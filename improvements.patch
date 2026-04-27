@@ -1,0 +1,835 @@
+<<<BEGIN PATCH>>>
+From 2a11f8ee42b758147e0243595dacfc74298d41b9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 27 Apr 2026 13:00:19 +0000
+Subject: [PATCH] Refactor combat to KeywordEffects registry, switch to
+ STS-style economy
+
+- Extract scattered keyword switch statements (Combat.gd, Card.gd) into a
+  single KeywordEffects autoload. Adding a new keyword now means editing
+  one file: register display text + on_play / on_death hooks. Combat.gd
+  exposes draw_one / damage_player_hero / damage_enemy_hero / get_opposing_card
+  as the narrow surface the registry mutates.
+- Mana is now a fixed pool of 3 refilled each turn, with chronograph/ash_crown
+  relics adding +1 in their own scopes. Hand draw moves to draw-5-at-start
+  and discard-hand-at-end of turn (Slay-the-Spire pattern). Enemy mana scales
+  modestly with turn number to match the lower cost curve.
+- Rescale every card's cost into the 1..3 range so the new mana pool is
+  meaningful. ATK/HP unchanged.
+- Add deck view + once-per-run card-removal events to MapView. Players can
+  open their full deck at any time and spend a removal token to thin it.
+- Wire MetaState.unlocked_cards into CardDB pools: tier-3 cards are now
+  locked by default and unlocked one at a time on each victory. MainMenu
+  shows unlock progress; GameOver announces the new unlock.
+- Move phoenix_heart_consumed from per-fight Combat state to RunState so the
+  relic correctly persists across combats within a run.
+---
+ project.godot                  |   1 +
+ scripts/Card.gd                |  18 +----
+ scripts/data/CardDB.gd         |  71 ++++++++++------
+ scripts/data/KeywordEffects.gd |  80 ++++++++++++++++++
+ scripts/scenes/Combat.gd       | 108 ++++++++++++++-----------
+ scripts/scenes/GameOver.gd     |   7 +-
+ scripts/scenes/MainMenu.gd     |   6 +-
+ scripts/scenes/MapView.gd      | 144 +++++++++++++++++++++++++++++++++
+ scripts/scenes/Reward.gd       |   9 +--
+ scripts/state/MetaState.gd     |  15 ++++
+ scripts/state/RunState.gd      |   6 ++
+ 11 files changed, 366 insertions(+), 99 deletions(-)
+ create mode 100644 scripts/data/KeywordEffects.gd
+
+diff --git a/project.godot b/project.godot
+index 08f70f2..e1cf8c7 100644
+--- a/project.godot
++++ b/project.godot
+@@ -26,6 +26,7 @@ RunState="*uid://dcq27ifbf3e7g"
+ MetaState="*uid://cyts2mfhubru2"
+ CardDB="*uid://c0ddf4qlhb4bb"
+ RelicDB="*uid://2p6cly80x3np"
++KeywordEffects="*res://scripts/data/KeywordEffects.gd"
+ 
+ [display]
+ 
+diff --git a/scripts/Card.gd b/scripts/Card.gd
+index 987a9f6..df0cb80 100644
+--- a/scripts/Card.gd
++++ b/scripts/Card.gd
+@@ -135,7 +135,7 @@ func _create_stat_labels() -> void:
+ 
+ 	# Keyword strip — small, above name
+ 	if card_data.has("keywords") and card_data.keywords.size() > 0:
+-		var kw_text := _format_keywords(card_data.keywords)
++		var kw_text := KeywordEffects.display_text_for(card_data.keywords)
+ 		_keyword_label = _make_label(kw_text, 16, Vector3(0, 0.005, -0.245),
+ 			Color(1.0, 0.85, 0.45), 4)
+ 
+@@ -147,22 +147,6 @@ func _create_stat_labels() -> void:
+ 		Vector3(0.14, 0.005, -0.22), Color(0.4, 0.6, 1.0), 12)
+ 
+ 
+-func _format_keywords(kws: Array) -> String:
+-	# Convert internal keyword strings to short display text
+-	var display: Array[String] = []
+-	for k in kws:
+-		match k:
+-			"charge": display.append("Charge")
+-			"taunt": display.append("Taunt")
+-			"lifesteal": display.append("Lifesteal")
+-			"frenzy": display.append("Frenzy")
+-			"deathrattle_smite": display.append("Death: smite")
+-			"deathrattle_burn": display.append("Death: burn")
+-			"onplay_draw": display.append("Play: draw")
+-			"onplay_smite": display.append("Play: smite")
+-	return "  ".join(display)
+-
+-
+ func _make_label(text: String, size: int, pos: Vector3,
+ 		color: Color, outline: int) -> Label3D:
+ 	var lbl := Label3D.new()
+diff --git a/scripts/data/CardDB.gd b/scripts/data/CardDB.gd
+index 27a7a72..67b6163 100644
+--- a/scripts/data/CardDB.gd
++++ b/scripts/data/CardDB.gd
+@@ -40,72 +40,75 @@ const PLAYER_POOL: Dictionary = {
+ 	},
+ 	"hedge_witch": {
+ 		"id": "hedge_witch", "name": "Hedge Witch",
+-		"cost": 2, "atk": 1, "hp": 3, "keywords": ["onplay_draw"],
++		"cost": 1, "atk": 1, "hp": 3, "keywords": ["onplay_draw"],
+ 		"tier": 1, "desc": "On Play: draw a card. She knows what comes next."
+ 	},
+ 	"thorn_acolyte": {
+ 		"id": "thorn_acolyte", "name": "Thorn Acolyte",
+-		"cost": 2, "atk": 2, "hp": 2, "keywords": [],
++		"cost": 1, "atk": 2, "hp": 2, "keywords": [],
+ 		"tier": 1, "desc": "A novice of the burning hedge."
+ 	},
+ 	"meadow_wolf": {
+ 		"id": "meadow_wolf", "name": "Meadow Wolf",
+-		"cost": 2, "atk": 3, "hp": 2, "keywords": [],
++		"cost": 1, "atk": 3, "hp": 2, "keywords": [],
+ 		"tier": 1, "desc": "Lean. Hungry. Fast."
+ 	},
+ 	"scarecrow_lord": {
+ 		"id": "scarecrow_lord", "name": "Scarecrow Lord",
+-		"cost": 3, "atk": 3, "hp": 4, "keywords": ["taunt"],
++		"cost": 2, "atk": 3, "hp": 4, "keywords": ["taunt"],
+ 		"tier": 1, "desc": "Taunt. The wicker king of the burning fields."
+ 	},
+ 
+ 	# ── UNCOMMON (tier 2) ──
+ 	"bone_queen": {
+ 		"id": "bone_queen", "name": "Bone Queen",
+-		"cost": 3, "atk": 3, "hp": 4, "keywords": ["deathrattle_smite"],
++		"cost": 2, "atk": 3, "hp": 4, "keywords": ["deathrattle_smite"],
+ 		"tier": 2, "desc": "Deathrattle: deal 2 damage to the opposing card."
+ 	},
+ 	"vampire_thrall": {
+ 		"id": "vampire_thrall", "name": "Vampire Thrall",
+-		"cost": 3, "atk": 3, "hp": 3, "keywords": ["lifesteal"],
++		"cost": 2, "atk": 3, "hp": 3, "keywords": ["lifesteal"],
+ 		"tier": 2, "desc": "Lifesteal. Drinks deeply from every wound."
+ 	},
+ 	"iron_titan": {
+ 		"id": "iron_titan", "name": "Iron Titan",
+-		"cost": 4, "atk": 3, "hp": 6, "keywords": ["taunt"],
++		"cost": 2, "atk": 3, "hp": 6, "keywords": ["taunt"],
+ 		"tier": 2, "desc": "Taunt. Forged in the heart of the meadow."
+ 	},
+ 	"crow_priest": {
+ 		"id": "crow_priest", "name": "Crow Priest",
+-		"cost": 3, "atk": 2, "hp": 3, "keywords": ["onplay_draw", "deathrattle_burn"],
++		"cost": 2, "atk": 2, "hp": 3, "keywords": ["onplay_draw", "deathrattle_burn"],
+ 		"tier": 2, "desc": "On Play: draw 1. Deathrattle: 1 damage to enemy hero."
+ 	},
+ 	"blood_pharaoh": {
+ 		"id": "blood_pharaoh", "name": "Blood Pharaoh",
+-		"cost": 4, "atk": 4, "hp": 4, "keywords": ["lifesteal"],
++		"cost": 2, "atk": 4, "hp": 4, "keywords": ["lifesteal"],
+ 		"tier": 2, "desc": "Lifesteal. Ancient and ravenous."
+ 	},
+ 	"ash_revenant": {
+ 		"id": "ash_revenant", "name": "Ash Revenant",
+-		"cost": 4, "atk": 4, "hp": 3, "keywords": ["frenzy"],
++		"cost": 2, "atk": 4, "hp": 3, "keywords": ["frenzy"],
+ 		"tier": 2, "desc": "Frenzy: +1 ATK after killing a card."
+ 	},
+ 
+-	# ── RARE (tier 3) ──
++	# ── RARE (tier 3) — locked until unlocked via meta progression ──
+ 	"void_king": {
+ 		"id": "void_king", "name": "Void King",
+-		"cost": 5, "atk": 5, "hp": 6, "keywords": ["taunt", "lifesteal"],
+-		"tier": 3, "desc": "Taunt, Lifesteal. The final darkness, crowned."
++		"cost": 3, "atk": 5, "hp": 6, "keywords": ["taunt", "lifesteal"],
++		"tier": 3, "locked": true,
++		"desc": "Taunt, Lifesteal. The final darkness, crowned."
+ 	},
+ 	"frost_monarch": {
+ 		"id": "frost_monarch", "name": "Frost Monarch",
+-		"cost": 6, "atk": 5, "hp": 7, "keywords": ["onplay_smite"],
+-		"tier": 3, "desc": "On Play: 2 damage to enemy hero. The long winter, crowned."
++		"cost": 3, "atk": 5, "hp": 7, "keywords": ["onplay_smite"],
++		"tier": 3, "locked": true,
++		"desc": "On Play: 2 damage to enemy hero. The long winter, crowned."
+ 	},
+ 	"hellfire_drake": {
+ 		"id": "hellfire_drake", "name": "Hellfire Drake",
+-		"cost": 5, "atk": 6, "hp": 4, "keywords": ["charge"],
+-		"tier": 3, "desc": "Charge. The sky burns where it passes."
++		"cost": 3, "atk": 6, "hp": 4, "keywords": ["charge"],
++		"tier": 3, "locked": true,
++		"desc": "Charge. The sky burns where it passes."
+ 	},
+ }
+ 
+@@ -124,41 +127,41 @@ const ENEMY_POOL: Dictionary = {
+ 	},
+ 	"crow_swarm": {
+ 		"id": "crow_swarm", "name": "Crow Swarm",
+-		"cost": 2, "atk": 2, "hp": 2, "keywords": [],
++		"cost": 1, "atk": 2, "hp": 2, "keywords": [],
+ 		"tier": 1, "desc": "Black wings."
+ 	},
+ 
+ 	# Tier 2 enemies (middle floors)
+ 	"stone_golem": {
+ 		"id": "stone_golem", "name": "Stone Golem",
+-		"cost": 2, "atk": 2, "hp": 5, "keywords": ["taunt"],
++		"cost": 1, "atk": 2, "hp": 5, "keywords": ["taunt"],
+ 		"tier": 2, "desc": "Taunt. Unyielding."
+ 	},
+ 	"cursed_wraith": {
+ 		"id": "cursed_wraith", "name": "Cursed Wraith",
+-		"cost": 3, "atk": 4, "hp": 3, "keywords": ["lifesteal"],
++		"cost": 2, "atk": 4, "hp": 3, "keywords": ["lifesteal"],
+ 		"tier": 2, "desc": "Lifesteal. Feeds on fear."
+ 	},
+ 	"thresher": {
+ 		"id": "thresher", "name": "Thresher",
+-		"cost": 3, "atk": 3, "hp": 3, "keywords": ["frenzy"],
++		"cost": 2, "atk": 3, "hp": 3, "keywords": ["frenzy"],
+ 		"tier": 2, "desc": "Frenzy. Cuts and keeps cutting."
+ 	},
+ 
+ 	# Tier 3 enemies (elites and bosses)
+ 	"hellfire_drake": {
+ 		"id": "hellfire_drake", "name": "Hellfire Drake",
+-		"cost": 4, "atk": 5, "hp": 4, "keywords": ["charge"],
++		"cost": 2, "atk": 5, "hp": 4, "keywords": ["charge"],
+ 		"tier": 3, "desc": "Charge. Burns all."
+ 	},
+ 	"the_harvester": {
+ 		"id": "the_harvester", "name": "The Harvester",
+-		"cost": 5, "atk": 5, "hp": 6, "keywords": ["taunt", "deathrattle_smite"],
++		"cost": 3, "atk": 5, "hp": 6, "keywords": ["taunt", "deathrattle_smite"],
+ 		"tier": 3, "desc": "Taunt. Deathrattle: 2 damage to opposing card."
+ 	},
+ 	"the_first_flame": {
+ 		"id": "the_first_flame", "name": "The First Flame",
+-		"cost": 6, "atk": 6, "hp": 8, "keywords": ["charge", "lifesteal"],
++		"cost": 3, "atk": 6, "hp": 8, "keywords": ["charge", "lifesteal"],
+ 		"tier": 3, "desc": "BOSS. Charge, Lifesteal. The fire that started it all."
+ 	},
+ }
+@@ -185,10 +188,28 @@ static func get_card_data(id: String) -> Dictionary:
+ 	return {}
+ 
+ 
++static func is_card_available(id: String) -> bool:
++	# A card is available if it's not locked, or if MetaState has unlocked it.
++	if not PLAYER_POOL.has(id):
++		return false
++	var data = PLAYER_POOL[id]
++	if not data.get("locked", false):
++		return true
++	return MetaState.unlocked_cards.has(id)
++
++
++static func locked_card_ids() -> Array[String]:
++	var out: Array[String] = []
++	for id in PLAYER_POOL.keys():
++		if PLAYER_POOL[id].get("locked", false) and not MetaState.unlocked_cards.has(id):
++			out.append(id)
++	return out
++
++
+ static func random_player_card_at_tier(tier: int) -> String:
+ 	var pool: Array = []
+ 	for id in PLAYER_POOL.keys():
+-		if PLAYER_POOL[id].tier == tier:
++		if PLAYER_POOL[id].tier == tier and is_card_available(id):
+ 			pool.append(id)
+ 	if pool.is_empty():
+ 		return ""
+diff --git a/scripts/data/KeywordEffects.gd b/scripts/data/KeywordEffects.gd
+new file mode 100644
+index 0000000..25c04b2
+--- /dev/null
++++ b/scripts/data/KeywordEffects.gd
+@@ -0,0 +1,80 @@
++extends Node
++## KeywordEffects.gd — central registry for keyword behaviour.
++##
++## Keywords used to be matched in scattered switch statements across
++## Combat.gd and Card.gd. Adding a keyword meant editing several files.
++## Now everything lives here: display text, on-play resolution, on-death
++## resolution, and any per-combat hooks.
++##
++## To add a new keyword:
++##   1. Add an entry to KEYWORDS with the display text and which trigger
++##      hooks it implements.
++##   2. Implement the hook function (on_play / on_death / etc) below.
++##   3. Combat.gd calls dispatch_* which iterates a card's keywords and
++##      runs the matching hook. No further wiring needed.
++##
++## The Combat scene is passed as `ctx` so hooks can mutate combat state
++## (hp, hand, fields). Keeping the surface narrow — hooks should only
++## touch combat state, not anything outside the fight.
++##
++## Add to autoload as "KeywordEffects" in Project Settings.
++
++const KEYWORDS: Dictionary = {
++	"charge":            { "display": "Charge",        "hooks": [] },
++	"taunt":             { "display": "Taunt",         "hooks": [] },
++	"lifesteal":         { "display": "Lifesteal",     "hooks": [] },
++	"frenzy":            { "display": "Frenzy",        "hooks": [] },
++	"deathrattle_smite": { "display": "Death: smite",  "hooks": ["on_death"] },
++	"deathrattle_burn":  { "display": "Death: burn",   "hooks": ["on_death"] },
++	"onplay_draw":       { "display": "Play: draw",    "hooks": ["on_play"] },
++	"onplay_smite":      { "display": "Play: smite",   "hooks": ["on_play"] },
++}
++
++
++static func display_text_for(keywords: Array) -> String:
++	var out: Array[String] = []
++	for k in keywords:
++		if KEYWORDS.has(k):
++			out.append(KEYWORDS[k].display)
++	return "  ".join(out)
++
++
++# Run all on-play effects for a card just placed.
++# ctx = the Combat scene, lane_idx = where it was placed, is_enemy = which side.
++static func dispatch_on_play(card_id: String, lane_idx: int, is_enemy: bool, ctx) -> void:
++	var data = CardDB.get_card_data(card_id)
++	if data.is_empty() or not data.has("keywords"): return
++	for kw in data.keywords:
++		_run_on_play(kw, lane_idx, is_enemy, ctx)
++
++
++# Run all on-death effects for a card that just died on the field.
++static func dispatch_on_death(card: Node3D, lane_idx: int, was_enemy: bool, ctx) -> void:
++	if card == null or not card.card_data.has("keywords"): return
++	for kw in card.card_data.keywords:
++		_run_on_death(kw, lane_idx, was_enemy, ctx)
++
++
++static func _run_on_play(kw: String, lane_idx: int, is_enemy: bool, ctx) -> void:
++	match kw:
++		"onplay_draw":
++			if not is_enemy:
++				ctx.draw_one()
++		"onplay_smite":
++			if is_enemy:
++				ctx.damage_player_hero(2)
++			else:
++				ctx.damage_enemy_hero(2)
++
++
++static func _run_on_death(kw: String, lane_idx: int, was_enemy: bool, ctx) -> void:
++	match kw:
++		"deathrattle_smite":
++			var target = ctx.get_opposing_card(lane_idx, was_enemy)
++			if target != null:
++				target.take_damage(2)
++		"deathrattle_burn":
++			if was_enemy:
++				ctx.damage_player_hero(1)
++			else:
++				ctx.damage_enemy_hero(1)
+diff --git a/scripts/scenes/Combat.gd b/scripts/scenes/Combat.gd
+index a5751f5..5bd8e8d 100644
+--- a/scripts/scenes/Combat.gd
++++ b/scripts/scenes/Combat.gd
+@@ -19,6 +19,10 @@ enum Phase { PLAYER_TURN, ENEMY_TURN, COMBAT, GAME_OVER }
+ var phase := Phase.PLAYER_TURN
+ var turn_number := 0
+ 
++# ── Mana / draw constants — STS-style: fixed pool refilled each turn ──
++const BASE_MAX_MANA: int = 3
++const HAND_DRAW_PER_TURN: int = 5
++
+ # ── Hero stats — player pulled from RunState, enemy generated per-fight ──
+ var player_hp: int
+ var player_max_hp: int
+@@ -53,7 +57,6 @@ var _cam_angle_y := 0.0
+ 
+ # ── Relic-related per-turn state ──
+ var _vampires_fang_used_this_turn: bool = false
+-var _phoenix_heart_consumed: bool = false
+ 
+ # ── HUD ──
+ var _phase_label: Label3D
+@@ -160,12 +163,12 @@ func _start_player_turn() -> void:
+ 	turn_number += 1
+ 	_vampires_fang_used_this_turn = false
+ 
+-	# Mana baseline 4 + 1 per turn up to 10
+-	player_max_mana = mini(turn_number + 3, 10)
+-	# Chronograph: +1 max mana
++	# Mana fixed at BASE_MAX_MANA, refilled every turn (STS-style).
++	player_max_mana = BASE_MAX_MANA
++	# Chronograph: +1 max mana for the whole fight.
+ 	if _has_relic("chronograph"):
+ 		player_max_mana += 1
+-	# Ash Crown: +1 mana on the first turn of every fight
++	# Ash Crown: +1 mana on the first turn of every fight.
+ 	if _has_relic("ash_crown") and turn_number == 1:
+ 		player_max_mana += 1
+ 
+@@ -182,28 +185,59 @@ func _start_player_turn() -> void:
+ 		var bs := RelicDB.get_relic("bloodstone")
+ 		player_hp = mini(player_hp + bs.value, player_max_hp)
+ 
+-	# Witch's Grimoire: +1 draw per turn
+-	var draw_count = 4 if turn_number == 1 else 1
++	# Draw a fresh hand each turn. Witch's Grimoire: +1 draw per turn.
++	var draw_count = HAND_DRAW_PER_TURN
+ 	if _has_relic("witchs_grimoire"):
+ 		draw_count += 1
+ 	for i in draw_count:
+-		if _hand.size() < MAX_HAND_SIZE and _player_draw_pile.size() > 0:
+-			_draw_card(_player_draw_pile.pop_front())
+-		elif _player_draw_pile.is_empty() and not _player_discard_pile.is_empty():
+-			# Reshuffle discard into draw pile
+-			_player_draw_pile = _player_discard_pile.duplicate()
+-			_player_draw_pile.shuffle()
+-			_player_discard_pile.clear()
+-			if _hand.size() < MAX_HAND_SIZE:
+-				_draw_card(_player_draw_pile.pop_front())
++		draw_one()
+ 
+ 	_end_turn_btn.disabled = false
+ 	_update_hud()
+ 
+ 
++# Public helper used by KeywordEffects (onplay_draw) and turn-start logic.
++func draw_one() -> void:
++	if _hand.size() >= MAX_HAND_SIZE: return
++	if _player_draw_pile.is_empty():
++		if _player_discard_pile.is_empty():
++			return
++		_player_draw_pile = _player_discard_pile.duplicate()
++		_player_draw_pile.shuffle()
++		_player_discard_pile.clear()
++	if _player_draw_pile.is_empty(): return
++	_draw_card(_player_draw_pile.pop_front())
++
++
++# Discard the entire hand into the discard pile and remove the visual cards.
++func _discard_hand() -> void:
++	for card in _hand:
++		_player_discard_pile.append(card.card_id)
++		card.queue_free()
++	_hand.clear()
++
++
++# Helpers exposed for KeywordEffects so it doesn't reach into private state.
++func damage_player_hero(amount: int) -> void:
++	player_hp -= amount
++	_on_hero_damaged(amount)
++	_update_hud()
++
++
++func damage_enemy_hero(amount: int) -> void:
++	enemy_hp -= amount
++	_update_hud()
++
++
++func get_opposing_card(lane_idx: int, was_enemy: bool) -> Node3D:
++	return _player_field[lane_idx] if was_enemy else _enemy_field[lane_idx]
++
++
+ func _start_enemy_turn() -> void:
+ 	phase = Phase.ENEMY_TURN
+-	enemy_mana = mini(turn_number + 3, 10)
++	# Enemy mana scales modestly with turn; matched roughly to player's
++	# fixed pool but with light ramp to keep late-game pressure on.
++	enemy_mana = mini(BASE_MAX_MANA + (turn_number - 1) / 2, BASE_MAX_MANA + 3)
+ 	_end_turn_btn.disabled = true
+ 	_update_hud()
+ 	# Reset enemy attack flags
+@@ -335,37 +369,11 @@ func _apply_lane_damage(amount: int, lane: Dictionary, _to_player_card: bool) ->
+ 
+ 
+ func _resolve_onplay(card_id: String, lane_idx: int, is_enemy: bool) -> void:
+-	var data = CardDB.get_card_data(card_id)
+-	if data.is_empty(): return
+-	if not data.has("keywords"): return
+-	for kw in data.keywords:
+-		match kw:
+-			"onplay_draw":
+-				if not is_enemy and _hand.size() < MAX_HAND_SIZE and _player_draw_pile.size() > 0:
+-					_draw_card(_player_draw_pile.pop_front())
+-			"onplay_smite":
+-				if is_enemy:
+-					player_hp -= 2
+-					_on_hero_damaged(2)
+-				else:
+-					enemy_hp -= 2
+-				_update_hud()
++	KeywordEffects.dispatch_on_play(card_id, lane_idx, is_enemy, self)
+ 
+ 
+ func _resolve_deathrattle(card: Node3D, lane_idx: int, was_enemy: bool) -> void:
+-	for kw in card.card_data.keywords:
+-		match kw:
+-			"deathrattle_smite":
+-				# Damage opposing card if any
+-				var target = _enemy_field[lane_idx] if not was_enemy else _player_field[lane_idx]
+-				if target != null:
+-					target.take_damage(2)
+-			"deathrattle_burn":
+-				if was_enemy:
+-					player_hp -= 1
+-					_on_hero_damaged(1)
+-				else:
+-					enemy_hp -= 1
++	KeywordEffects.dispatch_on_death(card, lane_idx, was_enemy, self)
+ 
+ 
+ func _on_card_killed(_was_player_killed: bool) -> void:
+@@ -376,9 +384,10 @@ func _on_card_killed(_was_player_killed: bool) -> void:
+ 
+ 
+ func _on_hero_damaged(_amount: int) -> void:
+-	# Phoenix Heart: revive on lethal once per run
+-	if _has_relic("phoenix_heart") and not _phoenix_heart_consumed and player_hp <= 0:
+-		_phoenix_heart_consumed = true
++	# Phoenix Heart: revive on lethal once per run.
++	# Tracked on RunState so it persists across fights, not per-combat.
++	if _has_relic("phoenix_heart") and not RunState.phoenix_heart_consumed and player_hp <= 0:
++		RunState.phoenix_heart_consumed = true
+ 		player_hp = 1
+ 	# Thorned Pendant: 1 dmg to random enemy card
+ 	if _has_relic("thorned_pendant"):
+@@ -621,6 +630,9 @@ func _update_hud() -> void:
+ 
+ func _on_end_turn() -> void:
+ 	if phase != Phase.PLAYER_TURN: return
++	# STS-style: discard the entire hand at end of turn.
++	_discard_hand()
++	_arrange_hand()
+ 	_start_enemy_turn()
+ 
+ 
+diff --git a/scripts/scenes/GameOver.gd b/scripts/scenes/GameOver.gd
+index be2d861..d0e3326 100644
+--- a/scripts/scenes/GameOver.gd
++++ b/scripts/scenes/GameOver.gd
+@@ -17,9 +17,14 @@ func _ready() -> void:
+ 		$Title.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+ 		$Subtitle.text = "The meadow burned without you.\nFloors reached: %d" % RunState.current_floor
+ 
+-	$Stats.text = "Total runs: %d   Victories: %d" % [
++	var stats := "Total runs: %d   Victories: %d" % [
+ 		MetaState.total_runs, MetaState.total_victories,
+ 	]
++	if MetaState.last_unlocked_card != "":
++		var unlocked = CardDB.get_card_data(MetaState.last_unlocked_card)
++		if not unlocked.is_empty():
++			stats += "\n\nNew card unlocked: %s" % unlocked.name
++	$Stats.text = stats
+ 	$BackBtn.pressed.connect(_back)
+ 
+ 
+diff --git a/scripts/scenes/MainMenu.gd b/scripts/scenes/MainMenu.gd
+index 81abe33..13854d2 100644
+--- a/scripts/scenes/MainMenu.gd
++++ b/scripts/scenes/MainMenu.gd
+@@ -15,10 +15,14 @@ func _ready() -> void:
+ 
+ 
+ func _refresh_stats() -> void:
+-	var s := "Runs: %d   Victories: %d   Defeats: %d" % [
++	var unlocked := MetaState.unlocked_cards.size()
++	var locked_remaining := CardDB.locked_card_ids().size()
++	var s := "Runs: %d   Victories: %d   Defeats: %d\nCards unlocked: %d  (still locked: %d)" % [
+ 		MetaState.total_runs,
+ 		MetaState.total_victories,
+ 		MetaState.total_defeats,
++		unlocked,
++		locked_remaining,
+ 	]
+ 	$VBox/StatsLabel.text = s
+ 
+diff --git a/scripts/scenes/MapView.gd b/scripts/scenes/MapView.gd
+index b623279..948c481 100644
+--- a/scripts/scenes/MapView.gd
++++ b/scripts/scenes/MapView.gd
+@@ -2,10 +2,17 @@ extends Control
+ ## MapView.gd — the run map. Currently a simple linear progression: shows
+ ## all 8 floors in a row, the next one is highlighted, click it to advance.
+ ## Replace later with a proper Slay-the-Spire branching map.
++##
++## Also hosts deck inspection and the once-per-run "remove a card" event,
++## so the player can thin their deck between fights.
+ 
+ const COMBAT_SCENE = "res://scenes/combat.tscn"
+ const MAIN_MENU = "res://scenes/main_menu.tscn"
+ 
++var _overlay: ColorRect
++var _panel: PanelContainer
++var _remove_mode: bool = false
++
+ 
+ func _ready() -> void:
+ 	if not RunState.run_active:
+@@ -13,6 +20,7 @@ func _ready() -> void:
+ 		get_tree().change_scene_to_file(MAIN_MENU)
+ 		return
+ 	_build_map()
++	_build_deck_buttons()
+ 
+ 
+ func _build_map() -> void:
+@@ -54,6 +62,33 @@ func _build_map() -> void:
+ 	]
+ 
+ 
++func _build_deck_buttons() -> void:
++	# Two buttons in the top-right: "View Deck" and "Remove a Card" (if charges left).
++	var hbox = $TopRight if has_node("TopRight") else null
++	if hbox == null:
++		hbox = HBoxContainer.new()
++		hbox.name = "TopRight"
++		hbox.set_anchors_preset(Control.PRESET_TOP_RIGHT)
++		hbox.position = Vector2(-360, 20)
++		hbox.add_theme_constant_override("separation", 8)
++		add_child(hbox)
++	for c in hbox.get_children():
++		c.queue_free()
++
++	var view_btn = Button.new()
++	view_btn.text = "View Deck (%d)" % RunState.deck.size()
++	view_btn.custom_minimum_size = Vector2(150, 36)
++	view_btn.pressed.connect(_open_deck_view.bind(false))
++	hbox.add_child(view_btn)
++
++	var remove_btn = Button.new()
++	remove_btn.text = "Remove a Card (%d)" % RunState.card_removals_remaining
++	remove_btn.custom_minimum_size = Vector2(180, 36)
++	remove_btn.disabled = RunState.card_removals_remaining <= 0
++	remove_btn.pressed.connect(_open_deck_view.bind(true))
++	hbox.add_child(remove_btn)
++
++
+ func _floor_label(floor_num: int, node_type: String) -> String:
+ 	var icon = ""
+ 	match node_type:
+@@ -68,3 +103,112 @@ func _on_floor_pressed(floor_num: int) -> void:
+ 		return
+ 	RunState.advance_floor()
+ 	get_tree().change_scene_to_file(COMBAT_SCENE)
++
++
++# ── Deck overlay ──
++func _open_deck_view(remove_mode: bool) -> void:
++	_remove_mode = remove_mode
++	_overlay = ColorRect.new()
++	_overlay.color = Color(0, 0, 0, 0.7)
++	_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
++	_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
++	add_child(_overlay)
++
++	_panel = PanelContainer.new()
++	_panel.set_anchors_preset(Control.PRESET_CENTER)
++	_panel.custom_minimum_size = Vector2(900, 600)
++	_panel.position = Vector2(-450, -300)
++	var pstyle = StyleBoxFlat.new()
++	pstyle.bg_color = Color(0.08, 0.06, 0.10, 1.0)
++	pstyle.corner_radius_top_left = 10
++	pstyle.corner_radius_top_right = 10
++	pstyle.corner_radius_bottom_left = 10
++	pstyle.corner_radius_bottom_right = 10
++	pstyle.content_margin_left = 16
++	pstyle.content_margin_right = 16
++	pstyle.content_margin_top = 14
++	pstyle.content_margin_bottom = 14
++	_panel.add_theme_stylebox_override("panel", pstyle)
++	_overlay.add_child(_panel)
++
++	var vbox = VBoxContainer.new()
++	vbox.add_theme_constant_override("separation", 10)
++	_panel.add_child(vbox)
++
++	var title = Label.new()
++	title.text = "Remove a Card  —  click to delete (permanent)" if remove_mode else "Your Deck"
++	title.add_theme_font_size_override("font_size", 24)
++	title.add_theme_color_override("font_color", Color(1, 0.85, 0.45) if remove_mode else Color.WHITE)
++	vbox.add_child(title)
++
++	var scroll = ScrollContainer.new()
++	scroll.custom_minimum_size = Vector2(870, 480)
++	vbox.add_child(scroll)
++
++	var grid = GridContainer.new()
++	grid.columns = 4
++	grid.add_theme_constant_override("h_separation", 8)
++	grid.add_theme_constant_override("v_separation", 8)
++	scroll.add_child(grid)
++
++	# Group identical cards together with a count badge.
++	var counts: Dictionary = {}
++	for id in RunState.deck:
++		counts[id] = counts.get(id, 0) + 1
++
++	for id in counts.keys():
++		var data = CardDB.get_card_data(id)
++		if data.is_empty(): continue
++		var btn = Button.new()
++		btn.custom_minimum_size = Vector2(200, 90)
++		btn.text = "%s  ×%d\n%d⚡  %d/%d\n%s" % [
++			data.name, counts[id],
++			data.cost, data.atk, data.hp,
++			KeywordEffects.display_text_for(data.get("keywords", [])),
++		]
++		btn.add_theme_font_size_override("font_size", 13)
++		btn.tooltip_text = data.get("desc", "")
++		var style = StyleBoxFlat.new()
++		style.corner_radius_top_left = 6
++		style.corner_radius_top_right = 6
++		style.corner_radius_bottom_left = 6
++		style.corner_radius_bottom_right = 6
++		style.bg_color = _tier_color(data.get("tier", 1))
++		btn.add_theme_stylebox_override("normal", style)
++		btn.add_theme_color_override("font_color", Color.WHITE)
++		if remove_mode:
++			btn.pressed.connect(_remove_card.bind(id))
++		grid.add_child(btn)
++
++	var close = Button.new()
++	close.text = "Close"
++	close.custom_minimum_size = Vector2(100, 32)
++	close.pressed.connect(_close_overlay)
++	vbox.add_child(close)
++
++
++func _tier_color(tier: int) -> Color:
++	match tier:
++		1: return Color(0.20, 0.25, 0.35)
++		2: return Color(0.45, 0.30, 0.55)
++		3: return Color(0.70, 0.45, 0.20)
++	return Color(0.20, 0.25, 0.35)
++
++
++func _remove_card(id: String) -> void:
++	if RunState.card_removals_remaining <= 0: return
++	if RunState.deck.size() <= 1:
++		# Don't let the player softlock themselves with an empty deck.
++		return
++	if RunState.remove_card(id):
++		RunState.card_removals_remaining -= 1
++	_close_overlay()
++	_build_map()
++	_build_deck_buttons()
++
++
++func _close_overlay() -> void:
++	if _overlay:
++		_overlay.queue_free()
++		_overlay = null
++		_panel = null
+diff --git a/scripts/scenes/Reward.gd b/scripts/scenes/Reward.gd
+index 55d4fee..04df1c1 100644
+--- a/scripts/scenes/Reward.gd
++++ b/scripts/scenes/Reward.gd
+@@ -33,8 +33,9 @@ func _build_ui() -> void:
+ 
+ 	for id in _card_choices:
+ 		var data = CardDB.get_card_data(id)
++		var kw_text = KeywordEffects.display_text_for(data.get("keywords", []))
+ 		var btn = _make_choice_button(
+-			"%s\n%d⚡  %d/%d\n%s" % [data.name, data.cost, data.atk, data.hp, _kw_text(data)],
++			"%s\n%d⚡  %d/%d\n%s" % [data.name, data.cost, data.atk, data.hp, kw_text],
+ 			data.desc, Color(0.20, 0.25, 0.35))
+ 		btn.pressed.connect(_pick_card.bind(id))
+ 		$CardRow.add_child(btn)
+@@ -53,12 +54,6 @@ func _build_ui() -> void:
+ 	$SkipBtn.pressed.connect(_skip)
+ 
+ 
+-func _kw_text(data: Dictionary) -> String:
+-	if not data.has("keywords") or data.keywords.is_empty():
+-		return ""
+-	return ", ".join(data.keywords)
+-
+-
+ func _make_choice_button(title: String, tooltip: String, color: Color) -> Button:
+ 	var btn = Button.new()
+ 	btn.custom_minimum_size = Vector2(180, 130)
+diff --git a/scripts/state/MetaState.gd b/scripts/state/MetaState.gd
+index adf7118..f3836b5 100644
+--- a/scripts/state/MetaState.gd
++++ b/scripts/state/MetaState.gd
+@@ -13,6 +13,9 @@ var fastest_victory_floors: int = -1
+ var unlocked_cards: Array[String] = []
+ var unlocked_relics: Array[String] = []
+ 
++# Transient — set by record_victory if a card was unlocked. Read by GameOver.
++var last_unlocked_card: String = ""
++
+ 
+ func _ready() -> void:
+ 	load_save()
+@@ -23,9 +26,21 @@ func record_victory() -> void:
+ 	total_victories += 1
+ 	if fastest_victory_floors < 0 or RunState.current_floor < fastest_victory_floors:
+ 		fastest_victory_floors = RunState.current_floor
++	last_unlocked_card = _unlock_random_locked_card()
+ 	save()
+ 
+ 
++# Pick one still-locked card from CardDB and unlock it. Returns the id,
++# or "" if everything is already unlocked.
++func _unlock_random_locked_card() -> String:
++	var locked: Array[String] = CardDB.locked_card_ids()
++	if locked.is_empty():
++		return ""
++	var pick = locked[randi() % locked.size()]
++	unlock_card(pick)
++	return pick
++
++
+ func record_defeat() -> void:
+ 	total_runs += 1
+ 	total_defeats += 1
+diff --git a/scripts/state/RunState.gd b/scripts/state/RunState.gd
+index 758d5a9..9019290 100644
+--- a/scripts/state/RunState.gd
++++ b/scripts/state/RunState.gd
+@@ -24,6 +24,10 @@ var current_floor: int = 0   # 0 = pre-run, 1..N = floors traversed
+ var run_active: bool = false
+ var run_seed: int = 0
+ 
++# ── Once-per-run flags ──
++var phoenix_heart_consumed: bool = false
++var card_removals_remaining: int = 2   # how many "remove a card" events the player can use this run
++
+ 
+ # ── Lane identities ──
+ # Index 0..3 maps to lanes left-to-right.
+@@ -64,6 +68,8 @@ func start_new_run() -> void:
+ 	current_floor = 0
+ 	run_active = true
+ 	run_seed = randi()
++	phoenix_heart_consumed = false
++	card_removals_remaining = 2
+ 	# Apply meta-unlocks here later if any persistent bonuses exist.
+ 
+ 
+-- 
+2.43.0
+
+<<<END PATCH>>>
