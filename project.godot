@@ -16,9 +16,16 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 config/name="Card Wars"
 config/description="A grimoire-themed deckbuilder where every card is a page of a heretic's burning book."
-run/main_scene="res://scenes/play_area.tscn"
+run/main_scene="res://scenes/main_menu.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
+
+[autoload]
+
+RunState="*uid://dcq27ifbf3e7g"
+MetaState="*uid://cyts2mfhubru2"
+CardDB="*uid://c0ddf4qlhb4bb"
+RelicDB="*uid://2p6cly80x3np"
 
 [display]
 

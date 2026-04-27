@@ -1,0 +1,129 @@
+[gd_scene load_steps=22 format=3]
+
+[ext_resource type="Script" path="res://scripts/scenes/Combat.gd" id="1_combat"]
+
+[sub_resource type="CameraAttributesPractical" id="CamAttrs"]
+auto_exposure_enabled = false
+
+[sub_resource type="Environment" id="Env"]
+background_mode = 1
+background_color = Color(0.08, 0.06, 0.10, 1)
+ambient_light_color = Color(0.4, 0.35, 0.42, 1)
+ambient_light_energy = 0.5
+tonemap_mode = 4
+glow_enabled = true
+glow_intensity = 0.4
+glow_bloom = 0.05
+glow_hdr_threshold = 1.0
+glow_blend_mode = 1
+adjustment_enabled = true
+adjustment_contrast = 1.10
+adjustment_saturation = 1.05
+
+[sub_resource type="StandardMaterial3D" id="MatLane1"]
+shading_mode = 0
+albedo_color = Color(0.92, 0.72, 0.18, 1)
+
+[sub_resource type="StandardMaterial3D" id="MatLane2"]
+shading_mode = 0
+albedo_color = Color(0.35, 0.75, 0.30, 1)
+
+[sub_resource type="StandardMaterial3D" id="MatLane3"]
+shading_mode = 0
+albedo_color = Color(0.55, 0.35, 0.78, 1)
+
+[sub_resource type="StandardMaterial3D" id="MatLane4"]
+shading_mode = 0
+albedo_color = Color(0.28, 0.62, 0.85, 1)
+
+[sub_resource type="PlaneMesh" id="MeshLane1"]
+size = Vector2(0.85, 2.8)
+material = SubResource("MatLane1")
+
+[sub_resource type="PlaneMesh" id="MeshLane2"]
+size = Vector2(0.85, 2.8)
+material = SubResource("MatLane2")
+
+[sub_resource type="PlaneMesh" id="MeshLane3"]
+size = Vector2(0.85, 2.8)
+material = SubResource("MatLane3")
+
+[sub_resource type="PlaneMesh" id="MeshLane4"]
+size = Vector2(0.85, 2.8)
+material = SubResource("MatLane4")
+
+[sub_resource type="StandardMaterial3D" id="MatBoardFrame"]
+shading_mode = 0
+albedo_color = Color(0.35, 0.22, 0.12, 1)
+
+[sub_resource type="PlaneMesh" id="MeshBoardFrame"]
+size = Vector2(4.0, 3.2)
+material = SubResource("MatBoardFrame")
+
+[sub_resource type="StandardMaterial3D" id="MatMidline"]
+shading_mode = 0
+albedo_color = Color(0.88, 0.82, 0.58, 1)
+emission_enabled = true
+emission = Color(0.88, 0.75, 0.45, 1)
+emission_energy_multiplier = 0.5
+
+[sub_resource type="BoxMesh" id="MeshMidline"]
+size = Vector3(3.7, 0.006, 0.025)
+material = SubResource("MatMidline")
+
+[sub_resource type="StandardMaterial3D" id="MatTable"]
+shading_mode = 0
+albedo_color = Color(0.16, 0.13, 0.11, 1)
+
+[sub_resource type="PlaneMesh" id="MeshTable"]
+size = Vector2(9, 7)
+material = SubResource("MatTable")
+
+[node name="Combat" type="Node3D"]
+script = ExtResource("1_combat")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env")
+camera_attributes = SubResource("CamAttrs")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.707, 0.707, 0, -0.707, 0.707, 0, 3.0, 3.0)
+fov = 50.0
+near = 0.05
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 4, 0)
+light_color = Color(1.0, 0.96, 0.88, 1)
+light_energy = 1.0
+shadow_enabled = true
+shadow_bias = 0.02
+
+[node name="Table" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.02, 0)
+mesh = SubResource("MeshTable")
+
+[node name="BoardFrame" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.005, 0)
+mesh = SubResource("MeshBoardFrame")
+
+[node name="Midline" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.003, 0)
+mesh = SubResource("MeshMidline")
+
+[node name="Lanes" type="Node3D" parent="."]
+
+[node name="Lane1" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.35, 0, 0)
+mesh = SubResource("MeshLane1")
+
+[node name="Lane2" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.45, 0, 0)
+mesh = SubResource("MeshLane2")
+
+[node name="Lane3" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.45, 0, 0)
+mesh = SubResource("MeshLane3")
+
+[node name="Lane4" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.35, 0, 0)
+mesh = SubResource("MeshLane4")
