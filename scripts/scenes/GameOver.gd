@@ -17,9 +17,14 @@ func _ready() -> void:
 		$Title.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
 		$Subtitle.text = "The meadow burned without you.\nFloors reached: %d" % RunState.current_floor
 
-	$Stats.text = "Total runs: %d   Victories: %d" % [
+	var stats := "Total runs: %d   Victories: %d" % [
 		MetaState.total_runs, MetaState.total_victories,
 	]
+	if MetaState.last_unlocked_card != "":
+		var unlocked = CardDB.get_card_data(MetaState.last_unlocked_card)
+		if not unlocked.is_empty():
+			stats += "\n\nNew card unlocked: %s" % unlocked.name
+	$Stats.text = stats
 	$BackBtn.pressed.connect(_back)
 
 

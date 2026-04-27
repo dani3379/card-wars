@@ -40,72 +40,75 @@ const PLAYER_POOL: Dictionary = {
 	},
 	"hedge_witch": {
 		"id": "hedge_witch", "name": "Hedge Witch",
-		"cost": 2, "atk": 1, "hp": 3, "keywords": ["onplay_draw"],
+		"cost": 1, "atk": 1, "hp": 3, "keywords": ["onplay_draw"],
 		"tier": 1, "desc": "On Play: draw a card. She knows what comes next."
 	},
 	"thorn_acolyte": {
 		"id": "thorn_acolyte", "name": "Thorn Acolyte",
-		"cost": 2, "atk": 2, "hp": 2, "keywords": [],
+		"cost": 1, "atk": 2, "hp": 2, "keywords": [],
 		"tier": 1, "desc": "A novice of the burning hedge."
 	},
 	"meadow_wolf": {
 		"id": "meadow_wolf", "name": "Meadow Wolf",
-		"cost": 2, "atk": 3, "hp": 2, "keywords": [],
+		"cost": 1, "atk": 3, "hp": 2, "keywords": [],
 		"tier": 1, "desc": "Lean. Hungry. Fast."
 	},
 	"scarecrow_lord": {
 		"id": "scarecrow_lord", "name": "Scarecrow Lord",
-		"cost": 3, "atk": 3, "hp": 4, "keywords": ["taunt"],
+		"cost": 2, "atk": 3, "hp": 4, "keywords": ["taunt"],
 		"tier": 1, "desc": "Taunt. The wicker king of the burning fields."
 	},
 
 	# ── UNCOMMON (tier 2) ──
 	"bone_queen": {
 		"id": "bone_queen", "name": "Bone Queen",
-		"cost": 3, "atk": 3, "hp": 4, "keywords": ["deathrattle_smite"],
+		"cost": 2, "atk": 3, "hp": 4, "keywords": ["deathrattle_smite"],
 		"tier": 2, "desc": "Deathrattle: deal 2 damage to the opposing card."
 	},
 	"vampire_thrall": {
 		"id": "vampire_thrall", "name": "Vampire Thrall",
-		"cost": 3, "atk": 3, "hp": 3, "keywords": ["lifesteal"],
+		"cost": 2, "atk": 3, "hp": 3, "keywords": ["lifesteal"],
 		"tier": 2, "desc": "Lifesteal. Drinks deeply from every wound."
 	},
 	"iron_titan": {
 		"id": "iron_titan", "name": "Iron Titan",
-		"cost": 4, "atk": 3, "hp": 6, "keywords": ["taunt"],
+		"cost": 2, "atk": 3, "hp": 6, "keywords": ["taunt"],
 		"tier": 2, "desc": "Taunt. Forged in the heart of the meadow."
 	},
 	"crow_priest": {
 		"id": "crow_priest", "name": "Crow Priest",
-		"cost": 3, "atk": 2, "hp": 3, "keywords": ["onplay_draw", "deathrattle_burn"],
+		"cost": 2, "atk": 2, "hp": 3, "keywords": ["onplay_draw", "deathrattle_burn"],
 		"tier": 2, "desc": "On Play: draw 1. Deathrattle: 1 damage to enemy hero."
 	},
 	"blood_pharaoh": {
 		"id": "blood_pharaoh", "name": "Blood Pharaoh",
-		"cost": 4, "atk": 4, "hp": 4, "keywords": ["lifesteal"],
+		"cost": 2, "atk": 4, "hp": 4, "keywords": ["lifesteal"],
 		"tier": 2, "desc": "Lifesteal. Ancient and ravenous."
 	},
 	"ash_revenant": {
 		"id": "ash_revenant", "name": "Ash Revenant",
-		"cost": 4, "atk": 4, "hp": 3, "keywords": ["frenzy"],
+		"cost": 2, "atk": 4, "hp": 3, "keywords": ["frenzy"],
 		"tier": 2, "desc": "Frenzy: +1 ATK after killing a card."
 	},
 
-	# ── RARE (tier 3) ──
+	# ── RARE (tier 3) — locked until unlocked via meta progression ──
 	"void_king": {
 		"id": "void_king", "name": "Void King",
-		"cost": 5, "atk": 5, "hp": 6, "keywords": ["taunt", "lifesteal"],
-		"tier": 3, "desc": "Taunt, Lifesteal. The final darkness, crowned."
+		"cost": 3, "atk": 5, "hp": 6, "keywords": ["taunt", "lifesteal"],
+		"tier": 3, "locked": true,
+		"desc": "Taunt, Lifesteal. The final darkness, crowned."
 	},
 	"frost_monarch": {
 		"id": "frost_monarch", "name": "Frost Monarch",
-		"cost": 6, "atk": 5, "hp": 7, "keywords": ["onplay_smite"],
-		"tier": 3, "desc": "On Play: 2 damage to enemy hero. The long winter, crowned."
+		"cost": 3, "atk": 5, "hp": 7, "keywords": ["onplay_smite"],
+		"tier": 3, "locked": true,
+		"desc": "On Play: 2 damage to enemy hero. The long winter, crowned."
 	},
 	"hellfire_drake": {
 		"id": "hellfire_drake", "name": "Hellfire Drake",
-		"cost": 5, "atk": 6, "hp": 4, "keywords": ["charge"],
-		"tier": 3, "desc": "Charge. The sky burns where it passes."
+		"cost": 3, "atk": 6, "hp": 4, "keywords": ["charge"],
+		"tier": 3, "locked": true,
+		"desc": "Charge. The sky burns where it passes."
 	},
 }
 
@@ -124,41 +127,41 @@ const ENEMY_POOL: Dictionary = {
 	},
 	"crow_swarm": {
 		"id": "crow_swarm", "name": "Crow Swarm",
-		"cost": 2, "atk": 2, "hp": 2, "keywords": [],
+		"cost": 1, "atk": 2, "hp": 2, "keywords": [],
 		"tier": 1, "desc": "Black wings."
 	},
 
 	# Tier 2 enemies (middle floors)
 	"stone_golem": {
 		"id": "stone_golem", "name": "Stone Golem",
-		"cost": 2, "atk": 2, "hp": 5, "keywords": ["taunt"],
+		"cost": 1, "atk": 2, "hp": 5, "keywords": ["taunt"],
 		"tier": 2, "desc": "Taunt. Unyielding."
 	},
 	"cursed_wraith": {
 		"id": "cursed_wraith", "name": "Cursed Wraith",
-		"cost": 3, "atk": 4, "hp": 3, "keywords": ["lifesteal"],
+		"cost": 2, "atk": 4, "hp": 3, "keywords": ["lifesteal"],
 		"tier": 2, "desc": "Lifesteal. Feeds on fear."
 	},
 	"thresher": {
 		"id": "thresher", "name": "Thresher",
-		"cost": 3, "atk": 3, "hp": 3, "keywords": ["frenzy"],
+		"cost": 2, "atk": 3, "hp": 3, "keywords": ["frenzy"],
 		"tier": 2, "desc": "Frenzy. Cuts and keeps cutting."
 	},
 
 	# Tier 3 enemies (elites and bosses)
 	"hellfire_drake": {
 		"id": "hellfire_drake", "name": "Hellfire Drake",
-		"cost": 4, "atk": 5, "hp": 4, "keywords": ["charge"],
+		"cost": 2, "atk": 5, "hp": 4, "keywords": ["charge"],
 		"tier": 3, "desc": "Charge. Burns all."
 	},
 	"the_harvester": {
 		"id": "the_harvester", "name": "The Harvester",
-		"cost": 5, "atk": 5, "hp": 6, "keywords": ["taunt", "deathrattle_smite"],
+		"cost": 3, "atk": 5, "hp": 6, "keywords": ["taunt", "deathrattle_smite"],
 		"tier": 3, "desc": "Taunt. Deathrattle: 2 damage to opposing card."
 	},
 	"the_first_flame": {
 		"id": "the_first_flame", "name": "The First Flame",
-		"cost": 6, "atk": 6, "hp": 8, "keywords": ["charge", "lifesteal"],
+		"cost": 3, "atk": 6, "hp": 8, "keywords": ["charge", "lifesteal"],
 		"tier": 3, "desc": "BOSS. Charge, Lifesteal. The fire that started it all."
 	},
 }
@@ -185,10 +188,28 @@ static func get_card_data(id: String) -> Dictionary:
 	return {}
 
 
+static func is_card_available(id: String) -> bool:
+	# A card is available if it's not locked, or if MetaState has unlocked it.
+	if not PLAYER_POOL.has(id):
+		return false
+	var data = PLAYER_POOL[id]
+	if not data.get("locked", false):
+		return true
+	return MetaState.unlocked_cards.has(id)
+
+
+static func locked_card_ids() -> Array[String]:
+	var out: Array[String] = []
+	for id in PLAYER_POOL.keys():
+		if PLAYER_POOL[id].get("locked", false) and not MetaState.unlocked_cards.has(id):
+			out.append(id)
+	return out
+
+
 static func random_player_card_at_tier(tier: int) -> String:
 	var pool: Array = []
 	for id in PLAYER_POOL.keys():
-		if PLAYER_POOL[id].tier == tier:
+		if PLAYER_POOL[id].tier == tier and is_card_available(id):
 			pool.append(id)
 	if pool.is_empty():
 		return ""

@@ -26,6 +26,7 @@ RunState="*uid://dcq27ifbf3e7g"
 MetaState="*uid://cyts2mfhubru2"
 CardDB="*uid://c0ddf4qlhb4bb"
 RelicDB="*uid://2p6cly80x3np"
+KeywordEffects="*res://scripts/data/KeywordEffects.gd"
 
 [display]
 

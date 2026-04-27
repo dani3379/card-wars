@@ -15,10 +15,14 @@ func _ready() -> void:
 
 
 func _refresh_stats() -> void:
-	var s := "Runs: %d   Victories: %d   Defeats: %d" % [
+	var unlocked := MetaState.unlocked_cards.size()
+	var locked_remaining := CardDB.locked_card_ids().size()
+	var s := "Runs: %d   Victories: %d   Defeats: %d\nCards unlocked: %d  (still locked: %d)" % [
 		MetaState.total_runs,
 		MetaState.total_victories,
 		MetaState.total_defeats,
+		unlocked,
+		locked_remaining,
 	]
 	$VBox/StatsLabel.text = s
 

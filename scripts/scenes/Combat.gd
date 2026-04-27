@@ -19,6 +19,10 @@ enum Phase { PLAYER_TURN, ENEMY_TURN, COMBAT, GAME_OVER }
 var phase := Phase.PLAYER_TURN
 var turn_number := 0
 
+# ── Mana / draw constants — STS-style: fixed pool refilled each turn ──
+const BASE_MAX_MANA: int = 3
+const HAND_DRAW_PER_TURN: int = 5
+
 # ── Hero stats — player pulled from RunState, enemy generated per-fight ──
 var player_hp: int
 var player_max_hp: int
@@ -53,7 +57,6 @@ var _cam_angle_y := 0.0
 
 # ── Relic-related per-turn state ──
 var _vampires_fang_used_this_turn: bool = false
-var _phoenix_heart_consumed: bool = false
 
 # ── HUD ──
 var _phase_label: Label3D
@@ -160,12 +163,12 @@ func _start_player_turn() -> void:
 	turn_number += 1
 	_vampires_fang_used_this_turn = false
 
-	# Mana baseline 4 + 1 per turn up to 10
-	player_max_mana = mini(turn_number + 3, 10)
-	# Chronograph: +1 max mana
+	# Mana fixed at BASE_MAX_MANA, refilled every turn (STS-style).
+	player_max_mana = BASE_MAX_MANA
+	# Chronograph: +1 max mana for the whole fight.
 	if _has_relic("chronograph"):
 		player_max_mana += 1
-	# Ash Crown: +1 mana on the first turn of every fight
+	# Ash Crown: +1 mana on the first turn of every fight.
 	if _has_relic("ash_crown") and turn_number == 1:
 		player_max_mana += 1
 
@@ -182,28 +185,59 @@ func _start_player_turn() -> void:
 		var bs := RelicDB.get_relic("bloodstone")
 		player_hp = mini(player_hp + bs.value, player_max_hp)
 
-	# Witch's Grimoire: +1 draw per turn
-	var draw_count = 4 if turn_number == 1 else 1
+	# Draw a fresh hand each turn. Witch's Grimoire: +1 draw per turn.
+	var draw_count = HAND_DRAW_PER_TURN
 	if _has_relic("witchs_grimoire"):
 		draw_count += 1
 	for i in draw_count:
-		if _hand.size() < MAX_HAND_SIZE and _player_draw_pile.size() > 0:
-			_draw_card(_player_draw_pile.pop_front())
-		elif _player_draw_pile.is_empty() and not _player_discard_pile.is_empty():
-			# Reshuffle discard into draw pile
-			_player_draw_pile = _player_discard_pile.duplicate()
-			_player_draw_pile.shuffle()
-			_player_discard_pile.clear()
-			if _hand.size() < MAX_HAND_SIZE:
-				_draw_card(_player_draw_pile.pop_front())
+		draw_one()
 
 	_end_turn_btn.disabled = false
 	_update_hud()
 
 
+# Public helper used by KeywordEffects (onplay_draw) and turn-start logic.
+func draw_one() -> void:
+	if _hand.size() >= MAX_HAND_SIZE: return
+	if _player_draw_pile.is_empty():
+		if _player_discard_pile.is_empty():
+			return
+		_player_draw_pile = _player_discard_pile.duplicate()
+		_player_draw_pile.shuffle()
+		_player_discard_pile.clear()
+	if _player_draw_pile.is_empty(): return
+	_draw_card(_player_draw_pile.pop_front())
+
+
+# Discard the entire hand into the discard pile and remove the visual cards.
+func _discard_hand() -> void:
+	for card in _hand:
+		_player_discard_pile.append(card.card_id)
+		card.queue_free()
+	_hand.clear()
+
+
+# Helpers exposed for KeywordEffects so it doesn't reach into private state.
+func damage_player_hero(amount: int) -> void:
+	player_hp -= amount
+	_on_hero_damaged(amount)
+	_update_hud()
+
+
+func damage_enemy_hero(amount: int) -> void:
+	enemy_hp -= amount
+	_update_hud()
+
+
+func get_opposing_card(lane_idx: int, was_enemy: bool) -> Node3D:
+	return _player_field[lane_idx] if was_enemy else _enemy_field[lane_idx]
+
+
 func _start_enemy_turn() -> void:
 	phase = Phase.ENEMY_TURN
-	enemy_mana = mini(turn_number + 3, 10)
+	# Enemy mana scales modestly with turn; matched roughly to player's
+	# fixed pool but with light ramp to keep late-game pressure on.
+	enemy_mana = mini(BASE_MAX_MANA + (turn_number - 1) / 2, BASE_MAX_MANA + 3)
 	_end_turn_btn.disabled = true
 	_update_hud()
 	# Reset enemy attack flags
@@ -335,37 +369,11 @@ func _apply_lane_damage(amount: int, lane: Dictionary, _to_player_card: bool) ->
 
 
 func _resolve_onplay(card_id: String, lane_idx: int, is_enemy: bool) -> void:
-	var data = CardDB.get_card_data(card_id)
-	if data.is_empty(): return
-	if not data.has("keywords"): return
-	for kw in data.keywords:
-		match kw:
-			"onplay_draw":
-				if not is_enemy and _hand.size() < MAX_HAND_SIZE and _player_draw_pile.size() > 0:
-					_draw_card(_player_draw_pile.pop_front())
-			"onplay_smite":
-				if is_enemy:
-					player_hp -= 2
-					_on_hero_damaged(2)
-				else:
-					enemy_hp -= 2
-				_update_hud()
+	KeywordEffects.dispatch_on_play(card_id, lane_idx, is_enemy, self)
 
 
 func _resolve_deathrattle(card: Node3D, lane_idx: int, was_enemy: bool) -> void:
-	for kw in card.card_data.keywords:
-		match kw:
-			"deathrattle_smite":
-				# Damage opposing card if any
-				var target = _enemy_field[lane_idx] if not was_enemy else _player_field[lane_idx]
-				if target != null:
-					target.take_damage(2)
-			"deathrattle_burn":
-				if was_enemy:
-					player_hp -= 1
-					_on_hero_damaged(1)
-				else:
-					enemy_hp -= 1
+	KeywordEffects.dispatch_on_death(card, lane_idx, was_enemy, self)
 
 
 func _on_card_killed(_was_player_killed: bool) -> void:
@@ -376,9 +384,10 @@ func _on_card_killed(_was_player_killed: bool) -> void:
 
 
 func _on_hero_damaged(_amount: int) -> void:
-	# Phoenix Heart: revive on lethal once per run
-	if _has_relic("phoenix_heart") and not _phoenix_heart_consumed and player_hp <= 0:
-		_phoenix_heart_consumed = true
+	# Phoenix Heart: revive on lethal once per run.
+	# Tracked on RunState so it persists across fights, not per-combat.
+	if _has_relic("phoenix_heart") and not RunState.phoenix_heart_consumed and player_hp <= 0:
+		RunState.phoenix_heart_consumed = true
 		player_hp = 1
 	# Thorned Pendant: 1 dmg to random enemy card
 	if _has_relic("thorned_pendant"):
@@ -621,6 +630,9 @@ func _update_hud() -> void:
 
 func _on_end_turn() -> void:
 	if phase != Phase.PLAYER_TURN: return
+	# STS-style: discard the entire hand at end of turn.
+	_discard_hand()
+	_arrange_hand()
 	_start_enemy_turn()
 
 

@@ -33,8 +33,9 @@ func _build_ui() -> void:
 
 	for id in _card_choices:
 		var data = CardDB.get_card_data(id)
+		var kw_text = KeywordEffects.display_text_for(data.get("keywords", []))
 		var btn = _make_choice_button(
-			"%s\n%d⚡  %d/%d\n%s" % [data.name, data.cost, data.atk, data.hp, _kw_text(data)],
+			"%s\n%d⚡  %d/%d\n%s" % [data.name, data.cost, data.atk, data.hp, kw_text],
 			data.desc, Color(0.20, 0.25, 0.35))
 		btn.pressed.connect(_pick_card.bind(id))
 		$CardRow.add_child(btn)
@@ -51,12 +52,6 @@ func _build_ui() -> void:
 		$RelicTitle.visible = false
 
 	$SkipBtn.pressed.connect(_skip)
-
-
-func _kw_text(data: Dictionary) -> String:
-	if not data.has("keywords") or data.keywords.is_empty():
-		return ""
-	return ", ".join(data.keywords)
 
 
 func _make_choice_button(title: String, tooltip: String, color: Color) -> Button:

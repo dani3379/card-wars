@@ -24,6 +24,10 @@ var current_floor: int = 0   # 0 = pre-run, 1..N = floors traversed
 var run_active: bool = false
 var run_seed: int = 0
 
+# ── Once-per-run flags ──
+var phoenix_heart_consumed: bool = false
+var card_removals_remaining: int = 2   # how many "remove a card" events the player can use this run
+
 
 # ── Lane identities ──
 # Index 0..3 maps to lanes left-to-right.
@@ -64,6 +68,8 @@ func start_new_run() -> void:
 	current_floor = 0
 	run_active = true
 	run_seed = randi()
+	phoenix_heart_consumed = false
+	card_removals_remaining = 2
 	# Apply meta-unlocks here later if any persistent bonuses exist.
 
 

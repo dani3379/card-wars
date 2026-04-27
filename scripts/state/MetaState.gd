@@ -13,6 +13,9 @@ var fastest_victory_floors: int = -1
 var unlocked_cards: Array[String] = []
 var unlocked_relics: Array[String] = []
 
+# Transient — set by record_victory if a card was unlocked. Read by GameOver.
+var last_unlocked_card: String = ""
+
 
 func _ready() -> void:
 	load_save()
@@ -23,7 +26,19 @@ func record_victory() -> void:
 	total_victories += 1
 	if fastest_victory_floors < 0 or RunState.current_floor < fastest_victory_floors:
 		fastest_victory_floors = RunState.current_floor
+	last_unlocked_card = _unlock_random_locked_card()
 	save()
+
+
+# Pick one still-locked card from CardDB and unlock it. Returns the id,
+# or "" if everything is already unlocked.
+func _unlock_random_locked_card() -> String:
+	var locked: Array[String] = CardDB.locked_card_ids()
+	if locked.is_empty():
+		return ""
+	var pick = locked[randi() % locked.size()]
+	unlock_card(pick)
+	return pick
 
 
 func record_defeat() -> void:

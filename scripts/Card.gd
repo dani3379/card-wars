@@ -135,7 +135,7 @@ func _create_stat_labels() -> void:
 
 	# Keyword strip — small, above name
 	if card_data.has("keywords") and card_data.keywords.size() > 0:
-		var kw_text := _format_keywords(card_data.keywords)
+		var kw_text := KeywordEffects.display_text_for(card_data.keywords)
 		_keyword_label = _make_label(kw_text, 16, Vector3(0, 0.005, -0.245),
 			Color(1.0, 0.85, 0.45), 4)
 
@@ -145,22 +145,6 @@ func _create_stat_labels() -> void:
 		Vector3(0.13, 0.005, 0.21), Color(0.25, 0.85, 0.35), 14)
 	_cost_label = _make_label(str(card_data.cost), 50,
 		Vector3(0.14, 0.005, -0.22), Color(0.4, 0.6, 1.0), 12)
-
-
-func _format_keywords(kws: Array) -> String:
-	# Convert internal keyword strings to short display text
-	var display: Array[String] = []
-	for k in kws:
-		match k:
-			"charge": display.append("Charge")
-			"taunt": display.append("Taunt")
-			"lifesteal": display.append("Lifesteal")
-			"frenzy": display.append("Frenzy")
-			"deathrattle_smite": display.append("Death: smite")
-			"deathrattle_burn": display.append("Death: burn")
-			"onplay_draw": display.append("Play: draw")
-			"onplay_smite": display.append("Play: smite")
-	return "  ".join(display)
 
 
 func _make_label(text: String, size: int, pos: Vector3,
