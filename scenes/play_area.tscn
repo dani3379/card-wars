@@ -1,0 +1,254 @@
+[gd_scene load_steps=28 format=3]
+
+[ext_resource type="Script" path="res://scripts/PlayArea.gd" id="1_playarea"]
+[ext_resource type="Script" path="res://scripts/MoodDirector.gd" id="2_mood"]
+[ext_resource type="Script" path="res://scripts/Atmosphere.gd" id="3_atm"]
+
+; ---------- Environment ----------
+[sub_resource type="CameraAttributesPractical" id="CamAttrs"]
+auto_exposure_enabled = false
+
+[sub_resource type="Environment" id="Env"]
+background_mode = 2
+tonemap_mode = 4
+glow_enabled = true
+fog_enabled = true
+volumetric_fog_enabled = true
+adjustment_enabled = true
+
+; ---------- Lane materials ----------
+[sub_resource type="StandardMaterial3D" id="MatLane1"]
+shading_mode = 0
+albedo_color = Color(0.92, 0.72, 0.18, 1)
+
+[sub_resource type="StandardMaterial3D" id="MatLane2"]
+shading_mode = 0
+albedo_color = Color(0.35, 0.75, 0.30, 1)
+
+[sub_resource type="StandardMaterial3D" id="MatLane3"]
+shading_mode = 0
+albedo_color = Color(0.55, 0.35, 0.78, 1)
+
+[sub_resource type="StandardMaterial3D" id="MatLane4"]
+shading_mode = 0
+albedo_color = Color(0.28, 0.62, 0.85, 1)
+
+[sub_resource type="PlaneMesh" id="MeshLane1"]
+size = Vector2(0.85, 2.8)
+material = SubResource("MatLane1")
+
+[sub_resource type="PlaneMesh" id="MeshLane2"]
+size = Vector2(0.85, 2.8)
+material = SubResource("MatLane2")
+
+[sub_resource type="PlaneMesh" id="MeshLane3"]
+size = Vector2(0.85, 2.8)
+material = SubResource("MatLane3")
+
+[sub_resource type="PlaneMesh" id="MeshLane4"]
+size = Vector2(0.85, 2.8)
+material = SubResource("MatLane4")
+
+; ---------- Board frame ----------
+[sub_resource type="StandardMaterial3D" id="MatBoardFrame"]
+shading_mode = 0
+albedo_color = Color(0.35, 0.22, 0.12, 1)
+
+[sub_resource type="PlaneMesh" id="MeshBoardFrame"]
+size = Vector2(4.0, 3.2)
+material = SubResource("MatBoardFrame")
+
+; ---------- Lane dividers ----------
+[sub_resource type="StandardMaterial3D" id="MatDivider"]
+shading_mode = 0
+albedo_color = Color(0.22, 0.15, 0.10, 1)
+
+[sub_resource type="BoxMesh" id="MeshDivider"]
+size = Vector3(0.03, 0.008, 2.8)
+material = SubResource("MatDivider")
+
+; ---------- Midline ----------
+[sub_resource type="StandardMaterial3D" id="MatMidline"]
+shading_mode = 0
+albedo_color = Color(0.88, 0.82, 0.58, 1)
+emission_enabled = true
+emission = Color(0.88, 0.75, 0.45, 1)
+emission_energy_multiplier = 0.5
+
+[sub_resource type="BoxMesh" id="MeshMidline"]
+size = Vector3(3.7, 0.006, 0.025)
+material = SubResource("MatMidline")
+
+; ---------- Board trim ----------
+[sub_resource type="StandardMaterial3D" id="MatTrim"]
+shading_mode = 0
+albedo_color = Color(0.52, 0.36, 0.22, 1)
+
+[sub_resource type="BoxMesh" id="MeshTrimH"]
+size = Vector3(4.0, 0.03, 0.07)
+material = SubResource("MatTrim")
+
+[sub_resource type="BoxMesh" id="MeshTrimV"]
+size = Vector3(0.07, 0.03, 3.2)
+material = SubResource("MatTrim")
+
+; ---------- Corner gems ----------
+[sub_resource type="StandardMaterial3D" id="MatGem"]
+shading_mode = 0
+albedo_color = Color(0.85, 0.65, 0.15, 1)
+emission_enabled = true
+emission = Color(1.0, 0.7, 0.2, 1)
+emission_energy_multiplier = 0.6
+
+[sub_resource type="SphereMesh" id="MeshGem"]
+radius = 0.05
+height = 0.045
+material = SubResource("MatGem")
+
+; ---------- Table surface ----------
+[sub_resource type="StandardMaterial3D" id="MatTable"]
+shading_mode = 0
+albedo_color = Color(0.26, 0.22, 0.18, 1)
+
+[sub_resource type="PlaneMesh" id="MeshTable"]
+size = Vector2(9, 7)
+material = SubResource("MatTable")
+
+; ---------- Scene tree ----------
+[node name="PlayArea" type="Node3D"]
+script = ExtResource("1_playarea")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env")
+camera_attributes = SubResource("CamAttrs")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.707, 0.707, 0, -0.707, 0.707, 0, 3.0, 3.0)
+fov = 50.0
+near = 0.05
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 4, 0)
+light_color = Color(1.0, 0.96, 0.88, 1)
+light_energy = 1.0
+shadow_enabled = true
+shadow_bias = 0.02
+
+; ---- MoodDirector ----
+[node name="MoodDirector" type="Node3D" parent="."]
+script = ExtResource("2_mood")
+play_area = NodePath("..")
+
+; ---- Atmosphere ----
+[node name="Atmosphere" type="Node3D" parent="."]
+script = ExtResource("3_atm")
+mood_director = NodePath("../MoodDirector")
+
+[node name="Petals" type="GPUParticles3D" parent="Atmosphere"]
+emitting = true
+
+[node name="Sparkles" type="GPUParticles3D" parent="Atmosphere"]
+emitting = true
+
+[node name="Bugs" type="GPUParticles3D" parent="Atmosphere"]
+emitting = true
+
+; ---- Table ----
+[node name="Table" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.02, 0)
+mesh = SubResource("MeshTable")
+
+; ---- Board frame ----
+[node name="BoardFrame" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.005, 0)
+mesh = SubResource("MeshBoardFrame")
+
+; ---- Trim ----
+[node name="TrimTop" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.008, -1.6)
+mesh = SubResource("MeshTrimH")
+
+[node name="TrimBottom" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.008, 1.6)
+mesh = SubResource("MeshTrimH")
+
+[node name="TrimLeft" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.0, 0.008, 0)
+mesh = SubResource("MeshTrimV")
+
+[node name="TrimRight" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.0, 0.008, 0)
+mesh = SubResource("MeshTrimV")
+
+; ---- Corner gems ----
+[node name="GemTL" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.96, 0.025, -1.56)
+mesh = SubResource("MeshGem")
+
+[node name="GemTR" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.96, 0.025, -1.56)
+mesh = SubResource("MeshGem")
+
+[node name="GemBL" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.96, 0.025, 1.56)
+mesh = SubResource("MeshGem")
+
+[node name="GemBR" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.96, 0.025, 1.56)
+mesh = SubResource("MeshGem")
+
+; ---- Midline ----
+[node name="Midline" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.003, 0)
+mesh = SubResource("MeshMidline")
+
+; ---- Lanes ----
+[node name="Lanes" type="Node3D" parent="."]
+
+[node name="Lane1" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.35, 0, 0)
+mesh = SubResource("MeshLane1")
+
+[node name="Lane2" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.45, 0, 0)
+mesh = SubResource("MeshLane2")
+
+[node name="Lane3" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.45, 0, 0)
+mesh = SubResource("MeshLane3")
+
+[node name="Lane4" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.35, 0, 0)
+mesh = SubResource("MeshLane4")
+
+; ---- Lane dividers ----
+[node name="Div1" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.9, 0.004, 0)
+mesh = SubResource("MeshDivider")
+
+[node name="Div2" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.0, 0.004, 0)
+mesh = SubResource("MeshDivider")
+
+[node name="Div3" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.9, 0.004, 0)
+mesh = SubResource("MeshDivider")
+
+; ---- Side labels ----
+[node name="PlayerLabel" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0.005, 1.35)
+text = "— YOUR SIDE —"
+font_size = 26
+pixel_size = 0.002
+modulate = Color(1, 1, 1, 0.35)
+outline_modulate = Color(0, 0, 0, 0.25)
+outline_size = 4
+
+[node name="EnemyLabel" type="Label3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 0, -1, 0, -1, 0, 0, 0.005, -1.35)
+text = "— ENEMY SIDE —"
+font_size = 26
+pixel_size = 0.002
+modulate = Color(1, 0.4, 0.4, 0.35)
+outline_modulate = Color(0, 0, 0, 0.25)
+outline_size = 4
