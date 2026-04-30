@@ -7,34 +7,41 @@ auto_exposure_enabled = false
 
 [sub_resource type="Environment" id="Env"]
 background_mode = 1
-background_color = Color(0.08, 0.06, 0.10, 1)
-ambient_light_color = Color(0.4, 0.35, 0.42, 1)
-ambient_light_energy = 0.5
+background_color = Color(0.04, 0.03, 0.05, 1)
+ambient_light_color = Color(0.30, 0.22, 0.28, 1)
+ambient_light_energy = 0.25
 tonemap_mode = 4
+tonemap_exposure = 1.1
 glow_enabled = true
-glow_intensity = 0.4
-glow_bloom = 0.05
-glow_hdr_threshold = 1.0
+glow_intensity = 0.7
+glow_strength = 1.1
+glow_bloom = 0.10
+glow_hdr_threshold = 0.9
 glow_blend_mode = 1
 adjustment_enabled = true
-adjustment_contrast = 1.10
-adjustment_saturation = 1.05
+adjustment_contrast = 1.15
+adjustment_saturation = 1.10
 
 [sub_resource type="StandardMaterial3D" id="MatLane1"]
-shading_mode = 0
-albedo_color = Color(0.92, 0.72, 0.18, 1)
+shading_mode = 1
+albedo_color = Color(0.55, 0.42, 0.10, 1)
+roughness = 0.85
+metallic = 0.0
 
 [sub_resource type="StandardMaterial3D" id="MatLane2"]
-shading_mode = 0
-albedo_color = Color(0.35, 0.75, 0.30, 1)
+shading_mode = 1
+albedo_color = Color(0.20, 0.45, 0.18, 1)
+roughness = 0.85
 
 [sub_resource type="StandardMaterial3D" id="MatLane3"]
-shading_mode = 0
-albedo_color = Color(0.55, 0.35, 0.78, 1)
+shading_mode = 1
+albedo_color = Color(0.32, 0.20, 0.45, 1)
+roughness = 0.85
 
 [sub_resource type="StandardMaterial3D" id="MatLane4"]
-shading_mode = 0
-albedo_color = Color(0.28, 0.62, 0.85, 1)
+shading_mode = 1
+albedo_color = Color(0.16, 0.36, 0.50, 1)
+roughness = 0.85
 
 [sub_resource type="PlaneMesh" id="MeshLane1"]
 size = Vector2(0.85, 2.8)
@@ -53,8 +60,9 @@ size = Vector2(0.85, 2.8)
 material = SubResource("MatLane4")
 
 [sub_resource type="StandardMaterial3D" id="MatBoardFrame"]
-shading_mode = 0
-albedo_color = Color(0.35, 0.22, 0.12, 1)
+shading_mode = 1
+albedo_color = Color(0.20, 0.13, 0.07, 1)
+roughness = 0.95
 
 [sub_resource type="PlaneMesh" id="MeshBoardFrame"]
 size = Vector2(4.0, 3.2)
@@ -72,8 +80,9 @@ size = Vector3(3.7, 0.006, 0.025)
 material = SubResource("MatMidline")
 
 [sub_resource type="StandardMaterial3D" id="MatTable"]
-shading_mode = 0
-albedo_color = Color(0.16, 0.13, 0.11, 1)
+shading_mode = 1
+albedo_color = Color(0.10, 0.08, 0.07, 1)
+roughness = 1.0
 
 [sub_resource type="PlaneMesh" id="MeshTable"]
 size = Vector2(9, 7)
@@ -88,13 +97,13 @@ camera_attributes = SubResource("CamAttrs")
 
 [node name="Camera3D" type="Camera3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 0.707, 0.707, 0, -0.707, 0.707, 0, 3.0, 3.0)
-fov = 50.0
+fov = 58.0
 near = 0.05
 
 [node name="Sun" type="DirectionalLight3D" parent="."]
 transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 4, 0)
-light_color = Color(1.0, 0.96, 0.88, 1)
-light_energy = 1.0
+light_color = Color(0.55, 0.50, 0.65, 1)
+light_energy = 0.30
 shadow_enabled = true
 shadow_bias = 0.02
 

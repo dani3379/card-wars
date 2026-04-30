@@ -42,30 +42,41 @@ var _hand: Array[Node3D] = []
 var _player_field: Array = [null, null, null, null]
 var _enemy_field: Array = [null, null, null, null]
 const MAX_HAND_SIZE := 8
-const HAND_CENTER := Vector3(0.0, 0.06, 2.2)
+const HAND_CENTER := Vector3(0.0, 0.06, 1.95)
 const HAND_CARD_SPACING := 0.46
-const HAND_CARD_TILT_X := -0.35
+const HAND_CARD_TILT_X := -0.32
 const LANE_X := [-1.35, -0.45, 0.45, 1.35]
 const PLAYER_ZONE_Z := 0.6
 const ENEMY_ZONE_Z := -0.6
 
 # ── Camera ──
 var _cam_pivot := Vector3(0, 0, 0.3)
-var _cam_distance := 4.2
-var _cam_angle_x := -45.0
+var _cam_distance := 5.4
+var _cam_angle_x := -42.0
 var _cam_angle_y := 0.0
+# Drift + mouse-follow state. Read each frame in _process so the camera
+# breathes a little instead of being a static viewport.
+const CAMERA_DRIFT_AMPLITUDE_X := 0.06
+const CAMERA_DRIFT_AMPLITUDE_Y := 0.04
+const CAMERA_DRIFT_SPEED := 0.35
+const CAMERA_MOUSE_FOLLOW_X := 0.22
+const CAMERA_MOUSE_FOLLOW_Y := 0.12
+const CAMERA_MOUSE_LERP := 4.0
+var _cam_drift_t: float = 0.0
+var _cam_mouse_offset: Vector3 = Vector3.ZERO
 
 # ── Relic-related per-turn state ──
 var _vampires_fang_used_this_turn: bool = false
 
-# ── HUD ──
-var _phase_label: Label3D
-var _player_hp_label: Label3D
-var _enemy_hp_label: Label3D
-var _mana_label: Label3D
-var _turn_label: Label3D
-var _info_label: Label3D
-var _floor_label: Label3D
+# ── HUD (2D overlay so it's always on-screen, not Label3D in world space) ──
+var _hud_layer: CanvasLayer
+var _phase_label: Label
+var _player_hp_label: Label
+var _enemy_hp_label: Label
+var _mana_label: Label
+var _turn_label: Label
+var _info_label: Label
+var _floor_label: Label
 var _end_turn_btn: Button
 var _relic_panel: HBoxContainer
 
@@ -79,6 +90,7 @@ func _ready() -> void:
 	get_viewport().physics_object_picking = true
 	_setup_fight_state()
 	_build_lane_labels()
+	_build_atmosphere()
 	_build_hud()
 	_build_end_turn_button()
 	_build_flash_layer()
@@ -99,13 +111,13 @@ func _setup_fight_state() -> void:
 
 	match node_type:
 		"combat":
-			enemy_max_hp = 18 + floor_num * 2
+			enemy_max_hp = 10 + floor_num * 2
 			_build_enemy_deck_normal(floor_num)
 		"elite":
-			enemy_max_hp = 25 + floor_num * 2
+			enemy_max_hp = 16 + floor_num * 2
 			_build_enemy_deck_elite(floor_num)
 		"boss":
-			enemy_max_hp = 60
+			enemy_max_hp = 35
 			_build_enemy_deck_boss()
 	enemy_hp = enemy_max_hp
 
@@ -523,6 +535,139 @@ func _nearest_lane_index(world_pos: Vector3) -> int:
 
 
 # ── HUD ──
+# ── Atmosphere ──
+# A small candle on the table edge with a real flickering point light, drifting
+# embers, and dust motes lit by the candle. Pure procedural setup — no scene
+# editing needed. Tweak the constants here for "feel".
+const CANDLE_BASE_ENERGY := 1.4
+const CANDLE_FLICKER_AMOUNT := 0.55
+const CANDLE_POSITION := Vector3(-2.4, 0.45, 1.35)
+
+var _candle_light: OmniLight3D
+var _candle_flame: MeshInstance3D
+var _candle_flicker_t: float = 0.0
+
+
+func _build_atmosphere() -> void:
+	_build_candle()
+	_build_embers()
+	_build_dust_motes()
+	_build_back_glow()
+
+
+func _build_candle() -> void:
+	var stem = MeshInstance3D.new()
+	var stem_mesh = CylinderMesh.new()
+	stem_mesh.top_radius = 0.07
+	stem_mesh.bottom_radius = 0.075
+	stem_mesh.height = 0.32
+	var stem_mat = StandardMaterial3D.new()
+	stem_mat.albedo_color = Color(0.92, 0.86, 0.70)
+	stem_mat.roughness = 0.85
+	stem_mesh.material = stem_mat
+	stem.mesh = stem_mesh
+	stem.position = CANDLE_POSITION + Vector3(0, 0.16, 0)
+	add_child(stem)
+
+	# Flame: a small emissive cone-ish mesh.
+	_candle_flame = MeshInstance3D.new()
+	var flame_mesh = SphereMesh.new()
+	flame_mesh.radius = 0.04
+	flame_mesh.height = 0.13
+	var flame_mat = StandardMaterial3D.new()
+	flame_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	flame_mat.albedo_color = Color(1.0, 0.78, 0.32)
+	flame_mat.emission_enabled = true
+	flame_mat.emission = Color(1.0, 0.65, 0.25)
+	flame_mat.emission_energy_multiplier = 4.0
+	flame_mesh.material = flame_mat
+	_candle_flame.mesh = flame_mesh
+	_candle_flame.position = CANDLE_POSITION + Vector3(0, 0.40, 0)
+	add_child(_candle_flame)
+
+	# Warm point light driving the scene's mood.
+	_candle_light = OmniLight3D.new()
+	_candle_light.light_color = Color(1.0, 0.65, 0.30)
+	_candle_light.light_energy = CANDLE_BASE_ENERGY
+	_candle_light.omni_range = 6.0
+	_candle_light.shadow_enabled = true
+	_candle_light.position = CANDLE_POSITION + Vector3(0, 0.40, 0)
+	add_child(_candle_light)
+
+
+func _build_embers() -> void:
+	# Drifting embers rising from the candle.
+	var p = GPUParticles3D.new()
+	var mat = ParticleProcessMaterial.new()
+	mat.direction = Vector3(0, 1, 0)
+	mat.spread = 12.0
+	mat.initial_velocity_min = 0.25
+	mat.initial_velocity_max = 0.55
+	mat.gravity = Vector3(0, 0.4, 0)  # rise, not fall
+	mat.scale_min = 0.4
+	mat.scale_max = 1.2
+	mat.color = Color(1.0, 0.55, 0.2, 1.0)
+	mat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	mat.emission_sphere_radius = 0.04
+	p.process_material = mat
+	var mesh = SphereMesh.new()
+	mesh.radius = 0.012
+	mesh.height = 0.024
+	var ember_mat = StandardMaterial3D.new()
+	ember_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	ember_mat.albedo_color = Color(1.0, 0.55, 0.2)
+	ember_mat.emission_enabled = true
+	ember_mat.emission = Color(1.0, 0.45, 0.15)
+	ember_mat.emission_energy_multiplier = 3.0
+	mesh.material = ember_mat
+	p.draw_pass_1 = mesh
+	p.amount = 24
+	p.lifetime = 2.4
+	p.preprocess = 1.5
+	p.position = CANDLE_POSITION + Vector3(0, 0.45, 0)
+	add_child(p)
+
+
+func _build_dust_motes() -> void:
+	# Slow ambient dust drifting through the candle's light cone.
+	var p = GPUParticles3D.new()
+	var mat = ParticleProcessMaterial.new()
+	mat.direction = Vector3(0.2, -0.05, 0.1)
+	mat.spread = 60.0
+	mat.initial_velocity_min = 0.05
+	mat.initial_velocity_max = 0.12
+	mat.gravity = Vector3.ZERO
+	mat.scale_min = 0.5
+	mat.scale_max = 1.6
+	mat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	mat.emission_box_extents = Vector3(3.0, 1.2, 2.5)
+	mat.color = Color(0.9, 0.85, 0.7, 0.5)
+	p.process_material = mat
+	var mesh = SphereMesh.new()
+	mesh.radius = 0.006
+	mesh.height = 0.012
+	var dust_mat = StandardMaterial3D.new()
+	dust_mat.albedo_color = Color(0.95, 0.9, 0.78)
+	dust_mat.roughness = 1.0
+	mesh.material = dust_mat
+	p.draw_pass_1 = mesh
+	p.amount = 80
+	p.lifetime = 6.0
+	p.preprocess = 4.0
+	p.position = Vector3(0, 1.0, 0)
+	add_child(p)
+
+
+func _build_back_glow() -> void:
+	# Dim warm rim light from the back to push the table out of pure darkness.
+	var rim = OmniLight3D.new()
+	rim.light_color = Color(0.6, 0.4, 0.5)
+	rim.light_energy = 0.6
+	rim.omni_range = 8.0
+	rim.position = Vector3(2.0, 1.5, -2.5)
+	add_child(rim)
+
+
 func _build_lane_labels() -> void:
 	# A small label above each lane showing its identity
 	for i in range(4):
@@ -540,65 +685,116 @@ func _build_lane_labels() -> void:
 
 
 func _build_hud() -> void:
-	_phase_label = _make_hud_label(Vector3(0, 2.6, -2.5), "YOUR TURN", 44, Color(1, 0.9, 0.4))
-	_floor_label = _make_hud_label(Vector3(0, 3.0, -2.5),
-		"Floor %d / %d" % [RunState.current_floor, RunState.FLOOR_COUNT], 26,
-		Color(0.85, 0.85, 0.95))
-	_player_hp_label = _make_hud_label(Vector3(-1.7, 0.15, 2.6),
-		"♥ 25/25", 36, Color(0.9, 0.3, 0.3))
-	_enemy_hp_label = _make_hud_label(Vector3(0, 2.5, -2.5),
-		"Enemy ♥ %d/%d" % [enemy_hp, enemy_max_hp], 30, Color(0.9, 0.4, 0.4))
-	_mana_label = _make_hud_label(Vector3(0, 0.15, 2.6), "◆ 5/5", 36, Color(0.4, 0.65, 1.0))
-	_turn_label = _make_hud_label(Vector3(1.7, 0.15, 2.6), "Turn 1", 26, Color(0.6, 0.6, 0.6))
-	_info_label = _make_hud_label(Vector3(0, 1.5, 0), "", 40, Color(1, 0.6, 0.3))
+	# Single CanvasLayer hosts every HUD label + button + relic strip in 2D.
+	# Positioned by anchors so the layout works at any window size.
+	_hud_layer = CanvasLayer.new()
+	_hud_layer.layer = 10
+	add_child(_hud_layer)
+
+	# Top center: floor + phase
+	_floor_label = _make_2d_label(
+		"Floor %d / %d" % [RunState.current_floor, RunState.FLOOR_COUNT],
+		22, Color(0.85, 0.85, 0.95))
+	_floor_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	_floor_label.offset_top = 12
+	_floor_label.offset_bottom = 38
+	_floor_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_hud_layer.add_child(_floor_label)
+
+	_phase_label = _make_2d_label("YOUR TURN", 32, Color(1, 0.9, 0.4))
+	_phase_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	_phase_label.offset_top = 38
+	_phase_label.offset_bottom = 78
+	_phase_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_hud_layer.add_child(_phase_label)
+
+	# Top center: enemy HP
+	_enemy_hp_label = _make_2d_label(
+		"Enemy ♥ %d/%d" % [enemy_hp, enemy_max_hp], 26, Color(0.95, 0.45, 0.45))
+	_enemy_hp_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	_enemy_hp_label.offset_top = 86
+	_enemy_hp_label.offset_bottom = 120
+	_enemy_hp_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_hud_layer.add_child(_enemy_hp_label)
+
+	# Bottom-left: player HP
+	_player_hp_label = _make_2d_label("♥ 25/25", 28, Color(0.95, 0.3, 0.3))
+	_player_hp_label.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_player_hp_label.offset_left = 24
+	_player_hp_label.offset_top = -64
+	_player_hp_label.offset_bottom = -28
+	_player_hp_label.offset_right = 320
+	_hud_layer.add_child(_player_hp_label)
+
+	# Bottom-center: mana
+	_mana_label = _make_2d_label("◆ 3/3", 30, Color(0.45, 0.7, 1.0))
+	_mana_label.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+	_mana_label.offset_top = -64
+	_mana_label.offset_bottom = -28
+	_mana_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_hud_layer.add_child(_mana_label)
+
+	# Bottom-right: turn counter
+	_turn_label = _make_2d_label("Turn 1", 22, Color(0.7, 0.7, 0.7))
+	_turn_label.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_turn_label.offset_left = -200
+	_turn_label.offset_right = -24
+	_turn_label.offset_top = -56
+	_turn_label.offset_bottom = -28
+	_turn_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_hud_layer.add_child(_turn_label)
+
+	# Center: transient info messages ("Not enough mana", etc.)
+	_info_label = _make_2d_label("", 30, Color(1, 0.65, 0.3))
+	_info_label.set_anchors_preset(Control.PRESET_CENTER)
+	_info_label.offset_left = -300
+	_info_label.offset_right = 300
+	_info_label.offset_top = 60
+	_info_label.offset_bottom = 110
+	_info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_hud_layer.add_child(_info_label)
 
 
-func _make_hud_label(pos: Vector3, text: String, size: int, color: Color) -> Label3D:
-	var lbl = Label3D.new()
+func _make_2d_label(text: String, size: int, color: Color) -> Label:
+	var lbl = Label.new()
 	lbl.text = text
-	lbl.font_size = size
-	lbl.pixel_size = 0.003
-	lbl.position = pos
-	lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	lbl.no_depth_test = true
-	lbl.modulate = color
-	lbl.outline_modulate = Color(0, 0, 0, 0.8)
-	lbl.outline_size = 8
-	lbl.fixed_size = true
-	lbl.render_priority = 10
-	add_child(lbl)
+	lbl.add_theme_font_size_override("font_size", size)
+	lbl.add_theme_color_override("font_color", color)
+	lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	lbl.add_theme_constant_override("outline_size", 6)
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return lbl
 
 
 func _build_end_turn_button() -> void:
-	var layer = CanvasLayer.new()
-	layer.layer = 10
-	add_child(layer)
 	_end_turn_btn = Button.new()
 	_end_turn_btn.text = "END TURN  [E]"
-	_end_turn_btn.position = Vector2(20, 20)
-	_end_turn_btn.custom_minimum_size = Vector2(140, 38)
+	_end_turn_btn.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_end_turn_btn.offset_left = -200
+	_end_turn_btn.offset_right = -24
+	_end_turn_btn.offset_top = -130
+	_end_turn_btn.offset_bottom = -80
 	_end_turn_btn.pressed.connect(_on_end_turn)
 	var style = StyleBoxFlat.new()
-	style.bg_color = Color(0.12, 0.42, 0.18, 0.9)
+	style.bg_color = Color(0.12, 0.42, 0.18, 0.95)
 	style.corner_radius_top_left = 6
 	style.corner_radius_top_right = 6
 	style.corner_radius_bottom_left = 6
 	style.corner_radius_bottom_right = 6
 	_end_turn_btn.add_theme_stylebox_override("normal", style)
 	_end_turn_btn.add_theme_color_override("font_color", Color.WHITE)
-	layer.add_child(_end_turn_btn)
+	_end_turn_btn.add_theme_font_size_override("font_size", 18)
+	_hud_layer.add_child(_end_turn_btn)
 
 
 func _build_relic_display() -> void:
-	# Top-right strip showing icons for all owned relics
-	var layer = CanvasLayer.new()
-	layer.layer = 10
-	add_child(layer)
+	# Top-left strip showing icons for all owned relics, just under the floor label.
 	_relic_panel = HBoxContainer.new()
-	_relic_panel.position = Vector2(20, 70)
+	_relic_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_relic_panel.offset_left = 24
+	_relic_panel.offset_top = 24
 	_relic_panel.add_theme_constant_override("separation", 8)
-	layer.add_child(_relic_panel)
+	_hud_layer.add_child(_relic_panel)
 	_refresh_relic_display()
 
 
@@ -617,15 +813,22 @@ func _refresh_relic_display() -> void:
 
 
 func _update_hud() -> void:
-	_player_hp_label.text = "♥ %d/%d" % [player_hp, player_max_hp]
-	_enemy_hp_label.text = "Enemy ♥ %d/%d" % [enemy_hp, enemy_max_hp]
-	_mana_label.text = "◆ %d/%d" % [player_mana, player_max_mana]
+	_player_hp_label.text = "♥ %d / %d" % [player_hp, player_max_hp]
+	_enemy_hp_label.text = "Enemy ♥ %d / %d" % [enemy_hp, enemy_max_hp]
+	_mana_label.text = "◆ %d / %d" % [player_mana, player_max_mana]
 	_turn_label.text = "Turn %d" % turn_number
 	match phase:
-		Phase.PLAYER_TURN: _phase_label.text = "YOUR TURN"; _phase_label.modulate = Color(1, 0.9, 0.4)
-		Phase.ENEMY_TURN: _phase_label.text = "ENEMY TURN"; _phase_label.modulate = Color(0.9, 0.4, 0.4)
-		Phase.COMBAT: _phase_label.text = "COMBAT"; _phase_label.modulate = Color(1, 0.5, 0.2)
-		Phase.GAME_OVER: pass
+		Phase.PLAYER_TURN:
+			_phase_label.text = "YOUR TURN"
+			_phase_label.add_theme_color_override("font_color", Color(1, 0.9, 0.4))
+		Phase.ENEMY_TURN:
+			_phase_label.text = "ENEMY TURN"
+			_phase_label.add_theme_color_override("font_color", Color(0.95, 0.45, 0.45))
+		Phase.COMBAT:
+			_phase_label.text = "COMBAT"
+			_phase_label.add_theme_color_override("font_color", Color(1, 0.55, 0.25))
+		Phase.GAME_OVER:
+			pass
 
 
 func _on_end_turn() -> void:
@@ -667,17 +870,52 @@ func freeze_frame(duration: float) -> void:
 
 func _show_info(msg: String) -> void:
 	_info_label.text = msg
-	_info_label.modulate = Color(1, 0.6, 0.3)
+	_info_label.add_theme_color_override("font_color", Color(1, 0.65, 0.3))
 	get_tree().create_timer(1.5).timeout.connect(func(): _info_label.text = "")
 
 
 # ── Camera ──
 func _process(delta: float) -> void:
+	_cam_drift_t += delta * CAMERA_DRIFT_SPEED
+	_update_mouse_offset(delta)
 	_update_camera_transform()
+	_update_candle_flicker(delta)
 	if _shake_amount > 0.001:
 		var jitter = Vector3(randf()-0.5, randf()-0.5, randf()-0.5) * _shake_amount * 0.06
 		camera.position += jitter
 		_shake_amount = lerp(_shake_amount, 0.0, clampf(delta * 7.0, 0, 1))
+
+
+# Two layered noise sines + a small random kick = a candle that doesn't loop.
+func _update_candle_flicker(delta: float) -> void:
+	if _candle_light == null:
+		return
+	_candle_flicker_t += delta
+	var n = sin(_candle_flicker_t * 11.3) * 0.5 + sin(_candle_flicker_t * 4.7 + 1.3) * 0.5
+	n += (randf() - 0.5) * 0.4
+	var energy = CANDLE_BASE_ENERGY + n * CANDLE_FLICKER_AMOUNT
+	_candle_light.light_energy = max(0.4, energy)
+	if _candle_flame != null:
+		var s = 1.0 + n * 0.18
+		_candle_flame.scale = Vector3(s, 1.0 + n * 0.25, s)
+
+
+# Smoothly chase the mouse-driven camera offset so the scene parallaxes
+# slightly with the cursor. Lerped so it never feels jittery.
+func _update_mouse_offset(delta: float) -> void:
+	var vp = get_viewport().get_visible_rect().size
+	if vp.x <= 0 or vp.y <= 0:
+		return
+	var mp = get_viewport().get_mouse_position()
+	# Normalise to -1..1 with the centre at 0.
+	var nx = clampf((mp.x / vp.x) * 2.0 - 1.0, -1.0, 1.0)
+	var ny = clampf((mp.y / vp.y) * 2.0 - 1.0, -1.0, 1.0)
+	var target = Vector3(
+		nx * CAMERA_MOUSE_FOLLOW_X,
+		-ny * CAMERA_MOUSE_FOLLOW_Y,
+		0.0,
+	)
+	_cam_mouse_offset = _cam_mouse_offset.lerp(target, clampf(delta * CAMERA_MOUSE_LERP, 0.0, 1.0))
 
 
 func _update_camera_transform() -> void:
@@ -688,8 +926,14 @@ func _update_camera_transform() -> void:
 		-sin(pitch_rad) * _cam_distance,
 		cos(yaw_rad) * cos(pitch_rad) * _cam_distance
 	)
-	camera.position = _cam_pivot + offset
-	camera.look_at(_cam_pivot, Vector3.UP)
+	# Subtle idle drift — independent of mouse — so the camera always breathes.
+	var drift = Vector3(
+		sin(_cam_drift_t * 0.7) * CAMERA_DRIFT_AMPLITUDE_X,
+		cos(_cam_drift_t * 0.5) * CAMERA_DRIFT_AMPLITUDE_Y,
+		0.0,
+	)
+	camera.position = _cam_pivot + offset + drift + _cam_mouse_offset
+	camera.look_at(_cam_pivot + _cam_mouse_offset * 0.35, Vector3.UP)
 
 
 func _unhandled_input(event: InputEvent) -> void:

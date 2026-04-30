@@ -40,16 +40,24 @@ var _active_tween: Tween = null
 var _drag_velocity := Vector3.ZERO
 
 const HOVER_LIFT := 0.18
-const HOVER_LIFT_TIME := 0.15
-const HOVER_DROP_TIME := 0.22
+const HOVER_LIFT_TIME := 0.13
+const HOVER_DROP_TIME := 0.20
 const HOVER_GLOW_ENERGY := 0.7
 const PLAY_ARC_HEIGHT := 0.4
 const PLAY_ARC_TIME := 0.55
-const DRAG_SPRING_STIFFNESS := 60.0
-const DRAG_SPRING_DAMPING := 14.0
+const DRAG_SPRING_STIFFNESS := 70.0
+const DRAG_SPRING_DAMPING := 13.0
 const DRAG_HEIGHT := 0.18
 const ART_SIZE := Vector2(0.30, 0.20)
 const ART_POS := Vector3(0, 0.006, 0.06)
+
+# Subtle breathing for cards resting in hand. Each card picks a random phase
+# offset on _ready so a hand of cards isn't synchronized.
+const BREATH_AMPLITUDE_Y := 0.006
+const BREATH_AMPLITUDE_ROT := 0.012
+const BREATH_SPEED := 1.4
+var _breath_t: float = 0.0
+var _breath_phase: float = 0.0
 
 
 func _ready() -> void:
@@ -64,6 +72,8 @@ func _ready() -> void:
 	if card_data.size() > 0:
 		current_hp = card_data.hp
 		current_atk = card_data.atk
+
+	_breath_phase = randf() * TAU
 
 	_apply_card_visual()
 	_create_art_panel()
@@ -218,9 +228,19 @@ func _die() -> void:
 
 
 func _process(delta: float) -> void:
-	if _is_playing or not _is_being_dragged:
+	if _is_being_dragged:
+		_update_drag_spring(delta)
 		return
-	_update_drag_spring(delta)
+	if _is_playing or _is_hovered or is_on_battlefield:
+		return
+	# Skip while a hand-position tween is mid-flight so we don't fight it.
+	if _active_tween and _active_tween.is_valid() and _active_tween.is_running():
+		return
+	# Idle in hand — breathe gently around the resting target.
+	_breath_t += delta * BREATH_SPEED
+	var s = sin(_breath_t + _breath_phase)
+	position.y = _hand_target_position.y + s * BREATH_AMPLITUDE_Y
+	rotation.z = _hand_target_rotation.z + s * BREATH_AMPLITUDE_ROT
 
 
 func _update_drag_spring(delta: float) -> void:
