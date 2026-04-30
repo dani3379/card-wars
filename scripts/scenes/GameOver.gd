@@ -5,16 +5,19 @@ const MAIN_MENU = "res://scenes/main_menu.tscn"
 
 
 func _ready() -> void:
-	var won = MetaState.total_victories > 0 and not RunState.run_active and RunState.hero_hp > 0
-	# Cleaner: check if last node was boss and player_hp > 0 at scene change.
-	# We rely on hero_hp > 0 as proxy for victory.
+	MenuAtmosphere.attach_to(self)
+
+	# Title font outline pop.
+	$Title.add_theme_constant_override("outline_size", 8)
+	$Title.add_theme_color_override("font_outline_color", Color(0.20, 0.05, 0.03, 1.0))
+
 	if RunState.hero_hp > 0:
 		$Title.text = "VICTORY"
-		$Title.add_theme_color_override("font_color", Color(0.4, 1.0, 0.5))
+		$Title.add_theme_color_override("font_color", Color(0.55, 1.0, 0.6))
 		$Subtitle.text = "The first flame is extinguished.\nFloors cleared: %d" % RunState.current_floor
 	else:
 		$Title.text = "DEFEAT"
-		$Title.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		$Title.add_theme_color_override("font_color", Color(1.0, 0.4, 0.4))
 		$Subtitle.text = "The meadow burned without you.\nFloors reached: %d" % RunState.current_floor
 
 	var stats := "Total runs: %d   Victories: %d" % [
@@ -25,6 +28,8 @@ func _ready() -> void:
 		if not unlocked.is_empty():
 			stats += "\n\nNew card unlocked: %s" % unlocked.name
 	$Stats.text = stats
+
+	MenuAtmosphere.style_button($BackBtn, true)
 	$BackBtn.pressed.connect(_back)
 
 

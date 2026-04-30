@@ -8,8 +8,8 @@ auto_exposure_enabled = false
 [sub_resource type="Environment" id="Env"]
 background_mode = 1
 background_color = Color(0.04, 0.03, 0.05, 1)
-ambient_light_color = Color(0.30, 0.22, 0.28, 1)
-ambient_light_energy = 0.25
+ambient_light_color = Color(0.45, 0.36, 0.42, 1)
+ambient_light_energy = 0.55
 tonemap_mode = 4
 tonemap_exposure = 1.1
 glow_enabled = true
@@ -102,8 +102,8 @@ near = 0.05
 
 [node name="Sun" type="DirectionalLight3D" parent="."]
 transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 4, 0)
-light_color = Color(0.55, 0.50, 0.65, 1)
-light_energy = 0.30
+light_color = Color(0.65, 0.62, 0.78, 1)
+light_energy = 0.55
 shadow_enabled = true
 shadow_bias = 0.02
 

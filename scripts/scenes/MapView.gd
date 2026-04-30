@@ -19,6 +19,7 @@ func _ready() -> void:
 		# Got here without an active run — bounce to menu
 		get_tree().change_scene_to_file(MAIN_MENU)
 		return
+	MenuAtmosphere.attach_to(self)
 	_build_map()
 	_build_deck_buttons()
 
@@ -77,14 +78,16 @@ func _build_deck_buttons() -> void:
 
 	var view_btn = Button.new()
 	view_btn.text = "View Deck (%d)" % RunState.deck.size()
-	view_btn.custom_minimum_size = Vector2(150, 36)
+	view_btn.custom_minimum_size = Vector2(170, 40)
+	MenuAtmosphere.style_button(view_btn, false)
 	view_btn.pressed.connect(_open_deck_view.bind(false))
 	hbox.add_child(view_btn)
 
 	var remove_btn = Button.new()
 	remove_btn.text = "Remove a Card (%d)" % RunState.card_removals_remaining
-	remove_btn.custom_minimum_size = Vector2(180, 36)
+	remove_btn.custom_minimum_size = Vector2(200, 40)
 	remove_btn.disabled = RunState.card_removals_remaining <= 0
+	MenuAtmosphere.style_button(remove_btn, true)
 	remove_btn.pressed.connect(_open_deck_view.bind(true))
 	hbox.add_child(remove_btn)
 

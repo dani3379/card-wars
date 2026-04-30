@@ -14,6 +14,7 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
 
+	MenuAtmosphere.attach_to(self)
 	_is_elite_reward = (RunState.node_type_for_floor(RunState.current_floor) == "elite")
 	_card_choices = CardDB.roll_card_reward(RunState.current_floor)
 	if _is_elite_reward:
@@ -51,23 +52,17 @@ func _build_ui() -> void:
 	else:
 		$RelicTitle.visible = false
 
+	MenuAtmosphere.style_button($SkipBtn, false)
 	$SkipBtn.pressed.connect(_skip)
 
 
-func _make_choice_button(title: String, tooltip: String, color: Color) -> Button:
+func _make_choice_button(title: String, tooltip: String, _color: Color) -> Button:
 	var btn = Button.new()
-	btn.custom_minimum_size = Vector2(180, 130)
+	btn.custom_minimum_size = Vector2(200, 150)
 	btn.text = title
 	btn.tooltip_text = tooltip
-	btn.add_theme_font_size_override("font_size", 14)
-	var style = StyleBoxFlat.new()
-	style.corner_radius_top_left = 8
-	style.corner_radius_top_right = 8
-	style.corner_radius_bottom_left = 8
-	style.corner_radius_bottom_right = 8
-	style.bg_color = color
-	btn.add_theme_stylebox_override("normal", style)
-	btn.add_theme_color_override("font_color", Color.WHITE)
+	btn.add_theme_font_size_override("font_size", 15)
+	MenuAtmosphere.style_button(btn, true)
 	return btn
 
 

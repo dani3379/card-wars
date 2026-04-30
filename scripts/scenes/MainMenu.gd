@@ -5,8 +5,16 @@ const MAP_SCENE = "res://scenes/map.tscn"
 
 
 func _ready() -> void:
+	MenuAtmosphere.attach_to(self)
+
 	$VBox/TitleLabel.text = "BURNING MEADOW"
+	$VBox/TitleLabel.add_theme_color_override(
+		"font_outline_color", Color(0.30, 0.10, 0.05, 1.0))
+	$VBox/TitleLabel.add_theme_constant_override("outline_size", 8)
 	$VBox/Subtitle.text = "a grimoire-deck roguelike"
+
+	MenuAtmosphere.style_button($VBox/StartBtn, true)
+	MenuAtmosphere.style_button($VBox/QuitBtn, false)
 
 	$VBox/StartBtn.pressed.connect(_on_start)
 	$VBox/QuitBtn.pressed.connect(_on_quit)

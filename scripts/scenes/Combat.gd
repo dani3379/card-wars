@@ -49,21 +49,28 @@ const LANE_X := [-1.35, -0.45, 0.45, 1.35]
 const PLAYER_ZONE_Z := 0.6
 const ENEMY_ZONE_Z := -0.6
 
-# ── Camera ──
-var _cam_pivot := Vector3(0, 0, 0.3)
-var _cam_distance := 5.4
-var _cam_angle_x := -42.0
-var _cam_angle_y := 0.0
-# Drift + mouse-follow state. Read each frame in _process so the camera
-# breathes a little instead of being a static viewport.
-const CAMERA_DRIFT_AMPLITUDE_X := 0.06
-const CAMERA_DRIFT_AMPLITUDE_Y := 0.04
-const CAMERA_DRIFT_SPEED := 0.35
-const CAMERA_MOUSE_FOLLOW_X := 0.22
-const CAMERA_MOUSE_FOLLOW_Y := 0.12
-const CAMERA_MOUSE_LERP := 4.0
+# ── Camera (Tabletop-Simulator style: RMB orbit, scroll zoom, MMB pan) ──
+const CAM_DEFAULT_PIVOT := Vector3(0, 0, 0.3)
+const CAM_DEFAULT_DISTANCE := 5.4
+const CAM_DEFAULT_ANGLE_X := -42.0
+const CAM_DEFAULT_ANGLE_Y := 0.0
+const CAM_ORBIT_SENSITIVITY := 0.35      # degrees per pixel of mouse motion
+const CAM_PAN_SENSITIVITY := 0.005       # world units per pixel
+const CAM_ZOOM_STEP := 0.45              # distance change per scroll tick
+const CAM_MIN_DISTANCE := 2.2
+const CAM_MAX_DISTANCE := 11.0
+const CAM_MIN_PITCH := -85.0
+const CAM_MAX_PITCH := -8.0
+# Tiny idle drift so the camera isn't dead-still when nobody's touching it.
+const CAM_IDLE_DRIFT := 0.015
+const CAM_IDLE_DRIFT_SPEED := 0.4
+var _cam_pivot := CAM_DEFAULT_PIVOT
+var _cam_distance := CAM_DEFAULT_DISTANCE
+var _cam_angle_x := CAM_DEFAULT_ANGLE_X
+var _cam_angle_y := CAM_DEFAULT_ANGLE_Y
+var _cam_orbit_active: bool = false
+var _cam_pan_active: bool = false
 var _cam_drift_t: float = 0.0
-var _cam_mouse_offset: Vector3 = Vector3.ZERO
 
 # ── Relic-related per-turn state ──
 var _vampires_fang_used_this_turn: bool = false
@@ -536,26 +543,35 @@ func _nearest_lane_index(world_pos: Vector3) -> int:
 
 # ── HUD ──
 # ── Atmosphere ──
-# A small candle on the table edge with a real flickering point light, drifting
-# embers, and dust motes lit by the candle. Pure procedural setup — no scene
-# editing needed. Tweak the constants here for "feel".
-const CANDLE_BASE_ENERGY := 1.4
-const CANDLE_FLICKER_AMOUNT := 0.55
-const CANDLE_POSITION := Vector3(-2.4, 0.45, 1.35)
+# Two candles on opposite corners with flickering warm point lights, drifting
+# embers, and dust motes. Pure procedural setup — no scene editing needed.
+# Tweak the constants here for "feel".
+const CANDLE_BASE_ENERGY := 2.4
+const CANDLE_FLICKER_AMOUNT := 0.65
+const CANDLE_POSITION_LEFT := Vector3(-2.4, 0.45, 1.35)
+const CANDLE_POSITION_RIGHT := Vector3(2.4, 0.45, 1.35)
 
+# `_candle_light` and `_candle_flame` are the primary candle (driven by the
+# flicker handler). The right-side candle gets its own quieter flicker.
 var _candle_light: OmniLight3D
 var _candle_flame: MeshInstance3D
+var _candle_light_2: OmniLight3D
+var _candle_flame_2: MeshInstance3D
 var _candle_flicker_t: float = 0.0
 
 
 func _build_atmosphere() -> void:
-	_build_candle()
-	_build_embers()
+	_candle_light = _build_candle(CANDLE_POSITION_LEFT, true)
+	_candle_light_2 = _build_candle(CANDLE_POSITION_RIGHT, false)
+	_build_embers(CANDLE_POSITION_LEFT)
+	_build_embers(CANDLE_POSITION_RIGHT)
 	_build_dust_motes()
 	_build_back_glow()
 
 
-func _build_candle() -> void:
+# Builds a candle stem + flame + omni-light at `pos`. The first one keeps a
+# reference to its flame mesh so the flicker handler can scale it.
+func _build_candle(pos: Vector3, is_primary: bool) -> OmniLight3D:
 	var stem = MeshInstance3D.new()
 	var stem_mesh = CylinderMesh.new()
 	stem_mesh.top_radius = 0.07
@@ -566,11 +582,10 @@ func _build_candle() -> void:
 	stem_mat.roughness = 0.85
 	stem_mesh.material = stem_mat
 	stem.mesh = stem_mesh
-	stem.position = CANDLE_POSITION + Vector3(0, 0.16, 0)
+	stem.position = pos + Vector3(0, 0.16, 0)
 	add_child(stem)
 
-	# Flame: a small emissive cone-ish mesh.
-	_candle_flame = MeshInstance3D.new()
+	var flame = MeshInstance3D.new()
 	var flame_mesh = SphereMesh.new()
 	flame_mesh.radius = 0.04
 	flame_mesh.height = 0.13
@@ -579,24 +594,28 @@ func _build_candle() -> void:
 	flame_mat.albedo_color = Color(1.0, 0.78, 0.32)
 	flame_mat.emission_enabled = true
 	flame_mat.emission = Color(1.0, 0.65, 0.25)
-	flame_mat.emission_energy_multiplier = 4.0
+	flame_mat.emission_energy_multiplier = 5.0
 	flame_mesh.material = flame_mat
-	_candle_flame.mesh = flame_mesh
-	_candle_flame.position = CANDLE_POSITION + Vector3(0, 0.40, 0)
-	add_child(_candle_flame)
+	flame.mesh = flame_mesh
+	flame.position = pos + Vector3(0, 0.40, 0)
+	add_child(flame)
+	if is_primary:
+		_candle_flame = flame
+	else:
+		_candle_flame_2 = flame
 
-	# Warm point light driving the scene's mood.
-	_candle_light = OmniLight3D.new()
-	_candle_light.light_color = Color(1.0, 0.65, 0.30)
-	_candle_light.light_energy = CANDLE_BASE_ENERGY
-	_candle_light.omni_range = 6.0
-	_candle_light.shadow_enabled = true
-	_candle_light.position = CANDLE_POSITION + Vector3(0, 0.40, 0)
-	add_child(_candle_light)
+	var light = OmniLight3D.new()
+	light.light_color = Color(1.0, 0.65, 0.30)
+	light.light_energy = CANDLE_BASE_ENERGY
+	light.omni_range = 7.0
+	light.shadow_enabled = true
+	light.position = pos + Vector3(0, 0.40, 0)
+	add_child(light)
+	return light
 
 
-func _build_embers() -> void:
-	# Drifting embers rising from the candle.
+func _build_embers(pos: Vector3) -> void:
+	# Drifting embers rising from the given candle position.
 	var p = GPUParticles3D.new()
 	var mat = ParticleProcessMaterial.new()
 	mat.direction = Vector3(0, 1, 0)
@@ -624,7 +643,7 @@ func _build_embers() -> void:
 	p.amount = 24
 	p.lifetime = 2.4
 	p.preprocess = 1.5
-	p.position = CANDLE_POSITION + Vector3(0, 0.45, 0)
+	p.position = pos + Vector3(0, 0.45, 0)
 	add_child(p)
 
 
@@ -876,8 +895,7 @@ func _show_info(msg: String) -> void:
 
 # ── Camera ──
 func _process(delta: float) -> void:
-	_cam_drift_t += delta * CAMERA_DRIFT_SPEED
-	_update_mouse_offset(delta)
+	_cam_drift_t += delta * CAM_IDLE_DRIFT_SPEED
 	_update_camera_transform()
 	_update_candle_flicker(delta)
 	if _shake_amount > 0.001:
@@ -887,35 +905,26 @@ func _process(delta: float) -> void:
 
 
 # Two layered noise sines + a small random kick = a candle that doesn't loop.
+# Both candles share the time but use different phases so they flicker
+# independently.
 func _update_candle_flicker(delta: float) -> void:
-	if _candle_light == null:
-		return
 	_candle_flicker_t += delta
-	var n = sin(_candle_flicker_t * 11.3) * 0.5 + sin(_candle_flicker_t * 4.7 + 1.3) * 0.5
-	n += (randf() - 0.5) * 0.4
-	var energy = CANDLE_BASE_ENERGY + n * CANDLE_FLICKER_AMOUNT
-	_candle_light.light_energy = max(0.4, energy)
-	if _candle_flame != null:
-		var s = 1.0 + n * 0.18
-		_candle_flame.scale = Vector3(s, 1.0 + n * 0.25, s)
-
-
-# Smoothly chase the mouse-driven camera offset so the scene parallaxes
-# slightly with the cursor. Lerped so it never feels jittery.
-func _update_mouse_offset(delta: float) -> void:
-	var vp = get_viewport().get_visible_rect().size
-	if vp.x <= 0 or vp.y <= 0:
-		return
-	var mp = get_viewport().get_mouse_position()
-	# Normalise to -1..1 with the centre at 0.
-	var nx = clampf((mp.x / vp.x) * 2.0 - 1.0, -1.0, 1.0)
-	var ny = clampf((mp.y / vp.y) * 2.0 - 1.0, -1.0, 1.0)
-	var target = Vector3(
-		nx * CAMERA_MOUSE_FOLLOW_X,
-		-ny * CAMERA_MOUSE_FOLLOW_Y,
-		0.0,
-	)
-	_cam_mouse_offset = _cam_mouse_offset.lerp(target, clampf(delta * CAMERA_MOUSE_LERP, 0.0, 1.0))
+	if _candle_light != null:
+		var n1 = sin(_candle_flicker_t * 11.3) * 0.5 \
+			+ sin(_candle_flicker_t * 4.7 + 1.3) * 0.5 \
+			+ (randf() - 0.5) * 0.4
+		_candle_light.light_energy = max(0.6, CANDLE_BASE_ENERGY + n1 * CANDLE_FLICKER_AMOUNT)
+		if _candle_flame != null:
+			var s1 = 1.0 + n1 * 0.18
+			_candle_flame.scale = Vector3(s1, 1.0 + n1 * 0.25, s1)
+	if _candle_light_2 != null:
+		var n2 = sin(_candle_flicker_t * 9.7 + 2.1) * 0.5 \
+			+ sin(_candle_flicker_t * 5.3 + 0.4) * 0.5 \
+			+ (randf() - 0.5) * 0.35
+		_candle_light_2.light_energy = max(0.6, CANDLE_BASE_ENERGY + n2 * CANDLE_FLICKER_AMOUNT)
+		if _candle_flame_2 != null:
+			var s2 = 1.0 + n2 * 0.18
+			_candle_flame_2.scale = Vector3(s2, 1.0 + n2 * 0.25, s2)
 
 
 func _update_camera_transform() -> void:
@@ -926,17 +935,66 @@ func _update_camera_transform() -> void:
 		-sin(pitch_rad) * _cam_distance,
 		cos(yaw_rad) * cos(pitch_rad) * _cam_distance
 	)
-	# Subtle idle drift — independent of mouse — so the camera always breathes.
+	# Tiny breath so the scene isn't perfectly frozen at rest.
 	var drift = Vector3(
-		sin(_cam_drift_t * 0.7) * CAMERA_DRIFT_AMPLITUDE_X,
-		cos(_cam_drift_t * 0.5) * CAMERA_DRIFT_AMPLITUDE_Y,
+		sin(_cam_drift_t) * CAM_IDLE_DRIFT,
+		cos(_cam_drift_t * 0.7) * CAM_IDLE_DRIFT * 0.6,
 		0.0,
 	)
-	camera.position = _cam_pivot + offset + drift + _cam_mouse_offset
-	camera.look_at(_cam_pivot + _cam_mouse_offset * 0.35, Vector3.UP)
+	camera.position = _cam_pivot + offset + drift
+	camera.look_at(_cam_pivot, Vector3.UP)
+
+
+# Reset to the default framing.
+func _reset_camera_view() -> void:
+	_cam_pivot = CAM_DEFAULT_PIVOT
+	_cam_distance = CAM_DEFAULT_DISTANCE
+	_cam_angle_x = CAM_DEFAULT_ANGLE_X
+	_cam_angle_y = CAM_DEFAULT_ANGLE_Y
 
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
-		if event.keycode == KEY_E or event.keycode == KEY_ENTER:
-			_on_end_turn()
+		match event.keycode:
+			KEY_E, KEY_ENTER:
+				_on_end_turn()
+			KEY_R, KEY_HOME:
+				_reset_camera_view()
+		return
+
+	# Right-mouse drag = orbit. Middle-mouse drag = pan. Scroll = zoom.
+	if event is InputEventMouseButton:
+		match event.button_index:
+			MOUSE_BUTTON_RIGHT:
+				_cam_orbit_active = event.pressed
+			MOUSE_BUTTON_MIDDLE:
+				_cam_pan_active = event.pressed
+			MOUSE_BUTTON_WHEEL_UP:
+				if event.pressed:
+					_cam_distance = clampf(
+						_cam_distance - CAM_ZOOM_STEP,
+						CAM_MIN_DISTANCE, CAM_MAX_DISTANCE)
+			MOUSE_BUTTON_WHEEL_DOWN:
+				if event.pressed:
+					_cam_distance = clampf(
+						_cam_distance + CAM_ZOOM_STEP,
+						CAM_MIN_DISTANCE, CAM_MAX_DISTANCE)
+		return
+
+	if event is InputEventMouseMotion:
+		if _cam_orbit_active:
+			_cam_angle_y -= event.relative.x * CAM_ORBIT_SENSITIVITY
+			_cam_angle_x = clampf(
+				_cam_angle_x + event.relative.y * CAM_ORBIT_SENSITIVITY,
+				CAM_MIN_PITCH, CAM_MAX_PITCH)
+		elif _cam_pan_active:
+			# Pan in the camera's local right/up plane so dragging feels natural.
+			var basis = camera.global_transform.basis
+			var right = basis.x
+			var up = basis.y
+			var dx = -event.relative.x * CAM_PAN_SENSITIVITY * _cam_distance
+			var dy = event.relative.y * CAM_PAN_SENSITIVITY * _cam_distance
+			# Project pan onto the table plane (ignore Y) so we don't drift up/down.
+			var pan = right * dx + up * dy
+			pan.y = 0.0
+			_cam_pivot += pan
