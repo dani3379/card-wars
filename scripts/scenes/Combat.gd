@@ -100,7 +100,6 @@ func _ready() -> void:
 	get_viewport().physics_object_picking = true
 	_setup_fight_state()
 	_build_lane_labels()
-	_build_atmosphere()
 	_build_hud()
 	_build_end_turn_button()
 	_build_flash_layer()
@@ -862,34 +861,10 @@ func _show_info(msg: String) -> void:
 func _process(delta: float) -> void:
 	_cam_drift_t += delta * CAM_IDLE_DRIFT_SPEED
 	_update_camera_transform()
-	_update_candle_flicker(delta)
 	if _shake_amount > 0.001:
 		var jitter = Vector3(randf()-0.5, randf()-0.5, randf()-0.5) * _shake_amount * 0.06
 		camera.position += jitter
 		_shake_amount = lerp(_shake_amount, 0.0, clampf(delta * 7.0, 0, 1))
-
-
-# Two layered noise sines + a small random kick = a candle that doesn't loop.
-# Both candles share the time but use different phases so they flicker
-# independently.
-func _update_candle_flicker(delta: float) -> void:
-	_candle_flicker_t += delta
-	if _candle_light != null:
-		var n1 = sin(_candle_flicker_t * 11.3) * 0.5 \
-			+ sin(_candle_flicker_t * 4.7 + 1.3) * 0.5 \
-			+ (randf() - 0.5) * 0.4
-		_candle_light.light_energy = max(0.6, CANDLE_BASE_ENERGY + n1 * CANDLE_FLICKER_AMOUNT)
-		if _candle_flame != null:
-			var s1 = 1.0 + n1 * 0.18
-			_candle_flame.scale = Vector3(s1, 1.0 + n1 * 0.25, s1)
-	if _candle_light_2 != null:
-		var n2 = sin(_candle_flicker_t * 9.7 + 2.1) * 0.5 \
-			+ sin(_candle_flicker_t * 5.3 + 0.4) * 0.5 \
-			+ (randf() - 0.5) * 0.35
-		_candle_light_2.light_energy = max(0.6, CANDLE_BASE_ENERGY + n2 * CANDLE_FLICKER_AMOUNT)
-		if _candle_flame_2 != null:
-			var s2 = 1.0 + n2 * 0.18
-			_candle_flame_2.scale = Vector3(s2, 1.0 + n2 * 0.25, s2)
 
 
 func _update_camera_transform() -> void:
