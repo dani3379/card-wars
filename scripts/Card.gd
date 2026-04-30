@@ -121,7 +121,7 @@ func _apply_card_visual() -> void:
 	var mat := base_mat.duplicate() as ShaderMaterial
 	if mat == null:
 		return
-	var idx := abs(card_id.hash()) % FACTION_PALETTE.size()
+	var idx: int = abs(card_id.hash()) % FACTION_PALETTE.size()
 	var faction := FACTION_PALETTE[idx]
 	# Opponent cards lean cooler/darker so they read as "the other side"
 	if is_opponent:
@@ -147,7 +147,7 @@ func _create_art_panel() -> void:
 		mat.albedo_color = Color.WHITE
 	else:
 		# Subtle dark vignetted swatch as placeholder
-		var idx := abs(card_id.hash()) % FACTION_PALETTE.size()
+		var idx: int = abs(card_id.hash()) % FACTION_PALETTE.size()
 		mat.albedo_color = FACTION_PALETTE[idx].darkened(0.55)
 	quad.material = mat
 	add_child(_art_panel)
