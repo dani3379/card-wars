@@ -1,42 +1,52 @@
-[gd_scene load_steps=9 format=3]
+[gd_scene load_steps=8 format=3]
 
 [ext_resource type="Script" path="res://scripts/Card.gd" id="1_card"]
-[ext_resource type="Shader" path="res://shaders/outline.gdshader" id="3_outline"]
+[ext_resource type="Shader" path="res://shaders/card_front.gdshader" id="2_front"]
 
-[sub_resource type="ShaderMaterial" id="MatCardOutline"]
-shader = ExtResource("3_outline")
-shader_parameter/outline_color = Color(0.06, 0.04, 0.10, 1)
-shader_parameter/outline_width = 0.004
+; Card front material — colored per-card by Card.gd via shader_parameter
+; for `faction_color` (lane affinity tint at the top band).
+[sub_resource type="ShaderMaterial" id="MatCardFront"]
+shader = ExtResource("2_front")
+shader_parameter/faction_color = Color(0.55, 0.42, 0.10, 1)
+shader_parameter/parchment_light = Color(0.78, 0.66, 0.48, 1)
+shader_parameter/parchment_dark = Color(0.50, 0.40, 0.27, 1)
+shader_parameter/gilt_color = Color(0.78, 0.62, 0.28, 1)
+shader_parameter/ink_color = Color(0.05, 0.04, 0.06, 1)
+shader_parameter/border_width = 0.030
+shader_parameter/gilt_width = 0.008
+shader_parameter/corner_radius = 0.06
+shader_parameter/band_height = 0.18
+shader_parameter/band_softness = 0.012
+shader_parameter/stain_strength = 0.25
+shader_parameter/wear_strength = 0.18
 
-; Card face (colored per-card by script)
-[sub_resource type="StandardMaterial3D" id="MatCardFront"]
-shading_mode = 0
-albedo_color = Color(0.92, 0.85, 0.68, 1)
-next_pass = SubResource("MatCardOutline")
-
+; Card body — slightly larger, more presence than the old 0.38x0.54 card
 [sub_resource type="BoxMesh" id="MeshCard"]
-size = Vector3(0.38, 0.006, 0.54)
+size = Vector3(0.42, 0.014, 0.60)
 material = SubResource("MatCardFront")
 
-; Dark border/frame slightly larger than the card
-[sub_resource type="StandardMaterial3D" id="MatFrame"]
-shading_mode = 0
-albedo_color = Color(0.08, 0.06, 0.04, 1)
+; A dark backing plate that fills the corners we discarded on the front,
+; so the card never reveals the lane material through its rounded corners.
+[sub_resource type="StandardMaterial3D" id="MatCardBacking"]
+albedo_color = Color(0.06, 0.05, 0.07, 1)
+roughness = 0.95
 
-[sub_resource type="BoxMesh" id="MeshFrame"]
-size = Vector3(0.42, 0.004, 0.58)
-material = SubResource("MatFrame")
+[sub_resource type="BoxMesh" id="MeshCardBacking"]
+size = Vector3(0.40, 0.012, 0.58)
+material = SubResource("MatCardBacking")
 
 [sub_resource type="BoxShape3D" id="ShapeCard"]
-size = Vector3(0.40, 0.03, 0.56)
+size = Vector3(0.42, 0.04, 0.60)
+
 
 [node name="Card" type="Node3D"]
 script = ExtResource("1_card")
 
-; Frame sits below the card face
-[node name="FrameMesh" type="MeshInstance3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.002, 0)
-mesh = SubResource("MeshFrame")
+; Backing sits a hair below the front so the discarded corners reveal
+; near-black instead of the lane.
+[node name="BackingMesh" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.0015, 0)
+mesh = SubResource("MeshCardBacking")
 
 [node name="CardMesh" type="MeshInstance3D" parent="."]
 mesh = SubResource("MeshCard")
@@ -50,6 +60,7 @@ shape = SubResource("ShapeCard")
 
 [node name="HoverGlow" type="OmniLight3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.06, 0)
-light_color = Color(1.0, 0.95, 0.6, 1)
+light_color = Color(1.0, 0.86, 0.50, 1)
 light_energy = 0.0
 omni_range = 1.0
+omni_attenuation = 1.5

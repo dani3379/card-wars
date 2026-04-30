@@ -1,8 +1,10 @@
 extends Node3D
 ## Card.gd — interaction, animation, keyword tracking.
 ##
-## Cards now load their data from CardDB via card_id. Keywords are stored
-## in card_data.keywords and read by Combat for effect resolution.
+## Cards load their data from CardDB via card_id. The mesh uses the
+## card_front shader; this script sets the faction_color shader parameter
+## from a small curated palette (so each card has a consistent ink tone)
+## and lays out stat labels for the new card silhouette.
 
 signal played
 signal destroyed
@@ -39,17 +41,33 @@ var _drag_offset := Vector3.ZERO
 var _active_tween: Tween = null
 var _drag_velocity := Vector3.ZERO
 
-const HOVER_LIFT := 0.18
-const HOVER_LIFT_TIME := 0.15
-const HOVER_DROP_TIME := 0.22
-const HOVER_GLOW_ENERGY := 0.7
-const PLAY_ARC_HEIGHT := 0.4
+const HOVER_LIFT := 0.20
+const HOVER_LIFT_TIME := 0.14
+const HOVER_DROP_TIME := 0.20
+const HOVER_GLOW_ENERGY := 0.85
+const PLAY_ARC_HEIGHT := 0.45
 const PLAY_ARC_TIME := 0.55
 const DRAG_SPRING_STIFFNESS := 60.0
 const DRAG_SPRING_DAMPING := 14.0
-const DRAG_HEIGHT := 0.18
-const ART_SIZE := Vector2(0.30, 0.20)
-const ART_POS := Vector3(0, 0.006, 0.06)
+const DRAG_HEIGHT := 0.20
+
+# Card mesh is 0.42 x 0.014 x 0.60. Top face's UV (0..1) maps to local-space
+# x∈[-0.21..0.21], z∈[-0.30..0.30]. Labels are positioned in local space.
+const ART_SIZE := Vector2(0.32, 0.20)
+const ART_POS := Vector3(0, 0.012, 0.05)
+
+# Curated faction-color palette. Each card hashes to one of these — gives
+# every card a consistent "ink tone" that matches the grimoire palette.
+const FACTION_PALETTE: Array[Color] = [
+	Color(0.55, 0.34, 0.10),  # ochre
+	Color(0.42, 0.18, 0.20),  # rust red
+	Color(0.20, 0.34, 0.20),  # moss
+	Color(0.16, 0.32, 0.42),  # steel blue
+	Color(0.32, 0.20, 0.42),  # violet
+	Color(0.50, 0.32, 0.16),  # umber
+	Color(0.18, 0.30, 0.32),  # verdigris
+	Color(0.40, 0.16, 0.32),  # plum
+]
 
 
 func _ready() -> void:
@@ -77,7 +95,6 @@ func has_keyword(kw: String) -> bool:
 
 
 func can_attack() -> bool:
-	# Charge cards can attack the turn they're played
 	if has_attacked_this_turn:
 		return false
 	if summoned_this_turn and not has_keyword("charge"):
@@ -86,15 +103,20 @@ func can_attack() -> bool:
 
 
 func _apply_card_visual() -> void:
-	var base_mat = mesh.get_active_material(0)
+	# Card front uses the card_front ShaderMaterial. We override its
+	# faction_color from the palette using a stable per-card hash.
+	var base_mat := mesh.get_active_material(0)
 	if base_mat == null:
 		return
-	var mat = base_mat.duplicate()
-	if mat is StandardMaterial3D:
-		var h = float(abs(card_id.hash()) % 360) / 360.0
-		var sat = 0.40 if is_opponent else 0.50
-		var val = 0.35 if is_opponent else 0.60
-		mat.albedo_color = Color.from_hsv(h, sat, val)
+	var mat := base_mat.duplicate() as ShaderMaterial
+	if mat == null:
+		return
+	var idx := abs(card_id.hash()) % FACTION_PALETTE.size()
+	var faction := FACTION_PALETTE[idx]
+	# Opponent cards lean cooler/darker so they read as "the other side"
+	if is_opponent:
+		faction = faction.darkened(0.25).lerp(Color(0.20, 0.16, 0.22), 0.30)
+	mat.set_shader_parameter("faction_color", faction)
 	mesh.set_surface_override_material(0, mat)
 
 
@@ -114,8 +136,9 @@ func _create_art_panel() -> void:
 		mat.albedo_texture = load(art_path)
 		mat.albedo_color = Color.WHITE
 	else:
-		var h = float(abs(card_id.hash()) % 360) / 360.0
-		mat.albedo_color = Color.from_hsv(h, 0.45, 0.30)
+		# Subtle dark vignetted swatch as placeholder
+		var idx := abs(card_id.hash()) % FACTION_PALETTE.size()
+		mat.albedo_color = FACTION_PALETTE[idx].darkened(0.55)
 	quad.material = mat
 	add_child(_art_panel)
 
@@ -124,31 +147,46 @@ func _create_stat_labels() -> void:
 	if card_data.is_empty():
 		return
 
-	_name_label = _make_label(card_data.name, 44, Vector3(0, 0.005, -0.20),
-		Color.WHITE, 12)
+	# Name sits in the faction band at the top of the card. The band runs
+	# from z = -0.30 to z = -0.192 (UV.y 0 .. 0.18), so center the name at
+	# roughly z = -0.245.
+	_name_label = _make_label(card_data.name, 32,
+		Vector3(0, 0.012, -0.245),
+		Color(0.97, 0.93, 0.82), 6)
+	_name_label.font_size = 32
+	_name_label.outline_size = 6
+
+	# Cost — small white numeral in a top-left dark badge area
+	_cost_label = _make_label(str(card_data.cost), 60,
+		Vector3(-0.165, 0.012, -0.245),
+		Color(0.95, 0.92, 0.78), 12)
+
+	# Description — small text under the art
 	_desc_label = _make_label(card_data.get("desc", ""), 18,
-		Vector3(0, 0.005, -0.04), Color(0.78, 0.74, 0.62), 4)
-	# Wrap long descriptions
+		Vector3(0, 0.012, 0.18),
+		Color(0.30, 0.22, 0.16), 0)
 	if _desc_label:
-		_desc_label.width = 320
+		_desc_label.width = 380
 		_desc_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 
-	# Keyword strip — small, above name
+	# Keywords: short strip just under the name, on the parchment
 	if card_data.has("keywords") and card_data.keywords.size() > 0:
 		var kw_text := _format_keywords(card_data.keywords)
-		_keyword_label = _make_label(kw_text, 16, Vector3(0, 0.005, -0.245),
-			Color(1.0, 0.85, 0.45), 4)
+		_keyword_label = _make_label(kw_text, 16,
+			Vector3(0, 0.012, -0.155),
+			Color(0.55, 0.30, 0.10), 0)
+		_keyword_label.outline_size = 0
 
-	_atk_label = _make_label(str(current_atk), 60,
-		Vector3(-0.13, 0.005, 0.21), Color(1.0, 0.35, 0.25), 14)
-	_hp_label = _make_label(str(current_hp), 60,
-		Vector3(0.13, 0.005, 0.21), Color(0.25, 0.85, 0.35), 14)
-	_cost_label = _make_label(str(card_data.cost), 50,
-		Vector3(0.14, 0.005, -0.22), Color(0.4, 0.6, 1.0), 12)
+	# Stats at the bottom — atk left, hp right, in their own ink color
+	_atk_label = _make_label(str(current_atk), 56,
+		Vector3(-0.155, 0.012, 0.245),
+		Color(0.78, 0.20, 0.16), 10)
+	_hp_label = _make_label(str(current_hp), 56,
+		Vector3(0.155, 0.012, 0.245),
+		Color(0.20, 0.55, 0.22), 10)
 
 
 func _format_keywords(kws: Array) -> String:
-	# Convert internal keyword strings to short display text
 	var display: Array[String] = []
 	for k in kws:
 		match k:
@@ -172,7 +210,7 @@ func _make_label(text: String, size: int, pos: Vector3,
 	lbl.position = pos
 	lbl.rotation = Vector3(-PI / 2, 0, 0)
 	lbl.modulate = color
-	lbl.outline_modulate = Color(0, 0, 0, 1)
+	lbl.outline_modulate = Color(0.04, 0.03, 0.05, 1)
 	lbl.outline_size = outline
 	lbl.no_depth_test = true
 	add_child(lbl)
@@ -183,11 +221,11 @@ func update_stat_display() -> void:
 	if _hp_label:
 		_hp_label.text = str(max(current_hp, 0))
 		if current_hp < card_data.hp:
-			_hp_label.modulate = Color(1.0, 0.3, 0.3)
+			_hp_label.modulate = Color(1.0, 0.30, 0.25)
 	if _atk_label:
 		_atk_label.text = str(current_atk)
 		if current_atk > card_data.atk:
-			_atk_label.modulate = Color(1.0, 0.8, 0.2)
+			_atk_label.modulate = Color(1.0, 0.85, 0.30)
 
 
 func _kill_active_tween() -> void:

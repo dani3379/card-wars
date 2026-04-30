@@ -1,84 +1,266 @@
-[gd_scene load_steps=22 format=3]
+[gd_scene load_steps=35 format=3]
 
 [ext_resource type="Script" path="res://scripts/scenes/Combat.gd" id="1_combat"]
+[ext_resource type="Shader" path="res://shaders/wood.gdshader" id="2_wood"]
+[ext_resource type="Shader" path="res://shaders/lane.gdshader" id="3_lane"]
+[ext_resource type="Shader" path="res://shaders/vignette.gdshader" id="4_vignette"]
 
+; ── Camera attributes & post-process environment ─────────────────────────────
 [sub_resource type="CameraAttributesPractical" id="CamAttrs"]
 auto_exposure_enabled = false
 
+[sub_resource type="ProceduralSkyMaterial" id="SkyMat"]
+sky_top_color = Color(0.05, 0.035, 0.06, 1)
+sky_horizon_color = Color(0.10, 0.06, 0.08, 1)
+sky_curve = 0.18
+ground_bottom_color = Color(0.02, 0.01, 0.02, 1)
+ground_horizon_color = Color(0.06, 0.04, 0.05, 1)
+ground_curve = 0.20
+sun_angle_max = 30.0
+
+[sub_resource type="Sky" id="Sky"]
+sky_material = SubResource("SkyMat")
+
 [sub_resource type="Environment" id="Env"]
-background_mode = 1
-background_color = Color(0.08, 0.06, 0.10, 1)
-ambient_light_color = Color(0.4, 0.35, 0.42, 1)
-ambient_light_energy = 0.5
+background_mode = 2
+sky = SubResource("Sky")
+ambient_light_source = 2
+ambient_light_color = Color(0.32, 0.26, 0.36, 1)
+ambient_light_energy = 0.55
+reflected_light_source = 2
 tonemap_mode = 4
+tonemap_exposure = 1.05
+tonemap_white = 6.0
+ssao_enabled = true
+ssao_radius = 1.4
+ssao_intensity = 1.6
+ssao_power = 1.5
+ssao_horizon = 0.06
+ssao_light_affect = 0.20
+ssao_ao_channel_affect = 0.40
 glow_enabled = true
-glow_intensity = 0.4
+glow_intensity = 0.50
+glow_strength = 1.05
 glow_bloom = 0.05
-glow_hdr_threshold = 1.0
 glow_blend_mode = 1
+glow_hdr_threshold = 1.05
+glow_hdr_scale = 2.5
+fog_enabled = true
+fog_light_color = Color(0.18, 0.10, 0.16, 1)
+fog_light_energy = 0.7
+fog_density = 0.020
+fog_aerial_perspective = 0.10
+fog_sky_affect = 0.0
 adjustment_enabled = true
-adjustment_contrast = 1.10
-adjustment_saturation = 1.05
+adjustment_brightness = 1.00
+adjustment_contrast = 1.18
+adjustment_saturation = 0.92
 
-[sub_resource type="StandardMaterial3D" id="MatLane1"]
-shading_mode = 0
-albedo_color = Color(0.92, 0.72, 0.18, 1)
+; ── Wood table material ───────────────────────────────────────────────────────
+[sub_resource type="ShaderMaterial" id="MatTable"]
+shader = ExtResource("2_wood")
+shader_parameter/wood_dark = Color(0.06, 0.038, 0.025, 1)
+shader_parameter/wood_mid = Color(0.14, 0.085, 0.052, 1)
+shader_parameter/wood_light = Color(0.24, 0.16, 0.10, 1)
+shader_parameter/grain_scale = 26.0
+shader_parameter/grain_strength = 0.55
+shader_parameter/grain_warp = 0.55
+shader_parameter/ring_scale = 2.0
+shader_parameter/ring_strength = 0.40
+shader_parameter/metal = 0.0
+shader_parameter/rough = 0.85
 
-[sub_resource type="StandardMaterial3D" id="MatLane2"]
-shading_mode = 0
-albedo_color = Color(0.35, 0.75, 0.30, 1)
+[sub_resource type="PlaneMesh" id="MeshTable"]
+size = Vector2(14, 10)
+material = SubResource("MatTable")
 
-[sub_resource type="StandardMaterial3D" id="MatLane3"]
-shading_mode = 0
-albedo_color = Color(0.55, 0.35, 0.78, 1)
+; Tiled wood for the inset playboard, slightly darker / different grain
+[sub_resource type="ShaderMaterial" id="MatBoard"]
+shader = ExtResource("2_wood")
+shader_parameter/wood_dark = Color(0.038, 0.022, 0.015, 1)
+shader_parameter/wood_mid = Color(0.085, 0.052, 0.034, 1)
+shader_parameter/wood_light = Color(0.14, 0.092, 0.062, 1)
+shader_parameter/grain_scale = 18.0
+shader_parameter/grain_strength = 0.7
+shader_parameter/grain_warp = 0.85
+shader_parameter/ring_scale = 1.6
+shader_parameter/ring_strength = 0.55
+shader_parameter/metal = 0.0
+shader_parameter/rough = 0.92
 
-[sub_resource type="StandardMaterial3D" id="MatLane4"]
-shading_mode = 0
-albedo_color = Color(0.28, 0.62, 0.85, 1)
+[sub_resource type="PlaneMesh" id="MeshBoard"]
+size = Vector2(4.30, 3.50)
+material = SubResource("MatBoard")
 
-[sub_resource type="PlaneMesh" id="MeshLane1"]
-size = Vector2(0.85, 2.8)
-material = SubResource("MatLane1")
-
-[sub_resource type="PlaneMesh" id="MeshLane2"]
-size = Vector2(0.85, 2.8)
-material = SubResource("MatLane2")
-
-[sub_resource type="PlaneMesh" id="MeshLane3"]
-size = Vector2(0.85, 2.8)
-material = SubResource("MatLane3")
-
-[sub_resource type="PlaneMesh" id="MeshLane4"]
-size = Vector2(0.85, 2.8)
-material = SubResource("MatLane4")
-
-[sub_resource type="StandardMaterial3D" id="MatBoardFrame"]
-shading_mode = 0
-albedo_color = Color(0.35, 0.22, 0.12, 1)
-
-[sub_resource type="PlaneMesh" id="MeshBoardFrame"]
-size = Vector2(4.0, 3.2)
-material = SubResource("MatBoardFrame")
-
-[sub_resource type="StandardMaterial3D" id="MatMidline"]
-shading_mode = 0
-albedo_color = Color(0.88, 0.82, 0.58, 1)
+; ── Gilt trim (raised border around the playboard) ───────────────────────────
+[sub_resource type="StandardMaterial3D" id="MatGilt"]
+albedo_color = Color(0.62, 0.46, 0.18, 1)
+metallic = 0.7
+metallic_specular = 0.5
+roughness = 0.30
 emission_enabled = true
-emission = Color(0.88, 0.75, 0.45, 1)
+emission = Color(0.62, 0.46, 0.18, 1)
+emission_energy_multiplier = 0.25
+
+[sub_resource type="BoxMesh" id="MeshTrimH"]
+size = Vector3(4.36, 0.025, 0.06)
+material = SubResource("MatGilt")
+
+[sub_resource type="BoxMesh" id="MeshTrimV"]
+size = Vector3(0.06, 0.025, 3.56)
+material = SubResource("MatGilt")
+
+; ── Midline (combat divider) ─────────────────────────────────────────────────
+[sub_resource type="StandardMaterial3D" id="MatMidline"]
+albedo_color = Color(0.55, 0.40, 0.18, 1)
+metallic = 0.6
+roughness = 0.35
+emission_enabled = true
+emission = Color(0.85, 0.55, 0.18, 1)
 emission_energy_multiplier = 0.5
 
 [sub_resource type="BoxMesh" id="MeshMidline"]
-size = Vector3(3.7, 0.006, 0.025)
+size = Vector3(4.10, 0.012, 0.030)
 material = SubResource("MatMidline")
 
-[sub_resource type="StandardMaterial3D" id="MatTable"]
+; ── Lane shader materials (one per lane, with sigil_index set) ───────────────
+[sub_resource type="ShaderMaterial" id="MatLane1"]
+shader = ExtResource("3_lane")
+shader_parameter/lane_color = Color(0.55, 0.34, 0.10, 1)
+shader_parameter/ink_color = Color(0.04, 0.03, 0.04, 1)
+shader_parameter/parchment = Color(0.18, 0.13, 0.10, 1)
+shader_parameter/sigil_index = 0
+shader_parameter/sigil_strength = 0.55
+shader_parameter/grain_scale = 8.0
+shader_parameter/grain_strength = 0.18
+shader_parameter/pulse_speed = 0.45
+shader_parameter/pulse_strength = 0.04
+shader_parameter/edge_darken = 0.55
+shader_parameter/edge_softness = 0.78
+shader_parameter/mood_tint = Color(1, 0.4, 0.2, 1)
+
+[sub_resource type="ShaderMaterial" id="MatLane2"]
+shader = ExtResource("3_lane")
+shader_parameter/lane_color = Color(0.18, 0.36, 0.18, 1)
+shader_parameter/ink_color = Color(0.04, 0.03, 0.04, 1)
+shader_parameter/parchment = Color(0.16, 0.14, 0.10, 1)
+shader_parameter/sigil_index = 1
+shader_parameter/sigil_strength = 0.55
+shader_parameter/grain_scale = 8.0
+shader_parameter/grain_strength = 0.18
+shader_parameter/pulse_speed = 0.40
+shader_parameter/pulse_strength = 0.04
+shader_parameter/edge_darken = 0.55
+shader_parameter/edge_softness = 0.78
+shader_parameter/mood_tint = Color(1, 0.4, 0.2, 1)
+
+[sub_resource type="ShaderMaterial" id="MatLane3"]
+shader = ExtResource("3_lane")
+shader_parameter/lane_color = Color(0.30, 0.18, 0.42, 1)
+shader_parameter/ink_color = Color(0.04, 0.03, 0.04, 1)
+shader_parameter/parchment = Color(0.13, 0.10, 0.14, 1)
+shader_parameter/sigil_index = 2
+shader_parameter/sigil_strength = 0.55
+shader_parameter/grain_scale = 8.0
+shader_parameter/grain_strength = 0.18
+shader_parameter/pulse_speed = 0.55
+shader_parameter/pulse_strength = 0.05
+shader_parameter/edge_darken = 0.55
+shader_parameter/edge_softness = 0.78
+shader_parameter/mood_tint = Color(1, 0.4, 0.2, 1)
+
+[sub_resource type="ShaderMaterial" id="MatLane4"]
+shader = ExtResource("3_lane")
+shader_parameter/lane_color = Color(0.14, 0.30, 0.42, 1)
+shader_parameter/ink_color = Color(0.04, 0.03, 0.04, 1)
+shader_parameter/parchment = Color(0.10, 0.13, 0.16, 1)
+shader_parameter/sigil_index = 3
+shader_parameter/sigil_strength = 0.55
+shader_parameter/grain_scale = 8.0
+shader_parameter/grain_strength = 0.18
+shader_parameter/pulse_speed = 0.50
+shader_parameter/pulse_strength = 0.04
+shader_parameter/edge_darken = 0.55
+shader_parameter/edge_softness = 0.78
+shader_parameter/mood_tint = Color(1, 0.4, 0.2, 1)
+
+[sub_resource type="PlaneMesh" id="MeshLane1"]
+size = Vector2(0.92, 3.10)
+material = SubResource("MatLane1")
+[sub_resource type="PlaneMesh" id="MeshLane2"]
+size = Vector2(0.92, 3.10)
+material = SubResource("MatLane2")
+[sub_resource type="PlaneMesh" id="MeshLane3"]
+size = Vector2(0.92, 3.10)
+material = SubResource("MatLane3")
+[sub_resource type="PlaneMesh" id="MeshLane4"]
+size = Vector2(0.92, 3.10)
+material = SubResource("MatLane4")
+
+; ── Lane dividers (thin gilt lines between lanes) ─────────────────────────────
+[sub_resource type="StandardMaterial3D" id="MatLaneDiv"]
+albedo_color = Color(0.32, 0.22, 0.10, 1)
+metallic = 0.5
+roughness = 0.55
+emission_enabled = true
+emission = Color(0.45, 0.30, 0.12, 1)
+emission_energy_multiplier = 0.15
+
+[sub_resource type="BoxMesh" id="MeshLaneDiv"]
+size = Vector3(0.012, 0.008, 3.10)
+material = SubResource("MatLaneDiv")
+
+; ── Candle stick props (pure visual — light comes from key/rim) ──────────────
+[sub_resource type="StandardMaterial3D" id="MatCandleBase"]
+albedo_color = Color(0.18, 0.10, 0.06, 1)
+roughness = 0.85
+
+[sub_resource type="CylinderMesh" id="MeshCandleBase"]
+top_radius = 0.06
+bottom_radius = 0.075
+height = 0.025
+radial_segments = 16
+material = SubResource("MatCandleBase")
+
+[sub_resource type="StandardMaterial3D" id="MatCandleStem"]
+albedo_color = Color(0.86, 0.82, 0.72, 1)
+roughness = 0.55
+metallic_specular = 0.10
+
+[sub_resource type="CylinderMesh" id="MeshCandleStem"]
+top_radius = 0.024
+bottom_radius = 0.028
+height = 0.20
+radial_segments = 14
+material = SubResource("MatCandleStem")
+
+[sub_resource type="StandardMaterial3D" id="MatFlame"]
 shading_mode = 0
-albedo_color = Color(0.16, 0.13, 0.11, 1)
+albedo_color = Color(1.0, 0.78, 0.32, 1)
+emission_enabled = true
+emission = Color(1.0, 0.62, 0.22, 1)
+emission_energy_multiplier = 4.5
+disable_receive_shadows = true
 
-[sub_resource type="PlaneMesh" id="MeshTable"]
-size = Vector2(9, 7)
-material = SubResource("MatTable")
+[sub_resource type="SphereMesh" id="MeshFlame"]
+radius = 0.012
+height = 0.040
+radial_segments = 10
+rings = 8
+material = SubResource("MatFlame")
 
+; ── Vignette overlay ──────────────────────────────────────────────────────────
+[sub_resource type="ShaderMaterial" id="MatVignette"]
+shader = ExtResource("4_vignette")
+shader_parameter/strength = 0.45
+shader_parameter/radius = 0.55
+shader_parameter/softness = 0.95
+shader_parameter/vignette_color = Color(0, 0, 0, 1)
+shader_parameter/grain_strength = 0.015
+shader_parameter/grain_speed = 12.0
+
+
+; ── Scene graph ──────────────────────────────────────────────────────────────
 [node name="Combat" type="Node3D"]
 script = ExtResource("1_combat")
 
@@ -87,43 +269,153 @@ environment = SubResource("Env")
 camera_attributes = SubResource("CamAttrs")
 
 [node name="Camera3D" type="Camera3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 0.707, 0.707, 0, -0.707, 0.707, 0, 3.0, 3.0)
-fov = 50.0
+transform = Transform3D(1, 0, 0, 0, 0.707, 0.707, 0, -0.707, 0.707, 0, 0, 3.4, 3.4)
+fov = 52.0
 near = 0.05
+far = 60.0
 
-[node name="Sun" type="DirectionalLight3D" parent="."]
-transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 4, 0)
-light_color = Color(1.0, 0.96, 0.88, 1)
-light_energy = 1.0
+; Warm key light: front-above, like a hanging lantern from the player's side
+[node name="KeyLight" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.92, -0.30, 0.25, 0, 0.64, 0.77, -0.39, -0.71, 0.59, 0, 5, 3)
+light_color = Color(1.00, 0.84, 0.60, 1)
+light_energy = 1.10
 shadow_enabled = true
-shadow_bias = 0.02
+shadow_bias = 0.04
+shadow_normal_bias = 1.5
+shadow_blur = 1.6
 
+; Cool rim from behind/above to separate the playboard from the dark sky
+[node name="RimLight" type="DirectionalLight3D" parent="."]
+transform = Transform3D(-0.95, 0, -0.31, -0.18, 0.81, 0.55, 0.25, 0.59, -0.77, 0, 4, -3)
+light_color = Color(0.46, 0.52, 0.78, 1)
+light_energy = 0.75
+shadow_enabled = false
+
+; Soft fill from below at very low energy — keeps the underside of cards
+; from going pitch-black.
+[node name="FillLight" type="DirectionalLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, -0.5, 0.866, 0, -0.866, -0.5, 0, -1, 0)
+light_color = Color(0.55, 0.45, 0.40, 1)
+light_energy = 0.18
+shadow_enabled = false
+
+; Wood table (large plane underneath the playboard for context)
 [node name="Table" type="MeshInstance3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.02, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.022, 0)
 mesh = SubResource("MeshTable")
 
-[node name="BoardFrame" type="MeshInstance3D" parent="."]
+; Inset playboard — slightly recessed wooden surface where lanes sit
+[node name="Board" type="MeshInstance3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.005, 0)
-mesh = SubResource("MeshBoardFrame")
+mesh = SubResource("MeshBoard")
 
+; Gilt frame around the playboard
+[node name="TrimTop" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.002, -1.78)
+mesh = SubResource("MeshTrimH")
+
+[node name="TrimBottom" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.002, 1.78)
+mesh = SubResource("MeshTrimH")
+
+[node name="TrimLeft" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.18, 0.002, 0)
+mesh = SubResource("MeshTrimV")
+
+[node name="TrimRight" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.18, 0.002, 0)
+mesh = SubResource("MeshTrimV")
+
+; Center divider between player & enemy zones
 [node name="Midline" type="MeshInstance3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.003, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.004, 0)
 mesh = SubResource("MeshMidline")
 
+; ── Lanes ────────────────────────────────────────────────────────────────────
 [node name="Lanes" type="Node3D" parent="."]
 
 [node name="Lane1" type="MeshInstance3D" parent="Lanes"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.35, 0, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.42, 0, 0)
 mesh = SubResource("MeshLane1")
 
 [node name="Lane2" type="MeshInstance3D" parent="Lanes"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.45, 0, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.475, 0, 0)
 mesh = SubResource("MeshLane2")
 
 [node name="Lane3" type="MeshInstance3D" parent="Lanes"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.45, 0, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.475, 0, 0)
 mesh = SubResource("MeshLane3")
 
 [node name="Lane4" type="MeshInstance3D" parent="Lanes"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.35, 0, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.42, 0, 0)
 mesh = SubResource("MeshLane4")
+
+[node name="LaneDiv1" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.945, 0.001, 0)
+mesh = SubResource("MeshLaneDiv")
+
+[node name="LaneDiv2" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.001, 0)
+mesh = SubResource("MeshLaneDiv")
+
+[node name="LaneDiv3" type="MeshInstance3D" parent="Lanes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.945, 0.001, 0)
+mesh = SubResource("MeshLaneDiv")
+
+; ── Candle props (left + right of the playboard) ─────────────────────────────
+[node name="CandleLeft" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.95, 0, 1.05)
+
+[node name="Base" type="MeshInstance3D" parent="CandleLeft"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.012, 0)
+mesh = SubResource("MeshCandleBase")
+
+[node name="Stem" type="MeshInstance3D" parent="CandleLeft"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.125, 0)
+mesh = SubResource("MeshCandleStem")
+
+[node name="Flame" type="MeshInstance3D" parent="CandleLeft"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.245, 0)
+mesh = SubResource("MeshFlame")
+
+[node name="Light" type="OmniLight3D" parent="CandleLeft"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.255, 0)
+light_color = Color(1.0, 0.66, 0.32, 1)
+light_energy = 1.20
+omni_range = 1.80
+omni_attenuation = 1.5
+shadow_enabled = false
+
+[node name="CandleRight" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.95, 0, 1.05)
+
+[node name="Base" type="MeshInstance3D" parent="CandleRight"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.012, 0)
+mesh = SubResource("MeshCandleBase")
+
+[node name="Stem" type="MeshInstance3D" parent="CandleRight"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.125, 0)
+mesh = SubResource("MeshCandleStem")
+
+[node name="Flame" type="MeshInstance3D" parent="CandleRight"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.245, 0)
+mesh = SubResource("MeshFlame")
+
+[node name="Light" type="OmniLight3D" parent="CandleRight"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.255, 0)
+light_color = Color(1.0, 0.66, 0.32, 1)
+light_energy = 1.10
+omni_range = 1.70
+omni_attenuation = 1.5
+shadow_enabled = false
+
+; ── Vignette overlay (sits below the HUD so panels aren't darkened) ─────────
+[node name="VignetteLayer" type="CanvasLayer" parent="."]
+layer = 5
+
+[node name="Vignette" type="ColorRect" parent="VignetteLayer"]
+material = SubResource("MatVignette")
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+color = Color(1, 1, 1, 1)
