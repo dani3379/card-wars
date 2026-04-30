@@ -75,7 +75,10 @@ var _cam_drift_t: float = 0.0
 # ── Relic-related per-turn state ──
 var _vampires_fang_used_this_turn: bool = false
 
-# ── HUD (2D overlay so it's always on-screen, not Label3D in world space) ──
+# ── HUD ──
+# All HUD labels are 2D Labels inside a CanvasLayer. Floating Label3Ds in
+# 3D space looked like placeholder debug text — proper UI panels read as
+# intentional design.
 var _hud_layer: CanvasLayer
 var _phase_label: Label
 var _player_hp_label: Label
@@ -422,7 +425,7 @@ func _check_game_over() -> void:
 	if player_hp <= 0:
 		phase = Phase.GAME_OVER
 		_phase_label.text = "DEFEAT"
-		_phase_label.modulate = Color(0.9, 0.2, 0.2)
+		_phase_label.add_theme_color_override("font_color", Color(0.95, 0.25, 0.25))
 		# Persist current HP for run-end screen, then transition
 		RunState.hero_hp = 0
 		get_tree().create_timer(1.5).timeout.connect(func():
@@ -432,7 +435,7 @@ func _check_game_over() -> void:
 	elif enemy_hp <= 0:
 		phase = Phase.GAME_OVER
 		_phase_label.text = "VICTORY!"
-		_phase_label.modulate = Color(0.2, 0.9, 0.3)
+		_phase_label.add_theme_color_override("font_color", Color(0.30, 0.92, 0.40))
 		# Save current HP back to RunState
 		RunState.hero_hp = max(player_hp, 1)
 		# Was this the boss?
@@ -542,277 +545,215 @@ func _nearest_lane_index(world_pos: Vector3) -> int:
 
 
 # ── HUD ──
-# ── Atmosphere ──
-# Two candles on opposite corners with flickering warm point lights, drifting
-# embers, and dust motes. Pure procedural setup — no scene editing needed.
-# Tweak the constants here for "feel".
-const CANDLE_BASE_ENERGY := 2.4
-const CANDLE_FLICKER_AMOUNT := 0.65
-const CANDLE_POSITION_LEFT := Vector3(-2.4, 0.45, 1.35)
-const CANDLE_POSITION_RIGHT := Vector3(2.4, 0.45, 1.35)
-
-# `_candle_light` and `_candle_flame` are the primary candle (driven by the
-# flicker handler). The right-side candle gets its own quieter flicker.
-var _candle_light: OmniLight3D
-var _candle_flame: MeshInstance3D
-var _candle_light_2: OmniLight3D
-var _candle_flame_2: MeshInstance3D
-var _candle_flicker_t: float = 0.0
-
-
-func _build_atmosphere() -> void:
-	_candle_light = _build_candle(CANDLE_POSITION_LEFT, true)
-	_candle_light_2 = _build_candle(CANDLE_POSITION_RIGHT, false)
-	_build_embers(CANDLE_POSITION_LEFT)
-	_build_embers(CANDLE_POSITION_RIGHT)
-	_build_dust_motes()
-	_build_back_glow()
-
-
-# Builds a candle stem + flame + omni-light at `pos`. The first one keeps a
-# reference to its flame mesh so the flicker handler can scale it.
-func _build_candle(pos: Vector3, is_primary: bool) -> OmniLight3D:
-	var stem = MeshInstance3D.new()
-	var stem_mesh = CylinderMesh.new()
-	stem_mesh.top_radius = 0.07
-	stem_mesh.bottom_radius = 0.075
-	stem_mesh.height = 0.32
-	var stem_mat = StandardMaterial3D.new()
-	stem_mat.albedo_color = Color(0.92, 0.86, 0.70)
-	stem_mat.roughness = 0.85
-	stem_mesh.material = stem_mat
-	stem.mesh = stem_mesh
-	stem.position = pos + Vector3(0, 0.16, 0)
-	add_child(stem)
-
-	var flame = MeshInstance3D.new()
-	var flame_mesh = SphereMesh.new()
-	flame_mesh.radius = 0.04
-	flame_mesh.height = 0.13
-	var flame_mat = StandardMaterial3D.new()
-	flame_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	flame_mat.albedo_color = Color(1.0, 0.78, 0.32)
-	flame_mat.emission_enabled = true
-	flame_mat.emission = Color(1.0, 0.65, 0.25)
-	flame_mat.emission_energy_multiplier = 5.0
-	flame_mesh.material = flame_mat
-	flame.mesh = flame_mesh
-	flame.position = pos + Vector3(0, 0.40, 0)
-	add_child(flame)
-	if is_primary:
-		_candle_flame = flame
-	else:
-		_candle_flame_2 = flame
-
-	var light = OmniLight3D.new()
-	light.light_color = Color(1.0, 0.65, 0.30)
-	light.light_energy = CANDLE_BASE_ENERGY
-	light.omni_range = 7.0
-	light.shadow_enabled = true
-	light.position = pos + Vector3(0, 0.40, 0)
-	add_child(light)
-	return light
-
-
-func _build_embers(pos: Vector3) -> void:
-	# Drifting embers rising from the given candle position.
-	var p = GPUParticles3D.new()
-	var mat = ParticleProcessMaterial.new()
-	mat.direction = Vector3(0, 1, 0)
-	mat.spread = 12.0
-	mat.initial_velocity_min = 0.25
-	mat.initial_velocity_max = 0.55
-	mat.gravity = Vector3(0, 0.4, 0)  # rise, not fall
-	mat.scale_min = 0.4
-	mat.scale_max = 1.2
-	mat.color = Color(1.0, 0.55, 0.2, 1.0)
-	mat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
-	mat.emission_sphere_radius = 0.04
-	p.process_material = mat
-	var mesh = SphereMesh.new()
-	mesh.radius = 0.012
-	mesh.height = 0.024
-	var ember_mat = StandardMaterial3D.new()
-	ember_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	ember_mat.albedo_color = Color(1.0, 0.55, 0.2)
-	ember_mat.emission_enabled = true
-	ember_mat.emission = Color(1.0, 0.45, 0.15)
-	ember_mat.emission_energy_multiplier = 3.0
-	mesh.material = ember_mat
-	p.draw_pass_1 = mesh
-	p.amount = 24
-	p.lifetime = 2.4
-	p.preprocess = 1.5
-	p.position = pos + Vector3(0, 0.45, 0)
-	add_child(p)
-
-
-func _build_dust_motes() -> void:
-	# Slow ambient dust drifting through the candle's light cone.
-	var p = GPUParticles3D.new()
-	var mat = ParticleProcessMaterial.new()
-	mat.direction = Vector3(0.2, -0.05, 0.1)
-	mat.spread = 60.0
-	mat.initial_velocity_min = 0.05
-	mat.initial_velocity_max = 0.12
-	mat.gravity = Vector3.ZERO
-	mat.scale_min = 0.5
-	mat.scale_max = 1.6
-	mat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	mat.emission_box_extents = Vector3(3.0, 1.2, 2.5)
-	mat.color = Color(0.9, 0.85, 0.7, 0.5)
-	p.process_material = mat
-	var mesh = SphereMesh.new()
-	mesh.radius = 0.006
-	mesh.height = 0.012
-	var dust_mat = StandardMaterial3D.new()
-	dust_mat.albedo_color = Color(0.95, 0.9, 0.78)
-	dust_mat.roughness = 1.0
-	mesh.material = dust_mat
-	p.draw_pass_1 = mesh
-	p.amount = 80
-	p.lifetime = 6.0
-	p.preprocess = 4.0
-	p.position = Vector3(0, 1.0, 0)
-	add_child(p)
-
-
-func _build_back_glow() -> void:
-	# Dim warm rim light from the back to push the table out of pure darkness.
-	var rim = OmniLight3D.new()
-	rim.light_color = Color(0.6, 0.4, 0.5)
-	rim.light_energy = 0.6
-	rim.omni_range = 8.0
-	rim.position = Vector3(2.0, 1.5, -2.5)
-	add_child(rim)
+const _PARCHMENT_BG := Color(0.10, 0.075, 0.060, 0.92)
+const _PARCHMENT_BORDER := Color(0.55, 0.40, 0.18, 1.0)
+const _GILT := Color(0.78, 0.62, 0.28, 1.0)
+const _IVORY := Color(0.96, 0.92, 0.78, 1.0)
 
 
 func _build_lane_labels() -> void:
-	# A small label above each lane showing its identity
+	# A small subtle label above each lane. Sigils on the lane material are
+	# the primary identity cue; this label is a quiet caption beneath them.
 	for i in range(4):
 		var lane = RunState.LANES[i]
 		var lbl = Label3D.new()
-		lbl.text = "%s %s" % [lane.icon, lane.name]
-		lbl.font_size = 28
-		lbl.pixel_size = 0.001
-		lbl.position = Vector3(LANE_X[i], 0.01, 1.55)
+		lbl.text = lane.name
+		lbl.font_size = 22
+		lbl.pixel_size = 0.0009
+		lbl.position = Vector3(LANE_X[i], 0.012, 1.66)
 		lbl.rotation = Vector3(-PI/2, 0, 0)
-		lbl.modulate = lane.color
-		lbl.outline_modulate = Color.BLACK
-		lbl.outline_size = 6
+		lbl.modulate = _GILT
+		lbl.outline_modulate = Color(0.04, 0.03, 0.02, 0.85)
+		lbl.outline_size = 4
 		add_child(lbl)
 
 
 func _build_hud() -> void:
-	# Single CanvasLayer hosts every HUD label + button + relic strip in 2D.
-	# Positioned by anchors so the layout works at any window size.
 	_hud_layer = CanvasLayer.new()
-	_hud_layer.layer = 10
+	_hud_layer.layer = 12
 	add_child(_hud_layer)
 
-	# Top center: floor + phase
-	_floor_label = _make_2d_label(
-		"Floor %d / %d" % [RunState.current_floor, RunState.FLOOR_COUNT],
-		22, Color(0.85, 0.85, 0.95))
-	_floor_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	_floor_label.offset_top = 12
-	_floor_label.offset_bottom = 38
+	# Top-center banner: floor + phase
+	var top := _make_panel(Vector2(0.5, 0.0), Vector2(-160, 14), Vector2(320, 84))
+	_hud_layer.add_child(top)
+	_floor_label = _make_text_label("Floor %d / %d" %
+		[RunState.current_floor, RunState.FLOOR_COUNT], 18, _GILT)
+	_floor_label.position = Vector2(0, 8)
+	_floor_label.size = Vector2(320, 24)
 	_floor_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hud_layer.add_child(_floor_label)
-
-	_phase_label = _make_2d_label("YOUR TURN", 32, Color(1, 0.9, 0.4))
-	_phase_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	_phase_label.offset_top = 38
-	_phase_label.offset_bottom = 78
+	top.add_child(_floor_label)
+	_phase_label = _make_text_label("YOUR TURN", 30, _IVORY)
+	_phase_label.position = Vector2(0, 32)
+	_phase_label.size = Vector2(320, 40)
 	_phase_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hud_layer.add_child(_phase_label)
+	top.add_child(_phase_label)
 
-	# Top center: enemy HP
-	_enemy_hp_label = _make_2d_label(
-		"Enemy ♥ %d/%d" % [enemy_hp, enemy_max_hp], 26, Color(0.95, 0.45, 0.45))
-	_enemy_hp_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	_enemy_hp_label.offset_top = 86
-	_enemy_hp_label.offset_bottom = 120
+	# Enemy HP — sits just under the top banner
+	var enemy_panel := _make_panel(Vector2(0.5, 0.0), Vector2(-100, 110), Vector2(200, 38))
+	_hud_layer.add_child(enemy_panel)
+	_enemy_hp_label = _make_text_label("Enemy  %d / %d" % [enemy_hp, enemy_max_hp],
+		18, Color(0.95, 0.55, 0.40))
+	_enemy_hp_label.position = Vector2(0, 6)
+	_enemy_hp_label.size = Vector2(200, 26)
 	_enemy_hp_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hud_layer.add_child(_enemy_hp_label)
+	enemy_panel.add_child(_enemy_hp_label)
 
-	# Bottom-left: player HP
-	_player_hp_label = _make_2d_label("♥ 25/25", 28, Color(0.95, 0.3, 0.3))
-	_player_hp_label.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_player_hp_label.offset_left = 24
-	_player_hp_label.offset_top = -64
-	_player_hp_label.offset_bottom = -28
-	_player_hp_label.offset_right = 320
-	_hud_layer.add_child(_player_hp_label)
+	# Bottom-left: HP plate
+	var hp_panel := _make_panel(Vector2(0.0, 1.0), Vector2(20, -82), Vector2(170, 62))
+	_hud_layer.add_child(hp_panel)
+	var hp_caption := _make_text_label("HEALTH", 12, _GILT)
+	hp_caption.position = Vector2(12, 6)
+	hp_caption.size = Vector2(146, 16)
+	hp_panel.add_child(hp_caption)
+	_player_hp_label = _make_text_label("%d / %d" % [player_hp, player_max_hp],
+		28, Color(0.95, 0.42, 0.42))
+	_player_hp_label.position = Vector2(12, 22)
+	_player_hp_label.size = Vector2(146, 36)
+	_player_hp_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hp_panel.add_child(_player_hp_label)
 
-	# Bottom-center: mana
-	_mana_label = _make_2d_label("◆ 3/3", 30, Color(0.45, 0.7, 1.0))
-	_mana_label.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
-	_mana_label.offset_top = -64
-	_mana_label.offset_bottom = -28
+	# Bottom-left, next to HP: Mana plate
+	var mana_panel := _make_panel(Vector2(0.0, 1.0), Vector2(200, -82), Vector2(170, 62))
+	_hud_layer.add_child(mana_panel)
+	var mana_caption := _make_text_label("MANA", 12, _GILT)
+	mana_caption.position = Vector2(12, 6)
+	mana_caption.size = Vector2(146, 16)
+	mana_panel.add_child(mana_caption)
+	_mana_label = _make_text_label("%d / %d" % [player_mana, player_max_mana],
+		28, Color(0.55, 0.78, 1.00))
+	_mana_label.position = Vector2(12, 22)
+	_mana_label.size = Vector2(146, 36)
 	_mana_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hud_layer.add_child(_mana_label)
+	mana_panel.add_child(_mana_label)
 
-	# Bottom-right: turn counter
-	_turn_label = _make_2d_label("Turn 1", 22, Color(0.7, 0.7, 0.7))
-	_turn_label.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	_turn_label.offset_left = -200
-	_turn_label.offset_right = -24
-	_turn_label.offset_top = -56
-	_turn_label.offset_bottom = -28
-	_turn_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	_hud_layer.add_child(_turn_label)
+	# Bottom-right above the end turn: turn counter (compact)
+	var turn_panel := _make_panel(Vector2(1.0, 1.0), Vector2(-150, -82),
+		Vector2(130, 36))
+	_hud_layer.add_child(turn_panel)
+	_turn_label = _make_text_label("Turn 1", 16, _GILT)
+	_turn_label.position = Vector2(0, 8)
+	_turn_label.size = Vector2(130, 22)
+	_turn_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	turn_panel.add_child(_turn_label)
 
-	# Center: transient info messages ("Not enough mana", etc.)
-	_info_label = _make_2d_label("", 30, Color(1, 0.65, 0.3))
+	# Center info toast (transient messages like "Lane occupied")
+	_info_label = _make_text_label("", 26, Color(1, 0.78, 0.40))
 	_info_label.set_anchors_preset(Control.PRESET_CENTER)
-	_info_label.offset_left = -300
-	_info_label.offset_right = 300
-	_info_label.offset_top = 60
-	_info_label.offset_bottom = 110
+	_info_label.position = Vector2(-220, -40)
+	_info_label.size = Vector2(440, 80)
 	_info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_info_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_info_label.add_theme_color_override("font_outline_color",
+		Color(0, 0, 0, 0.85))
+	_info_label.add_theme_constant_override("outline_size", 8)
 	_hud_layer.add_child(_info_label)
 
 
-func _make_2d_label(text: String, size: int, color: Color) -> Label:
-	var lbl = Label.new()
+func _make_panel(anchor: Vector2, offset: Vector2, size: Vector2) -> Panel:
+	# Builds a parchment-styled framed panel anchored to a corner of the
+	# screen. Anchor is (0..1, 0..1); offset is in pixels from that corner.
+	var panel := Panel.new()
+	panel.anchor_left = anchor.x
+	panel.anchor_right = anchor.x
+	panel.anchor_top = anchor.y
+	panel.anchor_bottom = anchor.y
+	panel.offset_left = offset.x
+	panel.offset_top = offset.y
+	panel.offset_right = offset.x + size.x
+	panel.offset_bottom = offset.y + size.y
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var style := StyleBoxFlat.new()
+	style.bg_color = _PARCHMENT_BG
+	style.border_color = _PARCHMENT_BORDER
+	style.border_width_top = 2
+	style.border_width_bottom = 2
+	style.border_width_left = 2
+	style.border_width_right = 2
+	style.corner_radius_top_left = 6
+	style.corner_radius_top_right = 6
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	style.shadow_color = Color(0, 0, 0, 0.55)
+	style.shadow_size = 6
+	style.shadow_offset = Vector2(0, 3)
+	panel.add_theme_stylebox_override("panel", style)
+	return panel
+
+
+func _make_text_label(text: String, size: int, color: Color) -> Label:
+	var lbl := Label.new()
 	lbl.text = text
 	lbl.add_theme_font_size_override("font_size", size)
 	lbl.add_theme_color_override("font_color", color)
-	lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
-	lbl.add_theme_constant_override("outline_size", 6)
+	lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.7))
+	lbl.add_theme_constant_override("outline_size", 4)
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return lbl
 
 
 func _build_end_turn_button() -> void:
-	_end_turn_btn = Button.new()
-	_end_turn_btn.text = "END TURN  [E]"
-	_end_turn_btn.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	_end_turn_btn.offset_left = -200
-	_end_turn_btn.offset_right = -24
-	_end_turn_btn.offset_top = -130
-	_end_turn_btn.offset_bottom = -80
-	_end_turn_btn.pressed.connect(_on_end_turn)
-	var style = StyleBoxFlat.new()
-	style.bg_color = Color(0.12, 0.42, 0.18, 0.95)
-	style.corner_radius_top_left = 6
-	style.corner_radius_top_right = 6
-	style.corner_radius_bottom_left = 6
-	style.corner_radius_bottom_right = 6
-	_end_turn_btn.add_theme_stylebox_override("normal", style)
-	_end_turn_btn.add_theme_color_override("font_color", Color.WHITE)
-	_end_turn_btn.add_theme_font_size_override("font_size", 18)
-	_hud_layer.add_child(_end_turn_btn)
+	# Bottom-right button styled to match the parchment plates
+	var btn := Button.new()
+	btn.text = "END TURN  [E]"
+	btn.anchor_left = 1.0
+	btn.anchor_right = 1.0
+	btn.anchor_top = 1.0
+	btn.anchor_bottom = 1.0
+	btn.offset_left = -180
+	btn.offset_top = -42
+	btn.offset_right = -20
+	btn.offset_bottom = -10
+	btn.pressed.connect(_on_end_turn)
+
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0.18, 0.10, 0.05, 0.92)
+	normal.border_color = _GILT
+	normal.border_width_top = 2
+	normal.border_width_bottom = 2
+	normal.border_width_left = 2
+	normal.border_width_right = 2
+	normal.corner_radius_top_left = 6
+	normal.corner_radius_top_right = 6
+	normal.corner_radius_bottom_left = 6
+	normal.corner_radius_bottom_right = 6
+	normal.shadow_color = Color(0, 0, 0, 0.55)
+	normal.shadow_size = 6
+	normal.shadow_offset = Vector2(0, 3)
+	btn.add_theme_stylebox_override("normal", normal)
+
+	var hover := normal.duplicate() as StyleBoxFlat
+	hover.bg_color = Color(0.32, 0.18, 0.06, 0.98)
+	btn.add_theme_stylebox_override("hover", hover)
+
+	var pressed := normal.duplicate() as StyleBoxFlat
+	pressed.bg_color = Color(0.10, 0.06, 0.03, 0.98)
+	btn.add_theme_stylebox_override("pressed", pressed)
+
+	var disabled := normal.duplicate() as StyleBoxFlat
+	disabled.bg_color = Color(0.10, 0.07, 0.05, 0.55)
+	disabled.border_color = Color(0.40, 0.30, 0.15, 0.55)
+	btn.add_theme_stylebox_override("disabled", disabled)
+
+	btn.add_theme_color_override("font_color", _IVORY)
+	btn.add_theme_color_override("font_hover_color", Color(1, 0.95, 0.78))
+	btn.add_theme_color_override("font_disabled_color", Color(0.7, 0.65, 0.55, 0.6))
+	btn.add_theme_font_size_override("font_size", 16)
+	_end_turn_btn = btn
+	_hud_layer.add_child(btn)
 
 
 func _build_relic_display() -> void:
-	# Top-left strip showing icons for all owned relics, just under the floor label.
+	# Top-left strip showing icons for all owned relics
 	_relic_panel = HBoxContainer.new()
-	_relic_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	_relic_panel.offset_left = 24
-	_relic_panel.offset_top = 24
-	_relic_panel.add_theme_constant_override("separation", 8)
+	_relic_panel.anchor_left = 0.0
+	_relic_panel.anchor_top = 0.0
+	_relic_panel.offset_left = 20
+	_relic_panel.offset_top = 20
+	_relic_panel.offset_right = 400
+	_relic_panel.offset_bottom = 50
+	_relic_panel.add_theme_constant_override("separation", 6)
+	_relic_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_hud_layer.add_child(_relic_panel)
 	_refresh_relic_display()
 
@@ -823,29 +764,49 @@ func _refresh_relic_display() -> void:
 	for relic_id in RunState.relics:
 		var relic = RelicDB.get_relic(relic_id)
 		if relic.is_empty(): continue
-		var lbl = Label.new()
-		lbl.text = "[%s]" % relic.name
-		lbl.tooltip_text = relic.desc
-		lbl.add_theme_color_override("font_color", Color(1.0, 0.85, 0.5))
-		lbl.add_theme_font_size_override("font_size", 14)
-		_relic_panel.add_child(lbl)
+		# Use a MarginContainer + Panel-styled background so the chip auto-sizes
+		# to its label and the HBoxContainer can lay them out left-to-right.
+		var chip := PanelContainer.new()
+		var style := StyleBoxFlat.new()
+		style.bg_color = Color(0.10, 0.075, 0.060, 0.85)
+		style.border_color = _PARCHMENT_BORDER
+		style.border_width_top = 1
+		style.border_width_bottom = 1
+		style.border_width_left = 1
+		style.border_width_right = 1
+		style.corner_radius_top_left = 4
+		style.corner_radius_top_right = 4
+		style.corner_radius_bottom_left = 4
+		style.corner_radius_bottom_right = 4
+		style.content_margin_left = 8
+		style.content_margin_right = 8
+		style.content_margin_top = 3
+		style.content_margin_bottom = 3
+		chip.add_theme_stylebox_override("panel", style)
+		chip.tooltip_text = relic.desc
+		var lbl := Label.new()
+		lbl.text = relic.name
+		lbl.add_theme_color_override("font_color", _GILT)
+		lbl.add_theme_font_size_override("font_size", 13)
+		chip.add_child(lbl)
+		_relic_panel.add_child(chip)
 
 
 func _update_hud() -> void:
-	_player_hp_label.text = "♥ %d / %d" % [player_hp, player_max_hp]
-	_enemy_hp_label.text = "Enemy ♥ %d / %d" % [enemy_hp, enemy_max_hp]
-	_mana_label.text = "◆ %d / %d" % [player_mana, player_max_mana]
+	_player_hp_label.text = "%d / %d" % [player_hp, player_max_hp]
+	_enemy_hp_label.text = "Enemy  %d / %d" % [enemy_hp, enemy_max_hp]
+	_mana_label.text = "%d / %d" % [player_mana, player_max_mana]
 	_turn_label.text = "Turn %d" % turn_number
 	match phase:
 		Phase.PLAYER_TURN:
 			_phase_label.text = "YOUR TURN"
-			_phase_label.add_theme_color_override("font_color", Color(1, 0.9, 0.4))
+			_phase_label.add_theme_color_override("font_color", Color(0.96, 0.92, 0.78))
 		Phase.ENEMY_TURN:
 			_phase_label.text = "ENEMY TURN"
-			_phase_label.add_theme_color_override("font_color", Color(0.95, 0.45, 0.45))
+			_phase_label.add_theme_color_override("font_color", Color(0.95, 0.45, 0.40))
 		Phase.COMBAT:
 			_phase_label.text = "COMBAT"
-			_phase_label.add_theme_color_override("font_color", Color(1, 0.55, 0.25))
+			_phase_label.add_theme_color_override("font_color", Color(1.00, 0.60, 0.25))
 		Phase.GAME_OVER:
 			pass
 
@@ -889,8 +850,12 @@ func freeze_frame(duration: float) -> void:
 
 func _show_info(msg: String) -> void:
 	_info_label.text = msg
-	_info_label.add_theme_color_override("font_color", Color(1, 0.65, 0.3))
-	get_tree().create_timer(1.5).timeout.connect(func(): _info_label.text = "")
+	_info_label.add_theme_color_override("font_color", Color(1.0, 0.78, 0.40))
+	_info_label.modulate = Color(1, 1, 1, 1)
+	var t := create_tween()
+	t.tween_interval(1.0)
+	t.tween_property(_info_label, "modulate:a", 0.0, 0.5)
+	t.tween_callback(func(): _info_label.text = "")
 
 
 # ── Camera ──
