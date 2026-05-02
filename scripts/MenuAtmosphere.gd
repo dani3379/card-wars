@@ -5,19 +5,46 @@ class_name MenuAtmosphere
 ## and dust motes. Call MenuAtmosphere.attach_to(self) from a menu's _ready().
 ##
 ## All assets are procedural so the project doesn't need image files.
+##
+## Atmosphere lives in two CanvasLayers attached to the host:
+##   - "AtmosphereBack"  (layer = -1) — gradient + vignette, drawn behind UI
+##   - "AtmosphereFront" (layer =  1) — dust + embers, drawn over UI
+## Putting them in CanvasLayers means the visuals never participate in the
+## host's Control input tree, so they can't accidentally swallow button
+## clicks.
 
-# Builds the visuals as children of `host` and inserts them at the bottom of
-# the child list so existing UI sits on top.
+const BACK_LAYER_NAME := "AtmosphereBack"
+const FRONT_LAYER_NAME := "AtmosphereFront"
+
+
 static func attach_to(host: Control) -> void:
-	_add_gradient_background(host)
-	_add_vignette(host)
-	_add_dust_layer(host)
-	_add_ember_layer(host)
+	var back := _make_canvas_layer(host, BACK_LAYER_NAME, -1)
+	var front := _make_canvas_layer(host, FRONT_LAYER_NAME, 1)
+	_add_gradient_background(back)
+	_add_vignette(back)
+	_add_dust_layer(front)
+	_add_ember_layer(front)
+	# Hide any flat-colour Background ColorRect that the .tscn may have shipped.
+	var legacy = host.get_node_or_null("Background")
+	if legacy is ColorRect:
+		legacy.visible = false
 
 
-static func _add_gradient_background(host: Control) -> void:
-	# Replace any existing flat ColorRect named "Background" with a vertical
-	# gradient TextureRect that sits behind everything else.
+static func _make_canvas_layer(host: Control, layer_name: String, layer: int) -> CanvasLayer:
+	var existing = host.get_node_or_null(layer_name)
+	if existing is CanvasLayer:
+		# Clean any previous run's children so re-attaching is idempotent.
+		for c in existing.get_children():
+			c.queue_free()
+		return existing
+	var cl = CanvasLayer.new()
+	cl.name = layer_name
+	cl.layer = layer
+	host.add_child(cl)
+	return cl
+
+
+static func _add_gradient_background(parent: CanvasLayer) -> void:
 	var bg = TextureRect.new()
 	bg.name = "GrimoireBackground"
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -39,18 +66,10 @@ static func _add_gradient_background(host: Control) -> void:
 	gtex.width = 16
 	gtex.height = 512
 	bg.texture = gtex
-
-	host.add_child(bg)
-	host.move_child(bg, 0)
-
-	# Hide any flat-colour Background ColorRect that the .tscn may have shipped.
-	var legacy = host.get_node_or_null("Background")
-	if legacy is ColorRect:
-		legacy.visible = false
+	parent.add_child(bg)
 
 
-static func _add_vignette(host: Control) -> void:
-	# Radial darkening at the edges.
+static func _add_vignette(parent: CanvasLayer) -> void:
 	var v = TextureRect.new()
 	v.name = "Vignette"
 	v.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -74,12 +93,10 @@ static func _add_vignette(host: Control) -> void:
 	gtex.width = 512
 	gtex.height = 512
 	v.texture = gtex
-
-	host.add_child(v)
-	host.move_child(v, 1)
+	parent.add_child(v)
 
 
-static func _add_dust_layer(host: Control) -> void:
+static func _add_dust_layer(parent: CanvasLayer) -> void:
 	# Slow ambient dust drifting upward across the whole screen.
 	var p = GPUParticles2D.new()
 	p.name = "MenuDust"
@@ -102,11 +119,10 @@ static func _add_dust_layer(host: Control) -> void:
 	p.process_material = pmat
 	p.texture = _make_soft_dot_texture(8, Color(1, 0.95, 0.8))
 	p.position = Vector2(800, 920)
+	parent.add_child(p)
 
-	host.add_child(p)
 
-
-static func _add_ember_layer(host: Control) -> void:
+static func _add_ember_layer(parent: CanvasLayer) -> void:
 	# Brighter, faster, warmer particles rising from the bottom corners.
 	var p = GPUParticles2D.new()
 	p.name = "MenuEmbers"
@@ -128,8 +144,7 @@ static func _add_ember_layer(host: Control) -> void:
 	p.process_material = pmat
 	p.texture = _make_soft_dot_texture(6, Color(1, 0.6, 0.25))
 	p.position = Vector2(800, 920)
-
-	host.add_child(p)
+	parent.add_child(p)
 
 
 # Build a small radial-falloff dot texture so particles look like glow points
