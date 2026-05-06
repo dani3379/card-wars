@@ -6,7 +6,7 @@ const MAP_SCENE = "res://scenes/map.tscn"
 
 func _ready() -> void:
 	$VBox/TitleLabel.text = "BURNING MEADOW"
-	$VBox/Subtitle.text = "a grimoire-deck roguelike"
+	$VBox/Subtitle.text = "a lane combat roguelike deckbuilder"
 
 	$VBox/StartBtn.pressed.connect(_on_start)
 	$VBox/QuitBtn.pressed.connect(_on_quit)
