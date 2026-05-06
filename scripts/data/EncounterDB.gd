@@ -9,7 +9,7 @@ var _enc_counter: int = 0
 
 func get_encounter(id: String) -> Dictionary:
 	if ENCOUNTERS.has(id):
-		return ENCOUNTERS[id].duplicate(true)
+		return ENCOUNTERS[id]
 	push_warning("EncounterDB: unknown encounter '%s'" % id)
 	return {}
 

@@ -27,6 +27,7 @@ const COL_SPACING := 140.0
 var _node_buttons: Dictionary = {}
 var _available_positions: Array = []
 var _canvas: Control
+var _connection_drawer: Control
 
 
 func _ready() -> void:
@@ -56,7 +57,14 @@ func _build_map() -> void:
 
 	_canvas = Control.new()
 	_canvas.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_canvas.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_canvas)
+
+	# Single draw node for all connection lines (replaces many Line2D nodes)
+	_connection_drawer = Control.new()
+	_connection_drawer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_connection_drawer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_canvas.add_child(_connection_drawer)
 
 	var available = RunState.get_available_nodes()
 	_available_positions = []
@@ -66,16 +74,25 @@ func _build_map() -> void:
 	_node_buttons.clear()
 	var total_rows = act_map.size()
 
+	# Collect connection line data for batch drawing
+	var lines: Array = []
 	for row_idx in range(total_rows):
 		var row = act_map[row_idx]
 		var row_count = row.size()
 		for col_idx in range(row_count):
 			var node = row[col_idx]
 			var pos = _node_position(row_idx, col_idx, row_count, total_rows)
-			_draw_connections(node, act_map, total_rows)
+			_collect_connections(node, act_map, lines)
 			var btn = _create_node_button(node, pos)
 			_canvas.add_child(btn)
 			_node_buttons[Vector2i(row_idx, col_idx)] = btn
+
+	# Draw all connections in a single _draw() call
+	_connection_drawer.draw.connect(func():
+		for line in lines:
+			_connection_drawer.draw_line(line.from, line.to, line.color, line.width)
+	)
+	_connection_drawer.queue_redraw()
 
 	_build_status_bar()
 	_build_potion_button()
@@ -135,7 +152,7 @@ func _create_node_button(node: Dictionary, pos: Vector2) -> Button:
 	return btn
 
 
-func _draw_connections(node: Dictionary, act_map: Array, _total_rows: int) -> void:
+func _collect_connections(node: Dictionary, act_map: Array, lines: Array) -> void:
 	var next_row_idx = node.row + 1
 	if next_row_idx >= act_map.size():
 		return
@@ -145,16 +162,12 @@ func _draw_connections(node: Dictionary, act_map: Array, _total_rows: int) -> vo
 		if target_col >= next_row.size():
 			continue
 		var to_pos = _node_position(next_row_idx, target_col, next_row.size(), act_map.size())
-		var line = Line2D.new()
-		line.add_point(from_pos)
-		line.add_point(to_pos)
-		line.width = 2.0
-		line.default_color = Color(0.4, 0.35, 0.25, 0.6)
-		var is_on_path = node.visited
-		if is_on_path:
-			line.default_color = Color(0.7, 0.6, 0.3, 0.8)
-			line.width = 3.0
-		_canvas.add_child(line)
+		var color = Color(0.4, 0.35, 0.25, 0.6)
+		var width = 2.0
+		if node.visited:
+			color = Color(0.7, 0.6, 0.3, 0.8)
+			width = 3.0
+		lines.append({"from": from_pos, "to": to_pos, "color": color, "width": width})
 
 
 func _build_status_bar() -> void:
@@ -193,12 +206,19 @@ func _on_node_pressed(row: int, col: int) -> void:
 		return
 	RunState.visit_node(row, col)
 	var ntype = RunState.current_node_type
+	var target_scene: String = ""
 	match ntype:
 		"combat", "elite", "boss":
-			get_tree().change_scene_to_file(COMBAT_SCENE)
+			target_scene = COMBAT_SCENE
 		"shop":
-			get_tree().change_scene_to_file(SHOP_SCENE)
+			target_scene = SHOP_SCENE
 		"rest":
-			get_tree().change_scene_to_file(REST_SCENE)
+			target_scene = REST_SCENE
 		"event":
-			get_tree().change_scene_to_file(EVENT_SCENE)
+			target_scene = EVENT_SCENE
+	if target_scene != "":
+		var err = get_tree().change_scene_to_file(target_scene)
+		if err != OK:
+			push_error("MapView: failed to load scene '%s' (error %d)" % [target_scene, err])
+	else:
+		push_warning("MapView: unknown node type '%s' at (%d,%d)" % [ntype, row, col])

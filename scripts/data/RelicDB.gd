@@ -128,7 +128,7 @@ const RELICS: Dictionary = {
 
 static func get_relic(id: String) -> Dictionary:
 	if RELICS.has(id):
-		return RELICS[id].duplicate(true)
+		return RELICS[id]
 	push_warning("RelicDB: unknown relic id '%s'" % id)
 	return {}
 
