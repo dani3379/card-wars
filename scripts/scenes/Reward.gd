@@ -14,10 +14,12 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
 
-	_is_elite_reward = (RunState.node_type_for_floor(RunState.current_floor) == "elite")
-	_card_choices = CardDB.roll_card_reward(RunState.current_floor)
+	var node_type = RunState.node_type_for_floor(RunState.current_floor)
+	_is_elite_reward = (node_type == "elite")
+	var is_boss = (node_type == "boss")
+	_card_choices = CardDB.roll_card_reward(RunState.get_act(), _is_elite_reward, is_boss)
 	if _is_elite_reward:
-		_relic_choices = RelicDB.roll_relic_reward(2, RunState.relics)
+		_relic_choices = RelicDB.roll_relic_reward("combat", RunState.relics)
 
 	_build_ui()
 
@@ -33,9 +35,13 @@ func _build_ui() -> void:
 
 	for id in _card_choices:
 		var data = CardDB.get_card_data(id)
-		var btn = _make_choice_button(
-			"%s\n%d⚡  %d/%d\n%s" % [data.name, data.cost, data.atk, data.hp, _kw_text(data)],
-			data.desc, Color(0.20, 0.25, 0.35))
+		var card_text: String
+		if data.get("type", "creature") == "spell":
+			card_text = "%s\n%d mana  SPELL\n%s" % [data.name, data.cost, _kw_text(data)]
+		else:
+			card_text = "%s\n%d mana  %d/%d\n%s" % [data.name, data.cost, data.atk, data.hp, _kw_text(data)]
+		var color = Color(0.15, 0.12, 0.30) if data.get("type", "") == "spell" else Color(0.20, 0.25, 0.35)
+		var btn = _make_choice_button(card_text, data.desc, color)
 		btn.pressed.connect(_pick_card.bind(id))
 		$CardRow.add_child(btn)
 

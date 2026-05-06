@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-"Burning Meadow" — a grimoire-themed lane combat roguelike deckbuilder built in Godot 4.6 (Forward+ renderer). Currently a 2.5D prototype (3D cards on a tilted table). The game loop: main menu → linear 8-floor map → combat → card reward → repeat → boss → game over.
+"Burning Meadow" — a lane combat roguelike deckbuilder built in Godot 4.6 (Forward+, 2D rendering). Inspired by Card Wars (combat) and Slay the Spire (roguelike structure). 4 lanes, simultaneous combat with Swift pre-phase, floop, sacrifice, spells. Game loop: main menu → 8-floor map → combat → card reward → repeat → boss → game over.
 
 ## Running the project
 
-Open in Godot 4.3+ and press F5. Main scene is `scenes/main_menu.tscn` (set in `project.godot`). No build step, no tests, no CLI tooling — everything runs inside the Godot editor.
+Open in Godot 4.3+ and press F5. Main scene is `scenes/main_menu.tscn`. No build step, no tests, no CLI tooling.
 
 ## Architecture
 
@@ -18,49 +18,56 @@ Open in Godot 4.3+ and press F5. Main scene is `scenes/main_menu.tscn` (set in `
 
 Scene transitions use `get_tree().change_scene_to_file()`. Each scene is a `.tscn` in `scenes/` with a matching script in `scripts/scenes/`.
 
-### Autoload singletons (persist across scene changes)
+### Autoload singletons
 
-- **RunState** (`scripts/state/RunState.gd`) — current run's mutable state: HP, deck, relics, floor, gold. Cleared on `start_new_run()`. Also defines the fixed lane identities (Forge/Grove/Void/Tide) and the floor→node-type mapping.
-- **MetaState** (`scripts/state/MetaState.gd`) — cross-run persistence: win/loss counts, unlocked cards/relics. Saved as JSON to `user://meta.save`.
-- **CardDB** (`scripts/data/CardDB.gd`) — all card definitions as const dictionaries. Split into `PLAYER_POOL` and `ENEMY_POOL`. `STARTER_DECK` defines the 10-card starting deck. `roll_card_reward()` handles tier-weighted random picks.
-- **RelicDB** (`scripts/data/RelicDB.gd`) — relic definitions with hook names (`turn_start`, `hero_damaged`, etc.) and a `value` field. Combat.gd checks `_has_relic()` and applies effects inline.
-- **KeywordEffects** (`scripts/data/KeywordEffects.gd`) — central dispatch for keyword on-play and on-death effects. Combat calls `dispatch_on_play`/`dispatch_on_death`; all keyword logic lives here.
+- **RunState** (`scripts/state/RunState.gd`) — current run state: HP, deck, relics, floor, gold. `get_act()` returns 1-3 based on floor. `start_new_run()` resets everything.
+- **MetaState** (`scripts/state/MetaState.gd`) — cross-run persistence: win/loss counts. Saved as JSON to `user://meta.save`.
+- **CardDB** (`scripts/data/CardDB.gd`) — 95 unique cards: 9 starter + 83 draft pool (30 common, 29 uncommon, 24 rare) + enemy creatures. Card types: "creature" (ATK/HP/keywords) and "spell" (spell effect + targeting). `roll_card_reward(act, is_elite, is_boss)` for rarity-weighted picks.
+- **RelicDB** (`scripts/data/RelicDB.gd`) — 36 relics across 3 tiers: starting (8), combat (23), utility (5). Each has hooks, effect ID, and value.
+- **KeywordEffects** (`scripts/data/KeywordEffects.gd`) — 16 keywords from design doc. Dispatchers: `dispatch_on_enter`, `dispatch_on_death`, `dispatch_start_of_round`. Handles regenerate, wither, on-enter/on-death effects, summon tokens.
 
 ### Combat scene (`scripts/scenes/Combat.gd`)
 
-The largest file. Owns:
-- Turn flow: `_start_player_turn()` → player drags cards → `_on_end_turn()` → `_start_enemy_turn()` → `_enemy_ai()` → `_do_combat()` → loop
-- 4-lane board: `_player_field[4]` and `_enemy_field[4]`, indexed 0-3 left-to-right
-- Lane effects applied in `_effective_attack()` and `_apply_lane_damage()`
-- Relic effects checked inline via `_has_relic()` at various hook points
-- Full HUD built programmatically (no .tscn UI nodes) — parchment-styled panels
-- Tabletop camera: RMB orbit, scroll zoom, MMB pan
+The largest file (~900 lines). Core systems:
+- **Round flow**: draw 5 → player plays creatures/spells, toggles floop, sacrifices → resolve floops → Swift phase → simultaneous combat → deaths/on-death → discard hand → enemy places 1-2 → new round. Round 1 is setup only (no combat).
+- **Board**: `_player_field[4]` and `_enemy_field[4]`, indexed 0-3. PanelContainer slots in HBoxContainers.
+- **Spells**: targeted spells enter `_targeting_spell` mode (click to resolve). Non-targeted resolve immediately. Exhaust pile separate from discard.
+- **Sacrifice**: once per turn, free action. Triggers on-death. [S] key or HUD button.
+- **Floop**: creatures with floop can toggle `will_floop`. Resolved before combat.
+- **Keywords**: Armored (-1 dmg from creatures), Swift (pre-phase), Thorns (1 back), Piercing (excess kills → face), Last Stand (survive once at 1 HP), Ranged (random target), Regenerate/Wither (start of round).
+- **Relic effects**: checked inline via `_has_relic()`. Major hooks: combat_start, turn_start, creature_played, hero_damaged, creature_death.
+- **HUD**: built programmatically. Parchment-styled panels, screen shake via CanvasLayer offset.
 
-### Card scene (`scripts/Card.gd`)
+### Card2D (`scripts/Card2D.gd`)
 
-Each card is a Node3D with: mesh, area3d for picking, hover glow light, Label3D stats. Handles its own drag/hover/play animation via tweens and a spring-physics drag system. Emits `played` and `destroyed` signals consumed by Combat.
+PanelContainer-based card. Supports creatures (ATK/HP display) and spells (SPELL label, no stats). Drag from hand above play threshold to play. Battlefield creatures show floop indicator. `take_damage()` handles Armored and Last Stand. `temp_atk_buff` for this-turn buffs.
 
-### Keywords currently implemented
+### Card data schema
 
-`charge`, `taunt`, `lifesteal`, `frenzy`, `deathrattle_smite`, `deathrattle_burn`, `onplay_draw`, `onplay_smite`. To add a keyword: add to `KeywordEffects.KEYWORDS`, implement the hook in `_run_on_play`/`_run_on_death`, add the string to card definitions in CardDB.
+Creatures: `id, name, type:"creature", cost, atk, hp, rarity, keywords[], desc`. Optional: `on_enter{}, on_death{}, floop{}, adj_buff{atk,hp}, wither:int, passive:String, extra_damage:int`.
+
+Spells: `id, name, type:"spell", cost, rarity, keywords[], desc, spell{type,value,...}, targeting:String`. Targeting: "enemy_creature", "friendly_creature", "any_creature", "any", "none".
 
 ### Adding content
 
-- **New card**: add entry to `CardDB.PLAYER_POOL` or `ENEMY_POOL`. Code reads dynamically.
-- **New relic**: add entry to `RelicDB.RELICS`, then add effect logic in Combat.gd where the hook fires.
-- **New keyword**: add to `KeywordEffects.KEYWORDS`, implement dispatch, update `Card._format_keywords()` for display.
+- **New card**: add to `CardDB.CARD_POOL`. Include all fields per schema above.
+- **New relic**: add to `RelicDB.RELICS`, implement effect check in Combat.gd.
+- **New keyword**: add to `KeywordEffects.KEYWORDS`, implement in dispatchers, add to Card2D display.
+- **New spell type**: add `spell.type` handler in Combat.gd `_resolve_spell()` or `_resolve_custom_spell()`.
 
 ## Key constants
 
-- Player HP: 25, Mana: 3/turn (both in RunState/Combat)
-- Hand draw: 5/turn, max hand: 8
-- 8 floors per run, boss at floor 8, elites at floors 4 and 7
-- Card tiers: 1 (common), 2 (uncommon), 3 (rare)
-- Lane positions: `LANE_X = [-1.35, -0.45, 0.45, 1.35]`
+- Player HP: 25, Mana: 3/turn fixed
+- Hand draw: 5/turn, max hand: 10
+- 8 floors per run. Acts: floors 1-3 = act 1, 4-6 = act 2, 7-8 = act 3
+- Boss at floor 8, elites at floors 4 and 7
+- Card rarities: "starter", "common", "uncommon", "rare"
+- Enemy creatures: temporary ENEMY_POOL, replaced by EncounterDB in Phase 4
 
 ## Gotchas
 
-- The README describes an older "Phase 2 prototype" with `PlayArea.gd` as orchestrator; the current codebase has moved past that to `Combat.gd`. `play_area.tscn` is orphaned.
-- Autoloads in `project.godot` reference UIDs, not paths. The KeywordEffects autoload uses a `res://` path — inconsistent but functional.
-- Combat.gd builds all HUD elements in code (`_build_hud`, `_build_end_turn_button`, etc.) rather than in the scene file. UI changes require editing GDScript, not the scene editor.
-- Card costs in CardDB don't match mana budget well — tier-2/3 cards cost 3-6 mana but base mana is 3, making expensive cards unplayable without the Chronograph relic.
+- Combat.gd builds all HUD in code, not in the scene editor
+- Spell targeting uses `_input()` override, not the card drag system
+- `KeywordEffects` accesses `ctx._player_field` / `ctx._enemy_field` directly — Combat is always the ctx
+- Enemy deck uses random pulls from ENEMY_POOL scaled by act (Phase 4 replaces with premade lineups)
+- Token creatures have synthetic card_data created in `summon_token()`, not from CardDB

@@ -24,9 +24,16 @@ var current_floor: int = 0   # 0 = pre-run, 1..N = floors traversed
 var run_active: bool = false
 var run_seed: int = 0
 
-
 # ── Once-per-run flags ──
 var phoenix_heart_consumed: bool = false
+
+
+func get_act() -> int:
+	if current_floor <= 3:
+		return 1
+	if current_floor <= 6:
+		return 2
+	return 3
 
 
 # ── Run lifecycle ──
