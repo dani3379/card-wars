@@ -1,6 +1,7 @@
 extends PanelContainer
 ## Card2D.gd — 2D card with drag, hover, stat display.
 ## Supports creatures (ATK/HP) and spells (effect text). Floop toggle on battlefield.
+## All animations removed for performance.
 
 signal played
 signal destroyed
@@ -35,12 +36,8 @@ var _is_playing := false
 var _drag_offset := Vector2.ZERO
 var _hand_target_position := Vector2.ZERO
 var _hand_target_rotation := 0.0
-var _active_tween: Tween = null
 
 const CARD_SIZE := Vector2(140, 200)
-const HOVER_SCALE := 1.15
-const HOVER_LIFT := 30.0
-const HOVER_TIME := 0.12
 const PLAY_THRESHOLD_Y := 0.45
 
 const BG_PLAYER := Color(0.12, 0.10, 0.08, 0.95)
@@ -266,12 +263,6 @@ func take_damage(amount: int) -> void:
 		current_hp = 1
 		last_stand_used = true
 	update_stat_display()
-	var orig_pos = position
-	var tw = create_tween()
-	tw.tween_property(self, "position",
-		orig_pos + Vector2((randf() - 0.5) * 8, (randf() - 0.5) * 8), 0.05)
-	tw.tween_property(self, "position", orig_pos, 0.15)\
-		.set_trans(Tween.TRANS_ELASTIC).set_ease(Tween.EASE_OUT)
 	if current_hp <= 0:
 		_die()
 
@@ -288,65 +279,37 @@ func take_damage_bypass_armor(amount: int) -> void:
 
 func _die() -> void:
 	destroyed.emit()
-	_kill_active_tween()
-	var tw = create_tween()
-	tw.tween_property(self, "modulate:a", 0.0, 0.3)\
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	tw.tween_property(self, "scale", Vector2(0.8, 0.8), 0.3)
-	tw.tween_callback(queue_free)
-
-
-func _kill_active_tween() -> void:
-	if _active_tween and _active_tween.is_valid():
-		_active_tween.kill()
-	_active_tween = null
+	queue_free()
 
 
 func set_hand_target(pos: Vector2, rot: float) -> void:
 	_hand_target_position = pos
 	_hand_target_rotation = rot
 	if not _is_hovered and not _is_being_dragged:
-		_animate_to_hand_position()
-
-
-func _animate_to_hand_position() -> void:
-	_kill_active_tween()
-	_active_tween = create_tween().set_parallel()
-	_active_tween.tween_property(self, "position", _hand_target_position, 0.2)\
-		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
-	_active_tween.tween_property(self, "rotation", _hand_target_rotation, 0.2)\
-		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
-	_active_tween.tween_property(self, "scale", Vector2.ONE, 0.2)
+		position = _hand_target_position
+		rotation = _hand_target_rotation
+		scale = Vector2.ONE
 
 
 func _on_mouse_entered() -> void:
 	if _is_playing or _is_being_dragged:
 		return
 	_is_hovered = true
-	if is_on_battlefield:
-		_set_border_color(BORDER_HOVER)
-		return
-	_kill_active_tween()
-	var lifted_pos = _hand_target_position + Vector2(0, -HOVER_LIFT)
-	_active_tween = create_tween().set_parallel()
-	_active_tween.tween_property(self, "position", lifted_pos, HOVER_TIME)\
-		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
-	_active_tween.tween_property(self, "scale", Vector2(HOVER_SCALE, HOVER_SCALE), HOVER_TIME)
-	_active_tween.tween_property(self, "rotation", 0.0, HOVER_TIME)
-	z_index = 10
 	_set_border_color(BORDER_HOVER)
+	if not is_on_battlefield:
+		z_index = 10
 
 
 func _on_mouse_exited() -> void:
 	if _is_being_dragged or _is_playing:
 		return
 	_is_hovered = false
-	if is_on_battlefield:
-		_set_border_color(BORDER_FLOOP if will_floop else BORDER_NORMAL)
-		return
-	z_index = 0
-	_set_border_color(BORDER_NORMAL)
-	_animate_to_hand_position()
+	_set_border_color(BORDER_FLOOP if (is_on_battlefield and will_floop) else BORDER_NORMAL)
+	if not is_on_battlefield:
+		z_index = 0
+		position = _hand_target_position
+		rotation = _hand_target_rotation
+		scale = Vector2.ONE
 
 
 func _set_border_color(color: Color) -> void:
@@ -369,12 +332,10 @@ func _gui_input(event: InputEvent) -> void:
 func _start_drag(mouse_pos: Vector2) -> void:
 	if _is_playing or is_on_battlefield or is_opponent:
 		return
-	_kill_active_tween()
 	_is_being_dragged = true
 	_is_hovered = false
 	_drag_offset = global_position - mouse_pos
 	z_index = 20
-	scale = Vector2(1.08, 1.08)
 
 
 func _update_drag(mouse_pos: Vector2) -> void:
@@ -390,18 +351,14 @@ func _end_drag() -> void:
 	if global_position.y < viewport_h * PLAY_THRESHOLD_Y:
 		played.emit()
 	else:
-		_animate_to_hand_position()
+		position = _hand_target_position
+		rotation = _hand_target_rotation
+		scale = Vector2.ONE
 
 
 func fly_to_play_area(target_pos: Vector2) -> void:
-	_kill_active_tween()
 	_is_playing = true
+	global_position = target_pos
+	rotation = 0.0
 	scale = Vector2.ONE
-	_active_tween = create_tween()
-	_active_tween.tween_property(self, "global_position", target_pos, 0.35)\
-		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
-	_active_tween.tween_property(self, "rotation", 0.0, 0.35)
-	_active_tween.tween_property(self, "scale", Vector2(1.1, 1.1), 0.06)
-	_active_tween.tween_property(self, "scale", Vector2.ONE, 0.15)\
-		.set_trans(Tween.TRANS_ELASTIC).set_ease(Tween.EASE_OUT)
-	_active_tween.finished.connect(func(): _is_playing = false)
+	_is_playing = false
