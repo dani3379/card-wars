@@ -295,6 +295,11 @@ const CARD_POOL: Dictionary = {
 	"apocalypse": {"id": "apocalypse", "name": "Apocalypse", "type": "spell", "cost": 3,
 		"rarity": "rare", "keywords": ["exhaust"], "desc": "Kill ALL creatures. 1 face dmg each. Exhaust.",
 		"spell": {"type": "custom", "id": "apocalypse"}, "targeting": "none"},
+
+	# Curse (added by events)
+	"curse": {"id": "curse", "name": "Curse", "type": "spell", "cost": 0,
+		"rarity": "starter", "keywords": [], "desc": "Does nothing. Wastes a draw.",
+		"spell": {"type": "none"}, "targeting": "none"},
 }
 
 
