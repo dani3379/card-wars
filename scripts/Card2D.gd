@@ -352,9 +352,7 @@ func _on_mouse_exited() -> void:
 func _set_border_color(color: Color) -> void:
 	var style = get_theme_stylebox("panel")
 	if style is StyleBoxFlat:
-		var s = style.duplicate() as StyleBoxFlat
-		s.border_color = color
-		add_theme_stylebox_override("panel", s)
+		style.border_color = color
 
 
 func _gui_input(event: InputEvent) -> void:

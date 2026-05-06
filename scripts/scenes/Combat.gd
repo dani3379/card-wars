@@ -90,6 +90,7 @@ const LANE_BORDER := Color(0.30, 0.22, 0.12, 0.8)
 
 
 func _ready() -> void:
+	set_process(false)
 	_setup_fight_state()
 	_build_board()
 	_build_hud()
@@ -1921,6 +1922,7 @@ func _build_flash_layer() -> void:
 
 func screen_shake(amount: float) -> void:
 	_shake_amount = max(_shake_amount, amount)
+	set_process(true)
 
 
 func freeze_frame(duration: float) -> void:
@@ -1953,6 +1955,7 @@ func _process(delta: float) -> void:
 		_shake_amount = lerp(_shake_amount, 0.0, clampf(delta * 7.0, 0, 1))
 	elif _shake_container:
 		_shake_container.position = Vector2.ZERO
+		set_process(false)
 
 
 func _unhandled_input(event: InputEvent) -> void:
