@@ -73,12 +73,8 @@ var _end_turn_btn: Button
 var _sacrifice_btn: Button
 var _relic_panel: HBoxContainer
 
-# Game feel
-var _shake_amount: float = 0.0
-var _shake_layer: CanvasLayer
-var _shake_container: Control
-var _flash_layer: CanvasLayer
-var _flash_rect: ColorRect
+# Board container (no effects)
+var _board_container: Control
 
 # Colors
 const PARCHMENT_BG := Color(0.10, 0.075, 0.060, 0.92)
@@ -94,7 +90,6 @@ func _ready() -> void:
 	_setup_fight_state()
 	_build_board()
 	_build_hud()
-	_build_flash_layer()
 	_init_decks()
 	_start_round()
 
@@ -204,7 +199,7 @@ func _on_end_turn() -> void:
 		# Round 1: setup only, no combat
 		_post_combat_sequence()
 	else:
-		get_tree().create_timer(0.3).timeout.connect(_do_combat)
+		_do_combat.call_deferred()
 
 
 func _resolve_floops() -> void:
@@ -355,7 +350,7 @@ func _resolve_swift_attack(lane_idx: int, is_enemy: bool, opponent_empty: Array[
 		var atk = _effective_attack(card, lane_idx, is_enemy)
 		_apply_thorns(opponent, card, is_enemy)
 		opponent.take_damage(atk)
-		screen_shake(0.3)
+	
 		if opponent.current_hp <= 0 and (card.has_keyword("piercing") or (is_enemy and _has_encounter_passive_keyword(card, "piercing"))):
 			var excess = abs(opponent.current_hp)
 			var bonus = 1 if (not is_enemy and _has_relic("piercing_crown")) else 0
@@ -378,7 +373,7 @@ func _simultaneous_combat(p: Control, e: Control, lane_idx: int) -> void:
 	p.take_damage(e_atk)
 	p.has_attacked_this_turn = true
 	e.has_attacked_this_turn = true
-	screen_shake(0.3)
+
 
 	# Piercing
 	if e.current_hp <= 0 and p.has_keyword("piercing"):
@@ -401,7 +396,7 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 	_apply_thorns(defender, attacker, attacker_is_enemy)
 	defender.take_damage(atk)
 	attacker.has_attacked_this_turn = true
-	screen_shake(0.3)
+
 	if defender.current_hp <= 0 and (attacker.has_keyword("piercing") or (attacker_is_enemy and _has_encounter_passive_keyword(attacker, "piercing"))):
 		var excess = abs(defender.current_hp)
 		var bonus = 1 if (not attacker_is_enemy and _has_relic("piercing_crown")) else 0
@@ -420,11 +415,9 @@ func _creature_hits_face(card: Control, lane_idx: int, is_enemy: bool) -> void:
 		atk = maxi(0, atk - reduction)
 		if atk > 0:
 			damage_player_hero(atk)
-			screen_shake(0.8)
-			screen_flash(Color(0.7, 0.05, 0.05, 0.45), 0.35)
 	else:
 		damage_enemy_hero(atk)
-		screen_shake(0.5)
+
 	card.has_attacked_this_turn = true
 
 
@@ -605,8 +598,8 @@ func _place_enemy_card(data: Dictionary, lane_idx: int) -> void:
 	_dispatch_encounter_on_enter(data, lane_idx)
 
 
-func _short_pause(duration: float) -> void:
-	await get_tree().create_timer(duration).timeout
+func _short_pause(_duration: float) -> void:
+	await get_tree().process_frame
 
 
 # =====================================================================
@@ -1475,18 +1468,15 @@ func _has_relic(id: String) -> bool:
 # =====================================================================
 
 func _build_board() -> void:
-	_shake_layer = CanvasLayer.new()
-	_shake_layer.layer = 0
-	add_child(_shake_layer)
-	_shake_container = Control.new()
-	_shake_container.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_shake_layer.add_child(_shake_container)
+	_board_container = Control.new()
+	_board_container.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_board_container)
 
 	_board_bg = ColorRect.new()
 	_board_bg.color = BOARD_BG
 	_board_bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_board_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_shake_container.add_child(_board_bg)
+	_board_container.add_child(_board_bg)
 
 	var main_vbox := VBoxContainer.new()
 	main_vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -1496,7 +1486,7 @@ func _build_board() -> void:
 	main_vbox.anchor_right = 0.9
 	main_vbox.add_theme_constant_override("separation", 4)
 	main_vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_shake_container.add_child(main_vbox)
+	_board_container.add_child(main_vbox)
 
 	var enemy_label := Label.new()
 	enemy_label.text = "— ENEMY SIDE —"
@@ -1909,53 +1899,22 @@ func _update_hud() -> void:
 #  GAME FEEL
 # =====================================================================
 
-func _build_flash_layer() -> void:
-	_flash_layer = CanvasLayer.new()
-	_flash_layer.layer = 5
-	add_child(_flash_layer)
-	_flash_rect = ColorRect.new()
-	_flash_rect.color = Color(1, 1, 1, 0)
-	_flash_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_flash_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_flash_layer.add_child(_flash_rect)
+func screen_shake(_amount: float) -> void:
+	pass
 
 
-func screen_shake(amount: float) -> void:
-	_shake_amount = max(_shake_amount, amount)
-	set_process(true)
+func freeze_frame(_duration: float) -> void:
+	pass
 
 
-func freeze_frame(duration: float) -> void:
-	Engine.time_scale = 0.0
-	await get_tree().create_timer(duration, true, false, true).timeout
-	Engine.time_scale = 1.0
-
-
-func screen_flash(color: Color, duration: float) -> void:
-	_flash_rect.color = color
-	var tw := create_tween()
-	tw.tween_property(_flash_rect, "color",
-		Color(color.r, color.g, color.b, 0.0), duration)
+func screen_flash(_color: Color, _duration: float) -> void:
+	pass
 
 
 func _show_info(msg: String) -> void:
 	_info_label.text = msg
 	_info_label.modulate = Color(1, 1, 1, 1)
-	var t := create_tween()
-	t.tween_interval(1.5)
-	t.tween_property(_info_label, "modulate:a", 0.0, 0.5)
-	t.tween_callback(func(): _info_label.text = "")
-
-
-func _process(delta: float) -> void:
-	if _shake_amount > 0.001 and _shake_container:
-		var jitter = Vector2((randf() - 0.5) * _shake_amount * 12,
-			(randf() - 0.5) * _shake_amount * 12)
-		_shake_container.position = jitter
-		_shake_amount = lerp(_shake_amount, 0.0, clampf(delta * 7.0, 0, 1))
-	elif _shake_container:
-		_shake_container.position = Vector2.ZERO
-		set_process(false)
+	get_tree().create_timer(2.0).timeout.connect(func(): _info_label.text = "")
 
 
 func _unhandled_input(event: InputEvent) -> void:
