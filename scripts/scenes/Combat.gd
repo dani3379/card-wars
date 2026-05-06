@@ -27,7 +27,10 @@ var enemy_max_hp: int
 var _player_draw_pile: Array[String] = []
 var _player_discard_pile: Array[String] = []
 var _exhaust_pile: Array[String] = []
-var _enemy_deck: Array[String] = []
+var _enemy_deck: Array[Dictionary] = []
+var _reinforcement: Dictionary = {}
+var _encounter_passive: String = ""
+var _encounter_name: String = ""
 
 var _hand: Array[Control] = []
 var _player_field: Array = [null, null, null, null]
@@ -103,29 +106,34 @@ func _setup_fight_state() -> void:
 	player_max_hp = RunState.hero_max_hp
 	player_hp = RunState.hero_hp
 	_starting_hp = player_hp
+	var enc_id = RunState.current_encounter_id
+	if enc_id != "":
+		var enc = EncounterDB.get_encounter(enc_id)
+		if not enc.is_empty():
+			enemy_max_hp = enc.hp
+			_encounter_passive = enc.get("passive_id", "")
+			_encounter_name = enc.get("name", "")
+			_enemy_deck = EncounterDB.build_enemy_deck(enc_id)
+			_reinforcement = EncounterDB.get_reinforcement(enc_id)
+			enemy_hp = enemy_max_hp
+			return
 	var act = RunState.get_act()
-	var node_type = RunState.node_type_for_floor(RunState.current_floor)
+	var node_type = RunState.current_node_type
 	match node_type:
 		"combat":
 			enemy_max_hp = [12, 17, 21][act - 1] + randi() % 4
-			_build_enemy_deck(act, false, false)
 		"elite":
 			enemy_max_hp = [18, 26, 30][act - 1] + randi() % 4
-			_build_enemy_deck(act, true, false)
 		"boss":
 			enemy_max_hp = [25, 32, 40][act - 1]
-			_build_enemy_deck(act, false, true)
+	_build_legacy_enemy_deck(act)
 	enemy_hp = enemy_max_hp
 
 
-func _build_enemy_deck(act: int, is_elite: bool, is_boss: bool) -> void:
-	var count = 8 if not is_elite and not is_boss else 12
-	for i in range(count):
-		_enemy_deck.append(CardDB.random_enemy_for_act(act))
-	if is_boss:
-		var boss_ids = ["e_warden_champ", "e_collector_champ", "e_devil_champ"]
-		_enemy_deck.push_front(boss_ids[clampi(act - 1, 0, 2)])
-	_enemy_deck.shuffle()
+func _build_legacy_enemy_deck(act: int) -> void:
+	for i in range(8):
+		var eid = CardDB.random_enemy_for_act(act)
+		_enemy_deck.append(CardDB.get_card_data(eid))
 
 
 func _init_decks() -> void:
@@ -152,6 +160,7 @@ func _start_round() -> void:
 	phase = Phase.PLAYER_TURN
 
 	KeywordEffects.dispatch_start_of_round(self)
+	_dispatch_passive_start_of_round()
 
 	# Mana
 	player_max_mana = BASE_MAX_MANA + _bonus_mana_next_turn
@@ -254,6 +263,21 @@ func _resolve_floop_ability(card: Control, lane_idx: int, is_enemy: bool) -> voi
 					card.current_atk += floop_data.get("value", 1)
 					opp.update_stat_display()
 					card.update_stat_display()
+			"heal_all_friendly":
+				var field = _enemy_field if is_enemy else _player_field
+				for c in field:
+					if c != null:
+						c.current_hp = mini(c.current_hp + floop_data.value, c.card_data.hp)
+						c.update_stat_display()
+			"summon_token":
+				var empty: Array[int] = []
+				var field = _enemy_field if is_enemy else _player_field
+				for i in range(4):
+					if field[i] == null:
+						empty.append(i)
+				if empty.size() > 0:
+					var l = empty[randi() % empty.size()]
+					summon_token(floop_data.atk, floop_data.hp, l, is_enemy)
 
 
 # =====================================================================
@@ -331,7 +355,7 @@ func _resolve_swift_attack(lane_idx: int, is_enemy: bool, opponent_empty: Array[
 		_apply_thorns(opponent, card, is_enemy)
 		opponent.take_damage(atk)
 		screen_shake(0.3)
-		if opponent.current_hp <= 0 and card.has_keyword("piercing"):
+		if opponent.current_hp <= 0 and (card.has_keyword("piercing") or (is_enemy and _has_encounter_passive_keyword(card, "piercing"))):
 			var excess = abs(opponent.current_hp)
 			var bonus = 1 if (not is_enemy and _has_relic("piercing_crown")) else 0
 			if is_enemy:
@@ -360,7 +384,7 @@ func _simultaneous_combat(p: Control, e: Control, lane_idx: int) -> void:
 		var excess = abs(e.current_hp)
 		var bonus = 1 if _has_relic("piercing_crown") else 0
 		damage_enemy_hero(excess + bonus)
-	if p.current_hp <= 0 and e.has_keyword("piercing"):
+	if p.current_hp <= 0 and (e.has_keyword("piercing") or _has_encounter_passive_keyword(e, "piercing")):
 		var excess = abs(p.current_hp)
 		damage_player_hero(excess)
 
@@ -377,7 +401,7 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 	defender.take_damage(atk)
 	attacker.has_attacked_this_turn = true
 	screen_shake(0.3)
-	if defender.current_hp <= 0 and attacker.has_keyword("piercing"):
+	if defender.current_hp <= 0 and (attacker.has_keyword("piercing") or (attacker_is_enemy and _has_encounter_passive_keyword(attacker, "piercing"))):
 		var excess = abs(defender.current_hp)
 		var bonus = 1 if (not attacker_is_enemy and _has_relic("piercing_crown")) else 0
 		if attacker_is_enemy:
@@ -389,7 +413,8 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 func _creature_hits_face(card: Control, lane_idx: int, is_enemy: bool) -> void:
 	var atk = _effective_attack(card, lane_idx, is_enemy)
 	if is_enemy:
-		# Check for wall damage reduction
+		if _encounter_passive == "harpy_swift_face" and card.has_keyword("swift"):
+			atk += 1
 		var reduction = _get_wall_reduction(lane_idx, false)
 		atk = maxi(0, atk - reduction)
 		if atk > 0:
@@ -422,7 +447,7 @@ func _resolve_ranged_attacks() -> void:
 
 
 func _apply_thorns(defender: Control, attacker: Control, attacker_is_enemy: bool) -> void:
-	if defender.has_keyword("thorns") and defender.current_hp > 0:
+	if (defender.has_keyword("thorns") or (not attacker_is_enemy and _has_encounter_passive_keyword(defender, "thorns"))) and defender.current_hp > 0:
 		var thorns_dmg = 1
 		if not attacker_is_enemy and _has_relic("briar_amulet"):
 			thorns_dmg = 2
@@ -491,10 +516,12 @@ func _cleanup_dead() -> void:
 			var card = _player_field[lane_idx]
 			KeywordEffects.dispatch_on_death(card, lane_idx, false, self)
 			_on_friendly_death(card, lane_idx)
+			_dispatch_encounter_on_player_death(lane_idx)
 			_player_field[lane_idx] = null
 		if _enemy_field[lane_idx] != null and _enemy_field[lane_idx].current_hp <= 0:
 			var card = _enemy_field[lane_idx]
 			KeywordEffects.dispatch_on_death(card, lane_idx, true, self)
+			_dispatch_encounter_on_enemy_death(lane_idx)
 			_enemy_field[lane_idx] = null
 
 
@@ -532,6 +559,8 @@ func _post_combat_sequence() -> void:
 			c.take_damage(999)
 			_player_field[i] = null
 
+	_dispatch_passive_end_of_round()
+
 	_update_hud()
 	_check_game_over()
 	if phase != Phase.GAME_OVER:
@@ -547,11 +576,32 @@ func _enemy_place_creatures() -> void:
 		if _enemy_field[lane_idx] != null:
 			continue
 		if _enemy_deck.is_empty():
-			_enemy_deck.append(CardDB.random_enemy_for_act(RunState.get_act()))
-		var card_id = _enemy_deck.pop_front()
-		_place_lane_card(card_id, lane_idx, true)
-		KeywordEffects.dispatch_on_enter(card_id, lane_idx, true, self)
+			if not _reinforcement.is_empty():
+				_enemy_deck.append(_reinforcement.duplicate(true))
+			else:
+				var eid = CardDB.random_enemy_for_act(RunState.get_act())
+				_enemy_deck.append(CardDB.get_card_data(eid))
+		var card_data = _enemy_deck.pop_front()
+		_place_enemy_card(card_data, lane_idx)
 		placed += 1
+
+
+func _place_enemy_card(data: Dictionary, lane_idx: int) -> void:
+	var card = CARD_SCENE.instantiate()
+	card.card_id = data.id
+	card.is_opponent = true
+	card.is_on_battlefield = true
+	card.card_data = data
+	card.summoned_this_turn = true
+	card.current_lane = lane_idx
+	_enemy_field[lane_idx] = card
+	var slot = _enemy_slots[lane_idx]
+	for child in slot.get_children():
+		child.queue_free()
+	slot.add_child(card)
+	card.destroyed.connect(_on_card_destroyed.bind(card))
+	KeywordEffects.dispatch_on_enter(card, lane_idx, true, self)
+	_dispatch_encounter_on_enter(data, lane_idx)
 
 
 func _short_pause(duration: float) -> void:
@@ -623,6 +673,10 @@ func _play_creature(card: Control, cost: int) -> void:
 
 	_first_creature_played = true
 	_place_card_in_slot(card, lane_idx)
+
+	# Encounter passive: collector heals on creature played
+	if _encounter_passive == "collector_heal":
+		enemy_hp = mini(enemy_hp + 1, enemy_max_hp)
 
 	# On-enter effects
 	KeywordEffects.dispatch_on_enter(card, lane_idx, false, self)
@@ -890,6 +944,9 @@ func _after_spell(card: Control) -> void:
 	else:
 		_player_discard_pile.append(card.card_id)
 	card.queue_free()
+	# Encounter passive: demon_spell_buff
+	if _encounter_passive == "demon_spell_buff":
+		_buff_random_enemy_atk(1)
 	_cleanup_dead()
 	_update_hud()
 
@@ -1172,7 +1229,7 @@ func _check_game_over() -> void:
 		if _has_relic("thiefs_gloves") and player_hp == _starting_hp:
 			RunState.gold += 5
 		# Gold reward
-		var node_type = RunState.node_type_for_floor(RunState.current_floor)
+		var node_type = RunState.current_node_type
 		match node_type:
 			"combat": RunState.gold += 25
 			"elite": RunState.gold += 40
@@ -1183,16 +1240,225 @@ func _check_game_over() -> void:
 			var missing = RunState.hero_max_hp - RunState.hero_hp
 			RunState.heal_hero(int(missing * 0.75))
 			get_tree().create_timer(2.0).timeout.connect(func():
-				if RunState.current_floor >= RunState.FLOOR_COUNT:
+				if RunState.is_final_boss():
 					RunState.end_run(true)
 					get_tree().change_scene_to_file(GAMEOVER_SCENE)
 				else:
+					RunState.advance_act()
 					get_tree().change_scene_to_file(REWARD_SCENE)
 			)
 		else:
 			get_tree().create_timer(1.0).timeout.connect(func():
 				get_tree().change_scene_to_file(REWARD_SCENE)
 			)
+
+
+# =====================================================================
+#  ENCOUNTER PASSIVES
+# =====================================================================
+
+func _dispatch_passive_start_of_round() -> void:
+	match _encounter_passive:
+		"orc_random_buff":
+			_buff_random_enemy_atk(1)
+		"cultist_buff":
+			var target = _random_enemy_creature()
+			if target != null:
+				target.current_atk += 1
+				target.current_hp = mini(target.current_hp + 1, target.card_data.hp + 1)
+				target.card_data.hp += 1
+				target.update_stat_display()
+		"forge_burn_all":
+			for field in [_player_field, _enemy_field]:
+				for c in field:
+					if c != null:
+						c.take_damage(1)
+		"hollow_king_snipe":
+			var highest = _highest_atk_player_creature()
+			if highest != null:
+				highest.take_damage(3)
+		"void_exile":
+			if not _player_draw_pile.is_empty():
+				_player_draw_pile.pop_front()
+		"nexus_rotation":
+			var cycle = (round_number - 1) % 3
+			match cycle:
+				0:
+					for c in _enemy_field:
+						if c != null:
+							c.current_atk += 1
+							c.update_stat_display()
+				1:
+					for c in _enemy_field:
+						if c != null:
+							c.current_hp = mini(c.current_hp + 2, c.card_data.hp)
+							c.update_stat_display()
+				2:
+					pass  # Thorns handled in combat resolution
+		"dragon_lair_periodic":
+			if round_number > 1 and (round_number - 1) % 3 == 0:
+				for c in _player_field:
+					if c != null:
+						c.take_damage(3)
+		"devil_cycle":
+			var cycle = (round_number - 1) % 3
+			match cycle:
+				0:
+					damage_player_hero(2)
+				1:
+					var count := 0
+					for c in _enemy_field:
+						if c != null:
+							count += 1
+					enemy_hp = mini(enemy_hp + count, enemy_max_hp)
+				2:
+					var highest = _highest_atk_player_creature()
+					if highest != null:
+						highest.take_damage(3)
+		"puppet_keyword_copy":
+			var source = _highest_atk_player_creature()
+			var target = _random_enemy_creature()
+			if source != null and target != null:
+				for kw in source.card_data.get("keywords", []):
+					if not target.card_data.keywords.has(kw):
+						target.card_data.keywords.append(kw)
+				target.update_stat_display()
+
+
+func _dispatch_passive_end_of_round() -> void:
+	match _encounter_passive:
+		"iron_warden_burn":
+			damage_player_hero(2)
+		"mushroom_heal":
+			for c in _enemy_field:
+				if c != null:
+					c.current_hp = mini(c.current_hp + 1, c.card_data.hp)
+					c.update_stat_display()
+		"executioner_face":
+			var highest = _highest_atk_enemy_creature()
+			if highest != null:
+				damage_player_hero(highest.current_atk + highest.temp_atk_buff)
+
+
+func _dispatch_encounter_on_enemy_death(lane_idx: int) -> void:
+	match _encounter_passive:
+		"wolf_pack_revenge":
+			for adj in [lane_idx - 1, lane_idx + 1]:
+				if adj >= 0 and adj < 4 and _enemy_field[adj] != null:
+					_enemy_field[adj].temp_atk_buff += 1
+					_enemy_field[adj].update_stat_display()
+		"necro_death_summon":
+			_summon_enemy_token(1, 2)
+		"crypt_ghost":
+			_summon_enemy_token_with_keyword(1, 1, "swift")
+		"mirror_instant_place":
+			pass  # handled in player death below
+
+
+func _dispatch_encounter_on_player_death(_lane_idx: int) -> void:
+	match _encounter_passive:
+		"mirror_instant_place":
+			_enemy_place_creatures()
+
+
+func _dispatch_encounter_on_enter(_data: Dictionary, _lane_idx: int) -> void:
+	if _encounter_passive == "bandit_mana_steal":
+		_bonus_mana_next_turn = maxi(0, _bonus_mana_next_turn - 1)
+
+
+func _has_encounter_passive_keyword(card: Control, keyword: String) -> bool:
+	match _encounter_passive:
+		"dragon_lord_piercing":
+			return keyword == "piercing"
+		"swamp_thorns":
+			return keyword == "thorns"
+		"merc_piercing":
+			if keyword == "piercing" and card != null:
+				return (card.current_atk + card.temp_atk_buff) >= 4
+		"stone_armor":
+			if keyword == "armored" and card != null:
+				return card.card_data.get("keywords", []).has("armored")
+		"harpy_swift_face":
+			return false
+		"nexus_rotation":
+			if keyword == "thorns":
+				return (round_number - 1) % 3 == 2
+	return false
+
+
+func _buff_random_enemy_atk(amount: int) -> void:
+	var target = _random_enemy_creature()
+	if target != null:
+		target.current_atk += amount
+		target.update_stat_display()
+
+
+func _random_enemy_creature() -> Control:
+	var enemies: Array = []
+	for c in _enemy_field:
+		if c != null:
+			enemies.append(c)
+	if enemies.is_empty():
+		return null
+	return enemies[randi() % enemies.size()]
+
+
+func _highest_atk_player_creature() -> Control:
+	var best: Control = null
+	var best_atk := -1
+	for c in _player_field:
+		if c != null:
+			var atk = c.current_atk + c.temp_atk_buff
+			if atk > best_atk:
+				best_atk = atk
+				best = c
+	return best
+
+
+func _highest_atk_enemy_creature() -> Control:
+	var best: Control = null
+	var best_atk := -1
+	for c in _enemy_field:
+		if c != null:
+			var atk = c.current_atk + c.temp_atk_buff
+			if atk > best_atk:
+				best_atk = atk
+				best = c
+	return best
+
+
+func _summon_enemy_token(atk: int, hp: int) -> void:
+	var empty_lanes: Array = []
+	for i in range(4):
+		if _enemy_field[i] == null:
+			empty_lanes.append(i)
+	if empty_lanes.is_empty():
+		return
+	var lane = empty_lanes[randi() % empty_lanes.size()]
+	summon_token(atk, hp, lane, true)
+
+
+func _summon_enemy_token_with_keyword(atk: int, hp: int, keyword: String) -> void:
+	var empty_lanes: Array = []
+	for i in range(4):
+		if _enemy_field[i] == null:
+			empty_lanes.append(i)
+	if empty_lanes.is_empty():
+		return
+	var lane = empty_lanes[randi() % empty_lanes.size()]
+	var data = {
+		"id": "token_%s" % keyword, "name": "Ghost" if keyword == "swift" else "Token",
+		"type": "creature", "cost": 0, "atk": atk, "hp": hp,
+		"rarity": "token", "keywords": [keyword], "desc": "",
+	}
+	_place_enemy_card(data, lane)
+
+
+func _has_passive_on_field(passive_id: String) -> bool:
+	for c in _player_field:
+		if c != null and c.card_data.get("passive", "") == passive_id:
+			return true
+	return false
 
 
 # =====================================================================
@@ -1391,8 +1657,8 @@ func _build_hud() -> void:
 
 	var top := _make_panel(Vector2(0.5, 0.0), Vector2(-160, 10), Vector2(320, 68))
 	_hud_layer.add_child(top)
-	_floor_label = _make_text_label("Floor %d / %d" %
-		[RunState.current_floor, RunState.FLOOR_COUNT], 14, GILT)
+	var floor_text = _encounter_name if _encounter_name != "" else "Floor %d" % RunState.current_floor
+	_floor_label = _make_text_label(floor_text, 14, GILT)
 	_floor_label.position = Vector2(0, 6)
 	_floor_label.size = Vector2(320, 20)
 	_floor_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -1411,6 +1677,16 @@ func _build_hud() -> void:
 	_enemy_hp_label.size = Vector2(180, 22)
 	_enemy_hp_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	enemy_panel.add_child(_enemy_hp_label)
+
+	if _encounter_passive != "":
+		var enc = EncounterDB.get_encounter(RunState.current_encounter_id)
+		var passive_label = _make_text_label(enc.get("passive_desc", ""),
+			11, Color(0.90, 0.65, 0.35))
+		passive_label.anchors_preset = Control.PRESET_TOP_WIDE
+		passive_label.position = Vector2(500, 120)
+		passive_label.size = Vector2(600, 20)
+		passive_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_hud_layer.add_child(passive_label)
 
 	var hp_panel := _make_panel(Vector2(0.0, 1.0), Vector2(16, -72), Vector2(150, 56))
 	_hud_layer.add_child(hp_panel)

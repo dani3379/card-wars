@@ -14,10 +14,10 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
 
-	var node_type = RunState.node_type_for_floor(RunState.current_floor)
-	_is_elite_reward = (node_type == "elite")
+	var node_type = RunState.current_node_type
+	_is_elite_reward = (node_type == "elite" or node_type == "boss")
 	var is_boss = (node_type == "boss")
-	_card_choices = CardDB.roll_card_reward(RunState.get_act(), _is_elite_reward, is_boss)
+	_card_choices = CardDB.roll_card_reward(RunState.get_act(), node_type == "elite", is_boss)
 	if _is_elite_reward:
 		_relic_choices = RelicDB.roll_relic_reward("combat", RunState.relics)
 

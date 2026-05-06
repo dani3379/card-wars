@@ -110,6 +110,24 @@ static func _run_on_enter(effect: Dictionary, lane_idx: int, is_enemy: bool, ctx
 				RunState.gold += effect.value
 		"atk_per_cards_played":
 			pass  # handled in Combat.gd
+		"damage_face":
+			if is_enemy:
+				ctx.damage_player_hero(effect.value)
+			else:
+				ctx.damage_enemy_hero(effect.value)
+		"debuff_opposing_atk":
+			var target = ctx.get_opposing_card(lane_idx, not is_enemy)
+			if target != null:
+				target.current_atk = maxi(0, target.current_atk - effect.value)
+				target.update_stat_display()
+		"discard_random":
+			if is_enemy and ctx._hand.size() > 0:
+				var idx = randi() % ctx._hand.size()
+				var c = ctx._hand[idx]
+				ctx._hand.remove_at(idx)
+				ctx._player_discard_pile.append(c.card_id)
+				ctx._hand_container.remove_child(c)
+				c.queue_free()
 		_:
 			pass
 
@@ -147,6 +165,17 @@ static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ct
 				ctx.damage_player_hero(effect.value)
 			else:
 				ctx.damage_enemy_hero(effect.value)
+		"debuff_all_player_atk":
+			if was_enemy:
+				for c in ctx._player_field:
+					if c != null:
+						c.current_atk = maxi(0, c.current_atk - effect.value)
+						c.update_stat_display()
+		"damage_adjacent":
+			var field = ctx._enemy_field if was_enemy else ctx._player_field
+			for adj in [lane_idx - 1, lane_idx + 1]:
+				if adj >= 0 and adj < 4 and field[adj] != null:
+					field[adj].take_damage(effect.value)
 		_:
 			pass
 
