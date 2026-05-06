@@ -25,31 +25,8 @@ var run_active: bool = false
 var run_seed: int = 0
 
 
-# ── Lane identities ──
-# Index 0..3 maps to lanes left-to-right.
-# Each lane has an id, a display name, an emoji/icon, and a description.
-const LANES: Array = [
-	{
-		"id": "forge", "name": "Forge", "icon": "⚒",
-		"color": Color(0.92, 0.72, 0.18),
-		"desc": "Cards here have +1 ATK.",
-	},
-	{
-		"id": "grove", "name": "Grove", "icon": "❀",
-		"color": Color(0.35, 0.75, 0.30),
-		"desc": "Cards here heal 1 HP at end of turn.",
-	},
-	{
-		"id": "void", "name": "Void", "icon": "✦",
-		"color": Color(0.55, 0.35, 0.78),
-		"desc": "Damage to hero from this lane is doubled.",
-	},
-	{
-		"id": "tide", "name": "Tide", "icon": "≈",
-		"color": Color(0.28, 0.62, 0.85),
-		"desc": "Cards here take -1 damage (minimum 1).",
-	},
-]
+# ── Once-per-run flags ──
+var phoenix_heart_consumed: bool = false
 
 
 # ── Run lifecycle ──
