@@ -107,7 +107,7 @@ static func _run_on_enter(effect: Dictionary, lane_idx: int, is_enemy: bool, ctx
 					ctx.draw_one()
 		"gain_gold":
 			if not is_enemy:
-				RunState.gold += effect.value
+				RunState.gain_gold(effect.value)
 		"atk_per_cards_played":
 			pass  # handled in Combat.gd
 		"damage_face":

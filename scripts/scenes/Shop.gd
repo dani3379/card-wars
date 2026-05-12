@@ -22,6 +22,7 @@ func _ready() -> void:
 	if not RunState.run_active:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
+	GameTheme.add_atmosphere(self, "shop")
 	_discount = 0.75 if RunState.has_relic("merchants_license") else 1.0
 	_roll_stock()
 	_build_ui()
@@ -57,37 +58,29 @@ func _price(base: int) -> int:
 
 func _build_ui() -> void:
 	for child in get_children():
-		if child.name != "Background":
+		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
 
-	var title = Label.new()
-	title.text = "SHOP"
-	title.add_theme_font_size_override("font_size", 32)
-	title.add_theme_color_override("font_color", Color(1, 0.85, 0.45))
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.position = Vector2(650, 20)
-	title.size = Vector2(300, 45)
+	var title = GameTheme.make_screen_title("SHOP", GameTheme.GILT_BRIGHT)
+	title.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	title.offset_top = 16
+	title.offset_bottom = 68
 	add_child(title)
 
-	var gold_label = Label.new()
-	gold_label.text = "💰 %d gold" % RunState.gold
-	gold_label.add_theme_font_size_override("font_size", 20)
-	gold_label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.5))
+	var gold_label = GameTheme.make_label("%d gold" % RunState.gold, 20, GameTheme.KEYWORD_GOLD)
 	gold_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	gold_label.position = Vector2(650, 60)
-	gold_label.size = Vector2(300, 30)
+	gold_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	gold_label.offset_top = 72
+	gold_label.offset_bottom = 100
 	add_child(gold_label)
 
 	# Card stock
-	var cards_label = Label.new()
-	cards_label.text = "Cards for Sale"
-	cards_label.add_theme_font_size_override("font_size", 18)
-	cards_label.add_theme_color_override("font_color", Color(0.8, 0.75, 0.6))
-	cards_label.position = Vector2(100, 110)
+	var cards_label = GameTheme.make_label("Cards for Sale", GameTheme.FONT_SUBHEADER, GameTheme.DESC_DIM)
+	cards_label.position = Vector2(160, 110)
 	add_child(cards_label)
 
 	var card_row = HBoxContainer.new()
-	card_row.position = Vector2(100, 140)
+	card_row.position = Vector2(160, 142)
 	card_row.add_theme_constant_override("separation", 16)
 	add_child(card_row)
 
@@ -107,10 +100,7 @@ func _build_ui() -> void:
 
 	# Relic stock
 	if _relic_stock.size() > 0:
-		var relic_label = Label.new()
-		relic_label.text = "Relic"
-		relic_label.add_theme_font_size_override("font_size", 18)
-		relic_label.add_theme_color_override("font_color", Color(0.8, 0.75, 0.6))
+		var relic_label = GameTheme.make_label("Relic", GameTheme.FONT_SUBHEADER, GameTheme.DESC_DIM)
 		relic_label.position = Vector2(100, 300)
 		add_child(relic_label)
 
@@ -129,10 +119,7 @@ func _build_ui() -> void:
 			relic_row.add_child(btn)
 
 	# Potion
-	var potion_label = Label.new()
-	potion_label.text = "Services"
-	potion_label.add_theme_font_size_override("font_size", 18)
-	potion_label.add_theme_color_override("font_color", Color(0.8, 0.75, 0.6))
+	var potion_label = GameTheme.make_label("Services", GameTheme.FONT_SUBHEADER, GameTheme.DESC_DIM)
 	potion_label.position = Vector2(100, 450)
 	add_child(potion_label)
 
@@ -144,7 +131,12 @@ func _build_ui() -> void:
 	var potion_price = _price(POTION_COST)
 	var potion_btn = _make_btn("Healing Potion\nHeal %d HP\n— %dg —" % [POTION_HEAL, potion_price], "",
 		Color(0.25, 0.40, 0.20), Vector2(160, 90))
-	potion_btn.disabled = RunState.gold < potion_price
+	# Sozu: can't gain potions
+	if RunState.has_downside("no_potions"):
+		potion_btn.disabled = true
+		potion_btn.text = "Healing Potion\n(Blocked by Sozu)"
+	elif RunState.gold < potion_price:
+		potion_btn.disabled = true
 	potion_btn.pressed.connect(_buy_potion.bind(potion_price))
 	services_row.add_child(potion_btn)
 
@@ -157,11 +149,9 @@ func _build_ui() -> void:
 	services_row.add_child(remove_btn)
 
 	# Leave button
-	var leave_btn = Button.new()
-	leave_btn.text = "Leave Shop"
-	leave_btn.custom_minimum_size = Vector2(160, 40)
+	var leave_btn = GameTheme.make_themed_button("Leave Shop",
+		Color(0.25, 0.20, 0.15), Vector2(160, 40), 16)
 	leave_btn.position = Vector2(720, 820)
-	leave_btn.add_theme_font_size_override("font_size", 16)
 	leave_btn.pressed.connect(func(): get_tree().change_scene_to_file(MAP_SCENE))
 	add_child(leave_btn)
 
@@ -173,20 +163,7 @@ func _kw(data: Dictionary) -> String:
 
 
 func _make_btn(text: String, tooltip: String, color: Color, min_size: Vector2) -> Button:
-	var btn = Button.new()
-	btn.custom_minimum_size = min_size
-	btn.text = text
-	btn.tooltip_text = tooltip
-	btn.add_theme_font_size_override("font_size", 13)
-	var style = StyleBoxFlat.new()
-	style.corner_radius_top_left = 8
-	style.corner_radius_top_right = 8
-	style.corner_radius_bottom_left = 8
-	style.corner_radius_bottom_right = 8
-	style.bg_color = color
-	btn.add_theme_stylebox_override("normal", style)
-	btn.add_theme_color_override("font_color", Color.WHITE)
-	return btn
+	return GameTheme.make_themed_button(text, color, min_size, 13, tooltip)
 
 
 func _buy_card(id: String, price: int) -> void:
@@ -217,13 +194,11 @@ func _buy_potion(price: int) -> void:
 
 func _start_remove_mode(price: int) -> void:
 	for child in get_children():
-		if child.name != "Background":
+		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
 
-	var title = Label.new()
-	title.text = "Choose a card to remove"
-	title.add_theme_font_size_override("font_size", 24)
-	title.add_theme_color_override("font_color", Color(1.0, 0.7, 0.4))
+	var title = GameTheme.make_label("Choose a card to remove",
+		GameTheme.FONT_HEADER, GameTheme.KEYWORD_GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.position = Vector2(500, 30)
 	title.size = Vector2(600, 40)
@@ -253,9 +228,8 @@ func _start_remove_mode(price: int) -> void:
 		btn.pressed.connect(_confirm_remove.bind(i, price))
 		grid.add_child(btn)
 
-	var cancel_btn = Button.new()
-	cancel_btn.text = "Cancel"
-	cancel_btn.custom_minimum_size = Vector2(120, 36)
+	var cancel_btn = GameTheme.make_themed_button("Cancel",
+		Color(0.25, 0.20, 0.15), Vector2(120, 36))
 	cancel_btn.position = Vector2(740, 800)
 	cancel_btn.pressed.connect(func(): _build_ui())
 	add_child(cancel_btn)
@@ -266,6 +240,6 @@ func _confirm_remove(deck_index: int, price: int) -> void:
 		return
 	RunState.gold -= price
 	if RunState.has_relic("scavengers_pouch"):
-		RunState.gold += 20
+		RunState.gain_gold(20)
 	RunState.remove_card_at(deck_index)
 	_build_ui()

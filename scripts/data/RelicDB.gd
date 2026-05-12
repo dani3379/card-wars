@@ -123,6 +123,65 @@ const RELICS: Dictionary = {
 	"scavengers_pouch": {"id": "scavengers_pouch", "name": "Scavenger's Pouch", "tier": "utility",
 		"desc": "Gain 20 gold when you remove a card.",
 		"hooks": ["card_removed"], "effect": "gold_on_remove", "value": 20},
+
+	# ═══════════════════════════════════════════
+	#  BOSS RELICS (pick 1 of 3 after boss kill, all +1 max mana with downside)
+	# ═══════════════════════════════════════════
+	"cursed_key": {"id": "cursed_key", "name": "Cursed Key", "tier": "boss",
+		"desc": "+1 max mana. Gain a Curse after every combat reward.",
+		"hooks": ["combat_end"], "effect": "boss_mana", "value": 1,
+		"downside": "curse_on_reward"},
+	"coffee_dripper": {"id": "coffee_dripper", "name": "Coffee Dripper", "tier": "boss",
+		"desc": "+1 max mana. Can't heal at rest sites.",
+		"hooks": [], "effect": "boss_mana", "value": 1,
+		"downside": "no_rest_heal"},
+	"fusion_hammer": {"id": "fusion_hammer", "name": "Fusion Hammer", "tier": "boss",
+		"desc": "+1 max mana. Can't upgrade cards at rest sites.",
+		"hooks": [], "effect": "boss_mana", "value": 1,
+		"downside": "no_upgrade"},
+	"ectoplasm": {"id": "ectoplasm", "name": "Ectoplasm", "tier": "boss",
+		"desc": "+1 max mana. Can't gain gold.",
+		"hooks": [], "effect": "boss_mana", "value": 1,
+		"downside": "no_gold"},
+	"busted_crown": {"id": "busted_crown", "name": "Busted Crown", "tier": "boss",
+		"desc": "+1 max mana. Card rewards show 1 choice instead of 3.",
+		"hooks": [], "effect": "boss_mana", "value": 1,
+		"downside": "fewer_rewards"},
+	"sozu": {"id": "sozu", "name": "Sozu", "tier": "boss",
+		"desc": "+1 max mana. Can't gain potions.",
+		"hooks": [], "effect": "boss_mana", "value": 1,
+		"downside": "no_potions"},
+	"philosophers_stone": {"id": "philosophers_stone", "name": "Philosopher's Stone", "tier": "boss",
+		"desc": "+1 max mana. All enemies get +1 ATK.",
+		"hooks": ["combat_start"], "effect": "boss_mana", "value": 1,
+		"downside": "enemy_atk_buff"},
+	"velvet_choker": {"id": "velvet_choker", "name": "Velvet Choker", "tier": "boss",
+		"desc": "+1 max mana. Can only play 5 cards per turn.",
+		"hooks": [], "effect": "boss_mana", "value": 1,
+		"downside": "play_limit"},
+	"mark_of_pain": {"id": "mark_of_pain", "name": "Mark of Pain", "tier": "boss",
+		"desc": "+1 max mana. Start each combat with 2 Curses in draw pile.",
+		"hooks": ["combat_start"], "effect": "boss_mana", "value": 1,
+		"downside": "start_curses"},
+
+	# ═══════════════════════════════════════════
+	#  MANA RELICS (regular, found in shops/events/rewards)
+	# ═══════════════════════════════════════════
+	"lantern": {"id": "lantern", "name": "Lantern", "tier": "combat",
+		"desc": "Gain 1 bonus mana on turn 1 of each combat.",
+		"hooks": ["turn_start"], "effect": "bonus_mana_turn1", "value": 1},
+	"happy_flower": {"id": "happy_flower", "name": "Happy Flower", "tier": "combat",
+		"desc": "Every 3 turns, gain 1 bonus mana.",
+		"hooks": ["turn_start"], "effect": "happy_flower", "value": 1},
+	"ice_cream": {"id": "ice_cream", "name": "Ice Cream", "tier": "combat",
+		"desc": "Unspent mana carries over fully between turns (no cap).",
+		"hooks": [], "effect": "full_mana_bank", "value": 0},
+	"art_of_war": {"id": "art_of_war", "name": "Art of War", "tier": "combat",
+		"desc": "If you play no cards this turn, gain 1 extra mana next turn.",
+		"hooks": ["turn_end"], "effect": "art_of_war", "value": 1},
+	"sundial": {"id": "sundial", "name": "Sundial", "tier": "combat",
+		"desc": "Every 3 deck shuffles, gain 2 mana.",
+		"hooks": ["deck_shuffle"], "effect": "sundial", "value": 2},
 }
 
 
@@ -154,3 +213,27 @@ static func roll_relic_reward(tier: String = "combat", exclude: Array[String] = 
 			pool.append(id)
 	pool.shuffle()
 	return pool.slice(0, mini(3, pool.size()))
+
+
+static func roll_boss_relics(exclude: Array[String] = []) -> Array[String]:
+	var pool: Array[String] = []
+	for id in get_relics_by_tier("boss"):
+		if not exclude.has(id):
+			pool.append(id)
+	pool.shuffle()
+	return pool.slice(0, mini(3, pool.size()))
+
+
+static func get_boss_mana_bonus(relics_held: Array[String]) -> int:
+	var bonus := 0
+	for id in relics_held:
+		if RELICS.has(id) and RELICS[id].get("effect", "") == "boss_mana":
+			bonus += RELICS[id].get("value", 1)
+	return bonus
+
+
+static func has_downside(relics_held: Array[String], downside: String) -> bool:
+	for id in relics_held:
+		if RELICS.has(id) and RELICS[id].get("downside", "") == downside:
+			return true
+	return false

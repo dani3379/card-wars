@@ -15,6 +15,7 @@ func _ready() -> void:
 	if not RunState.run_active:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
+	GameTheme.add_atmosphere(self, "rest")
 	_build_choice_ui()
 
 
@@ -22,52 +23,61 @@ func _build_choice_ui() -> void:
 	_mode = Mode.CHOOSE
 	_clear_ui()
 
-	var title = Label.new()
-	title.text = "REST SITE"
-	title.add_theme_font_size_override("font_size", 32)
-	title.add_theme_color_override("font_color", Color(0.5, 0.95, 0.6))
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.position = Vector2(600, 40)
-	title.size = Vector2(400, 45)
+	var title = GameTheme.make_screen_title("REST SITE", GameTheme.HEALTH_GREEN)
+	title.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	title.offset_top = 32
+	title.offset_bottom = 85
 	add_child(title)
 
-	var subtitle = Label.new()
-	subtitle.text = "♥ %d / %d" % [RunState.hero_hp, RunState.hero_max_hp]
-	subtitle.add_theme_font_size_override("font_size", 20)
-	subtitle.add_theme_color_override("font_color", Color(0.8, 0.8, 0.7))
+	var subtitle = GameTheme.make_label("♥ %d / %d" % [RunState.hero_hp, RunState.hero_max_hp],
+		20, GameTheme.IVORY)
 	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	subtitle.position = Vector2(650, 85)
-	subtitle.size = Vector2(300, 30)
+	subtitle.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	subtitle.offset_top = 90
+	subtitle.offset_bottom = 120
 	add_child(subtitle)
 
 	var row = HBoxContainer.new()
-	row.position = Vector2(300, 200)
+	row.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	row.offset_top = 180
+	row.offset_bottom = 400
 	row.add_theme_constant_override("separation", 40)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	add_child(row)
 
 	# Heal
 	var heal_btn = _make_btn("♨ REST\n\nHeal to full HP\n(%d → %d)" % [
 		RunState.hero_hp, RunState.hero_max_hp],
-		Color(0.15, 0.40, 0.20), Vector2(250, 200))
-	heal_btn.disabled = RunState.hero_hp >= RunState.hero_max_hp
+		"", Color(0.15, 0.40, 0.20), Vector2(250, 200))
+	# Coffee Dripper: can't heal at rest sites
+	if RunState.has_downside("no_rest_heal"):
+		heal_btn.disabled = true
+		heal_btn.text = "♨ REST\n\n(Blocked by\nCoffee Dripper)"
+	elif RunState.hero_hp >= RunState.hero_max_hp:
+		heal_btn.disabled = true
 	heal_btn.pressed.connect(_do_heal)
 	row.add_child(heal_btn)
 
 	# Upgrade
 	var upgrade_btn = _make_btn("⚒ UPGRADE\n\nUpgrade one card\nSharpen / Fortify / Imbue",
-		Color(0.40, 0.25, 0.15), Vector2(250, 200))
-	var has_upgradeable = false
-	for i in range(RunState.deck.size()):
-		if not RunState.is_card_upgraded(i):
-			has_upgradeable = true
-			break
-	upgrade_btn.disabled = not has_upgradeable
+		"", Color(0.40, 0.25, 0.15), Vector2(250, 200))
+	# Fusion Hammer: can't upgrade at rest sites
+	if RunState.has_downside("no_upgrade"):
+		upgrade_btn.disabled = true
+		upgrade_btn.text = "⚒ UPGRADE\n\n(Blocked by\nFusion Hammer)"
+	else:
+		var has_upgradeable = false
+		for i in range(RunState.deck.size()):
+			if not RunState.is_card_upgraded(i):
+				has_upgradeable = true
+				break
+		upgrade_btn.disabled = not has_upgradeable
 	upgrade_btn.pressed.connect(_start_upgrade_mode)
 	row.add_child(upgrade_btn)
 
 	# Remove
 	var remove_btn = _make_btn("✕ REMOVE\n\nRemove one card\nfrom your deck",
-		Color(0.45, 0.15, 0.15), Vector2(250, 200))
+		"", Color(0.45, 0.15, 0.15), Vector2(250, 200))
 	remove_btn.disabled = RunState.deck.size() <= 1
 	remove_btn.pressed.connect(_start_remove_mode)
 	row.add_child(remove_btn)
@@ -82,10 +92,7 @@ func _start_upgrade_mode() -> void:
 	_mode = Mode.PICK_CARD
 	_clear_ui()
 
-	var title = Label.new()
-	title.text = "Choose a card to upgrade"
-	title.add_theme_font_size_override("font_size", 24)
-	title.add_theme_color_override("font_color", Color(1.0, 0.7, 0.4))
+	var title = GameTheme.make_label("Choose a card to upgrade", GameTheme.FONT_HEADER, GameTheme.KEYWORD_GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.position = Vector2(500, 30)
 	title.size = Vector2(600, 40)
@@ -125,10 +132,7 @@ func _select_card_for_upgrade(deck_index: int) -> void:
 	_clear_ui()
 
 	var data = CardDB.get_card_data(RunState.deck[deck_index])
-	var title = Label.new()
-	title.text = "Upgrade: %s" % data.name
-	title.add_theme_font_size_override("font_size", 24)
-	title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.45))
+	var title = GameTheme.make_label("Upgrade: %s" % data.name, GameTheme.FONT_HEADER, GameTheme.GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.position = Vector2(500, 40)
 	title.size = Vector2(600, 40)
@@ -148,7 +152,7 @@ func _select_card_for_upgrade(deck_index: int) -> void:
 	else:
 		var val = data.get("spell", {}).get("value", 0)
 		sharpen_desc = "SHARPEN\n\n+%d to damage\n%d → %d" % [bonus, val, val + bonus]
-	var sharpen_btn = _make_btn(sharpen_desc, Color(0.55, 0.20, 0.15), Vector2(280, 200))
+	var sharpen_btn = _make_btn(sharpen_desc, "", Color(0.55, 0.20, 0.15), Vector2(280, 200))
 	sharpen_btn.pressed.connect(_do_upgrade.bind("sharpen"))
 	row.add_child(sharpen_btn)
 
@@ -160,7 +164,7 @@ func _select_card_for_upgrade(deck_index: int) -> void:
 	else:
 		var new_cost = maxi(0, data.cost - 1)
 		fortify_desc = "FORTIFY\n\n-1 mana cost\n%dm → %dm" % [data.cost, new_cost]
-	var fortify_btn = _make_btn(fortify_desc, Color(0.15, 0.25, 0.55), Vector2(280, 200))
+	var fortify_btn = _make_btn(fortify_desc, "", Color(0.15, 0.25, 0.55), Vector2(280, 200))
 	fortify_btn.pressed.connect(_do_upgrade.bind("fortify"))
 	row.add_child(fortify_btn)
 
@@ -185,7 +189,7 @@ func _select_card_for_upgrade(deck_index: int) -> void:
 	elif data.type == "spell":
 		_build_spell_imbue_choices(row)
 	else:
-		var imbue_btn = _make_btn(imbue_desc, Color(0.35, 0.15, 0.50), Vector2(280, 200))
+		var imbue_btn = _make_btn(imbue_desc, "", Color(0.35, 0.15, 0.50), Vector2(280, 200))
 		imbue_btn.disabled = true
 		row.add_child(imbue_btn)
 
@@ -197,19 +201,19 @@ func _build_imbue_choices(options: Array, parent: HBoxContainer) -> void:
 		var display = KeywordEffects.KEYWORDS.get(kw, {}).get("display", kw)
 		var desc_text = KeywordEffects.tooltip_for(kw)
 		var btn = _make_btn("IMBUE\n\n+ %s\n%s" % [display, desc_text],
-			Color(0.35, 0.15, 0.50), Vector2(220, 200))
+			"", Color(0.35, 0.15, 0.50), Vector2(220, 200))
 		btn.pressed.connect(_do_upgrade.bind("imbue", kw))
 		parent.add_child(btn)
 
 
 func _build_spell_imbue_choices(parent: HBoxContainer) -> void:
 	var retain_btn = _make_btn("IMBUE\n\n+ Retain\nKeep in hand",
-		Color(0.35, 0.15, 0.50), Vector2(220, 200))
+		"", Color(0.35, 0.15, 0.50), Vector2(220, 200))
 	retain_btn.pressed.connect(_do_upgrade.bind("imbue", "retain"))
 	parent.add_child(retain_btn)
 
 	var double_btn = _make_btn("IMBUE\n\nDouble effect\n+ Exhaust",
-		Color(0.50, 0.15, 0.40), Vector2(220, 200))
+		"", Color(0.50, 0.15, 0.40), Vector2(220, 200))
 	double_btn.pressed.connect(_do_upgrade.bind("imbue", "double_exhaust"))
 	parent.add_child(double_btn)
 
@@ -236,10 +240,7 @@ func _do_upgrade(path: String, keyword: String = "") -> void:
 func _start_remove_mode() -> void:
 	_clear_ui()
 
-	var title = Label.new()
-	title.text = "Choose a card to remove"
-	title.add_theme_font_size_override("font_size", 24)
-	title.add_theme_color_override("font_color", Color(1.0, 0.5, 0.4))
+	var title = GameTheme.make_label("Choose a card to remove", GameTheme.FONT_HEADER, GameTheme.BLOOD_RED)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.position = Vector2(500, 30)
 	title.size = Vector2(600, 40)
@@ -280,26 +281,12 @@ func _kw(data: Dictionary) -> String:
 	return ", ".join(data.keywords)
 
 
-func _make_btn(text: String, color: Color, min_size: Vector2) -> Button:
-	var btn = Button.new()
-	btn.custom_minimum_size = min_size
-	btn.text = text
-	btn.add_theme_font_size_override("font_size", 13)
-	var style = StyleBoxFlat.new()
-	style.corner_radius_top_left = 8
-	style.corner_radius_top_right = 8
-	style.corner_radius_bottom_left = 8
-	style.corner_radius_bottom_right = 8
-	style.bg_color = color
-	btn.add_theme_stylebox_override("normal", style)
-	btn.add_theme_color_override("font_color", Color.WHITE)
-	return btn
+func _make_btn(text: String, tooltip: String, color: Color, min_size: Vector2 = Vector2(250, 200)) -> Button:
+	return GameTheme.make_themed_button(text, color, min_size, 13, tooltip)
 
 
 func _add_cancel_btn() -> void:
-	var btn = Button.new()
-	btn.text = "Cancel"
-	btn.custom_minimum_size = Vector2(120, 36)
+	var btn = GameTheme.make_themed_button("Cancel", Color(0.25, 0.20, 0.15), Vector2(120, 36))
 	btn.position = Vector2(740, 810)
 	btn.pressed.connect(func(): _build_choice_ui())
 	add_child(btn)
@@ -307,5 +294,5 @@ func _add_cancel_btn() -> void:
 
 func _clear_ui() -> void:
 	for child in get_children():
-		if child.name != "Background":
+		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()

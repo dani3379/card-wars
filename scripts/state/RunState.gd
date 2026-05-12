@@ -25,6 +25,9 @@ var current_encounter_id: String = ""
 var current_node_type: String = ""
 var events_seen: Array[String] = []
 
+# ── Mana ──
+var base_max_mana: int = 3
+
 # ── Compatibility ──
 var current_floor: int = 0
 var run_active: bool = false
@@ -60,6 +63,7 @@ func start_new_run() -> void:
 	hero_hp = 25
 	gold = 0
 	potions = 0
+	base_max_mana = 3
 	deck = []
 	deck_uids = []
 	card_upgrades = {}
@@ -200,6 +204,20 @@ func damage_hero(amount: int) -> void:
 
 func heal_hero(amount: int) -> void:
 	hero_hp = mini(hero_max_hp, hero_hp + amount)
+
+
+func gain_gold(amount: int) -> void:
+	if has_downside("no_gold"):
+		return
+	gold += amount
+
+
+func get_max_mana() -> int:
+	return base_max_mana + RelicDB.get_boss_mana_bonus(relics)
+
+
+func has_downside(downside: String) -> bool:
+	return RelicDB.has_downside(relics, downside)
 
 
 # ── Potions ──
