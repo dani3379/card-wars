@@ -1,10 +1,10 @@
 extends PanelContainer
-## Card2D.gd — 2D card with drag, hover, stat display.
-## Supports creatures (ATK/HP) and spells (effect text). Floop toggle on battlefield.
-## All animations removed for performance.
+## Card2D.gd — 150x200 card with ornate frame overlay.
+## Layers: card art → ornate frame → name banner + divider → content.
 
 signal played
 signal destroyed
+signal floop_clicked
 
 @export var card_id: String = ""
 @export var is_opponent: bool = false
@@ -17,6 +17,7 @@ var current_lane: int = -1
 var has_attacked_this_turn: bool = false
 var summoned_this_turn: bool = true
 var will_floop: bool = false
+var has_flooped_this_turn: bool = false
 var last_stand_used: bool = false
 var is_token: bool = false
 var temp_atk_buff: int = 0
@@ -26,9 +27,15 @@ var _atk_label: Label
 var _hp_label: Label
 var _cost_label: Label
 var _desc_label: Label
-var _keyword_label: Label
 var _type_label: Label
 var _floop_indicator: Label
+var _rarity_strip: ColorRect
+var _art_rect: Control
+var _cost_badge: Panel
+var _frame_tex: TextureRect
+var _atk_badge: HBoxContainer
+var _hp_badge: HBoxContainer
+var _default_border_color: Color
 
 var _is_hovered := false
 var _is_being_dragged := false
@@ -37,29 +44,17 @@ var _drag_offset := Vector2.ZERO
 var _hand_target_position := Vector2.ZERO
 var _hand_target_rotation := 0.0
 
-const CARD_SIZE := Vector2(140, 200)
+const CARD_W := 150
+const CARD_H := 200
+const CARD_SIZE := Vector2(CARD_W, CARD_H)
 const PLAY_THRESHOLD_Y := 0.45
-
-const BG_PLAYER := Color(0.12, 0.10, 0.08, 0.95)
-const BG_ENEMY := Color(0.15, 0.06, 0.06, 0.95)
-const BG_SPELL := Color(0.08, 0.06, 0.14, 0.95)
-const BORDER_NORMAL := Color(0.55, 0.40, 0.18)
-const BORDER_HOVER := Color(0.90, 0.75, 0.35)
-const BORDER_FLOOP := Color(0.30, 0.70, 0.95)
-const ATK_COLOR := Color(1.0, 0.35, 0.25)
-const HP_COLOR := Color(0.25, 0.85, 0.35)
-const HP_DAMAGED := Color(1.0, 0.3, 0.3)
-const ATK_BUFFED := Color(1.0, 0.8, 0.2)
-const COST_COLOR := Color(0.4, 0.65, 1.0)
-const KEYWORD_COLOR := Color(1.0, 0.85, 0.45)
-const NAME_COLOR := Color(0.96, 0.92, 0.78)
-const DESC_COLOR := Color(0.70, 0.66, 0.55)
-const SPELL_TYPE_COLOR := Color(0.65, 0.50, 0.90)
 
 
 func _ready() -> void:
 	custom_minimum_size = CARD_SIZE
 	size = CARD_SIZE
+	size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	mouse_entered.connect(_on_mouse_entered)
 	mouse_exited.connect(_on_mouse_exited)
@@ -78,172 +73,351 @@ func _ready() -> void:
 func is_creature() -> bool:
 	return card_data.get("type", "creature") == "creature"
 
-
 func is_spell() -> bool:
 	return card_data.get("type", "") == "spell"
-
 
 func has_keyword(kw: String) -> bool:
 	if not card_data.has("keywords"):
 		return false
 	return card_data.keywords.has(kw)
 
-
 func has_floop() -> bool:
 	return card_data.has("floop")
 
-
 func can_attack() -> bool:
-	if has_attacked_this_turn:
-		return false
-	if will_floop:
-		return false
-	if card_data.get("passive", "") == "cannot_attack_wall":
-		return false
-	if card_data.get("passive", "") == "siege":
-		return true
+	if has_attacked_this_turn: return false
+	if will_floop: return false
+	if has_flooped_this_turn: return false
+	if card_data.get("passive", "") == "cannot_attack_wall": return false
+	if card_data.get("passive", "") == "siege": return true
 	return true
-
 
 func effective_atk() -> int:
 	return current_atk + temp_atk_buff
 
 
+# ═══════════════════════════════════════════
+#  CARD BACKGROUND
+# ═══════════════════════════════════════════
+
 func _build_style() -> void:
-	var style := StyleBoxFlat.new()
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(0, 0, 0, 0)
+	s.border_color = Color(0, 0, 0, 0)
+	s.set_border_width_all(2)
+	s.set_corner_radius_all(6)
+	s.content_margin_left = 0
+	s.content_margin_right = 0
+	s.content_margin_top = 0
+	s.content_margin_bottom = 0
+	s.shadow_color = Color(0, 0, 0, 0.7)
+	s.shadow_size = 5
+	s.shadow_offset = Vector2(0, 3)
+	add_theme_stylebox_override("panel", s)
+	_default_border_color = Color(0, 0, 0, 0)
+
+
+# ═══════════════════════════════════════════
+#  LAYOUT — layered: art → frame → banner → content
+# ═══════════════════════════════════════════
+
+func _find_card_art() -> Texture2D:
+	var cid = card_data.get("id", "")
+	var name_id = card_data.get("name", "").to_lower().replace(" ", "_").replace("'", "")
+	var art: Texture2D = null
 	if is_spell():
-		style.bg_color = BG_SPELL
-	elif is_opponent:
-		style.bg_color = BG_ENEMY
-	else:
-		style.bg_color = BG_PLAYER
-	style.border_color = BORDER_NORMAL
-	style.border_width_top = 2
-	style.border_width_bottom = 2
-	style.border_width_left = 2
-	style.border_width_right = 2
-	style.corner_radius_top_left = 6
-	style.corner_radius_top_right = 6
-	style.corner_radius_bottom_left = 6
-	style.corner_radius_bottom_right = 6
-	style.content_margin_left = 6
-	style.content_margin_right = 6
-	style.content_margin_top = 4
-	style.content_margin_bottom = 4
-	add_theme_stylebox_override("panel", style)
+		art = GameTheme.try_load_spell_art(cid)
+		if art == null:
+			art = GameTheme.try_load_spell_art(name_id)
+	if art == null:
+		art = GameTheme.try_load_creature_art(cid)
+	if art == null and name_id != "":
+		art = GameTheme.try_load_creature_art(name_id)
+	if art == null and name_id != "":
+		art = GameTheme.try_load_creature_art("e_" + name_id)
+	return art
 
 
 func _build_layout() -> void:
 	if card_data.is_empty():
 		return
 
-	var vbox := VBoxContainer.new()
-	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_theme_constant_override("separation", 2)
-	add_child(vbox)
+	var root := Control.new()
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
 
-	# Top row: cost + name
-	var top_row := HBoxContainer.new()
-	top_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(top_row)
+	# ── Layer 1: Card art clipped inside frame window ──
+	var card_art: Texture2D = _find_card_art()
+	if card_art:
+		var art_clip := Control.new()
+		art_clip.clip_contents = true
+		art_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		art_clip.anchor_left = 0.06
+		art_clip.anchor_right = 0.94
+		art_clip.anchor_top = 0.05
+		art_clip.anchor_bottom = 0.54
+		root.add_child(art_clip)
+		_art_rect = art_clip
 
-	_cost_label = _make_label(str(card_data.cost), 18, COST_COLOR)
-	_cost_label.custom_minimum_size.x = 22
-	top_row.add_child(_cost_label)
+		var art_tex := TextureRect.new()
+		art_tex.texture = card_art
+		art_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		art_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		art_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+		art_tex.anchor_bottom = 1.5
+		art_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		art_clip.add_child(art_tex)
+	else:
+		var placeholder := ColorRect.new()
+		placeholder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var hue = float(abs(card_id.hash()) % 360) / 360.0
+		placeholder.color = Color.from_hsv(hue, 0.45 if not is_opponent else 0.30, 0.35 if not is_opponent else 0.22)
+		placeholder.anchor_left = 0.06
+		placeholder.anchor_right = 0.94
+		placeholder.anchor_top = 0.05
+		placeholder.anchor_bottom = 0.54
+		root.add_child(placeholder)
+		_art_rect = placeholder
 
-	_name_label = _make_label(card_data.name, 14, NAME_COLOR)
+	# ── Layer 2: Ornate frame overlay ──
+	if GameTheme.tex_card_frame_ornate:
+		_frame_tex = TextureRect.new()
+		_frame_tex.texture = GameTheme.tex_card_frame_ornate
+		_frame_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		_frame_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		_frame_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_frame_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if is_spell():
+			_frame_tex.self_modulate = Color(0.85, 0.78, 1.0)
+		elif is_opponent:
+			_frame_tex.self_modulate = Color(1.0, 0.82, 0.78)
+		root.add_child(_frame_tex)
+
+	# ── Layer 3: Name banner (top, over art) ──
+	var banner := PanelContainer.new()
+	banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner.anchor_left = 0.06
+	banner.anchor_right = 0.94
+	banner.anchor_top = 0.04
+	banner.anchor_bottom = 0.16
+	var bs := StyleBoxFlat.new()
+	bs.bg_color = Color(0.06, 0.05, 0.04, 0.88)
+	bs.border_color = Color(0.65, 0.50, 0.25, 0.8)
+	bs.set_border_width_all(1)
+	bs.set_corner_radius_all(3)
+	bs.content_margin_left = 2
+	bs.content_margin_right = 4
+	bs.content_margin_top = 0
+	bs.content_margin_bottom = 0
+	banner.add_theme_stylebox_override("panel", bs)
+	root.add_child(banner)
+
+	var banner_row := HBoxContainer.new()
+	banner_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner_row.add_theme_constant_override("separation", 3)
+	banner.add_child(banner_row)
+
+	_cost_badge = _make_circle_badge(GameTheme.MANA_BLUE, 18)
+	banner_row.add_child(_cost_badge)
+	_cost_label = _make_badge_label(str(card_data.cost), 11)
+	_cost_badge.add_child(_cost_label)
+
+	_name_label = Label.new()
+	_name_label.text = card_data.name
+	if GameTheme.font_display:
+		_name_label.add_theme_font_override("font", GameTheme.font_display)
+	_name_label.add_theme_font_size_override("font_size", 11)
+	_name_label.add_theme_color_override("font_color", GameTheme.IVORY)
+	_name_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
+	_name_label.add_theme_constant_override("outline_size", 2)
 	_name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_name_label.clip_text = true
-	top_row.add_child(_name_label)
+	_name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner_row.add_child(_name_label)
 
-	# Type indicator for spells
+	# ── Gold divider at art-text boundary ──
+	var divider := ColorRect.new()
+	divider.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	divider.anchor_left = 0.07
+	divider.anchor_right = 0.93
+	divider.anchor_top = 0.555
+	divider.anchor_bottom = 0.565
+	divider.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.6)
+	root.add_child(divider)
+
+	# ── Layer 4: Content in stone area ──
+	var content := VBoxContainer.new()
+	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.add_theme_constant_override("separation", 1)
+	content.anchor_left = 0.07
+	content.anchor_right = 0.93
+	content.anchor_top = 0.57
+	content.anchor_bottom = 0.97
+	root.add_child(content)
+
+	_rarity_strip = ColorRect.new()
+	_rarity_strip.custom_minimum_size = Vector2(0, 2)
+	_rarity_strip.color = GameTheme.rarity_color(card_data.get("rarity", "common"))
+	_rarity_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.add_child(_rarity_strip)
+
 	if is_spell():
-		_type_label = _make_label("SPELL", 10, SPELL_TYPE_COLOR)
+		_type_label = Label.new()
+		_type_label.text = "SPELL"
+		if GameTheme.font_display:
+			_type_label.add_theme_font_override("font", GameTheme.font_display)
+		_type_label.add_theme_font_size_override("font_size", 9)
+		_type_label.add_theme_color_override("font_color", GameTheme.SPELL_PURPLE)
 		_type_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		vbox.add_child(_type_label)
+		_type_label.custom_minimum_size = Vector2(0, 10)
+		_type_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		content.add_child(_type_label)
 
-	# Keywords
-	if card_data.has("keywords") and card_data.keywords.size() > 0:
-		_keyword_label = _make_label(
-			KeywordEffects.display_text_for(card_data.keywords),
-			10, KEYWORD_COLOR)
-		_keyword_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		vbox.add_child(_keyword_label)
-
-	# Art placeholder (creatures only)
-	if is_creature():
-		var art := ColorRect.new()
-		art.custom_minimum_size = Vector2(0, 50)
-		art.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		art.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var h = float(abs(card_id.hash()) % 360) / 360.0
-		var sat = 0.35 if is_opponent else 0.45
-		var val = 0.25 if is_opponent else 0.35
-		art.color = Color.from_hsv(h, sat, val)
-		vbox.add_child(art)
-
-	# Description
-	_desc_label = _make_label(card_data.get("desc", ""), 10, DESC_COLOR)
+	_desc_label = Label.new()
+	_desc_label.text = card_data.get("desc", "")
+	if GameTheme.font_body:
+		_desc_label.add_theme_font_override("font", GameTheme.font_body)
+	_desc_label.add_theme_font_size_override("font_size", 9)
+	_desc_label.add_theme_color_override("font_color", GameTheme.DESC_DIM)
 	_desc_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_desc_label.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	vbox.add_child(_desc_label)
+	_desc_label.clip_text = true
+	_desc_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.add_child(_desc_label)
 
-	# Bottom row: ATK / HP for creatures, empty for spells
-	if is_creature():
-		var bot_row := HBoxContainer.new()
-		bot_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		bot_row.alignment = BoxContainer.ALIGNMENT_CENTER
-		vbox.add_child(bot_row)
-
-		_atk_label = _make_label(str(current_atk), 22, ATK_COLOR)
-		_atk_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		_atk_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		bot_row.add_child(_atk_label)
-
-		var sep := Label.new()
-		sep.text = "/"
-		sep.add_theme_font_size_override("font_size", 18)
-		sep.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
-		sep.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		bot_row.add_child(sep)
-
-		_hp_label = _make_label(str(current_hp), 22, HP_COLOR)
-		_hp_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		_hp_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		bot_row.add_child(_hp_label)
-
-	# Floop indicator (hidden by default, shown when toggled on battlefield)
-	_floop_indicator = _make_label("FLOOP", 12, BORDER_FLOOP)
+	_floop_indicator = Label.new()
+	_floop_indicator.text = "FLOOP"
+	if GameTheme.font_display:
+		_floop_indicator.add_theme_font_override("font", GameTheme.font_display)
+	_floop_indicator.add_theme_font_size_override("font_size", 9)
+	_floop_indicator.add_theme_color_override("font_color", GameTheme.FLOOP_BLUE)
 	_floop_indicator.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_floop_indicator.custom_minimum_size = Vector2(0, 10)
+	_floop_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_floop_indicator.visible = false
-	vbox.add_child(_floop_indicator)
+	content.add_child(_floop_indicator)
+
+	if is_creature():
+		var footer := HBoxContainer.new()
+		footer.custom_minimum_size = Vector2(0, 20)
+		footer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		content.add_child(footer)
+
+		_atk_badge = GameTheme.make_icon_stat(
+			GameTheme.tex_icon_sword, str(current_atk),
+			GameTheme.ATK_RED, 15)
+		footer.add_child(_atk_badge)
+		_atk_label = _atk_badge.get_child(1) as Label
+
+		var spacer := Control.new()
+		spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		footer.add_child(spacer)
+
+		_hp_badge = GameTheme.make_icon_stat(
+			GameTheme.tex_icon_heart, str(current_hp),
+			GameTheme.HEALTH_GREEN, 15)
+		footer.add_child(_hp_badge)
+		_hp_label = _hp_badge.get_child(1) as Label
+	else:
+		var spell_foot := Label.new()
+		spell_foot.text = "— SPELL —"
+		if GameTheme.font_display:
+			spell_foot.add_theme_font_override("font", GameTheme.font_display)
+		spell_foot.add_theme_font_size_override("font_size", 9)
+		spell_foot.add_theme_color_override("font_color", GameTheme.SPELL_PURPLE)
+		spell_foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		spell_foot.custom_minimum_size = Vector2(0, 14)
+		spell_foot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		content.add_child(spell_foot)
 
 
-func _make_label(text: String, font_size: int, color: Color) -> Label:
+# ── Layout helpers ──
+
+func _make_circle_badge(color: Color, sz: int) -> Panel:
+	var p := Panel.new()
+	p.custom_minimum_size = Vector2(sz, sz)
+	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var s := StyleBoxFlat.new()
+	s.bg_color = color
+	s.border_color = color.lightened(0.3)
+	s.border_color.a = 0.4
+	var r := int(sz * 0.5)
+	s.corner_radius_top_left = r
+	s.corner_radius_top_right = r
+	s.corner_radius_bottom_left = r
+	s.corner_radius_bottom_right = r
+	s.border_width_top = 1
+	s.border_width_bottom = 1
+	s.border_width_left = 1
+	s.border_width_right = 1
+	p.add_theme_stylebox_override("panel", s)
+	return p
+
+
+func _make_badge_label(text: String, font_sz: int) -> Label:
 	var lbl := Label.new()
 	lbl.text = text
-	lbl.add_theme_font_size_override("font_size", font_size)
-	lbl.add_theme_color_override("font_color", color)
+	if GameTheme.font_body:
+		lbl.add_theme_font_override("font", GameTheme.font_body)
+	lbl.add_theme_font_size_override("font_size", font_sz)
+	lbl.add_theme_color_override("font_color", Color.WHITE)
+	lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	lbl.add_theme_constant_override("outline_size", 2)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return lbl
 
 
+# ═══════════════════════════════════════════
+#  STAT UPDATES
+# ═══════════════════════════════════════════
+
 func update_stat_display() -> void:
 	if _hp_label:
 		_hp_label.text = str(max(current_hp, 0))
-		_hp_label.add_theme_color_override("font_color",
-			HP_DAMAGED if current_hp < card_data.hp else HP_COLOR)
+		if current_hp < card_data.hp:
+			_hp_label.add_theme_color_override("font_color", GameTheme.HP_DAMAGED)
+		else:
+			_hp_label.add_theme_color_override("font_color", Color.WHITE)
 	if _atk_label:
 		var display_atk = current_atk + temp_atk_buff
 		_atk_label.text = str(display_atk)
-		_atk_label.add_theme_color_override("font_color",
-			ATK_BUFFED if display_atk > card_data.atk else ATK_COLOR)
+		if display_atk > card_data.atk:
+			_atk_label.add_theme_color_override("font_color", GameTheme.ATK_BUFFED)
+		elif display_atk < card_data.atk:
+			_atk_label.add_theme_color_override("font_color", GameTheme.HP_DAMAGED)
+		else:
+			_atk_label.add_theme_color_override("font_color", Color.WHITE)
 
 
 func update_floop_display() -> void:
 	if _floop_indicator:
-		_floop_indicator.visible = will_floop
-	_set_border_color(BORDER_FLOOP if will_floop else BORDER_NORMAL)
+		if will_floop:
+			_floop_indicator.text = "FLOOP"
+			_floop_indicator.add_theme_color_override("font_color", GameTheme.FLOOP_BLUE)
+			_floop_indicator.visible = true
+		elif is_on_battlefield and has_floop() and not is_opponent:
+			_floop_indicator.text = "click: floop"
+			_floop_indicator.visible = true
+			_floop_indicator.add_theme_color_override("font_color", Color(0.6, 0.5, 0.3, 0.7))
+		else:
+			_floop_indicator.visible = false
+	if will_floop:
+		_set_border_color(GameTheme.FLOOP_BLUE)
+		if _art_rect:
+			_art_rect.modulate = Color(0.6, 0.7, 1.0, 0.9)
+	elif is_on_battlefield and has_floop() and not is_opponent:
+		_set_border_color(Color(0.5, 0.4, 0.2, 0.6))
+		if _art_rect:
+			_art_rect.modulate = Color.WHITE
+	else:
+		_set_border_color(_get_default_frame_tint())
+		if _art_rect:
+			_art_rect.modulate = Color.WHITE
 
 
 func toggle_floop() -> void:
@@ -252,6 +426,10 @@ func toggle_floop() -> void:
 	will_floop = not will_floop
 	update_floop_display()
 
+
+# ═══════════════════════════════════════════
+#  DAMAGE
+# ═══════════════════════════════════════════
 
 func take_damage(amount: int) -> void:
 	if has_keyword("armored"):
@@ -282,6 +460,10 @@ func _die() -> void:
 	queue_free()
 
 
+# ═══════════════════════════════════════════
+#  HAND POSITIONING + HOVER
+# ═══════════════════════════════════════════
+
 func set_hand_target(pos: Vector2, rot: float) -> void:
 	_hand_target_position = pos
 	_hand_target_rotation = rot
@@ -295,21 +477,31 @@ func _on_mouse_entered() -> void:
 	if _is_playing or _is_being_dragged:
 		return
 	_is_hovered = true
-	_set_border_color(BORDER_HOVER)
+	_set_border_color(GameTheme.GILT_BRIGHT)
 	if not is_on_battlefield:
 		z_index = 10
+		pivot_offset = Vector2(size.x * 0.5, size.y)
+		scale = Vector2(1.15, 1.15)
 
 
 func _on_mouse_exited() -> void:
 	if _is_being_dragged or _is_playing:
 		return
 	_is_hovered = false
-	_set_border_color(BORDER_FLOOP if (is_on_battlefield and will_floop) else BORDER_NORMAL)
+	if is_on_battlefield and will_floop:
+		_set_border_color(GameTheme.FLOOP_BLUE)
+	elif is_on_battlefield and has_floop() and not is_opponent:
+		_set_border_color(Color(0.5, 0.4, 0.2, 0.6))
+	else:
+		_set_border_color(_get_default_frame_tint())
 	if not is_on_battlefield:
 		z_index = 0
-		position = _hand_target_position
-		rotation = _hand_target_rotation
 		scale = Vector2.ONE
+		pivot_offset = Vector2.ZERO
+
+
+func _get_default_frame_tint() -> Color:
+	return _default_border_color
 
 
 func _set_border_color(color: Color) -> void:
@@ -318,11 +510,18 @@ func _set_border_color(color: Color) -> void:
 		style.border_color = color
 
 
+# ═══════════════════════════════════════════
+#  DRAG TO PLAY
+# ═══════════════════════════════════════════
+
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
-				_start_drag(event.global_position)
+				if is_on_battlefield and not is_opponent and has_floop():
+					floop_clicked.emit()
+				else:
+					_start_drag(event.global_position)
 			else:
 				_end_drag()
 	elif event is InputEventMouseMotion and _is_being_dragged:
@@ -351,9 +550,10 @@ func _end_drag() -> void:
 	if global_position.y < viewport_h * PLAY_THRESHOLD_Y:
 		played.emit()
 	else:
-		position = _hand_target_position
-		rotation = _hand_target_rotation
 		scale = Vector2.ONE
+		rotation = 0.0
+		if get_parent() is Container:
+			get_parent().queue_sort()
 
 
 func fly_to_play_area(target_pos: Vector2) -> void:

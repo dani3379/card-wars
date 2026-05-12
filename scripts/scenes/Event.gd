@@ -12,6 +12,7 @@ func _ready() -> void:
 	if not RunState.run_active:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
+	GameTheme.add_atmosphere(self, "event")
 	_pick_event()
 	_build_ui()
 
@@ -31,30 +32,30 @@ func _pick_event() -> void:
 
 func _build_ui() -> void:
 	for child in get_children():
-		if child.name != "Background":
+		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
 
-	var title = Label.new()
-	title.text = _event_data.name
-	title.add_theme_font_size_override("font_size", 28)
-	title.add_theme_color_override("font_color", Color(0.85, 0.70, 1.0))
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.position = Vector2(500, 50)
-	title.size = Vector2(600, 40)
+	var title = GameTheme.make_screen_title(_event_data.name, GameTheme.SPELL_PURPLE, 28)
+	title.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	title.offset_top = 40
+	title.offset_bottom = 90
 	add_child(title)
 
-	var desc = Label.new()
-	desc.text = _event_data.desc
-	desc.add_theme_font_size_override("font_size", 16)
-	desc.add_theme_color_override("font_color", Color(0.75, 0.72, 0.65))
+	var desc = GameTheme.make_label(_event_data.desc, 16, GameTheme.DESC_DIM)
 	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc.position = Vector2(350, 110)
-	desc.size = Vector2(900, 80)
+	desc.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	desc.offset_left = 200
+	desc.offset_right = -200
+	desc.offset_top = 110
+	desc.offset_bottom = 190
 	add_child(desc)
 
 	var row = HBoxContainer.new()
-	row.position = Vector2(300, 230)
+	row.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	row.offset_top = 220
+	row.offset_bottom = 420
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 60)
 	add_child(row)
 
@@ -63,9 +64,7 @@ func _build_ui() -> void:
 		btn.pressed.connect(_resolve_choice.bind(choice))
 		row.add_child(btn)
 
-	var skip_btn = Button.new()
-	skip_btn.text = "Leave"
-	skip_btn.custom_minimum_size = Vector2(120, 36)
+	var skip_btn = GameTheme.make_themed_button("Leave", Color(0.25, 0.20, 0.15), Vector2(120, 36))
 	skip_btn.position = Vector2(740, 810)
 	skip_btn.pressed.connect(func(): get_tree().change_scene_to_file(MAP_SCENE))
 	add_child(skip_btn)
@@ -73,10 +72,16 @@ func _build_ui() -> void:
 
 func _resolve_choice(choice: Dictionary) -> void:
 	var effects = choice.get("effects", [])
+	if effects.is_empty():
+		get_tree().change_scene_to_file(MAP_SCENE)
+		return
 	var result_text := ""
 	for effect in effects:
 		result_text += _apply_effect(effect) + "\n"
-	_show_result(result_text)
+	if result_text.strip_edges().is_empty():
+		get_tree().change_scene_to_file(MAP_SCENE)
+	else:
+		_show_result(result_text)
 
 
 func _apply_effect(effect: Dictionary) -> String:
@@ -91,7 +96,10 @@ func _apply_effect(effect: Dictionary) -> String:
 			RunState.damage_hero(effect.value)
 			return "Took %d damage." % effect.value
 		"gold":
-			RunState.gold += effect.value
+			if effect.value > 0:
+				RunState.gain_gold(effect.value)
+			else:
+				RunState.gold += effect.value  # losses bypass ectoplasm
 			if effect.value > 0:
 				return "Gained %d gold." % effect.value
 			else:
@@ -140,11 +148,14 @@ func _apply_effect(effect: Dictionary) -> String:
 		"remove_choice":
 			_start_remove_mode()
 			return ""
+		"remove_choice_multi":
+			_start_multi_remove_mode(effect.value)
+			return ""
 		"gamble":
 			if RunState.gold >= 30:
 				RunState.gold -= 30
 				if randi() % 2 == 0:
-					RunState.gold += 90
+					RunState.gain_gold(90)
 					return "Won! +90 gold!"
 				else:
 					return "Lost 30 gold."
@@ -152,7 +163,7 @@ func _apply_effect(effect: Dictionary) -> String:
 		"debuff_starters":
 			for i in range(RunState.deck.size()):
 				var id = RunState.deck[i]
-				if id in ["footman", "squire", "knight"]:
+				if id in ["troll", "sprite", "naga"]:
 					if not RunState.is_card_upgraded(i):
 						RunState.upgrade_card(i, "fortify_neg")
 			return "Starter creatures lose 1 HP permanently."
@@ -166,37 +177,29 @@ func _show_result(text: String) -> void:
 	if text.is_empty():
 		return
 	for child in get_children():
-		if child.name != "Background":
+		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
 
-	var result_label = Label.new()
-	result_label.text = text.strip_edges()
-	result_label.add_theme_font_size_override("font_size", 20)
-	result_label.add_theme_color_override("font_color", Color(0.9, 0.85, 0.7))
+	var result_label = GameTheme.make_label(text.strip_edges(), 20, GameTheme.IVORY)
 	result_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	result_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	result_label.position = Vector2(400, 300)
 	result_label.size = Vector2(800, 200)
 	add_child(result_label)
 
-	var continue_btn = Button.new()
-	continue_btn.text = "Continue"
-	continue_btn.custom_minimum_size = Vector2(140, 40)
+	var continue_btn = GameTheme.make_themed_button("Continue",
+		Color(0.20, 0.35, 0.20), Vector2(140, 40), 16)
 	continue_btn.position = Vector2(730, 550)
-	continue_btn.add_theme_font_size_override("font_size", 16)
 	continue_btn.pressed.connect(func(): get_tree().change_scene_to_file(MAP_SCENE))
 	add_child(continue_btn)
 
 
 func _start_remove_mode() -> void:
 	for child in get_children():
-		if child.name != "Background":
+		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
 
-	var title = Label.new()
-	title.text = "Choose a card to remove"
-	title.add_theme_font_size_override("font_size", 22)
-	title.add_theme_color_override("font_color", Color(1.0, 0.7, 0.4))
+	var title = GameTheme.make_label("Choose a card to remove", 22, GameTheme.KEYWORD_GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.position = Vector2(500, 30)
 	title.size = Vector2(600, 40)
@@ -224,15 +227,63 @@ func _start_remove_mode() -> void:
 		grid.add_child(btn)
 
 
-func _start_butcher_mode() -> void:
+func _start_multi_remove_mode(count: int) -> void:
 	for child in get_children():
-		if child.name != "Background":
+		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
 
-	var title = Label.new()
-	title.text = "Choose a creature for the Butcher (+2 ATK, +Wither 1)"
-	title.add_theme_font_size_override("font_size", 20)
-	title.add_theme_color_override("font_color", Color(1.0, 0.6, 0.3))
+	var _remaining = count
+	var title = GameTheme.make_label("Choose %d card(s) to remove" % _remaining,
+		22, GameTheme.BLOOD_RED)
+	title.name = "RemoveTitle"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.position = Vector2(500, 30)
+	title.size = Vector2(600, 40)
+	add_child(title)
+
+	var grid = GridContainer.new()
+	grid.name = "RemoveGrid"
+	grid.columns = 6
+	grid.position = Vector2(150, 80)
+	grid.add_theme_constant_override("h_separation", 10)
+	grid.add_theme_constant_override("v_separation", 10)
+	add_child(grid)
+
+	for i in range(RunState.deck.size()):
+		var data = RunState.get_upgraded_card_data(i)
+		var text: String
+		if data.get("type", "creature") == "spell":
+			text = "%s\n%dm" % [data.name, data.cost]
+		else:
+			text = "%s\n%d/%d" % [data.name, data.atk, data.hp]
+		var btn = _make_btn(text, "", Color(0.25, 0.2, 0.35), Vector2(130, 70))
+		btn.pressed.connect(_on_multi_remove_pick.bind(i, count))
+		grid.add_child(btn)
+
+
+var _multi_remove_remaining: int = 0
+var _multi_remove_removed: int = 0
+
+func _on_multi_remove_pick(deck_index: int, total: int) -> void:
+	if _multi_remove_remaining <= 0:
+		_multi_remove_remaining = total
+		_multi_remove_removed = 0
+	RunState.remove_card_at(deck_index)
+	_multi_remove_removed += 1
+	_multi_remove_remaining -= 1
+	if _multi_remove_remaining <= 0 or RunState.deck.size() <= 1:
+		_show_result("Removed %d card(s)." % _multi_remove_removed)
+	else:
+		_start_multi_remove_mode(_multi_remove_remaining)
+
+
+func _start_butcher_mode() -> void:
+	for child in get_children():
+		if child.name != "Background" and child.name != "Atmosphere":
+			child.queue_free()
+
+	var title = GameTheme.make_label("Choose a creature for the Butcher (+2 ATK, +Wither 1)",
+		20, GameTheme.KEYWORD_GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.position = Vector2(300, 30)
 	title.size = Vector2(1000, 40)
@@ -259,20 +310,7 @@ func _start_butcher_mode() -> void:
 
 
 func _make_btn(text: String, tooltip: String, color: Color, min_size: Vector2) -> Button:
-	var btn = Button.new()
-	btn.custom_minimum_size = min_size
-	btn.text = text
-	btn.tooltip_text = tooltip
-	btn.add_theme_font_size_override("font_size", 13)
-	var style = StyleBoxFlat.new()
-	style.corner_radius_top_left = 8
-	style.corner_radius_top_right = 8
-	style.corner_radius_bottom_left = 8
-	style.corner_radius_bottom_right = 8
-	style.bg_color = color
-	btn.add_theme_stylebox_override("normal", style)
-	btn.add_theme_color_override("font_color", Color.WHITE)
-	return btn
+	return GameTheme.make_themed_button(text, color, min_size, 13, tooltip)
 
 
 # ── Event definitions ──
@@ -343,10 +381,10 @@ const EVENTS: Dictionary = {
 		"desc": "A sinister altar pulses with shadow. It promises purification... through pain.",
 		"choices": [
 			{
-				"label": "Make the Sacrifice\n\nRemove 3 cards.\nTake 3 damage.",
-				"desc": "Remove 3 cards, take 3 dmg",
+				"label": "Make the Sacrifice\n\nChoose 3 cards to remove.\nTake 3 damage.",
+				"desc": "Choose 3 cards to remove, take 3 dmg",
 				"effects": [
-					{"type": "remove_cards", "value": 3},
+					{"type": "remove_choice_multi", "value": 3},
 					{"type": "damage", "value": 3},
 				],
 			},
