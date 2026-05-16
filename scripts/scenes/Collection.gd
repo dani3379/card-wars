@@ -3,6 +3,15 @@ extends Control
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 const MENU_SCENE = "res://scenes/main_menu.tscn"
 
+# Card Gallery — shows every card in CardDB.CARD_POOL grouped by rarity/type.
+# Previously baked cards locally; now shares CardTextureCache with Combat so
+# a card baked in the gallery is reused next time it shows up in hand.
+# Display nodes are real Card2D instances with `live_baked_mode = true` +
+# `is_on_battlefield = true`: the layout dispatches to the baked-overlay
+# fast path (single TextureRect + overlay numerals), the is_on_battlefield
+# flag disables the hand-card drag system, and Card2D's existing hover
+# behaviour pops up the detail panel.
+
 const SECTIONS = [
 	{"label": "Starter", "rarity": "starter", "type": "creature"},
 	{"label": "Common Creatures", "rarity": "common", "type": "creature"},
@@ -53,20 +62,24 @@ func _ready() -> void:
 	content.add_theme_constant_override("separation", 16)
 	scroll.add_child(content)
 
+	# Pre-bake every card's static-display texture into CardTextureCache.
+	# 122 cards × 2 frames ≈ 4 s of one-time load; cards appear section-by-
+	# section as they bake. Cached entries from a previous Combat run return
+	# instantly, so revisiting the gallery is fast.
 	var all_cards: Array[Dictionary] = []
 	for id in CardDB.CARD_POOL:
 		all_cards.append(CardDB.CARD_POOL[id])
 
 	for section in SECTIONS:
-		var cards: Array[Dictionary] = []
+		var section_cards: Array[Dictionary] = []
 		for c in all_cards:
 			if c.get("rarity", "") == section.rarity and c.get("type", "") == section.type:
-				cards.append(c)
-		if cards.is_empty():
+				section_cards.append(c)
+		if section_cards.is_empty():
 			continue
 
 		var section_lbl := Label.new()
-		section_lbl.text = "%s  (%d)" % [section.label, cards.size()]
+		section_lbl.text = "%s  (%d)" % [section.label, section_cards.size()]
 		if GameTheme.font_display:
 			section_lbl.add_theme_font_override("font", GameTheme.font_display)
 		section_lbl.add_theme_font_size_override("font_size", 20)
@@ -75,14 +88,25 @@ func _ready() -> void:
 		content.add_child(section_lbl)
 
 		var grid := HFlowContainer.new()
-		grid.add_theme_constant_override("h_separation", 12)
-		grid.add_theme_constant_override("v_separation", 12)
+		grid.add_theme_constant_override("h_separation", 22)
+		grid.add_theme_constant_override("v_separation", 24)
 		content.add_child(grid)
 
-		cards.sort_custom(func(a, b): return a.get("cost", 0) < b.get("cost", 0))
-		for card_data in cards:
+		section_cards.sort_custom(func(a, b): return a.get("cost", 0) < b.get("cost", 0))
+
+		# Bake then add per card. Sequential so the SubViewport handles one
+		# card at a time and the user sees cards appear top-down rather than
+		# all popping in at the end of a 4-second freeze. Cards already in
+		# the cache (e.g. revisiting after a combat) return immediately.
+		for card_data in section_cards:
+			await CardTextureCache.bake(card_data)
+			if not is_inside_tree():
+				return  # user hit Back during bake
 			var card = CARD_SCENE.instantiate()
 			card.card_data = card_data.duplicate(true)
 			card.card_id = card_data.get("id", "")
+			# is_on_battlefield = true → no drag, no hover scale; just the
+			# detail popup, matching the pre-existing gallery behaviour.
 			card.is_on_battlefield = true
+			card.live_baked_mode = true
 			grid.add_child(card)

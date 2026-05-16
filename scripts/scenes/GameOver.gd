@@ -7,6 +7,13 @@ const MAIN_MENU = "res://scenes/main_menu.tscn"
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "game_over")
 
+	# Apply display font to title
+	if GameTheme.font_display:
+		$Title.add_theme_font_override("font", GameTheme.font_display)
+	if GameTheme.font_body:
+		$Subtitle.add_theme_font_override("font", GameTheme.font_body)
+		$Stats.add_theme_font_override("font", GameTheme.font_body)
+
 	if RunState.hero_hp > 0:
 		$Title.text = "VICTORY"
 		var vcol := Color(0.4, 1.0, 0.5)
@@ -34,7 +41,13 @@ func _ready() -> void:
 	hover.bg_color = bg.lightened(0.18)
 	hover.border_color = GameTheme.GILT_BRIGHT
 	$BackBtn.add_theme_stylebox_override("hover", hover)
+	var pressed := normal.duplicate() as StyleBoxFlat
+	pressed.bg_color = bg.darkened(0.20)
+	$BackBtn.add_theme_stylebox_override("pressed", pressed)
 	$BackBtn.add_theme_color_override("font_color", GameTheme.IVORY)
+	$BackBtn.add_theme_color_override("font_hover_color", Color(1.0, 0.95, 0.80))
+	if GameTheme.font_display:
+		$BackBtn.add_theme_font_override("font", GameTheme.font_display)
 	$BackBtn.pressed.connect(_back)
 
 

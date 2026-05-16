@@ -106,6 +106,25 @@ const RELICS: Dictionary = {
 		"hooks": ["hero_damaged"], "effect": "bloodstone_buff", "value": 1},
 
 	# ═══════════════════════════════════════════
+	#  4x4 RELICS — designed around the front/back row redesign
+	# ═══════════════════════════════════════════
+	"vanguard_banner": {"id": "vanguard_banner", "name": "Vanguard Banner", "tier": "combat",
+		"desc": "Your front-row creatures have +1 ATK.",
+		"hooks": [], "effect": "front_row_atk", "value": 1},
+	"rear_guard_charm": {"id": "rear_guard_charm", "name": "Rear Guard Charm", "tier": "combat",
+		"desc": "Your back-row creatures regenerate 1 HP at start of each round.",
+		"hooks": ["turn_start"], "effect": "back_row_regen", "value": 1},
+	"phantom_veil": {"id": "phantom_veil", "name": "Phantom Veil", "tier": "combat",
+		"desc": "Once per round: the first friendly that would die survives at 1 HP.",
+		"hooks": ["creature_death"], "effect": "phantom_veil", "value": 1},
+	"twin_edge": {"id": "twin_edge", "name": "Twin Edge", "tier": "combat",
+		"desc": "Your back-row creatures attack even when their front is alive (split damage).",
+		"hooks": [], "effect": "twin_edge", "value": 0},
+	"hexagonal_shield": {"id": "hexagonal_shield", "name": "Hexagonal Shield", "tier": "combat",
+		"desc": "Enemy ranged attacks can't target your back row.",
+		"hooks": [], "effect": "back_ranged_immune", "value": 0},
+
+	# ═══════════════════════════════════════════
 	#  UTILITY RELICS (5)
 	# ═══════════════════════════════════════════
 	"merchants_license": {"id": "merchants_license", "name": "Merchant's License", "tier": "utility",

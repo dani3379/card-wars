@@ -5,12 +5,12 @@ extends Node
 const KEYWORDS: Dictionary = {
 	"armored":    {"display": "Armored",     "desc": "Takes 1 less damage from creature attacks (min 1)."},
 	"swift":      {"display": "Swift",       "desc": "Attacks before simultaneous combat."},
-	"ranged":     {"display": "Ranged",      "desc": "Attacks random enemy creature. Lane counts as empty."},
+	"ranged":     {"display": "Ranged",      "desc": "Attacks back-row enemies first, then front. Blocked column is fine."},
 	"thorns":     {"display": "Thorns",      "desc": "Deals 1 back to anything that attacks it."},
 	"regenerate": {"display": "Regenerate",  "desc": "Heals 1 HP at start of each round."},
 	"summon":     {"display": "Summon",      "desc": "Summons 1/1 token in adjacent empty lane."},
 	"last_stand": {"display": "Last Stand",  "desc": "First lethal hit leaves it at 1 HP."},
-	"piercing":   {"display": "Piercing",    "desc": "Excess kill damage hits enemy face."},
+	"piercing":   {"display": "Piercing",    "desc": "Excess kill damage hits enemy back row, then face."},
 	"sacrifice":  {"display": "Sacrifice",   "desc": "Kill a friendly creature to play."},
 	"exhaust":    {"display": "Exhaust",     "desc": "Removed from fight after use."},
 	"retain":     {"display": "Retain",      "desc": "Keep instead of discarding at end of turn."},
@@ -34,6 +34,56 @@ static func tooltip_for(keyword: String) -> String:
 	if KEYWORDS.has(keyword):
 		return "%s: %s" % [KEYWORDS[keyword].display, KEYWORDS[keyword].desc]
 	return ""
+
+
+# Wrap any occurrence of a keyword display name in BBCode color+bold tags so a
+# RichTextLabel renders them in gold. Match is case-insensitive but preserves
+# the original word casing. Multi-word keywords ("Last Stand", "On-Enter",
+# "On-Death", "Adj. Buff") are handled by sorting longest-first so the longer
+# names match before their substrings.
+const KEYWORD_GOLD := "#c89e4a"
+
+static func colorize_keywords(text: String) -> String:
+	if text.is_empty():
+		return ""
+	var names: Array[String] = []
+	for k in KEYWORDS.keys():
+		names.append(KEYWORDS[k].display)
+	# Sort longest-first so "Last Stand" matches before "Last".
+	names.sort_custom(func(a, b): return a.length() > b.length())
+	var out = text
+	for n in names:
+		# Build a regex matching whole-word (or hyphenated-word) occurrences.
+		# We use case-insensitive search via lowercase compare.
+		var idx = 0
+		var lowered = out.to_lower()
+		var n_low = n.to_lower()
+		var result = ""
+		while idx < out.length():
+			var found = lowered.find(n_low, idx)
+			if found == -1:
+				result += out.substr(idx)
+				break
+			# Word-boundary check: prev/next char must not be alphanumeric.
+			var prev_ok = (found == 0) or not _is_word_char(out[found - 1])
+			var end = found + n.length()
+			var next_ok = (end >= out.length()) or not _is_word_char(out[end])
+			if prev_ok and next_ok:
+				result += out.substr(idx, found - idx)
+				result += "[b][color=%s]%s[/color][/b]" % [KEYWORD_GOLD, out.substr(found, n.length())]
+				idx = end
+			else:
+				result += out.substr(idx, found - idx + 1)
+				idx = found + 1
+		out = result
+		lowered = out.to_lower()
+	return out
+
+
+static func _is_word_char(c: String) -> bool:
+	# Hyphens and periods are NOT word chars here, so "On-Enter" inside text like
+	# "...On-Enter trigger" still matches.
+	return c.length() > 0 and (c.to_lower() != c.to_upper() or (c >= "0" and c <= "9"))
 
 
 static func dispatch_on_enter(card, lane_idx: int, is_enemy: bool, ctx) -> void:
@@ -61,19 +111,15 @@ static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx) -> void
 
 
 static func dispatch_start_of_round(ctx) -> void:
-	for lane_idx in range(4):
-		for field_arr in [ctx._player_field, ctx._enemy_field]:
-			var is_enemy = (field_arr == ctx._enemy_field)
-			var card = field_arr[lane_idx]
-			if card == null:
-				continue
-			if card.has_keyword("regenerate"):
-				card.current_hp = mini(card.current_hp + 1, card.card_data.hp)
-				card.update_stat_display()
-			if card.has_keyword("wither"):
-				var w = card.card_data.get("wither", 1)
-				card.current_atk = maxi(0, card.current_atk - w)
-				card.update_stat_display()
+	# 4x4: iterate every creature on both sides, both rows.
+	for card in ctx._all_creatures_both_sides():
+		if card.has_keyword("regenerate"):
+			card.current_hp = mini(card.current_hp + 1, card.card_data.hp)
+			card.update_stat_display()
+		if card.has_keyword("wither"):
+			var w = card.card_data.get("wither", 1)
+			card.current_atk = maxi(0, card.current_atk - w)
+			card.update_stat_display()
 
 
 static func _run_on_enter(effect: Dictionary, lane_idx: int, is_enemy: bool, ctx) -> void:
@@ -89,18 +135,13 @@ static func _run_on_enter(effect: Dictionary, lane_idx: int, is_enemy: bool, ctx
 			if not is_enemy:
 				ctx.draw_one()
 		"damage_random_player":
-			var targets: Array = []
-			var field = ctx._player_field if is_enemy else ctx._enemy_field
-			for c in field:
-				if c != null:
-					targets.append(c)
-			if targets.size() > 0:
-				targets[randi() % targets.size()].take_damage(effect.value)
+			# "From the placer's perspective, hit a random opposing creature." 4x4: both rows.
+			var opponents = ctx._all_friendly(not is_enemy)
+			if opponents.size() > 0:
+				opponents[randi() % opponents.size()].take_damage(effect.value)
 		"damage_all_enemies":
-			var field = ctx._player_field if is_enemy else ctx._enemy_field
-			for c in field:
-				if c != null:
-					c.take_damage(effect.value)
+			for c in ctx._all_friendly(not is_enemy):
+				c.take_damage(effect.value)
 		"draw":
 			if not is_enemy:
 				for i in effect.value:
@@ -148,10 +189,8 @@ static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ct
 			if target != null:
 				target.take_damage(effect.value)
 		"damage_all_enemies":
-			var field = ctx._player_field if was_enemy else ctx._enemy_field
-			for c in field:
-				if c != null:
-					c.take_damage(effect.value)
+			for c in ctx._all_friendly(not was_enemy):
+				c.take_damage(effect.value)
 		"summon":
 			ctx.summon_token(effect.atk, effect.hp, lane_idx, was_enemy)
 		"bonus_mana":
@@ -167,28 +206,32 @@ static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ct
 				ctx.damage_enemy_hero(effect.value)
 		"debuff_all_player_atk":
 			if was_enemy:
-				for c in ctx._player_field:
-					if c != null:
-						c.current_atk = maxi(0, c.current_atk - effect.value)
-						c.update_stat_display()
+				for c in ctx._all_player_creatures():
+					c.current_atk = maxi(0, c.current_atk - effect.value)
+					c.update_stat_display()
 		"damage_adjacent":
-			var field = ctx._enemy_field if was_enemy else ctx._player_field
-			for adj in [lane_idx - 1, lane_idx + 1]:
-				if adj >= 0 and adj < 4 and field[adj] != null:
-					field[adj].take_damage(effect.value)
+			# 4x4: hit same-row adjacency on the dead creature's side.
+			# Without a row reference we hit both rows' adjacencies.
+			for row in [0, 1]:
+				var field = ctx._row_array(was_enemy, row)
+				for adj in [lane_idx - 1, lane_idx + 1]:
+					if adj >= 0 and adj < 4 and field[adj] != null:
+						field[adj].take_damage(effect.value)
 		_:
 			pass
 
 
 static func _do_summon(lane_idx: int, is_enemy: bool, ctx) -> void:
+	# 4x4: try same-row adjacent empties first (front), then fall through.
 	var adj_lanes: Array[int] = []
 	if lane_idx > 0:
 		adj_lanes.append(lane_idx - 1)
 	if lane_idx < 3:
 		adj_lanes.append(lane_idx + 1)
 	adj_lanes.shuffle()
-	var field = ctx._enemy_field if is_enemy else ctx._player_field
-	for l in adj_lanes:
-		if field[l] == null:
-			ctx.summon_token(1, 1, l, is_enemy)
-			return
+	for row in [0, 1]:
+		var field = ctx._row_array(is_enemy, row)
+		for l in adj_lanes:
+			if field[l] == null:
+				ctx.summon_token(1, 1, l, is_enemy, row)
+				return
