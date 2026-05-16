@@ -3,5 +3,5 @@
 [ext_resource type="Script" path="res://scripts/Card2D.gd" id="1"]
 
 [node name="Card2D" type="PanelContainer"]
-custom_minimum_size = Vector2(140, 200)
+custom_minimum_size = Vector2(150, 200)
 script = ExtResource("1")

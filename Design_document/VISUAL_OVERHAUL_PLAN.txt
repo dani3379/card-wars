@@ -1,0 +1,525 @@
+BURNING MEADOW — Visual Overhaul Plan
+=======================================
+
+Current state: flat colored rectangles, tiny text, no visual hierarchy.
+Everything is dark grey on dark grey. Looks like a prototype, not a game.
+
+Goal: proper card game quality visuals using only Godot UI nodes (StyleBoxFlat,
+Labels, ColorRects, Containers). No particle effects, no shaders, no imported
+art assets. Just clean, well-structured programmatic UI.
+
+
+PHASE 10: Global Styling Foundation (do FIRST)
+================================================
+
+This sets up reusable pieces that all other phases depend on.
+
+Create scripts/ui/Theme.gd (autoload singleton):
+
+  Shared color palette constants:
+    PARCHMENT_BG ....... Color(0.18, 0.14, 0.10)     Dark warm brown
+    PARCHMENT_LIGHT .... Color(0.25, 0.20, 0.14)     Lighter brown panels
+    PARCHMENT_BORDER ... Color(0.55, 0.42, 0.20)     Gold-brown border
+    GILT ............... Color(0.85, 0.70, 0.30)      Bright gold accents
+    GILT_DIM ........... Color(0.55, 0.42, 0.20)      Muted gold
+    BLOOD_RED .......... Color(0.85, 0.25, 0.20)      HP damage, enemy tint
+    HEALTH_GREEN ....... Color(0.25, 0.75, 0.30)      HP full
+    MANA_BLUE .......... Color(0.35, 0.55, 0.90)      Mana, spell tint
+    MANA_EMPTY ......... Color(0.15, 0.18, 0.25)      Spent mana pip
+    IVORY .............. Color(0.92, 0.88, 0.78)      Primary text
+    CREAM .............. Color(0.75, 0.70, 0.60)      Secondary text
+    FADED .............. Color(0.45, 0.40, 0.35)      Disabled/ghost text
+    SPELL_PURPLE ....... Color(0.45, 0.30, 0.65)      Spell card tint
+    STARTER_GREY ....... Color(0.50, 0.48, 0.45)      Starter rarity
+    COMMON_WHITE ....... Color(0.85, 0.82, 0.78)      Common rarity
+    UNCOMMON_BLUE ...... Color(0.40, 0.55, 0.85)      Uncommon rarity
+    RARE_GOLD .......... Color(0.90, 0.72, 0.25)      Rare rarity
+
+  Shared StyleBox factory functions:
+    make_panel(bg_color, border_color, corner_radius, border_width) -> StyleBoxFlat
+    make_card_frame(type, rarity, is_opponent) -> StyleBoxFlat
+    make_button_style(color, hover_color) -> Dictionary of styleboxes
+    make_hp_bar(current, max, width, height) -> Control
+    make_mana_pips(current, max) -> HBoxContainer
+
+  Shared font sizes:
+    FONT_TITLE ......... 28     Screen titles
+    FONT_HEADER ........ 22     Section headers
+    FONT_BODY .......... 16     Primary text
+    FONT_CARD_NAME ..... 14     Card names
+    FONT_CARD_STATS .... 22     ATK/HP numbers
+    FONT_CARD_COST ..... 18     Mana cost
+    FONT_CARD_DESC ..... 11     Card description text
+    FONT_SMALL ......... 10     Labels, captions
+    FONT_HUD ........... 18     HUD numbers
+
+  Shared button factory:
+    make_themed_button(text, color, size) -> Button
+    Applies consistent StyleBoxFlat with:
+      - Rounded corners (8px)
+      - 2px gold border
+      - Dark shadow (offset 2, size 4)
+      - Hover state: lighter bg, brighter border
+      - Pressed state: darker bg, inset shadow
+      - Disabled state: grey bg, no border highlight
+    Replaces the 8+ different _make_btn() functions across Shop/Rest/Event/Reward
+
+Files touched: 1 new file (Theme.gd), project.godot (add autoload)
+
+
+PHASE 1: Card2D Redesign
+==========================
+
+Current: 140x200 flat dark rectangle. Cost and name on same line in tiny text.
+Small colored rectangle as art. Stats at bottom center with "/" separator.
+Keywords in yellow text. Everything cramped.
+
+Target: Recognizable card game card. Clear visual hierarchy.
+
+Card size: 160x220 (up from 140x200)
+
+Layout (top to bottom):
+  +----------------------------------+
+  | [COST]  Card Name           [R]  |  <- Header bar (28px)
+  |  (18)   (14pt ivory)      (gem)  |
+  +----------------------------------+
+  |                                  |
+  |         ART REGION               |  <- 55% of card height
+  |       (colored rect with         |
+  |        inner frame border)       |
+  |                                  |
+  +----------------------------------+
+  |  Keywords  |  Floop indicator    |  <- Keyword bar (16px, if any)
+  +----------------------------------+
+  |  Description text (11pt)         |  <- Desc area (fills remaining)
+  |  wrapping, cream colored         |
+  +----------------------------------+
+  | [ATK]                     [HP]   |  <- Stat footer (30px, creatures)
+  | red circle    or    green circle |
+  |   (22pt)        "SPELL" (spells) |
+  +----------------------------------+
+
+Cost badge:
+  - Circle shape (ColorRect + corner_radius = 14, size 28x28)
+  - Blue fill (MANA_BLUE)
+  - White number centered (18pt)
+  - Always top-left, overlapping the header slightly
+
+Name:
+  - 14pt, IVORY color
+  - Clip if too long
+  - Left-aligned next to cost
+
+Rarity indicator:
+  - Small circle (8x8) or colored dot in top-right of header
+  - Grey = starter, white = common, blue = uncommon, gold = rare
+  - Subtle but visible
+
+Art region:
+  - Colored rectangle based on card ID hash (keep current approach)
+  - BUT with higher saturation (0.55 player, 0.40 enemy) and value (0.45/0.30)
+  - Inner border: 1px darker shade inset by 3px, creating a "frame" effect
+  - For spells: use a different pattern — vertical gradient from spell_purple to darker
+
+Keyword bar:
+  - Only shown if card has keywords
+  - Small text (10pt), GILT color
+  - If floop: show small blue circle icon before "Floop"
+
+Description:
+  - 11pt, CREAM color
+  - Auto-wrap
+  - If no description (Peasant/Soldier), this area is smaller and art region grows
+
+Stat footer (creatures):
+  - ATK: left-aligned, red background circle (24x24), white number (20pt)
+  - HP: right-aligned, green background circle (24x24), white number (20pt)
+  - No "/" separator — the circles make it clear
+  - Buffed ATK: circle turns yellow-gold
+  - Damaged HP: circle turns darker red
+
+Stat footer (spells):
+  - "SPELL" centered, purple text (14pt)
+
+Border:
+  - 3px width (up from 2px)
+  - 8px corner radius (up from 6px)
+  - Default: PARCHMENT_BORDER
+  - Hover: GILT (bright gold)
+  - Flooped: MANA_BLUE
+  - Sacrifice target: BLOOD_RED
+  - Can't afford: border dims to FADED
+
+Card background:
+  - Creatures: dark warm brown (0.14, 0.11, 0.08)
+  - Spells: dark purple-brown (0.12, 0.08, 0.14)
+  - Enemy creatures: dark red-brown (0.16, 0.08, 0.06)
+  - Slightly lighter than current — more contrast with the border
+
+Floop on battlefield:
+  - Available (not toggled): faint blue tint on border, small "floop" hint text
+  - Toggled on: full blue border, art region gets blue-tinted overlay,
+    "FLOOP" text replaces description area
+
+Hover behavior (hand cards):
+  - Lift up 40px
+  - Scale to 1.15x
+  - z_index = 10
+  - Border changes to bright gold
+  - On mouse exit: return to position (let container manage)
+
+Unplayable (not enough mana):
+  - Entire card gets 40% opacity overlay
+  - Cost badge turns red instead of blue
+  - Still draggable (game shows "not enough mana" message)
+
+Files touched: Card2D.gd (rewrite _build_style, _build_layout, update_stat_display,
+update_floop_display), may reference Theme.gd constants
+
+
+PHASE 2: Combat Board
+=======================
+
+Current: flat black background, invisible lanes, tiny side labels, thin gold
+midline, lane slots are barely visible panels with "Lane X" text.
+
+Target: clear battlefield grid where you can see the 4-lane structure.
+
+Background:
+  - Not flat black. Gradient effect using two overlapping ColorRects:
+    Top half: dark red-brown (0.12, 0.07, 0.06) — enemy territory
+    Bottom half: dark green-brown (0.07, 0.10, 0.06) — player territory
+  - Very subtle, just enough to distinguish sides without looking at labels
+
+Lane columns:
+  - Alternating very subtle tint: lanes 1 and 3 slightly lighter (+0.02 value)
+  - Creates a visible 4-column grid without explicit divider lines
+
+Lane slots:
+  - Larger: 180px wide minimum (up from 150)
+  - Empty slot appearance: card-shaped outline with dashed/faint border
+    (1px, FADED color), rounded corners matching card shape
+  - Remove "Lane 1/2/3/4" text — the card-shaped placeholders make it obvious
+  - Slot background: very subtle fill (0.08, 0.07, 0.06, 0.3) — barely visible
+    but distinct from the board background
+
+Midline:
+  - 4px thick (up from 3)
+  - GILT color with slight glow (shadow_size = 3)
+  - No labels — clean divider
+
+Side labels:
+  - Remove "— ENEMY SIDE —" and "— YOUR SIDE —"
+  - The HP panels, card colors, and board gradient make it obvious
+  - Less visual clutter
+
+Lane spacing:
+  - 12px between lanes (up from 8)
+  - More breathing room for cards
+
+Files touched: Combat.gd (_build_board, _make_lane_slot)
+
+
+PHASE 3: Combat HUD
+=====================
+
+Current: small floating parchment panels in corners, tiny text, numbers only
+for HP and mana, default Godot buttons.
+
+Target: integrated top/bottom bars, HP bars with fill, mana pips.
+
+Top bar:
+  - Full-width panel anchored to top (height: 80px)
+  - Warm dark brown background with gold bottom border (2px)
+  - Left section: encounter name (16pt, GILT)
+  - Center section: "ROUND X — YOUR TURN" (22pt, IVORY)
+  - Right section: enemy HP bar
+    - Red bar (200px wide, 24px tall)
+    - Fill from left to right proportional to HP
+    - "Enemy 15/20" text overlaid on bar (14pt white)
+    - Bar background: dark grey. Fill: gradient red to dark red
+
+Bottom bar:
+  - Full-width panel anchored to bottom (height: 70px)
+  - Same warm dark brown as top bar, gold top border
+  - Left section: player HP bar
+    - Green bar (200px wide, 24px tall)
+    - Fill proportional to HP
+    - "25/25" text overlaid (14pt white)
+    - Green when > 50%, yellow when 25-50%, red when < 25%
+  - Center section: mana pips
+    - Row of circles (20px diameter each)
+    - Filled = MANA_BLUE, empty = MANA_EMPTY
+    - Show actual pip count based on max mana (3-5+ pips)
+    - Banked mana pips: slightly different shade (lighter blue)
+  - Right section: buttons
+    - END TURN button: 120x40, warm brown fill, gold border, "END TURN [E]"
+    - SACRIFICE button: 100x36, dark red fill, "SACRIFICE [S]"
+    - Both styled with Theme.make_themed_button()
+
+Encounter passive text:
+  - Below the top bar, centered, semi-transparent dark panel behind it
+  - Amber text (14pt)
+  - Only visible if encounter has a passive
+
+Info messages (center screen):
+  - Larger (26pt)
+  - Dark semi-transparent panel behind the text (not just outlined text)
+  - Fades after 2 seconds
+
+Draw pile / discard pile indicators:
+  - Bottom-left area, small styled panels
+  - "Draw: 6" and "Discard: 3" with small icon
+
+Files touched: Combat.gd (_build_hud, _build_end_turn_button,
+_build_sacrifice_button, _update_hud, _show_info)
+
+
+PHASE 4: Hand Area
+===================
+
+Current: HBoxContainer with -20 separation, cards in flat row, cards fly to
+wrong position on hover/drag cancel.
+
+Target: card fan with hover lift, clear hand region.
+
+Hand region:
+  - Defined area at bottom of board (between board and bottom HUD bar)
+  - Very subtle dark panel backing (slightly darker than board bg)
+  - 220px height for the hand area
+
+Card fan layout:
+  - KEEP HBoxContainer approach but improve it:
+  - Separation: -30px (more overlap for larger cards)
+  - Each card gets slight rotation: -(N/2 - i) * 2 degrees
+    where N = hand size, i = card index
+  - Each card gets slight Y offset: parabolic curve, center cards higher
+  - This creates a natural fan/arc shape
+
+Hover behavior:
+  - Hovered card: lift up 40px (negative Y offset), scale 1.15x, z_index 10
+  - Snap back on mouse exit via container re-sort
+  - No position tracking needed — container manages base positions
+
+Card count:
+  - Small label in top-right of hand region: "Hand 4/10" (10pt, FADED)
+
+Unplayable dimming:
+  - Cards where cost > player_mana:
+  - Apply modulate = Color(0.5, 0.5, 0.5, 0.8) to dim them
+  - Cost badge turns red to show "can't afford"
+  - Updated each time mana changes
+
+Drag feedback:
+  - While dragging above play threshold: card border glows green
+  - While dragging below threshold: border returns to normal
+  - On cancel: container re-sorts, card slides back
+
+Files touched: Card2D.gd (hover behavior, fan rotation),
+Combat.gd (_hand_container setup, draw_one for dimming updates)
+
+
+PHASE 5: Map View
+==================
+
+Current: color-coded rectangular buttons, straight Line2D connections,
+basic layout.
+
+Target: map that looks like a journey/adventure path.
+
+Node styling:
+  - Replace plain buttons with styled circular nodes (60x60)
+  - Each node type gets a distinct color AND icon text:
+    Combat: dark red circle, sword icon text
+    Elite: gold circle, star icon text
+    Boss: large dark red circle (80x80), skull icon text
+    Rest: green circle, campfire icon text
+    Shop: amber circle, coin icon text
+    Event: purple circle, "?" text
+  - All nodes have 3px border, dark shadow (size 4)
+
+Node states:
+  - Available (clickable): pulsing border (brighter gold, use a timer to
+    alternate border color), larger size
+  - Current position: bright gold filled circle marker on current row
+  - Visited: dimmed (40% opacity), small checkmark overlaid
+  - Locked (not reachable): very dim (20% opacity), no border
+
+Paths:
+  - 3px thick lines (up from current)
+  - Available paths: GILT color, full opacity
+  - Visited paths: FADED color, 40% opacity
+  - Unreachable paths: very dim, 15% opacity
+  - Slight curve: use Line2D with 3 points (start, midpoint shifted
+    slightly, end) for gentle S-curves between rows
+
+Background:
+  - Dark warm gradient, top to bottom
+  - Very subtle vertical "road" feel
+
+Act banner:
+  - Top of screen: "ACT 1" in large styled banner
+  - Parchment panel with gold border, centered
+  - Act number prominent (28pt)
+
+Player info bar:
+  - Bottom of screen: HP, gold, deck size, relics
+  - Consistent with combat HUD styling
+
+Files touched: MapView.gd (significant rewrite of node rendering and path drawing)
+
+
+PHASE 6: Shop Screen
+======================
+
+Current: text buttons with card descriptions and prices, flat layout.
+
+Target: merchant stall with real card previews.
+
+Layout:
+  - Title: "SHOP" banner at top, styled parchment panel, gold text (28pt)
+  - Gold display: prominent, top-right, coin icon + amount (22pt)
+
+Card display:
+  - Use actual Card2D instances (or at minimum, styled panels that match
+    Card2D's visual structure) for cards being sold
+  - Cards displayed at 0.85x scale in a horizontal row
+  - Price tag below each card: gold coin icon + amount
+  - Sold out / can't afford: card dims, price turns red
+
+Relic display:
+  - Larger panel (220x120) with parchment styling
+  - Relic name in GILT (16pt)
+  - Description in CREAM (12pt)
+  - Price below in gold
+
+Services section:
+  - "Healing Potion" and "Remove Card" as styled panels, not plain buttons
+  - Potion: green tinted panel with heal amount
+  - Removal: red tinted panel
+
+Leave button:
+  - Bottom center, muted styling (player shouldn't accidentally leave)
+
+Disabled items:
+  - Clear grey overlay when can't afford
+  - Price text turns red
+  - "Not enough gold" tooltip
+
+Files touched: Shop.gd (significant rewrite of _build_ui)
+
+
+PHASE 7: Rest Site
+===================
+
+Current: three flat buttons in a row.
+
+Target: cozy rest stop with clear choices.
+
+Layout:
+  - Title: "REST SITE" banner, green-gold tint
+  - HP display: prominent bar below title showing current/max
+  - Three option panels (320x280 each) in a row:
+
+Heal panel:
+  - Green tinted background
+  - Large campfire icon area (text: flame emoji or "REST" in decorative style)
+  - "Heal to full HP" description
+  - Shows: "17/25 -> 25/25"
+  - Blocked by Coffee Dripper: red X overlay, explanation text
+
+Upgrade panel:
+  - Amber tinted background
+  - Hammer icon area
+  - "Upgrade a card" description
+  - Shows upgrade path previews
+  - Blocked by Fusion Hammer: red X overlay
+
+Remove panel:
+  - Red tinted background
+  - X icon area
+  - "Remove a card" description
+
+Card picker (upgrade/remove mode):
+  - Show actual Card2D instances in a scrollable grid
+  - Cards at 0.8x scale
+  - Clickable with hover highlight
+  - Back/cancel button styled consistently
+
+Files touched: Rest.gd (rewrite _build_choice_ui, _start_upgrade_mode,
+_start_remove_mode)
+
+
+PHASE 8: Reward Screen
+========================
+
+Current: dark screen, three flat purple/blue buttons with tiny card text.
+"Skip Reward" button at bottom.
+
+Target: exciting reward moment with real card previews.
+
+Layout:
+  - "VICTORY" banner at top (28pt, GILT, styled parchment panel)
+  - "Choose a card to add to your deck" subtitle (16pt, CREAM)
+  - Three Card2D instances displayed at 1.2x scale, centered, spaced evenly
+  - Cards have hover: lift up + glow border
+  - Click to pick (same as current)
+
+Boss reward (relics):
+  - After card pick, relic choice appears
+  - Three relic panels (250x150), parchment styled
+  - Relic name prominent (18pt, GILT)
+  - Description (13pt, CREAM)
+  - "+1 max mana" highlight in MANA_BLUE for boss relics
+  - Downside text in BLOOD_RED below
+
+Skip button:
+  - Smaller, bottom center
+  - Muted color (FADED border) — de-emphasized
+
+Gold reward display:
+  - Show gold gained: "+25 gold" with coin icon
+
+Files touched: Reward.gd (rewrite _build_ui to use Card2D instances)
+
+
+PHASE 9: Main Menu
+====================
+
+Current: presumably basic buttons.
+
+Target: atmospheric title screen.
+
+Layout:
+  - Dark warm background (subtle gradient)
+  - "BURNING MEADOW" title: large (36pt), GILT color, centered upper-third
+  - Subtitle/tagline: "A Lane Combat Deckbuilder" (16pt, CREAM)
+  - Three buttons centered vertically:
+    "New Run" — large (200x50), warm brown, gold border
+    "Continue" — same size, slightly dimmer (disabled if no run active)
+    "Quit" — smaller (160x40), muted colors
+  - Buttons use Theme.make_themed_button()
+  - Meta stats shown small at bottom: "Wins: 3 | Losses: 12"
+
+Files touched: main_menu.gd (or whatever the main menu script is)
+
+
+IMPLEMENTATION ORDER
+=====================
+
+  Priority  Phase   Impact    Effort   Description
+  --------  ------  -------   ------   -----------
+  1         10      HIGH      LOW      Global styling foundation (1 new file)
+  2         1       HIGHEST   MEDIUM   Card2D redesign (everything depends on this)
+  3         3       HIGH      MEDIUM   Combat HUD (makes combat readable)
+  4         4       HIGH      LOW      Hand area (fixes hover/drag feel)
+  5         2       MEDIUM    LOW      Combat board (lanes and battlefield)
+  6         8       MEDIUM    MEDIUM   Reward screen (use real Card2D)
+  7         6       MEDIUM    MEDIUM   Shop (use real Card2D)
+  8         7       MEDIUM    LOW      Rest site (styled choices)
+  9         5       MEDIUM    MEDIUM   Map view (node icons, paths)
+  10        9       LOW       LOW      Main menu (least urgent)
+
+Estimated total: ~2000 lines of UI code changes across 10 files.
+No new assets, no shaders, no particles. Just structured StyleBoxFlat
+usage, proper layout hierarchy, and consistent theming.

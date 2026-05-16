@@ -92,3 +92,26 @@ Spells: `id, name, type:"spell", cost, rarity, keywords[], desc, spell{type,valu
 - Token creatures have synthetic card_data created in `summon_token()`, not from CardDB
 - MapView, Shop, Rest, Event all build UI programmatically; their .tscn files only have Background + script
 - Card upgrades are tracked per deck index but not yet applied during combat card draw (draw pile uses card IDs)
+
+## Card text positioning (Card2D v3 layout)
+
+Text on cards (cost, name, type, description, ATK, HP, FLOOP) is positioned by **pixel-measured POINT_* constants** in [scripts/Card2D.gd](scripts/Card2D.gd), each pointing at the center of a painted region in the 300×400 source frame texture.
+
+**To tune or re-derive these positions, run:**
+
+```
+python tools/measure_frame.py
+```
+
+It scans `assets/frames/frame_creature_common.png` pixel-by-pixel — looking for the red orb's bright-red core, the banner's dark-gray interior, the gold divider scroll, the tan parchment well, etc. — and prints a copy-pasteable block of `POINT_* := Vector2(...)` constants with the bbox center of each region. Replace the matching constants in `Card2D._build_full_layout_v3`'s header.
+
+**Eyeballing positions does not work.** Earlier attempts had `POINT_NAME` 20px above the actual painted banner because the banner's gold trim above the dark interior visually fooled the measurement. The script reads pixel values directly, so it can't be fooled the same way.
+
+**Layout uses point-anchored centering, not anchor rects.** The helper `_center_at_point(label, point, size)` anchors a label to a single point with symmetric `offset_left/right/top/bottom = ±size/2`. This avoids two Godot quirks: (1) `Label.vertical_alignment = CENTER` misaligns when the rect is smaller than the font's line box; (2) asymmetric anchor rects make `horizontal_alignment = CENTER` compute the visual midpoint inconsistently. POINT_* is "where the center goes," SIZE_* is "how much room the label gets" — keep SIZE_* generous (≥36px tall) so Godot's centering works.
+
+**Font setup** lives in [scripts/GameTheme.gd](scripts/GameTheme.gd) `_load_assets()`. Three fonts:
+- `font_display` — Cinzel Variable wrapped in FontVariation with `wght: 600` (SemiBold) for names, type, FLOOP
+- `font_stat` — same Cinzel but `wght: 800` (Black) for cost / ATK / HP numerals — matches AAA card-game stat-orb conventions (Hearthstone, MtG Arena)
+- `font_body` — Nunito Regular for descriptions
+
+Both Cinzel variations set `spacing_bottom = -3` to optically center caps-only text (caps don't use descender space, so geometric center renders ~1.5px high). If text still looks high, increase the negative value; if low, push toward 0.

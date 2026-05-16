@@ -25,15 +25,20 @@ RelicDB="*uid://2p6cly80x3np"
 KeywordEffects="*res://scripts/data/KeywordEffects.gd"
 EncounterDB="*res://scripts/data/EncounterDB.gd"
 GameTheme="*res://scripts/GameTheme.gd"
+UserSettings="*res://scripts/state/UserSettings.gd"
+CardTextureCache="*res://scripts/state/CardTextureCache.gd"
 
 [display]
 
 window/size/viewport_width=1600
 window/size/viewport_height=900
-window/stretch/mode="viewport"
+window/size/mode=2
+window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 
 [rendering]
 
+textures/canvas_textures/default_texture_filter=2
 renderer/rendering_method="gl_compatibility"
+anti_aliasing/quality/msaa_2d=3
 environment/defaults/default_clear_color=Color(0.04, 0.03, 0.025, 1)

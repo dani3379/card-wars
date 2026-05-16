@@ -36,16 +36,22 @@ var phoenix_heart_consumed: bool = false
 
 const ACTS: int = 3
 
-const ROW_TEMPLATES: Array = [
-	["combat", "combat"],
-	["combat", "event", "combat"],
-	["rest", "shop"],
-	["combat", "combat", "event"],
-	["combat", "combat"],
-	["elite", "combat"],
-	["rest", "shop"],
-	["boss"],
-]
+# ── Slay-the-Spire-style map constants ──
+# 7 columns wide, 15 rows tall (rows 0..13 are explorable, row 14 = boss).
+# 6 paths walk from row 0 to row 13; rest sites occupy row 13; boss is row 14.
+const MAP_WIDTH: int = 7
+const MAP_HEIGHT: int = 15
+const BOSS_ROW: int = 14
+const REST_ROW: int = 13
+const NUM_PATHS: int = 4         # Fewer paths than STS (6) — fits our smaller, faster runs.
+const MIN_ELITE_ROW: int = 5     # Elites/rest cannot appear before this row.
+
+# Room-type probabilities (cumulative). Mirrors STS: combat 46%, event 22%,
+# elite 10%, rest 12%, shop 10%.
+const PROB_SHOP: float = 0.10
+const PROB_REST: float = 0.22    # 0.10 + 0.12
+const PROB_ELITE: float = 0.32   # 0.22 + 0.10
+const PROB_EVENT: float = 0.54   # 0.32 + 0.22
 
 
 func get_act() -> int:
@@ -244,18 +250,21 @@ func get_available_nodes() -> Array:
 		return []
 	if map_position.row == -1:
 		return act_map[0].duplicate()
-	var row = map_position.row
-	var col = map_position.col
+	var row: int = map_position.row
+	var col: int = map_position.col
 	if row >= act_map.size():
 		return []
-	var current_node = act_map[row][col]
-	var next_row = row + 1
+	var current_node: Dictionary = _find_node_by_col(act_map[row], col)
+	if current_node.is_empty():
+		return []
+	var next_row: int = row + 1
 	if next_row >= act_map.size():
 		return []
 	var available: Array = []
-	for c in current_node.connections:
-		if c < act_map[next_row].size():
-			available.append(act_map[next_row][c])
+	for target_col in current_node.connections:
+		var n = _find_node_by_col(act_map[next_row], target_col)
+		if not n.is_empty():
+			available.append(n)
 	return available
 
 
@@ -264,11 +273,20 @@ func visit_node(row: int, col: int) -> void:
 	if act_map.is_empty():
 		return
 	map_position = {"row": row, "col": col}
-	var node = act_map[row][col]
-	node.visited = true
-	current_node_type = node.type
-	current_encounter_id = node.get("encounter_id", "")
-	current_floor += 1
+	for n in act_map[row]:
+		if n.col == col:
+			n.visited = true
+			current_node_type = n.type
+			current_encounter_id = n.get("encounter_id", "")
+			current_floor += 1
+			return
+
+
+func _find_node_by_col(row_nodes: Array, col: int) -> Dictionary:
+	for n in row_nodes:
+		if n.col == col:
+			return n
+	return {}
 
 
 func advance_act() -> void:
@@ -299,81 +317,248 @@ func _generate_map() -> void:
 		map_data.append(_generate_act_map(act, rng))
 
 
+## Generates a single act map. Implements the Slay-the-Spire algorithm:
+##   1. Walk NUM_PATHS paths from row 0 up to REST_ROW, ±1 column per step,
+##      with a no-crossing constraint.
+##   2. Assign room types per the STS probability table, respecting the
+##      "no consecutive elite/shop/rest", "no rest before MIN_ELITE_ROW",
+##      "no rest on row REST_ROW-1", and "siblings must differ" rules.
+##   3. Add a single boss node at the BOSS_ROW center, with every populated
+##      REST_ROW node connecting up to it.
+##   4. Walk through and assign encounter IDs to combat/elite/boss nodes.
 func _generate_act_map(act: int, rng: RandomNumberGenerator) -> Array:
-	var rows: Array = []
-	var combat_ids = EncounterDB.get_ids_for(act, "combat").duplicate()
-	_shuffle_array(combat_ids, rng)
-	var elite_ids = EncounterDB.get_ids_for(act, "elite").duplicate()
-	_shuffle_array(elite_ids, rng)
-	var boss_ids = EncounterDB.get_ids_for(act, "boss").duplicate()
-	_shuffle_array(boss_ids, rng)
-	var combat_idx := 0
-
-	for row_idx in range(ROW_TEMPLATES.size()):
-		var template = ROW_TEMPLATES[row_idx]
+	var grid: Array = []
+	for r in range(MAP_HEIGHT):
 		var row: Array = []
-		for col_idx in range(template.size()):
-			var ntype: String = template[col_idx]
-			var encounter_id := ""
-			match ntype:
+		for c in range(MAP_WIDTH):
+			row.append(null)
+		grid.append(row)
+
+	_generate_paths(grid, rng)
+	_assign_node_types(grid, rng)
+	_add_boss_node(grid)
+	_assign_encounters(grid, act, rng)
+	return _flatten_grid(grid)
+
+
+func _generate_paths(grid: Array, rng: RandomNumberGenerator) -> void:
+	var starts: Array[int] = []
+	for p in range(NUM_PATHS):
+		var start_col: int = _pick_start_col(rng, starts, p)
+		starts.append(start_col)
+		_walk_path(grid, start_col, rng)
+
+
+func _pick_start_col(rng: RandomNumberGenerator, prev_starts: Array,
+		path_idx: int) -> int:
+	# STS rule: the first two paths must originate from different columns so
+	# the player always has a meaningful first choice.
+	var avail: Array[int] = []
+	for c in range(MAP_WIDTH):
+		if path_idx == 1 and prev_starts.size() > 0 and c == prev_starts[0]:
+			continue
+		avail.append(c)
+	return avail[rng.randi() % avail.size()]
+
+
+func _walk_path(grid: Array, start_col: int,
+		rng: RandomNumberGenerator) -> void:
+	var cur_col: int = start_col
+	if grid[0][cur_col] == null:
+		grid[0][cur_col] = _make_node(cur_col, 0)
+	for r in range(REST_ROW):
+		var next_col: int = _pick_next_col(grid, r, cur_col, rng)
+		if grid[r + 1][next_col] == null:
+			grid[r + 1][next_col] = _make_node(next_col, r + 1)
+		var conns: Array = grid[r][cur_col]["connections"]
+		if not conns.has(next_col):
+			conns.append(next_col)
+		cur_col = next_col
+
+
+func _make_node(col: int, row: int) -> Dictionary:
+	return {
+		"type": "",
+		"encounter_id": "",
+		"visited": false,
+		"connections": [],
+		"row": row,
+		"col": col,
+	}
+
+
+func _pick_next_col(grid: Array, r: int, cur_col: int,
+		rng: RandomNumberGenerator) -> int:
+	# Step diagonally to ±1 or stay in the same column. Never produce an edge
+	# that crosses an existing one (no X-shaped intersections). Candidates
+	# whose destination cell is already populated get double weight, so paths
+	# prefer to merge into existing nodes — this reduces total node count and
+	# gives the map a more organic feel (STS2-style convergent landmarks).
+	var candidates: Array[int] = []
+	for d in [-1, 0, 1]:
+		var nc: int = cur_col + d
+		if nc < 0 or nc >= MAP_WIDTH:
+			continue
+		if _would_cross(grid, r, cur_col, nc):
+			continue
+		candidates.append(nc)
+		if grid[r + 1][nc] != null:
+			candidates.append(nc)
+	if candidates.is_empty():
+		return cur_col
+	return candidates[rng.randi() % candidates.size()]
+
+
+func _would_cross(grid: Array, r: int, from_col: int, to_col: int) -> bool:
+	# Two diagonals form an X when the cell at the destination column already
+	# has an edge pointing to our source column. Straight-up steps never cross.
+	if to_col == from_col:
+		return false
+	var partner = grid[r][to_col]
+	if partner == null:
+		return false
+	return partner["connections"].has(from_col)
+
+
+func _assign_node_types(grid: Array, rng: RandomNumberGenerator) -> void:
+	# Row 0 → all combat (always a real fight to start). Row REST_ROW → all
+	# rest sites (the breather before the boss).
+	for c in range(MAP_WIDTH):
+		if grid[0][c] != null:
+			grid[0][c]["type"] = "combat"
+		if grid[REST_ROW][c] != null:
+			grid[REST_ROW][c]["type"] = "rest"
+	for r in range(1, REST_ROW):
+		for c in range(MAP_WIDTH):
+			if grid[r][c] == null:
+				continue
+			grid[r][c]["type"] = _pick_room_type(grid, r, c, rng)
+
+
+func _pick_room_type(grid: Array, r: int, c: int,
+		rng: RandomNumberGenerator) -> String:
+	# Retry until placement satisfies every rule, then fall back to combat
+	# if 200 attempts can't find a valid alternative.
+	for _attempt in range(200):
+		var roll: float = rng.randf()
+		var t: String
+		if roll < PROB_SHOP:
+			t = "shop"
+		elif roll < PROB_REST:
+			t = "rest"
+		elif roll < PROB_ELITE:
+			t = "elite"
+		elif roll < PROB_EVENT:
+			t = "event"
+		else:
+			t = "combat"
+		if (t == "elite" or t == "rest") and r < MIN_ELITE_ROW:
+			continue
+		if t == "rest" and r == REST_ROW - 1:
+			continue
+		if _is_consecutive_violation(grid, t, r, c):
+			continue
+		if _has_sibling_with_type(grid, t, r, c):
+			continue
+		return t
+	return "combat"
+
+
+func _is_consecutive_violation(grid: Array, t: String, r: int,
+		c: int) -> bool:
+	# STS: elite/shop/rest can't follow the same type on any incoming path.
+	if t != "elite" and t != "shop" and t != "rest":
+		return false
+	if r == 0:
+		return false
+	for pc in range(MAP_WIDTH):
+		var parent = grid[r - 1][pc]
+		if parent == null:
+			continue
+		if not parent["connections"].has(c):
+			continue
+		if parent.get("type", "") == t:
+			return true
+	return false
+
+
+func _has_sibling_with_type(grid: Array, t: String, r: int,
+		c: int) -> bool:
+	# STS: a parent with multiple outgoing edges must point to distinct types,
+	# so the player's choice between siblings is always meaningful.
+	if r == 0:
+		return false
+	for pc in range(MAP_WIDTH):
+		var parent = grid[r - 1][pc]
+		if parent == null:
+			continue
+		if not parent["connections"].has(c):
+			continue
+		for sc in parent["connections"]:
+			if sc == c:
+				continue
+			var sibling = grid[r][sc]
+			if sibling == null:
+				continue
+			if sibling.get("type", "") == t:
+				return true
+	return false
+
+
+func _add_boss_node(grid: Array) -> void:
+	var boss_col: int = MAP_WIDTH / 2
+	grid[BOSS_ROW][boss_col] = _make_node(boss_col, BOSS_ROW)
+	grid[BOSS_ROW][boss_col]["type"] = "boss"
+	for c in range(MAP_WIDTH):
+		if grid[REST_ROW][c] != null:
+			grid[REST_ROW][c]["connections"] = [boss_col]
+
+
+func _assign_encounters(grid: Array, act: int,
+		rng: RandomNumberGenerator) -> void:
+	var combat_ids: Array = EncounterDB.get_ids_for(act, "combat").duplicate()
+	_shuffle_array(combat_ids, rng)
+	var elite_ids: Array = EncounterDB.get_ids_for(act, "elite").duplicate()
+	_shuffle_array(elite_ids, rng)
+	var boss_ids: Array = EncounterDB.get_ids_for(act, "boss").duplicate()
+	_shuffle_array(boss_ids, rng)
+	var combat_idx: int = 0
+	var elite_idx: int = 0
+	for r in range(MAP_HEIGHT):
+		for c in range(MAP_WIDTH):
+			var node = grid[r][c]
+			if node == null:
+				continue
+			match node["type"]:
 				"combat":
-					if combat_idx < combat_ids.size():
-						encounter_id = combat_ids[combat_idx]
+					if combat_ids.size() > 0:
+						node["encounter_id"] = combat_ids[combat_idx % combat_ids.size()]
 						combat_idx += 1
-					elif combat_ids.size() > 0:
-						encounter_id = combat_ids[rng.randi() % combat_ids.size()]
 				"elite":
 					if elite_ids.size() > 0:
-						encounter_id = elite_ids[0]
+						node["encounter_id"] = elite_ids[elite_idx % elite_ids.size()]
+						elite_idx += 1
 				"boss":
 					if boss_ids.size() > 0:
-						encounter_id = boss_ids[0]
-			row.append({
-				"type": ntype,
-				"encounter_id": encounter_id,
-				"visited": false,
-				"connections": [],
-				"row": row_idx,
-				"col": col_idx,
-			})
-		rows.append(row)
+						node["encounter_id"] = boss_ids[0]
 
-	_connect_rows(rows, rng)
+
+func _flatten_grid(grid: Array) -> Array:
+	# Compact the sparse grid into per-row arrays of only the populated nodes.
+	# Each node keeps its grid `col` for visuals and for connection lookups.
+	var rows: Array = []
+	for r in range(MAP_HEIGHT):
+		var row_nodes: Array = []
+		for c in range(MAP_WIDTH):
+			if grid[r][c] != null:
+				row_nodes.append(grid[r][c])
+		rows.append(row_nodes)
 	return rows
-
-
-func _connect_rows(rows: Array, rng: RandomNumberGenerator) -> void:
-	for row_idx in range(rows.size() - 1):
-		var cur_row = rows[row_idx]
-		var next_row = rows[row_idx + 1]
-		var nr = next_row.size()
-		var cr = cur_row.size()
-		for col_idx in range(cr):
-			var target = clampi(col_idx * nr / maxi(1, cr), 0, nr - 1)
-			var conns: Array = [target]
-			if rng.randf() < 0.4 and nr > 1:
-				var alt = target + (1 if rng.randf() < 0.5 else -1)
-				alt = clampi(alt, 0, nr - 1)
-				if not conns.has(alt):
-					conns.append(alt)
-			cur_row[col_idx].connections = conns
-		for col_idx in range(nr):
-			var has_incoming := false
-			for node in cur_row:
-				if node.connections.has(col_idx):
-					has_incoming = true
-					break
-			if not has_incoming:
-				var nearest = clampi(col_idx * cr / maxi(1, nr), 0, cr - 1)
-				cur_row[nearest].connections.append(col_idx)
-	if rows.size() >= 2:
-		for node in rows[rows.size() - 2]:
-			node.connections = [0]
 
 
 func _shuffle_array(arr: Array, rng: RandomNumberGenerator) -> void:
 	for i in range(arr.size() - 1, 0, -1):
-		var j = rng.randi() % (i + 1)
+		var j: int = rng.randi() % (i + 1)
 		var temp = arr[i]
 		arr[i] = arr[j]
 		arr[j] = temp
