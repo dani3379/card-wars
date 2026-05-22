@@ -7,3 +7,26 @@ export_presets.cfg
 .DS_Store
 Thumbs.db
 .claude/
+
+# --- Scratch / work-in-progress (not shipped) ---
+staging/
+_preview_*
+*.tmp.*
+
+# Frame iteration & debug leftovers
+assets/frames/_backup_v3/
+assets/frames/_debug_*
+assets/frames/frame_comparison*
+assets/frames/frame_cleaned_comparison*
+assets/frames/*_cleaned*
+assets/frames/*_thin*
+assets/frames/frame_creature_common_v3*
+assets/frames/frame_creature_common_v4*
+assets/frames/frame_v4_cardsize*
+assets/frames/frame_v5_*
+
+# AI art / UI experiments
+assets/ui/_ai_*
+
+# Font test scratch
+assets/fonts/test/

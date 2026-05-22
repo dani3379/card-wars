@@ -10,8 +10,11 @@ var total_runs: int = 0
 var total_victories: int = 0
 var total_defeats: int = 0
 var fastest_victory_floors: int = -1
-var unlocked_cards: Array[String] = []
-var unlocked_relics: Array[String] = []
+# Highest ascension the player has unlocked by winning at level N. Each victory
+# bumps this by 1 (capped at MAX_ASCENSION). The player still picks which
+# ascension to play in MainMenu — they're not forced to climb.
+var unlocked_ascension: int = 0
+const MAX_ASCENSION: int = 5
 
 
 func _ready() -> void:
@@ -23,6 +26,9 @@ func record_victory() -> void:
 	total_victories += 1
 	if fastest_victory_floors < 0 or RunState.current_floor < fastest_victory_floors:
 		fastest_victory_floors = RunState.current_floor
+	# Bump unlocked tier if they beat the current one.
+	if RunState.current_ascension >= unlocked_ascension and unlocked_ascension < MAX_ASCENSION:
+		unlocked_ascension = mini(RunState.current_ascension + 1, MAX_ASCENSION)
 	save()
 
 
@@ -32,26 +38,13 @@ func record_defeat() -> void:
 	save()
 
 
-func unlock_card(id: String) -> void:
-	if not unlocked_cards.has(id):
-		unlocked_cards.append(id)
-		save()
-
-
-func unlock_relic(id: String) -> void:
-	if not unlocked_relics.has(id):
-		unlocked_relics.append(id)
-		save()
-
-
 func save() -> void:
 	var data := {
 		"total_runs": total_runs,
 		"total_victories": total_victories,
 		"total_defeats": total_defeats,
 		"fastest_victory_floors": fastest_victory_floors,
-		"unlocked_cards": unlocked_cards,
-		"unlocked_relics": unlocked_relics,
+		"unlocked_ascension": unlocked_ascension,
 	}
 	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
 	if f:
@@ -71,10 +64,4 @@ func load_save() -> void:
 		total_victories = parsed.get("total_victories", 0)
 		total_defeats = parsed.get("total_defeats", 0)
 		fastest_victory_floors = parsed.get("fastest_victory_floors", -1)
-		# Arrays come back as untyped Array; copy element-by-element.
-		unlocked_cards.clear()
-		for c in parsed.get("unlocked_cards", []):
-			unlocked_cards.append(c)
-		unlocked_relics.clear()
-		for r in parsed.get("unlocked_relics", []):
-			unlocked_relics.append(r)
+		unlocked_ascension = int(parsed.get("unlocked_ascension", 0))

@@ -13,7 +13,7 @@ const CARD_POOL: Dictionary = {
 	# ═══════════════════════════════════════════
 	"goblin": {"id": "goblin", "name": "Goblin", "type": "creature", "cost": 1, "atk": 1, "hp": 1,
 		"rarity": "starter", "keywords": [], "desc": ""},
-	"orc": {"id": "orc", "name": "Orc", "type": "creature", "cost": 2, "atk": 2, "hp": 2,
+	"brute": {"id": "brute", "name": "Brute", "type": "creature", "cost": 2, "atk": 2, "hp": 2,
 		"rarity": "starter", "keywords": [], "desc": ""},
 	"troll": {"id": "troll", "name": "Troll", "type": "creature", "cost": 2, "atk": 2, "hp": 3,
 		"rarity": "starter", "keywords": ["floop"], "desc": "Floop: heal self 2.",
@@ -365,6 +365,21 @@ const CARD_POOL: Dictionary = {
 	"apocalypse": {"id": "apocalypse", "name": "Apocalypse", "type": "spell", "cost": 3,
 		"rarity": "rare", "keywords": ["exhaust"], "desc": "Kill ALL creatures. 1 face dmg each. Exhaust.",
 		"spell": {"type": "custom", "id": "apocalypse"}, "targeting": "none"},
+	"lay_on_hands": {"id": "lay_on_hands", "name": "Lay on Hands", "type": "spell", "cost": 1,
+		"rarity": "rare", "keywords": [], "desc": "Heal target friendly to full HP and give it permanent +0/+2.",
+		"spell": {"type": "custom", "id": "lay_on_hands"}, "targeting": "friendly_creature"},
+	"mending_light": {"id": "mending_light", "name": "Mending Light", "type": "spell", "cost": 2,
+		"rarity": "rare", "keywords": ["exhaust"], "desc": "Heal 8 HP. All friendly creatures heal 3. Exhaust.",
+		"spell": {"type": "custom", "id": "mending_light"}, "targeting": "none"},
+	"banish": {"id": "banish", "name": "Banish", "type": "spell", "cost": 2,
+		"rarity": "rare", "keywords": ["exhaust"], "desc": "Exhaust target enemy creature. It triggers no On-Death.",
+		"spell": {"type": "custom", "id": "banish"}, "targeting": "enemy_creature"},
+	"time_snare": {"id": "time_snare", "name": "Time Snare", "type": "spell", "cost": 2,
+		"rarity": "rare", "keywords": ["exhaust"], "desc": "All enemy creatures cannot attack this turn. Exhaust.",
+		"spell": {"type": "custom", "id": "time_snare"}, "targeting": "none"},
+	"holy_smite": {"id": "holy_smite", "name": "Holy Smite", "type": "spell", "cost": 1,
+		"rarity": "rare", "keywords": [], "desc": "Deal damage equal to target enemy's missing HP.",
+		"spell": {"type": "custom", "id": "holy_smite"}, "targeting": "enemy_creature"},
 
 	# ═══════════════════════════════════════════
 	#  4-COST POWERHOUSES (require mana banking)
@@ -442,7 +457,7 @@ const ENEMY_POOL: Dictionary = {
 
 const STARTER_DECK: Array[String] = [
 	"goblin", "goblin", "goblin", "goblin",
-	"orc", "orc", "orc", "orc",
+	"brute", "brute", "brute", "brute",
 	"sprite",
 	"troll",
 ]
@@ -455,11 +470,6 @@ static func get_card_data(id: String) -> Dictionary:
 		return ENEMY_POOL[id].duplicate(true)
 	push_warning("CardDB: unknown card id '%s'" % id)
 	return {}
-
-
-static func is_spell(id: String) -> bool:
-	var data = get_card_data(id)
-	return data.get("type", "") == "spell"
 
 
 static func cards_of_rarity(rarity: String) -> Array[String]:

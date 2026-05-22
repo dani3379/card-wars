@@ -27,6 +27,7 @@ EncounterDB="*res://scripts/data/EncounterDB.gd"
 GameTheme="*res://scripts/GameTheme.gd"
 UserSettings="*res://scripts/state/UserSettings.gd"
 CardTextureCache="*res://scripts/state/CardTextureCache.gd"
+AudioBank="*res://scripts/AudioBank.gd"
 
 [display]
 
@@ -34,7 +35,6 @@ window/size/viewport_width=1600
 window/size/viewport_height=900
 window/size/mode=2
 window/stretch/mode="canvas_items"
-window/stretch/aspect="expand"
 
 [rendering]
 

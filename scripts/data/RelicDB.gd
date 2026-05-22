@@ -104,6 +104,9 @@ const RELICS: Dictionary = {
 	"bloodstone_relic": {"id": "bloodstone_relic", "name": "Bloodstone", "tier": "combat",
 		"desc": "When you take face damage, creatures +1 ATK this turn.",
 		"hooks": ["hero_damaged"], "effect": "bloodstone_buff", "value": 1},
+	"phoenix_heart": {"id": "phoenix_heart", "name": "Phoenix Heart", "tier": "combat",
+		"desc": "Once per run: when you would die, revive at 1 HP instead.",
+		"hooks": ["hero_damaged"], "effect": "phoenix_revive", "value": 1},
 
 	# ═══════════════════════════════════════════
 	#  4x4 RELICS — designed around the front/back row redesign
@@ -117,9 +120,6 @@ const RELICS: Dictionary = {
 	"phantom_veil": {"id": "phantom_veil", "name": "Phantom Veil", "tier": "combat",
 		"desc": "Once per round: the first friendly that would die survives at 1 HP.",
 		"hooks": ["creature_death"], "effect": "phantom_veil", "value": 1},
-	"twin_edge": {"id": "twin_edge", "name": "Twin Edge", "tier": "combat",
-		"desc": "Your back-row creatures attack even when their front is alive (split damage).",
-		"hooks": [], "effect": "twin_edge", "value": 0},
 	"hexagonal_shield": {"id": "hexagonal_shield", "name": "Hexagonal Shield", "tier": "combat",
 		"desc": "Enemy ranged attacks can't target your back row.",
 		"hooks": [], "effect": "back_ranged_immune", "value": 0},
@@ -211,18 +211,22 @@ static func get_relic(id: String) -> Dictionary:
 	return {}
 
 
+# Returns the texture for a relic icon, or null if none is installed for that
+# id. Stored in `assets/icons/relics/<id>.svg` so the lookup is convention-
+# based and doesn't require every RelicDB entry to carry an explicit path.
+static func get_relic_icon(id: String) -> Texture2D:
+	var path := "res://assets/icons/relics/%s.svg" % id
+	if not ResourceLoader.exists(path):
+		return null
+	return load(path) as Texture2D
+
+
 static func get_relics_by_tier(tier: String) -> Array[String]:
 	var result: Array[String] = []
 	for id in RELICS.keys():
 		if RELICS[id].tier == tier:
 			result.append(id)
 	return result
-
-
-static func roll_starting_relics() -> Array[String]:
-	var pool = get_relics_by_tier("starting")
-	pool.shuffle()
-	return pool.slice(0, 3)
 
 
 static func roll_relic_reward(tier: String = "combat", exclude: Array[String] = []) -> Array[String]:

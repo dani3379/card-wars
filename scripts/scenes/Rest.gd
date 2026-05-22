@@ -16,6 +16,7 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
 	GameTheme.add_atmosphere(self, "rest")
+	AudioBank.play_music("rest")
 	_build_choice_ui()
 
 
@@ -76,7 +77,7 @@ func _build_choice_ui() -> void:
 	row.add_child(upgrade_btn)
 
 	# Remove
-	var remove_btn = _make_btn("✕ REMOVE\n\nRemove one card\nfrom your deck",
+	var remove_btn = _make_btn("REMOVE\n\nRemove one card\nfrom your deck",
 		"", Color(0.45, 0.15, 0.15), Vector2(250, 200))
 	remove_btn.disabled = RunState.deck.size() <= 1
 	remove_btn.pressed.connect(_start_remove_mode)
@@ -85,7 +86,7 @@ func _build_choice_ui() -> void:
 
 func _do_heal() -> void:
 	RunState.hero_hp = RunState.hero_max_hp
-	get_tree().change_scene_to_file(MAP_SCENE)
+	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 
 
 func _start_upgrade_mode() -> void:
@@ -115,9 +116,9 @@ func _start_upgrade_mode() -> void:
 		var data = CardDB.get_card_data(RunState.deck[i])
 		var text: String
 		if data.get("type", "creature") == "spell":
-			text = "%s\n%dm SPELL\n%s" % [data.name, data.cost, _kw(data)]
+			text = "%s\n%dm SPELL\n%s" % [data.name, data.cost, GameTheme.format_keywords(data)]
 		else:
-			text = "%s\n%dm %d/%d\n%s" % [data.name, data.cost, data.atk, data.hp, _kw(data)]
+			text = "%s\n%dm %d/%d\n%s" % [data.name, data.cost, data.atk, data.hp, GameTheme.format_keywords(data)]
 		var color = Color(0.15, 0.12, 0.30) if data.type == "spell" else Color(0.20, 0.25, 0.35)
 		var btn = _make_btn(text, data.desc, color, Vector2(150, 110))
 		btn.pressed.connect(_select_card_for_upgrade.bind(i))
@@ -234,7 +235,7 @@ func _do_upgrade(path: String, keyword: String = "") -> void:
 	if _selected_card_index < 0:
 		return
 	RunState.upgrade_card(_selected_card_index, path, keyword)
-	get_tree().change_scene_to_file(MAP_SCENE)
+	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 
 
 func _start_remove_mode() -> void:
@@ -268,17 +269,11 @@ func _start_remove_mode() -> void:
 		var btn = _make_btn(text, data.desc, color, Vector2(150, 90))
 		btn.pressed.connect(func():
 			RunState.remove_card_at(i)
-			get_tree().change_scene_to_file(MAP_SCENE)
+			GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 		)
 		grid.add_child(btn)
 
 	_add_cancel_btn()
-
-
-func _kw(data: Dictionary) -> String:
-	if not data.has("keywords") or data.keywords.is_empty():
-		return ""
-	return ", ".join(data.keywords)
 
 
 func _make_btn(text: String, tooltip: String, color: Color, min_size: Vector2 = Vector2(250, 200)) -> Button:
@@ -286,7 +281,7 @@ func _make_btn(text: String, tooltip: String, color: Color, min_size: Vector2 = 
 
 
 func _add_cancel_btn() -> void:
-	var btn = GameTheme.make_themed_button("Cancel", Color(0.25, 0.20, 0.15), Vector2(120, 36))
+	var btn = GameTheme.make_back_button("CANCEL", Vector2(140, 40), 15)
 	btn.position = Vector2(740, 810)
 	btn.pressed.connect(func(): _build_choice_ui())
 	add_child(btn)

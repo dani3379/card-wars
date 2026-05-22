@@ -9,6 +9,22 @@
 
 Source: https://game-icons.net
 
+## Relic icons (`assets/icons/relics/`)
+**game-icons.net** — CC BY 3.0. One icon per relic in RelicDB, named by relic id,
+recolored to gilt at runtime. Background rect stripped for transparency.
+- **Lorc** (https://lorcblog.blogspot.com): swords-emblem, stone-tower, thorny-vine,
+  echo-ripples, crown, rally-the-troops, fire-ring, hunting-horn, scar-wound, cannon,
+  meat-cleaver, vulture, ribcage, crystal-cluster, scroll-unfurled, gem-pendant,
+  burning-passion, flying-flag, ghost, anvil-impact, treasure-map, knapsack,
+  skeleton-key, spectre, crowned-skull, round-bottom-flask, gem-necklace,
+  bleeding-wound, lantern, battle-gear, sundial
+- **Delapouite** (https://delapouite.com): drum, running-shoe, ring, rock-golem,
+  gloves, rolling-dices, mimic-chest, spiked-shield, diploma, book-cover, coffee-pot,
+  thor-hammer, jug, sunflower, ice-cream-cone
+- **willdabeast**: round-shield
+
+Source: https://game-icons.net
+
 ## Card keyword medallion icons
 **game-icons.net** — CC BY 3.0
 - templar-shield, liberty-wing, bow-arrow, star-gate, heart-shield, plain-arrow,

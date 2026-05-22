@@ -47,9 +47,8 @@ func _ready() -> void:
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	header.add_child(title)
 
-	var back_btn := GameTheme.make_themed_button("Back", Color(0.20, 0.15, 0.12),
-		Vector2(100, 40), 16)
-	back_btn.pressed.connect(func(): get_tree().change_scene_to_file(MENU_SCENE))
+	var back_btn := GameTheme.make_back_button("BACK", Vector2(120, 40), 16)
+	back_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MENU_SCENE))
 	header.add_child(back_btn)
 
 	var scroll := ScrollContainer.new()

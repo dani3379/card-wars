@@ -27,13 +27,27 @@ var _master_pct: Label
 var _music_pct: Label
 var _sfx_pct: Label
 var _res_option: OptionButton
-var _fullscreen_toggle: Button
+var _display_mode_option: OptionButton
+var _fps_cap_option: OptionButton
+var _colorblind_option: OptionButton
+var _ui_scale_slider: HSlider
+var _ui_scale_pct: Label
+var _brightness_slider: HSlider
+var _brightness_pct: Label
+var _anim_speed_option: OptionButton
+var _tooltip_delay_slider: HSlider
+var _tooltip_delay_pct: Label
 var _pending_res: Vector2i
-var _pending_fullscreen: bool
+var _pending_display_mode: String
 var _available_res: Array = []
 
 var _anim_tween: Tween
 var _gear_tween: Tween
+# Cached refs for parts that change with run state — the title flips between
+# "PAUSED" / "SETTINGS" and the system-action row swaps Abandon / Main Menu
+# depending on whether a run is active when the overlay opens.
+var _title_label: Label = null
+var _system_row: HBoxContainer = null
 
 
 func _ready() -> void:
@@ -107,7 +121,9 @@ func _build_overlay() -> void:
 	_panel_root.add_child(center)
 
 	var panel_wrap := PanelContainer.new()
-	panel_wrap.custom_minimum_size = Vector2(540, 0)
+	# Wider panel to host two side-by-side columns (each ~460 wide + padding +
+	# inter-column separator). Was 540 single-column.
+	panel_wrap.custom_minimum_size = Vector2(1020, 0)
 	_apply_panel_style(panel_wrap)
 	center.add_child(panel_wrap)
 
@@ -115,18 +131,51 @@ func _build_overlay() -> void:
 	vbox.add_theme_constant_override("separation", 2)
 	panel_wrap.add_child(vbox)
 
+	# Title + divider span the full panel width.
 	_add_title(vbox)
 	_add_fancy_divider(vbox)
 
-	# ── Audio ──
-	_add_section_label(vbox, "AUDIO", AUDIO_ON_PATH)
-	_add_spacer(vbox, 4)
+	# ── Two-column body ──
+	# Right column gets the longest section (DISPLAY, 9 rows); left column
+	# gets AUDIO + GAMEPLAY + ACCESSIBILITY (3+3+2 = 8 rows). Roughly balanced
+	# heights and keeps each section as a self-contained group.
+	var cols := HBoxContainer.new()
+	cols.add_theme_constant_override("separation", 24)
+	cols.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cols.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(cols)
 
-	var master_row: Array = _add_slider_row(vbox, "Master", UserSettings.master_volume)
+	var left_col := VBoxContainer.new()
+	left_col.add_theme_constant_override("separation", 2)
+	left_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	left_col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cols.add_child(left_col)
+
+	# Vertical separator between columns.
+	var col_sep := ColorRect.new()
+	col_sep.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.25)
+	col_sep.custom_minimum_size = Vector2(1, 0)
+	col_sep.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	col_sep.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cols.add_child(col_sep)
+
+	var right_col := VBoxContainer.new()
+	right_col.add_theme_constant_override("separation", 2)
+	right_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	right_col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cols.add_child(right_col)
+
+	# ── LEFT COLUMN: Audio + Gameplay + Accessibility ──
+	_add_section_label(left_col, "AUDIO", AUDIO_ON_PATH)
+	_add_spacer(left_col, 4)
+
+	var master_row: Array = _add_slider_row(left_col, "Master", UserSettings.master_volume)
 	_master_slider = master_row[0]; _master_pct = master_row[1]
-	var music_row: Array = _add_slider_row(vbox, "Music", UserSettings.music_volume)
+	var music_row: Array = _add_slider_row(left_col, "Music", UserSettings.music_volume)
 	_music_slider = music_row[0]; _music_pct = music_row[1]
-	var sfx_row: Array = _add_slider_row(vbox, "Effects", UserSettings.sfx_volume)
+	var sfx_row: Array = _add_slider_row(left_col, "Effects", UserSettings.sfx_volume)
 	_sfx_slider = sfx_row[0]; _sfx_pct = sfx_row[1]
 
 	_master_slider.value_changed.connect(func(v: float):
@@ -136,18 +185,42 @@ func _build_overlay() -> void:
 	_sfx_slider.value_changed.connect(func(v: float):
 		UserSettings.set_sfx_volume(v); _sfx_pct.text = "%d%%" % int(v * 100))
 
-	_add_fancy_divider(vbox)
+	_add_fancy_divider(left_col)
 
-	# ── Display ──
-	_add_section_label(vbox, "DISPLAY")
-	_add_spacer(vbox, 4)
+	_add_section_label(left_col, "GAMEPLAY")
+	_add_spacer(left_col, 4)
 
-	_add_resolution_row(vbox)
-	_add_fullscreen_row(vbox)
-	_add_toggle_row(vbox, "Screen Shake", UserSettings.screen_shake,
+	_add_anim_speed_row(left_col)
+	_add_tooltip_delay_row(left_col)
+	_add_toggle_row(left_col, "End-Turn Warning", UserSettings.end_turn_warning,
+		func(v: bool): UserSettings.set_end_turn_warning(v))
+
+	_add_fancy_divider(left_col)
+
+	_add_section_label(left_col, "ACCESSIBILITY")
+	_add_spacer(left_col, 4)
+
+	_add_toggle_row(left_col, "Reduce Motion", UserSettings.reduce_motion,
+		func(v: bool): UserSettings.set_reduce_motion(v))
+	_add_colorblind_row(left_col)
+
+	# ── RIGHT COLUMN: Display ──
+	_add_section_label(right_col, "DISPLAY")
+	_add_spacer(right_col, 4)
+
+	_add_resolution_row(right_col)
+	_add_display_mode_row(right_col)
+	_add_toggle_row(right_col, "V-Sync", UserSettings.vsync,
+		func(v: bool): UserSettings.set_vsync(v))
+	_add_fps_cap_row(right_col)
+	_add_ui_scale_row(right_col)
+	_add_brightness_row(right_col)
+	_add_toggle_row(right_col, "Screen Shake", UserSettings.screen_shake,
 		func(v: bool): UserSettings.set_screen_shake(v))
-	_add_toggle_row(vbox, "Particles", UserSettings.particles,
+	_add_toggle_row(right_col, "Particles", UserSettings.particles,
 		func(v: bool): UserSettings.set_particles(v))
+	_add_toggle_row(right_col, "Mute on Focus Loss", UserSettings.mute_on_focus_loss,
+		func(v: bool): UserSettings.set_mute_on_focus_loss(v))
 
 	_add_fancy_divider(vbox)
 
@@ -162,13 +235,55 @@ func _build_overlay() -> void:
 	apply_btn.pressed.connect(_apply_and_close)
 	btn_row.add_child(apply_btn)
 
-	var close_btn := GameTheme.make_themed_button("CLOSE", Color(0.20, 0.15, 0.12),
-		Vector2(140, 40), 16)
+	# "Resume" / Close — pill back button, primary way out.
+	var close_btn := GameTheme.make_back_button("RESUME", Vector2(150, 40), 16)
 	close_btn.pressed.connect(_close)
 	btn_row.add_child(close_btn)
 
 	vbox.add_child(btn_row)
+	_add_spacer(vbox, 6)
+
+	# Second row: destructive / system actions, visually separated so they're
+	# never the first thing the player's hand reaches for. Rebuilt on every
+	# _open() so it reflects the current run state.
+	_system_row = HBoxContainer.new()
+	_system_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	_system_row.add_theme_constant_override("separation", 12)
+	_system_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(_system_row)
+	_rebuild_system_row()
 	_add_spacer(vbox, 4)
+
+
+func _rebuild_system_row() -> void:
+	# Repopulate the Abandon / Main Menu / Quit row based on current state.
+	# Called on every _open() so context changes (started a run, finished it)
+	# are reflected.
+	if _system_row == null:
+		return
+	for child in _system_row.get_children():
+		child.queue_free()
+
+	if RunState.run_active:
+		var abandon_btn := GameTheme.make_themed_button("ABANDON RUN",
+			Color(0.36, 0.12, 0.10), Vector2(170, 38), 14)
+		abandon_btn.add_theme_color_override("font_color", Color(1.0, 0.85, 0.75))
+		abandon_btn.pressed.connect(_abandon_run)
+		_system_row.add_child(abandon_btn)
+	elif get_tree() != null and get_tree().current_scene != null:
+		# Out of a run: a "MAIN MENU" path makes sense from any scene except the
+		# main menu itself.
+		if get_tree().current_scene.name != "MainMenu":
+			var menu_btn := GameTheme.make_themed_button("MAIN MENU",
+				Color(0.18, 0.14, 0.10), Vector2(150, 38), 14)
+			menu_btn.pressed.connect(_to_main_menu)
+			_system_row.add_child(menu_btn)
+
+	# "Quit Game" — exit to OS. Always present so Esc → Quit Game is one path.
+	var quit_btn := GameTheme.make_themed_button("QUIT GAME",
+		Color(0.18, 0.14, 0.10), Vector2(150, 38), 14)
+	quit_btn.pressed.connect(_quit_game)
+	_system_row.add_child(quit_btn)
 
 
 func _apply_panel_style(panel: PanelContainer) -> void:
@@ -215,7 +330,10 @@ func _add_title(parent: VBoxContainer) -> void:
 			row.add_child(icon)
 
 	var lbl := Label.new()
-	lbl.text = "SETTINGS"
+	# Title is context-aware: during an active run the overlay acts as the
+	# pause menu, so call it "PAUSED" — on the main menu / out of a run it's
+	# just configuration so call it "SETTINGS". Updated on every _open().
+	lbl.text = "PAUSED" if RunState.run_active else "SETTINGS"
 	if GameTheme.font_display:
 		lbl.add_theme_font_override("font", GameTheme.font_display)
 	lbl.add_theme_font_size_override("font_size", 28)
@@ -224,6 +342,7 @@ func _add_title(parent: VBoxContainer) -> void:
 	lbl.add_theme_constant_override("outline_size", 3)
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(lbl)
+	_title_label = lbl
 
 	var icon2 := TextureRect.new()
 	if tex:
@@ -474,31 +593,209 @@ func _make_popup_hover_style() -> StyleBoxFlat:
 #  FULLSCREEN ROW  (toggle that disables resolution)
 # ═══════════════════════════════════════════════════
 
-func _add_fullscreen_row(parent: VBoxContainer) -> void:
+func _add_display_mode_row(parent: VBoxContainer) -> void:
+	# Three-way: Windowed / Borderless / Fullscreen. Borderless is windowed
+	# with no decoration, sized to the monitor — best for streamers and
+	# multi-monitor users who want fast Alt-Tab.
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("Fullscreen", 160)
+	var lbl := _make_row_label("Display Mode", 160)
 	row.add_child(lbl)
 
-	_fullscreen_toggle = Button.new()
-	_fullscreen_toggle.custom_minimum_size = Vector2(70, 30)
-	_fullscreen_toggle.toggle_mode = true
-	_fullscreen_toggle.button_pressed = UserSettings.fullscreen
-	_fullscreen_toggle.text = "ON" if UserSettings.fullscreen else "OFF"
-	_fullscreen_toggle.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	_style_toggle(_fullscreen_toggle, UserSettings.fullscreen)
-
-	_fullscreen_toggle.toggled.connect(func(pressed: bool):
-		_fullscreen_toggle.text = "ON" if pressed else "OFF"
-		_style_toggle(_fullscreen_toggle, pressed)
-		_pending_fullscreen = pressed
-		_res_option.disabled = pressed)
-
-	_res_option.disabled = UserSettings.fullscreen
-	row.add_child(_fullscreen_toggle)
+	_display_mode_option = OptionButton.new()
+	_display_mode_option.custom_minimum_size = Vector2(170, 30)
+	_display_mode_option.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	var modes := ["windowed", "borderless", "fullscreen"]
+	var labels := ["Windowed", "Borderless", "Fullscreen"]
+	var current := UserSettings.display_mode
+	for i in modes.size():
+		_display_mode_option.add_item(labels[i], i)
+		if modes[i] == current:
+			_display_mode_option.selected = i
+	_style_option_button(_display_mode_option)
+	_display_mode_option.item_selected.connect(func(idx: int):
+		_pending_display_mode = modes[idx]
+		_res_option.disabled = (_pending_display_mode != "windowed"))
+	_res_option.disabled = (current != "windowed")
+	row.add_child(_display_mode_option)
 	parent.add_child(row)
+
+
+func _add_fps_cap_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_add_row_pad(row)
+
+	var lbl := _make_row_label("FPS Cap", 160)
+	row.add_child(lbl)
+
+	_fps_cap_option = OptionButton.new()
+	_fps_cap_option.custom_minimum_size = Vector2(170, 30)
+	_fps_cap_option.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	var caps := [0, 30, 60, 120, 144, 240]
+	var cap_labels := ["Unlimited", "30 FPS", "60 FPS", "120 FPS", "144 FPS", "240 FPS"]
+	for i in caps.size():
+		_fps_cap_option.add_item(cap_labels[i], i)
+		if caps[i] == UserSettings.fps_cap:
+			_fps_cap_option.selected = i
+	_style_option_button(_fps_cap_option)
+	_fps_cap_option.item_selected.connect(func(idx: int):
+		UserSettings.set_fps_cap(caps[idx]))
+	row.add_child(_fps_cap_option)
+	parent.add_child(row)
+
+
+func _add_ui_scale_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_add_row_pad(row)
+
+	var lbl := _make_row_label("UI Scale", 100)
+	row.add_child(lbl)
+
+	_ui_scale_slider = HSlider.new()
+	_ui_scale_slider.min_value = 0.7
+	_ui_scale_slider.max_value = 1.5
+	_ui_scale_slider.step = 0.05
+	_ui_scale_slider.value = UserSettings.ui_scale
+	_ui_scale_slider.custom_minimum_size = Vector2(220, 24)
+	_ui_scale_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_slider(_ui_scale_slider)
+	row.add_child(_ui_scale_slider)
+
+	_ui_scale_pct = _make_pct_label("%d%%" % int(UserSettings.ui_scale * 100))
+	row.add_child(_ui_scale_pct)
+
+	_ui_scale_slider.value_changed.connect(func(v: float):
+		UserSettings.set_ui_scale(v)
+		_ui_scale_pct.text = "%d%%" % int(v * 100))
+
+	_add_row_pad(row)
+	parent.add_child(row)
+
+
+func _add_brightness_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_add_row_pad(row)
+
+	var lbl := _make_row_label("Brightness", 100)
+	row.add_child(lbl)
+
+	_brightness_slider = HSlider.new()
+	_brightness_slider.min_value = -0.4
+	_brightness_slider.max_value = 0.4
+	_brightness_slider.step = 0.05
+	_brightness_slider.value = UserSettings.brightness
+	_brightness_slider.custom_minimum_size = Vector2(220, 24)
+	_brightness_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_slider(_brightness_slider)
+	row.add_child(_brightness_slider)
+
+	_brightness_pct = _make_pct_label("%+d%%" % int(UserSettings.brightness * 100))
+	row.add_child(_brightness_pct)
+
+	_brightness_slider.value_changed.connect(func(v: float):
+		UserSettings.set_brightness(v)
+		_brightness_pct.text = "%+d%%" % int(v * 100))
+
+	_add_row_pad(row)
+	parent.add_child(row)
+
+
+func _add_anim_speed_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_add_row_pad(row)
+
+	var lbl := _make_row_label("Animation Speed", 160)
+	row.add_child(lbl)
+
+	_anim_speed_option = OptionButton.new()
+	_anim_speed_option.custom_minimum_size = Vector2(170, 30)
+	_anim_speed_option.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	var speeds := [0.5, 1.0, 1.5, 3.0]
+	var speed_labels := ["Slow", "Normal", "Fast", "Instant"]
+	var current_speed := UserSettings.anim_speed
+	var selected := 1
+	for i in speeds.size():
+		_anim_speed_option.add_item(speed_labels[i], i)
+		if abs(speeds[i] - current_speed) < 0.01:
+			selected = i
+	_anim_speed_option.selected = selected
+	_style_option_button(_anim_speed_option)
+	_anim_speed_option.item_selected.connect(func(idx: int):
+		UserSettings.set_anim_speed(speeds[idx]))
+	row.add_child(_anim_speed_option)
+	parent.add_child(row)
+
+
+func _add_tooltip_delay_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_add_row_pad(row)
+
+	var lbl := _make_row_label("Tooltip Delay", 100)
+	row.add_child(lbl)
+
+	_tooltip_delay_slider = HSlider.new()
+	_tooltip_delay_slider.min_value = 0.0
+	_tooltip_delay_slider.max_value = 0.5
+	_tooltip_delay_slider.step = 0.05
+	_tooltip_delay_slider.value = UserSettings.tooltip_delay
+	_tooltip_delay_slider.custom_minimum_size = Vector2(220, 24)
+	_tooltip_delay_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_style_slider(_tooltip_delay_slider)
+	row.add_child(_tooltip_delay_slider)
+
+	_tooltip_delay_pct = _make_pct_label("%dms" % int(UserSettings.tooltip_delay * 1000))
+	row.add_child(_tooltip_delay_pct)
+
+	_tooltip_delay_slider.value_changed.connect(func(v: float):
+		UserSettings.set_tooltip_delay(v)
+		_tooltip_delay_pct.text = "%dms" % int(v * 1000))
+
+	_add_row_pad(row)
+	parent.add_child(row)
+
+
+func _add_colorblind_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_add_row_pad(row)
+
+	var lbl := _make_row_label("Color Blind Mode", 160)
+	row.add_child(lbl)
+
+	_colorblind_option = OptionButton.new()
+	_colorblind_option.custom_minimum_size = Vector2(170, 30)
+	_colorblind_option.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	var modes := ["off", "deuteranopia", "protanopia", "tritanopia"]
+	var mode_labels := ["Off", "Deuteranopia", "Protanopia", "Tritanopia"]
+	for i in modes.size():
+		_colorblind_option.add_item(mode_labels[i], i)
+		if modes[i] == UserSettings.colorblind_mode:
+			_colorblind_option.selected = i
+	_style_option_button(_colorblind_option)
+	_colorblind_option.item_selected.connect(func(idx: int):
+		UserSettings.set_colorblind_mode(modes[idx]))
+	row.add_child(_colorblind_option)
+	parent.add_child(row)
+
+
+func _make_pct_label(text: String) -> Label:
+	var pct := Label.new()
+	pct.text = text
+	pct.custom_minimum_size = Vector2(60, 0)
+	pct.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	if GameTheme.font_body:
+		pct.add_theme_font_override("font", GameTheme.font_body)
+	pct.add_theme_font_size_override("font_size", 14)
+	pct.add_theme_color_override("font_color", GameTheme.GILT)
+	pct.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return pct
 
 
 # ═══════════════════════════════════════════════════
@@ -617,6 +914,12 @@ func _open() -> void:
 	_panel_root.visible = true
 	_gear_btn.modulate = GameTheme.GILT_BRIGHT
 
+	# Refresh title + system actions to current context every time the overlay
+	# opens — what counted as a "run" might be different now than at boot.
+	if _title_label != null:
+		_title_label.text = "PAUSED" if RunState.run_active else "SETTINGS"
+	_rebuild_system_row()
+
 	_master_slider.value = UserSettings.master_volume
 	_music_slider.value = UserSettings.music_volume
 	_sfx_slider.value = UserSettings.sfx_volume
@@ -626,15 +929,12 @@ func _open() -> void:
 
 	# Sync resolution dropdown and pending state
 	_pending_res = UserSettings.resolution
-	_pending_fullscreen = UserSettings.fullscreen
+	_pending_display_mode = UserSettings.display_mode
 	for i in _available_res.size():
 		if _available_res[i] == UserSettings.resolution:
 			_res_option.selected = i
 			break
-	_fullscreen_toggle.button_pressed = UserSettings.fullscreen
-	_fullscreen_toggle.text = "ON" if UserSettings.fullscreen else "OFF"
-	_style_toggle(_fullscreen_toggle, UserSettings.fullscreen)
-	_res_option.disabled = UserSettings.fullscreen
+	_res_option.disabled = (UserSettings.display_mode != "windowed")
 
 	_backdrop.modulate = Color(1, 1, 1, 0)
 	_panel_root.modulate = Color(1, 1, 1, 0)
@@ -650,26 +950,59 @@ func _open() -> void:
 
 
 func _apply_and_close() -> void:
-	var fs := _pending_fullscreen
-	var res := _pending_res
-
-	UserSettings.fullscreen = fs
-	UserSettings.resolution = res
-	UserSettings.save()
-
-	if fs:
-		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
-	else:
-		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
-		# Mode change needs a frame to propagate before resize works (Godot 4.4+)
+	# Resolution + display mode flow through UserSettings setters so persistence
+	# and DisplayServer changes happen consistently. Other settings (volume,
+	# vsync, fps cap, etc.) apply live when toggled, so APPLY only handles the
+	# window-mode + resolution pair.
+	UserSettings.resolution = _pending_res
+	UserSettings.set_display_mode(_pending_display_mode)
+	if _pending_display_mode == "windowed":
 		await get_tree().process_frame
-		get_window().size = res
-		var screen := DisplayServer.screen_get_size()
-		var pos := Vector2i(
-			maxi((screen.x - res.x) / 2, 0),
-			maxi((screen.y - res.y) / 2, 0))
-		DisplayServer.window_set_position(pos)
+		UserSettings._apply_resolution()
 	_close()
+
+
+func _abandon_run() -> void:
+	# Modal confirm before destroying the run. Players will eventually mis-click
+	# the Abandon button — without a yes/no gate, that single click would erase
+	# 30 minutes of decisions.
+	GameTheme.show_confirm_dialog(self,
+		"ABANDON RUN?",
+		"Your current progress will be lost and this run will be counted as a defeat. Are you sure?",
+		"YES, ABANDON",
+		"KEEP PLAYING",
+		Callable(self, "_confirm_abandon_run"))
+
+
+func _confirm_abandon_run() -> void:
+	if RunState.run_active:
+		RunState.end_run(false)
+	_close()
+	GameTheme.fade_out_then_change_scene(self, "res://scenes/main_menu.tscn", 0.4)
+
+
+func _to_main_menu() -> void:
+	# Direct path back to the title screen from non-run scenes (Collection,
+	# Credits, etc. where Esc was pressed). Closes the overlay then fades.
+	_close()
+	GameTheme.fade_out_then_change_scene(self, "res://scenes/main_menu.tscn", 0.30)
+
+
+func _quit_game() -> void:
+	# Confirm before quitting if a run is active, otherwise quit immediately.
+	if RunState.run_active:
+		GameTheme.show_confirm_dialog(self,
+			"QUIT GAME?",
+			"Your current run will be lost. Quit to desktop?",
+			"YES, QUIT",
+			"KEEP PLAYING",
+			Callable(self, "_do_quit"))
+	else:
+		_do_quit()
+
+
+func _do_quit() -> void:
+	get_tree().quit()
 
 
 func _close() -> void:

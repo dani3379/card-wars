@@ -13,6 +13,7 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
 	GameTheme.add_atmosphere(self, "event")
+	AudioBank.play_music("event")
 	_pick_event()
 	_build_ui()
 
@@ -64,22 +65,22 @@ func _build_ui() -> void:
 		btn.pressed.connect(_resolve_choice.bind(choice))
 		row.add_child(btn)
 
-	var skip_btn = GameTheme.make_themed_button("Leave", Color(0.25, 0.20, 0.15), Vector2(120, 36))
+	var skip_btn = GameTheme.make_back_button("LEAVE", Vector2(140, 40), 15)
 	skip_btn.position = Vector2(740, 810)
-	skip_btn.pressed.connect(func(): get_tree().change_scene_to_file(MAP_SCENE))
+	skip_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
 	add_child(skip_btn)
 
 
 func _resolve_choice(choice: Dictionary) -> void:
 	var effects = choice.get("effects", [])
 	if effects.is_empty():
-		get_tree().change_scene_to_file(MAP_SCENE)
+		GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 		return
 	var result_text := ""
 	for effect in effects:
 		result_text += _apply_effect(effect) + "\n"
 	if result_text.strip_edges().is_empty():
-		get_tree().change_scene_to_file(MAP_SCENE)
+		GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 	else:
 		_show_result(result_text)
 
@@ -190,7 +191,7 @@ func _show_result(text: String) -> void:
 	var continue_btn = GameTheme.make_themed_button("Continue",
 		Color(0.20, 0.35, 0.20), Vector2(140, 40), 16)
 	continue_btn.position = Vector2(730, 550)
-	continue_btn.pressed.connect(func(): get_tree().change_scene_to_file(MAP_SCENE))
+	continue_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
 	add_child(continue_btn)
 
 
@@ -471,6 +472,298 @@ const EVENTS: Dictionary = {
 				"label": "Leave It\n\nDon't risk it.",
 				"desc": "No effect",
 				"effects": [],
+			},
+		],
+	},
+
+	"thrice_blessed_spring": {
+		"name": "The Thrice-Blessed Spring",
+		"desc": "A spring boils with old miracles. Each sip heals deeper — and rots something deeper still.",
+		"choices": [
+			{
+				"label": "One Sip\n\nHeal 6. A starter weakens.",
+				"desc": "+6 HP, starters -1 HP",
+				"effects": [
+					{"type": "heal", "value": 6},
+					{"type": "debuff_starters"},
+				],
+			},
+			{
+				"label": "Two Sips\n\nHeal 14. Lose 30 gold to the dregs.",
+				"desc": "+14 HP, -30 gold",
+				"effects": [
+					{"type": "heal", "value": 14},
+					{"type": "gold", "value": -30},
+				],
+			},
+			{
+				"label": "Drink Deep\n\nHeal fully. Gain a curse.",
+				"desc": "Full heal, +curse",
+				"effects": [
+					{"type": "heal_full"},
+					{"type": "add_curse"},
+				],
+			},
+		],
+	},
+
+	"pawnbrokers_window": {
+		"name": "The Pawnbroker's Window",
+		"desc": "Behind smoked glass, the pawnbroker fans her wares. She does not sell. She only trades.",
+		"choices": [
+			{
+				"label": "Trade Steel\n\nLose 6 HP.\nPick a card to remove.",
+				"desc": "-6 HP, remove 1 chosen",
+				"effects": [
+					{"type": "damage", "value": 6},
+					{"type": "remove_choice"},
+				],
+			},
+			{
+				"label": "Trade Coin\n\nLose 80 gold.\nUpgrade a random card.",
+				"desc": "-80 gold, upgrade random",
+				"effects": [
+					{"type": "gold", "value": -80},
+					{"type": "upgrade_random"},
+				],
+			},
+			{
+				"label": "Trade Future\n\nGain a curse.\nTake a rare card.",
+				"desc": "+curse, +rare card",
+				"effects": [
+					{"type": "add_curse"},
+					{"type": "add_rare"},
+				],
+			},
+		],
+	},
+
+	"fork_in_the_long_road": {
+		"name": "The Fork in the Long Road",
+		"desc": "Two paths split the moor. One smells of woodsmoke. The other, of iron.",
+		"choices": [
+			{
+				"label": "The Smoke Road\n\nHeal 10.\nLose 40 gold to the tollman.",
+				"desc": "+10 HP, -40 gold",
+				"effects": [
+					{"type": "heal", "value": 10},
+					{"type": "gold", "value": -40},
+				],
+			},
+			{
+				"label": "The Iron Road\n\nTake 8 damage.\nGain 70 gold from the dead.",
+				"desc": "-8 HP, +70 gold",
+				"effects": [
+					{"type": "damage", "value": 8},
+					{"type": "gold", "value": 70},
+				],
+			},
+		],
+	},
+
+	"beekeeper": {
+		"name": "The Beekeeper",
+		"desc": "She wears no veil. The bees have made a hood of her face, and they move when she speaks. 'I have honey,' she says. 'And other things. The hive remembers everything that has ever stung.'",
+		"choices": [
+			{
+				"label": "Take the honey jar\n\nIt is warm.\nIt is moving.",
+				"desc": "+10 HP, +curse",
+				"effects": [
+					{"type": "heal", "value": 10},
+					{"type": "add_curse"},
+				],
+			},
+			{
+				"label": "Let them sting you\n\nThe hive shudders.\nSomething is given back.",
+				"desc": "-4 HP, upgrade a card",
+				"effects": [
+					{"type": "damage", "value": 4},
+					{"type": "upgrade_random"},
+				],
+			},
+			{
+				"label": "Ask what the hive remembers\n\nShe smiles.\nThe bees do not.",
+				"desc": "Remove 1 chosen card",
+				"effects": [
+					{"type": "remove_choice"},
+				],
+			},
+		],
+	},
+
+	"burning_cradle": {
+		"name": "The Burning Cradle",
+		"desc": "A wicker cradle sits in the middle of the path, alight. Nothing is inside it. Nothing has ever been inside it. It rocks anyway.",
+		"choices": [
+			{
+				"label": "Kneel and sing to it\n\nThe flames lean toward your mouth\nlike they know the words.",
+				"desc": "-3 HP, heal to full",
+				"effects": [
+					{"type": "damage", "value": 3},
+					{"type": "heal_full"},
+				],
+			},
+			{
+				"label": "Put it out with your cloak\n\nThe cradle goes cold.\nSo does something in your chest.",
+				"desc": "-40 gold, +random relic",
+				"effects": [
+					{"type": "gold", "value": -40},
+					{"type": "random_relic"},
+				],
+			},
+			{
+				"label": "Walk past. It is not yours.\n\nYou hear it rocking for an hour after.",
+				"desc": "No effect",
+				"effects": [],
+			},
+		],
+	},
+
+	"woodcutter": {
+		"name": "The Woodcutter",
+		"desc": "He has been chopping the same tree for thirty years. The tree has not gotten smaller. He has. 'Swing for me,' he says, 'and I'll teach you the trick of it.'",
+		"choices": [
+			{
+				"label": "Take the axe\n\nIt is heavier than it looks.\nMost things are.",
+				"desc": "Upgrade a card, -2 HP",
+				"effects": [
+					{"type": "upgrade_random"},
+					{"type": "damage", "value": 2},
+				],
+			},
+			{
+				"label": "Sit and watch him work\n\nHe talks the whole time.\nYou learn nothing useful.",
+				"desc": "+35 gold",
+				"effects": [
+					{"type": "gold", "value": 35},
+				],
+			},
+			{
+				"label": "Tell him the tree is winning\n\nHe laughs until he cries.\nThen he just cries.",
+				"desc": "No effect",
+				"effects": [],
+			},
+		],
+	},
+
+	"char_widow": {
+		"name": "The Char-Widow's Pyre",
+		"desc": "A woman feeds her wedding dress to a fire one inch at a time. She has been doing this since the meadow began to burn. 'Throw something in,' she says without looking up. 'It helps.'",
+		"choices": [
+			{
+				"label": "Throw in a fistful of gold\n\nIt melts.\nShe sighs like a kettle.",
+				"desc": "-50 gold, +8 HP",
+				"effects": [
+					{"type": "gold", "value": -50},
+					{"type": "heal", "value": 8},
+				],
+			},
+			{
+				"label": "Throw in two of your cards\n\nThey curl, blacken, are gone.\nYou feel lighter.",
+				"desc": "Remove 2 chosen cards",
+				"effects": [
+					{"type": "remove_choice_multi", "value": 2},
+				],
+			},
+			{
+				"label": "Throw in your own sleeve\n\nShe finally looks up.\nShe knows you now.",
+				"desc": "-5 HP, +random relic",
+				"effects": [
+					{"type": "damage", "value": 5},
+					{"type": "random_relic"},
+				],
+			},
+		],
+	},
+
+	"gravesong_choir": {
+		"name": "The Gravesong Choir",
+		"desc": "Four hooded singers stand around an open grave, humming a tune you almost recognize. One pauses, lifts a finger to her lips, and beckons toward the empty pit.",
+		"choices": [
+			{
+				"label": "Lay 2 cards in the grave\n\nThe choir sings them down.\nGain a rare card and 30 gold.",
+				"desc": "Remove 2 chosen, +rare, +30g",
+				"effects": [
+					{"type": "remove_choice_multi", "value": 2},
+					{"type": "add_rare"},
+					{"type": "gold", "value": 30},
+				],
+			},
+			{
+				"label": "Sing along\n\nThe melody upgrades a card\nin your deck.",
+				"desc": "Upgrade a random card",
+				"effects": [
+					{"type": "upgrade_random"},
+				],
+			},
+			{
+				"label": "Cover your ears and leave\n\nYou snatch a coin purse from\nthe offering plate as you go.",
+				"desc": "+50 gold",
+				"effects": [
+					{"type": "gold", "value": 50},
+				],
+			},
+		],
+	},
+
+	"glass_familiar": {
+		"name": "The Glass Familiar",
+		"desc": "A small cat of spun glass watches you from a stone pedestal. It tilts its head. 'Make two of me,' it says, 'or one of anything else.'",
+		"choices": [
+			{
+				"label": "Pay 30 gold\n\nDuplicate a card in\nyour deck twice.",
+				"desc": "-30 gold, copy a card x2",
+				"effects": [
+					{"type": "gold", "value": -30},
+					{"type": "copy_card"},
+					{"type": "copy_card"},
+				],
+			},
+			{
+				"label": "Trade a memory\n\nLose 5 HP.\nGain a random relic.",
+				"desc": "-5 HP, +random relic",
+				"effects": [
+					{"type": "damage", "value": 5},
+					{"type": "random_relic"},
+				],
+			},
+			{
+				"label": "Pet the cat and walk on\n\nIt purrs, like glass might.",
+				"desc": "+5 HP",
+				"effects": [
+					{"type": "heal", "value": 5},
+				],
+			},
+		],
+	},
+
+	"spellwrights_pact": {
+		"name": "The Spellwright's Pact",
+		"desc": "An old scribe is hunched over a smoldering page. Ink runs upward off the parchment into the air. 'I'll teach you a true word,' he says, 'but the saying of it costs flesh.'",
+		"choices": [
+			{
+				"label": "Sign in blood\n\nLose 8 HP. Gain a rare card\nand upgrade a card.",
+				"desc": "-8 HP, +rare, upgrade random",
+				"effects": [
+					{"type": "damage", "value": 8},
+					{"type": "add_rare"},
+					{"type": "upgrade_random"},
+				],
+			},
+			{
+				"label": "Pay for the page\n\nThe scribe sells you a clean\ncopy for 50 gold.",
+				"desc": "-50 gold, +rare card",
+				"effects": [
+					{"type": "gold", "value": -50},
+					{"type": "add_rare"},
+				],
+			},
+			{
+				"label": "Refuse and rest\n\nThe scribe pours you tea.",
+				"desc": "+10 HP",
+				"effects": [
+					{"type": "heal", "value": 10},
+				],
 			},
 		],
 	},
