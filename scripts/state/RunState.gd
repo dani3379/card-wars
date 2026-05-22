@@ -33,6 +33,12 @@ var current_floor: int = 0
 var run_active: bool = false
 var run_seed: int = 0
 var phoenix_heart_consumed: bool = false
+# Ascension level chosen for this run (0..MetaState.unlocked_ascension).
+# Each tier scales encounter face HP (see ASCENSION_HP_MULT). Set in
+# start_new_run; never modified mid-run.
+var current_ascension: int = 0
+# Per-ascension HP multiplier applied to encounter face HP. Index = ascension.
+const ASCENSION_HP_MULT: Array[float] = [1.0, 1.20, 1.40, 1.60, 1.80, 2.0]
 
 const ACTS: int = 3
 
@@ -58,18 +64,19 @@ func get_act() -> int:
 	return current_act_idx + 1
 
 
-func node_type_for_floor(_floor_num: int) -> String:
-	return current_node_type
-
-
 # ── Run lifecycle ──
 
-func start_new_run() -> void:
+func start_new_run(starting_relic: String = "", ascension: int = -1) -> void:
 	hero_max_hp = 25
 	hero_hp = 25
 	gold = 0
 	potions = 0
 	base_max_mana = 3
+	# Default to player's highest unlocked tier if caller didn't pick one.
+	if ascension < 0:
+		current_ascension = MetaState.unlocked_ascension
+	else:
+		current_ascension = clampi(ascension, 0, MetaState.unlocked_ascension)
 	deck = []
 	deck_uids = []
 	card_upgrades = {}
@@ -77,6 +84,8 @@ func start_new_run() -> void:
 	for id in CardDB.STARTER_DECK:
 		add_card(id)
 	relics = []
+	if starting_relic != "":
+		relics.append(starting_relic)
 	current_floor = 0
 	current_act_idx = 0
 	map_position = {"row": -1, "col": -1}
@@ -85,11 +94,13 @@ func start_new_run() -> void:
 	events_seen = []
 	run_active = true
 	run_seed = randi()
+	CardTextureCache.clear()
 	_generate_map()
 
 
 func end_run(victorious: bool) -> void:
 	run_active = false
+	clear_save()  # save only persists in-progress runs; ended ones are gone
 	if victorious:
 		MetaState.record_victory()
 	else:
@@ -104,17 +115,6 @@ func add_card(id: String) -> int:
 	deck_uids.append(uid)
 	_next_uid += 1
 	return uid
-
-
-func remove_card(id: String) -> bool:
-	for i in range(deck.size()):
-		if deck[i] == id:
-			var uid = deck_uids[i]
-			deck.remove_at(i)
-			deck_uids.remove_at(i)
-			card_upgrades.erase(uid)
-			return true
-	return false
 
 
 func remove_card_at(index: int) -> bool:
@@ -279,6 +279,7 @@ func visit_node(row: int, col: int) -> void:
 			current_node_type = n.type
 			current_encounter_id = n.get("encounter_id", "")
 			current_floor += 1
+			save_run()  # checkpoint: player is committing to enter a room
 			return
 
 
@@ -298,13 +299,6 @@ func advance_act() -> void:
 
 func is_final_boss() -> bool:
 	return current_act_idx >= ACTS - 1 and current_node_type == "boss"
-
-
-func is_act_complete() -> bool:
-	var act_map = get_current_act_map()
-	if act_map.is_empty():
-		return true
-	return map_position.row >= act_map.size() - 1
 
 
 # ── Map generation ──
@@ -562,3 +556,198 @@ func _shuffle_array(arr: Array, rng: RandomNumberGenerator) -> void:
 		var temp = arr[i]
 		arr[i] = arr[j]
 		arr[j] = temp
+
+
+# ════════════════════════════════════════════════════════════════════
+#  SAVE / RESUME
+# ════════════════════════════════════════════════════════════════════
+# Persists the in-progress run as JSON across SAVE_SLOTS slots. The save is
+# written every time the player commits to a map node (`visit_node`), so
+# quitting and relaunching restores them on the map at the room they were
+# about to enter. The save is cleared on death or victory (end_run).
+
+const SAVE_VERSION: int = 1
+const SAVE_SLOTS: int = 3
+const LEGACY_SAVE_PATH: String = "user://run.save"
+
+# Which slot the current in-memory run reads from / writes to. -1 means
+# "no slot picked yet" (e.g. the player is in the main menu before starting).
+var active_slot: int = -1
+
+
+func _save_path_for_slot(slot: int) -> String:
+	return "user://run_%d.save" % slot
+
+
+# Migrates a pre-multislot save (user://run.save) into slot 0 so existing
+# players don't lose their in-progress run. Idempotent: no-op once migrated.
+func _migrate_legacy_save() -> void:
+	if not FileAccess.file_exists(LEGACY_SAVE_PATH):
+		return
+	var target := _save_path_for_slot(0)
+	if FileAccess.file_exists(target):
+		# Slot 0 already has a save — drop the legacy file rather than overwrite.
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(LEGACY_SAVE_PATH))
+		return
+	var src := FileAccess.open(LEGACY_SAVE_PATH, FileAccess.READ)
+	if src == null:
+		return
+	var text := src.get_as_text()
+	src.close()
+	var dst := FileAccess.open(target, FileAccess.WRITE)
+	if dst == null:
+		return
+	dst.store_string(text)
+	dst.close()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(LEGACY_SAVE_PATH))
+
+
+func _ready() -> void:
+	_migrate_legacy_save()
+
+
+func save_run() -> void:
+	if not run_active:
+		return
+	if active_slot < 0 or active_slot >= SAVE_SLOTS:
+		push_warning("RunState.save_run: invalid active_slot %d, defaulting to 0" % active_slot)
+		active_slot = 0
+	# JSON converts integer dict keys to strings, so card_upgrades keys come
+	# back as Strings on load — we convert back in load_run().
+	var payload: Dictionary = {
+		"version": SAVE_VERSION,
+		"hero_max_hp": hero_max_hp,
+		"hero_hp": hero_hp,
+		"gold": gold,
+		"potions": potions,
+		"deck": deck,
+		"deck_uids": deck_uids,
+		"card_upgrades": card_upgrades,
+		"next_uid": _next_uid,
+		"relics": relics,
+		"map_data": map_data,
+		"current_act_idx": current_act_idx,
+		"map_position": map_position,
+		"current_encounter_id": current_encounter_id,
+		"current_node_type": current_node_type,
+		"events_seen": events_seen,
+		"base_max_mana": base_max_mana,
+		"current_floor": current_floor,
+		"run_seed": run_seed,
+		"phoenix_heart_consumed": phoenix_heart_consumed,
+		"current_ascension": current_ascension,
+		"saved_at": int(Time.get_unix_time_from_system()),
+	}
+	var path := _save_path_for_slot(active_slot)
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		push_warning("RunState.save_run: could not open %s for write" % path)
+		return
+	f.store_string(JSON.stringify(payload))
+	f.close()
+
+
+# All three slot accessors take an optional slot. -1 means "use the active
+# slot" so existing call sites that don't know about slots keep working.
+func has_save(slot: int = -1) -> bool:
+	var s: int = slot if slot >= 0 else active_slot
+	if s < 0 or s >= SAVE_SLOTS:
+		return false
+	return FileAccess.file_exists(_save_path_for_slot(s))
+
+
+func clear_save(slot: int = -1) -> void:
+	var s: int = slot if slot >= 0 else active_slot
+	if s < 0 or s >= SAVE_SLOTS:
+		return
+	var path := _save_path_for_slot(s)
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+
+
+# Loads and parses a save file, returning the raw Dictionary or {} on failure.
+# Shared by load_run() and get_slot_summary() so summary headers don't have
+# to duplicate the parse/version-check logic.
+func _read_slot(slot: int) -> Dictionary:
+	if slot < 0 or slot >= SAVE_SLOTS:
+		return {}
+	var path := _save_path_for_slot(slot)
+	if not FileAccess.file_exists(path):
+		return {}
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return {}
+	var text := f.get_as_text()
+	f.close()
+	var parsed = JSON.parse_string(text)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return {}
+	var data: Dictionary = parsed
+	if int(data.get("version", 0)) != SAVE_VERSION:
+		return {}
+	return data
+
+
+# Returns a small summary of a slot for the menu's slot picker:
+#   {has_save: bool, act: int, floor: int, hp: int, max_hp: int,
+#    gold: int, ascension: int, saved_at: int}
+# If the slot is empty or corrupt, has_save is false and other fields are 0.
+func get_slot_summary(slot: int) -> Dictionary:
+	var data := _read_slot(slot)
+	if data.is_empty():
+		return {"has_save": false}
+	return {
+		"has_save": true,
+		"act": int(data.get("current_act_idx", 0)) + 1,
+		"floor": int(data.get("current_floor", 0)),
+		"hp": int(data.get("hero_hp", 0)),
+		"max_hp": int(data.get("hero_max_hp", 25)),
+		"gold": int(data.get("gold", 0)),
+		"ascension": int(data.get("current_ascension", 0)),
+		"saved_at": int(data.get("saved_at", 0)),
+	}
+
+
+func load_run(slot: int = -1) -> bool:
+	var s: int = slot if slot >= 0 else active_slot
+	var data := _read_slot(s)
+	if data.is_empty():
+		return false
+
+	hero_max_hp = int(data.get("hero_max_hp", 25))
+	hero_hp = int(data.get("hero_hp", 25))
+	gold = int(data.get("gold", 0))
+	potions = int(data.get("potions", 0))
+	# Rebuild typed arrays from the plain JSON arrays.
+	deck = []
+	for id in data.get("deck", []):
+		deck.append(String(id))
+	deck_uids = []
+	for uid in data.get("deck_uids", []):
+		deck_uids.append(int(uid))
+	# JSON int-keyed dicts come back as String keys — convert.
+	card_upgrades = {}
+	var raw_upgrades: Dictionary = data.get("card_upgrades", {})
+	for k in raw_upgrades:
+		card_upgrades[int(k)] = raw_upgrades[k]
+	_next_uid = int(data.get("next_uid", deck.size()))
+	relics = []
+	for id in data.get("relics", []):
+		relics.append(String(id))
+	map_data = data.get("map_data", [])
+	current_act_idx = int(data.get("current_act_idx", 0))
+	map_position = data.get("map_position", {"row": -1, "col": -1})
+	current_encounter_id = String(data.get("current_encounter_id", ""))
+	current_node_type = String(data.get("current_node_type", ""))
+	events_seen = []
+	for id in data.get("events_seen", []):
+		events_seen.append(String(id))
+	base_max_mana = int(data.get("base_max_mana", 3))
+	current_floor = int(data.get("current_floor", 0))
+	run_seed = int(data.get("run_seed", 0))
+	phoenix_heart_consumed = bool(data.get("phoenix_heart_consumed", false))
+	current_ascension = int(data.get("current_ascension", 0))
+	run_active = true
+	active_slot = s
+	CardTextureCache.clear()
+	return true

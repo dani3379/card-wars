@@ -23,6 +23,7 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
 	GameTheme.add_atmosphere(self, "shop")
+	AudioBank.play_music("shop")
 	_discount = 0.75 if RunState.has_relic("merchants_license") else 1.0
 	_roll_stock()
 	_build_ui()
@@ -89,9 +90,9 @@ func _build_ui() -> void:
 		var price = _price(BASE_PRICES.get(data.rarity, 50))
 		var text: String
 		if data.get("type", "creature") == "spell":
-			text = "%s\n%dm SPELL\n%s\n— %dg —" % [data.name, data.cost, _kw(data), price]
+			text = "%s\n%dm SPELL\n%s\n— %dg —" % [data.name, data.cost, GameTheme.format_keywords(data), price]
 		else:
-			text = "%s\n%dm %d/%d\n%s\n— %dg —" % [data.name, data.cost, data.atk, data.hp, _kw(data), price]
+			text = "%s\n%dm %d/%d\n%s\n— %dg —" % [data.name, data.cost, data.atk, data.hp, GameTheme.format_keywords(data), price]
 		var color = Color(0.15, 0.12, 0.30) if data.type == "spell" else Color(0.20, 0.25, 0.35)
 		var btn = _make_btn(text, data.desc, color, Vector2(160, 140))
 		btn.disabled = RunState.gold < price
@@ -110,10 +111,9 @@ func _build_ui() -> void:
 		add_child(relic_row)
 
 		for id in _relic_stock:
-			var relic = RelicDB.get_relic(id)
 			var price = _price(RELIC_COST)
-			var btn = _make_btn("%s\n%s\n— %dg —" % [relic.name, relic.desc, price], "",
-				Color(0.55, 0.30, 0.20), Vector2(200, 100))
+			var btn = GameTheme.make_relic_card(id, Color(0.55, 0.30, 0.20),
+				Vector2(220, 150), price)
 			btn.disabled = RunState.gold < price
 			btn.pressed.connect(_buy_relic.bind(id, price))
 			relic_row.add_child(btn)
@@ -148,18 +148,11 @@ func _build_ui() -> void:
 	remove_btn.pressed.connect(_start_remove_mode.bind(remove_price))
 	services_row.add_child(remove_btn)
 
-	# Leave button
-	var leave_btn = GameTheme.make_themed_button("Leave Shop",
-		Color(0.25, 0.20, 0.15), Vector2(160, 40), 16)
-	leave_btn.position = Vector2(720, 820)
-	leave_btn.pressed.connect(func(): get_tree().change_scene_to_file(MAP_SCENE))
+	# Leave button — gold pill with ← arrow, distinct from the buy buttons.
+	var leave_btn = GameTheme.make_back_button("LEAVE SHOP", Vector2(180, 44), 17)
+	leave_btn.position = Vector2(710, 820)
+	leave_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
 	add_child(leave_btn)
-
-
-func _kw(data: Dictionary) -> String:
-	if not data.has("keywords") or data.keywords.is_empty():
-		return ""
-	return ", ".join(data.keywords)
 
 
 func _make_btn(text: String, tooltip: String, color: Color, min_size: Vector2) -> Button:
@@ -170,6 +163,7 @@ func _buy_card(id: String, price: int) -> void:
 	if RunState.gold < price:
 		return
 	RunState.gold -= price
+	_spawn_gold_spend(price)
 	RunState.add_card(id)
 	_card_stock.erase(id)
 	_build_ui()
@@ -179,6 +173,7 @@ func _buy_relic(id: String, price: int) -> void:
 	if RunState.gold < price:
 		return
 	RunState.gold -= price
+	_spawn_gold_spend(price)
 	RunState.add_relic(id)
 	_relic_stock.erase(id)
 	_build_ui()
@@ -188,8 +183,22 @@ func _buy_potion(price: int) -> void:
 	if RunState.gold < price:
 		return
 	RunState.gold -= price
+	_spawn_gold_spend(price)
 	RunState.potions += 1
 	_build_ui()
+
+
+func _spawn_gold_spend(price: int) -> void:
+	# Centered floating "-Ng" so the player gets a beat for every purchase, even
+	# though _build_ui() rebuilds the gold label below it.
+	var vp := get_viewport_rect().size
+	GameTheme.spawn_floating_text(self,
+		Vector2(vp.x * 0.5, 90.0),
+		"-%d g" % price,
+		Color(1.0, 0.55, 0.18),
+		true)
+	if AudioBank != null:
+		AudioBank.play_sfx("coin")
 
 
 func _start_remove_mode(price: int) -> void:
@@ -228,8 +237,7 @@ func _start_remove_mode(price: int) -> void:
 		btn.pressed.connect(_confirm_remove.bind(i, price))
 		grid.add_child(btn)
 
-	var cancel_btn = GameTheme.make_themed_button("Cancel",
-		Color(0.25, 0.20, 0.15), Vector2(120, 36))
+	var cancel_btn = GameTheme.make_back_button("CANCEL", Vector2(140, 40), 15)
 	cancel_btn.position = Vector2(740, 800)
 	cancel_btn.pressed.connect(func(): _build_ui())
 	add_child(cancel_btn)
@@ -239,7 +247,14 @@ func _confirm_remove(deck_index: int, price: int) -> void:
 	if RunState.gold < price:
 		return
 	RunState.gold -= price
+	_spawn_gold_spend(price)
 	if RunState.has_relic("scavengers_pouch"):
 		RunState.gain_gold(20)
+		var vp := get_viewport_rect().size
+		GameTheme.spawn_floating_text(self,
+			Vector2(vp.x * 0.5, 140.0),
+			"+20 g (Scavenger's Pouch)",
+			Color(1.0, 0.85, 0.30),
+			false)
 	RunState.remove_card_at(deck_index)
 	_build_ui()

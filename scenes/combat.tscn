@@ -1,7 +1,7 @@
 [gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://scripts/scenes/Combat.gd" id="1_combat"]
-[ext_resource type="Texture2D" path="res://assets/backgrounds/triumph_of_death.jpg" id="2_bg"]
+[ext_resource type="Texture2D" path="res://assets/backgrounds/combat_battlefield.png" id="2_bg"]
 
 [node name="Combat" type="Control"]
 layout_mode = 3

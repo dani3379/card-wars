@@ -87,11 +87,20 @@ func _ready() -> void:
 	if not RunState.run_active:
 		get_tree().change_scene_to_file(MAIN_MENU)
 		return
+	AudioBank.play_music("map")
 	var bg = get_node_or_null("Background")
 	if bg:
 		bg.self_modulate = Color(0.10, 0.08, 0.06, 1.0)
 	GameTheme.add_atmosphere(self, "map", false)
 	_build_map()
+	# Checkpoint: every return to the map captures post-room state (HP, gold,
+	# deck changes, relics earned). Clear the room-in-progress fields first so a
+	# later resume lands on the map rather than re-entering the room the player
+	# just finished. visit_node still saves on entry, so a quit *during* a room
+	# resumes back into that room.
+	RunState.current_node_type = ""
+	RunState.current_encounter_id = ""
+	RunState.save_run()
 
 
 func _build_map() -> void:
@@ -1036,7 +1045,7 @@ func _build_act_banner() -> void:
 				if not enc.is_empty():
 					boss_name = enc.name
 				break
-	var banner_text := "Act %d  ◆  Boss Ahead: %s" % \
+	var banner_text := "Act %d  ·  Boss Ahead: %s" % \
 		[RunState.get_act(), boss_name]
 	var cur_floor: int = RunState.map_position.row + 1
 	cur_floor = maxi(cur_floor, 0)
@@ -1176,7 +1185,7 @@ func _show_deck_viewer() -> void:
 	overlay.add_child(scroll)
 
 	var grid = GridContainer.new()
-	# 180-wide v4 cards × 7 cols + 6×12 separation = 1332 px, fits 1440 scroll.
+	# 225-wide cards at compact scale (0.483) × 7 cols + 6×18 separation = ~870 px, fits 1440 scroll.
 	grid.columns = 7
 	grid.add_theme_constant_override("h_separation", 18)
 	grid.add_theme_constant_override("v_separation", 22)
@@ -1202,8 +1211,7 @@ func _show_deck_viewer() -> void:
 			grid.add_child(card)
 		await get_tree().process_frame
 
-	var close_btn = GameTheme.make_themed_button("Close",
-		Color(0.25, 0.20, 0.15), Vector2(120, 36))
+	var close_btn = GameTheme.make_back_button("CLOSE", Vector2(140, 40), 15)
 	close_btn.position = Vector2(740, 800)
 	close_btn.pressed.connect(func(): overlay.queue_free())
 	overlay.add_child(close_btn)
@@ -1221,7 +1229,4 @@ func _on_node_pressed(row: int, col: int) -> void:
 		"rest": target = REST_SCENE
 		"event": target = EVENT_SCENE
 	if target != "":
-		var err = get_tree().change_scene_to_file(target)
-		if err != OK:
-			push_error("MapView: failed to load '%s' (error %d)"
-				% [target, err])
+		GameTheme.fade_out_then_change_scene(self, target, 0.30)

@@ -19,6 +19,8 @@ func _ready() -> void:
 		return
 
 	GameTheme.add_atmosphere(self, "reward")
+	# Reward continues whatever combat music faded out; if no track is loaded,
+	# the map track keeps quiet — no separate "reward" music asset needed.
 	var node_type = RunState.current_node_type
 	_is_elite_reward = (node_type == "elite" or node_type == "boss")
 	var is_boss = (node_type == "boss")
@@ -79,6 +81,7 @@ func _build_ui() -> void:
 		card_row.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		outer.add_child(card_row)
 
+		var slot_idx := 0
 		for id in _card_choices:
 			var data = CardDB.get_card_data(id)
 			var slot := VBoxContainer.new()
@@ -98,6 +101,12 @@ func _build_ui() -> void:
 			pick_btn.pressed.connect(_pick_card.bind(id))
 			slot.add_child(pick_btn)
 
+			# Staggered fan-in reveal: each card starts small + transparent +
+			# offset down, then springs into place one after the other. Reads as
+			# "the spoils unfurl before you" rather than "everything pops in".
+			_animate_card_reveal(card, pick_btn, slot_idx)
+			slot_idx += 1
+
 	# Relic choices
 	if _is_elite_reward and _relic_choices.size() > 0:
 		var sep := GameTheme.make_separator(GameTheme.GILT, 200.0)
@@ -114,9 +123,8 @@ func _build_ui() -> void:
 		outer.add_child(relic_row)
 
 		for id in _relic_choices:
-			var relic = RelicDB.get_relic(id)
-			var btn = GameTheme.make_themed_button("%s\n%s" % [relic.name, relic.desc],
-				Color(0.55, 0.30, 0.20), Vector2(220, 120), 13)
+			var btn = GameTheme.make_relic_card(id, Color(0.55, 0.30, 0.20),
+				Vector2(220, 150))
 			btn.pressed.connect(_pick_relic.bind(id))
 			relic_row.add_child(btn)
 
@@ -133,40 +141,51 @@ func _build_ui() -> void:
 			Vector2(220, 36), 15)
 		skip_gold_btn.pressed.connect(_skip_for_gold)
 		skip_row.add_child(skip_gold_btn)
-		var skip_btn = GameTheme.make_themed_button("Skip", Color(0.30, 0.20, 0.15),
-			Vector2(120, 36), 15)
+		var skip_btn = GameTheme.make_back_button("SKIP", Vector2(140, 40), 15)
 		skip_btn.pressed.connect(_skip)
 		skip_row.add_child(skip_btn)
 	else:
-		var skip_btn = GameTheme.make_themed_button("Continue", Color(0.30, 0.20, 0.15),
-			Vector2(140, 36), 15)
+		var skip_btn = GameTheme.make_back_button("CONTINUE", Vector2(160, 42), 15)
 		skip_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		skip_btn.pressed.connect(_skip)
 		outer.add_child(skip_btn)
 
 
-func _kw_text(data: Dictionary) -> String:
-	if not data.has("keywords") or data.keywords.is_empty():
-		return ""
-	return ", ".join(data.keywords)
+func _animate_card_reveal(card: Control, pick_btn: Control, idx: int) -> void:
+	# Hide the card + button, then spring them in after a staggered delay so the
+	# three reward choices reveal one-by-one.
+	card.modulate.a = 0.0
+	card.scale = Vector2(0.6, 0.6)
+	pick_btn.modulate.a = 0.0
+	var delay := 0.18 + float(idx) * 0.16
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(card, "modulate:a", 1.0, 0.28).set_delay(delay)
+	tw.tween_property(card, "scale", Vector2.ONE, 0.36) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(delay)
+	tw.tween_property(pick_btn, "modulate:a", 1.0, 0.24).set_delay(delay + 0.18)
 
 
 func _pick_card(id: String) -> void:
 	RunState.add_card(id)
+	if AudioBank != null:
+		AudioBank.play_sfx("card_play")
 	if _is_elite_reward and _relic_choices.size() > 0:
 		_card_choices.clear()
 		_build_ui()
 	else:
-		get_tree().change_scene_to_file(MAP_SCENE)
+		GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 
 
 func _pick_relic(id: String) -> void:
 	RunState.add_relic(id)
-	get_tree().change_scene_to_file(MAP_SCENE)
+	if AudioBank != null:
+		AudioBank.play_sfx("coin")
+	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 
 
 func _skip() -> void:
-	get_tree().change_scene_to_file(MAP_SCENE)
+	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 
 
 func _skip_for_gold() -> void:
@@ -177,4 +196,4 @@ func _skip_for_gold() -> void:
 		_card_choices.clear()
 		_build_ui()
 	else:
-		get_tree().change_scene_to_file(MAP_SCENE)
+		GameTheme.fade_out_then_change_scene(self, MAP_SCENE)

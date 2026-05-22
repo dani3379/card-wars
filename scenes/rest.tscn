@@ -1,7 +1,7 @@
 [gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://scripts/scenes/Rest.gd" id="1"]
-[ext_resource type="Texture2D" path="res://assets/backgrounds/rest_campfire.jpg" id="2_bg"]
+[ext_resource type="Texture2D" path="res://assets/backgrounds/rest_campfire.png" id="2_bg"]
 
 [node name="Rest" type="Control"]
 layout_mode = 3

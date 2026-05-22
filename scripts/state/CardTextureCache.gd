@@ -19,10 +19,10 @@ extends Node
 # the cache key — those are reflected via the live overlay labels.
 
 const BAKE_PAD := 12
-const SLOT_W := 180
-const SLOT_H := 252
-const TEX_W := SLOT_W + BAKE_PAD * 2  # 204
-const TEX_H := SLOT_H + BAKE_PAD * 2  # 276
+const SLOT_W := 225
+const SLOT_H := 300
+const TEX_W := SLOT_W + BAKE_PAD * 2  # 249
+const TEX_H := SLOT_H + BAKE_PAD * 2  # 324
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 
 var _cache: Dictionary = {}  # String → ImageTexture
@@ -92,12 +92,19 @@ func bake(card_data: Dictionary) -> Texture2D:
 	card.static_display = true
 	card.bake_strip_stats = true
 	_bake_viewport.add_child(card)
-	# Card2D._ready sets size = (180, 252). The viewport is 12 px larger on
+	# Card2D._ready sets size = (225, 300). The viewport is 12 px larger on
 	# each axis so the cost/ATK/HP orbs that hang -9 px past the silhouette
 	# get captured instead of clipped at the framebuffer edge.
 	card.position = Vector2(BAKE_PAD, BAKE_PAD)
-	await get_tree().process_frame
-	await get_tree().process_frame
+	# Use frame_post_draw — process_frame is too early. Dynamic fonts
+	# rasterize glyphs into an atlas asynchronously; capturing on
+	# process_frame fires BEFORE the first glyph atlas pass completes, so the
+	# bake captures fallback-font glyphs or partial rasterization. This is
+	# the cause of "the font loads but the bake still shows the old font"
+	# bugs (godotengine/godot#106957). 2x frame_post_draw waits for the
+	# atlas to fill on the first pass and stabilizes on the second.
+	await RenderingServer.frame_post_draw
+	await RenderingServer.frame_post_draw
 	if _bake_viewport == null or not is_instance_valid(_bake_viewport):
 		# Scene shut down mid-bake (player exited combat etc.) — give up.
 		return null

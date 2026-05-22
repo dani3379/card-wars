@@ -1,7 +1,7 @@
 [gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://scripts/scenes/Reward.gd" id="1"]
-[ext_resource type="Texture2D" path="res://assets/backgrounds/combat_arena.jpg" id="2_bg"]
+[ext_resource type="Texture2D" path="res://assets/backgrounds/combat_battlefield.png" id="2_bg"]
 
 [node name="Reward" type="Control"]
 layout_mode = 3

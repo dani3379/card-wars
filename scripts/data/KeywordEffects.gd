@@ -41,7 +41,7 @@ static func tooltip_for(keyword: String) -> String:
 # the original word casing. Multi-word keywords ("Last Stand", "On-Enter",
 # "On-Death", "Adj. Buff") are handled by sorting longest-first so the longer
 # names match before their substrings.
-const KEYWORD_GOLD := "#c89e4a"
+const KEYWORD_GOLD := "#e8b547"  # warm parchment gold, 5.1:1 contrast on #4E4956 text well (WCAG AA)
 
 static func colorize_keywords(text: String) -> String:
 	if text.is_empty():
@@ -91,7 +91,7 @@ static func dispatch_on_enter(card, lane_idx: int, is_enemy: bool, ctx) -> void:
 	if data.is_empty() or not data.has("on_enter"):
 		return
 	var effect = data.on_enter
-	_run_on_enter(effect, lane_idx, is_enemy, ctx)
+	_run_on_enter(effect, card, lane_idx, is_enemy, ctx)
 	if data.has("keywords") and data.keywords.has("summon"):
 		_do_summon(lane_idx, is_enemy, ctx)
 
@@ -122,7 +122,57 @@ static func dispatch_start_of_round(ctx) -> void:
 			card.update_stat_display()
 
 
-static func _run_on_enter(effect: Dictionary, lane_idx: int, is_enemy: bool, ctx) -> void:
+const COMBAT_KEYWORDS := ["armored", "swift", "ranged", "thorns", "regenerate", "last_stand", "piercing"]
+
+
+static func _copy_abilities_partial(card, src: Dictionary) -> void:
+	# Mirror Knight scope: gain combat keywords + persistent abilities of `src`
+	# without changing the card's own body or overriding its intrinsic floop.
+	# Adds on_death / adj_buff / passive / wither only if the card doesn't
+	# already have one — so Mirror Knight keeps its own swap_atk floop while
+	# inheriting the defender's death-rattles, auras, and stat-keywords.
+	for kw in src.get("keywords", []):
+		if kw in COMBAT_KEYWORDS and not card.card_data.keywords.has(kw):
+			card.card_data.keywords.append(kw)
+	if src.has("on_death") and not card.card_data.has("on_death"):
+		card.card_data["on_death"] = src["on_death"].duplicate(true)
+	if src.has("adj_buff") and not card.card_data.has("adj_buff"):
+		card.card_data["adj_buff"] = src["adj_buff"].duplicate(true)
+	if src.has("passive") and not card.card_data.has("passive"):
+		card.card_data["passive"] = src["passive"]
+	if src.has("wither") and not card.card_data.has("wither"):
+		card.card_data["wither"] = src["wither"]
+	card.update_stat_display()
+
+
+static func _copy_creature_onto(card, src: Dictionary) -> void:
+	# Doppelganger scope: full transform — body + all keywords + every persistent
+	# ability dict from `src` (on_death, floop, adj_buff, passive, wither). Skips
+	# on_enter because we're already inside the copying card's on_enter dispatch;
+	# re-running the source's on_enter from here would recurse and was the
+	# original reason this function was abilities-blind. The card now actually
+	# *becomes* the source instead of grafting only its ATK/HP and a couple of
+	# combat keywords.
+	var atk := int(src.get("atk", card.current_atk))
+	var hp := int(src.get("hp", card.current_hp))
+	card.card_data.atk = atk
+	card.card_data.hp = hp
+	card.current_atk = atk
+	card.current_hp = hp
+	for kw in src.get("keywords", []):
+		if not card.card_data.keywords.has(kw):
+			card.card_data.keywords.append(kw)
+	for dict_key in ["on_death", "floop", "adj_buff"]:
+		if src.has(dict_key):
+			card.card_data[dict_key] = src[dict_key].duplicate(true)
+	if src.has("passive"):
+		card.card_data["passive"] = src["passive"]
+	if src.has("wither"):
+		card.card_data["wither"] = src["wither"]
+	card.update_stat_display()
+
+
+static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: bool, ctx) -> void:
 	match effect.get("type", ""):
 		"damage_opposing":
 			var target = ctx.get_opposing_card(lane_idx, not is_enemy)
@@ -166,9 +216,42 @@ static func _run_on_enter(effect: Dictionary, lane_idx: int, is_enemy: bool, ctx
 				var idx = randi() % ctx._hand.size()
 				var c = ctx._hand[idx]
 				ctx._hand.remove_at(idx)
-				ctx._player_discard_pile.append(c.card_id)
+				ctx._player_discard_pile.append(ctx._pile_entry(c.card_id, c.deck_uid))
 				ctx._hand_container.remove_child(c)
 				c.queue_free()
+		"copy_friendly":
+			# Copycat: take on the body of a random other friendly creature.
+			if card != null:
+				var pool := []
+				for c in ctx._all_friendly(is_enemy):
+					if c != card:
+						pool.append(c)
+				if pool.size() > 0:
+					_copy_creature_onto(card, pool[randi() % pool.size()].card_data)
+		"copy_opposing_keywords":
+			# Mirror Knight: mirror the opposing creature's combat keywords AND
+			# its persistent abilities (on_death / adj_buff / passive / wither)
+			# without changing Mirror Knight's body or overriding its own floop.
+			# Previously this only copied combat keywords, so vs anything without
+			# armored/swift/thorns Mirror Knight landed as a vanilla 2/3.
+			if card != null:
+				var opp = ctx.get_opposing_card(lane_idx, not is_enemy)
+				if opp != null:
+					_copy_abilities_partial(card, opp.card_data)
+		"copy_last_dead":
+			# Doppelganger: become a copy of the last creature that died.
+			if card != null:
+				var src = ctx._last_dead_copy_data()
+				if not src.is_empty():
+					_copy_creature_onto(card, src)
+		"look_top":
+			# Stray Cat: look at the top N of the draw pile, draw the cheapest.
+			if not is_enemy:
+				ctx._look_top_pick(int(effect.get("value", 3)))
+		"cast_random_spell":
+			# Chaos Imp: cast a random non-custom spell for free, auto-targeted.
+			if not is_enemy:
+				ctx.cast_random_spell_free()
 		_:
 			pass
 
