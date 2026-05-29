@@ -1,0 +1,238 @@
+Alpha
+Ancient Wyrm
+Anglerfish
+Apprentice
+Archer
+Ash Hound
+Banner-Bearer
+Bannerman
+Banshee
+Bastion
+Black Lancer
+Bleeding Heart
+Bloodfang
+Bloom Husk
+Boar
+Bog Beast
+Bog Slime
+Bombardier
+Bone Crone
+Bone Dragon
+Bone Knight
+Bone Walker
+Bone-Ram
+Bound Prisoner
+Brawler
+Bristleback
+Brood Harpy
+Brute
+Burning Martyr
+Camp Follower
+Camp Mutt
+Cantor
+Cap Lasher
+Captain
+Cauldron
+Char-Hide
+Charging Ram
+Chick
+Chief
+Chieftain
+Chorus of Echoes
+Cinder Pup
+Cinder Sprite
+Cinder Whelp
+Coal Carrier
+Coal Hulk
+Collector Golem
+Collector's Champion
+Collector's Pride
+Conductor
+Conflagrant
+Court Hexer
+Court Jester
+Court Mourner
+Crossbow Guard
+Crossbow Knight
+Crossbow Lady
+Crossbowman
+Crow
+Crow Witch
+Crypt Spider
+Cub
+Cutpurse
+Dark Acolyte
+Dark Priest
+Deepling
+Demon Soldier
+Den Mother
+Devil's Champion
+Devotee
+Display Case
+Doppel
+Drake
+Drowned
+Earthshaker
+Echo Twin
+Egg Mother
+Elder Drake
+Ember
+Ember Mystic
+Ember Stalker
+Executioner
+Fallen Knight
+Fallen Paladin
+Fanatic
+Field Mouse
+Fire Giant
+Flame Sprite
+Flanker
+Fledgling
+Flock Whisperer
+Footman
+Forgeling
+Forsworn Champion
+Fragment
+Glass Shard
+Glass Sniper
+Granite Guard
+Gravewarden
+Grunt
+Hall-Watcher
+Hammerer
+Hatchling
+Hatchling Brood
+Hellfire Imp
+Hellhound
+Hexer
+Hoard Guardian
+Hollow Champion
+Hollow Knight
+Houndmaster
+Hummer
+Hymn Bearer
+Ice Sprite
+Imp
+Infernal
+Initiate
+Inquisitor
+Iron Guard
+Iron Maiden
+Iron Recruit
+Iron Sentinel
+Iron Vanguard
+Jailer
+Kindler
+Kobold Hurler
+Lava Drake
+Leech
+Lesser Demon
+Lich
+Lich Acolyte
+Lieutenant
+Looter
+Mad Shepherd
+Maestro
+Maggot-Lamb
+Marionette
+Marrow Knight
+Matron
+Mire Druid
+Mirror Wisp
+Mosquito
+Mourner Knight
+Mycelium
+Nexus Core
+Null Beast
+Pack Wolf
+Pack-Master
+Pale Handmaid
+Pebble
+Phylactery
+Piglet
+Pikeman
+Pit Fiend
+Plunderer
+Puffer
+Pumpkin Head
+Puppet Knight
+Puppeteer's Guard
+Pyro
+Pyromancer
+Quarry Brute
+Razorback
+Recruit
+Reflection
+Rift Stalker
+Risen
+Risen Bones
+Risen Lich
+Runt
+Saboteur
+Scarecrow
+Scrap Crow
+Shade Knight
+Shadow Blade
+Shadow Double
+Shadow Sprite
+Shattered Twin
+Skeleton
+Skeleton Knight
+Sky Stalker
+Slag Heap
+Slinger
+Smoldering Crow
+Sneak
+Soprano
+Soul Cage
+Soul Drinker
+Soul Reaper
+Sow
+Spark
+Spawn
+Specter
+Spore
+Spore Beast
+Sprout
+Squire
+Stalker
+Standard Bearer
+Stitched Hand
+Stone Hurler
+Stone Sentinel
+Stone Sprite
+Storm Harpy
+Storm Sprite
+Straw Man
+Stray Lamb
+String Wraith
+Tendril
+Tenor
+Tentacle
+The Black Tide
+The Crone
+Thornveil
+Thug
+Tide Spawn
+Tide Sprite
+Tormentor
+Trebuchet
+Trinket
+Tusker
+Veteran
+Void Guard
+Void Maw
+Void Spawn
+Warden's Champion
+Warrior
+Whelp
+Whipman
+Whisper-King
+Wind Harpy
+Witch Doctor
+Withered King
+Wraith
+Wyrm
+Yearling
+Yearling Boar
+Zealot

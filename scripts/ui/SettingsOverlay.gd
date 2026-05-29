@@ -52,7 +52,10 @@ var _system_row: HBoxContainer = null
 
 func _ready() -> void:
 	layer = 100
-	_build_gear_button()
+	# Old top-right gear button has been retired — every scene now adds its
+	# own top-LEFT gear via GameTheme.make_settings_gear() so the position is
+	# consistent (matches Hearthstone / Cross Blitz / Marvel Snap). Skipping
+	# _build_gear_button() prevents the second gear from showing up.
 	_build_overlay()
 	_panel_root.visible = false
 	_backdrop.visible = false
@@ -236,7 +239,7 @@ func _build_overlay() -> void:
 	btn_row.add_child(apply_btn)
 
 	# "Resume" / Close — pill back button, primary way out.
-	var close_btn := GameTheme.make_back_button("RESUME", Vector2(150, 40), 16)
+	var close_btn := GameTheme.make_back_button("RESUME", Vector2(150, 40))
 	close_btn.pressed.connect(_close)
 	btn_row.add_child(close_btn)
 
@@ -265,6 +268,13 @@ func _rebuild_system_row() -> void:
 		child.queue_free()
 
 	if RunState.run_active:
+		# Save & exit path: preserves the run so it can be resumed from the
+		# load screen. Sits left of ABANDON because it's the safer choice.
+		var menu_btn := GameTheme.make_themed_button("MAIN MENU",
+			Color(0.18, 0.14, 0.10), Vector2(150, 38), 14)
+		menu_btn.pressed.connect(_to_main_menu_save_run)
+		_system_row.add_child(menu_btn)
+
 		var abandon_btn := GameTheme.make_themed_button("ABANDON RUN",
 			Color(0.36, 0.12, 0.10), Vector2(170, 38), 14)
 		abandon_btn.add_theme_color_override("font_color", Color(1.0, 0.85, 0.75))
@@ -912,7 +922,8 @@ func _open() -> void:
 	_is_open = true
 	_backdrop.visible = true
 	_panel_root.visible = true
-	_gear_btn.modulate = GameTheme.GILT_BRIGHT
+	if _gear_btn != null:
+		_gear_btn.modulate = GameTheme.GILT_BRIGHT
 
 	# Refresh title + system actions to current context every time the overlay
 	# opens — what counted as a "run" might be different now than at boot.
@@ -988,6 +999,24 @@ func _to_main_menu() -> void:
 	GameTheme.fade_out_then_change_scene(self, "res://scenes/main_menu.tscn", 0.30)
 
 
+func _to_main_menu_save_run() -> void:
+	# Save-and-quit from an active run. Confirms first because save_run() only
+	# captures room-boundary state — anything in-progress in the current combat
+	# (hand, board, mana) is lost and the encounter restarts on resume.
+	GameTheme.show_confirm_dialog(self,
+		"RETURN TO MAIN MENU?",
+		"Your run will be saved. You can resume it from the Load Game screen.",
+		"SAVE & EXIT",
+		"KEEP PLAYING",
+		Callable(self, "_confirm_to_main_menu_save_run"))
+
+
+func _confirm_to_main_menu_save_run() -> void:
+	RunState.save_run()
+	_close()
+	GameTheme.fade_out_then_change_scene(self, "res://scenes/main_menu.tscn", 0.30)
+
+
 func _quit_game() -> void:
 	# Confirm before quitting if a run is active, otherwise quit immediately.
 	if RunState.run_active:
@@ -1018,10 +1047,11 @@ func _close() -> void:
 		_backdrop.visible = false
 		_panel_root.visible = false)
 
-	if _gear_tween and _gear_tween.is_valid():
-		_gear_tween.kill()
-	_gear_tween = create_tween()
-	_gear_tween.tween_property(_gear_btn, "modulate", Color(0.82, 0.66, 0.30, 0.55), 0.2)
+	if _gear_btn != null:
+		if _gear_tween and _gear_tween.is_valid():
+			_gear_tween.kill()
+		_gear_tween = create_tween()
+		_gear_tween.tween_property(_gear_btn, "modulate", Color(0.82, 0.66, 0.30, 0.55), 0.2)
 
 
 func _input(event: InputEvent) -> void:

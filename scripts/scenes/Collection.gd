@@ -29,11 +29,14 @@ func _ready() -> void:
 
 	var margin := MarginContainer.new()
 	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
-	margin.add_theme_constant_override("margin_left", 40)
+	# Left margin bumped 40→80 so the settings gear (top-left, ~62px wide) has
+	# room without colliding with the section labels.
+	margin.add_theme_constant_override("margin_left", 80)
 	margin.add_theme_constant_override("margin_right", 40)
 	margin.add_theme_constant_override("margin_top", 20)
 	margin.add_theme_constant_override("margin_bottom", 20)
 	add_child(margin)
+	GameTheme.make_settings_gear(self)
 
 	var outer := VBoxContainer.new()
 	outer.add_theme_constant_override("separation", 12)
@@ -47,7 +50,7 @@ func _ready() -> void:
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	header.add_child(title)
 
-	var back_btn := GameTheme.make_back_button("BACK", Vector2(120, 40), 16)
+	var back_btn := GameTheme.make_back_button("BACK", Vector2(120, 40))
 	back_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MENU_SCENE))
 	header.add_child(back_btn)
 

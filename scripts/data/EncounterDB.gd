@@ -51,8 +51,20 @@ func build_enemy_deck(encounter_id: String) -> Array[Dictionary]:
 	var enc = get_encounter(encounter_id)
 	if enc.is_empty():
 		return []
+	# Composition variants: if the encounter defines a `deck_variants` array of
+	# alternate deck lists, pick one at random. The author can also keep the
+	# base `deck` and add `deck_variants` for additional flavors — we treat the
+	# base as one of the options so existing encounters get more variety for
+	# free as soon as a single variant is added.
+	var source_deck: Array = enc.deck
+	var variants: Array = enc.get("deck_variants", [])
+	if variants.size() > 0:
+		var options: Array = [enc.deck]
+		for v in variants:
+			options.append(v)
+		source_deck = options[randi() % options.size()]
 	var deck: Array[Dictionary] = []
-	for creature in enc.deck:
+	for creature in source_deck:
 		deck.append(make_card_data(creature))
 	return deck
 
@@ -61,6 +73,15 @@ func get_reinforcement(encounter_id: String) -> Dictionary:
 	var enc = get_encounter(encounter_id)
 	if enc.is_empty():
 		return {}
+	# Reinforcement pool: same pattern as deck variants. If the encounter has
+	# a `reinforcement_pool` list, pick one at random; otherwise fall back to
+	# the single `reinforcement` field. Empty pool = stick with base.
+	var pool: Array = enc.get("reinforcement_pool", [])
+	if pool.size() > 0:
+		var options: Array = [enc.reinforcement]
+		for p in pool:
+			options.append(p)
+		return make_card_data(options[randi() % options.size()])
 	return make_card_data(enc.reinforcement)
 
 
@@ -76,59 +97,198 @@ func get_reactive_passive(encounter_id: String) -> Dictionary:
 	return {}
 
 
+func get_encounter_script(encounter_id: String) -> Array:
+	## Returns scripted-event entries for an encounter, in order.
+	## Each entry: {round: int, msg: String, event: String, params...}
+	## Combat.gd plays them at start of the matching round.
+	if ENCOUNTER_SCRIPTS.has(encounter_id):
+		return ENCOUNTER_SCRIPTS[encounter_id]
+	return []
+
+
 # Boss phase definitions: each phase has threshold, passive_id, passive_desc,
 # and an optional transition effect.
 const BOSS_PHASES: Dictionary = {
 	"iron_warden": [
-		{"threshold": 13, "passive_id": "iron_warden_burn", "passive_desc": "2 face damage to player at end of each round."},
-		{"threshold": 0, "passive_id": "iron_warden_siege", "passive_desc": "3 face damage + all enemies gain Armored.",
+		{"threshold": 13, "passive_id": "", "passive_desc": ""},
+		{"threshold": 0, "passive_id": "iron_warden_siege", "passive_desc": "All enemies gain Armored.",
 			"transition_msg": "The Warden enters Siege Mode!",
 			"transition_effect": {"type": "summon", "name": "Iron Guard", "atk": 2, "hp": 5, "kw": ["armored"]}},
 	],
 	"dragon_lord": [
 		{"threshold": 12, "passive_id": "dragon_lord_piercing", "passive_desc": "All enemy creatures have Piercing."},
-		{"threshold": 0, "passive_id": "dragon_lord_phase2", "passive_desc": "Piercing + all enemies +1 ATK.",
+		{"threshold": 0, "passive_id": "dragon_lord_phase2", "passive_desc": "All enemy creatures have Piercing and gain +1 ATK.",
 			"transition_msg": "The Dragon Lord roars!",
 			"transition_effect": {"type": "heal_all_enemies", "value": 2}},
 	],
 	"collector": [
-		{"threshold": 17, "passive_id": "collector_heal", "passive_desc": "Player creature played: Collector heals 1 HP."},
-		{"threshold": 0, "passive_id": "collector_phase2", "passive_desc": "Player creature: heal 2 + random enemy +1 ATK.",
+		{"threshold": 17, "passive_id": "collector_heal", "passive_desc": "When you play a creature: the Collector heals 1 HP."},
+		{"threshold": 0, "passive_id": "collector_phase2", "passive_desc": "When you play a creature: the Collector heals 2 HP and a random enemy gains +1 ATK.",
 			"transition_msg": "The Collector unveils his gallery!",
 			"transition_effect": {"type": "summon_multiple", "name": "Trinket", "atk": 2, "hp": 3, "count": 2}},
 	],
 	"hollow_king": [
-		{"threshold": 16, "passive_id": "hollow_king_snipe", "passive_desc": "Highest-ATK player creature takes 3 damage each round."},
-		{"threshold": 0, "passive_id": "hollow_king_phase2", "passive_desc": "Two highest take 3 dmg + Curse added to deck.",
+		{"threshold": 16, "passive_id": "hollow_king_snipe", "passive_desc": "Start of each round: deal 3 damage to your highest-ATK creature."},
+		{"threshold": 0, "passive_id": "hollow_king_phase2", "passive_desc": "Start of each round: deal 3 damage to your two highest-ATK creatures and add a Curse to your discard pile.",
 			"transition_msg": "The Hollow King's void spreads!",
 			"transition_effect": {"type": "debuff_all_player_atk", "value": 1}},
 	],
 	"the_devil": [
-		{"threshold": 20, "passive_id": "devil_cycle", "passive_desc": "Cycle: R1 2 face, R2 heal 1/enemy, R3 3 to highest-ATK."},
-		{"threshold": 10, "passive_id": "devil_phase2", "passive_desc": "Cycle doubled + all enemies +1 ATK.",
+		{"threshold": 20, "passive_id": "devil_cycle", "passive_desc": "Three-round cycle (repeats). Round 1: deal 2 face damage. Round 2: heal 1 HP for every enemy on the board. Round 3: deal 3 damage to your highest-ATK creature."},
+		{"threshold": 10, "passive_id": "devil_phase2", "passive_desc": "The three-round cycle's effects double. All enemy creatures gain +1 ATK.",
 			"transition_msg": "THE DEVIL REVEALS HIS TRUE FORM!",
 			"transition_effect": {"type": "summon", "name": "Pit Fiend", "atk": 4, "hp": 5, "kw": ["armored", "regenerate"]}},
-		{"threshold": 0, "passive_id": "devil_phase3", "passive_desc": "DESPERATION: 3 face + summon + all enemies +1 ATK/round.",
+		{"threshold": 0, "passive_id": "devil_phase3", "passive_desc": "DESPERATION. Each round: deal 3 face damage, summon a creature, and all enemies gain +1 ATK.",
 			"transition_msg": "THE DEVIL UNLEASHES HIS FULL POWER!",
 			"transition_effect": {"type": "buff_all_enemies_atk", "value": 1}},
 	],
 	"the_crone": [
-		{"threshold": 24, "passive_id": "crone_drip", "passive_desc": "End of round: 1 Curse to discard."},
-		{"threshold": 12, "passive_id": "crone_lash", "passive_desc": "Drip + 1 face damage per Curse in your deck.",
+		{"threshold": 24, "passive_id": "crone_drip", "passive_desc": "End of each round: add 1 Curse to your discard pile."},
+		{"threshold": 12, "passive_id": "crone_lash", "passive_desc": "End of each round: add 1 Curse to your discard pile and deal 1 face damage for each Curse in your deck.",
 			"transition_msg": "The Crone's voice cracks the air!",
 			"transition_effect": {"type": "summon", "name": "Wraith", "atk": 2, "hp": 3, "kw": ["swift"]}},
-		{"threshold": 0, "passive_id": "crone_doom", "passive_desc": "2 Curses + 1 face per Curse + Wraith summon each round.",
+		{"threshold": 0, "passive_id": "crone_doom", "passive_desc": "End of each round: add 2 Curses to your discard pile, deal 1 face damage per Curse in your deck, and summon a Wraith.",
 			"transition_msg": "THE CRONE BURIES YOU IN HER GRAVE-DIRT!",
 			"transition_effect": {"type": "buff_all_enemies_atk", "value": 1}},
 	],
 	"the_black_tide": [
-		{"threshold": 26, "passive_id": "tide_swell", "passive_desc": "End of round: summon 2/3 Deepling if board <4."},
-		{"threshold": 13, "passive_id": "tide_surge", "passive_desc": "Swell + all enemies +1 ATK each round.",
+		{"threshold": 26, "passive_id": "tide_swell", "passive_desc": "End of each round: if there are fewer than 4 enemy creatures on the board, summon a 2/3 Deepling."},
+		{"threshold": 13, "passive_id": "tide_surge", "passive_desc": "Deepling summon AND all enemy creatures gain +1 ATK each round.",
 			"transition_msg": "The tide rises higher!",
 			"transition_effect": {"type": "summon", "name": "Anglerfish", "atk": 4, "hp": 3}},
-		{"threshold": 0, "passive_id": "tide_drown", "passive_desc": "Surge + 3 damage to your weakest creature each round.",
+		{"threshold": 0, "passive_id": "tide_drown", "passive_desc": "All previous effects AND each round: deal 3 damage to your weakest creature.",
 			"transition_msg": "THE BLACK TIDE DRAGS YOU UNDER!",
 			"transition_effect": {"type": "buff_all_enemies_atk", "value": 2}},
+	],
+}
+
+
+# Encounter scripts: scripted moments at specific rounds that change the
+# fight dynamic. Modeled after Slay the Spire's elite/boss patterns where
+# specific turns have predictable but impactful events the player learns
+# to plan around (Hexaghost lighting candles, Lagavulin waking up).
+#
+# Each entry: {round: int, msg: String, event: String, ...params}
+# Events handled in Combat.gd._run_encounter_script:
+#   - summon: places a named creature (params: name, atk, hp, kw[])
+#   - buff_all_atk: all enemy creatures gain +N ATK permanent (params: value)
+#   - buff_all_hp: all enemy creatures gain +N HP (params: value)
+#   - grant_keyword_all: grant a keyword to all enemy creatures (params: keyword)
+#   - face_damage: direct damage to player face (params: value)
+#   - heal_all: heal all enemy creatures (params: value)
+const ENCOUNTER_SCRIPTS: Dictionary = {
+	# ── Act 1 ────────────────────────────────────────────────────────────
+	"goblin_scouts": [
+		{"round": 3, "msg": "The goblins call for backup!",
+			"event": "summon", "name": "Goblin", "atk": 2, "hp": 2},
+		{"round": 5, "msg": "GOBLIN AMBUSH!",
+			"event": "grant_keyword_all", "keyword": "swift"},
+	],
+	"wolf_pack": [
+		{"round": 2, "msg": "The wolves howl — pack frenzy!",
+			"event": "buff_all_atk", "value": 1},
+		{"round": 4, "msg": "The Alpha emerges!",
+			"event": "summon", "name": "Alpha Wolf", "atk": 4, "hp": 5},
+	],
+	"bandit_camp": [
+		{"round": 3, "msg": "The bandits draw blades!",
+			"event": "grant_keyword_all", "keyword": "swift"},
+		{"round": 5, "msg": "Bandit reinforcements arrive!",
+			"event": "summon", "name": "Bandit Captain", "atk": 3, "hp": 4},
+	],
+	"mushroom_grove": [
+		{"round": 2, "msg": "Spores fill the air…",
+			"event": "face_damage", "value": 2},
+		{"round": 4, "msg": "The grove awakens!",
+			"event": "buff_all_hp", "value": 2},
+	],
+	"stone_sentinels": [
+		{"round": 3, "msg": "The sentinels harden their shells!",
+			"event": "grant_keyword_all", "keyword": "armored"},
+	],
+	"harpy_nest": [
+		{"round": 2, "msg": "The harpies take flight!",
+			"event": "grant_keyword_all", "keyword": "swift"},
+		{"round": 4, "msg": "Mother Harpy descends!",
+			"event": "summon", "name": "Mother Harpy", "atk": 3, "hp": 5},
+	],
+	"boar_herd": [
+		{"round": 3, "msg": "The herd charges!",
+			"event": "buff_all_atk", "value": 1},
+	],
+	"scarecrow_field": [
+		{"round": 2, "msg": "The crows arrive!",
+			"event": "summon", "name": "Crow", "atk": 2, "hp": 2},
+		{"round": 4, "msg": "Harvest moon rises!",
+			"event": "buff_all_atk", "value": 1},
+	],
+	# ── Act 2 ────────────────────────────────────────────────────────────
+	"cultist_enclave": [
+		{"round": 3, "msg": "The cultists begin the ritual!",
+			"event": "face_damage", "value": 3},
+		{"round": 5, "msg": "An acolyte ascends!",
+			"event": "summon", "name": "Ritual Acolyte", "atk": 3, "hp": 5},
+	],
+	"swamp_horror": [
+		{"round": 2, "msg": "The swamp churns!",
+			"event": "heal_all", "value": 2},
+		{"round": 4, "msg": "The Horror surfaces!",
+			"event": "summon", "name": "Bog Tendril", "atk": 4, "hp": 4},
+	],
+	"mercenary_company": [
+		{"round": 3, "msg": "The captain rallies the line!",
+			"event": "buff_all_atk", "value": 1},
+	],
+	"haunted_crypt": [
+		{"round": 2, "msg": "Cold wind from the crypt…",
+			"event": "face_damage", "value": 2},
+		{"round": 4, "msg": "The dead rise!",
+			"event": "summon", "name": "Risen Skeleton", "atk": 3, "hp": 3},
+	],
+	"fire_giants_forge": [
+		{"round": 3, "msg": "The forge roars to life!",
+			"event": "grant_keyword_all", "keyword": "swift"},
+	],
+	"ash_hounds": [
+		{"round": 2, "msg": "The hounds catch your scent!",
+			"event": "buff_all_atk", "value": 1},
+		{"round": 4, "msg": "The pack masters arrive!",
+			"event": "summon", "name": "Ash Master", "atk": 4, "hp": 4},
+	],
+	# ── Act 3 ────────────────────────────────────────────────────────────
+	"mirror_temple": [
+		{"round": 3, "msg": "Your reflection turns hostile!",
+			"event": "buff_all_atk", "value": 2},
+	],
+	"elemental_nexus": [
+		{"round": 2, "msg": "The leylines surge!",
+			"event": "grant_keyword_all", "keyword": "piercing"},
+		{"round": 4, "msg": "A greater elemental manifests!",
+			"event": "summon", "name": "Storm Elemental", "atk": 4, "hp": 5},
+	],
+	"executioners_block": [
+		{"round": 3, "msg": "The Executioner raises his axe!",
+			"event": "face_damage", "value": 4},
+	],
+	"dragons_lair": [
+		{"round": 2, "msg": "Dragon-fire scorches the field!",
+			"event": "face_damage", "value": 3},
+		{"round": 4, "msg": "The dragon's wrath grows!",
+			"event": "buff_all_atk", "value": 1},
+	],
+	"pyre_cult": [
+		{"round": 3, "msg": "The pyre flares!",
+			"event": "buff_all_atk", "value": 2},
+	],
+	"withered_court": [
+		{"round": 2, "msg": "The court whispers curses…",
+			"event": "face_damage", "value": 2},
+		{"round": 4, "msg": "The Withered King appears!",
+			"event": "summon", "name": "Withered King", "atk": 5, "hp": 6},
+	],
+	"killing_choir": [
+		{"round": 3, "msg": "The choir reaches its crescendo!",
+			"event": "buff_all_atk", "value": 1},
 	],
 }
 
@@ -137,10 +297,6 @@ const BOSS_PHASES: Dictionary = {
 # "trigger": what player action triggers it
 # "effect": what happens when triggered
 const REACTIVE_PASSIVES: Dictionary = {
-	"orc_warband": {"trigger": "ON_PLAYER_SPELL", "effect": "buff_chieftain_atk",
-		"desc": "Chieftain gains +1 ATK when player plays a spell."},
-	"necromancer_tower": {"trigger": "ON_CREATURE_DEATH", "effect": "double_on_death",
-		"desc": "Enemy on-death effects trigger twice."},
 	"cultist_enclave": {"trigger": "ON_PLAYER_SACRIFICE", "effect": "face_damage",
 		"value": 2, "desc": "Deal 2 face damage when player sacrifices."},
 	"haunted_crypt": {"trigger": "ON_PLAYER_FLOOP", "effect": "damage_flooper",
@@ -149,14 +305,6 @@ const REACTIVE_PASSIVES: Dictionary = {
 		"value": 1, "desc": "Deal 1 to the flooping creature."},
 	"puppeteer": {"trigger": "ON_PLAYER_SUMMON", "effect": "summon_puppet",
 		"atk": 2, "hp": 2, "desc": "Summon a 2/2 Puppet when player summons."},
-	"mirror_temple": {"trigger": "ON_CREATURE_DEATH", "effect": "heal_all_enemies",
-		"value": 1, "desc": "All surviving enemies heal 1 on any death."},
-	"executioners_block": {"trigger": "ON_PLAYER_DRAW", "effect": "face_damage_per_draw",
-		"desc": "1 face damage per extra card drawn beyond 5."},
-	"archlich": {"trigger": "ON_PLAYER_SPELL", "effect": "summon_shard",
-		"atk": 1, "hp": 1, "desc": "Summon 1/1 Bone Shard when player plays a spell."},
-	"void_walker": {"trigger": "ON_PLAYER_DRAW", "effect": "exile_card",
-		"desc": "Exile 1 additional card from deck on extra draw."},
 }
 
 
@@ -169,842 +317,1245 @@ const ENCOUNTERS: Dictionary = {
 	# =================== ACT 1 — COMBAT ===========================
 
 	"goblin_scouts": {
-		"name": "Goblin Scouts", "act": 1, "type": "combat", "hp": 12,
+		# Goblin Scouts — AMBUSH AND SCATTER. Almost everything is Swift (the
+		# whole pack swings before player creatures resolve), most carry a
+		# small chip-damage on_enter or random-player ping. Low HP, easy to
+		# clear — but the first round HURTS if you didn't expect a wave.
+		"name": "The First Cut", "act": 1, "type": "combat", "hp": 11,
 		"passive_id": "", "passive_desc": "",
 		"deck": [
-			{"name": "Goblin", "atk": 2, "hp": 2},
-			{"name": "Goblin", "atk": 2, "hp": 2},
-			{"name": "Goblin", "atk": 2, "hp": 2,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Goblin", "atk": 2, "hp": 2},
-			{"name": "Goblin Scout", "atk": 2, "hp": 3,
-				"intents": ["ATK", "RALLY", "ATK", "ATK"]},
-			{"name": "Goblin Scout", "atk": 2, "hp": 3},
+			{"name": "Runt", "atk": 1, "hp": 2, "kw": ["swift"],
+				"on_death": {"type": "summon", "atk": 1, "hp": 1}},
+			{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+			{"name": "Pyro", "atk": 2, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "damage_random_player", "value": 1}},
+			{"name": "Looter", "atk": 2, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "damage_face", "value": 1}},
+			{"name": "Banner-Bearer", "atk": 1, "hp": 3,
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Chief", "atk": 3, "hp": 3, "kw": ["swift"],
+				"on_enter": {"type": "damage_face", "value": 1}},
 		],
-		"reinforcement": {"name": "Runt", "atk": 1, "hp": 1},
+		"deck_variants": [
+			# Variant: knife-eared swarm — all-swift, all-low, drowns you in chip.
+			[
+				{"name": "Runt", "atk": 1, "hp": 2, "kw": ["swift"],
+					"on_death": {"type": "summon", "atk": 1, "hp": 1}},
+				{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
+				{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
+				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+				{"name": "Pyro", "atk": 2, "hp": 2, "kw": ["swift"],
+					"on_enter": {"type": "damage_random_player", "value": 1}},
+				{"name": "Chief", "atk": 3, "hp": 3, "kw": ["swift"],
+					"on_enter": {"type": "damage_face", "value": 1}},
+			],
+			# Variant: slinger line — ranged-heavy, less swift up close.
+			[
+				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+				{"name": "Looter", "atk": 2, "hp": 2, "kw": ["swift"],
+					"on_enter": {"type": "damage_face", "value": 1}},
+				{"name": "Pyro", "atk": 2, "hp": 2, "kw": ["swift"],
+					"on_enter": {"type": "damage_random_player", "value": 1}},
+				{"name": "Banner-Bearer", "atk": 1, "hp": 3,
+					"adj_buff": {"atk": 1, "hp": 0}},
+				{"name": "Runt", "atk": 1, "hp": 2, "kw": ["swift"],
+					"on_death": {"type": "summon", "atk": 1, "hp": 1}},
+			],
+		],
+		"reinforcement": {"name": "Whelp", "atk": 1, "hp": 1, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+		],
 	},
 
 	"wolf_pack": {
-		"name": "Wolf Pack", "act": 1, "type": "combat", "hp": 14,
+		# Wolf Pack — DENSITY MATTERS. Most wolves carry adj_buff, so a clumped
+		# pack hits much harder than a spread one. The revenge passive rages
+		# adjacents when one falls; killing the buffer in the middle is the
+		# puzzle, not killing the front-row chaff.
+		"name": "The Den Mother's Brood", "act": 1, "type": "combat", "hp": 13,
 		"passive_id": "wolf_pack_revenge",
-		"passive_desc": "When an enemy creature dies, adjacent enemies gain +1 ATK this turn.",
+		"passive_desc": "When an enemy creature dies: adjacent enemies gain +1 ATK this round.",
 		"deck": [
-			{"name": "Wolf", "atk": 2, "hp": 3},
-			{"name": "Wolf", "atk": 2, "hp": 3},
-			{"name": "Wolf", "atk": 2, "hp": 3},
-			{"name": "Dire Wolf", "atk": 3, "hp": 3},
-			{"name": "Dire Wolf", "atk": 3, "hp": 3},
-			{"name": "Alpha", "atk": 3, "hp": 4,
-				"intents": ["ATK", "RALLY", "ATK", "ATK"]},
+			{"name": "Cub", "atk": 1, "hp": 2, "kw": ["last_stand"]},
+			{"name": "Stalker", "atk": 2, "hp": 2, "kw": ["swift"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Flanker", "atk": 2, "hp": 2, "kw": ["swift"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Pack Wolf", "atk": 2, "hp": 3,
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Den Mother", "atk": 1, "hp": 5,
+				"adj_buff": {"atk": 0, "hp": 1},
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+			{"name": "Bloodfang", "atk": 3, "hp": 3, "kw": ["piercing"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Alpha", "atk": 3, "hp": 5, "kw": ["swift"],
+				"adj_buff": {"atk": 1, "hp": 0}},
 		],
-		"reinforcement": {"name": "Pup", "atk": 1, "hp": 1},
+		"deck_variants": [
+			# Variant: glass-cannon pack — all-swift, low HP, hits hard.
+			[
+				{"name": "Cub", "atk": 1, "hp": 2, "kw": ["last_stand"]},
+				{"name": "Stalker", "atk": 2, "hp": 2, "kw": ["swift"],
+					"adj_buff": {"atk": 1, "hp": 0}},
+				{"name": "Stalker", "atk": 2, "hp": 2, "kw": ["swift"],
+					"adj_buff": {"atk": 1, "hp": 0}},
+				{"name": "Bloodfang", "atk": 3, "hp": 3, "kw": ["piercing"],
+					"adj_buff": {"atk": 1, "hp": 0}},
+				{"name": "Bloodfang", "atk": 3, "hp": 3, "kw": ["piercing"],
+					"adj_buff": {"atk": 1, "hp": 0}},
+				{"name": "Alpha", "atk": 3, "hp": 5, "kw": ["swift"],
+					"adj_buff": {"atk": 1, "hp": 0}},
+			],
+			# Variant: brood-heavy pack — slow, summoner-leaning.
+			[
+				{"name": "Cub", "atk": 1, "hp": 2, "kw": ["last_stand"]},
+				{"name": "Cub", "atk": 1, "hp": 2, "kw": ["last_stand"]},
+				{"name": "Pack Wolf", "atk": 2, "hp": 3,
+					"adj_buff": {"atk": 1, "hp": 0}},
+				{"name": "Den Mother", "atk": 1, "hp": 5,
+					"adj_buff": {"atk": 0, "hp": 1},
+					"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+				{"name": "Den Mother", "atk": 1, "hp": 5,
+					"adj_buff": {"atk": 0, "hp": 1},
+					"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+				{"name": "Alpha", "atk": 3, "hp": 5, "kw": ["swift"],
+					"adj_buff": {"atk": 1, "hp": 0}},
+			],
+		],
+		"reinforcement": {"name": "Yearling", "atk": 2, "hp": 2, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Stalker", "atk": 2, "hp": 2, "kw": ["swift"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Pack Wolf", "atk": 2, "hp": 3,
+				"adj_buff": {"atk": 1, "hp": 0}},
+		],
 	},
 
 	"bandit_camp": {
-		"name": "Bandit Camp", "act": 1, "type": "combat", "hp": 14,
+		"name": "The Toll-Takers", "act": 1, "type": "combat", "hp": 13,
 		"passive_id": "bandit_mana_steal",
-		"passive_desc": "First enemy placed each turn steals 1 player mana next turn.",
+		"passive_desc": "When the enemy places its first reinforcement each round: you lose 1 mana next turn.",
+		# Bandit Camp — mixed combat archetypes. Cutpurse (eco), Archer (range),
+		# Brawler (front), Hexer (debuff), Captain (lead), Saboteur (curse).
+		# Bandit Camp — STEAL AND STING. Every bandit chips at face on entry
+		# or carries Ranged for sniping. Brawler is the only real wall — kill
+		# him and you eat hits, kill the snipers first and you eat the wall.
 		"deck": [
-			{"name": "Bandit", "atk": 2, "hp": 3},
-			{"name": "Bandit", "atk": 2, "hp": 3},
-			{"name": "Bandit", "atk": 2, "hp": 3},
-			{"name": "Archer", "atk": 2, "hp": 3,
+			{"name": "Cutpurse", "atk": 2, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "damage_face", "value": 1}},
+			{"name": "Brawler", "atk": 3, "hp": 3, "kw": ["armored"]},
+			{"name": "Archer", "atk": 2, "hp": 2, "kw": ["ranged"],
 				"on_enter": {"type": "damage_random_player", "value": 1}},
-			{"name": "Archer", "atk": 2, "hp": 3,
-				"on_enter": {"type": "damage_random_player", "value": 1}},
-			{"name": "Captain", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
+			{"name": "Hexer", "atk": 1, "hp": 3, "kw": ["ranged"],
+				"on_enter": {"type": "debuff_opposing_atk", "value": 1}},
+			{"name": "Saboteur", "atk": 2, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "damage_face", "value": 1}},
+			{"name": "Camp Mutt", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Captain", "atk": 3, "hp": 4, "kw": ["swift"],
+				"adj_buff": {"atk": 1, "hp": 0}},
 		],
-		"reinforcement": {"name": "Thug", "atk": 1, "hp": 2},
+		"deck_variants": [
+			# Variant: ranged outlaws — two archers + crossbow, fewer melee.
+			[
+				{"name": "Cutpurse", "atk": 2, "hp": 2,
+					"on_enter": {"type": "damage_face", "value": 1}},
+				{"name": "Archer", "atk": 2, "hp": 2, "kw": ["ranged"],
+					"on_enter": {"type": "damage_random_player", "value": 1}},
+				{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": ["ranged"]},
+				{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": ["ranged"]},
+				{"name": "Camp Mutt", "atk": 2, "hp": 2, "kw": ["swift"]},
+				{"name": "Captain", "atk": 3, "hp": 4,
+					"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
+			],
+			# Variant: curse-heavy crew — two saboteurs, no archer.
+			[
+				{"name": "Cutpurse", "atk": 2, "hp": 2,
+					"on_enter": {"type": "damage_face", "value": 1}},
+				{"name": "Saboteur", "atk": 2, "hp": 2,
+					"intents": ["ATK", "ABILITY", "ATK", "ATK"],
+					"ability": {"type": "curse"}},
+				{"name": "Saboteur", "atk": 2, "hp": 2,
+					"intents": ["ATK", "ABILITY", "ATK", "ATK"],
+					"ability": {"type": "curse"}},
+				{"name": "Hexer", "atk": 1, "hp": 3,
+					"intents": ["ATK", "ABILITY", "ATK", "ABILITY"],
+					"ability": {"type": "steal_atk", "value": 1}},
+				{"name": "Brawler", "atk": 3, "hp": 3, "kw": ["armored"]},
+				{"name": "Captain", "atk": 3, "hp": 4,
+					"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
+			],
+		],
+		"reinforcement": {"name": "Thug", "atk": 2, "hp": 2},
+		"reinforcement_pool": [
+			{"name": "Camp Mutt", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Cutpurse", "atk": 2, "hp": 2,
+				"on_enter": {"type": "damage_face", "value": 1}},
+		],
 	},
 
 	"mushroom_grove": {
-		"name": "Mushroom Grove", "act": 1, "type": "combat", "hp": 10,
+		"name": "The Spore-Cathedral", "act": 1, "type": "combat", "hp": 9,
 		"passive_id": "mushroom_heal",
-		"passive_desc": "Heal all enemy creatures 1 at end of round.",
+		"passive_desc": "End of each round: heal every enemy creature for 1 HP.",
+		# Mushroom Grove — IT JUST GROWS BACK. Almost every fungus regenerates
+		# or seeds another on death; the grove passive heals everything at
+		# round-end. The damage is low but trading is futile. AoE clears
+		# faster than spot-killing.
 		"deck": [
-			{"name": "Sprout", "atk": 1, "hp": 4},
-			{"name": "Sprout", "atk": 1, "hp": 4},
-			{"name": "Sprout", "atk": 1, "hp": 4},
-			{"name": "Spore Beast", "atk": 2, "hp": 4},
-			{"name": "Spore Beast", "atk": 2, "hp": 4},
-			{"name": "Mycelium", "atk": 2, "hp": 5,
-				"on_death": {"type": "damage_all_enemies", "value": 1},
-				"intents": ["ATK", "HEAL", "ATK", "HEAL"]},
+			{"name": "Sprout", "atk": 1, "hp": 3, "kw": ["regenerate"]},
+			{"name": "Puffer", "atk": 1, "hp": 2, "kw": ["regenerate"],
+				"on_death": {"type": "damage_all_enemies", "value": 1}},
+			{"name": "Spore Beast", "atk": 2, "hp": 4, "kw": ["regenerate"],
+				"on_death": {"type": "summon", "atk": 1, "hp": 2}},
+			{"name": "Thornveil", "atk": 1, "hp": 4, "kw": ["thorns", "regenerate"]},
+			{"name": "Cap Lasher", "atk": 3, "hp": 2, "kw": ["thorns"]},
+			{"name": "Bloom Husk", "atk": 2, "hp": 3, "kw": ["regenerate"],
+				"adj_buff": {"atk": 0, "hp": 1}},
+			{"name": "Mycelium", "atk": 2, "hp": 5, "kw": ["regenerate"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
 		],
-		"reinforcement": {"name": "Spore", "atk": 1, "hp": 2},
+		"deck_variants": [
+			# Variant: thorny wall — multiple Thornveils discourage free trades.
+			[
+				{"name": "Sprout", "atk": 1, "hp": 3, "kw": ["regenerate"]},
+				{"name": "Thornveil", "atk": 1, "hp": 4, "kw": ["thorns"]},
+				{"name": "Thornveil", "atk": 1, "hp": 4, "kw": ["thorns"]},
+				{"name": "Bloom Husk", "atk": 2, "hp": 3,
+					"adj_buff": {"atk": 0, "hp": 1}},
+				{"name": "Bloom Husk", "atk": 2, "hp": 3,
+					"adj_buff": {"atk": 0, "hp": 1}},
+				{"name": "Mycelium", "atk": 2, "hp": 5,
+					"on_death": {"type": "damage_all_enemies", "value": 1},
+					"intents": ["ATK", "HEAL", "ATK", "HEAL"]},
+			],
+			# Variant: bomb grove — Puffers and Spore Beasts everywhere.
+			[
+				{"name": "Puffer", "atk": 1, "hp": 2,
+					"on_death": {"type": "damage_all_enemies", "value": 1}},
+				{"name": "Puffer", "atk": 1, "hp": 2,
+					"on_death": {"type": "damage_all_enemies", "value": 1}},
+				{"name": "Spore Beast", "atk": 2, "hp": 4,
+					"on_death": {"type": "summon", "atk": 1, "hp": 2}},
+				{"name": "Spore Beast", "atk": 2, "hp": 4,
+					"on_death": {"type": "summon", "atk": 1, "hp": 2}},
+				{"name": "Cap Lasher", "atk": 3, "hp": 2},
+				{"name": "Mycelium", "atk": 2, "hp": 5,
+					"on_death": {"type": "damage_all_enemies", "value": 1},
+					"intents": ["ATK", "HEAL", "ATK", "HEAL"]},
+			],
+		],
+		"reinforcement": {"name": "Spore", "atk": 1, "hp": 2, "kw": ["regenerate"]},
+		"reinforcement_pool": [
+			{"name": "Puffer", "atk": 1, "hp": 2,
+				"on_death": {"type": "damage_all_enemies", "value": 1}},
+			{"name": "Sprout", "atk": 1, "hp": 3, "kw": ["regenerate"]},
+		],
 	},
 
 	"stone_sentinels": {
-		"name": "Stone Sentinels", "act": 1, "type": "combat", "hp": 12,
+		"name": "The Tooth-Stones", "act": 1, "type": "combat", "hp": 11,
 		"passive_id": "",
 		"passive_desc": "",
+		# Stone Sentinels — heavy fortress: walls, hurlers, breakers, an animator.
+		# Stone Sentinels — STONE THAT BITES BACK. Every sentinel is armored
+		# or thorns or both. Spells get through fine; weapon trades are
+		# punishing. Players learn to bring AoE / piercing for this fight or
+		# eat thorns chip damage on every hit.
 		"deck": [
-			{"name": "Golem", "atk": 2, "hp": 3},
-			{"name": "Golem", "atk": 2, "hp": 3},
-			{"name": "Golem", "atk": 2, "hp": 4, "kw": ["armored"]},
-			{"name": "Golem", "atk": 2, "hp": 4},
-			{"name": "Rock Hurler", "atk": 3, "hp": 3,
-				"on_enter": {"type": "damage_random_player", "value": 1},
-				"intents": ["ATK", "ATK", "GUARD", "ATK"]},
+			{"name": "Pebble", "atk": 1, "hp": 3, "kw": ["thorns"],
+				"on_death": {"type": "damage_opposing_lane", "value": 1}},
+			{"name": "Bastion", "atk": 1, "hp": 5, "kw": ["armored", "thorns"]},
+			{"name": "Stone Hurler", "atk": 2, "hp": 3, "kw": ["ranged", "armored"]},
 			{"name": "Granite Guard", "atk": 2, "hp": 4, "kw": ["armored"]},
+			{"name": "Earthshaker", "atk": 3, "hp": 3, "kw": ["armored"],
+				"on_enter": {"type": "damage_random_player", "value": 2}},
+			{"name": "Quarry Brute", "atk": 4, "hp": 3, "kw": ["thorns"]},
+			{"name": "Stone Sentinel", "atk": 2, "hp": 5, "kw": ["armored", "thorns"]},
 		],
-		"reinforcement": {"name": "Fragment", "atk": 1, "hp": 2},
+		"reinforcement": {"name": "Fragment", "atk": 1, "hp": 2, "kw": ["armored", "thorns"]},
+		"reinforcement_pool": [
+			{"name": "Granite Guard", "atk": 2, "hp": 4, "kw": ["armored"]},
+			{"name": "Pebble", "atk": 1, "hp": 3, "kw": ["thorns"],
+				"on_death": {"type": "damage_opposing_lane", "value": 1}},
+		],
 	},
 
 	"harpy_nest": {
-		"name": "Harpy Nest", "act": 1, "type": "combat", "hp": 13,
+		# Harpy Nest — DIVE AND VANISH. Almost every flyer is Swift, several
+		# are also Ranged (back-row preference) so blocking a lane doesn't
+		# stop the next dive. The matron buffs adjacents — kill her early or
+		# the whole flock hits harder.
+		"name": "The Stooping Wings", "act": 1, "type": "combat", "hp": 12,
 		"passive_id": "harpy_swift_face",
-		"passive_desc": "Enemy Swift creatures deal +1 face damage through empty lanes.",
+		"passive_desc": "Enemy Swift creatures deal +1 extra face damage when attacking through empty lanes.",
 		"deck": [
-			{"name": "Harpy", "atk": 3, "hp": 2},
-			{"name": "Harpy", "atk": 3, "hp": 2},
-			{"name": "Harpy", "atk": 3, "hp": 2},
+			{"name": "Chick", "atk": 1, "hp": 1, "kw": ["swift", "last_stand"]},
 			{"name": "Wind Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
-			{"name": "Wind Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
-			{"name": "Matron", "atk": 2, "hp": 4,
-				"on_death": {"type": "damage_opposing", "value": 2},
-				"intents": ["ATK", "ATK", "RETREAT", "ATK"]},
+			{"name": "Storm Harpy", "atk": 2, "hp": 2, "kw": ["swift", "ranged"]},
+			{"name": "Plunderer", "atk": 2, "hp": 3, "kw": ["swift"],
+				"on_enter": {"type": "damage_face", "value": 1}},
+			{"name": "Brood Harpy", "atk": 1, "hp": 3, "kw": ["ranged"],
+				"on_death": {"type": "summon", "atk": 1, "hp": 1}},
+			{"name": "Sky Stalker", "atk": 3, "hp": 3, "kw": ["swift", "piercing"]},
+			{"name": "Matron", "atk": 2, "hp": 5, "kw": ["swift"],
+				"adj_buff": {"atk": 1, "hp": 0}},
 		],
-		"reinforcement": {"name": "Chick", "atk": 1, "hp": 1},
+		"reinforcement": {"name": "Fledgling", "atk": 2, "hp": 1, "kw": ["swift"]},
 	},
 
 	"boar_herd": {
-		# Vanilla Act 1 brawl — beefy front line, tusker's death rattle teaches lane-trade order.
-		"name": "Boar Herd", "act": 1, "type": "combat", "hp": 13,
+		# Boar Herd — STAMPEDE. Almost every boar is Swift, Piercing, or
+		# Thorns — they're built to overwhelm, charge through, and gore on
+		# the way out. High ATK, low HP. Trades hurt both ways, which is
+		# the point: ignoring them costs face damage, killing them costs
+		# board.
+		"name": "The Trampling Hour", "act": 1, "type": "combat", "hp": 12,
 		"passive_id": "", "passive_desc": "",
 		"deck": [
-			{"name": "Boar", "atk": 3, "hp": 2,
-				"intents": ["ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Boar", "atk": 3, "hp": 2,
-				"intents": ["ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Boar", "atk": 3, "hp": 2,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Sow", "atk": 2, "hp": 4,
-				"intents": ["ATK", "GUARD", "ATK", "ATK"]},
-			{"name": "Tusker", "atk": 3, "hp": 4,
-				"on_death": {"type": "damage_opposing_lane", "value": 2},
-				"intents": ["ATK", "ENRAGE", "ATK", "ATK"]},
+			{"name": "Piglet", "atk": 1, "hp": 2, "kw": ["swift"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+			{"name": "Boar", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Razorback", "atk": 2, "hp": 3, "kw": ["thorns", "swift"]},
+			{"name": "Sow", "atk": 2, "hp": 5, "kw": ["thorns"]},
+			{"name": "Bristleback", "atk": 3, "hp": 3, "kw": ["thorns"],
+				"on_death": {"type": "damage_all_enemies", "value": 2}},
+			{"name": "Charging Ram", "atk": 4, "hp": 2, "kw": ["swift", "piercing"]},
+			{"name": "Tusker", "atk": 4, "hp": 4, "kw": ["piercing"],
+				"on_death": {"type": "damage_opposing_lane", "value": 3}},
 		],
-		"reinforcement": {"name": "Piglet", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Yearling Boar", "atk": 2, "hp": 2, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Boar", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Razorback", "atk": 2, "hp": 3, "kw": ["thorns", "swift"]},
+		],
 	},
 
 	"scarecrow_field": {
-		# Thorns + Wither tutorial — sticky chaff that punishes greedy attacks; mushroom_heal keeps the witch ticking.
-		"name": "Scarecrow Field", "act": 1, "type": "combat", "hp": 11,
+		# Scarecrow Field — DRESSED IN THORNS. Half the field is straw-stuffed
+		# walls that hurt to touch (thorns), the rest decay (wither) or peck
+		# at your face (Crow swift). The Crow Witch heals it all back up at
+		# end of round if you don't clear fast.
+		"name": "The Field That Watches Back", "act": 1, "type": "combat", "hp": 10,
 		"passive_id": "mushroom_heal",
-		"passive_desc": "Heal all enemy creatures 1 at end of round.",
+		"passive_desc": "End of each round: heal every enemy creature for 1 HP.",
 		"deck": [
-			{"name": "Scarecrow", "atk": 1, "hp": 4, "kw": ["thorns"],
-				"intents": ["ATK", "GUARD", "ATK", "GUARD"]},
-			{"name": "Scarecrow", "atk": 1, "hp": 4, "kw": ["thorns"],
-				"intents": ["ATK", "GUARD", "ATK", "GUARD"]},
-			{"name": "Straw Man", "atk": 2, "hp": 3, "wither": 1,
-				"intents": ["ATK", "ATK", "ATK", "ATK"]},
-			{"name": "Straw Man", "atk": 2, "hp": 3, "wither": 1,
-				"intents": ["ATK", "ATK", "ATK", "ATK"]},
-			{"name": "Crow Witch", "atk": 2, "hp": 4,
-				"on_enter": {"type": "damage_random_player", "value": 1},
-				"intents": ["ATK", "ABILITY", "ATK", "ATK"],
-				"ability": {"type": "heal_all", "value": 1}},
+			{"name": "Scarecrow", "atk": 1, "hp": 5, "kw": ["thorns"]},
+			{"name": "Straw Man", "atk": 2, "hp": 3, "kw": ["thorns"], "wither": 1},
+			{"name": "Pumpkin Head", "atk": 3, "hp": 2, "kw": ["thorns"],
+				"on_death": {"type": "damage_opposing_lane", "value": 2}},
+			{"name": "Field Mouse", "atk": 1, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "damage_random_player", "value": 1}},
+			{"name": "Stitched Hand", "atk": 2, "hp": 3, "kw": ["thorns", "regenerate"]},
+			{"name": "Crow", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Crow Witch", "atk": 2, "hp": 4, "kw": ["thorns"],
+				"on_enter": {"type": "damage_random_player", "value": 1}},
 		],
-		"reinforcement": {"name": "Crow", "atk": 2, "hp": 1},
+		"reinforcement": {"name": "Scrap Crow", "atk": 2, "hp": 1, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Field Mouse", "atk": 1, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "damage_random_player", "value": 1}},
+			{"name": "Straw Man", "atk": 2, "hp": 3, "kw": ["thorns"], "wither": 1},
+		],
 	},
 
 	# =================== ACT 1 — ELITE ============================
 
 	"orc_warband": {
-		"name": "Orc Warband", "act": 1, "type": "elite", "hp": 20,
+		# Orc Warband (Act 1 elite) — BARBARIC RALLY. Inspired by Total War orc
+		# waves: small grunts get permanent +1 ATK every round (orc_random_buff
+		# passive), so the longer the fight runs the more dangerous the chaff
+		# gets. Every orc carries Swift or Piercing — there's nowhere safe to
+		# stall. Kill the Chieftain fast or the buffs land on the wrong guys.
+		"name": "The Long Drumming", "act": 1, "type": "elite", "hp": 18,
 		"passive_id": "orc_random_buff",
-		"passive_desc": "Each round, a random enemy creature gains +1 ATK permanently.",
+		"passive_desc": "Start of each round: a random enemy creature gains +1 ATK for the rest of the fight.",
 		"deck": [
-			{"name": "Warrior", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Warrior", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Warrior", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Brute", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ENRAGE", "ATK", "ATK"]},
-			{"name": "Brute", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ENRAGE", "ATK", "ATK"]},
-			{"name": "Drummer", "atk": 2, "hp": 4, "adj_buff": {"atk": 1, "hp": 0},
-				"intents": ["RALLY", "ATK", "RALLY", "ATK"]},
-			{"name": "Chieftain", "atk": 4, "hp": 4,
-				"intents": ["ATK", "ATK", "ABILITY", "ATK", "ATK", "ABILITY"],
-				"ability": {"type": "warcry", "value": 1}},
+			{"name": "Warrior", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Warrior", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Brute", "atk": 3, "hp": 4, "kw": ["piercing"]},
+			{"name": "Brute", "atk": 3, "hp": 4, "kw": ["piercing"]},
+			{"name": "Bannerman", "atk": 1, "hp": 3, "kw": ["swift"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Chieftain", "atk": 4, "hp": 4, "kw": ["swift", "piercing"],
+				"adj_buff": {"atk": 1, "hp": 0}},
 		],
-		"reinforcement": {"name": "Grunt", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Grunt", "atk": 2, "hp": 2, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Warrior", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Brute", "atk": 3, "hp": 4, "kw": ["piercing"]},
+		],
 	},
 
 	"necromancer_tower": {
-		"name": "Necromancer's Tower", "act": 1, "type": "elite", "hp": 22,
+		# Necromancer's Tower (Act 1 elite) — ENDLESS DEAD. Inspired by StS
+		# Slime Boss: every kill makes the board WORSE — the necro_death_summon
+		# passive spawns a Skeleton every time anything dies. Most creatures
+		# have Last Stand or summon on death. The reactive double_on_death
+		# already amplifies enemy deaths. Spell AoE > spot-killing.
+		"name": "Where the Dead Come Back", "act": 1, "type": "elite", "hp": 18,
 		"passive_id": "necro_death_summon",
-		"passive_desc": "When an enemy creature dies, summon a 1/2 Skeleton in a random empty lane.",
+		"passive_desc": "When a non-Skeleton enemy dies: summon a 1/1 Skeleton in a random empty enemy lane.",
 		"deck": [
-			{"name": "Skeleton", "atk": 2, "hp": 3},
-			{"name": "Skeleton", "atk": 2, "hp": 3},
-			{"name": "Skeleton", "atk": 2, "hp": 3},
-			{"name": "Bone Knight", "atk": 3, "hp": 4,
-				"on_death": {"type": "summon", "atk": 2, "hp": 2},
-				"intents": ["ATK", "GUARD", "ATK", "ATK"]},
-			{"name": "Dark Acolyte", "atk": 2, "hp": 4, "adj_buff": {"atk": 1, "hp": 0},
-				"intents": ["ATK", "ATK", "ABILITY", "ATK"],
-				"ability": {"type": "resurrect"}},
-			{"name": "Lich", "atk": 3, "hp": 5, "kw": ["regenerate"],
-				"intents": ["ATK", "HEAL", "ATK", "ATK"]},
+			{"name": "Skeleton", "atk": 1, "hp": 1, "kw": ["last_stand"]},
+			{"name": "Skeleton", "atk": 1, "hp": 1, "kw": ["last_stand"]},
+			{"name": "Bone Knight", "atk": 2, "hp": 3, "kw": ["last_stand"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+			{"name": "Bone Knight", "atk": 2, "hp": 3, "kw": ["last_stand"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+			{"name": "Dark Acolyte", "atk": 1, "hp": 3, "kw": ["regenerate"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Lich", "atk": 3, "hp": 4, "kw": ["regenerate", "last_stand"],
+				"on_death": {"type": "summon", "atk": 3, "hp": 3}},
 		],
-		"reinforcement": {"name": "Risen Bones", "atk": 1, "hp": 2},
+		"reinforcement": {"name": "Risen Bones", "atk": 1, "hp": 2, "kw": ["last_stand"]},
+		"reinforcement_pool": [
+			{"name": "Skeleton", "atk": 1, "hp": 1, "kw": ["last_stand"]},
+			{"name": "Bone Knight", "atk": 2, "hp": 3, "kw": ["last_stand"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+		],
 	},
 
 	# =================== ACT 1 — BOSS =============================
 
 	"iron_warden": {
-		"name": "The Iron Warden", "act": 1, "type": "boss", "hp": 25,
-		"passive_id": "iron_warden_burn",
-		"passive_desc": "2 face damage to player at end of each round.",
-		"deck": [
-			{"name": "Iron Sentinel", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "GUARD", "ATK"]},
-			{"name": "Iron Sentinel", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "GUARD", "ATK"]},
-			{"name": "Iron Sentinel", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "GUARD", "ATK"]},
-			{"name": "Iron Guard", "atk": 2, "hp": 5, "kw": ["armored"],
-				"intents": ["ATK", "GUARD", "ATK", "GUARD"]},
-			{"name": "Siege Engine", "atk": 3, "hp": 3,
-				"on_enter": {"type": "damage_all_enemies", "value": 1},
-				"intents": ["ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Warden's Champion", "atk": 4, "hp": 4, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "ABILITY", "ATK", "CHARGE", "ATK"],
-				"ability": {"type": "mark"}},
-			{"name": "Iron Vanguard", "atk": 4, "hp": 5, "kw": ["last_stand"],
-				"intents": ["ATK", "ATK", "ENRAGE", "ATK", "ATK"]},
+		# Iron Warden (Act 1 boss) — THE SIEGE ENGINE CHARGES. Inspired by
+		# StS Hexaghost: a back-row Trebuchet structure ticks up each round
+		# (player_creature_enter feeds it via the pyre_ritual reactive
+		# pattern — see EncounterEffects). When it crosses Charge 3, the
+		# trebuchet IGNITION fires for AoE + face damage. Phase 2 (HP < 13)
+		# adds the iron_warden_siege passive that armors every enemy.
+		# Two clocks: the siege, and the phase shift. Plan for both.
+		"name": "The Iron Warden", "act": 1, "type": "boss", "hp": 23,
+		"passive_id": "siege_ritual",
+		"passive_desc": "Each enemy death loads the Trebuchet (+1 Charge). At 3 Charges it FIRES: deal 3 damage to all your creatures and 4 face damage.",
+		"structures": [
+			{"name": "Trebuchet", "atk": 0, "hp": 99,
+				"kw": ["structure"], "charge_max": 3, "lane": 1},
 		],
-		"reinforcement": {"name": "Iron Recruit", "atk": 2, "hp": 3},
+		"deck": [
+			{"name": "Iron Sentinel", "atk": 3, "hp": 3, "kw": ["armored"]},
+			{"name": "Iron Sentinel", "atk": 3, "hp": 3, "kw": ["armored"]},
+			{"name": "Iron Guard", "atk": 2, "hp": 4, "kw": ["armored", "thorns"]},
+			{"name": "Warden's Champion", "atk": 4, "hp": 3, "kw": ["swift", "piercing"]},
+			{"name": "Iron Vanguard", "atk": 4, "hp": 4, "kw": ["armored", "last_stand"]},
+			{"name": "Bombardier", "atk": 2, "hp": 2, "kw": ["ranged", "armored"]},
+		],
+		"reinforcement": {"name": "Iron Recruit", "atk": 2, "hp": 2, "kw": ["armored"]},
 	},
 
 	"dragon_lord": {
-		"name": "Dragon Lord", "act": 1, "type": "boss", "hp": 23,
+		# Dragon Lord (Act 1 boss) — TWO BREATHS, TWO FORMS. Inspired by
+		# Cuphead's dragon: phase 1 every enemy has Piercing (dragon_lord_piercing
+		# passive), phase 2 (HP < 12) every enemy gets +1 ATK AND keeps
+		# piercing (dragon_lord_phase2). The phase shift banner fires the
+		# "ROAR" beat. Drakes are the chaff with claws; Wyrms heal back up;
+		# Elder Drake is the centerpiece.
+		"name": "The Wyrm-Father", "act": 1, "type": "boss", "hp": 21,
 		"passive_id": "dragon_lord_piercing",
 		"passive_desc": "All enemy creatures have Piercing.",
 		"deck": [
-			{"name": "Drake", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Drake", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Drake", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Wyrm", "atk": 3, "hp": 4, "kw": ["regenerate"],
-				"intents": ["ATK", "HEAL", "ATK", "ATK"]},
-			{"name": "Wyrm", "atk": 3, "hp": 4, "kw": ["regenerate"],
-				"intents": ["ATK", "HEAL", "ATK", "ATK"]},
-			{"name": "Elder Drake", "atk": 4, "hp": 5,
-				"on_enter": {"type": "damage_all_enemies", "value": 2},
-				"intents": ["ATK", "ATK", "ABILITY", "ATK", "ATK", "CHARGE"],
-				"ability": {"type": "warcry", "value": 1}},
+			{"name": "Drake", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Drake", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Drake", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Wyrm", "atk": 3, "hp": 4, "kw": ["regenerate"]},
+			{"name": "Wyrm", "atk": 3, "hp": 4, "kw": ["regenerate"]},
+			{"name": "Hatchling Brood", "atk": 1, "hp": 2, "kw": ["swift"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+			{"name": "Elder Drake", "atk": 4, "hp": 5, "kw": ["armored"],
+				"on_enter": {"type": "damage_all_enemies", "value": 2}},
 		],
-		"reinforcement": {"name": "Whelp", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Whelp", "atk": 2, "hp": 2, "kw": ["swift"]},
 	},
 
 	# =================== ACT 2 — COMBAT ===========================
 
 	"cultist_enclave": {
-		"name": "Cultist Enclave", "act": 2, "type": "combat", "hp": 18,
+		# Cultist theme — DEATHS CASCADE. Every cultist goes out with a bang:
+		# damage on death, debuffs on death, summons on death. Killing one
+		# triggers another beat. The easy kills hurt you the most.
+		"name": "The Bleeding-Heart Cell", "act": 2, "type": "combat", "hp": 16,
 		"passive_id": "cultist_buff",
-		"passive_desc": "Each round, a random enemy gains +1/+1.",
+		"passive_desc": "Start of each round: a random Cultist gains +1/+1.",
 		"deck": [
-			{"name": "Cultist", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "ENRAGE", "ATK"]},
-			{"name": "Cultist", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "ENRAGE", "ATK"]},
-			{"name": "Cultist", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "ENRAGE", "ATK"]},
+			{"name": "Initiate", "atk": 2, "hp": 2, "kw": ["swift"],
+				"on_death": {"type": "damage_face", "value": 1}},
+			{"name": "Bleeding Heart", "atk": 2, "hp": 3,
+				"on_death": {"type": "damage_all_enemies", "value": 2}},
+			{"name": "Hexer", "atk": 1, "hp": 3, "kw": ["thorns"],
+				"on_death": {"type": "debuff_all_player_atk", "value": 1}},
+			{"name": "Zealot", "atk": 3, "hp": 3, "kw": ["piercing"],
+				"on_death": {"type": "damage_face", "value": 2}},
 			{"name": "Dark Priest", "atk": 2, "hp": 4, "kw": ["regenerate"],
-				"intents": ["ATK", "HEAL", "ATK", "HEAL"]},
-			{"name": "Dark Priest", "atk": 2, "hp": 4, "kw": ["regenerate"],
-				"intents": ["ATK", "HEAL", "ATK", "HEAL"]},
-			{"name": "Zealot", "atk": 3, "hp": 3,
-				"on_death": {"type": "damage_face", "value": 2},
-				"intents": ["ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Fanatic", "atk": 4, "hp": 4,
-				"intents": ["ATK", "ATK", "ABILITY", "ATK", "ATK"],
-				"ability": {"type": "curse"}},
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+			{"name": "Devotee", "atk": 2, "hp": 2,
+				"on_death": {"type": "damage_opposing", "value": 3}},
+			{"name": "Fanatic", "atk": 4, "hp": 4, "kw": ["piercing"],
+				"on_death": {"type": "damage_all_enemies", "value": 3}},
 		],
-		"reinforcement": {"name": "Initiate", "atk": 2, "hp": 2},
+		"deck_variants": [
+			# Variant: bomb cell — three Bleeding Hearts, every kill bites back.
+			[
+				{"name": "Initiate", "atk": 2, "hp": 2, "kw": ["swift"],
+					"on_death": {"type": "damage_face", "value": 1}},
+				{"name": "Bleeding Heart", "atk": 2, "hp": 3,
+					"on_death": {"type": "damage_all_enemies", "value": 2}},
+				{"name": "Bleeding Heart", "atk": 2, "hp": 3,
+					"on_death": {"type": "damage_all_enemies", "value": 2}},
+				{"name": "Bleeding Heart", "atk": 2, "hp": 3,
+					"on_death": {"type": "damage_all_enemies", "value": 2}},
+				{"name": "Zealot", "atk": 3, "hp": 3, "kw": ["piercing"],
+					"on_death": {"type": "damage_face", "value": 2}},
+				{"name": "Fanatic", "atk": 4, "hp": 4, "kw": ["piercing"],
+					"on_death": {"type": "damage_all_enemies", "value": 3}},
+			],
+			# Variant: cursed congregation — heavy on hex/curse cascades.
+			[
+				{"name": "Hexer", "atk": 1, "hp": 3, "kw": ["thorns"],
+					"on_death": {"type": "debuff_all_player_atk", "value": 1}},
+				{"name": "Hexer", "atk": 1, "hp": 3, "kw": ["thorns"],
+					"on_death": {"type": "debuff_all_player_atk", "value": 1}},
+				{"name": "Dark Priest", "atk": 2, "hp": 4, "kw": ["regenerate"],
+					"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+				{"name": "Devotee", "atk": 2, "hp": 2,
+					"on_death": {"type": "damage_opposing", "value": 3}},
+				{"name": "Devotee", "atk": 2, "hp": 2,
+					"on_death": {"type": "damage_opposing", "value": 3}},
+				{"name": "Fanatic", "atk": 4, "hp": 4, "kw": ["piercing"],
+					"on_death": {"type": "damage_all_enemies", "value": 3}},
+			],
+		],
+		"reinforcement": {"name": "Devotee", "atk": 2, "hp": 2,
+			"on_death": {"type": "damage_opposing", "value": 3}},
+		"reinforcement_pool": [
+			{"name": "Initiate", "atk": 2, "hp": 2, "kw": ["swift"],
+				"on_death": {"type": "damage_face", "value": 1}},
+			{"name": "Bleeding Heart", "atk": 2, "hp": 3,
+				"on_death": {"type": "damage_all_enemies", "value": 2}},
+		],
 	},
 
 	"swamp_horror": {
-		"name": "Swamp Horror", "act": 2, "type": "combat", "hp": 18,
+		# Swamp Horror — THE SWAMP HEALS ITSELF. With the swamp_thorns passive
+		# every creature already has Thorns; most also Regenerate so chip
+		# damage doesn't stick. The fight rewards big single hits over slow
+		# grinds. Drowned is the only true wall (armored).
+		"name": "The Drowned Garden", "act": 2, "type": "combat", "hp": 16,
 		"passive_id": "swamp_thorns",
 		"passive_desc": "All enemy creatures have Thorns.",
 		"deck": [
-			{"name": "Bog Lurker", "atk": 2, "hp": 5,
-				"intents": ["ATK", "ATK", "GUARD", "ATK"]},
-			{"name": "Bog Lurker", "atk": 2, "hp": 5,
-				"intents": ["ATK", "ATK", "GUARD", "ATK"]},
-			{"name": "Bog Lurker", "atk": 2, "hp": 5,
-				"intents": ["ATK", "ATK", "GUARD", "ATK"]},
-			{"name": "Mire Beast", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "ATK", "CHARGE"]},
-			{"name": "Mire Beast", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "ATK", "CHARGE"]},
-			{"name": "Swamp Hag", "atk": 2, "hp": 3,
-				"floop": {"type": "heal_all_friendly", "value": 2},
-				"intents": ["ABILITY", "ATK", "ATK", "ABILITY", "ATK"],
-				"ability": {"type": "heal_all", "value": 2}},
-			{"name": "Hydra Spawn", "atk": 3, "hp": 3, "kw": ["regenerate"],
-				"intents": ["ATK", "ATK", "HEAL", "ATK"]},
+			{"name": "Mosquito", "atk": 2, "hp": 1, "kw": ["swift"]},
+			{"name": "Bog Slime", "atk": 1, "hp": 3, "kw": ["regenerate"],
+				"on_death": {"type": "summon", "atk": 1, "hp": 2}},
+			{"name": "Tendril", "atk": 3, "hp": 2, "kw": ["ranged", "regenerate"]},
+			{"name": "Drowned", "atk": 2, "hp": 6, "kw": ["armored", "regenerate"]},
+			{"name": "Mire Druid", "atk": 1, "hp": 3, "kw": ["regenerate"],
+				"adj_buff": {"atk": 0, "hp": 1}},
+			{"name": "Leech", "atk": 2, "hp": 3, "kw": ["regenerate"]},
+			{"name": "Bog Beast", "atk": 4, "hp": 5, "kw": ["regenerate"]},
 		],
-		"reinforcement": {"name": "Leech", "atk": 1, "hp": 3},
+		"deck_variants": [
+			# Variant: regen wall — three regen creatures, very slow grind.
+			[
+				{"name": "Mosquito", "atk": 2, "hp": 1, "kw": ["swift"]},
+				{"name": "Bog Slime", "atk": 1, "hp": 3, "kw": ["regenerate"],
+					"on_death": {"type": "summon", "atk": 1, "hp": 2}},
+				{"name": "Bog Slime", "atk": 1, "hp": 3, "kw": ["regenerate"],
+					"on_death": {"type": "summon", "atk": 1, "hp": 2}},
+				{"name": "Drowned", "atk": 2, "hp": 6, "kw": ["armored"]},
+				{"name": "Leech", "atk": 1, "hp": 3, "kw": ["regenerate"]},
+				{"name": "Bog Beast", "atk": 4, "hp": 5, "kw": ["regenerate"]},
+			],
+			# Variant: ambush pool — swift + ranged-heavy, no big bruiser.
+			[
+				{"name": "Mosquito", "atk": 2, "hp": 1, "kw": ["swift"]},
+				{"name": "Mosquito", "atk": 2, "hp": 1, "kw": ["swift"]},
+				{"name": "Tendril", "atk": 3, "hp": 2, "kw": ["ranged"]},
+				{"name": "Tendril", "atk": 3, "hp": 2, "kw": ["ranged"]},
+				{"name": "Mire Druid", "atk": 1, "hp": 3,
+					"adj_buff": {"atk": 0, "hp": 1}},
+				{"name": "Witch Doctor", "atk": 2, "hp": 3,
+					"intents": ["ATK", "ABILITY", "ATK", "ABILITY"],
+					"ability": {"type": "heal_all", "value": 2}},
+				{"name": "Drowned", "atk": 2, "hp": 6, "kw": ["armored"]},
+			],
+		],
+		"reinforcement": {"name": "Leech", "atk": 1, "hp": 3, "kw": ["regenerate"]},
+		"reinforcement_pool": [
+			{"name": "Mosquito", "atk": 2, "hp": 1, "kw": ["swift"]},
+			{"name": "Tendril", "atk": 3, "hp": 2, "kw": ["ranged"]},
+		],
 	},
 
 	"mercenary_company": {
-		"name": "Mercenary Company", "act": 2, "type": "combat", "hp": 17,
+		# Mercenary Company — DISCIPLINED RANKS. Buffer-heavy: Lieutenant /
+		# Standard Bearer / Captain make weak soldiers strong. The merc_piercing
+		# passive turns any 4+ ATK creature (buffed or natural) into a face
+		# threat. Kill the buffers first or trade horribly with the puffed-up
+		# line.
+		"name": "The Coin-Sworn", "act": 2, "type": "combat", "hp": 15,
 		"passive_id": "merc_piercing",
-		"passive_desc": "Enemy creatures with 4+ ATK have Piercing.",
+		"passive_desc": "Enemy creatures with 4 or more ATK have Piercing.",
 		"deck": [
-			{"name": "Sellsword", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "RETREAT", "ATK"]},
-			{"name": "Sellsword", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "RETREAT", "ATK"]},
-			{"name": "Captain", "atk": 4, "hp": 4,
-				"intents": ["ATK", "RALLY", "ATK", "ATK", "CHARGE"]},
-			{"name": "Captain", "atk": 4, "hp": 4,
-				"intents": ["ATK", "RALLY", "ATK", "ATK", "CHARGE"]},
-			{"name": "Sharpshooter", "atk": 3, "hp": 2, "kw": ["ranged"]},
-			{"name": "Enforcer", "atk": 4, "hp": 3, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Brute", "atk": 5, "hp": 4,
-				"intents": ["ATK", "ENRAGE", "ATK", "ATK"]},
+			{"name": "Recruit", "atk": 2, "hp": 3, "kw": ["armored"]},
+			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
+			{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": ["ranged"]},
+			{"name": "Lieutenant", "atk": 1, "hp": 4, "kw": ["armored"],
+				"adj_buff": {"atk": 2, "hp": 0}},
+			{"name": "Standard Bearer", "atk": 1, "hp": 3,
+				"adj_buff": {"atk": 1, "hp": 0},
+				"on_death": {"type": "debuff_all_player_atk", "value": 1}},
+			{"name": "Veteran", "atk": 3, "hp": 4, "kw": ["swift", "piercing"]},
+			{"name": "Captain", "atk": 2, "hp": 5, "kw": ["armored"],
+				"adj_buff": {"atk": 1, "hp": 0}},
 		],
-		"reinforcement": {"name": "Recruit", "atk": 2, "hp": 3},
+		"reinforcement": {"name": "Camp Follower", "atk": 1, "hp": 3,
+			"adj_buff": {"atk": 1, "hp": 0}},
+		"reinforcement_pool": [
+			{"name": "Recruit", "atk": 2, "hp": 3, "kw": ["armored"]},
+			{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": ["ranged"]},
+		],
 	},
 
 	"haunted_crypt": {
-		"name": "Haunted Crypt", "act": 2, "type": "combat", "hp": 19,
+		# Crypt theme — THE DEAD KEEP RISING. Every creature either summons
+		# more on death, survives lethal hits (last_stand), or is itself a
+		# summon from another dying enemy. Killing makes the board WORSE.
+		# Players have to learn to leave certain creatures alive.
+		"name": "The Crypt That Will Not Stay Shut", "act": 2, "type": "combat", "hp": 17,
 		"passive_id": "crypt_ghost",
-		"passive_desc": "When an enemy creature dies, summon a 1/1 Ghost with Swift in a random empty lane.",
+		"passive_desc": "When an enemy creature dies: summon a 1/1 Swift Ghost in a random empty enemy lane.",
 		"deck": [
-			{"name": "Wraith", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "ATK", "RETREAT"]},
-			{"name": "Wraith", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "ATK", "RETREAT"]},
-			{"name": "Wraith", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "ATK", "RETREAT"]},
-			{"name": "Banshee", "atk": 2, "hp": 3,
-				"on_death": {"type": "debuff_all_player_atk", "value": 1},
-				"intents": ["ATK", "ABILITY", "ATK", "ATK"],
-				"ability": {"type": "terrify"}},
-			{"name": "Banshee", "atk": 2, "hp": 3,
-				"on_death": {"type": "debuff_all_player_atk", "value": 1},
-				"intents": ["ATK", "ABILITY", "ATK", "ATK"],
-				"ability": {"type": "terrify"}},
-			{"name": "Gravewarden", "atk": 3, "hp": 5, "kw": ["armored"],
-				"intents": ["ATK", "GUARD", "ATK", "GUARD"]},
-			{"name": "Specter", "atk": 2, "hp": 2, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "RETREAT", "ATK"]},
+			{"name": "Bone Walker", "atk": 2, "hp": 2, "kw": ["last_stand"],
+				"on_death": {"type": "summon", "atk": 1, "hp": 1}},
+			{"name": "Skeleton", "atk": 2, "hp": 1, "kw": ["last_stand"]},
+			{"name": "Crypt Spider", "atk": 3, "hp": 2, "kw": ["piercing", "swift"]},
+			{"name": "Wraith", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Banshee", "atk": 2, "hp": 3, "kw": ["swift"],
+				"on_death": {"type": "debuff_all_player_atk", "value": 1}},
+			{"name": "Gravewarden", "atk": 2, "hp": 6, "kw": ["armored", "last_stand"]},
+			{"name": "Risen Lich", "atk": 4, "hp": 4, "kw": ["piercing"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
 		],
-		"reinforcement": {"name": "Shade", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Risen", "atk": 2, "hp": 2, "kw": ["last_stand"]},
+		"reinforcement_pool": [
+			{"name": "Skeleton", "atk": 2, "hp": 1, "kw": ["last_stand"]},
+			{"name": "Wraith", "atk": 3, "hp": 3, "kw": ["swift"]},
+		],
 	},
 
 	"fire_giants_forge": {
-		"name": "Fire Giant's Forge", "act": 2, "type": "combat", "hp": 20,
+		# Fire Giant's Forge — HOT TO TOUCH, HOT TO HIT. Nearly every creature
+		# has Armored or Thorns (forged metal / glowing coals); chip damage
+		# rains down from forge_burn_all + Slag Heap detonations. Even
+		# ignoring the board drains HP fast.
+		"name": "The Forge That Eats", "act": 2, "type": "combat", "hp": 18,
 		"passive_id": "forge_burn_all",
-		"passive_desc": "Start of each round, deal 1 damage to ALL creatures on both sides.",
+		"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
 		"deck": [
-			{"name": "Flame Golem", "atk": 3, "hp": 5,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Flame Golem", "atk": 3, "hp": 5,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Flame Golem", "atk": 3, "hp": 5,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Forge Guardian", "atk": 2, "hp": 6, "kw": ["armored"],
-				"intents": ["ATK", "GUARD", "ATK", "GUARD"]},
-			{"name": "Forge Guardian", "atk": 2, "hp": 6, "kw": ["armored"],
-				"intents": ["ATK", "GUARD", "ATK", "GUARD"]},
-			{"name": "Ember Elemental", "atk": 4, "hp": 3,
-				"on_death": {"type": "damage_adjacent", "value": 2},
-				"intents": ["ATK", "ENRAGE", "ATK", "ATK"]},
-			{"name": "Slag Heap", "atk": 0, "hp": 6,
-				"on_death": {"type": "damage_opposing_lane", "value": 3},
-				"intents": ["GUARD", "GUARD", "GUARD", "GUARD"]},
+			{"name": "Apprentice", "atk": 1, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "damage_face", "value": 1}},
+			{"name": "Ember", "atk": 2, "hp": 1, "kw": ["swift", "ranged"]},
+			{"name": "Coal Carrier", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
+			{"name": "Forgeling", "atk": 3, "hp": 3, "kw": ["armored", "thorns"]},
+			{"name": "Hammerer", "atk": 3, "hp": 3, "kw": ["armored"],
+				"on_enter": {"type": "damage_opposing", "value": 2}},
+			{"name": "Slag Heap", "atk": 0, "hp": 6, "kw": ["armored", "thorns"],
+				"on_death": {"type": "damage_opposing_lane", "value": 3}},
+			{"name": "Fire Giant", "atk": 4, "hp": 5, "kw": ["armored"],
+				"adj_buff": {"atk": 1, "hp": 0}},
 		],
-		"reinforcement": {"name": "Cinder", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Cinder Sprite", "atk": 1, "hp": 1, "kw": ["swift"],
+			"on_enter": {"type": "damage_face", "value": 1}},
+		"reinforcement_pool": [
+			{"name": "Ember", "atk": 2, "hp": 1, "kw": ["swift", "ranged"]},
+			{"name": "Forgeling", "atk": 3, "hp": 3, "kw": ["armored", "thorns"]},
+		],
 	},
 
 	"oathbroken_knights": {
-		# Keyword spread (armored/swift/last_stand). Champion forces a 2-tap decision: kill now or after board's set.
-		"name": "Oath-Broken Knights", "act": 2, "type": "combat", "hp": 19,
+		# Oath-Broken Knights — ARMORED AND VENGEFUL. Every knight is Armored
+		# or carries Piercing (or both). The flock has a Standard Bearer
+		# buffing adjacents, a Fallen Paladin healing, and a Forsworn Champion
+		# that refuses to die clean (Last Stand). Slow but punishing trades.
+		"name": "The Faithless Lances", "act": 2, "type": "combat", "hp": 17,
 		"passive_id": "", "passive_desc": "",
 		"deck": [
-			{"name": "Disgraced Squire", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Disgraced Squire", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Fallen Knight", "atk": 2, "hp": 5, "kw": ["armored"],
-				"intents": ["ATK", "GUARD", "ATK", "GUARD"]},
-			{"name": "Fallen Knight", "atk": 2, "hp": 5, "kw": ["armored"],
-				"intents": ["ATK", "GUARD", "ATK", "GUARD"]},
-			{"name": "Black Outrider", "atk": 3, "hp": 3, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "RETREAT", "ATK"]},
-			{"name": "Forsworn Champion", "atk": 4, "hp": 5, "kw": ["last_stand"],
-				"on_death": {"type": "debuff_all_player_atk", "value": 1},
-				"intents": ["ATK", "ATK", "ABILITY", "ATK", "ATK"],
-				"ability": {"type": "warcry", "value": 1}},
+			{"name": "Squire", "atk": 2, "hp": 2, "kw": ["armored"]},
+			{"name": "Black Lancer", "atk": 4, "hp": 2, "kw": ["swift", "piercing"]},
+			{"name": "Crossbow Knight", "atk": 2, "hp": 3, "kw": ["ranged", "armored"]},
+			{"name": "Fallen Knight", "atk": 3, "hp": 5, "kw": ["armored", "piercing"]},
+			{"name": "Standard Bearer", "atk": 1, "hp": 4, "kw": ["armored"],
+				"adj_buff": {"atk": 1, "hp": 0},
+				"on_death": {"type": "debuff_all_player_atk", "value": 1}},
+			{"name": "Fallen Paladin", "atk": 2, "hp": 4, "kw": ["armored", "regenerate"]},
+			{"name": "Forsworn Champion", "atk": 4, "hp": 5, "kw": ["armored", "last_stand"]},
 		],
-		"reinforcement": {"name": "Footman", "atk": 2, "hp": 3},
+		"reinforcement": {"name": "Footman", "atk": 2, "hp": 3, "kw": ["armored"]},
+		"reinforcement_pool": [
+			{"name": "Squire", "atk": 2, "hp": 2, "kw": ["armored"]},
+			{"name": "Crossbow Knight", "atk": 2, "hp": 3, "kw": ["ranged", "armored"]},
+		],
 	},
 
 	"ash_hounds": {
-		# Swift tempo race — forge_burn_all shaves the hounds (intentional). Houndmaster's death rattle keeps pressure post-kill.
-		"name": "Ash Hounds", "act": 2, "type": "combat", "hp": 18,
+		# Ash Hounds — BURNING PACK. Every hound is Swift (chase) and most
+		# carry Thorns or Piercing (burning to touch / fangs through armor).
+		# Forge_burn_all chip damage burns them too, but they're disposable
+		# — the pack is built to rush you down before round 4.
+		"name": "The Cinder-Hounds", "act": 2, "type": "combat", "hp": 16,
 		"passive_id": "forge_burn_all",
-		"passive_desc": "Start of each round, deal 1 damage to ALL creatures on both sides.",
+		"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
 		"deck": [
-			{"name": "Ash Hound", "atk": 3, "hp": 2, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Ash Hound", "atk": 3, "hp": 2, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Ash Hound", "atk": 3, "hp": 2, "kw": ["swift"],
-				"intents": ["ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Ember Mastiff", "atk": 3, "hp": 4, "wither": 1,
-				"intents": ["ATK", "ATK", "ENRAGE", "ATK"]},
-			{"name": "Ember Mastiff", "atk": 3, "hp": 4, "wither": 1,
-				"intents": ["ATK", "ATK", "ENRAGE", "ATK"]},
-			{"name": "Cinder Warden", "atk": 2, "hp": 5, "kw": ["regenerate"],
-				"intents": ["ATK", "GUARD", "ATK", "GUARD", "ATK"]},
-			{"name": "Houndmaster", "atk": 3, "hp": 4,
-				"on_death": {"type": "damage_face", "value": 3},
-				"intents": ["ATK", "RALLY", "ATK", "ATK", "CHARGE"]},
+			{"name": "Cinder Pup", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Ash Hound", "atk": 4, "hp": 2, "kw": ["swift", "piercing"], "wither": 1},
+			{"name": "Smoldering Crow", "atk": 2, "hp": 2, "kw": ["ranged", "swift"]},
+			{"name": "Char-Hide", "atk": 1, "hp": 5, "kw": ["thorns", "armored"]},
+			{"name": "Pack-Master", "atk": 2, "hp": 4, "kw": ["swift"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Ember Stalker", "atk": 3, "hp": 3, "kw": ["swift", "piercing"]},
+			{"name": "Houndmaster", "atk": 3, "hp": 5, "kw": ["swift"],
+				"on_death": {"type": "damage_face", "value": 3}},
 		],
-		"reinforcement": {"name": "Cinder Pup", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Cinder Pup", "atk": 2, "hp": 2, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Ash Hound", "atk": 4, "hp": 2, "kw": ["swift", "piercing"], "wither": 1},
+			{"name": "Smoldering Crow", "atk": 2, "hp": 2, "kw": ["ranged", "swift"]},
+		],
 	},
 
 	# =================== ACT 2 — ELITE ============================
 
 	"demon_vanguard": {
-		"name": "Demon Vanguard", "act": 2, "type": "elite", "hp": 28,
+		# Demon Vanguard (Act 2 elite) — SPELLS FEED THE WAR. Inspired by MtG
+		# Phyrexian War: the demon_spell_buff passive permanently buffs a
+		# random enemy every time you cast. The roster is deliberately varied
+		# so EVERY enemy is scary to buff — there's no "safe" target the
+		# spell buff can land on. Soldiers wall, Hellhounds chase, Pit Fiend
+		# grows, Infernal nukes. The fight says "every spell is a tradeoff."
+		"name": "The Threshold Choir", "act": 2, "type": "elite", "hp": 25,
 		"passive_id": "demon_spell_buff",
-		"passive_desc": "Whenever player plays a spell, a random enemy creature gains +1 ATK permanently.",
+		"passive_desc": "When you cast a spell: a random enemy creature gains +1 ATK for the rest of the fight.",
 		"deck": [
-			{"name": "Demon Soldier", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Demon Soldier", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Demon Soldier", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Hellhound", "atk": 4, "hp": 3, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "ATK", "CHARGE"]},
-			{"name": "Hellhound", "atk": 4, "hp": 3, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "ATK", "CHARGE"]},
-			{"name": "Pit Fiend", "atk": 4, "hp": 5, "kw": ["armored", "regenerate"],
-				"intents": ["ATK", "ATK", "ABILITY", "ATK", "ATK", "ATK", "ABILITY"],
-				"ability": {"type": "devour"}},
-			{"name": "Infernal", "atk": 5, "hp": 4, "kw": ["piercing"],
-				"intents": ["ATK", "ENRAGE", "ATK", "ATK", "CHARGE", "ATK"]},
+			{"name": "Demon Soldier", "atk": 2, "hp": 5, "kw": ["armored"]},
+			{"name": "Demon Soldier", "atk": 2, "hp": 5, "kw": ["armored"]},
+			{"name": "Hellhound", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Hellhound", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Pit Fiend", "atk": 3, "hp": 6, "kw": ["regenerate"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Imp", "atk": 1, "hp": 3, "kw": ["ranged"],
+				"on_enter": {"type": "damage_face", "value": 1}},
+			{"name": "Infernal", "atk": 4, "hp": 4, "kw": ["piercing"],
+				"on_death": {"type": "damage_face", "value": 3}},
 		],
-		"reinforcement": {"name": "Imp", "atk": 2, "hp": 3},
+		"reinforcement": {"name": "Imp", "atk": 1, "hp": 3, "kw": ["ranged"],
+			"on_enter": {"type": "damage_face", "value": 1}},
+		"reinforcement_pool": [
+			{"name": "Hellhound", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Demon Soldier", "atk": 2, "hp": 5, "kw": ["armored"]},
+		],
 	},
 
 	"puppeteer": {
-		"name": "The Puppeteer", "act": 2, "type": "elite", "hp": 26,
+		# The Puppeteer (Act 2 elite) — PUPPETS ON STRINGS. Inspired by Hollow
+		# Knight Mantis Lords and Inscryption's clockwork puppets: marionettes
+		# clog every lane, and the puppet_keyword_copy passive steals YOUR
+		# best keywords each round and slaps them onto an enemy. Built tall
+		# (lots of bodies), buffed wide (passive). Sweep wide, not deep.
+		"name": "The Puppeteer", "act": 2, "type": "elite", "hp": 23,
 		"passive_id": "puppet_keyword_copy",
-		"passive_desc": "Start of each round, copy keywords from player's highest-ATK creature onto a random enemy.",
+		"passive_desc": "Start of each round: copy the keywords from your highest-ATK creature onto a random enemy.",
 		"deck": [
 			{"name": "Marionette", "atk": 2, "hp": 3,
-				"intents": ["ATK", "ATK", "RETREAT", "ATK"]},
+				"on_enter": {"type": "copy_opposing_keywords"}},
 			{"name": "Marionette", "atk": 2, "hp": 3,
-				"intents": ["ATK", "ATK", "RETREAT", "ATK"]},
+				"on_enter": {"type": "copy_opposing_keywords"}},
 			{"name": "Marionette", "atk": 2, "hp": 3,
-				"intents": ["ATK", "ATK", "RETREAT", "ATK"]},
+				"on_enter": {"type": "copy_opposing_keywords"}},
 			{"name": "Marionette", "atk": 2, "hp": 3,
-				"intents": ["ATK", "ATK", "RETREAT", "ATK"]},
-			{"name": "Puppet Knight", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "GUARD"]},
-			{"name": "Puppet Knight", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "GUARD"]},
-			{"name": "Shadow Double", "atk": 3, "hp": 3,
-				"intents": ["ATK", "ABILITY", "ATK", "ATK", "ABILITY"],
-				"ability": {"type": "steal_atk", "value": 1}},
-			{"name": "Puppeteer's Guard", "atk": 3, "hp": 5,
-				"intents": ["ATK", "GUARD", "ATK", "ATK", "RALLY"]},
+				"on_enter": {"type": "copy_opposing_keywords"}},
+			{"name": "Puppet Knight", "atk": 3, "hp": 4, "kw": ["armored"]},
+			{"name": "Puppet Knight", "atk": 3, "hp": 4, "kw": ["armored"]},
+			{"name": "Shadow Double", "atk": 3, "hp": 3, "kw": ["swift"],
+				"on_enter": {"type": "copy_opposing_keywords"}},
+			{"name": "Puppeteer's Guard", "atk": 3, "hp": 5, "kw": ["armored", "thorns"]},
 		],
-		"reinforcement": {"name": "String", "atk": 1, "hp": 2},
+		"reinforcement": {"name": "String Wraith", "atk": 1, "hp": 2, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Marionette", "atk": 2, "hp": 3,
+				"on_enter": {"type": "copy_opposing_keywords"}},
+			{"name": "Shadow Double", "atk": 3, "hp": 3, "kw": ["swift"],
+				"on_enter": {"type": "copy_opposing_keywords"}},
+		],
 	},
 
 	# =================== ACT 2 — BOSS =============================
 
 	"collector": {
-		"name": "The Collector", "act": 2, "type": "boss", "hp": 34,
+		# The Collector (Act 2 boss) — DON'T PLAY YOUR HAND. Inspired by
+		# Inscryption's Leshy: every creature you play heals the Collector
+		# (collector_heal passive). Phase 2 doubles the heal AND buffs a
+		# random enemy ATK. The fight rewards SPELL decks; punishes wide
+		# board strategies. Deck is full of slow walls and an armored
+		# Display Case — they don't kill you fast, but every turn you build
+		# board, you lose your win condition (the boss heals back up).
+		"name": "The Collector", "act": 2, "type": "boss", "hp": 31,
 		"passive_id": "collector_heal",
-		"passive_desc": "Whenever player plays a creature from hand, The Collector heals 1 HP.",
+		"passive_desc": "When you play a creature from your hand: The Collector heals 1 HP.",
 		"deck": [
-			{"name": "Collector Golem", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "GUARD", "ATK", "ATK"]},
-			{"name": "Collector Golem", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "GUARD", "ATK", "ATK"]},
-			{"name": "Collector Golem", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "GUARD", "ATK", "ATK"]},
-			{"name": "Display Case", "atk": 2, "hp": 5, "kw": ["armored"],
-				"intents": ["GUARD", "GUARD", "ATK", "GUARD", "GUARD"]},
-			{"name": "Collector's Pride", "atk": 4, "hp": 4,
-				"on_death": {"type": "summon", "atk": 2, "hp": 2},
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Soul Cage", "atk": 3, "hp": 3,
-				"floop": {"type": "steal_atk", "value": 1},
-				"intents": ["ATK", "ABILITY", "ATK", "ABILITY", "ATK"],
-				"ability": {"type": "steal_atk", "value": 1}},
-			{"name": "Collector's Champion", "atk": 4, "hp": 5, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "ABILITY", "ATK", "CHARGE", "ATK"],
-				"ability": {"type": "mark"}},
+			{"name": "Collector Golem", "atk": 3, "hp": 4, "kw": ["armored"]},
+			{"name": "Collector Golem", "atk": 3, "hp": 4, "kw": ["armored"]},
+			{"name": "Collector Golem", "atk": 3, "hp": 4, "kw": ["armored"]},
+			{"name": "Display Case", "atk": 2, "hp": 5, "kw": ["armored", "thorns"]},
+			{"name": "Collector's Pride", "atk": 4, "hp": 4, "kw": ["armored"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+			{"name": "Soul Cage", "atk": 3, "hp": 3, "kw": ["regenerate"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Collector's Champion", "atk": 4, "hp": 5, "kw": ["swift", "armored"]},
 		],
-		"reinforcement": {"name": "Trinket", "atk": 2, "hp": 3},
+		"reinforcement": {"name": "Trinket", "atk": 2, "hp": 3, "kw": ["armored"]},
 	},
 
 	"hollow_king": {
-		"name": "The Hollow King", "act": 2, "type": "boss", "hp": 32,
+		# Hollow King (Act 2 boss) — THE EYE THAT JUDGES. Inspired by
+		# Bloodborne's One Reborn: every round, the hollow_king_snipe
+		# passive deals 3 damage to your highest-ATK creature. Wide-board
+		# strategies survive; tall single-threat strategies bleed. Phase 2
+		# (hollow_king_phase2) snipes the TOP TWO and adds a Curse to your
+		# discard. Deck: chaff bodies that don't matter if they die — the
+		# pressure is the passive, not the creatures.
+		"name": "The Hollow King", "act": 2, "type": "boss", "hp": 29,
 		"passive_id": "hollow_king_snipe",
-		"passive_desc": "Start of each round, player's highest-ATK creature takes 3 damage.",
+		"passive_desc": "Start of each round: your highest-ATK creature takes 3 damage.",
 		"deck": [
-			{"name": "Hollow Knight", "atk": 3, "hp": 5,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Hollow Knight", "atk": 3, "hp": 5,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Hollow Knight", "atk": 3, "hp": 5,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Void Guard", "atk": 2, "hp": 6, "kw": ["armored", "regenerate"],
-				"intents": ["ATK", "GUARD", "ATK", "GUARD", "GUARD", "ATK"]},
-			{"name": "Shadow Blade", "atk": 4, "hp": 3, "kw": ["swift", "piercing"],
-				"intents": ["ATK", "ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Hollow Champion", "atk": 5, "hp": 5, "kw": ["last_stand"],
-				"intents": ["ATK", "ATK", "ABILITY", "ATK", "ATK", "CHARGE", "ABILITY"],
-				"ability": {"type": "hex"}},
+			{"name": "Hollow Knight", "atk": 2, "hp": 4, "kw": ["armored"]},
+			{"name": "Hollow Knight", "atk": 2, "hp": 4, "kw": ["armored"]},
+			{"name": "Hollow Knight", "atk": 2, "hp": 4, "kw": ["armored"]},
+			{"name": "Void Guard", "atk": 1, "hp": 5, "kw": ["armored", "regenerate"]},
+			{"name": "Shadow Blade", "atk": 3, "hp": 2, "kw": ["swift", "piercing"]},
+			{"name": "Shadow Blade", "atk": 3, "hp": 2, "kw": ["swift", "piercing"]},
+			{"name": "Hollow Champion", "atk": 4, "hp": 4, "kw": ["last_stand", "piercing"]},
 		],
-		"reinforcement": {"name": "Shade Knight", "atk": 3, "hp": 3},
+		"reinforcement": {"name": "Shade Knight", "atk": 2, "hp": 2, "kw": ["swift"]},
 	},
 
 	# =================== ACT 3 — COMBAT ===========================
 
 	"mirror_temple": {
-		"name": "Mirror Temple", "act": 3, "type": "combat", "hp": 22,
+		# Mirror Temple — YOUR OWN POWER REFLECTED. Reflection copies your
+		# keywords, Shattered Twin spawns more glass on death, the temple
+		# refills lanes the instant your creatures die. Defensive trades
+		# barely work — every kill triggers a fresh enemy beat.
+		"name": "The Hall of Wrong Reflections", "act": 3, "type": "combat", "hp": 20,
 		"passive_id": "mirror_instant_place",
-		"passive_desc": "When a player creature dies, enemy draws and places a creature immediately.",
+		"passive_desc": "When one of your creatures dies: the enemy draws and places a creature immediately.",
 		"deck": [
-			{"name": "Mirror Knight", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "RETREAT", "ATK", "ATK"]},
-			{"name": "Mirror Knight", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "RETREAT", "ATK", "ATK"]},
-			{"name": "Mirror Knight", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "RETREAT", "ATK", "ATK"]},
+			{"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Glass Sniper", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Hall-Watcher", "atk": 1, "hp": 6, "kw": ["thorns", "armored"]},
 			{"name": "Reflection", "atk": 2, "hp": 3, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "ATK", "CHARGE"]},
-			{"name": "Reflection", "atk": 2, "hp": 3, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "ATK", "CHARGE"]},
-			{"name": "Doppel", "atk": 4, "hp": 4,
-				"intents": ["ATK", "ABILITY", "ATK", "ATK", "ABILITY", "ATK"],
-				"ability": {"type": "steal_atk", "value": 1}},
-			{"name": "Temple Guardian", "atk": 4, "hp": 5, "kw": ["last_stand"],
-				"intents": ["ATK", "GUARD", "ATK", "ATK", "CHARGE"]},
+				"on_enter": {"type": "copy_opposing_keywords"}},
+			{"name": "Chorus of Echoes", "atk": 1, "hp": 4,
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Shattered Twin", "atk": 3, "hp": 3, "kw": ["piercing"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+			{"name": "Doppel", "atk": 2, "hp": 4, "kw": ["swift"],
+				"on_enter": {"type": "copy_opposing_keywords"}},
 		],
-		"reinforcement": {"name": "Shard", "atk": 2, "hp": 3},
+		"deck_variants": [
+			# Variant: house of doubles — reflections and shattered twins stack,
+			# meaning the player's own keywords get mirrored back fast.
+			[
+				{"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
+				{"name": "Reflection", "atk": 2, "hp": 3,
+					"on_enter": {"type": "copy_opposing_keywords"}},
+				{"name": "Reflection", "atk": 2, "hp": 3,
+					"on_enter": {"type": "copy_opposing_keywords"}},
+				{"name": "Shattered Twin", "atk": 3, "hp": 3,
+					"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+				{"name": "Shattered Twin", "atk": 3, "hp": 3,
+					"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+				{"name": "Doppel", "atk": 2, "hp": 4,
+					"intents": ["ATK", "ABILITY", "ATK", "ABILITY"],
+					"ability": {"type": "steal_atk", "value": 2}},
+			],
+		],
+		"reinforcement": {"name": "Glass Shard", "atk": 2, "hp": 2},
+		"reinforcement_pool": [
+			{"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Glass Sniper", "atk": 3, "hp": 2, "kw": ["ranged"]},
+		],
 	},
 
 	"elemental_nexus": {
-		"name": "Elemental Nexus", "act": 3, "type": "combat", "hp": 23,
+		# Elemental Nexus — EVERY KEYWORD AT ONCE. Each sprite embodies one
+		# element via its keyword (Flame=swift, Ice=armored, Storm=ranged+piercing,
+		# Tide=regen, Stone=thorns, Shadow=swift+on_enter chip). The nexus_rotation
+		# passive amps the whole board on a 3-round cycle. The puzzle is "no
+		# single counter covers all of them."
+		"name": "The Storm Made Flesh", "act": 3, "type": "combat", "hp": 21,
 		"passive_id": "nexus_rotation",
-		"passive_desc": "Rotates each round: R1 all enemies +1 ATK, R2 heal 2, R3 Thorns this round. Repeat.",
+		"passive_desc": "Three-round cycle (repeats). Round 1: all enemies gain +1 ATK. Round 2: all enemies heal 2 HP. Round 3: all enemies gain Thorns this round.",
 		"deck": [
-			{"name": "Fire Elemental", "atk": 4, "hp": 3,
-				"intents": ["ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Fire Elemental", "atk": 4, "hp": 3,
-				"intents": ["ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Ice Elemental", "atk": 2, "hp": 5,
-				"intents": ["ATK", "GUARD", "ATK", "GUARD", "ATK"]},
-			{"name": "Ice Elemental", "atk": 2, "hp": 5,
-				"intents": ["ATK", "GUARD", "ATK", "GUARD", "ATK"]},
-			{"name": "Storm Elemental", "atk": 3, "hp": 4, "kw": ["ranged"]},
-			{"name": "Earth Elemental", "atk": 3, "hp": 6, "kw": ["armored"],
-				"intents": ["ATK", "GUARD", "GUARD", "ATK"]},
-			{"name": "Nexus Core", "atk": 2, "hp": 4, "adj_buff": {"atk": 1, "hp": 0},
-				"intents": ["RALLY", "ATK", "ABILITY", "RALLY", "ATK", "ATK"],
-				"ability": {"type": "warcry", "value": 1}},
+			{"name": "Flame Sprite", "atk": 4, "hp": 1, "kw": ["swift", "piercing"],
+				"on_death": {"type": "damage_all_enemies", "value": 1}},
+			{"name": "Ice Sprite", "atk": 1, "hp": 5, "kw": ["armored", "thorns"]},
+			{"name": "Storm Sprite", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Tide Sprite", "atk": 2, "hp": 3, "kw": ["regenerate", "ranged"]},
+			{"name": "Stone Sprite", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
+			{"name": "Shadow Sprite", "atk": 3, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "damage_random_player", "value": 2}},
+			{"name": "Nexus Core", "atk": 2, "hp": 5, "kw": ["armored"],
+				"adj_buff": {"atk": 1, "hp": 0}},
 		],
-		"reinforcement": {"name": "Spark", "atk": 2, "hp": 2},
+		"deck_variants": [
+			# Variant: fire-coil — fire/shadow leaning, no regen, hits hard early.
+			[
+				{"name": "Flame Sprite", "atk": 4, "hp": 1, "kw": ["swift"],
+					"on_death": {"type": "damage_all_enemies", "value": 1}},
+				{"name": "Flame Sprite", "atk": 4, "hp": 1, "kw": ["swift"],
+					"on_death": {"type": "damage_all_enemies", "value": 1}},
+				{"name": "Storm Sprite", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+				{"name": "Shadow Sprite", "atk": 3, "hp": 2,
+					"on_enter": {"type": "damage_random_player", "value": 2}},
+				{"name": "Shadow Sprite", "atk": 3, "hp": 2,
+					"on_enter": {"type": "damage_random_player", "value": 2}},
+				{"name": "Nexus Core", "atk": 2, "hp": 5,
+					"adj_buff": {"atk": 1, "hp": 0},
+					"intents": ["RALLY", "ATK", "ABILITY", "RALLY"],
+					"ability": {"type": "warcry", "value": 1}},
+			],
+		],
+		"reinforcement": {"name": "Spark", "atk": 2, "hp": 1, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Flame Sprite", "atk": 4, "hp": 1, "kw": ["swift"],
+				"on_death": {"type": "damage_all_enemies", "value": 1}},
+			{"name": "Stone Sprite", "atk": 1, "hp": 4, "kw": ["thorns"]},
+		],
 	},
 
 	"executioners_block": {
-		"name": "The Executioner's Block", "act": 3, "type": "combat", "hp": 21,
+		# Executioner's Block — EVERYTHING PIERCES. Torture chamber: every
+		# enemy carries Piercing (the executioner's blade goes through armor)
+		# or detonates on death (Bound Prisoner's hidden bomb). The passive
+		# adds face damage from the highest ATK each round, so trades that
+		# leave their heavy hitter alive bleed you out fast.
+		"name": "The Executioner's Block", "act": 3, "type": "combat", "hp": 19,
 		"passive_id": "executioner_face",
-		"passive_desc": "Each round, the highest-ATK enemy also deals its ATK as face damage to the player.",
+		"passive_desc": "Each round: the highest-ATK enemy also deals damage equal to its ATK to your face.",
 		"deck": [
-			{"name": "Headsman", "atk": 4, "hp": 4,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK", "ENRAGE"]},
-			{"name": "Headsman", "atk": 4, "hp": 4,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK", "ENRAGE"]},
-			{"name": "Torturer", "atk": 3, "hp": 3,
-				"on_enter": {"type": "debuff_opposing_atk", "value": 2},
-				"intents": ["ATK", "ABILITY", "ATK", "ATK", "ABILITY"],
-				"ability": {"type": "mark"}},
-			{"name": "Torturer", "atk": 3, "hp": 3,
-				"on_enter": {"type": "debuff_opposing_atk", "value": 2},
-				"intents": ["ATK", "ABILITY", "ATK", "ATK", "ABILITY"],
-				"ability": {"type": "mark"}},
-			{"name": "Condemned", "atk": 2, "hp": 5, "kw": ["thorns", "last_stand"],
-				"intents": ["ATK", "GUARD", "ATK", "GUARD", "ATK", "GUARD"]},
-			{"name": "Executioner", "atk": 5, "hp": 4, "kw": ["piercing"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK", "ATK"]},
+			{"name": "Jailer", "atk": 2, "hp": 3, "kw": ["piercing"]},
+			{"name": "Crossbow Guard", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Tormentor", "atk": 4, "hp": 3, "kw": ["swift", "piercing"],
+				"on_enter": {"type": "damage_face", "value": 2}},
+			{"name": "Iron Maiden", "atk": 1, "hp": 6, "kw": ["thorns", "armored"]},
+			{"name": "Inquisitor", "atk": 2, "hp": 4, "kw": ["piercing"],
+				"on_enter": {"type": "debuff_opposing_atk", "value": 2}},
+			{"name": "Bound Prisoner", "atk": 0, "hp": 5,
+				"on_death": {"type": "damage_opposing", "value": 4}},
+			{"name": "Executioner", "atk": 5, "hp": 5, "kw": ["piercing"]},
 		],
-		"reinforcement": {"name": "Jailer", "atk": 2, "hp": 4},
+		"deck_variants": [
+			# Variant: gallows trap — Bound Prisoners stack as living bombs.
+			[
+				{"name": "Jailer", "atk": 2, "hp": 3},
+				{"name": "Whipman", "atk": 2, "hp": 3},
+				{"name": "Bound Prisoner", "atk": 0, "hp": 5,
+					"on_death": {"type": "damage_opposing", "value": 4}},
+				{"name": "Bound Prisoner", "atk": 0, "hp": 5,
+					"on_death": {"type": "damage_opposing", "value": 4}},
+				{"name": "Iron Maiden", "atk": 1, "hp": 6, "kw": ["thorns", "armored"]},
+				{"name": "Inquisitor", "atk": 2, "hp": 4,
+					"intents": ["ATK", "ABILITY", "ATK", "ABILITY"],
+					"ability": {"type": "mark"}},
+				{"name": "Executioner", "atk": 5, "hp": 5, "kw": ["piercing"]},
+			],
+		],
+		"reinforcement": {"name": "Whipman", "atk": 2, "hp": 3},
+		"reinforcement_pool": [
+			{"name": "Jailer", "atk": 2, "hp": 3},
+			{"name": "Crossbow Guard", "atk": 2, "hp": 2, "kw": ["ranged"]},
+		],
 	},
 
 	"dragons_lair": {
-		"name": "Dragon's Lair", "act": 3, "type": "combat", "hp": 24,
+		# Dragon's Lair — SCALES AND CLAWS. Every dragon carries Armored
+		# (thick scales) or Piercing (claws/teeth through anything). The
+		# whelps and kobolds are the only chaff; the rest are statline
+		# threats. The periodic AoE passive punishes stalling.
+		"name": "Where the Old Drake Sleeps", "act": 3, "type": "combat", "hp": 22,
 		"passive_id": "dragon_lair_periodic",
-		"passive_desc": "Every 3 rounds, deal 3 damage to ALL player creatures.",
+		"passive_desc": "Every 3 rounds: deal 3 damage to all your creatures.",
 		"deck": [
-			{"name": "Drake", "atk": 3, "hp": 4, "kw": ["piercing"],
-				"intents": ["ATK", "ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Drake", "atk": 3, "hp": 4, "kw": ["piercing"],
-				"intents": ["ATK", "ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Drake", "atk": 3, "hp": 4, "kw": ["piercing"],
-				"intents": ["ATK", "ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Wyrm", "atk": 4, "hp": 5, "kw": ["regenerate"],
-				"intents": ["ATK", "ATK", "HEAL", "ATK", "ATK"]},
-			{"name": "Wyrm", "atk": 4, "hp": 5, "kw": ["regenerate"],
-				"intents": ["ATK", "ATK", "HEAL", "ATK", "ATK"]},
-			{"name": "Elder Dragon", "atk": 5, "hp": 6, "wither": 1,
-				"on_enter": {"type": "damage_all_enemies", "value": 2},
-				"intents": ["ATK", "ATK", "ATK", "ABILITY", "ATK", "ATK", "CHARGE"],
-				"ability": {"type": "warcry", "value": 1}},
+			{"name": "Hatchling", "atk": 2, "hp": 2, "kw": ["swift", "piercing"]},
+			{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": ["ranged"]},
+			{"name": "Hoard Guardian", "atk": 1, "hp": 7, "kw": ["armored", "thorns"]},
+			{"name": "Egg Mother", "atk": 1, "hp": 4, "kw": ["armored"],
+				"on_death": {"type": "summon", "atk": 3, "hp": 3}},
+			{"name": "Drake", "atk": 4, "hp": 5, "kw": ["armored", "piercing"]},
+			{"name": "Lava Drake", "atk": 3, "hp": 4, "kw": ["regenerate", "piercing"],
+				"on_death": {"type": "damage_all_enemies", "value": 2}},
+			{"name": "Ancient Wyrm", "atk": 5, "hp": 6, "kw": ["piercing", "armored"], "wither": 1},
 		],
-		"reinforcement": {"name": "Whelp", "atk": 2, "hp": 3},
+		"deck_variants": [
+			# Variant: nest of whelps — two egg mothers, lots of hatchlings.
+			[
+				{"name": "Hatchling", "atk": 2, "hp": 2, "kw": ["swift"]},
+				{"name": "Hatchling", "atk": 2, "hp": 2, "kw": ["swift"]},
+				{"name": "Egg Mother", "atk": 1, "hp": 4,
+					"on_death": {"type": "summon", "atk": 3, "hp": 3}},
+				{"name": "Egg Mother", "atk": 1, "hp": 4,
+					"on_death": {"type": "summon", "atk": 3, "hp": 3}},
+				{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": ["ranged"]},
+				{"name": "Lava Drake", "atk": 3, "hp": 4, "kw": ["regenerate"],
+					"on_death": {"type": "damage_all_enemies", "value": 2}},
+				{"name": "Ancient Wyrm", "atk": 5, "hp": 6, "kw": ["piercing"], "wither": 1},
+			],
+		],
+		"reinforcement": {"name": "Whelp", "atk": 2, "hp": 3, "kw": ["piercing"]},
+		"reinforcement_pool": [
+			{"name": "Hatchling", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": ["ranged"]},
+		],
 	},
 
 	"pyre_cult": {
-		# Fire cult — forge_burn_all + Conflagrant's 3-face on-death demands one-shot kills.
-		"name": "The Pyre Cult", "act": 3, "type": "combat", "hp": 22,
+		# Pyre theme — FIRE THAT SPREADS. Every cultist either pierces (fire
+		# burns through walls), burns on contact (thorns), or explodes on death
+		# (chain damage). The forge_burn_all passive keeps ambient chip damage
+		# flowing every round. No structures — the deck IS the theme.
+		"name": "The Pyre Cult", "act": 3, "type": "combat", "hp": 20,
 		"passive_id": "forge_burn_all",
-		"passive_desc": "Start of each round, deal 1 damage to ALL creatures on both sides.",
+		"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
 		"deck": [
-			{"name": "Torchbearer", "atk": 3, "hp": 3, "kw": ["thorns"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Torchbearer", "atk": 3, "hp": 3, "kw": ["thorns"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Ash Devotee", "atk": 2, "hp": 5, "kw": ["regenerate"],
-				"on_death": {"type": "damage_adjacent", "value": 2},
-				"intents": ["ATK", "HEAL", "ATK", "HEAL"]},
-			{"name": "Ash Devotee", "atk": 2, "hp": 5, "kw": ["regenerate"],
-				"on_death": {"type": "damage_adjacent", "value": 2},
-				"intents": ["ATK", "HEAL", "ATK", "HEAL"]},
-			{"name": "Kindler", "atk": 3, "hp": 4,
-				"on_enter": {"type": "damage_face", "value": 2},
-				"intents": ["ATK", "ABILITY", "ATK", "ATK"]},
+			{"name": "Cinder Whelp", "atk": 1, "hp": 2, "kw": ["swift", "piercing"]},
+			{"name": "Ember Mystic", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Coal Hulk", "atk": 2, "hp": 5, "kw": ["thorns", "armored"]},
+			{"name": "Kindler", "atk": 3, "hp": 3, "kw": ["piercing"],
+				"on_enter": {"type": "damage_face", "value": 2}},
+			{"name": "Pyromancer", "atk": 2, "hp": 4, "kw": ["thorns"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Burning Martyr", "atk": 3, "hp": 3,
+				"on_death": {"type": "damage_all_enemies", "value": 2}},
 			{"name": "Conflagrant", "atk": 5, "hp": 5, "kw": ["piercing"],
-				"on_death": {"type": "damage_face", "value": 3},
-				"intents": ["ATK", "ATK", "ENRAGE", "ATK", "ATK", "CHARGE"]},
+				"on_death": {"type": "damage_face", "value": 3}},
 		],
-		"reinforcement": {"name": "Cinder Acolyte", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Cinder Whelp", "atk": 1, "hp": 2, "kw": ["swift", "piercing"]},
+		"reinforcement_pool": [
+			{"name": "Burning Martyr", "atk": 3, "hp": 3,
+				"on_death": {"type": "damage_all_enemies", "value": 2}},
+			{"name": "Ember Mystic", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+		],
 	},
 
 	"withered_court": {
-		# cultist_buff keeps refreshing one royal. Wither + last_stand royalty force patience-vs-race decision.
-		"name": "The Withered Court", "act": 3, "type": "combat", "hp": 24,
+		# Withered Court — WHISPERS AND WITHER. Every courtier debuffs the
+		# player on enter (opposing -ATK, random discard, AoE debuff) or
+		# carries Wither / Thorns. The court doesn't kill quickly — it
+		# strangles your board into uselessness. Spell-heavy decks shred
+		# this fight; creature-heavy decks struggle.
+		"name": "The Withered Court", "act": 3, "type": "combat", "hp": 22,
 		"passive_id": "cultist_buff",
-		"passive_desc": "Each round, a random enemy gains +1/+1.",
+		"passive_desc": "Start of each round: a random Courtier gains +1/+1.",
 		"deck": [
-			{"name": "Dust Courtier", "atk": 3, "hp": 4, "wither": 1,
-				"intents": ["ATK", "ATK", "RETREAT", "ATK"]},
-			{"name": "Dust Courtier", "atk": 3, "hp": 4, "wither": 1,
-				"intents": ["ATK", "ATK", "RETREAT", "ATK"]},
-			{"name": "Pale Handmaid", "atk": 2, "hp": 4, "adj_buff": {"atk": 1, "hp": 0},
-				"intents": ["RALLY", "ATK", "RALLY", "ATK"]},
-			{"name": "Mourner Knight", "atk": 4, "hp": 4, "kw": ["thorns"],
-				"on_death": {"type": "debuff_all_player_atk", "value": 1},
-				"intents": ["ATK", "GUARD", "ATK", "ATK", "ENRAGE"]},
-			{"name": "Mourner Knight", "atk": 4, "hp": 4, "kw": ["thorns"],
-				"on_death": {"type": "debuff_all_player_atk", "value": 1},
-				"intents": ["ATK", "GUARD", "ATK", "ATK", "ENRAGE"]},
-			{"name": "Hollow Princess", "atk": 3, "hp": 6, "kw": ["last_stand", "regenerate"],
-				"intents": ["ATK", "ABILITY", "ATK", "HEAL", "ATK", "ABILITY"],
-				"ability": {"type": "terrify"}},
-			{"name": "Crowned Cadaver", "atk": 5, "hp": 5, "kw": ["last_stand"],
-				"adj_buff": {"atk": 1, "hp": 0},
-				"intents": ["ATK", "RALLY", "ATK", "ATK", "CHARGE", "ATK"]},
+			{"name": "Court Jester", "atk": 2, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "discard_random"}},
+			{"name": "Crossbow Lady", "atk": 2, "hp": 3, "kw": ["ranged"]},
+			{"name": "Court Hexer", "atk": 2, "hp": 3, "kw": ["thorns"],
+				"on_enter": {"type": "debuff_opposing_atk", "value": 2}},
+			{"name": "Pale Handmaid", "atk": 1, "hp": 5, "kw": ["thorns"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Mourner Knight", "atk": 3, "hp": 5, "kw": ["thorns"], "wither": 1},
+			{"name": "Whisper-King", "atk": 2, "hp": 4, "kw": ["thorns"],
+				"on_enter": {"type": "debuff_opposing_atk", "value": 2}},
+			{"name": "Withered King", "atk": 4, "hp": 6, "kw": ["last_stand", "thorns"],
+				"on_death": {"type": "debuff_all_player_atk", "value": 1}},
 		],
-		"reinforcement": {"name": "Court Mourner", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Court Mourner", "atk": 1, "hp": 3,
+			"on_enter": {"type": "discard_random"}},
+		"reinforcement_pool": [
+			{"name": "Court Hexer", "atk": 2, "hp": 3, "kw": ["thorns"],
+				"on_enter": {"type": "debuff_opposing_atk", "value": 2}},
+			{"name": "Court Jester", "atk": 2, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "discard_random"}},
+		],
 	},
 
 	"killing_choir": {
-		# Ranged back-row + hollow_king_snipe punishes single-bomb strategy. Forces spreading damage across mediums.
-		"name": "The Killing Choir", "act": 3, "type": "combat", "hp": 23,
+		# Killing Choir — SONG REACHES EVERYWHERE. The choir sings from the
+		# back: most singers are Ranged (their voice carries), and the
+		# Hymn Bearer / Conductor buff adjacent voices. The snipe passive
+		# silences your strongest creature each round. Push damage onto the
+		# back-row singers fast or get sung to death.
+		"name": "The Killing Choir", "act": 3, "type": "combat", "hp": 21,
 		"passive_id": "hollow_king_snipe",
-		"passive_desc": "Start of each round, player's highest-ATK creature takes 3 damage.",
+		"passive_desc": "Start of each round: your highest-ATK creature takes 3 damage.",
 		"deck": [
-			{"name": "Chorister", "atk": 3, "hp": 3, "kw": ["ranged"],
-				"intents": ["ATK", "ATK", "ATK", "RETREAT"]},
-			{"name": "Chorister", "atk": 3, "hp": 3, "kw": ["ranged"],
-				"intents": ["ATK", "ATK", "ATK", "RETREAT"]},
-			{"name": "Hymn Bearer", "atk": 2, "hp": 5, "adj_buff": {"atk": 1, "hp": 0},
-				"intents": ["RALLY", "ATK", "RALLY", "ATK", "GUARD"]},
-			{"name": "Echo Twin", "atk": 3, "hp": 3, "kw": ["swift"],
-				"on_enter": {"type": "damage_random_player", "value": 2},
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Echo Twin", "atk": 3, "hp": 3, "kw": ["swift"],
-				"on_enter": {"type": "damage_random_player", "value": 2},
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Silent Choirmaster", "atk": 3, "hp": 4,
-				"on_enter": {"type": "debuff_opposing_atk", "value": 2},
-				"intents": ["ATK", "ABILITY", "ATK", "ATK", "ABILITY"],
-				"ability": {"type": "mark"}},
-			{"name": "Lead Cantor", "atk": 4, "hp": 6, "kw": ["piercing"],
-				"on_enter": {"type": "damage_all_enemies", "value": 2},
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ABILITY", "ATK"],
-				"ability": {"type": "warcry", "value": 1}},
+			{"name": "Echo Twin", "atk": 3, "hp": 2, "kw": ["swift", "ranged"]},
+			{"name": "Soprano", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Tenor", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Hymn Bearer", "atk": 1, "hp": 5,
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Conductor", "atk": 2, "hp": 3, "kw": ["ranged"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Cantor", "atk": 2, "hp": 4, "kw": ["ranged"],
+				"on_death": {"type": "damage_all_enemies", "value": 2}},
+			{"name": "Maestro", "atk": 3, "hp": 5, "kw": ["ranged"],
+				"on_death": {"type": "summon", "atk": 3, "hp": 3}},
 		],
-		"reinforcement": {"name": "Hummer", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Hummer", "atk": 2, "hp": 2, "kw": ["ranged"]},
+		"reinforcement_pool": [
+			{"name": "Echo Twin", "atk": 3, "hp": 2, "kw": ["swift", "ranged"]},
+			{"name": "Soprano", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+		],
 	},
 
 	# =================== ACT 3 — ELITE ============================
 
 	"archlich": {
-		"name": "The Archlich", "act": 3, "type": "elite", "hp": 32,
+		# Archlich (Act 3 elite) — STEEL DOES NOTHING. Inspired by Dark Souls
+		# Gravelord Nito: archlich_immortal blocks creature attacks from
+		# pushing enemies below 1 HP. Different obstacles to spell-kill: a
+		# Bone Dragon that pierces back at you, a Lich Acolyte that summons,
+		# a Phylactery wall, Skeleton Knights that just keep coming. The
+		# puzzle is "which one do I spend my limited spells on first."
+		"name": "The Bone-Crowned", "act": 3, "type": "elite", "hp": 29,
 		"passive_id": "archlich_immortal",
-		"passive_desc": "Enemy creatures cannot be reduced below 1 HP by creature attacks. Only spells/effects can finish them.",
+		"passive_desc": "Creature attacks can't reduce enemies below 1 HP. Only spells and other effects can finish them off.",
 		"deck": [
-			{"name": "Skeleton Knight", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "GUARD", "ATK", "ATK"]},
-			{"name": "Skeleton Knight", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "GUARD", "ATK", "ATK"]},
-			{"name": "Skeleton Knight", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "GUARD", "ATK", "ATK"]},
-			{"name": "Bone Dragon", "atk": 4, "hp": 5, "kw": ["piercing", "regenerate"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK", "ATK", "ENRAGE"]},
-			{"name": "Lich Acolyte", "atk": 2, "hp": 3,
-				"floop": {"type": "summon_token", "atk": 2, "hp": 2},
-				"intents": ["ATK", "ABILITY", "ATK", "ATK", "ABILITY", "ATK"],
-				"ability": {"type": "resurrect"}},
-			{"name": "Phylactery", "atk": 0, "hp": 8,
-				"intents": ["GUARD", "GUARD", "GUARD", "GUARD", "GUARD", "GUARD"]},
+			{"name": "Skeleton Knight", "atk": 3, "hp": 4},
+			{"name": "Skeleton Knight", "atk": 3, "hp": 4},
+			{"name": "Bone Walker", "atk": 2, "hp": 3, "kw": ["swift"]},
+			{"name": "Bone Dragon", "atk": 4, "hp": 5, "kw": ["piercing"]},
+			{"name": "Lich Acolyte", "atk": 1, "hp": 3,
+				"adj_buff": {"atk": 1, "hp": 0},
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+			{"name": "Phylactery", "atk": 0, "hp": 8, "kw": ["thorns", "armored"]},
 		],
 		"reinforcement": {"name": "Risen", "atk": 2, "hp": 3},
+		"reinforcement_pool": [
+			{"name": "Skeleton Knight", "atk": 3, "hp": 4},
+			{"name": "Bone Walker", "atk": 2, "hp": 3, "kw": ["swift"]},
+		],
 	},
 
 	"void_walker": {
-		"name": "The Void Walker", "act": 3, "type": "elite", "hp": 30,
+		# Void Walker (Act 3 elite) — RACE THE CLOCK. Inspired by StS Time
+		# Eater: the void_exile passive deletes the top of your deck every
+		# turn (permanently). Sustained-card decks lose by attrition before
+		# they can stabilize. The Void Maw shreds your hand on top. The
+		# fight pressures you to kill fast — every stalled turn costs you a
+		# card you might've needed.
+		"name": "The One Who Walks Sideways", "act": 3, "type": "elite", "hp": 27,
 		"passive_id": "void_exile",
-		"passive_desc": "Start of player's turn, exile top card of deck (removed from fight permanently).",
+		"passive_desc": "Start of your turn: the top card of your draw pile is exiled (removed from this fight).",
 		"deck": [
-			{"name": "Void Spawn", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Void Spawn", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Void Spawn", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Rift Stalker", "atk": 4, "hp": 3, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "RETREAT", "ATK", "ATK"]},
-			{"name": "Rift Stalker", "atk": 4, "hp": 3, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "RETREAT", "ATK", "ATK"]},
+			{"name": "Void Spawn", "atk": 3, "hp": 4, "kw": ["swift"]},
+			{"name": "Void Spawn", "atk": 3, "hp": 4, "kw": ["swift"]},
+			{"name": "Rift Stalker", "atk": 4, "hp": 3, "kw": ["swift", "piercing"]},
+			{"name": "Rift Stalker", "atk": 4, "hp": 3, "kw": ["swift", "piercing"]},
 			{"name": "Null Beast", "atk": 3, "hp": 5,
-				"on_enter": {"type": "discard_random", "value": 1},
-				"intents": ["ATK", "ATK", "ABILITY", "ATK", "ATK"],
-				"ability": {"type": "hex"}},
-			{"name": "Void Maw", "atk": 5, "hp": 5,
-				"intents": ["ATK", "ABILITY", "ATK", "ATK", "ATK", "ABILITY", "ATK"],
-				"ability": {"type": "devour"}},
+				"on_enter": {"type": "discard_random"}},
+			{"name": "Null Beast", "atk": 3, "hp": 5,
+				"on_enter": {"type": "discard_random"}},
+			{"name": "Void Maw", "atk": 5, "hp": 5, "kw": ["piercing"],
+				"on_enter": {"type": "discard_random"}},
 		],
-		"reinforcement": {"name": "Fragment", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Fragment", "atk": 2, "hp": 2, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Rift Stalker", "atk": 4, "hp": 3, "kw": ["swift", "piercing"]},
+			{"name": "Void Spawn", "atk": 3, "hp": 4, "kw": ["swift"]},
+		],
 	},
 
 	"corrupted_shepherd": {
-		# wolf_pack_revenge weaponizes the clear-the-board instinct. Mad Shepherd's adj_buff stacks with the passive.
-		"name": "The Corrupted Shepherd", "act": 3, "type": "elite", "hp": 30,
+		# Corrupted Shepherd (Act 3 elite) — THE MASTER, THEN THE FLOCK.
+		# Inspired by Bloodborne beast hunts (Cleric Beast / Vicar Amelia):
+		# the Shepherd is the buff hub, the Whisperer is the healer, the
+		# rams and lambs are disposable but they SCALE when allies die
+		# (wolf_pack_revenge). Kill the front-row flock first and the
+		# remaining beasts rage; kill the buffers first and the front
+		# collapses. Real target-order puzzle.
+		"name": "The Shepherd Who Lost His Sheep", "act": 3, "type": "elite", "hp": 27,
 		"passive_id": "wolf_pack_revenge",
-		"passive_desc": "When an enemy creature dies, adjacent enemies gain +1 ATK this turn.",
+		"passive_desc": "When an enemy creature dies: adjacent enemies gain +1 ATK this round.",
 		"deck": [
-			{"name": "Maggot-Lamb", "atk": 3, "hp": 2, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Maggot-Lamb", "atk": 3, "hp": 2, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Maggot-Lamb", "atk": 3, "hp": 2, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Bone-Ram", "atk": 4, "hp": 3, "kw": ["piercing"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Bone-Ram", "atk": 4, "hp": 3, "kw": ["piercing"],
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
+			{"name": "Maggot-Lamb", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Maggot-Lamb", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Stray Lamb", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Bone-Ram", "atk": 4, "hp": 3, "kw": ["piercing"]},
+			{"name": "Bone-Ram", "atk": 4, "hp": 3, "kw": ["piercing"]},
 			{"name": "Flock Whisperer", "atk": 2, "hp": 5, "kw": ["regenerate"],
-				"on_death": {"type": "summon", "name": "Stray Lamb", "atk": 2, "hp": 2},
-				"intents": ["ATK", "HEAL", "ATK", "ABILITY", "ATK"],
-				"ability": {"type": "resurrect"}},
+				"adj_buff": {"atk": 0, "hp": 1},
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
 			{"name": "Mad Shepherd", "atk": 4, "hp": 6, "kw": ["last_stand"],
-				"adj_buff": {"atk": 1, "hp": 0},
-				"intents": ["ATK", "RALLY", "ATK", "ATK", "ABILITY", "ATK", "CHARGE"],
-				"ability": {"type": "warcry", "value": 1}},
+				"adj_buff": {"atk": 1, "hp": 0}},
 		],
-		"reinforcement": {"name": "Stray Lamb", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Stray Lamb", "atk": 2, "hp": 2, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Maggot-Lamb", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Bone-Ram", "atk": 4, "hp": 3, "kw": ["piercing"]},
+		],
 	},
 
 	# =================== ACT 3 — BOSS =============================
 
 	"the_devil": {
-		"name": "THE DEVIL", "act": 3, "type": "boss", "hp": 40,
+		# The Devil (Act 3 boss) — THREE FACES. Inspired by Persona 5's
+		# boss reveals: the devil_cycle passive rotates effect each round
+		# (R1 face, R2 heal, R3 snipe). Phase 2 (HP < 20) DOUBLES the cycle
+		# and summons a Pit Fiend with the existing banner reveal. Phase 3
+		# (HP < 10) is DESPERATION — 3 face per round, +1 ATK to all, summon.
+		# The 3 phases already exist; deck is variety of demons that all
+		# play differently so the cycle hits different things.
+		"name": "THE DEVIL", "act": 3, "type": "boss", "hp": 36,
 		"passive_id": "devil_cycle",
-		"passive_desc": "Cycle: R1 deal 2 face damage. R2 heal 1 per enemy on board. R3 deal 3 to player's highest-ATK creature. Repeat.",
+		"passive_desc": "Three-round cycle (repeats). Round 1: deal 2 face damage. Round 2: heal 1 HP for every enemy on the board. Round 3: deal 3 damage to your highest-ATK creature.",
 		"deck": [
-			{"name": "Demon Soldier", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Demon Soldier", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Demon Soldier", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Demon Soldier", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Hellfire Imp", "atk": 3, "hp": 3,
-				"on_enter": {"type": "damage_face", "value": 2},
-				"intents": ["ATK", "ABILITY", "ATK", "ATK", "ABILITY"],
-				"ability": {"type": "curse"}},
-			{"name": "Pit Fiend", "atk": 4, "hp": 5, "kw": ["armored", "regenerate"],
-				"intents": ["ATK", "ATK", "ABILITY", "ATK", "ATK", "ATK", "GUARD", "ABILITY"],
-				"ability": {"type": "devour"}},
-			{"name": "Soul Reaper", "atk": 3, "hp": 4, "kw": ["swift", "piercing"],
-				"intents": ["ATK", "ATK", "ATK", "CHARGE", "ATK", "ATK"]},
-			{"name": "Devil's Champion", "atk": 5, "hp": 6,
-				"kw": ["last_stand"], "adj_buff": {"atk": 1, "hp": 0},
-				"intents": ["ATK", "RALLY", "ATK", "ATK", "ABILITY", "ATK", "CHARGE"],
-				"ability": {"type": "warcry", "value": 1}},
-			{"name": "Iron Vanguard", "atk": 4, "hp": 5, "kw": ["last_stand"],
-				"intents": ["ATK", "ATK", "GUARD", "ATK", "ENRAGE"]},
+			{"name": "Demon Soldier", "atk": 3, "hp": 4, "kw": ["armored", "piercing"]},
+			{"name": "Demon Soldier", "atk": 3, "hp": 4, "kw": ["armored", "piercing"]},
+			{"name": "Hellfire Imp", "atk": 2, "hp": 3, "kw": ["swift"],
+				"on_enter": {"type": "damage_face", "value": 2}},
+			{"name": "Hellfire Imp", "atk": 2, "hp": 3, "kw": ["swift"],
+				"on_enter": {"type": "damage_face", "value": 2}},
+			{"name": "Pit Fiend", "atk": 4, "hp": 5, "kw": ["armored", "regenerate"]},
+			{"name": "Soul Reaper", "atk": 3, "hp": 4, "kw": ["swift", "piercing"]},
+			{"name": "Devil's Champion", "atk": 5, "hp": 6, "kw": ["piercing", "last_stand"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Iron Vanguard", "atk": 4, "hp": 5, "kw": ["armored", "last_stand"]},
 		],
-		"reinforcement": {"name": "Lesser Demon", "atk": 3, "hp": 3},
+		"reinforcement": {"name": "Lesser Demon", "atk": 3, "hp": 3, "kw": ["piercing"]},
 	},
 
 	"the_crone": {
-		# Curse-pile boss: passive seeds Curses into your deck every round and
-		# eventually punishes you for carrying them. Tempo answer is removal
-		# (banish/exhaust) and aggressive face damage to skip the late phases.
-		"name": "THE CRONE", "act": 3, "type": "boss", "hp": 36,
-		"passive_id": "crone_drip",
-		"passive_desc": "End of round: adds 1 Curse to your discard pile.",
+		# The Crone (Act 3 boss) — THE CAULDRON BREWS. Inspired by MtG
+		# Liliana and Hand of Fate hag bosses: a back-row Cauldron structure
+		# tracks how many curses she's brewed. Phase 1 (crone_drip) drips
+		# one curse per round. Phase 2 (crone_lash) starts dealing face per
+		# curse in your deck. Phase 3 (crone_doom) is the climax — every
+		# round adds two curses + face damage + a Wraith summon. Aggressive
+		# removal decks shred this; slow decks drown in curses.
+		"name": "THE CRONE", "act": 3, "type": "boss", "hp": 32,
+		"passive_id": "cauldron_brew",
+		"passive_desc": "End of each round: the Cauldron gains 1 Charge and adds 1 Curse to your discard pile. At 5 Charges the Cauldron OVERFLOWS: summons a Wraith, adds 2 more Curses, and deals 3 face damage.",
+		"structures": [
+			{"name": "Cauldron", "atk": 0, "hp": 99,
+				"kw": ["structure"], "charge_max": 5, "lane": 1},
+		],
 		"deck": [
-			{"name": "Skeleton", "atk": 2, "hp": 2,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Skeleton", "atk": 2, "hp": 2,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Wraith", "atk": 2, "hp": 3, "kw": ["swift"],
-				"intents": ["ATK", "ATK", "ATK", "ATK"]},
-			{"name": "Bone Crone", "atk": 3, "hp": 4,
-				"on_enter": {"type": "damage_face", "value": 2},
-				"intents": ["ATK", "ABILITY", "ATK", "ATK"]},
-			{"name": "Bone Crone", "atk": 3, "hp": 4,
-				"on_enter": {"type": "damage_face", "value": 2},
-				"intents": ["ATK", "ABILITY", "ATK", "ATK"]},
-			{"name": "Marrow Knight", "atk": 4, "hp": 5, "kw": ["armored"],
-				"intents": ["ATK", "ATK", "GUARD", "ATK", "ATK"]},
-			{"name": "Soul Drinker", "atk": 3, "hp": 5, "kw": ["regenerate"],
-				"intents": ["ATK", "HEAL", "ATK", "ATK"]},
+			{"name": "Skeleton", "atk": 2, "hp": 2, "kw": ["last_stand"]},
+			{"name": "Skeleton", "atk": 2, "hp": 2, "kw": ["last_stand"]},
+			{"name": "Wraith", "atk": 2, "hp": 3, "kw": ["swift"]},
+			{"name": "Wraith", "atk": 2, "hp": 3, "kw": ["swift"]},
+			{"name": "Bone Crone", "atk": 3, "hp": 4, "kw": ["thorns"],
+				"on_enter": {"type": "damage_face", "value": 2}},
+			{"name": "Marrow Knight", "atk": 4, "hp": 5, "kw": ["armored", "piercing"]},
+			{"name": "Soul Drinker", "atk": 3, "hp": 5, "kw": ["regenerate"]},
 			{"name": "The Crone", "atk": 5, "hp": 7, "kw": ["regenerate", "last_stand"],
-				"intents": ["ATK", "ABILITY", "ATK", "CHARGE", "ATK"],
-				"ability": {"type": "curse"}},
+				"adj_buff": {"atk": 1, "hp": 0}},
 		],
 		"reinforcement": {"name": "Specter", "atk": 2, "hp": 2, "kw": ["swift"]},
 	},
@@ -1013,28 +1564,27 @@ const ENCOUNTERS: Dictionary = {
 		# Swarm boss: keeps refilling its board and eventually buffs every wave.
 		# The player needs board clears (Earthquake / Apocalypse / Inferno) and
 		# enough single-target damage to finish off the high-HP centerpieces.
-		"name": "THE BLACK TIDE", "act": 3, "type": "boss", "hp": 38,
+		"name": "THE BLACK TIDE", "act": 3, "type": "boss", "hp": 34,
 		"passive_id": "tide_swell",
 		"passive_desc": "End of round: if fewer than 4 enemy creatures, summon a 2/3 Deepling.",
+		# Black Tide (Act 3 boss) — THE WATER RISES. Inspired by Subnautica
+		# deep-horror + MtG Emrakul: the tide_swell passive summons a Deepling
+		# every round you don't keep the board full. Phase 2 (tide_surge)
+		# also gives every enemy +1 ATK per round. Phase 3 (tide_drown)
+		# damages your weakest creature. Every wave brings something different:
+		# Tide Spawn chaff, Deeplings tanks, Anglerfish ambush, Tentacle regen,
+		# the Tide itself the unkillable centerpiece.
 		"deck": [
-			{"name": "Tide Spawn", "atk": 2, "hp": 3,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Tide Spawn", "atk": 2, "hp": 3,
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "Deepling", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "ATK"]},
-			{"name": "Deepling", "atk": 3, "hp": 4,
-				"intents": ["ATK", "ATK", "ATK"]},
-			{"name": "Drowned", "atk": 3, "hp": 5, "kw": ["last_stand"],
-				"intents": ["ATK", "ATK", "GUARD", "ATK", "ATK"]},
-			{"name": "Tentacle", "atk": 2, "hp": 6, "kw": ["regenerate"],
-				"intents": ["ATK", "ATK", "ATK", "GUARD", "ATK"]},
-			{"name": "Anglerfish", "atk": 4, "hp": 3,
-				"on_enter": {"type": "damage_opposing", "value": 2},
-				"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
-			{"name": "The Black Tide", "atk": 6, "hp": 8, "kw": ["piercing", "regenerate"],
-				"intents": ["ATK", "RALLY", "ATK", "ATK", "CHARGE", "ATK"]},
+			{"name": "Tide Spawn", "atk": 2, "hp": 3, "kw": ["swift"]},
+			{"name": "Tide Spawn", "atk": 2, "hp": 3, "kw": ["swift"]},
+			{"name": "Deepling", "atk": 3, "hp": 4, "kw": ["regenerate"]},
+			{"name": "Deepling", "atk": 3, "hp": 4, "kw": ["regenerate"]},
+			{"name": "Drowned", "atk": 3, "hp": 5, "kw": ["armored", "last_stand"]},
+			{"name": "Tentacle", "atk": 2, "hp": 6, "kw": ["thorns", "regenerate"]},
+			{"name": "Anglerfish", "atk": 4, "hp": 3, "kw": ["swift", "piercing"],
+				"on_enter": {"type": "damage_opposing", "value": 2}},
+			{"name": "The Black Tide", "atk": 6, "hp": 8, "kw": ["piercing", "regenerate"]},
 		],
-		"reinforcement": {"name": "Spawn", "atk": 2, "hp": 2},
+		"reinforcement": {"name": "Spawn", "atk": 2, "hp": 2, "kw": ["swift"]},
 	},
 }

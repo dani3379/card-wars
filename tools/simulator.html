@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Burning Meadow — Combat Simulator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1410; }
+  </style>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-type="module">
+const { useState, useCallback } = React;
+
+// ── inline from burning_meadow_sim.jsx (everything except the import/export) ──
+</script>
+  <script>
+    // We load the JSX file content via fetch, strip the import/export, and eval with Babel
+    fetch('burning_meadow_sim.jsx')
+      .then(r => r.text())
+      .then(code => {
+        // Strip ES module syntax so it works as a plain script
+        code = code.replace(/^import\s.*?from\s.*?;?\s*$/m, '');
+        code = code.replace('export default function', 'function');
+
+        // Provide React hooks as globals
+        const preamble = `
+          const { useState, useCallback, useRef, useEffect } = React;
+        `;
+
+        const postamble = `
+          ReactDOM.createRoot(document.getElementById('root')).render(
+            React.createElement(BurningMeadowSim)
+          );
+        `;
+
+        const full = preamble + code + postamble;
+        const transformed = Babel.transform(full, { presets: ['react'] }).code;
+        eval(transformed);
+      })
+      .catch(err => {
+        document.getElementById('root').innerHTML =
+          '<p style="color:#c44b4b;padding:40px;font-family:monospace;">Failed to load simulator: ' + err.message + '</p>';
+      });
+  </script>
+</body>
+</html>

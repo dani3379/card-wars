@@ -30,3 +30,16 @@ assets/ui/_ai_*
 
 # Font test scratch
 assets/fonts/test/
+
+# --- Local dev study & screenshot workspaces (large scratch; kept on disk, not shipped) ---
+# Video captures + extracted frames, card-redesign renders, and probe screenshots.
+# These live under tools/ and are never loaded by the game.
+tools/combat_study/
+tools/card_redesign_v6/
+tools/screenshot/
+tools/screenshot_boot.*
+tools/_crop_*
+
+# Godot editor temp / backup files
+*.TMP
+project.godot~*

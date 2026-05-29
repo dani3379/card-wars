@@ -11,6 +11,11 @@ const SKIP_CARD_GOLD := 20
 var _card_choices: Array[String] = []
 var _relic_choices: Array[String] = []
 var _is_elite_reward: bool = false
+var _mutator_bonus_gold: int = 0
+var _mutator_name: String = ""
+# Collector's Tome: how many of the 2 allowed picks have been taken so far.
+# Resets implicitly on scene unload (a fresh Reward instance starts at 0).
+var _collectors_tome_picks: int = 0
 
 
 func _ready() -> void:
@@ -25,24 +30,65 @@ func _ready() -> void:
 	_is_elite_reward = (node_type == "elite" or node_type == "boss")
 	var is_boss = (node_type == "boss")
 
-	# Busted Crown: only 1 card choice instead of 3
+	# Busted Crown: only 1 card choice instead of 3.
+	# Scout's Emblem: see 4 choices instead of 3 (overrides default, NOT downside).
 	var reward_count := 3
 	if RunState.has_downside("fewer_rewards"):
 		reward_count = 1
-	_card_choices = CardDB.roll_card_reward(RunState.get_act(), node_type == "elite", is_boss)
+	elif RunState.has_relic("scouts_emblem"):
+		reward_count = 4
+	_card_choices = CardDB.roll_card_reward(
+		RunState.get_act(), node_type == "elite", is_boss, reward_count)
 	if _card_choices.size() > reward_count:
 		_card_choices = _card_choices.slice(0, reward_count)
+	# Stardust Vial: append a rare-rarity ("boss-tier" in our schema is rare)
+	# card option on non-boss reward screens. Boss rewards already roll rares.
+	if not is_boss and RunState.has_relic("stardust_vial"):
+		var rare_pool: Array[String] = CardDB.get_pool_by_rarity("rare")
+		if rare_pool.size() > 0:
+			var picked: String = rare_pool[randi() % rare_pool.size()]
+			if not _card_choices.has(picked):
+				_card_choices.append(picked)
 
 	# Cursed Key: gain a curse after combat
 	if RunState.has_downside("curse_on_reward"):
-		RunState.add_card("curse")
+		RunState.add_card(CardDB.random_curse_id())
+
+	# Mutator bonus gold: the fight we just won carried a per-fight modifier.
+	# Pay out its gold_bonus once, then clear the id so subsequent map nodes
+	# don't double-pay if the player re-enters Reward via save/load.
+	_mutator_bonus_gold = 0
+	_mutator_name = ""
+	if RunState.current_mutator_id != "" and MutatorDB.exists(RunState.current_mutator_id):
+		var mut: Dictionary = MutatorDB.get_mutator(RunState.current_mutator_id)
+		_mutator_bonus_gold = int(mut.get("gold_bonus", 0))
+		_mutator_name = String(mut.get("name", ""))
+		if _mutator_bonus_gold > 0:
+			RunState.gold += _mutator_bonus_gold
+		RunState.current_mutator_id = ""
 
 	if is_boss:
-		_relic_choices = RelicDB.roll_boss_relics(RunState.relics)
+		_relic_choices = RelicDB.roll_boss_relics(RunState.relics, RunState.current_hero_id)
 	elif _is_elite_reward:
-		_relic_choices = RelicDB.roll_relic_reward("combat", RunState.relics)
+		_relic_choices = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
+
+	# Olympian's Mark: after every elite victory, upgrade one random un-upgraded
+	# creature/spell in the deck for free. Applies the same "+" upgrade the
+	# rest-site offers, so the relic stays in lockstep with the player-driven
+	# forge path instead of carving out a parallel buff.
+	if node_type == "elite" and RunState.has_relic("olympians_mark"):
+		var candidates: Array[int] = []
+		for i in RunState.deck.size():
+			if not RunState.is_card_upgraded(i):
+				var d: Dictionary = CardDB.get_card_data(RunState.deck[i])
+				if d.get("type", "") in ["creature", "spell"] \
+						and CardDB.is_upgradeable(RunState.deck[i]):
+					candidates.append(i)
+		if candidates.size() > 0:
+			RunState.upgrade_card(candidates[randi() % candidates.size()], "plus")
 
 	_build_ui()
+	GameTheme.make_settings_gear(self)
 
 
 func _build_ui() -> void:
@@ -67,6 +113,22 @@ func _build_ui() -> void:
 		"VICTORY  —  Floor %d" % RunState.current_floor, GameTheme.GILT_BRIGHT,
 		GameTheme.FONT_HEADER)
 	outer.add_child(title)
+
+	# Mutator payout line — sits under the title so it reads as part of the
+	# victory beat. Only appears for mutator fights that actually paid bonus
+	# gold; pure-gift mutators (gold_bonus == 0) get a softer reminder line.
+	if _mutator_name != "":
+		var mut_line: Label
+		if _mutator_bonus_gold > 0:
+			mut_line = GameTheme.make_label(
+				"★ %s bonus: +%d gold" % [_mutator_name, _mutator_bonus_gold],
+				GameTheme.FONT_SUBHEADER, Color(1.0, 0.78, 0.32))
+		else:
+			mut_line = GameTheme.make_label(
+				"★ Survived %s" % _mutator_name,
+				GameTheme.FONT_SUBHEADER, Color(0.55, 1.0, 0.70))
+		mut_line.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		outer.add_child(mut_line)
 
 	# Card choices — real Card2D instances with pick buttons
 	if _card_choices.size() > 0:
@@ -95,8 +157,8 @@ func _build_ui() -> void:
 			card.is_on_battlefield = true
 			slot.add_child(card)
 
-			var pick_btn = GameTheme.make_themed_button("Pick",
-				Color(0.18, 0.30, 0.14), Vector2(120, 36), 15)
+			var pick_btn = GameTheme.make_back_button("PICK", Vector2(120, 36), 16,
+				GameTheme.KEYWORD_GOLD)
 			pick_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 			pick_btn.pressed.connect(_pick_card.bind(id))
 			slot.add_child(pick_btn)
@@ -136,16 +198,15 @@ func _build_ui() -> void:
 		skip_row.add_theme_constant_override("separation", 16)
 		outer.add_child(skip_row)
 		var skip_gold = SKIP_CARD_GOLD
-		var skip_gold_btn = GameTheme.make_themed_button(
-			"Skip card  →  +%d gold" % skip_gold, Color(0.30, 0.25, 0.10),
-			Vector2(220, 36), 15)
+		var skip_gold_btn = GameTheme.make_back_button(
+			"Skip card  →  +%d gold" % skip_gold, Vector2(220, 40), 16)
 		skip_gold_btn.pressed.connect(_skip_for_gold)
 		skip_row.add_child(skip_gold_btn)
-		var skip_btn = GameTheme.make_back_button("SKIP", Vector2(140, 40), 15)
+		var skip_btn = GameTheme.make_back_button("SKIP", Vector2(140, 40))
 		skip_btn.pressed.connect(_skip)
 		skip_row.add_child(skip_btn)
 	else:
-		var skip_btn = GameTheme.make_back_button("CONTINUE", Vector2(160, 42), 15)
+		var skip_btn = GameTheme.make_back_button("CONTINUE", Vector2(160, 42))
 		skip_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		skip_btn.pressed.connect(_skip)
 		outer.add_child(skip_btn)
@@ -170,22 +231,35 @@ func _pick_card(id: String) -> void:
 	RunState.add_card(id)
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play")
+	# Collector's Tome: pick 2 cards instead of 1. Track the pick count via
+	# _collectors_tome_picks; when the player has chosen the second card,
+	# advance normally. Skip the bonus on boss rewards (already chunky).
+	if RunState.has_relic("collectors_tome") and _collectors_tome_picks < 1 \
+			and not (RunState.current_node_type == "boss"):
+		_collectors_tome_picks += 1
+		# Remove the just-picked card from the choices and rebuild so the
+		# player picks their second from the remaining options.
+		_card_choices.erase(id)
+		_build_ui()
+		return
 	if _is_elite_reward and _relic_choices.size() > 0:
 		_card_choices.clear()
 		_build_ui()
 	else:
-		GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
+		_go_to_map()
 
 
 func _pick_relic(id: String) -> void:
 	RunState.add_relic(id)
 	if AudioBank != null:
 		AudioBank.play_sfx("coin")
-	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
+	if id == "bottled_talisman":
+		await GameTheme.bind_bottled_talisman(self)
+	_go_to_map()
 
 
 func _skip() -> void:
-	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
+	_go_to_map()
 
 
 func _skip_for_gold() -> void:
@@ -196,4 +270,15 @@ func _skip_for_gold() -> void:
 		_card_choices.clear()
 		_build_ui()
 	else:
-		GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
+		_go_to_map()
+
+
+func _go_to_map() -> void:
+	# Boss rewards advance the act on their way out. Combat used to do this
+	# before queuing the Reward transition, but that wiped current_node_type
+	# and made Reward render as a normal fight. Holding the advance until
+	# now lets Reward read node_type == "boss" while still putting the player
+	# on the next act's map on exit.
+	if RunState.current_node_type == "boss":
+		RunState.advance_act()
+	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)

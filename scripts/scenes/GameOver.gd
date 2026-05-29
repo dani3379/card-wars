@@ -21,7 +21,7 @@ func _ready() -> void:
 		asc_suffix = "\nAscension %d" % RunState.current_ascension
 	if RunState.hero_hp > 0:
 		$Title.text = "VICTORY"
-		var vcol := Color(0.4, 1.0, 0.5)
+		var vcol := Color(1.0, 0.84, 0.38)
 		$Title.add_theme_color_override("font_color", vcol)
 		$Title.add_theme_color_override("font_outline_color", Color(vcol.r, vcol.g, vcol.b, 0.25))
 		$Title.add_theme_constant_override("outline_size", 8)
@@ -33,8 +33,14 @@ func _ready() -> void:
 		$Title.add_theme_color_override("font_color", dcol)
 		$Title.add_theme_color_override("font_outline_color", Color(dcol.r, dcol.g, dcol.b, 0.25))
 		$Title.add_theme_constant_override("outline_size", 8)
-		$Subtitle.text = "The meadow burned without you.\nFloors reached: %d%s" % [
-			RunState.current_floor, asc_suffix]
+		# "Killed by X" line surfaces the cause-of-death captured by Combat
+		# when the player went to 0 HP. Mid-run quits (no death) leave the
+		# string empty, so we only append it when it's actually meaningful.
+		var death_line: String = ""
+		if RunState.cause_of_death != "":
+			death_line = "\nFelled by %s" % RunState.cause_of_death
+		$Subtitle.text = "The meadow burned without you.\nFloors reached: %d%s%s" % [
+			RunState.current_floor, asc_suffix, death_line]
 
 	$Stats.text = "Total runs %d  •  Victories %d" % [
 		MetaState.total_runs, MetaState.total_victories,
@@ -49,7 +55,7 @@ func _ready() -> void:
 	var old_btn: Node = $BackBtn
 	old_btn.name = "BackBtn_old"
 	old_btn.queue_free()
-	var styled := GameTheme.make_back_button("BACK TO MENU", Vector2(240, 50), 19)
+	var styled := GameTheme.make_back_button("BACK TO MENU", Vector2(240, 50))
 	styled.name = "BackBtn"
 	# Anchor a 240×50 rect to the bottom-center. Manual anchors+offsets avoid
 	# the PRESET_CENTER_BOTTOM+position trap that pushed the control off-screen.
@@ -63,17 +69,33 @@ func _ready() -> void:
 	styled.offset_bottom = -100
 	styled.pressed.connect(_back)
 	add_child(styled)
+	GameTheme.make_settings_gear(self)
 
 	_animate_intro()
 
 
+const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+
+# Thumbnail size for deck cards in the summary. Card2D's intrinsic size is
+# 225×300; we display at scale = THUMB_W / 225 ≈ 0.4 to fit a deck of 15-25
+# cards in 2 rows without colliding with the BackBtn at y≈800. The slot
+# Control claims THUMB_SIZE so HFlowContainer lays them out compactly while
+# the Card2D child shrinks via `scale`.
+const THUMB_W: float = 90.0
+const THUMB_H: float = 120.0
+const THUMB_SIZE := Vector2(THUMB_W, THUMB_H)
+const THUMB_SCALE: float = THUMB_W / 225.0
+
+
 func _build_run_summary() -> void:
-	# Detailed recap of the run that just ended — deck size, gold, relics —
-	# the post-mortem read every roguelike player wants. Built as a panel
-	# beneath the Stats line so it doesn't fight the headline VICTORY/DEFEAT.
+	# Detailed recap of the run that just ended — stats, mutators, relics,
+	# and a thumbnail strip of the final deck. Replaces an earlier text-only
+	# summary so the post-mortem matches the AAA polish of the in-combat HUD:
+	# gilded relic chips instead of a comma list, deduplicated deck thumbnails
+	# (with ×N stack badges) instead of "Deck: 12 cards".
 	var panel := PanelContainer.new()
 	panel.name = "RunSummaryPanel"
-	panel.custom_minimum_size = Vector2(560, 0)
+	panel.custom_minimum_size = Vector2(1280, 0)
 	var s := StyleBoxFlat.new()
 	s.bg_color = Color(0.12, 0.09, 0.07, 0.92)
 	s.border_color = Color(0.83, 0.74, 0.54, 0.85)  # GILT
@@ -85,22 +107,23 @@ func _build_run_summary() -> void:
 	s.corner_radius_top_right = 14
 	s.corner_radius_bottom_left = 14
 	s.corner_radius_bottom_right = 14
-	s.content_margin_left = 22
-	s.content_margin_right = 22
-	s.content_margin_top = 14
-	s.content_margin_bottom = 14
+	s.content_margin_left = 28
+	s.content_margin_right = 28
+	s.content_margin_top = 16
+	s.content_margin_bottom = 18
 	s.shadow_size = 14
 	s.shadow_color = Color(0, 0, 0, 0.5)
 	panel.add_theme_stylebox_override("panel", s)
-	# Center the 560-wide summary panel 100px below screen-center.
+	# Top-anchored at y=315 so it sits under the repositioned Stats label
+	# (y≈275-305) with headroom for the BackBtn at y≈800.
 	panel.anchor_left = 0.5
 	panel.anchor_right = 0.5
-	panel.anchor_top = 0.5
-	panel.anchor_bottom = 0.5
-	panel.offset_left = -280
-	panel.offset_right = 280
-	panel.offset_top = 100
-	panel.offset_bottom = 100  # height auto-expands from content
+	panel.anchor_top = 0.0
+	panel.anchor_bottom = 0.0
+	panel.offset_left = -640
+	panel.offset_right = 640
+	panel.offset_top = 315
+	panel.offset_bottom = 315  # height auto-expands from content
 	add_child(panel)
 
 	var col := VBoxContainer.new()
@@ -111,41 +134,187 @@ func _build_run_summary() -> void:
 	head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(head)
 
-	# Stats row: floor / gold / deck size in a single line of three.
+	# Stats row: floor / fights won / gold. Deck count moved into the deck
+	# strip header below since we now visualize the deck.
 	var stats_row := HBoxContainer.new()
 	stats_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	stats_row.add_theme_constant_override("separation", 28)
 	col.add_child(stats_row)
 	stats_row.add_child(_stat_chip("Floor", str(RunState.current_floor)))
+	stats_row.add_child(_stat_chip("Fights Won", str(RunState.fights_won)))
 	stats_row.add_child(_stat_chip("Gold", str(RunState.gold)))
-	stats_row.add_child(_stat_chip("Deck", "%d cards" % RunState.deck.size()))
 
-	# Relics list — if more than 0, render their names as a centered comma list.
+	# Mutators survived — only show the strip if the player actually braved
+	# any. Still rendered as text since mutators are conceptual debuffs, not
+	# collectible items with art.
+	if RunState.mutators_survived.size() > 0:
+		_add_separator(col)
+		var mhead := _make_summary_label(
+			"MUTATORS SURVIVED  (%d)" % RunState.mutators_survived.size(),
+			14, Color(0.83, 0.74, 0.54, 0.85))
+		mhead.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		col.add_child(mhead)
+
+		var mnames: Array = []
+		for mid in RunState.mutators_survived:
+			var m = MutatorDB.get_mutator(mid)
+			if not m.is_empty():
+				mnames.append(String(m.get("name", mid)))
+			else:
+				mnames.append(mid)
+		var mlist := _make_summary_label(", ".join(mnames), 13,
+			Color(1.0, 0.78, 0.42, 0.92))
+		mlist.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		mlist.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		mlist.custom_minimum_size = Vector2(480, 0)
+		col.add_child(mlist)
+
+	# Relics — gilded chips with hover tooltips (name + desc), matching the
+	# combat HUD strip. make_relic_chip handles tier-glow + icon/letter
+	# fallback for icon-less relics, so this Just Works for every relic.
 	if RunState.relics.size() > 0:
-		var sep := ColorRect.new()
-		sep.custom_minimum_size = Vector2(420, 1.5)
-		sep.color = Color(0.83, 0.74, 0.54, 0.30)
-		sep.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		col.add_child(sep)
-
+		_add_separator(col)
 		var rel_head := _make_summary_label("RELICS  (%d)" % RunState.relics.size(),
 			14, Color(0.83, 0.74, 0.54, 0.85))
 		rel_head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		col.add_child(rel_head)
 
-		var names: Array = []
+		var rel_flow := HFlowContainer.new()
+		rel_flow.alignment = FlowContainer.ALIGNMENT_CENTER
+		rel_flow.add_theme_constant_override("h_separation", 8)
+		rel_flow.add_theme_constant_override("v_separation", 8)
+		rel_flow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		col.add_child(rel_flow)
 		for rid in RunState.relics:
-			var r = RelicDB.get_relic(rid)
-			if r != null and not r.is_empty():
-				names.append(r.get("name", rid))
-			else:
-				names.append(rid)
-		var rel_list := _make_summary_label(", ".join(names), 13,
-			Color(0.96, 0.92, 0.78, 0.92))
-		rel_list.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		rel_list.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		rel_list.custom_minimum_size = Vector2(480, 0)
-		col.add_child(rel_list)
+			rel_flow.add_child(GameTheme.make_relic_chip(rid, 52))
+
+	# Deck — deduplicated Card2D thumbnails with ×N stack badges. Uses
+	# CardTextureCache to cache the heavy v4 layout into a single TextureRect
+	# per card; the panel still shows the live numerals + frame instead of a
+	# count text. Async (await) because each uncached card needs ~2 frames to
+	# bake; cached cards (typical mid-run case) return instantly.
+	if RunState.deck.size() > 0:
+		_add_separator(col)
+		var deck_head := _make_summary_label(
+			"DECK  (%d cards)" % RunState.deck.size(),
+			14, Color(0.83, 0.74, 0.54, 0.85))
+		deck_head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		col.add_child(deck_head)
+
+		var deck_flow := HFlowContainer.new()
+		deck_flow.alignment = FlowContainer.ALIGNMENT_CENTER
+		deck_flow.add_theme_constant_override("h_separation", 10)
+		deck_flow.add_theme_constant_override("v_separation", 12)
+		deck_flow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		col.add_child(deck_flow)
+		# Build deferred so the panel skeleton renders immediately and the
+		# fade-in animation can start while bakes are still in flight.
+		_populate_deck_strip(deck_flow)
+
+
+func _add_separator(col: VBoxContainer) -> void:
+	var sep := ColorRect.new()
+	sep.custom_minimum_size = Vector2(520, 1.5)
+	sep.color = Color(0.83, 0.74, 0.54, 0.30)
+	sep.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	col.add_child(sep)
+
+
+func _populate_deck_strip(parent: HFlowContainer) -> void:
+	# Aggregate deck entries by visual identity (id + cost + atk + hp + sorted
+	# keywords). Two upgraded Goblins stack; an upgraded + un-upgraded Goblin
+	# do not. Order by cost ascending so the strip reads left-to-right cheap
+	# to expensive — matches Collection's section ordering.
+	var groups: Dictionary = {}   # key → {"data": Dictionary, "count": int}
+	var order: Array[String] = []
+	for i in RunState.deck.size():
+		var data: Dictionary = RunState.get_upgraded_card_data(i)
+		if data.is_empty():
+			continue
+		var key: String = CardTextureCache.cache_key(data)
+		if not groups.has(key):
+			groups[key] = {"data": data, "count": 0}
+			order.append(key)
+		groups[key]["count"] += 1
+	order.sort_custom(func(a, b):
+		return int(groups[a]["data"].get("cost", 0)) < int(groups[b]["data"].get("cost", 0)))
+
+	for key in order:
+		var entry: Dictionary = groups[key]
+		var slot := _make_deck_thumb(entry["data"], int(entry["count"]))
+		if not is_inside_tree():
+			return  # scene exited mid-bake
+		parent.add_child(slot)
+		await get_tree().process_frame
+
+
+func _make_deck_thumb(card_data: Dictionary, count: int) -> Control:
+	# Slot Control claims THUMB_SIZE so HFlowContainer reserves the right
+	# footprint; the Card2D child renders at full 225×300 logical size but
+	# `scale = THUMB_SCALE` shrinks it visually to fit. clip_contents = true
+	# prevents the card's drop shadow from bleeding past the slot rect.
+	var slot := Control.new()
+	slot.custom_minimum_size = THUMB_SIZE
+	slot.size = THUMB_SIZE
+	slot.mouse_filter = Control.MOUSE_FILTER_PASS
+	slot.clip_contents = false  # tooltip popup needs to extend past the slot
+
+	var card = CARD_SCENE.instantiate()
+	card.card_data = card_data.duplicate(true)
+	card.card_id = card_data.get("id", "")
+	# is_on_battlefield → no drag system, no hover lift. live_baked_mode →
+	# uses CardTextureCache's baked texture once warm (cheap), falls back to
+	# full layout on cold cache. Pre-baked just below.
+	card.is_on_battlefield = true
+	card.live_baked_mode = true
+	card.scale = Vector2(THUMB_SCALE, THUMB_SCALE)
+	card.position = Vector2.ZERO
+	slot.add_child(card)
+	# Bake in background so the first frame the slot exists, the cache is
+	# already warm and Card2D's _build_layout picks the fast path. No await
+	# here — the live overlay numerals stay correct even on cache miss.
+	CardTextureCache.bake(card_data)
+
+	if count > 1:
+		slot.add_child(_make_count_badge(count))
+	return slot
+
+
+func _make_count_badge(n: int) -> Label:
+	# Gilt-on-dark numeral chip in the bottom-right corner of a deck thumb,
+	# inventory-game style. ×4 sticks ~20px in from the slot edges so the
+	# badge sits on the card's parchment, not its frame.
+	var badge := Label.new()
+	badge.text = "×%d" % n
+	badge.add_theme_font_size_override("font_size", 16)
+	if GameTheme.font_stat:
+		badge.add_theme_font_override("font", GameTheme.font_stat)
+	badge.add_theme_color_override("font_color", GameTheme.GILT_BRIGHT)
+	badge.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	badge.add_theme_constant_override("outline_size", 4)
+	badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	badge.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var bg := StyleBoxFlat.new()
+	bg.bg_color = Color(0.06, 0.05, 0.04, 0.92)
+	bg.border_color = GameTheme.GILT
+	for k in ["border_width_top", "border_width_bottom",
+			"border_width_left", "border_width_right"]:
+		bg.set(k, 1)
+	for k in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		bg.set(k, 4)
+	badge.add_theme_stylebox_override("normal", bg)
+	# Anchor a small chip to the bottom-right of THUMB_SIZE.
+	badge.anchor_left = 1.0
+	badge.anchor_right = 1.0
+	badge.anchor_top = 1.0
+	badge.anchor_bottom = 1.0
+	badge.offset_left = -34
+	badge.offset_right = -4
+	badge.offset_top = -22
+	badge.offset_bottom = -4
+	return badge
 
 
 func _stat_chip(label: String, value: String) -> VBoxContainer:

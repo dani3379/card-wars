@@ -42,6 +42,10 @@ class_name CreatureInstance
 
 # === Per-round flags (cleared by tick_end_of_round) =====================
 var stunned: bool = false             # Spell/floop set; skips combat this round
+var is_frozen: bool = false           # Freeze spell; skips combat this round, cleared after
+
+# === Persistent flags (cleared by reset_temp_state only) ================
+var has_shield: bool = false          # Shield keyword; absorbs first hit then removed
 
 
 # === Combat lifecycle ===================================================
@@ -50,9 +54,11 @@ func tick_end_of_round() -> void:
 	# Reset every per-round flag in one place so we never forget one. As fields
 	# migrate here from set_meta, add their reset to this method.
 	stunned = false
+	is_frozen = false
 
 
 func reset_temp_state() -> void:
 	# Clear ALL temporary effects — used when a creature is copied or transformed
 	# (e.g. become_copy floop). Per-round tick is a subset of this.
+	has_shield = false
 	tick_end_of_round()

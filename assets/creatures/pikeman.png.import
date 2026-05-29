@@ -2,12 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://dauo3rshgouq7"
-valid=false
+uid="uid://diy3ogepx1m0m"
+path="res://.godot/imported/pikeman.png-0212b8d62f104d6ff705ecc7d5a84cec.ctex"
+metadata={
+"vram_texture": false
+}
 
 [deps]
 
 source_file="res://assets/creatures/pikeman.png"
+dest_files=["res://.godot/imported/pikeman.png-0212b8d62f104d6ff705ecc7d5a84cec.ctex"]
 
 [params]
 

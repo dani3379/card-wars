@@ -4,35 +4,48 @@ BURNING MEADOW — Game Design Document (v1.0 Implementation)
 1. OVERVIEW
 -----------
 
-Burning Meadow is a lane-based combat roguelike deckbuilder built in Godot 4.6.
-The player navigates a branching map across 3 acts, fighting premade encounters
-in a 4-lane simultaneous combat system. Inspired by Card Wars (lane combat,
+Burning Meadow is a lane combat roguelike deckbuilder built in Godot 4.6
+(gl_compatibility renderer, 2D). The player navigates a branching map across
+3 acts, fighting premade encounters on a 4x4 board -- 4 lanes wide x 2 rows
+(front/back) per side. Combat is simultaneous with a Swift pre-phase, plus
+floop abilities, sacrifices, and spells. Inspired by Card Wars (lane combat,
 floop abilities) and Slay the Spire (roguelike meta-progression, map structure,
-shop/rest/event nodes).
+shop/rest/event nodes). The back row is play/queue space, not a separate
+combat tier -- front rows attack first and are attacked first.
 
 Core Loop:
-  Main Menu -> Pick Starting Relic -> Map -> Combat/Shop/Rest/Event ->
-  Card Reward -> Map -> ... -> Boss -> Next Act -> ... -> Final Boss (Act 3) ->
-  Victory/Game Over
+  Main Menu -> Starting Relic Pick (programmatic overlay) -> Map ->
+  Combat / Shop / Rest / Event -> Card Reward -> Map -> ... -> Act Boss ->
+  Next Act (fresh map) -> ... -> Act 3 Boss -> Victory / Game Over
+
+Scene transitions use get_tree().change_scene_to_file(). Run state is
+checkpointed to user://run_N.save every time the player commits to a map node,
+so quitting and relaunching resumes at that room. The save is cleared on death
+or final victory.
 
 
 2. PLAYER STATS & CONSTANTS
 ----------------------------
 
-  Starting HP ........... 25
-  Max HP ................ 25
-  Base mana per turn .... 3 (increases via boss relics)
-  Cards drawn per turn .. 4
-  Max hand size ......... 10
-  Mana banking .......... Up to 1 unspent mana carries to next turn
-  Starting gold ......... 0
-  Starting deck ......... 10 cards (4 unique)
-  Starting potions ...... 0
-  Potion heal ........... 8 HP
-  Max potions ........... 3
-  Lanes ................. 4
-  Acts .................. 3
-  Rows per act .......... 8
+  Starting HP ............ 25
+  Max HP ................. 25 (mutable via events / relics)
+  Base mana per turn ..... 3 (grows via boss relics)
+  Cards drawn per turn ... 4 (HAND_DRAW_PER_TURN)
+  Max hand size .......... 10
+  Mana banking ........... Up to 1 unspent mana carries to next turn
+                            (Ice Cream relic uncaps the bank)
+  Starting gold .......... 0
+  Starting deck .......... 10 cards (4 unique starters)
+  Starting potions ....... 0
+  Potion heal ............ 8 HP
+  Max potions ............ 3
+  Board .................. 4 lanes x 2 rows per side (front/back) = 8 slots/side
+  Acts ................... 3
+  Map size ............... 15 rows x up to 7 columns per act
+                            (BOSS_ROW = 14, REST_ROW = 13, MIN_ELITE_ROW = 5)
+  Paths per act .......... 4 (NUM_PATHS -- fewer than StS's 6)
+  Ascension tiers ........ 0..5; HP multiplier 1.0 / 1.20 / 1.40 / 1.60 /
+                            1.80 / 2.0 applied to encounter face HP
 
 
 3. COMBAT SYSTEM
@@ -40,23 +53,40 @@ Core Loop:
 
 3.1 Board Layout
 
-  4 lanes, each with a player slot (bottom) and enemy slot (top). Creatures are
-  placed in specific lanes and fight the creature directly opposing them. Empty
-  lanes allow face damage.
+  4 lanes x 2 rows per side: each side has a FRONT row and a BACK row, mirrored
+  across the centre line. 8 player slots (front 0..3 / back 0..3) face 8 enemy
+  slots in the same layout. Front and back are mechanically identical -- both
+  rows attack each turn -- but the front row resolves first and is also hit
+  first. The back row is effectively queue space (room to maneuver), not a
+  separate combat tier. A column is "empty" for face-damage purposes only when
+  BOTH the opposing front and opposing back lanes were empty at start of
+  combat. Canonical accessors in Combat.gd are `_player_field` / `_enemy_field`
+  (front) and `_player_back` / `_enemy_back`, surfaced via `_row_array(is_enemy,
+  row)` with ROW_FRONT = 0 and ROW_BACK = 1.
 
 3.2 Round Flow (Current Implementation)
 
+  FIGHT START (once, before round 1)
+    |-- _place_starting_board() seats the encounter's opening creatures on the
+    |     enemy front row (back row only used as overflow). Act / encounter
+    |     type sets the starting count.
+    +-- _start_round() runs for the first time -> round_number becomes 1.
+
   ROUND START
+    |-- Tick down persistent ATK buffs (Butcher's Cleaver etc.)
     |-- Keyword effects: Regenerate heals 1, Wither reduces ATK
     |-- Encounter passive start-of-round triggers
-    |-- Enemy places 1-2 creatures (before player acts)
-    |-- Mana refills to base + boss relic bonuses (+ up to 1 banked)
-    |-- Player draws 4 cards (hand sorted by cost)
+    |-- Mana refills to base + relic bonuses + up to 1 banked (Ice Cream
+    |     uncaps banking)
+    |-- Enemy intents assigned and displayed
+    |-- Escalation check (round >= ESCALATION_REINFORCE_ROUND etc.)
+    |-- Player draws 4 cards (Courier's Bag: +1 on turn 1)
     +-- PLAYER TURN begins
 
   PLAYER TURN (free actions in any order)
     |-- Play creatures from hand (drag above play line)
-    |     +-- Lane selected by mouse position, rejects occupied lanes
+    |     +-- Lane selected by mouse position, rejects occupied slots in both
+    |         rows of the chosen column
     |-- Play spells (drag above play line, then click target)
     |-- Toggle Floop on battlefield creatures (click)
     |     +-- Flooping PREVENTS the creature from attacking this turn
@@ -64,18 +94,27 @@ Core Loop:
     +-- End Turn (E key or button)
 
   END TURN
-    |-- Resolve Floop abilities (flooped creatures skip combat)
-    |-- SWIFT PHASE: All Swift creatures attack first
-    |-- SEQUENTIAL PHASE: Player creatures attack (lanes 0->3), then enemy
-    |     creatures attack (lanes 0->3). If player kills enemy, it doesn't
-    |     retaliate. Dead creatures are removed from the fight entirely.
-    |-- Ranged creatures attack random targets
-    |-- Piercing excess -> face damage
-    |-- Thorns reflect damage
-    |-- Deaths processed, on-death effects trigger
+    |-- Resolve Floop abilities (flooped creatures skip combat; player floops
+    |     fire ON_PLAYER_FLOOP reactives)
+    |-- Resolve enemy non-attack intents
+    |-- SWIFT PHASE: Swift creatures strike first, front row then back row,
+    |     each side alternating lane-by-lane
+    |-- PLAYER ATTACK PHASE: player front row attacks (lanes 0->3), then
+    |     player back row attacks (lanes 0->3). Each column's front opposing
+    |     creature is hit first; if it is dead or never existed, the back-row
+    |     creature is exposed; if both opposing slots in the column were empty
+    |     at start of combat, the attack lands as face damage.
+    |-- ENEMY ATTACK PHASE: mirror order -- enemy front, then enemy back.
+    |-- Ranged creatures attack random targets (back row preferred, then front)
+    |-- Piercing excess -> opposing back row first, then face
+    |-- Thorns reflect 1 damage back (bypasses Armored)
+    |-- Deaths processed, on-death effects trigger (ON_CREATURE_DEATH
+    |     reactives fire here)
     |-- Berserker growth (+1 ATK if attacked)
     |-- Cleanup dead creatures (REMOVED from fight, not recycled)
     |-- Discard hand (Retain cards kept)
+    |-- Enemy places 1-2 creatures from its ordered deck onto the enemy front
+    |     row (back row as overflow). Escalation may double-place.
     |-- Assassin self-destruct check
     |-- Encounter end-of-round passives
     |-- Check win/loss
@@ -83,19 +122,24 @@ Core Loop:
 
 3.3 Combat Phases Detail
 
-  SWIFT PHASE: Creatures with Swift keyword attack before sequential combat.
-  Both player and enemy Swift creatures resolve in lane order (0->3).
+  SWIFT PHASE: Creatures with Swift attack before sequential combat. Resolves
+  front-row first then back-row, alternating sides lane-by-lane (player lane 0,
+  enemy lane 0, player lane 1, enemy lane 1, ...).
 
-  SEQUENTIAL PHASE: Player creatures attack first (lanes 0->3), then enemy
-  creatures attack (lanes 0->3). If a player creature kills its opposing enemy,
-  that enemy does NOT retaliate. If a lane has only one creature and the opposing
-  lane was empty at combat start, that creature deals face damage.
+  SEQUENTIAL PHASE: Player attacks first -- front row lanes 0->3, then back row
+  lanes 0->3. Then the enemy mirrors -- enemy front 0->3, then enemy back 0->3.
+  Each attacker targets the opposing creature in the same column: front first;
+  if the front is dead/empty the back-row creature is hit; if BOTH opposing
+  slots in the column were empty at combat start, the attacker deals face
+  damage. If an attacker kills its target, the target does NOT retaliate.
 
-  RANGED: Ranged creatures skip normal lane combat. Instead they attack a random
-  enemy creature. Their lane counts as empty for face damage purposes.
+  RANGED: Ranged creatures skip normal column combat. They attack a random
+  enemy creature, preferring back-row targets (then front, then face if none
+  remain). Their column still counts toward face-damage rules.
 
   PIERCING: When a creature with Piercing kills its opponent, excess damage
-  carries through to the enemy hero's HP.
+  carries through to the opposing back-row creature in the same column if one
+  exists; otherwise it hits the enemy hero's HP.
 
   THORNS: When a creature with Thorns is attacked, it deals 1 damage back to
   the attacker (bypasses Armored).
@@ -103,29 +147,50 @@ Core Loop:
 3.4 Sacrifice System
 
   Once per turn, the player can sacrifice a friendly creature on the
-  battlefield. This triggers the creature's on-death effect. Activated via S key
-  or HUD button. Visual: valid sacrifice targets get red border highlight during
-  sacrifice mode.
+  battlefield as a free action. This triggers the creature's on-death effect.
+  Activated via S key or HUD button. Visual: valid sacrifice targets get red
+  border highlight during sacrifice mode.
+
+  Sacrifice is NOT a widespread keyword/cost system -- it's primarily the free
+  once-per-turn action above. A handful of individual cards opt into sacrifice
+  as part of their own effect (Bloodsworn is the only creature that REQUIRES a
+  sacrifice to play; Offering, Fuel the Pyre, Blood Pyre's floop, Mass Grave,
+  and Apocalypse fold sacrifice into their resolution). The vast majority of
+  cards never touch the sacrifice mechanic at all.
 
 3.5 Floop System
 
   Creatures with a Floop ability can be toggled on the battlefield by clicking
   them. A flooping creature CANNOT ATTACK that turn — it activates its special
   ability instead. This makes every floop a real decision: use the ability or
-  deal combat damage. Visual: blue "FLOOP" indicator and blue border.
+  deal combat damage. Visual: blue "FLOOP" indicator and blue border. Player
+  floops fire the ON_PLAYER_FLOOP reactive passive hook. Echo Staff relic
+  triggers each floop twice. "Adjacent" for floops means same-row lane neighbours
+  on the flooping creature's row; buff_adjacent_atk also reaches the column-mate
+  in the other row.
 
-  Floop Types:
-    damage_any ............. Deal X damage to a random enemy creature
-    damage_opposing ........ Deal X damage to opposing creature
-    summon_random .......... Summon X/Y token in a random empty lane
-    kill_adjacent_summon ... Kill adjacent friendly, summon X/Y in its place
-    steal_atk .............. Steal 1 ATK from opposing creature
-    heal_all_friendly ...... Heal all friendly creatures by X
-    heal_self .............. Heal self by X
-    summon_token ........... Summon X/Y token in a random empty lane
-    buff_adjacent_atk ...... Adjacent friendly creatures +X ATK this turn
-    gain_mana .............. Gain X mana this turn
-    grow_atk ............... +X ATK permanently
+  Floop Types (dispatched in Combat._resolve_floop_ability):
+
+    DAMAGE: damage_any, damage_opposing, damage_opposing_splash,
+      damage_opposing_heal, damage_all_enemies, damage_all, damage_face,
+      damage_self_opposing, drain, execute, slay_draw, unleash_atk,
+      graveyard_damage, discard_top_damage
+
+    BUFF / HEAL: heal_self, heal_adjacent, heal_all_friendly, grow_atk,
+      grow_per_enemies, buff_all_atk_permanent, buff_target_hp,
+      buff_tokens_atk, buff_adjacent_atk
+
+    DEFENSE: temp_armored, grant_armored_all, shield_adjacent, buff_thorns,
+      grant_thorns_adjacent, redirect_adjacent, stun_opposing
+
+    CARD / ECONOMY: draw, scry, reorder_deck, filter_draw, raise_dead,
+      gain_gold, gain_mana, discount_next, spawn_token_hand
+
+    MOVEMENT: relocate, challenge
+
+    SUMMON / TRANSFORM: summon_random, summon_token, kill_adjacent_summon,
+      steal_atk, devour_adjacent, copy_opposing_floop, swap_atk, become_copy,
+      blood_sacrifice
 
 3.6 Spell System
 
@@ -156,7 +221,8 @@ Core Loop:
   second_wind, reposition, lightning, offering, grave_pact, fuel_the_pyre,
   pillage, echo_spell, kings_command, unholy_bargain, mass_grave, dark_pact,
   war_chant, grave_robbery, cataclysm, soul_swap, apocalypse, adrenaline,
-  bloodletting, turbo, concentrate, recycle
+  bloodletting, turbo, concentrate, recycle, inferno, overwhelming_force,
+  lay_on_hands, mending_light, banish, time_snare, holy_smite
 
 3.7 Deck System
 
@@ -191,52 +257,70 @@ Core Loop:
 3.9 Enemy AI
 
   Enemies place 1-2 creatures per round from a premade ordered deck (from
-  EncounterDB). Placement prefers empty lanes, targeting: opposing occupied
-  lanes first, then random empty lanes. When the deck runs out, a reinforcement
-  creature is used infinitely.
+  EncounterDB) during _post_combat_sequence (i.e. at the end of the round,
+  ready for the player's next turn). The first 2 rounds always place 1; elites
+  and bosses always place 2; normal fights place 2 on a 1-in-3 roll.
+
+  Placement priority is always front-row first, back-row only as overflow:
+    Elite ..... targets the player's strongest column first, then other
+                player-occupied front lanes.
+    Boss ...... shuffled across empty front lanes.
+    Regular ... blocks player-occupied front columns first, then any empty
+                front lane.
+  Any unfilled remainder is then filled into back-row slots (lanes 0..3,
+  shuffled). When the deck runs out the encounter's reinforcement creature is
+  appended infinitely. Past ESCALATION_REINFORCE_ROUND (round 8) regular fights
+  double-place each round, and past round 12 the reinforcement gains +1/+1 per
+  round.
 
 
 4. CARD DATABASE
 -----------------
 
-4.1 Starter Deck (10 cards, 4 unique)
+4.1 Starter Deck (10 cards, 4 unique in deck; 6 unique starter-rarity total)
 
-  Peasant x4 ........ Creature  1 mana  1/1  --  No abilities. Cheap filler body
-  Soldier x4 ........ Creature  2 mana  2/2  --  No abilities. Vanilla beater
-  Squire x1 ......... Creature  1 mana  1/2  --  Floop: adjacent creatures +1 ATK
-  Footman x1 ........ Creature  2 mana  2/3  --  Floop: heal self 2
+  Goblin x4 ......... Creature  1 mana  1/1  --  No abilities. Cheap filler body
+  Brute x4 .......... Creature  2 mana  2/2  --  No abilities. Vanilla beater
+  Sprite x1 ......... Creature  1 mana  1/2  --  Floop: adj creatures +1 ATK this turn
+  Troll x1 .......... Creature  2 mana  2/3  --  Floop: heal self 2
 
-4.2 Common Creatures (17)
+  Also in starter pool (not in default deck):
+  Naga .............. Creature  3 mana  3/4  --  Floop: deal 2 to opposing creature
+  Ratling ........... Creature  1 mana  2/2  Wither 1  On-Death: 2 to opposing lane.
+                      Floop: 1 to opposing, +1 ATK perm
 
-  Ranger ............ 2 mana  2/4  [Order]  Vanilla
-  Hound ............. 1 mana  3/2  [Wild]  Dies if it doesn't kill opponent
-  Shieldbearer ...... 2 mana  1/5  [Order]  Armored
-  Pikeman ........... 2 mana  2/3  [Order]  On-Enter: 1 dmg to opposing creature
-  Lookout ........... 1 mana  1/2  [Arcane]  On-Enter: draw 1. Can't block
-                      (lane counts as empty for face damage)
-  Militia ........... 1 mana  1/3  [Order]  Retain  While in hand, draw 1 fewer
-  Wolf .............. 2 mana  3/3  [Wild]  On-Death: 2 dmg to opposing lane
-  Harpy ............. 2 mana  2/3  [Wild]  Swift  Must play in leftmost empty lane
-  Thornguard ........ 2 mana  1/4  [Undead]  Thorns  On-Death: 1 to ALL enemies
-  Raven ............. 1 mana  2/2  [Wild]  Ranged  Attacks random enemy
-  Squire Captain .... 2 mana  2/3  [Order]  Summon 1/1 adjacent. If adjacent to
-                      another Order creature, token has +1/+1 instead
-  Sellsword ......... 2 mana  3/3  [Wild]  Wither 1
-  Torchbearer ....... 1 mana  1/2  [Arcane]  Adj Arcane creatures +1 ATK.
-                      Wither 1
-  Gravedigger ....... 1 mana  1/3  [Undead]  Draw 1 on first Undead death per
-                      round. Non-Undead death: gain 1 gold instead
-  Bloodhound ........ 1 mana  2/2  [Wild]  On-Enter: 1 to opposing. Draw 1 per
-                      Wild creature on your field
-  Scavenger ......... 1 mana  1/2  [Arcane]  On-Enter: gain 5 gold. Next card
-                      reward offers 1 fewer choice
-  Stone Wall ........ 2 mana  0/6  [Order]  Cannot attack. Cannot be sacrificed.
-                      Immune to friendly spells. Adj empty lanes -1 face dmg
-  Mana Sprite ....... 1 mana  0/2           Floop: gain 1 mana this turn
+4.2 Common Creatures (18) -- all have Floop
+
+  Ranger ............ 2 mana  2/4  Floop: 1 to opposing, heal self 1
+  Hound ............. 1 mana  2/2  Floop: 2 to random enemy creature
+  Shieldbearer ...... 2 mana  1/5  Armored. Floop: adj friendlies -1 dmg this round
+  Pikeman ........... 2 mana  2/3  On-Enter: 1 to opposing. Floop: 1 to opposing +
+                      adj enemy lanes
+  Lookout ........... 1 mana  1/2  On-Enter: draw 1. Floop: scry (top card, keep or
+                      bottom)
+  Militia ........... 1 mana  1/3  Retain. Floop: gain Armored until next round
+  Wolf .............. 2 mana  3/3  On-Death: 2 to opposing lane. Floop: 1 to ALL
+                      enemy creatures
+  Harpy ............. 2 mana  2/3  Swift. Floop: move to any empty friendly lane
+  Thornguard ........ 2 mana  1/4  Thorns. On-Death: 1 to ALL enemies. Floop:
+                      +2 Thorns this round
+  Raven ............. 1 mana  2/2  Ranged. Floop: look at top 3, reorder
+  Squire Captain .... 2 mana  2/3  Summon. Floop: all tokens +1 ATK this turn
+  Sellsword ......... 2 mana  3/3  Wither 1. Floop: gain 3 gold
+  Torchbearer ....... 1 mana  1/2  Adj +1 ATK. Wither 1. Floop: adj friendlies gain
+                      Thorns 1 this round
+  Gravedigger ....... 1 mana  1/3  Passive: draw on ally death. Floop: return random
+                      creature from discard to hand
+  Bloodhound ........ 1 mana  2/2  On-Enter: 1 to opposing + draw 1. Floop: 1 to
+                      opposing, draw 1 if kill
+  Scavenger ......... 1 mana  1/2  On-Enter: gain 5 gold. Floop: gain 2 gold
+  Stone Wall ........ 2 mana  0/7  Thorns. Cannot attack. Adj empty -1 face dmg.
+                      Floop: adj friendlies gain Armored this round
+  Mana Sprite ....... 1 mana  1/2  Floop: gain 1 mana this turn
 
 4.3 Common Spells (15)
 
-  Slash ............. 1 mana  Deal 4 to target creature
+  Slash ............. 1 mana  Deal 3 to target creature
   Shield Wall ....... 1 mana  Target creature +0/+3
   War Cry ........... 1 mana  All your creatures +1 ATK this turn
   Provision ......... 1 mana  Draw 2 cards
@@ -249,90 +333,111 @@ Core Loop:
   Quick Shot ........ 0 mana  Deal 1 to any target
   Scrap ............. 0 mana  Discard 1 card. Gain 1 mana this turn
   Barricade ......... 1 mana  Creature +0/+3, can't attack. Absorbs face dmg
-  Adrenaline ........ 0 mana  Exhaust  Gain 1 mana. Draw 2 cards
+  Adrenaline ........ 0 mana  Exhaust  Gain 1 mana. Draw 1 card
   Concentrate ....... 0 mana  Discard 2 cards. Gain 2 mana
 
-4.4 Uncommon Creatures (20)
+4.4 Uncommon Creatures (18) -- all have Floop
 
-  Battle Drummer .... 2 mana  1/4  [Order]  Adj +2 ATK
-  Witch ............. 2 mana  2/3  [Arcane]  Floop: deal 3 to any creature
-  Duelist ........... 2 mana  3/4  [Wild]  On-Enter: 2 to opposing. Takes +1 dmg
-  Griffin ........... 2 mana  3/3  [Wild]  Swift  On-Death: return to hand (once)
-  Bannerman ......... 2 mana  2/4  [Order]  Passive: all Order creatures +1 ATK.
-                      Lost on death
-  Berserker ......... 2 mana  3/3  [Wild]  +1 ATK each round it attacks. +1 dmg
-  Mule .............. 1 mana  0/3  [Arcane]  On-Enter: draw 2
-  Sentinel .......... 3 mana  2/5  [Order]  Armored  Thorns
-  War Hound ......... 2 mana  3/3  [Wild]  Piercing
-  Necromancer ....... 2 mana  1/3  [Undead]  On-Death: summon 2/2. Floop: kill
-                      adj, summon 2/2
-  Bloodsworn ........ 2 mana  4/4  [Undead]  Sacrifice: kill a friendly to play
-  Blood Pyre ........ 1 mana  1/3  [Undead]  On-Death: +1 mana next turn
-  Copycat ........... 2 mana  0/1  [Arcane]  On-Enter: copy any friendly creature
-  Stray Cat ......... 0 mana  1/1  [Arcane]  On-Enter: look at top 3, pick 1
-  Mirror Knight ..... 2 mana  2/3  [Order]  On-Enter: copy opposing keywords
-  Vengeful Spirit ... 1 mana  0/1  [Undead]  +1 ATK per face damage taken
-  Iron Bastion ...... 3 mana  1/7  [Order]  Armored. All face damage to player -1
-  Leyline Conduit ... 2 mana  0/3           Passive: +1 mana/turn while alive.
-                      Floop: gain 2 mana this turn
-  Fanatic ........... 2 mana  ?/3  [Arcane]  ATK = number of Arcane creatures in
-                      your deck
-  Pack Hunter ....... 1 mana  1/1  [Wild]  +1/+1 for each other Wild creature in
-                      your deck
+  Battle Drummer .... 2 mana  1/4  Adj +2 ATK. Floop: all friendlies +1 ATK perm
+  Witch ............. 2 mana  2/3  Floop: deal 3 to any creature
+  Duelist ........... 2 mana  3/3  On-Enter: 2 to opposing. Floop: 2 to opposing,
+                      heal 2 if kill
+  Griffin ........... 2 mana  3/3  Swift. On-Death: return to hand (once). Floop:
+                      attack any lane this round
+  Bannerman ......... 2 mana  2/4  Passive: all friendlies +1 ATK (lost on death).
+                      Floop: target friendly +2 HP perm
+  Berserker ......... 2 mana  3/3  +1 ATK each round it attacks. +1 dmg taken.
+                      Floop: 2 to opposing, take 1 self-dmg
+  Mule .............. 1 mana  0/3  On-Enter: draw 2. Floop: discard 1, draw 1
+  Sentinel .......... 3 mana  3/5  Armored. Thorns. Floop: opposing creature can't
+                      attack this round
+  War Hound ......... 2 mana  3/3  Piercing. Floop: 1 to enemy face
+  Necromancer ....... 2 mana  1/3  On-Death: summon 2/2. Floop: kill adj, summon 2/2
+  Bloodsworn ........ 2 mana  3/3  Sacrifice to play. Floop: 2 to opposing, lose 1 HP
+  Blood Pyre ........ 1 mana  1/3  On-Death: +1 mana next turn. Floop: sacrifice
+                      self, adj +2 ATK perm
+  Copycat ........... 2 mana  0/1  On-Enter: copy friendly. Floop: use opposing's
+                      floop instead
+  Stray Cat ......... 0 mana  1/1  On-Enter: look at top 3, pick 1. Floop: add 1/1
+                      token to hand
+  Mirror Knight ..... 2 mana  2/3  On-Enter: copy opposing keywords. Floop: swap
+                      ATK with opposing until end of round
+  Vengeful Spirit ... 1 mana  0/2  Last Stand. +1 ATK per face dmg taken. Floop:
+                      deal this creature's ATK to opposing
+  Iron Bastion ...... 3 mana  1/7  Armored. Face dmg -1. Floop: all friendlies gain
+                      Armored this round
+  Leyline Conduit ... 2 mana  0/3  Passive: +1 mana/turn while alive. Floop: gain 2
+                      mana this turn
 
-4.5 Uncommon Spells (12)
+4.5 Uncommon Spells (15)
 
   Smite ............. 2 mana  Exhaust  Deal 6 to target creature
   Inspire ........... 2 mana  Exhaust  All creatures +2 ATK this turn
-  Ambush ............ 1 mana  Deal 2 to all enemy creatures
-  Second Wind ....... 1 mana  Full heal creature + permanent +1 ATK
-  Reposition ........ 1 mana  Swap two creature lanes, both +1 ATK this turn
-  Lightning ......... 1 mana  Deal 2 to creature and 2 face
+  Ambush ............ 1 mana  Deal 1 to all enemy creatures
+  Second Wind ....... 1 mana  Remove all damage from creature. +1 ATK permanent
+  Reposition ........ 1 mana  Swap two creatures' lanes. Both +1 ATK this turn
+  Lightning ......... 1 mana  Deal 2 to creature and 1 face
   Offering .......... 0 mana  Exhaust  Sacrifice creature, gain 2 mana
   Grave Pact ........ 1 mana  Retain  Next friendly death returns to hand
   Fuel the Pyre ..... 1 mana  Sacrifice creature, deal its ATK to any target
-  Battle Hymn ....... 1 mana  All creatures +1 ATK permanently
-  Pillage ........... 1 mana  Deal 3 to creature; if dies, gain 10 gold
+  Battle Hymn ....... 1 mana  All friendly creatures +1 ATK this turn
+  Pillage ........... 1 mana  Deal 3 to creature. If it dies, gain 10 gold
   Echo .............. 2 mana  Exhaust  Copy last spell played this turn
   Bloodletting ...... 0 mana  Lose 2 HP. Gain 2 mana
   Turbo ............. 0 mana  Gain 2 mana. Add a Curse to your discard pile
-  Recycle ........... 1 mana  Exhaust highest-cost card from hand. Gain its cost
-                      as mana
+  Recycle ........... 1 mana  Exhaust a card from hand. Gain mana equal to its cost
 
-4.6 Rare Creatures (15)
+4.6 Rare Creatures (17) -- all have Floop
 
-  Dragon Hatchling .. 3 mana  4/5  [Wild]  On-Enter: 2 to ALL enemies. Wither 1
-  Royal Guard ....... 3 mana  2/6  [Order]  Adj creatures -1 dmg. +1 ATK when hit
-  Assassin .......... 2 mana  5/1  [Wild]  Swift  Piercing  Dies at end of turn
-  Hydra ............. 3 mana  2/5  [Wild]  Attacks ALL enemy lanes. Takes 1 each
-  Summoner .......... 2 mana  1/3  [Arcane]  Summon  Floop: summon 1/1 random lane
-  Paladin ........... 3 mana  3/5  [Order]  Last Stand  Adj +1 ATK
-  Corpse Eater ...... 2 mana  2/4  [Undead]  +1 ATK whenever a friendly creature
-                      dies. +1 extra if it was Undead
-  Ironclad Veteran .. 3 mana  3/5  [Order]  On-Enter: +1 ATK per card played
-  Kindling .......... 0 mana  0/1  [Undead]  No abilities. Sacrifice fodder
-  Doppelganger ...... 3 mana  1/1  [Undead]  On-Enter: copy last creature that died
-  Vampire Lord ...... 3 mana  3/5  [Undead]  Regenerate. On kill: heal 2 HP, +1 ATK
-  Chaos Imp ......... 1 mana  2/2  [Arcane]  On-Enter: cast random spell from deck
-  Warden of Graves .. 2 mana  2/4  [Undead]  All on-death effects trigger twice
-  Siege Golem ....... 3 mana  5/6  [Order]  Only empty opposing lane. Face dmg only
-  Pyre Keeper ....... 2 mana  2/4  [Undead]  +2 ATK whenever an Undead creature
-                      dies
+  Dragon Hatchling .. 3 mana  4/5  On-Enter: 2 to ALL enemies. Wither 1. Floop: 1 to
+                      ALL creatures (both sides)
+  Royal Guard ....... 3 mana  2/6  Adj -1 dmg. +1 ATK when hit. Floop: redirect adj
+                      attacks to this creature
+  Assassin .......... 2 mana  5/1  Swift. Piercing. Dies end of turn. Floop: destroy
+                      opposing with HP <= 2
+  Hydra ............. 3 mana  2/5  Attacks ALL lanes. Floop: +1 ATK per enemy
+                      creature on board
+  Summoner .......... 2 mana  1/3  Summon. Floop: summon 1/1 random lane
+  Paladin ........... 3 mana  3/5  Last Stand. Adj +1 ATK. Floop: heal all
+                      friendlies 2
+  Corpse Eater ...... 2 mana  2/4  +1 ATK on ally death. Floop: destroy adj
+                      friendly, gain its ATK and HP
+  Ironclad Veteran .. 3 mana  3/5  On-Enter: +1 ATK per card played. Floop: next
+                      card this turn costs 1 less
+  Kindling .......... 0 mana  0/1  Sacrifice fodder. Floop: deal 1 to opposing
+  Doppelganger ...... 3 mana  2/3  On-Enter: copy last dead. Floop: become copy of
+                      opposing until end of round
+  Vampire Lord ...... 3 mana  3/5  Regenerate. On kill: heal 2 + ATK. Floop: drain 2
+                      (deal 2, heal self 2)
+  Chaos Imp ......... 1 mana  2/2  On-Enter: random spell free. Floop: mill top card,
+                      deal its cost to random enemy
+  Warden of Graves .. 2 mana  2/4  Double on-death. Floop: 1 dmg per creature in
+                      discard pile to opposing
+  Siege Golem ....... 3 mana  5/6  Empty opposing only. Face dmg only. Floop: 3 to
+                      opposing creature
+  War Titan ......... 4 mana  6/8  Armored. Floop: 2 to ALL enemy creatures
+  Archmage .......... 4 mana  3/5  On-Enter: draw 2. Floop: 3 to any enemy creature
+  Doom Knight ....... 4 mana  5/6  Swift. Piercing. Floop: +2 ATK this turn
 
-4.7 Rare Spells (11)
+4.7 Rare Spells (17)
 
   Earthquake ........ 2 mana  Exhaust  Deal 3 to ALL creatures
   King's Command .... 2 mana  Exhaust  All +3 ATK this turn, +0/+1 permanent
   Unholy Bargain .... 0 mana  Exhaust  Draw 3. Take 3 face damage
   Mass Grave ........ 1 mana  Exhaust  Kill ALL friendly. 3 face dmg each
   Dark Pact ......... 1 mana  All creatures +1 ATK permanent. Take 2 face dmg
-  War Chant ......... 0 mana  Discard 2. Gain 1 mana this turn
+  War Chant ......... 0 mana  Discard 2 cards. Draw 2 cards
   Grave Robbery ..... 1 mana  Exhaust  Return last dead creature to hand
   Cataclysm ......... 3 mana  Exhaust  Highest-ATK creature's ATK to ALL enemies
   Soul Swap ......... 1 mana  Swap target creature's ATK and HP
   Apocalypse ........ 3 mana  Exhaust  Kill ALL creatures. 1 face dmg each
-  Battle Sage ....... 1 mana  Exhaust  Target creature +1 ATK per spell cast
-                      this fight (counts spells played before this one)
+  Lay on Hands ...... 1 mana  Heal friendly to full HP and give +0/+2 permanent
+  Mending Light ..... 2 mana  Exhaust  Heal 5 HP. All friendly creatures heal 2
+  Banish ............ 2 mana  Exhaust  Exhaust target enemy. No On-Death triggers
+  Time Snare ........ 2 mana  Exhaust  All enemy creatures cannot attack this turn
+  Holy Smite ........ 1 mana  Deal damage equal to target enemy's missing HP
+  Inferno ........... 4 mana  Exhaust  Deal 4 to ALL enemy creatures and 4 to face
+  Overwhelming Force  4 mana  Exhaust  All friendly creatures +3 ATK permanently
 
 4.8 Special Cards
 
@@ -344,13 +449,19 @@ Core Loop:
 
   Armored ........... Takes 1 less damage from creature attacks (min 1)
   Swift ............. Attacks before simultaneous combat phase
-  Ranged ............ Attacks random enemy creature. Lane counts as empty
-  Thorns ............ Deals 1 back to anything that attacks it
+  Ranged ............ Attacks back-row enemies first, then front. Blocked
+                      column is fine. Lane still counts toward face-damage rules
+  Thorns ............ Deals 1 back to anything that attacks it (bypasses Armored)
   Regenerate ........ Heals 1 HP at start of each round
   Summon ............ Summons 1/1 token in adjacent empty lane on play
   Last Stand ........ First lethal hit leaves it at 1 HP instead
-  Piercing .......... Excess kill damage hits enemy face
-  Sacrifice ......... Must kill a friendly creature to play this card
+  Piercing .......... Excess kill damage hits the opposing back row, then face
+  Sacrifice ......... Must kill a friendly creature to play this card.
+                      Listed for completeness, but only ONE creature in the
+                      whole card pool (Bloodsworn) actually carries this as a
+                      play-cost keyword. A few spells/floops fold sacrifice
+                      into their resolution (see 3.4) -- they don't tag the
+                      keyword. Not a tribal-style mechanic; not a build-around.
   Exhaust ........... Removed from fight after use (not recycled)
   Retain ............ Kept in hand instead of discarding at end of turn
   Wither ............ Loses ATK at start of each round (min 0)
@@ -359,55 +470,32 @@ Core Loop:
   Floop ............. Skip attack to use special ability (toggle)
   Adj. Buff ......... Neighboring creatures get stat bonus
 
-  On-Enter Types: damage_opposing, damage_opposing_draw, damage_random_player,
-    damage_all_enemies, draw, gain_gold, atk_per_cards_played, damage_face,
-    debuff_opposing_atk, discard_random, copy_friendly, look_top,
-    copy_opposing_keywords, copy_last_dead, cast_random_spell
+  On-Enter Types (KeywordEffects._run_on_enter): damage_opposing,
+    damage_opposing_draw, damage_random_player, damage_all_enemies, draw,
+    gain_gold, atk_per_cards_played, damage_face, debuff_opposing_atk,
+    discard_random, copy_friendly, copy_opposing_keywords, copy_last_dead,
+    look_top, cast_random_spell
 
-  On-Death Types: damage_opposing_lane, damage_opposing, damage_all_enemies,
-    summon, bonus_mana, return_to_hand_once, damage_face,
-    debuff_all_player_atk, damage_adjacent
-
-
-5.1 TRIBE SYSTEM (4 Tribes)
-
-  Every drafted creature belongs to one of four tribes: Wild, Undead, Order, or
-  Arcane. Starter deck creatures (Footman, Squire, Knight, Conscript) are
-  untagged. Tribes have no automatic bonuses -- they are identity tags that
-  specific cards reference in their own effects.
-
-  Wild ............... Aggressive, fast, animalistic. High ATK, low HP.
-                      Favors face damage and fast kills.
-  Undead ............. Death-focused, sacrifice-synergy. On-death effects,
-                      summoning from death, snowball scaling.
-  Order .............. Defensive, structured, military. High HP, adjacency
-                      buffs, damage reduction, board durability.
-  Arcane ............. Spell-synergy, abilities, utility. Floop, draw, spell
-                      cost reduction, ability scaling.
-
-  Tribal synergy comes from individual cards whose effects reference their
-  tribe (e.g. Bannerman: "all Order creatures +1 ATK", Corpse Eater: "+1
-  extra ATK if the dead creature was Undead"). No tribe grants passive bonuses
-  just for existing in the deck. The player must find tribal payoff cards AND
-  draft enough tribal creatures for those payoffs to matter.
-
-  Tribal Payoff Cards:
-    Wild ....... Pack Hunter (scales with Wild count), Bloodhound (draws per
-                 Wild on field)
-    Undead ..... Corpse Eater (extra ATK on Undead death), Gravedigger (draws
-                 on Undead death), Pyre Keeper (scales with Undead death)
-    Order ...... Bannerman (buffs Order only), Squire Captain (stronger token
-                 near Order)
-    Arcane ..... Fanatic (ATK = Arcane count), Torchbearer (buffs adj Arcane)
-
-  Tribe Distribution (draft pool):
-    Wild ....... 6 common, 5 uncommon, 3 rare  (14 total)
-    Undead ..... 2 common, 4 uncommon, 6 rare  (12 total)
-    Order ...... 6 common, 5 uncommon, 4 rare  (15 total)
-    Arcane ..... 3 common, 5 uncommon, 2 rare  (10 total)
+  On-Death Types (KeywordEffects._run_on_death): damage_opposing_lane,
+    damage_opposing, damage_all_enemies, summon, bonus_mana,
+    return_to_hand_once, damage_face, debuff_all_player_atk, damage_adjacent
 
 
-6. RELIC SYSTEM (50 Relics)
+5.1 TRIBE SYSTEM -- NOT IMPLEMENTED
+
+  Tribes (Wild / Undead / Order / Arcane) were planned in earlier drafts but
+  are NOT present in code: no creature in CardDB.gd carries a tribe field, and
+  the proposed tribal payoff cards (Pack Hunter, Fanatic, Pyre Keeper, Battle
+  Sage) were never added. The card lists in section 4 have had their [Tribe]
+  tags stripped to reflect current code. Card-to-card synergy still exists
+  (Bannerman buffs all friendlies, Gravedigger draws on ally death, Corpse
+  Eater scales with friendly deaths) but operates on "friendly creature"
+  rather than tribal membership. Whether to reintroduce tribes is an open
+  design decision; the original four-tribe intent is preserved in version
+  history.
+
+
+6. RELIC SYSTEM (55 Relics)
 -----------------------------
 
 6.1 Starting Relics (8) -- Pick 1 of 3 at run start
@@ -421,7 +509,7 @@ Core Loop:
   Soul Lantern ........ First friendly death each round: +1 mana next turn
   Veteran's Medal ..... 1-cost creatures have +1/+1
 
-6.2 Combat Relics (28) -- From elites, events, shops
+6.2 Combat Relics (33) -- From elites, events, shops
 
   War Drum ............ On-enter damage effects deal +1
   Banner of Unity ..... Adjacency buffs give +1 extra
@@ -446,6 +534,11 @@ Core Loop:
   Mimic Ring .......... Played creature copies 1 keyword from adjacent ally
   Scroll of Greed ..... Non-normal draw: gain 1 gold per card
   Bloodstone .......... When you take face damage, creatures +1 ATK this turn
+  Phoenix Heart ....... Once per run: when you would die, revive at 1 HP instead
+  Vanguard Banner ..... Your front-row creatures have +1 ATK
+  Rear Guard Charm .... Your back-row creatures regenerate 1 HP at start of round
+  Phantom Veil ........ Once per round: first friendly that would die survives at 1 HP
+  Hexagonal Shield .... Enemy ranged attacks can't target your back row
   Lantern ............. Gain 1 bonus mana on turn 1 of each combat
   Happy Flower ........ Every 3 turns, gain 1 bonus mana
   Ice Cream ........... Unspent mana carries over fully between turns (no cap)
@@ -493,15 +586,15 @@ Core Loop:
     Deck: 3x Bandit (2/3), 2x Archer (2/3, on-enter: 1 random dmg), Captain (3/3)
     Reinforcement: Thug (1/2)
 
-  Mushroom Grove (14 HP)
+  Mushroom Grove (10 HP)
     Passive: Heal all enemies 1 at end of round
     Deck: 3x Sprout (1/4), 2x Spore Beast (2/4), Mycelium (2/5, on-death: 1 all)
     Reinforcement: Spore (1/2)
 
-  Stone Sentinels (15 HP)
-    Passive: Enemy Armored takes 2 less damage
-    Deck: 2x Golem (2/4), 2x Golem (2/4 Armored), Rock Hurler (3/3, on-enter: 2
-      random), Granite Guard (2/5 Thorns)
+  Stone Sentinels (12 HP)
+    Passive: None
+    Deck: 2x Golem (2/3), Golem (2/4 Armored), Golem (2/4), Rock Hurler (3/3,
+      on-enter: 1 random), Granite Guard (2/4 Armored)
     Reinforcement: Fragment (1/2)
 
   Harpy Nest (13 HP)
@@ -513,13 +606,16 @@ Core Loop:
 7.2 Act 1 -- Elite (2)
 
   Orc Warband (20 HP)
-    Passive: Random enemy +1 ATK each round
+    Passive: Each round, a random enemy creature gains +1 ATK permanently.
+    Reactive: ON_PLAYER_SPELL -> Chieftain gains +1 ATK.
     Deck: 3x Warrior (3/3), 2x Brute (3/4), Drummer (2/4, adj +1 ATK),
       Chieftain (4/4)
     Reinforcement: Grunt (2/2)
 
   Necromancer's Tower (22 HP)
-    Passive: Enemy death -> summon 1/2 Skeleton random lane
+    Passive: When an enemy creature dies, summon a 1/2 Skeleton in a random
+      empty lane.
+    Reactive: ON_CREATURE_DEATH -> enemy on-death effects trigger twice.
     Deck: 3x Skeleton (2/3), Bone Knight (3/4, on-death: summon 2/2), Dark
       Acolyte (2/4, adj +1), Lich (3/5 Regenerate)
     Reinforcement: Risen Bones (1/2)
@@ -542,7 +638,8 @@ Core Loop:
 7.4 Act 2 -- Combat (5)
 
   Cultist Enclave (18 HP)
-    Passive: Random enemy +1/+1 per round
+    Passive: Each round, a random enemy gains +1/+1.
+    Reactive: ON_PLAYER_SACRIFICE -> 2 face damage.
     Deck: 3x Cultist (3/3), 2x Dark Priest (2/4 Regenerate), Zealot (3/3,
       on-death: 2 face), Fanatic (4/4)
     Reinforcement: Initiate (2/2)
@@ -560,7 +657,9 @@ Core Loop:
     Reinforcement: Recruit (2/3)
 
   Haunted Crypt (19 HP)
-    Passive: Enemy death -> summon 1/1 Ghost with Swift
+    Passive: When an enemy creature dies, summon a 1/1 Ghost with Swift in a
+      random empty lane.
+    Reactive: ON_PLAYER_FLOOP -> 1 damage to the flooping creature.
     Deck: 3x Wraith (3/4), 2x Banshee (2/3, on-death: -1 ATK all player),
       Gravewarden (3/5 Armored), Specter (2/2 Swift)
     Reinforcement: Shade (2/2)
@@ -574,13 +673,17 @@ Core Loop:
 7.5 Act 2 -- Elite (2)
 
   Demon Vanguard (28 HP)
-    Passive: Player spell -> random enemy +1 ATK permanent
+    Passive: Whenever player plays a spell, a random enemy creature gains +1
+      ATK permanently.
+    Reactive: ON_PLAYER_FLOOP -> 1 damage to the flooping creature.
     Deck: 3x Demon Soldier (3/4), 2x Hellhound (4/3 Swift), Pit Fiend (4/5
       Armored+Regenerate), Infernal (5/4 Piercing)
     Reinforcement: Imp (2/3)
 
   The Puppeteer (26 HP)
-    Passive: Copy keywords from player's highest-ATK creature to random enemy
+    Passive: Start of each round, copy keywords from player's highest-ATK
+      creature onto a random enemy.
+    Reactive: ON_PLAYER_SUMMON -> summon a 2/2 Puppet.
     Deck: 4x Marionette (2/3), 2x Puppet Knight (3/4), Shadow Double (3/3),
       Puppeteer's Guard (3/5)
     Reinforcement: String (1/2)
@@ -603,7 +706,9 @@ Core Loop:
 7.7 Act 3 -- Combat (4)
 
   Mirror Temple (22 HP)
-    Passive: Player creature death -> enemy draws and places immediately
+    Passive: When a player creature dies, enemy draws and places a creature
+      immediately.
+    Reactive: ON_CREATURE_DEATH -> all surviving enemies heal 1.
     Deck: 3x Mirror Knight (3/4), 2x Reflection (2/3 Swift), Doppel (4/4),
       Temple Guardian (4/5 Last Stand)
     Reinforcement: Shard (2/3)
@@ -614,8 +719,10 @@ Core Loop:
       (3/4 Ranged), Earth Elemental (3/6 Armored), Nexus Core (2/4, adj +1)
     Reinforcement: Spark (2/2)
 
-  Executioner's Block (21 HP)
-    Passive: Highest-ATK enemy also deals ATK as face damage
+  The Executioner's Block (21 HP)
+    Passive: Each round, the highest-ATK enemy also deals its ATK as face
+      damage to the player.
+    Reactive: ON_PLAYER_DRAW -> 1 face damage per extra card drawn beyond 5.
     Deck: 2x Headsman (4/4), 2x Torturer (3/3, on-enter: -2 ATK), Condemned
       (2/5 Thorns+Last Stand), Executioner (5/4 Piercing)
     Reinforcement: Jailer (2/4)
@@ -629,13 +736,17 @@ Core Loop:
 7.8 Act 3 -- Elite (2)
 
   The Archlich (32 HP)
-    Passive: Enemies can't go below 1 HP from attacks (spells only finish)
+    Passive: Enemy creatures cannot be reduced below 1 HP by creature attacks.
+      Only spells/effects can finish them.
+    Reactive: ON_PLAYER_SPELL -> summon a 1/1 Bone Shard.
     Deck: 3x Skeleton Knight (3/4), Bone Dragon (4/5 Piercing+Regenerate), Lich
       Acolyte (2/3, floop: summon 2/2), Phylactery (0/8)
     Reinforcement: Risen (2/3)
 
   The Void Walker (30 HP)
-    Passive: Start of turn: exile top card of deck permanently
+    Passive: Start of player's turn, exile top card of deck (removed from fight
+      permanently).
+    Reactive: ON_PLAYER_DRAW -> exile 1 additional card from deck on extra draw.
     Deck: 3x Void Spawn (3/4), 2x Rift Stalker (4/3 Swift), Null Beast (3/5,
       on-enter: discard 1 random), Void Maw (5/5)
     Reinforcement: Fragment (2/2)
@@ -650,32 +761,106 @@ Core Loop:
     Reinforcement: Lesser Demon (3/3)
 
 
+7.10 Reactive Passives
+----------------------
+
+Beyond the start/end-of-round passive in 7.1-7.9, ten encounters carry a
+second layer: a REACTIVE passive that fires the moment the player takes a
+specific action. This is the system's main answer to "what makes each fight
+feel mechanically distinct?" -- the base passive sets the rhythm, the reactive
+passive punishes a specific play pattern.
+
+Triggers and their meanings:
+
+  ON_PLAYER_SPELL      -- fires when player resolves a spell card.
+  ON_PLAYER_SACRIFICE  -- fires when player sacrifices a creature.
+  ON_PLAYER_FLOOP      -- fires when a player flooper resolves its ability.
+  ON_PLAYER_SUMMON     -- fires when a player places a creature (hand or token).
+  ON_CREATURE_DEATH    -- fires when ANY creature on either side dies.
+  ON_PLAYER_DRAW       -- fires when player draws beyond the standard 4-card hand.
+
+Each reactive passive runs ONCE per qualifying event and is independent of the
+encounter's normal start/end-of-round passive. Reactive effects are skill-
+expression levers: the player can avoid the trigger by adapting their plan
+(e.g. don't sacrifice into Cultist Enclave; don't spell-spam vs Archlich).
+
+Reactive lineup (per encounter):
+
+  Orc Warband           ON_PLAYER_SPELL     Chieftain +1 ATK permanent
+  Necromancer's Tower   ON_CREATURE_DEATH   enemy on-death triggers twice
+  Cultist Enclave       ON_PLAYER_SACRIFICE 2 face damage
+  Haunted Crypt         ON_PLAYER_FLOOP     1 damage to the flooping creature
+  Demon Vanguard        ON_PLAYER_FLOOP     1 damage to the flooping creature
+  The Puppeteer         ON_PLAYER_SUMMON    summon a 2/2 Puppet
+  Mirror Temple         ON_CREATURE_DEATH   all surviving enemies heal 1
+  Executioner's Block   ON_PLAYER_DRAW      1 face per extra card past 5
+  The Archlich          ON_PLAYER_SPELL     summon a 1/1 Bone Shard
+  The Void Walker       ON_PLAYER_DRAW      exile an extra card from deck
+
+Example -- Necromancer's Tower:
+  Base passive: when an enemy dies, summon a 1/2 Skeleton in a random lane.
+  Reactive (ON_CREATURE_DEATH): the dying enemy's own on-death effect runs
+  twice. So a Bone Knight (on-death: summon 2/2) summons two 2/2s AND the
+  Tower's passive then drops a 1/2 Skeleton -- one death produces three new
+  bodies. The reactive trigger re-runs the dying card's on-death directly
+  rather than dispatching through the death pipeline, so it doesn't recurse
+  through itself.
+
+Example -- The Archlich:
+  Base passive: enemy creatures cannot be reduced below 1 HP by creature
+  attacks; only spells/effects can finish them. Reactive (ON_PLAYER_SPELL):
+  summon a 1/1 Bone Shard. The two stack into a deliberate puzzle -- the
+  player needs spells to finish enemies, but each spell adds a fresh body.
+  Wide AOE (Apocalypse, Earthquake) wins this fight; spamming Fireball loses
+  it.
+
+Reactive passives are defined in REACTIVE_PASSIVES inside EncounterDB.gd; the
+combat dispatcher is _dispatch_reactive(trigger, source_card, lane_idx) in
+Combat.gd.
+
+
 8. MAP & PROGRESSION
 ----------------------
 
 8.1 Map Structure
 
-  Each act has 8 rows. Player starts at bottom and moves upward one row at a
-  time. Each row has 1-3 nodes. Nodes connect to 1-2 nodes in the next row.
+  Each act map is procedurally generated as a 15-row x 7-column grid using a
+  Slay-the-Spire-style algorithm. The map renders horizontally (player walks
+  left -> right toward the boss), but the data axes still call row the
+  start->boss axis and col the lane axis.
 
-  Row Template (per act):
-    Row 0: combat, combat
-    Row 1: combat, event, combat
-    Row 2: rest, shop
-    Row 3: combat, combat, event
-    Row 4: combat, combat
-    Row 5: elite, combat
-    Row 6: rest, shop
-    Row 7: boss (single node, all paths converge)
+  Generation steps (RunState._generate_act_map):
+    1. Walk NUM_PATHS = 4 paths from row 0 to REST_ROW (row 13). Each step
+       moves +/-1 column or stays, with a no-crossing rule so two diagonals
+       never form an X. Path #2 must start on a different column than path #1.
+       Where a destination cell is already populated, candidates get double
+       weight so paths prefer to merge (organic, convergent landmarks).
+    2. Row 0 = all Combat. Row 13 (REST_ROW) = all Rest sites.
+       Rows 1..12 roll node types from a cumulative probability table:
+         Shop  10%, Rest 12%, Elite 10%, Event 22%, Combat 46%.
+       Rules:
+         - Elite and Rest cannot appear before MIN_ELITE_ROW (row 5).
+         - Rest cannot appear on the row just below REST_ROW.
+         - Elite / Shop / Rest may not follow the same type on any incoming path.
+         - Sibling nodes sharing a parent must have distinct types.
+         If 200 retries fail, the slot falls back to Combat.
+    3. A single Boss node (BOSS_ROW = 14) is placed in the center column.
+       Every populated REST_ROW node connects to it, so all paths converge.
+    4. Encounters are dealt out of EncounterDB by type (combat / elite / boss),
+       shuffled by the run seed so each map plays differently.
 
 8.2 Node Types
 
   Combat (sword icon) ...... Standard fight from EncounterDB
-  Elite (star icon) ........ Harder fight, better rewards
-  Boss (skull icon) ........ Act boss, must defeat to advance
-  Rest (hot spring icon) ... Heal, upgrade, or remove a card
-  Shop (coin icon) ......... Buy cards, relics, potions, remove cards
+  Elite (skull icon) ....... Harder fight, better rewards (rare-weighted)
+  Boss (crown icon) ........ Act boss, must defeat to advance
+  Rest (campfire icon) ..... Heal to full, upgrade a card, or remove a card
+  Shop (diamond icon) ...... Buy cards, relics, potions, remove cards
   Event (? icon) ........... Random choice encounter with tradeoffs
+
+  All node icons sit on inked plates with a hand-drawn dashed parchment route
+  between them. Visited nodes dim and gain a checkmark; the player's current
+  position is marked with a red "YOU" chevron.
 
 8.3 Act Progression
 
@@ -728,10 +913,13 @@ Prices (base):
   Healing Potion ...... 40g
   Card Removal ........ 50g
 
-Merchant's License relic applies 25% discount. Scavenger's Pouch grants +20g
-on card removal.
+Merchant's License relic applies a 25% discount to every price. Scavenger's
+Pouch refunds +20g whenever the player pays for a card removal. The Sozu
+downside disables the healing-potion slot entirely ("Blocked by Sozu").
 
-Stock: 4 cards (act-based rarity weights) + 1 relic + potion + removal.
+Stock per visit: 4 unique act-weighted cards, exactly 1 relic, a healing
+potion, and a card-removal service. Stock is rerolled on entry, not on
+purchase.
 
 Shop Rarity Weights:
                 Common    Uncommon    Rare
@@ -744,54 +932,149 @@ Shop Rarity Weights:
 ---------------
 
 Three options (pick one):
-  1. REST ...... Heal to full HP
-  2. UPGRADE ... Choose a card, then choose Sharpen / Fortify / Imbue
-  3. REMOVE .... Remove one card from deck
+  1. REST ...... Heal to full HP.
+                 Disabled at max HP, or blocked entirely by the
+                 Coffee Dripper downside ("Blocked by Coffee Dripper").
+  2. UPGRADE ... Choose a card, then pick Sharpen / Fortify / Imbue.
+                 Disabled when every card is already upgraded, or blocked
+                 entirely by the Fusion Hammer downside.
+  3. REMOVE .... Remove one card from the deck. Disabled when deck size <= 1.
 
 
-12. EVENTS (8)
----------------
+12. EVENTS (18)
+----------------
+
+Each event renders against a fullscreen Midjourney-generated illustration
+(loaded from assets/events/<event_key>.png) with dark gradient fades top and
+bottom for title and choice legibility. Choices are frameless headline + body
+text rows with a gilt diamond ornament -- no rectangle buttons.
+
+Two-choice events (accept / decline):
 
   The Blacksmith's Offer
-    A: Upgrade any card. That card gains Exhaust (one use per fight)
-    B: Leave
+    A: Upgrade a random card; lose a random card.
+    B: Decline.
 
   The Blood Fountain
-    A: Full heal. Lose 3 max HP permanently
-    B: Gain 5 max HP. Take 5 damage
+    A: Heal to full HP; starter creatures permanently lose 1 HP.
+    B: Walk away.
 
   The Collector
-    A: Gain random rare card + gain a Curse
-    B: Leave
+    A: Gain a random rare card; add a Curse to the deck.
+    B: Refuse.
 
   Dark Altar
-    A: Remove up to 3 cards. Lose 3 max HP per card removed
-    B: Leave
+    A: Choose 3 cards to remove; take 3 damage.
+    B: Turn away.
 
   The Gambler
-    A: Reveal top 5 cards of your deck. Discard any number permanently
-       (removed from the run)
-    B: Leave
+    A: Bet 30 gold -- 50/50: win 90g or lose the 30g.
+    B: Decline.
 
   The Hermit
-    A: Remove any card. Next 2 card rewards offer 1 fewer choice
-    B: Transform a random card into a random card of one higher rarity
+    A: Copy a random card from the deck.
+    B: Remove any one card for free.
 
   The Butcher
-    A: Choose creature: +2 ATK, gains Wither 1
-    B: Leave
+    A: Choose a creature: +2 ATK (gains Wither 1 narratively; mechanically
+       handled via a sharpen upgrade).
+    B: Keep walking.
 
   Mysterious Shrine
-    A: Choose a card to remove. Gain a random relic and a Curse
-    B: Leave
+    A: Lose a random card; gain a random relic.
+    B: Leave.
 
-Events are non-repeating within a run (tracks seen). If all 8 seen, pool resets.
+Three-choice events (each beat has its own price):
+
+  The Thrice-Blessed Spring
+    A: +6 HP, starters -1 HP.    B: +14 HP, -30 gold.    C: Full heal, +Curse.
+
+  The Pawnbroker's Window
+    A: -6 HP, remove 1 chosen card.    B: -80 gold, upgrade a random card.
+    C: +Curse, gain a rare card.
+
+  The Fork in the Long Road
+    A: +10 HP, -40 gold.    B: -8 HP, +70 gold.
+
+  The Beekeeper
+    A: +10 HP, +Curse.    B: -4 HP, upgrade a random card.
+    C: Remove 1 chosen card.
+
+  The Burning Cradle
+    A: -3 HP, heal to full.    B: -40 gold, gain a random relic.
+    C: Leave (no effect).
+
+  The Woodcutter
+    A: Upgrade a random card, -2 HP.    B: +35 gold.    C: No effect.
+
+  The Char-Widow's Pyre
+    A: -50 gold, +8 HP.    B: Remove 2 chosen cards.
+    C: -5 HP, gain a random relic.
+
+  The Gravesong Choir
+    A: Remove 2 chosen cards, gain a rare card, +30 gold.
+    B: Upgrade a random card.    C: +50 gold.
+
+  The Glass Familiar
+    A: -30 gold, copy a deck card twice.    B: -5 HP, gain a random relic.
+    C: +5 HP.
+
+  The Spellwright's Pact
+    A: -8 HP, gain a rare card, upgrade a random card.
+    B: -50 gold, gain a rare card.    C: +10 HP.
+
+Events are non-repeating within a run (tracked in RunState.events_seen). When
+every event has been seen, the pool resets and any event can repeat.
 
 
 13. UI/UX FEATURES (Current Build)
 ------------------------------------
 
-13.1 Combat HUD
+13.1 Global Chrome
+  - Every non-combat scene has a painted background image (main_menu,
+    map_parchment, combat_arena, shop_tavern, rest_campfire, event_forest,
+    triumph_of_death for game over) plus a GameTheme atmosphere overlay
+    (vignette + dust) added via GameTheme.add_atmosphere().
+  - A top-left settings gear (GameTheme.make_settings_gear) sits on every
+    scene and opens the SettingsOverlay (CanvasLayer, layer = 100):
+    master / music / SFX volume sliders, resolution, display mode, FPS cap,
+    colorblind mode, UI scale, brightness, animation speed, tooltip delay,
+    plus Abandon Run / Return to Main Menu / Resume.
+  - GameTheme.fade_out_then_change_scene handles every scene transition with
+    a short fade so the player never sees a hard cut.
+  - AudioBank autoload plays per-scene music (main_menu, map, combat -- random
+    pick from per-act pools -- shop, rest, event) and SFX (hit, death, coin,
+    victory, etc.).
+
+13.2 Main Menu & Credits
+  - Left-aligned title column with shimmering "BURNING MEADOW" header and
+    rising ember CPUParticles2D for ambient motion. Background Ken-Burns
+    drifts opposite the cursor for parallax depth.
+  - Buttons: New Run, Continue (if a save exists), Card Gallery, Credits,
+    Quit. Ascension tier selector with the highest-unlocked tier preselected.
+  - Credits scene lists fonts, art (Kenney + public-domain masters), music
+    tracks with licenses, and engine attribution.
+
+13.3 Starting Relic Pick
+  - Built programmatically over the main-menu background on every New Run.
+    Player chooses one of three rolled starting relics before the first map
+    is generated; the chosen relic is added to the deck via start_new_run().
+
+13.4 Map View
+  - Slay-the-Spire-style horizontal scrolling parchment with dashed inked
+    paths, hand-drawn map terrain (mountains, trees, pebbles) scattered
+    between nodes, START disc + boss banner. Available nodes pulse with a
+    gold halo; visited nodes dim and gain a checkmark.
+  - Top HUD bar: heart (HP), gold coin, ACT N label, relic icons, potion
+    slots (3, filled/empty), Use Potion button, deck viewer button.
+  - Deck viewer overlay: full-screen modal grid of every card in the deck
+    (rendered as real Card2D nodes with upgrade modifications applied),
+    plus composition stats (creatures / spells / rarity counts). Cards
+    spawn 6 per frame to keep the popup responsive.
+  - Floor counter and "Boss Ahead: X" banner; legend strip below the map.
+  - The scroll auto-centers on the player at ~30% from the left edge.
+
+13.5 Combat HUD
   - Parchment-styled panels with gold borders
   - Player HP (left) / Enemy HP + name (right) at top
   - Mana display with pip visualization
@@ -799,24 +1082,30 @@ Events are non-repeating within a run (tracks seen). If all 8 seen, pool resets.
   - Info messages (center, auto-fading)
   - End Turn button (E key shortcut)
   - Sacrifice button (S key shortcut, shows when valid)
-  - Discard pile viewer button
+  - Discard pile viewer button + Exhaust pile viewer button
   - Draw pile count display
   - Hand card count display
   - Keyboard shortcut help text
   - Encounter name and passive description
   - Relic icons display
 
-13.2 Card Interactions
-  - Drag cards above play threshold (45% screen height) to play
-  - Lane selection based on mouse position (not card position)
-  - Occupied lanes reject placement with message
-  - Cards snap back to hand on all rejection paths
-  - Hover: cards lift up 30px, gold border highlight
-  - Unplayable cards (insufficient mana) dimmed gray
-  - Hand auto-sorted by cost after drawing
-  - Tooltips with full card info and keyword descriptions
+13.6 Card Interactions
+  - Cards rendered through Card2D using pixel-measured frame layout (POINT_*
+    constants in Card2D.gd) over painted creature / spell portraits from
+    assets/creatures and assets/spells.
+  - Drag cards above the play threshold (45% screen height) to play.
+  - Lane selection based on mouse position (not card position).
+  - Occupied lanes reject placement with message.
+  - Cards snap back to hand on all rejection paths.
+  - Hover: cards lift up 30px, gold border highlight.
+  - Unplayable cards (insufficient mana) dimmed gray.
+  - Hand auto-sorted by cost after drawing.
+  - Tooltips with full card info and keyword descriptions.
+  - Targeted spells use a spell-targeting overlay (click-to-resolve) handled
+    via Combat._input(), not the card-drag system.
 
-13.3 Battlefield
+13.7 Battlefield
+  - 4x4 board (4 lanes x front/back rows per side).
   - Lane glow during card drag:
       Green highlight on valid target lane
       Red highlight on occupied lanes
@@ -824,12 +1113,21 @@ Events are non-repeating within a run (tracks seen). If all 8 seen, pool resets.
   - Sacrifice mode: red border highlight on valid targets
   - Floop toggle: blue "FLOOP" indicator and blue border
 
-13.4 Visual Feedback
+13.8 Visual Feedback
   - HP flash on damage (red pulse with size increase)
   - Screen shake on significant damage (CanvasLayer offset)
   - Reshuffle notification when draw pile refreshes
+  - Floating gold-spend / gold-gain numerals (GameTheme.spawn_floating_text)
+  - Floating combat damage and heal numbers
 
-13.5 Admin/Debug
+13.9 Persistence
+  - In-progress runs save to user://run_N.save (3 slots) on every node visit;
+    relaunching offers Continue from the most recent slot. The save is
+    cleared on death or final victory.
+  - MetaState tracks cross-run win/loss counts to user://meta.save and gates
+    ascension tier unlocks.
+
+13.10 Admin/Debug
   - F1: Instant win (sets enemy HP to 0)
 
 
@@ -842,25 +1140,44 @@ Events are non-repeating within a run (tracks seen). If all 8 seen, pool resets.
   Scene transitions via get_tree().change_scene_to_file().
 
 14.2 Autoload Singletons
-  RunState ............ Run state, deck, relics, gold, map, upgrades
-  MetaState ........... Cross-run win/loss persistence (JSON save)
-  CardDB .............. All card definitions (112+ cards)
-  RelicDB ............. All relic definitions (50 relics)
-  KeywordEffects ...... Keyword dispatch and display helpers
-  EncounterDB ......... All encounter definitions (26 encounters)
+  RunState ............. Run state, deck, relics, gold, map, upgrades, save/load
+  MetaState ............ Cross-run win/loss + ascension unlock (JSON save)
+  CardDB ............... All card definitions (~152 entries: ~104 draftable +
+                          18 enemy-only + tokens / curses)
+  RelicDB .............. All relic definitions (56 relics across starter /
+                          combat / utility tiers, including 4x4-specific
+                          relics like Vanguard Banner and Rear Guard Charm)
+  KeywordEffects ....... 16-keyword dispatcher (on-enter / on-death /
+                          start-of-round); accesses Combat as ctx
+  EncounterDB .......... 26 premade encounter lineups across 3 acts, with a
+                          REACTIVE_PASSIVES table for per-fight triggers
+  AudioBank ............ SFX + music dispatcher (play_sfx / play_music /
+                          play_music_random)
+  CardTextureCache ..... Preloads card frame and art textures to avoid
+                          per-card disk reads
+  GameTheme ............ Fonts, colors, panel styles, scene backgrounds /
+                          atmosphere, settings-gear factory, enemy-name->
+                          art-alias map
+  UserSettings ......... Persisted display / audio / accessibility settings;
+                          parents the SettingsOverlay
 
 14.3 Key Scripts
-  Combat.gd ........... Core combat logic, HUD, all phases        (~2200 lines)
-  Card2D.gd ........... Card display, drag/drop, hover, stats     (~420 lines)
-  MapView.gd .......... Branching map rendering, navigation       (~305 lines)
-  RunState.gd ......... Run state, deck, upgrades, map gen        (~360 lines)
-  CardDB.gd ........... Card definitions, reward rolling          (~435 lines)
-  EncounterDB.gd ...... Encounter definitions, deck building      (~520 lines)
-  RelicDB.gd .......... Relic definitions, reward rolling         (~160 lines)
-  KeywordEffects.gd ... Keyword dispatch (on-enter/death/round)   (~195 lines)
-  Shop.gd ............. Shop UI, buying, card removal             (~270 lines)
-  Rest.gd ............. Rest site: heal/upgrade/remove            (~310 lines)
-  Event.gd ............ Random events with choices                (~500 lines)
+  Combat.gd ............ Core combat logic, HUD, phases, spells   (~5900 lines)
+  Card2D.gd ............ Card display, drag/drop, frame layout    (~4200 lines)
+  MapView.gd ........... Branching map rendering, navigation,
+                          deck viewer, terrain decoration         (~1240 lines)
+  RunState.gd .......... Run state, map gen, upgrades, save/load  (~750 lines)
+  CardDB.gd ............ Card definitions, reward rolling         (~535 lines)
+  EncounterDB.gd ....... Encounter definitions, reinforcements,
+                          REACTIVE_PASSIVES                       (~1040 lines)
+  RelicDB.gd ........... Relic definitions, reward rolling        (~290 lines)
+  KeywordEffects.gd .... Keyword dispatch (on-enter/death/round)  (~320 lines)
+  Shop.gd .............. Shop UI, buying, card removal            (~300 lines)
+  Rest.gd .............. Rest site: heal/upgrade/remove           (~295 lines)
+  Event.gd ............. 18 random events with choices            (~1020 lines)
+  MainMenu.gd .......... Title, ember particles, ascension picker (~885 lines)
+  Credits.gd ........... Attribution screen
+  SettingsOverlay.gd ... Settings popup (CanvasLayer)
 
 14.4 Rendering
   - Godot 4.6, GL Compatibility renderer, 2D rendering
@@ -874,16 +1191,388 @@ Events are non-repeating within a run (tracks seen). If all 8 seen, pool resets.
 
   Category      Creatures    Spells    Total
   ---------     ---------    ------    -----
-  Starter       4 unique     0         4 unique / 10 deck
+  Starter       6 unique     0         6 unique / 10 deck
   Common        18           15        33
-  Uncommon      20           15        35
-  Rare          15           11        26
-  Draft Pool    53           41        94
-  Enemy         17           --        17
+  Uncommon      18           15        33
+  Rare          17           17        34
+  Draft Pool    53           47        100
+  Enemy         18           --        18
   Special       --           1         1
-  Total Unique  70+          42        112+
+  Total Unique  77           48        125
 
 
-=============================================================
+16. AUDIO SYSTEM
+------------------
+
+The audio layer is intentionally thin: a single autoload (`AudioBank`) loads
+SFX variants and music tracks from disk, plays them through Godot's
+AudioServer buses, and no-ops gracefully whenever a file is missing -- so the
+game runs identically with or without the audio folder populated. Volume,
+bus setup, and persistence live in `UserSettings`.
+
+16.1 AudioBank API (scripts/AudioBank.gd)
+  - play_sfx(event, pitch_jitter=0.06, volume_db=0.0)
+      Picks a random variant from assets/audio/sfx/<event>/ and plays it
+      through a 12-player round-robin pool on the SFX bus. Pitch is jittered
+      by +/- pitch_jitter so rapid-fire plays don't sound mechanical.
+  - play_music(track, fade_seconds=1.0)
+      Crossfades to assets/audio/music/<track>.{ogg,wav,mp3} via an A/B
+      AudioStreamPlayer pair. Same-track call is a no-op. Stream's loop
+      flag is forced on so ambient beds don't stop after one play.
+  - play_music_random(candidates, fade_seconds=1.0)
+      Picks one track from the array and crossfades to it. The
+      currently-playing track is excluded from the pool, so consecutive
+      fights never start on the same song when the pool has 2+ entries.
+  - stop_music(fade_seconds=0.6)
+      Fades both A/B players to silence and stops them.
+  - Missing files: every loader and resolver returns early on absent
+      directories / streams, so the game tolerates a fully empty
+      assets/audio tree without raising errors.
+
+16.2 Music slots
+  Each scene calls play_music() (or play_music_random()) on entry. Combat
+  picks per node type and act:
+
+  - main_menu .............. Title screen (MainMenu.gd)
+  - map .................... Overworld / map view (MapView.gd)
+  - shop ................... Shop scene (Shop.gd)
+  - rest ................... Rest site (Rest.gd)
+  - event .................. Event / story node (Event.gd)
+  - victory ................ GameOver win screen (GameOver.gd)
+  - defeat ................. GameOver lose screen (GameOver.gd)
+  - combat_elite ........... All elite fights (any act)
+  - combat_boss ............ Act 1-2 boss fights
+  - combat_boss_act3 ....... Act 3 boss only (heavier symphonic-metal track)
+
+  Standard fight pools (random pick via play_music_random, excludes the
+  previously-played entry so back-to-back fights never repeat):
+
+      Act 1 .. [combat, combat_act1_b]
+      Act 2 .. [combat_act2, combat_act2_b]
+      Act 3 .. [combat_act3, combat_act3_b]
+
+16.3 SFX events
+  All triggered via AudioBank.play_sfx(event). Each event folder may hold
+  multiple variants; one is chosen at random per play.
+
+  - card_play .......... Player plays a creature (Combat._play_card)
+  - spell_cast ......... Player casts a spell (Combat._resolve_spell)
+  - card_draw .......... Card drawn into hand (Combat._draw_card)
+  - card_discard ....... End-of-turn discard sweep (Combat)
+  - hit ................ Attack lands on a creature (Card2D.take_damage)
+  - hit_hero ........... Player or enemy hero takes damage (Combat)
+  - death .............. Creature dies (Card2D destruction path)
+  - floop .............. A floop ability activates (Card2D)
+  - heal ............... Creature is healed
+  - coin ............... Gold gained / spent (Shop, Reward)
+  - turn_start ......... Round banner appears (Combat); first round of
+                         combat plays at volume_db=+3.0 as a louder cue
+  - victory ............ Combat won (Combat)
+  - defeat ............. Combat lost / run ended (Combat)
+  - button_click ....... Any major button press
+
+16.4 Licensing
+  The soundtrack is a mix of CC0 (Public Domain) and CC-BY 3.0 tracks
+  sourced from OpenGameArt.org. CC-BY 3.0 tracks require ongoing
+  attribution; the credit lines are kept visible to players in the in-game
+  Credits screen (scripts/scenes/Credits.gd) and mirrored in
+  assets/audio/music/MUSIC_CREDITS.md. Required attributions:
+
+  - "A Fight in the Fields", "Out Of Time", "The Fallen" -- Jonathan Shaw
+      (www.jshaw.co.uk), from his RPG Orchestral Essentials packs
+  - "The Tread of War" -- Jonathan Shaw, Johan Brodd (jobromedia), and
+      cynicmusic (built on cynicmusic's "Battle Theme A")
+
+  All SFX are Kenney CC0 (Interface Sounds 1.0); attribution is not
+  required but is given in Credits anyway. Track-to-file mapping for both
+  music and SFX lives in the two credits files alongside source URLs.
+
+16.5 Settings
+  Volume is controlled from the Settings overlay (gear icon, top-left of
+  every scene; Esc also opens it) with three sliders in the AUDIO section:
+
+  - Master ... bus 0 ("Master"), default 100%
+  - Music .... "Music" bus, default 70% (full music drowns out SFX)
+  - Effects .. "SFX" bus, default 100%
+
+  Sliders feed UserSettings.set_master_volume / set_music_volume /
+  set_sfx_volume; each setter calls linear_to_db, applies the new value via
+  AudioServer.set_bus_volume_db, mutes the bus at 0, and persists the value
+  to user://settings.save (JSON). The Music and SFX buses are created at
+  startup by UserSettings._setup_audio_buses() and routed to Master.
+  AudioBank's pooled players are pre-assigned to these buses on construction.
+
+  A separate "Mute on Focus Loss" toggle (default ON) silences the Master
+  bus while the game window is unfocused, restoring volume on focus return.
+
+
+17. ROADMAP / KNOWN GAPS vs GENRE PARITY
+------------------------------------------
+
+This section catalogues the systems and presentation pieces that were
+identified as gaps when Burning Meadow v1.0 was compared against the
+contemporary roguelike-deckbuilder bar (Slay the Spire, Monster Train,
+Wildfrost, Inscryption Act 1, Cobalt Core). Items marked NOT IMPLEMENTED
+are absent from the current build. Items marked PARTIAL have an existing
+foundation in code; their "Current state" section describes what already
+ships, and the "Still missing" / "Planned" section describes what would
+close the gap. Each item is written in the same spirit as 5.1 (TRIBE
+SYSTEM).
+
+17.1 Alternate Characters / Classes -- NOT IMPLEMENTED
+
+  Current state: One playable hero. The starter deck is fixed (4x Goblin,
+  4x Brute, 1x Sprite, 1x Troll). The same draftable pool of ~104 cards is
+  rolled on every run regardless of intent.
+
+  Gap vs genre: Slay the Spire ships four characters, each with its own
+  ~75-card pool and distinct mechanical identity. Monster Train pairs 5
+  clans for 20 combos. Wildfrost has 3 tribes x 3 leaders. A single-hero
+  deckbuilder caps at one strategic vocabulary -- after first clear, every
+  subsequent run opens the same way.
+
+  Planned (not implemented): three alt characters that REUSE the existing
+  card/enemy pool rather than requiring a fresh content layer. Each leans
+  on a slice of the current card pool to give that hero an identity.
+
+    THE NECROMANCER (sacrifice / on-death tribe; 22 starting HP)
+      Starter deck: 4x Skeleton (1/1, on-death: draw 1, new card), 2x Bone
+      Acolyte (1/2, floop: sacrifice friendly to summon 2/2), 2x Ratling,
+      1x Blood Pyre, 1x Offering. Reward pool biases sacrifice / on-death
+      cards into common/uncommon weight: Bloodsworn, Mass Grave, Corpse
+      Eater, Warden of Graves, Grave Robbery, Dark Pact, Fuel the Pyre,
+      Necromancer, Vampire Lord. Frail HP forces the player to USE the
+      sacrifice economy rather than tanking.
+
+    THE WITCH (spell-only / no-creature opener; 20 starting HP)
+      Starter deck: 4x Flame Bolt, 4x Slash, 2x Provision. Cannot play
+      creatures from her starter; the board fills via spell side-effects
+      (Chaos Imp's random-spell-on-enter chain, summon-from-spell cards,
+      a hero "Familiar" 1/1 token she generates each round). Hero ability:
+      every spell cast also deals 1 face damage. Reward pool biases spells.
+
+    THE MARSHAL (formation / banner / token tribe; 28 starting HP)
+      Starter deck: 4x Footman (renamed Brute), 2x Pikeman, 2x Squire
+      Captain, 1x Battle Drummer, 1x War Cry. Identity is adjacency,
+      tokens, and stacking ATK buffs. Reward pool biases Royal Guard,
+      Bannerman, Paladin, Iron Bastion, Battle Hymn, King's Command,
+      Inspire.
+
+  Implementation skeleton (notes for future work):
+    - RunState.starter_character: String, set at the new "character pick"
+      step before starting-relic pick.
+    - CardDB.get_starter_deck(character_id) -> Array[String]
+    - CardDB.roll_card_reward gains a character_id filter that re-weights
+      certain cards from rare->uncommon or uncommon->common for the
+      matching hero (cheap to implement: a per-character "promotions"
+      dict mapping card_id -> rarity_shift).
+    - RelicDB.roll_relic_reward gains the same bias (Bone Pile guaranteed
+      to surface for Necromancer, Worn Spellbook for Witch, Banner of
+      Unity for Marshal).
+    - MetaState tracks wins-per-character so the ascension cell count
+      can grow with character count rather than being capped at the
+      single-hero footprint.
+
+17.2 Run History / The Memorial Wall -- NOT IMPLEMENTED
+
+  Current state: MetaState tracks total runs / victories / defeats /
+  fastest floor / unlocked ascension. No per-run data is stored. When a
+  run ends there is no record of what the player actually tried -- no
+  deck snapshot, no relic list, no path traversal, no seed -- only the
+  cumulative win/loss counter ticking up.
+
+  Gap vs genre: Slay the Spire stores roughly the last 50 runs with a
+  full deck snapshot, relic list, floor reached, killing blow, gold
+  accumulated, and per-floor decision log. Players replay defeats in
+  their head and learn from them. Monster Train, Wildfrost, and even
+  Inscryption (the Act 1 dead-card list) all carry similar memory
+  hooks. No history means the player can't reflect, and the meta is
+  structurally amnesiac.
+
+  Planned (not implemented): THE MEMORIAL WALL -- a scene accessed from
+  the main menu. Thematically a dusk meadow with small ember-candles
+  marking each completed run (lit blue for victories, red for deaths,
+  dimmed for old entries past slot 50). Clicking a candle opens that
+  run's record:
+
+      Hero ............ Marshal / Witch / Necromancer (per 17.1)
+      Outcome ......... Victory at floor 14, OR "Killed by Iron Vanguard
+                        on floor 9 of Act 2"
+      Ascension ....... A3
+      Final deck ...... grid of Card2D nodes with upgrades applied
+                        (re-rendered from cached card_ids + upgrades)
+      Relics .......... icon row grouped by tier
+      Path ............ thumbnail of each act's map with route drawn
+      Seed ............ "BM-A3F4C2..." (clickable to copy for replay)
+      Duration ........ 1h 47m
+
+  Storage: append-only JSON list in user://run_history.save, capped at
+  100 entries with FIFO eviction. Written once at GameOver, not per-node,
+  to avoid disk churn. Each entry is ~2-3KB; 100 entries fits in 300KB.
+
+  Why a wall and not a table: BM's tone ([[burning-meadow-tone]]) is
+  multi-register, and the burning-meadow imagery wants a visual metaphor
+  for memory rather than a spreadsheet. The wall reads as story; the
+  table reads as stats. The data is the same -- the framing isn't.
+
+17.3 Card-Play Animation & Spell VFX Layer -- PARTIAL
+
+  Audit note: a first-pass spell VFX layer ALREADY EXISTS in the code.
+  Combat._play_spell_cast_vfx() at Combat.gd:5723 routes spells to
+  color-coded particle bursts (warm red for damage, deep red for face /
+  AoE damage, gold for ATK buffs, green for heal, blue for draw, purple
+  for custom). Combat.spawn_spell_burst() spawns an 18-particle one-shot
+  with gravity and self-free. AudioBank.play_sfx("spell_cast") plays
+  alongside. So "every spell has a visual" is cleared at a basic
+  color-coded tier. What follows describes the gap from that tier to
+  the genre bar.
+
+  Current state: Cards snap from hand into their lane slot with no
+  intermediate motion. Spells resolve as instant state changes plus a
+  generic "spell_cast" SFX. There are NO per-archetype visual effects
+  for spells -- Apocalypse, Earthquake, Lightning, Flame Bolt, Holy
+  Smite, and Time Snare all look identical visually (zero VFX). The
+  total visual-effect budget is CanvasLayer screen shake, CPUParticles2D
+  ember bursts on sacrifice and piercing exits, and HP color flashes.
+
+  Gap vs genre: this is the single biggest "feels prototype" tell.
+  Hearthstone / MtG Arena ship per-card on-cast VFX as table stakes.
+  Even Slay the Spire (2017 indie) gives every attack and skill its own
+  tween, color, and particle hit. Cobalt Core spent disproportionate dev
+  time on calibrated screen-shake-per-impact. Wildfrost's squash-and-
+  stretch IS the game feel. BM currently sits near the 2014 mobile
+  card-game motion bar.
+
+  Planned (not implemented): a tiered VFX layer, built in this order.
+
+    TIER 1 (cheap, mandatory): card-play tween from hand to lane slot
+    via a small arc (Tween, ~0.35s, ease_out, +5% scale punch at lane
+    impact, settle to 100%). Sacrifices and on-death exits already use
+    ash-burst particles -- extend the same vocabulary to play arrival
+    so motion language stays consistent.
+
+    TIER 2 (medium): per-archetype spell VFX, six families. Each family
+    is one particle preset plus one tween pair (~50 lines per family).
+    Cards map to a family by spell type or by a new tag in CardDB.
+
+        FIRE ........ Flame Bolt, Fireball, Inferno, Fuel the Pyre
+                      (rising orange particle cone + screen warm)
+        SHOCK ....... Lightning, Holy Smite, Time Snare
+                      (white-blue zigzag via Line2D + brief flash)
+        BLIGHT ...... Dark Pact, Mass Grave, Bloodletting, Apocalypse,
+                      Curse, Unholy Bargain
+                      (purple sweep + skull-mote particles)
+        BLESSING .... Patch Up, Lay on Hands, Mending Light, Battle
+                      Hymn, Inspire, War Cry
+                      (golden upward shimmer + soft bloom)
+        EARTH ....... Earthquake, Shove, Reposition, Cataclysm,
+                      Overwhelming Force
+                      (brown dust + 6px screen shake along Y)
+        MIND ........ Concentrate, Adrenaline, Gambit, Echo, Banish,
+                      Soul Swap, Grave Pact
+                      (slow pale sweep + pulse on target frame)
+
+    TIER 3 (rich, optional): unique VFX for the boss-tier rare spells
+    (Apocalypse, Cataclysm, Inferno, Overwhelming Force, King's
+    Command). These should be the "you built toward this card" wow
+    moments. One bespoke effect each. Only build if budget remains.
+
+  Implementation order: TIER 1 first (it touches every card), TIER 2
+  next (greatest "feels like a real game now" jump), TIER 3 last.
+
+17.4 Nested Keyword Tooltips & Information Layer -- PARTIAL
+
+  Audit note: keyword COLORIZATION in card descriptions ALREADY WORKS.
+  KeywordEffects.colorize_keywords() (KeywordEffects.gd:46) wraps any
+  keyword display name found in card.desc with BBCode gold tags
+  ([b][color=#e8b547]...[/color][/b], 5.1:1 contrast / WCAG AA on the
+  parchment well). Card2D's description label has bbcode_enabled = true
+  (Card2D.gd:2020) so the gold renders. Matching is case-insensitive,
+  word-boundary safe, longest-first ("Last Stand" matches before
+  "Last"). KeywordEffects.tooltip_for(keyword) provides a static
+  glossary string. So players ALREADY see which words are mechanical
+  keywords. What's missing is HOVER popups on those gold spans, nested
+  chaining, encounter-passive-name hover, and a top-level COMPENDIUM
+  scene -- see below.
+
+  (Original "card tooltips show the full card description plus a static
+  keyword glossary panel in the corner" framing remains accurate for
+  the hover-popup gap.)
+
+  Gap vs genre: Slay the Spire ships nested keyword tooltips as one of
+  its most-praised UX features. Hovering "Vulnerable" on a card pops
+  an explainer; if that explainer mentions "Frail", hovering Frail
+  inside the popup chains another popup. The information graph is
+  navigable from any card without leaving the hover. Hearthstone, MtG
+  Arena, and Inscryption (Act 1's lexicon) all do versions of this.
+  BM's 16 keywords plus ~30 floop / spell / encounter-passive terms
+  are a real cognitive load and a static glossary doesn't scale.
+
+  Planned (not implemented):
+    - Card description gets keyword spans wrapped in a hover hook.
+      Card2D parses card.desc for known keyword tokens at build time
+      and substitutes RichTextLabel BBCode spans.
+    - Hovering a keyword span pops a small parchment tooltip
+      (~300x120, anchored to the keyword's screen position) using
+      KeywordEffects.KEYWORDS[name].description.
+    - If the tooltip's text mentions another keyword, that token is
+      ALSO a hover hook (chained). Nested tooltips shrink slightly
+      and offset 20px so the chain is readable.
+    - Encounter passive panel gets the same treatment: passive names
+      and reactive trigger names (ON_PLAYER_SACRIFICE) are hoverable
+      and explained.
+    - Add a top-level COMPENDIUM scene, accessed from the main menu
+      AND the in-combat help overlay. One tab per system: Keywords,
+      Floop Types, Spell Types, Reactive Triggers. Every term on one
+      searchable page so a stuck player can step out of combat and
+      look something up without quitting the run.
+
+  The information IS in the game (KeywordEffects, EncounterDB, CardDB
+  all hold the descriptions). It's just locked behind a static panel
+  instead of woven into the card text itself.
+
+17.5 Animated Card Hover / Hand Juice -- PARTIAL
+
+  Audit note: Card2D ALREADY has a real hover state. On mouse-enter
+  (Card2D.gd:3846) the card lifts 80px (not 30 as the older draft
+  said), scales to 1.15x, resets rotation to 0, z-indexes to 10, and
+  sets a GILT_BRIGHT border. A hover detail panel renders after
+  UserSettings.tooltip_delay seconds (0 = instant). Mouse-exit
+  restores everything. Drag suppresses hover and shrinks the card to
+  0.85x (Hearthstone / Cross Blitz convention).
+
+  Still missing: tilt-toward-cursor, neighbor-push (adjacent cards
+  don't shift sideways), tween-based easing (current hover uses raw
+  Vector2 assignments, not eased curves), and squash-and-stretch
+  arrival.
+
+  Gap vs genre: hand juice is the polish gold standard for card-game
+  feel. Wildfrost's hand bounces with squash-and-stretch on hover.
+  MtG Arena's cards tilt toward the cursor in 3D. Even STS does a
+  clean lift + slight rotation. The hand is where the player's eye
+  spends the most time, and BM's hand currently moves more like an
+  inventory than a deck.
+
+  Planned (not implemented):
+    - Hover begins a tween, 0.18s ease_out, that does THREE things:
+        1. Lift the card up 30px (already present), keep this.
+        2. Rotate the card around its lifted pivot to point gently
+           AT the cursor -- max +/- 8 degrees, scaled by cursor
+           distance from card center. Updates each frame while hover
+           is held.
+        3. Push the LEFT neighbor card 14px left and the RIGHT
+           neighbor card 14px right, each with their own 0.12s
+           ease_out tween, so the hovered card has breathing room.
+    - After 0.6s of continuous hover, fade in a card-preview panel
+      (320x440) anchored above the card, showing the full art at
+      higher zoom with full description below. This panel REPLACES
+      the current tooltip and is where the nested keyword tooltips
+      (17.11) live.
+    - On drag start, the lift + rotation + neighbor-push reset
+      immediately so the card snaps to the cursor without hand-juice
+      fighting the drag.
+
+  One tween system, one set of curves. Two days of work; the hand
+  starts feeling like a card game instead of a spreadsheet row.
 Burning Meadow v1.0 -- Design Document
-Generated from implemented source code, May 2026
+Reconciled with implemented source code, 2026-05-23

@@ -10,6 +10,7 @@ const COMBAT_SCENE = "res://scenes/combat.tscn"
 const SHOP_SCENE = "res://scenes/shop.tscn"
 const REST_SCENE = "res://scenes/rest.tscn"
 const EVENT_SCENE = "res://scenes/event.tscn"
+const TREASURE_SCENE = "res://scenes/treasure.tscn"
 const COLLECTION_SCENE = "res://scenes/collection.tscn"
 const CREDITS_SCENE = "res://scenes/credits.tscn"
 
@@ -23,6 +24,12 @@ const ASH := Color(0.62, 0.58, 0.52, 1.0)
 # across menu rebuilds (e.g. relic-select → back) so the player doesn't have
 # to re-pick their tier every time.
 var _selected_ascension: int = -1
+
+# Pending seed override for the upcoming run. 0 = roll a fresh seed (normal run).
+# Set by _on_daily_run / _on_custom_run so _begin_run_with can hand it to
+# RunState.start_new_run. Cleared after start so subsequent new-runs roll
+# their own seeds again.
+var _pending_seed_override: int = 0
 
 # ── Start-screen motion (premium drift) ──────────────────────────────────────
 # The background slowly breathes (Ken Burns) and drifts opposite the cursor for a
@@ -127,6 +134,20 @@ func _rebuild_menu() -> void:
 		Color(0.18, 0.36, 0.18), MENU_FONT, MENU_H)
 	btn_start.pressed.connect(_on_new_run)
 	col.add_child(btn_start)
+
+	# Daily run — deterministic seed from today's date so every player gets
+	# the same map and can compare scores. Same size as other main buttons;
+	# hierarchy comes from the muted color, not from shrinking the button.
+	var btn_daily := _make_menu_button("DAILY RUN",
+		Color(0.30, 0.24, 0.34), MENU_FONT, MENU_H)
+	btn_daily.pressed.connect(_on_daily_run)
+	col.add_child(btn_daily)
+
+	# Custom seed — opens an input screen for sharing/replaying specific maps.
+	var btn_custom := _make_menu_button("CUSTOM SEED",
+		Color(0.30, 0.24, 0.34), MENU_FONT, MENU_H)
+	btn_custom.pressed.connect(_on_custom_run)
+	col.add_child(btn_custom)
 
 	if has_any_save:
 		var btn_load := _make_menu_button("LOAD GAME",
@@ -294,71 +315,6 @@ func _on_menu_btn_hover(inner: Control, lbl: Label, flames: Array,
 	for flame in flames:
 		tw.tween_property(flame, "modulate:a", target_a, 0.18)
 	tw.tween_property(inner, "position:x", 12.0 if hovering else 0.0, 0.18)
-
-
-func _make_relic_tile(rid: String) -> Button:
-	# A clickable "relic card": gold-trimmed panel with the relic's icon on the
-	# left and its name + description stacked on the right. Mirrors the save-slot
-	# pattern (empty Button + child container with mouse_filter IGNORE) so the
-	# whole tile is one hit target. The icon is loaded by convention from
-	# RelicDB.get_relic_icon and tinted gilt; if it isn't imported yet the tile
-	# simply renders without the icon column rather than breaking.
-	var r := RelicDB.get_relic(rid)
-	var bg := Color(0.18, 0.20, 0.32)
-	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(0, 88)
-	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	btn.focus_mode = Control.FOCUS_NONE
-	var normal := _make_button_stylebox(bg, GILT, 8)
-	btn.add_theme_stylebox_override("normal", normal)
-	var hover := normal.duplicate() as StyleBoxFlat
-	hover.bg_color = bg.lightened(0.18)
-	hover.border_color = GILT_BRIGHT
-	hover.shadow_size = 10
-	hover.shadow_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.35)
-	btn.add_theme_stylebox_override("hover", hover)
-	var pressed := normal.duplicate() as StyleBoxFlat
-	pressed.bg_color = bg.darkened(0.18)
-	pressed.border_color = bg.lightened(0.25)
-	btn.add_theme_stylebox_override("pressed", pressed)
-
-	var row := HBoxContainer.new()
-	row.set_anchors_preset(Control.PRESET_FULL_RECT)
-	row.add_theme_constant_override("separation", 14)
-	row.alignment = BoxContainer.ALIGNMENT_BEGIN
-	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	btn.add_child(row)
-
-	var icon := RelicDB.get_relic_icon(rid)
-	if icon != null:
-		var tex := TextureRect.new()
-		tex.texture = icon
-		tex.custom_minimum_size = Vector2(64, 64)
-		tex.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		tex.modulate = GILT
-		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_child(tex)
-
-	var text_col := VBoxContainer.new()
-	text_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	text_col.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	text_col.add_theme_constant_override("separation", 2)
-	text_col.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(text_col)
-
-	var name_lbl := _make_display_label(r.get("name", rid), 20, GILT_BRIGHT)
-	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	text_col.add_child(name_lbl)
-	var desc_lbl := _make_display_label(r.get("desc", ""), 13, IVORY)
-	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_lbl.custom_minimum_size = Vector2(380, 0)
-	desc_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	text_col.add_child(desc_lbl)
-
-	btn.pressed.connect(_begin_run_with.bind(rid))
-	return btn
 
 
 func _make_button_stylebox(bg: Color, border: Color, corner: int) -> StyleBoxFlat:
@@ -629,6 +585,7 @@ func _load_slot_into_game(slot: int) -> void:
 		"shop": target = SHOP_SCENE
 		"rest": target = REST_SCENE
 		"event": target = EVENT_SCENE
+		"treasure": target = TREASURE_SCENE
 	GameTheme.fade_out_then_change_scene(self, target, 0.45)
 
 
@@ -638,13 +595,34 @@ func _begin_new_in_slot(slot: int) -> void:
 	# the slot summary, so an extra confirmation here would just be friction).
 	RunState.clear_save(slot)
 	RunState.active_slot = slot
-	_show_relic_select()
+	_show_hero_select()
 
 
 func _on_slot_delete(slot: int) -> void:
 	# Wipes the slot's save and rebuilds the load screen so the row updates.
 	RunState.clear_save(slot)
 	_show_load_screen(false)
+
+
+func _center_menu_for_subscreen(width: float = 620.0, height: float = 640.0) -> void:
+	# Re-anchor the Menu VBox from the main-menu left column to a screen-
+	# centered rect. The main menu wants left-alignment so the painted
+	# character splash on the right stays unobstructed, but for sub-screens
+	# (LOAD GAME, CHOOSE A STARTING RELIC) the same anchor leaves a narrow
+	# UI column floating in dead space — recentering balances the composition.
+	# _rebuild_menu() resets the anchors when returning to the main menu, so
+	# this only needs to flip one way.
+	var menu := get_node_or_null("Menu")
+	if menu == null:
+		return
+	menu.anchor_left = 0.5
+	menu.anchor_right = 0.5
+	menu.anchor_top = 0.5
+	menu.anchor_bottom = 0.5
+	menu.offset_left = -width / 2.0
+	menu.offset_right = width / 2.0
+	menu.offset_top = -height / 2.0
+	menu.offset_bottom = height / 2.0
 
 
 func _show_load_screen(overwrite_mode: bool) -> void:
@@ -656,6 +634,7 @@ func _show_load_screen(overwrite_mode: bool) -> void:
 		return
 	for child in menu.get_children():
 		child.queue_free()
+	_center_menu_for_subscreen()
 
 	var title_text := "OVERWRITE A SLOT" if overwrite_mode else "LOAD GAME"
 	var title := _make_display_label(title_text, 30, GILT_BRIGHT)
@@ -685,10 +664,11 @@ func _show_load_screen(overwrite_mode: bool) -> void:
 	menu.add_child(back)
 
 
-func _show_relic_select() -> void:
-	# Design intent: pick 1 of 3 starting relics before the run begins. Rebuilds
-	# the menu column in place (reusing the proven VBox + button factory) so the
-	# layout stays consistent with the main menu.
+func _show_hero_select() -> void:
+	# StS-style hero pick: each tile is a deck + 1 mild signature relic. Picking
+	# one starts the run immediately — no separate relic-pick step afterwards.
+	# Uses a 2×2 grid (4 heroes, 4 tiles) centered in the same subscreen rect as
+	# the old relic pick so the surrounding atmosphere/background stay put.
 	var menu := get_node_or_null("Menu")
 	if menu == null:
 		# Fallback: never block starting a run if the menu node is missing.
@@ -697,29 +677,277 @@ func _show_relic_select() -> void:
 		return
 	for child in menu.get_children():
 		child.queue_free()
+	# Wider rect than the relic pick — hero tiles are richer (deck preview +
+	# relic chip) so they want more horizontal room.
+	_center_menu_for_subscreen(920.0, 680.0)
 
-	var title := _make_display_label("CHOOSE A STARTING RELIC", 30, GILT_BRIGHT)
+	var title := _make_display_label("CHOOSE YOUR HERO", 30, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	menu.add_child(title)
-	menu.add_child(_make_ornament_row(220.0))
+	menu.add_child(_make_ornament_row(260.0))
 	var spacer := Control.new()
 	spacer.custom_minimum_size = Vector2(0, 12)
 	menu.add_child(spacer)
 
-	for rid in RelicDB.roll_relic_reward("starting"):
-		menu.add_child(_make_relic_tile(rid))
-		var gap := Control.new()
-		gap.custom_minimum_size = Vector2(0, 6)
-		menu.add_child(gap)
+	# 2×2 grid: two rows of two tiles each. GridContainer keeps the columns
+	# evenly sized regardless of tile content width.
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 14)
+	grid.add_theme_constant_override("v_separation", 14)
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	menu.add_child(grid)
+
+	for hid in HeroDB.HERO_ORDER:
+		grid.add_child(_make_hero_tile(hid))
+
+	var back_spacer := Control.new()
+	back_spacer.custom_minimum_size = Vector2(0, 12)
+	menu.add_child(back_spacer)
 
 	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 15, 40)
 	back.pressed.connect(_rebuild_menu)
 	menu.add_child(back)
 
 
-func _begin_run_with(relic_id: String) -> void:
-	RunState.start_new_run(relic_id, _selected_ascension)
-	GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
+func _make_hero_tile(hid: String) -> Button:
+	# Hero card: gold-trimmed panel matching the relic-tile pattern, but two-
+	# column inside — left has name/tagline/deck preview, right has the
+	# signature relic chip with its own name + desc. Click anywhere starts
+	# the run with that hero.
+	var hero := HeroDB.get_hero(hid)
+	var bg := Color(0.18, 0.20, 0.32)
+	var btn := Button.new()
+	btn.custom_minimum_size = Vector2(0, 200)
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	btn.focus_mode = Control.FOCUS_NONE
+	var normal := _make_button_stylebox(bg, GILT, 8)
+	btn.add_theme_stylebox_override("normal", normal)
+	var hover := normal.duplicate() as StyleBoxFlat
+	hover.bg_color = bg.lightened(0.18)
+	hover.border_color = GILT_BRIGHT
+	hover.shadow_size = 10
+	hover.shadow_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.35)
+	btn.add_theme_stylebox_override("hover", hover)
+	var pressed := normal.duplicate() as StyleBoxFlat
+	pressed.bg_color = bg.darkened(0.18)
+	pressed.border_color = bg.lightened(0.25)
+	btn.add_theme_stylebox_override("pressed", pressed)
+
+	# Horizontal split: [portrait | text column]. Portrait uses the painted
+	# hero_portrait_<id>.png if it exists, falls back to no-portrait layout when
+	# the asset hasn't been generated yet (so the tile keeps working through the
+	# whole art pipeline).
+	var split := HBoxContainer.new()
+	split.set_anchors_preset(Control.PRESET_FULL_RECT)
+	split.add_theme_constant_override("separation", 12)
+	split.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(split)
+
+	var left_pad := Control.new()
+	left_pad.custom_minimum_size = Vector2(1, 0)
+	left_pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	split.add_child(left_pad)
+
+	var portrait_path := "res://assets/portraits/hero_portrait_%s.png" % hid
+	if ResourceLoader.exists(portrait_path):
+		# CenterContainer forces children to their min size and centers them,
+		# unlike HBox + SIZE_SHRINK_CENTER which (in this layout) lets the
+		# TextureRect stretch to the row height.
+		var portrait_wrap := CenterContainer.new()
+		portrait_wrap.custom_minimum_size = Vector2(140, 186)
+		portrait_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		split.add_child(portrait_wrap)
+
+		var portrait := TextureRect.new()
+		portrait.texture = load(portrait_path)
+		portrait.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		portrait.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		portrait.custom_minimum_size = Vector2(140, 186)
+		portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		portrait.modulate = Color(1.02, 1.0, 0.95, 1.0)
+		portrait_wrap.add_child(portrait)
+
+	var col := VBoxContainer.new()
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_theme_constant_override("separation", 4)
+	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	split.add_child(col)
+
+	var name_lbl := _make_display_label(String(hero.get("name", hid)), 22, GILT_BRIGHT)
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(name_lbl)
+
+	var tagline := _make_display_label(String(hero.get("tagline", "")), 13, Color(0.95, 0.82, 0.55))
+	tagline.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	tagline.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(tagline)
+
+	var desc_lbl := _make_display_label(String(hero.get("desc", "")), 12, IVORY)
+	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc_lbl.custom_minimum_size = Vector2(0, 0)
+	desc_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(desc_lbl)
+
+	# Deck composition summary: "4× Goblin · 2× Brute · ..." Aggregates duplicate
+	# card ids so the tile stays compact even on a 10-card list.
+	var deck_text := _summarize_deck(hero.get("deck", []))
+	var deck_lbl := _make_display_label(deck_text, 11, Color(0.78, 0.74, 0.62))
+	deck_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	deck_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(deck_lbl)
+
+	# Relic strip: little chip + relic name/desc, separated from the deck text
+	# by a thin gilt divider so the eye reads it as "starting gear".
+	var divider := ColorRect.new()
+	divider.custom_minimum_size = Vector2(0, 1)
+	divider.color = Color(GILT.r, GILT.g, GILT.b, 0.4)
+	divider.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(divider)
+
+	var relic_row := HBoxContainer.new()
+	relic_row.add_theme_constant_override("separation", 10)
+	relic_row.alignment = BoxContainer.ALIGNMENT_BEGIN
+	relic_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(relic_row)
+
+	var relic_id: String = String(hero.get("relic", ""))
+	if relic_id != "":
+		var chip := GameTheme.make_relic_chip(relic_id, 44)
+		chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		relic_row.add_child(chip)
+		var relic_text_col := VBoxContainer.new()
+		relic_text_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		relic_text_col.add_theme_constant_override("separation", 1)
+		relic_text_col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		relic_row.add_child(relic_text_col)
+		var relic_data := RelicDB.get_relic(relic_id)
+		var rname := _make_display_label(String(relic_data.get("name", relic_id)), 13, GILT_BRIGHT)
+		rname.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		relic_text_col.add_child(rname)
+		var rdesc := _make_display_label(String(relic_data.get("desc", "")), 11, IVORY)
+		rdesc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		rdesc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		relic_text_col.add_child(rdesc)
+
+	btn.pressed.connect(_begin_run_with.bind(hid))
+	return btn
+
+
+func _summarize_deck(deck: Array) -> String:
+	# "4× Goblin · 2× Brute · 2× Ratling · 2× Fireball" — aggregates the raw
+	# 10-card list into a copy-readable composition string. Preserves the first-
+	# seen order so the heaviest cards (which the deck leads with) read first.
+	var counts: Dictionary = {}
+	var order: Array[String] = []
+	for cid in deck:
+		var id: String = String(cid)
+		if not counts.has(id):
+			counts[id] = 0
+			order.append(id)
+		counts[id] += 1
+	var parts: Array[String] = []
+	for id in order:
+		var card := CardDB.get_card_data(id)
+		var name: String = String(card.get("name", id))
+		parts.append("%d× %s" % [int(counts[id]), name])
+	return "  ·  ".join(parts)
+
+
+func _begin_run_with(hero_id: String) -> void:
+	# Hand the pending seed override (set by _on_daily_run / _on_custom_run) to
+	# start_new_run, then clear it so the next plain NEW RUN rolls fresh again.
+	var seed_to_use := _pending_seed_override
+	_pending_seed_override = 0
+	RunState.start_new_run(hero_id, _selected_ascension, seed_to_use)
+	# After the hero is locked in, offer the run's opening blessing — 3 safe
+	# tiles (one per reward family) + 1 risky tile (real cost, bigger payoff).
+	# Skipping is allowed and routes straight to the map.
+	_show_blessing_select()
+
+
+func _on_daily_run() -> void:
+	# Slot allocation mirrors _on_new_run, but with a deterministic seed.
+	_pending_seed_override = RunState.daily_seed()
+	var empty := _first_empty_slot()
+	if empty >= 0:
+		_begin_new_in_slot(empty)
+	else:
+		_show_load_screen(true)
+
+
+func _on_custom_run() -> void:
+	# Opens the seed-input screen. Actual run start happens after the player
+	# types a seed and clicks BEGIN (handler: _start_custom_run).
+	_show_custom_seed_input()
+
+
+func _show_custom_seed_input() -> void:
+	# Replaces the menu column with a centered text-input form, matching the
+	# relic-select pattern. Reuses _center_menu_for_subscreen so it lands in
+	# the same visual position as the other sub-screens.
+	var menu := get_node_or_null("Menu")
+	if menu == null:
+		return
+	for child in menu.get_children():
+		child.queue_free()
+	_center_menu_for_subscreen()
+
+	var title := _make_display_label("CUSTOM SEED", 30, GILT_BRIGHT)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	menu.add_child(title)
+	menu.add_child(_make_ornament_row(220.0))
+
+	var hint := _make_display_label(
+		"Type a seed. Same seed → same map.\nShare it with a friend for a head-to-head run.",
+		15, ASH)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	menu.add_child(hint)
+
+	var spacer := Control.new()
+	spacer.custom_minimum_size = Vector2(0, 16)
+	menu.add_child(spacer)
+
+	var edit := LineEdit.new()
+	edit.name = "SeedInput"
+	edit.placeholder_text = "burningmeadow"
+	edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	edit.add_theme_font_size_override("font_size", 20)
+	edit.add_theme_color_override("font_color", IVORY)
+	edit.add_theme_color_override("font_placeholder_color", Color(0.55, 0.50, 0.42))
+	edit.custom_minimum_size = Vector2(360, 44)
+	edit.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	if GameTheme.font_display:
+		edit.add_theme_font_override("font", GameTheme.font_display)
+	menu.add_child(edit)
+
+	var spacer2 := Control.new()
+	spacer2.custom_minimum_size = Vector2(0, 20)
+	menu.add_child(spacer2)
+
+	var begin := _make_menu_button("BEGIN", Color(0.18, 0.36, 0.18), 22, 50)
+	begin.pressed.connect(func():
+		var s: String = edit.text.strip_edges().to_lower()
+		if s == "":
+			s = "burningmeadow"
+		_pending_seed_override = RunState.seed_from_string(s)
+		var empty := _first_empty_slot()
+		if empty >= 0:
+			_begin_new_in_slot(empty)
+		else:
+			_show_load_screen(true)
+	)
+	menu.add_child(begin)
+
+	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 15, 40)
+	back.pressed.connect(func():
+		_pending_seed_override = 0
+		_rebuild_menu()
+	)
+	menu.add_child(back)
 
 
 func _change_ascension(delta: int) -> void:
@@ -868,3 +1096,399 @@ func _start_title_shimmer() -> void:
 	_title_shimmer_tween.parallel().tween_property(title, "scale", Vector2(1.025, 1.025), 2.2)
 	_title_shimmer_tween.tween_property(title, "modulate", base, 2.2)
 	_title_shimmer_tween.parallel().tween_property(title, "scale", Vector2.ONE, 2.2)
+
+
+# ---------------------------------------------------------------------------
+# OPENING BLESSING
+# ---------------------------------------------------------------------------
+# After the hero is picked, the player gets a single opening boon: 3 "safe"
+# tiles drawn from the seven reward families (gold, heal, max HP, free relic,
+# free potion, free card, free upgrade) plus 1 "risky" tile with a real cost
+# and a bigger payoff. SKIP is always available — the run can start cold if
+# the player wants the full StS opening.
+#
+# This is built in MainMenu (rather than a dedicated scene) so it reuses the
+# atmosphere/parallax already running behind the menu and shares the hero-
+# pick sub-screen pattern (replace the Menu VBox in place, no scene change).
+
+func _show_blessing_select() -> void:
+	var menu := get_node_or_null("Menu")
+	if menu == null:
+		# If the menu node somehow vanished, never block the run from starting.
+		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
+		return
+	# Hide the centered Menu VBox used by every other sub-screen — the blessing
+	# screen lays itself out as a full-screen event-style composition (title
+	# top-left, choices stacked bottom-left) so it reads like the in-run event
+	# rooms instead of a boxed picker dialog.
+	menu.visible = false
+
+	# Defensive cleanup in case the screen is re-entered.
+	for child in get_children():
+		var cname: String = child.name
+		if cname in ["Background", "Atmosphere", "Menu"]:
+			continue
+		child.queue_free()
+
+	const COLUMN_LEFT := 110
+	const COLUMN_WIDTH := 760
+
+	var title := _make_display_label("AN OPENING BLESSING", 38, GILT_BRIGHT)
+	title.name = "BlessingTitle"
+	title.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	title.offset_left = COLUMN_LEFT
+	title.offset_top = 90
+	title.offset_right = COLUMN_LEFT + COLUMN_WIDTH
+	title.offset_bottom = 90 + 60
+	title.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	title.add_theme_constant_override("outline_size", 5)
+	title.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.75))
+	title.add_theme_constant_override("shadow_offset_x", 0)
+	title.add_theme_constant_override("shadow_offset_y", 2)
+	add_child(title)
+
+	var ornament := _make_ornament_row(220.0, true)
+	ornament.name = "BlessingOrnament"
+	ornament.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	ornament.offset_left = COLUMN_LEFT
+	ornament.offset_top = 154
+	ornament.offset_right = COLUMN_LEFT + 260
+	ornament.offset_bottom = 174
+	add_child(ornament)
+
+	var hint := _make_display_label(
+		"The road is long. Take a gift before you begin — three are kind, one demands a price.",
+		17, IVORY)
+	hint.name = "BlessingHint"
+	hint.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	hint.offset_left = COLUMN_LEFT
+	hint.offset_top = 184
+	hint.offset_right = COLUMN_LEFT + COLUMN_WIDTH
+	hint.offset_bottom = 184 + 60
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	hint.add_theme_constant_override("outline_size", 3)
+	hint.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.85))
+	hint.add_theme_constant_override("shadow_offset_x", 0)
+	hint.add_theme_constant_override("shadow_offset_y", 2)
+	add_child(hint)
+
+	# Frameless gem-prefixed choices, stacked bottom-left like the in-run event
+	# screen. Same composition as Event.gd: the choice ladder is the focal point,
+	# the description floats above, the skip is tucked beneath.
+	var num_choices := 4
+	var choice_h := 84
+	var stack_h := num_choices * choice_h + (num_choices - 1) * 8
+	var choices_vbox := VBoxContainer.new()
+	choices_vbox.name = "BlessingChoices"
+	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	choices_vbox.offset_left = COLUMN_LEFT
+	choices_vbox.offset_right = COLUMN_LEFT + COLUMN_WIDTH
+	choices_vbox.offset_top = -(stack_h + 120)
+	choices_vbox.offset_bottom = -120
+	choices_vbox.add_theme_constant_override("separation", 8)
+	add_child(choices_vbox)
+
+	var blessings := _roll_blessings()
+	for entry in blessings:
+		choices_vbox.add_child(_make_blessing_choice(entry, choice_h))
+
+	var skip := _make_menu_button("SKIP — BEGIN THE RUN",
+		Color(0.22, 0.16, 0.14), 16, 40)
+	skip.name = "BlessingSkip"
+	skip.pressed.connect(_skip_blessing)
+	skip.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	skip.offset_left = COLUMN_LEFT
+	skip.offset_right = COLUMN_LEFT + 360
+	skip.offset_top = -82
+	skip.offset_bottom = -36
+	add_child(skip)
+
+
+# Roll the displayed tiles: 3 distinct safe entries + 1 risky entry.
+# Each "entry" is a dict {id, name, desc, risky, color, apply: Callable} —
+# the actual mutation lives on `apply` so the tile click handler stays one
+# line. Some families (free relic / free potion / free card) sample from the
+# live DB at apply time so the player can't peek at the exact card before
+# committing.
+func _roll_blessings() -> Array:
+	var safe_pool: Array[String] = [
+		"gold", "heal", "max_hp", "relic", "potion", "card", "upgrade",
+	]
+	safe_pool.shuffle()
+	var picked_safe := safe_pool.slice(0, 3)
+
+	var risky_pool: Array[String] = [
+		"pact_relic", "cursed_gold", "glass_pact", "devourer",
+	]
+	var picked_risky: String = risky_pool[randi() % risky_pool.size()]
+
+	var entries: Array = []
+	for id in picked_safe:
+		entries.append(_blessing_entry(id, false))
+	entries.append(_blessing_entry(picked_risky, true))
+	# Shuffle so the risky tile isn't always the last cell.
+	entries.shuffle()
+	return entries
+
+
+func _blessing_entry(id: String, risky: bool) -> Dictionary:
+	# Centralised description / tint per blessing. Effects are applied in
+	# _apply_blessing — keeping render data and effect logic separate so a
+	# typo in copy can't accidentally double-pay the player.
+	var safe_color := Color(0.18, 0.30, 0.20)   # green-leaning for "safe"
+	var risk_color := Color(0.36, 0.18, 0.22)   # deep wine for "risky"
+	var color: Color = risk_color if risky else safe_color
+	var data := {"id": id, "risky": risky, "color": color}
+	match id:
+		# ── Safe ──
+		"gold":
+			data["name"] = "Heavy Purse"
+			data["desc"] = "Gain 60 gold."
+		"heal":
+			data["name"] = "Healer's Touch"
+			data["desc"] = "Heal 12 HP."
+		"max_hp":
+			data["name"] = "Iron Constitution"
+			data["desc"] = "+6 max HP, and heal 6 HP."
+		"relic":
+			data["name"] = "Wanderer's Trinket"
+			data["desc"] = "Gain a random combat relic."
+		"potion":
+			data["name"] = "Hidden Cache"
+			data["desc"] = "Gain a random potion and 20 gold."
+		"card":
+			data["name"] = "Strange Diagram"
+			data["desc"] = "Add a random uncommon card to your deck."
+		"upgrade":
+			data["name"] = "Travelling Whetstone"
+			data["desc"] = "Sharpen a random un-upgraded card in your deck."
+		# ── Risky ──
+		"pact_relic":
+			data["name"] = "Pact of Embers"
+			data["desc"] = "Gain a random rare relic — but add 2 curses to your deck."
+		"cursed_gold":
+			data["name"] = "Cursed Coin Pile"
+			data["desc"] = "Gain 150 gold — but lose 6 max HP."
+		"glass_pact":
+			data["name"] = "Glass Pact"
+			data["desc"] = "+10 max HP and full heal — but gain 1 curse."
+		"devourer":
+			data["name"] = "Devourer's Boon"
+			data["desc"] = "A random creature gains +2 ATK and Wither 1 permanently."
+		_:
+			data["name"] = id
+			data["desc"] = ""
+	return data
+
+
+func _make_blessing_choice(entry: Dictionary, height: int) -> Button:
+	# Frameless gem-prefixed choice — mirrors the in-run Event.gd choice style
+	# (gem on the left, headline + body to its right, no panel chrome). Risky
+	# entries get a wine-tinted gem and a "RISKY" chip beside the headline so
+	# the player can read the warning without a separate panel color.
+	var risky: bool = bool(entry.get("risky", false))
+	var name_text: String = String(entry.get("name", ""))
+	var desc_text: String = String(entry.get("desc", ""))
+
+	var btn := Button.new()
+	btn.flat = true
+	btn.custom_minimum_size = Vector2(560, height)
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.size_flags_horizontal = Control.SIZE_FILL
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+
+	var transparent := StyleBoxFlat.new()
+	transparent.bg_color = Color(0, 0, 0, 0)
+	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
+		btn.add_theme_stylebox_override(state, transparent)
+
+	btn.pressed.connect(_pick_blessing.bind(entry))
+
+	var hbox := HBoxContainer.new()
+	hbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hbox.offset_left = 24
+	hbox.offset_right = -24
+	hbox.add_theme_constant_override("separation", 20)
+	hbox.alignment = BoxContainer.ALIGNMENT_BEGIN
+	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(hbox)
+
+	var gem := TextureRect.new()
+	var diamond_tex := load("res://assets/icons/diamond.png") as Texture2D
+	if diamond_tex:
+		gem.texture = diamond_tex
+	gem.custom_minimum_size = Vector2(18, 18)
+	gem.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	gem.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	var base_gem_color: Color = (
+		Color(0.85, 0.32, 0.30, 0.95) if risky
+		else Color(GILT.r, GILT.g, GILT.b, 0.85))
+	var hover_gem_color: Color = (
+		Color(1.0, 0.50, 0.40, 1.0) if risky
+		else Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 1.0))
+	gem.modulate = base_gem_color
+	gem.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	gem.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(gem)
+
+	var vbox := VBoxContainer.new()
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	vbox.add_theme_constant_override("separation", 4)
+	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(vbox)
+
+	# Headline row: name on the left, optional RISKY chip on the right.
+	var headline_row := HBoxContainer.new()
+	headline_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	headline_row.add_theme_constant_override("separation", 12)
+	headline_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(headline_row)
+
+	var headline := Label.new()
+	headline.text = name_text
+	headline.add_theme_font_size_override("font_size", 26)
+	headline.add_theme_color_override("font_color", IVORY)
+	headline.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.80))
+	headline.add_theme_constant_override("outline_size", 3)
+	headline.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.75))
+	headline.add_theme_constant_override("shadow_offset_x", 0)
+	headline.add_theme_constant_override("shadow_offset_y", 2)
+	if GameTheme.font_display:
+		headline.add_theme_font_override("font", GameTheme.font_display)
+	headline.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	headline.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	headline_row.add_child(headline)
+
+	if risky:
+		var chip := Label.new()
+		chip.text = "RISKY"
+		chip.add_theme_font_size_override("font_size", 13)
+		chip.add_theme_color_override("font_color", Color(1.0, 0.55, 0.42))
+		chip.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+		chip.add_theme_constant_override("outline_size", 3)
+		if GameTheme.font_display:
+			chip.add_theme_font_override("font", GameTheme.font_display)
+		chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		headline_row.add_child(chip)
+
+	var body := Label.new()
+	body.text = desc_text
+	body.add_theme_font_size_override("font_size", 17)
+	body.add_theme_color_override("font_color", GameTheme.DESC_DIM)
+	body.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.70))
+	body.add_theme_constant_override("outline_size", 2)
+	body.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.65))
+	body.add_theme_constant_override("shadow_offset_x", 0)
+	body.add_theme_constant_override("shadow_offset_y", 1)
+	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	if GameTheme.font_body:
+		body.add_theme_font_override("font", GameTheme.font_body)
+	body.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(body)
+
+	btn.mouse_entered.connect(func() -> void:
+		gem.modulate = hover_gem_color
+		headline.add_theme_color_override("font_color", GameTheme.KEYWORD_GOLD)
+	)
+	btn.mouse_exited.connect(func() -> void:
+		gem.modulate = base_gem_color
+		headline.add_theme_color_override("font_color", IVORY)
+	)
+
+	return btn
+
+
+func _pick_blessing(entry: Dictionary) -> void:
+	_apply_blessing(String(entry.get("id", "")))
+	GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
+
+
+func _skip_blessing() -> void:
+	GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
+
+
+# Applies the picked blessing's mutation to RunState. Effects sample from the
+# live DBs (relics/potions/cards/upgrades) at apply time so the tile copy
+# stays evergreen — and so the player can't peek at the exact roll. Every
+# branch is intentionally self-contained: no shared "reward bundle" helper,
+# because the families don't actually overlap (a card add doesn't compose
+# with a relic add for this screen) and inlining is easier to audit.
+func _apply_blessing(id: String) -> void:
+	match id:
+		# ── Safe ──
+		"gold":
+			RunState.gain_gold(60)
+		"heal":
+			RunState.heal_hero(12)
+		"max_hp":
+			RunState.hero_max_hp += 6
+			RunState.heal_hero(6)
+		"relic":
+			var pool: Array[String] = RelicDB.roll_relic_reward(
+				"combat", RunState.relics, RunState.current_hero_id)
+			if not pool.is_empty():
+				RunState.add_relic(pool[0])
+		"potion":
+			if RunState.can_add_potion():
+				RunState.add_potion(PotionDB.roll_random_potion())
+			RunState.gain_gold(20)
+		"card":
+			var uncommons: Array[String] = CardDB.get_pool_by_rarity("uncommon")
+			if not uncommons.is_empty():
+				RunState.add_card(uncommons[randi() % uncommons.size()])
+		"upgrade":
+			# Sharpen a random un-upgraded creature/spell. Mirrors Olympian's
+			# Mark's auto-upgrade so we don't open a picker on the menu screen.
+			var candidates: Array[int] = []
+			for i in RunState.deck.size():
+				if RunState.is_card_upgraded(i):
+					continue
+				var d: Dictionary = CardDB.get_card_data(RunState.deck[i])
+				if d.get("type", "") in ["creature", "spell"] \
+						and CardDB.is_upgradeable(RunState.deck[i]):
+					candidates.append(i)
+			if not candidates.is_empty():
+				RunState.upgrade_card(
+					candidates[randi() % candidates.size()], "plus")
+		# ── Risky ──
+		"pact_relic":
+			# Roll a rare relic from the boss pool — these are the strongest
+			# in the game, justifying the curse tax. Two curses, not three,
+			# because this fires on round 1 with a fresh deck (no upgrades to
+			# soak the dilution yet).
+			var bosses: Array[String] = RelicDB.roll_boss_relics(
+				RunState.relics, RunState.current_hero_id)
+			if not bosses.is_empty():
+				RunState.add_relic(bosses[0])
+			for _i in 2:
+				RunState.add_card(CardDB.random_curse_id())
+		"cursed_gold":
+			RunState.gain_gold(150)
+			RunState.hero_max_hp = maxi(1, RunState.hero_max_hp - 6)
+			RunState.hero_hp = mini(RunState.hero_hp, RunState.hero_max_hp)
+		"glass_pact":
+			RunState.hero_max_hp += 10
+			RunState.heal_hero(RunState.hero_max_hp)
+			RunState.add_card(CardDB.random_curse_id())
+		"devourer":
+			# Pick a non-starter creature so the boon lands on a real combat
+			# unit, not a 1/1 starter goblin. Falls back to any creature if
+			# the deck is starter-only (Pyromancer / Acolyte openers).
+			var creature_indices: Array[int] = []
+			var starter_indices: Array[int] = []
+			for i in RunState.deck.size():
+				var d: Dictionary = CardDB.get_card_data(RunState.deck[i])
+				if d.get("type", "") != "creature":
+					continue
+				if d.get("rarity", "") == "starter":
+					starter_indices.append(i)
+				else:
+					creature_indices.append(i)
+			var pool: Array[int] = creature_indices if not creature_indices.is_empty() \
+				else starter_indices
+			if not pool.is_empty():
+				RunState.upgrade_card(
+					pool[randi() % pool.size()], "butcher")

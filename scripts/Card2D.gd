@@ -7,6 +7,15 @@ extends PanelContainer
 
 signal played
 signal destroyed
+# Fired when current_hp would drop the card to dead. Listeners (Phantom Veil
+# relic, Reborn on_death) can set current_hp back > 0 to cancel the death.
+# If no listener rescues, _die() runs and destroyed fires.
+signal will_die
+# Fires AFTER current_hp is reduced (any path: combat, spell, thorns, on-death
+# damage). amount is the post-armor damage actually applied. Used by relics
+# like Stalwart's Anvil, Wormwood, Spike Driver that need to react to a
+# friendly being hit.
+signal damaged(amount: int)
 signal floop_clicked
 # Drag lifecycle — Combat listens so it can light up the slot the player is
 # about to drop on. `dragging` fires each time the cursor moves while the
@@ -235,6 +244,7 @@ class GemOrb extends Control:
 	var fill_color: Color = Color.WHITE
 	var shape: String = "hex"             # hex / shield / drop / diamond / peak
 	var style: String = "faceted"         # "faceted" or "smooth"
+	var gloss: float = 1.0                # specular/bevel strength; <1 = calmer/matte
 	# Light direction (unit vector pointing FROM the light TO the surface).
 	# Upper-left light → vector points down-right. Stored as where the lit
 	# normal POINTS: (-0.40, -0.92) means the brightest facet faces up-left.
@@ -294,10 +304,10 @@ class GemOrb extends Control:
 			var spec_pos := center + LIGHT * Vector2(size.x * 0.26, size.y * 0.28)
 			var rad_outer := min_dim * 0.20
 			var rad_inner := min_dim * 0.085
-			draw_circle(spec_pos, rad_outer, Color(1, 1, 1, 0.38),
+			draw_circle(spec_pos, rad_outer, Color(1, 1, 1, 0.38 * gloss),
 				true, -1.0, true)
 			draw_circle(spec_pos + LIGHT * rad_inner * 0.35,
-				rad_inner, Color(1, 1, 1, 0.95), true, -1.0, true)
+				rad_inner, Color(1, 1, 1, 0.95 * gloss), true, -1.0, true)
 
 		# ── Layer 5: Bottom-right inner rim shadow ────────────────────────
 		# Wedge of the polygon facing away from the light gets an extra
@@ -325,7 +335,7 @@ class GemOrb extends Control:
 				# Pull bevel slightly inward so the dark rim still reads.
 				var ai := a - (a - center) * 0.04
 				var bi := b - (b - center) * 0.04
-				draw_line(ai, bi, Color(1, 1, 1, 0.55), 1.3, true)
+				draw_line(ai, bi, Color(1, 1, 1, 0.55 * gloss), 1.3, true)
 
 	# Faceted: each triangle (center → edge a → edge b) gets a flat colour
 	# based on its angular position. Saturated bases blend toward white
@@ -657,6 +667,15 @@ var deck_uid: int = -1
 # _atk_label / _hp_label refs, so combat logic is unchanged. Falls back to
 # v4 silently if CardTextureCache hasn't pre-baked this card yet.
 @export var live_baked_mode: bool = false
+# Visual-redesign prototype path. ONLY set true by tools/render_cards harness.
+# When true, _build_layout dispatches to _build_redesign_proto so the live game
+# (which never sets this) is completely unaffected.
+@export var redesign_proto: bool = false
+# Keyword-treatment A/B for the redesign prototype only. 0 = pill shelf,
+# 1 = drop (no icon row), 2 = engraved recessed plaque, 3 = stamps on the
+# art's lower-left, 4 = 40px orb rail, 5 = 56px orbs (stat-orb parity).
+# 5 is the chosen default: the only size legible at 0.6x battlefield scale.
+@export var kw_variant: int = 5
 
 # Per-card font override (used by Collection gallery font A/B test).
 # When set, this Font replaces GameTheme.font_display for the name banner
@@ -668,6 +687,9 @@ var card_data: Dictionary = {}
 var current_hp := 0
 var current_atk := 0
 var current_lane: int = -1
+# Sentinel for "ATK never displayed yet" — used by update_stat_display to
+# emit a buff/debuff popup only on subsequent changes, not the first paint.
+var _displayed_effective_atk: int = -999
 # Typed gameplay state — receptacle for flags migrating off set_meta.
 # See scripts/state/CreatureInstance.gd for the migration map.
 var state: CreatureInstance = CreatureInstance.new()
@@ -959,6 +981,7 @@ var _cost_label: Label
 var _desc_label: Label
 var _type_label: Label
 var _floop_indicator: Label
+var _floop_pulse_tween: Tween = null
 # Bottom-of-card type plate (rarity gem + type text). Always present on both
 # spells and creatures, mirrors the StS "Skill" tag. For creatures it's
 # hidden when the FLOOP indicator activates — see update_floop_display.
@@ -1078,7 +1101,12 @@ const POINT_TYPE    := Vector2(150.0, 235.0)   # below banner — keyword strip
 const POINT_DESC    := Vector2(150.0, 304.0)   # text well center
 const POINT_ATK     := Vector2(30.0, 378.0)    # legacy — orbs use direct anchors
 const POINT_HP      := Vector2(270.0, 378.0)   # legacy — orbs use direct anchors
-const POINT_FLOOP   := Vector2(150.0, 390.0)   # between bottom orbs
+const POINT_FLOOP   := Vector2(150.0, 390.0)   # between bottom orbs (creatures)
+# Spell cards have no bottom orbs, so the targeting tag ("FRIENDLY" / "ENEMY" /
+# "ANY CREATURE" / "ANY TARGET") used to sit at POINT_FLOOP and clip out of the
+# 400px card frame. Anchor it inside the text-well lower band instead — fully
+# visible without overlapping the description (well ends at y≈354).
+const POINT_SPELL_TARGET := Vector2(150.0, 372.0)
 
 const SIZE_COST     := Vector2(48, 36)
 const SIZE_NAME     := Vector2(210, 38)
@@ -1088,6 +1116,19 @@ const SIZE_TYPE     := Vector2(170, 26)
 const SIZE_DESC     := Vector2(240, 100)
 const SIZE_STAT     := Vector2(48, 36)    # shared by ATK and HP
 const SIZE_FLOOP    := Vector2(150, 24)
+
+# Vertical pixel nudge applied to the cost / ATK / HP numeral labels inside
+# their SphereOrb containers. Positive = move text DOWN, negative = move UP.
+# Why this exists: Godot's Label vertical_alignment = CENTER centers on the
+# font's full line box (ascent + descent), but caps/digits don't occupy the
+# descender region — they visually sit in the UPPER portion of the line box,
+# so the rendered character appears HIGH inside the orb. The SphereOrb's
+# drop shadow below the sphere also shifts the painted "visual center" of
+# the orb DOWNWARD relative to the container's geometric center. Both
+# effects compound to put numerals visibly above the orb's bright center.
+# This offset bypasses Godot's font-metric-driven centering with a direct
+# pixel shift. Tune by eye: bigger value pushes numerals further down.
+const ORB_NUMERAL_Y_OFFSET := 3
 
 
 func _ready() -> void:
@@ -1193,6 +1234,10 @@ func can_attack() -> bool:
 	if has_attacked_this_turn: return false
 	if will_floop: return false
 	if has_flooped_this_turn: return false
+	if state.is_frozen: return false
+	# Structures are board objects (Pyres, Mausoleums, Altars) — they hold
+	# charge counters and trigger encounter effects but never swing themselves.
+	if has_keyword("structure"): return false
 	if card_data.get("passive", "") == "cannot_attack_wall": return false
 	if card_data.get("passive", "") == "siege": return true
 	return true
@@ -1235,20 +1280,23 @@ func _find_card_art() -> Texture2D:
 	var name_id = card_data.get("name", "").to_lower().replace(" ", "_").replace("'", "")
 	var art: Texture2D = null
 	if is_spell():
-		art = GameTheme.try_load_spell_art(cid)
+		art = CardArtAliases.try_load_spell_art(cid)
 		if art == null:
-			art = GameTheme.try_load_spell_art(name_id)
+			art = CardArtAliases.try_load_spell_art(name_id)
 	if art == null:
-		art = GameTheme.try_load_creature_art(cid)
+		art = CardArtAliases.try_load_creature_art(cid)
 	if art == null and name_id != "":
-		art = GameTheme.try_load_creature_art(name_id)
+		art = CardArtAliases.try_load_creature_art(name_id)
 	if art == null and name_id != "":
-		art = GameTheme.try_load_creature_art("e_" + name_id)
+		art = CardArtAliases.try_load_creature_art("e_" + name_id)
 	return art
 
 
 func _build_layout() -> void:
 	if card_data.is_empty():
+		return
+	if redesign_proto:
+		_build_redesign_proto()
 		return
 	# Reset stat base colours each build; v4 overrides per-plate so its ATK
 	# reads dark-on-gold and HP light-on-red. Other layouts keep the
@@ -1272,7 +1320,13 @@ func _build_layout() -> void:
 		else:
 			_build_full_layout_v4()
 	elif GameTheme.USE_NEW_FRAME:
-		_build_full_layout_v3()
+		# v6 redesign promoted to live. The in-hand card and every static card
+		# display flow through this branch; so does the CardTextureCache bake
+		# (it sets static_display + bake_strip_stats but no layout flag), so the
+		# baked texture is the redesign with blank numerals and the baked-overlay
+		# live labels land on the orbs (positions match v3). Battlefield tokens
+		# use compact_mode above; the render harness still sets redesign_proto.
+		_build_redesign_proto()
 	else:
 		_build_full_layout()
 
@@ -1329,22 +1383,14 @@ func _build_compact_layout() -> void:
 	# 18px. The number sits on the gem directly, Hearthstone-style.
 
 	# Compact battlefield stat orbs — round gems matching the hand-card
-	# trio. Shape uniformity (3 circles) reads cleaner than 3 polygons at
-	# this scale; position + colour disambiguate cost/ATK/HP.
-
-	# Top-left cost orb.
-	var c_cost := GemOrb.new()
-	c_cost.shape = "circle"
-	c_cost.style = "smooth"
-	c_cost.fill_color = GameTheme.COST_BLUE_GEM
-	c_cost.position = Vector2(4, 4)
-	c_cost.custom_minimum_size = Vector2(30, 30)
-	c_cost.size = Vector2(30, 30)
-	_cost_badge = c_cost
-	root.add_child(c_cost)
-	_cost_label = _build_orb_number_label(str(card_data.get("cost", 0)),
-		14, true)
-	c_cost.add_child(_cost_label)
+	# trio. Shape uniformity reads cleaner than polygons at this scale;
+	# position + colour disambiguate ATK/HP.
+	#
+	# No cost orb on the battlefield: mana cost is a "what does it take to
+	# play this" stat, and the card has already been played. Leaving it on
+	# the token confused the read (looked like another stat). Cost still
+	# shows on the hover detail panel. _cost_badge/_cost_label stay null —
+	# set_display_cost guards on is_on_battlefield + a null check.
 
 	# Bottom-left ATK and bottom-right HP gems (creatures only).
 	if is_creature():
@@ -1396,6 +1442,54 @@ func _build_compact_layout() -> void:
 	_floop_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(_floop_indicator)
 
+	# Keyword orbs along the top-right so Swift / Piercing / Armored etc.
+	# stay readable at a glance on battlefield tokens.
+	var keywords: Array = card_data.get("keywords", [])
+	if keywords.size() > 0:
+		# Filter to icon-bearing, non-floop keywords (floop owns the FLOOP
+		# indicator; on_enter et al. have no glyph). Cap at 3 for token width.
+		var kw_icons: Array[Texture2D] = []
+		for kw in keywords:
+			if String(kw) == "floop":
+				continue
+			var icon_tex: Texture2D = GameTheme.get_keyword_icon(kw)
+			if icon_tex == null:
+				continue
+			kw_icons.append(icon_tex)
+			if kw_icons.size() >= 3:
+				break
+		# Glossy arcane-violet orbs at stat-orb parity (30px vs the token's 32px
+		# ATK/HP gems) so keywords read at a glance; the flat 20px gold glyphs
+		# washed into the art. Same GemOrb sphere as the stat orbs.
+		if kw_icons.size() > 0:
+			var kw_orb := 30.0
+			var kw_gap := 4.0
+			var kw_total := float(kw_icons.size()) * kw_orb + float(kw_icons.size() - 1) * kw_gap
+			for i in range(kw_icons.size()):
+				var korb := GemOrb.new()
+				korb.shape = "circle"
+				korb.style = "smooth"
+				korb.fill_color = Color(0.247, 0.153, 0.376)  # deep arcane violet
+				korb.gloss = 0.42  # calmer than stat orbs so the gilt glyph reads
+				korb.anchor_left = 1.0; korb.anchor_right = 1.0
+				korb.anchor_top = 0.0; korb.anchor_bottom = 0.0
+				korb.offset_left = -4.0 - kw_total + float(i) * (kw_orb + kw_gap)
+				korb.offset_right = korb.offset_left + kw_orb
+				korb.offset_top = 4.0
+				korb.offset_bottom = 4.0 + kw_orb
+				korb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				root.add_child(korb)
+				var kglyph := TextureRect.new()
+				kglyph.texture = kw_icons[i]
+				kglyph.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				kglyph.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				kglyph.set_anchors_preset(Control.PRESET_FULL_RECT)
+				kglyph.offset_left = 6; kglyph.offset_right = -6
+				kglyph.offset_top = 6; kglyph.offset_bottom = -6
+				kglyph.modulate = GameTheme.GILT_BRIGHT
+				kglyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				korb.add_child(kglyph)
+
 
 # ═══════════════════════════════════════════
 #  BAKED OVERLAY LAYOUT — texture + live stat labels
@@ -1436,14 +1530,17 @@ func _build_baked_overlay_layout() -> void:
 	root.add_child(tex_rect)
 
 	# ── Live overlay: cost orb numeral ──
-	# Wrapper Control positioned exactly where the v4 cost SphereOrb sits
-	# (anchor 0,0 with -9..35 offsets). The label inside uses PRESET_FULL_RECT
-	# so it centres inside the sphere painted underneath.
+	# Wrapper Control concentric with the cost SphereOrb painted into the baked
+	# texture. The bake uses the v3 layout, whose orbs are 56px (anchor 0,0 with
+	# -9..47 offsets, sphere center at card-local 19px) — so the slot MUST use
+	# the same 56px box, not the old v4 44px box (-9..35), or the numeral lands
+	# above/left of the sphere. The label inside uses PRESET_FULL_RECT so it
+	# centres inside the sphere painted underneath.
 	var cost_slot := Control.new()
 	cost_slot.anchor_left = 0.0; cost_slot.anchor_right = 0.0
 	cost_slot.anchor_top = 0.0; cost_slot.anchor_bottom = 0.0
-	cost_slot.offset_left = -9; cost_slot.offset_right = 35
-	cost_slot.offset_top = -9; cost_slot.offset_bottom = 35
+	cost_slot.offset_left = -9; cost_slot.offset_right = 47
+	cost_slot.offset_top = -9; cost_slot.offset_bottom = 47
 	cost_slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(cost_slot)
 	_cost_label = _make_stat_number(str(card_data.get("cost", 0)),
@@ -1456,11 +1553,14 @@ func _build_baked_overlay_layout() -> void:
 
 	if is_creature():
 		# ── Live overlay: ATK orb numeral (bottom-left) ──
+		# 56px box concentric with the v3 ATK sphere (anchor 0,1, -9..47 / -47..9,
+		# sphere center at card-local (19, h-19)). Old v4 44px box left the numeral
+		# below the sphere center — the worst-offset "bottom orb" case.
 		var atk_slot := Control.new()
 		atk_slot.anchor_left = 0.0; atk_slot.anchor_right = 0.0
 		atk_slot.anchor_top = 1.0; atk_slot.anchor_bottom = 1.0
-		atk_slot.offset_left = -9; atk_slot.offset_right = 35
-		atk_slot.offset_top = -35; atk_slot.offset_bottom = 9
+		atk_slot.offset_left = -9; atk_slot.offset_right = 47
+		atk_slot.offset_top = -47; atk_slot.offset_bottom = 9
 		atk_slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		root.add_child(atk_slot)
 		_atk_base_color = Color(0.10, 0.07, 0.02)  # dark-on-gold, matches v4
@@ -1470,11 +1570,13 @@ func _build_baked_overlay_layout() -> void:
 		_atk_badge = null
 
 		# ── Live overlay: HP orb numeral (bottom-right) ──
+		# 56px box concentric with the v3 HP sphere (anchor 1,1, -47..9 / -47..9,
+		# sphere center at card-local (w-19, h-19)).
 		var hp_slot := Control.new()
 		hp_slot.anchor_left = 1.0; hp_slot.anchor_right = 1.0
 		hp_slot.anchor_top = 1.0; hp_slot.anchor_bottom = 1.0
-		hp_slot.offset_left = -35; hp_slot.offset_right = 9
-		hp_slot.offset_top = -35; hp_slot.offset_bottom = 9
+		hp_slot.offset_left = -47; hp_slot.offset_right = 9
+		hp_slot.offset_top = -47; hp_slot.offset_bottom = 9
 		hp_slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		root.add_child(hp_slot)
 		_hp_base_color = Color(1, 0.97, 0.92)
@@ -1614,7 +1716,7 @@ func _build_full_layout() -> void:
 	if GameTheme.font_display:
 		_name_label.add_theme_font_override("font", GameTheme.font_display)
 	_name_label.add_theme_font_size_override("font_size", 11)
-	_name_label.add_theme_color_override("font_color", GameTheme.IVORY)
+	_name_label.add_theme_color_override("font_color", GameTheme.get_name_color(card_data))
 	_name_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
 	_name_label.add_theme_constant_override("outline_size", 2)
 	_name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1790,6 +1892,10 @@ func _build_full_layout_v3() -> void:
 		var grain_overlay := TextureRect.new()
 		grain_overlay.texture = GameTheme.tex_card_grain
 		grain_overlay.stretch_mode = TextureRect.STRETCH_TILE
+		# EXPAND_IGNORE_SIZE drops the 256x256 texture min-size so FULL_RECT anchors
+		# can shrink the rect to the parent panel; without it the grain keeps its
+		# texture size and spills out below/beside the card (visible band in Reward).
+		grain_overlay.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		grain_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 		grain_overlay.modulate = Color(1, 1, 1, 0.20)
 		grain_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1893,23 +1999,37 @@ void fragment() {
 	# label paints it on top of the orb. Without this check we'd burn the
 	# number into the cached texture AND overlay it, causing "22" doubling.
 	var stat_font: Font = display_font_override if display_font_override else GameTheme.font_stat
+	# Numerals at 14 pt — matches the compact battlefield's label size so hand
+	# cards and field tokens read with consistent number weight. (Earlier
+	# experiment at 22 pt looked "giga" relative to the battlefield because
+	# the 56 px hand orbs are visibly larger than the 30 px field orbs to
+	# begin with — equal font size keeps the absolute glyph height matched.)
+	# PRESET_FULL_RECT + CENTER alignment puts the glyph at the orb's visual
+	# center; GameTheme.font_stat's FontVariation sets spacing_bottom = −5 so
+	# caps/numerals optically center inside the line box instead of sitting high.
 	_cost_label = _make_styled_label(
 		"" if bake_strip_stats else str(card_data.cost),
 		stat_font, 14, Color(0.996, 0.941, 0.800))  # #FEF0CC
 	_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+	# Shift the label rect DOWN to optically center the numeral on the orb's
+	# painted bright center (see ORB_NUMERAL_Y_OFFSET docs above).
+	_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
+	_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
 	_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	v3_cost_orb.add_child(_cost_label)
 
 	# ── Layer 4: Name label inside the painted banner ──
-	# DARK text on the CREAM banner. #2A1F12 = warm dark brown, contrast 15.1:1
-	# on cream (AAA). No outline — a 3px black outline around tiny dark glyphs
-	# blobs them out, fusing letters into illegible smears (the old bug). At
-	# 15:1 contrast Lilita's heavy weight stands on its own. Soft drop shadow
-	# adds depth without darkening. Ellipsis-trim handles long names like
-	# "Collector's Champion" gracefully when they overflow the banner.
+	# DARK text on the CREAM banner — tribe-tinted. Each tribe color was hand-
+	# tuned for ≥4.5:1 contrast on the cream banner (soldier amber, wretch rust,
+	# beast forest, fae teal, undead crimson, construct slate, spell violet,
+	# neutral warm brown). No outline — a 3px black outline around tiny dark
+	# glyphs blobs them out, fusing letters into illegible smears (the old bug).
+	# At ≥4.5:1 contrast Lilita's heavy weight stands on its own. Soft drop
+	# shadow adds depth without darkening. Ellipsis-trim handles long names
+	# like "Collector's Champion" gracefully when they overflow the banner.
 	var display_font: Font = display_font_override if display_font_override else GameTheme.font_display
 	_name_label = _make_styled_label(card_data.name, display_font,
-		13, Color(0.165, 0.122, 0.071))  # #2A1F12 — warm dark brown
+		13, GameTheme.get_name_color(card_data))
 	_name_label.add_theme_constant_override("outline_size", 0)
 	_name_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.30))
 	_name_label.add_theme_constant_override("shadow_offset_x", 0)
@@ -2031,6 +2151,8 @@ void fragment() {
 			"" if bake_strip_stats else str(current_atk),
 			stat_font, 14, Color(1.000, 0.957, 0.839))  # #FFF4D6
 		_atk_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_atk_label.offset_top = ORB_NUMERAL_Y_OFFSET
+		_atk_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
 		_atk_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		v3_atk_orb.add_child(_atk_label)
 
@@ -2045,6 +2167,8 @@ void fragment() {
 			"" if bake_strip_stats else str(current_hp),
 			stat_font, 14, Color(1.000, 0.941, 0.898))  # #FFF0E5
 		_hp_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_hp_label.offset_top = ORB_NUMERAL_Y_OFFSET
+		_hp_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
 		_hp_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		v3_hp_orb.add_child(_hp_label)
 
@@ -2064,7 +2188,7 @@ void fragment() {
 			tgt_lbl.add_theme_color_override("font_outline_color",
 				Color(1, 0.93, 0.78, 0.50))
 			tgt_lbl.add_theme_constant_override("outline_size", 1)
-			_center_at_point(tgt_lbl, POINT_FLOOP, SIZE_FLOOP)
+			_center_at_point(tgt_lbl, POINT_SPELL_TARGET, SIZE_FLOOP)
 			root.add_child(tgt_lbl)
 
 	# Rarity strip — kept as a hidden placeholder so external code that reads
@@ -2075,6 +2199,576 @@ void fragment() {
 	_rarity_strip.visible = false
 	_rarity_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(_rarity_strip)
+
+
+# ═══════════════════════════════════════════
+#  REDESIGN PROTOTYPE (v6) — visual-audit mockup, gated by `redesign_proto`.
+#  Builds on the v3 painted frame + PD-master art (the game's strongest
+#  assets) and resolves the four unfinished zones from the design review:
+#    1. Rarity is now a card-wide language — colored glow rim + a faceted
+#       rarity gem (uncommon/rare only), not just a faint frame tint.
+#    2. Keyword medallions are seated on an engraved SHELF instead of
+#       floating as mystery glyphs in dead space.
+#    3. Description sits on an aged-parchment page, vertically centered, so
+#       short cards don't leave a void and the text reads as "a page."
+#    4. Spells own their bottom with a forged footer cartouche (targeting /
+#       INSTANT / EXHAUST) flanked by gems — no more empty orb wells.
+#  NOTE: the painted filigree corners + forged nameplate in the full vision
+#  are MJ-commissioned art; this proto fakes them procedurally to show layout.
+# ═══════════════════════════════════════════
+
+func _build_redesign_proto() -> void:
+	var root := Control.new()
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+
+	var rarity := String(card_data.get("rarity", "common"))
+	var is_sp := is_spell()
+	var glow_col: Color = GameTheme.rarity_color(rarity)
+
+	# ── Layer -1: soft neutral seat shadow ───────────────────────────────
+	# A large, soft, rarity-independent dark halo so the hard card edge melts
+	# into whatever it sits on instead of stopping abruptly. This is the
+	# "transition to the background" — every card casts the same gentle seat;
+	# the rarity glow (Layer 0) then adds colour on top for rares/uncommons.
+	var seat := Panel.new()
+	seat.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	seat.anchor_left = 0.06; seat.anchor_right = 0.94
+	seat.anchor_top = 0.04; seat.anchor_bottom = 0.965
+	var seat_st := StyleBoxFlat.new()
+	seat_st.bg_color = Color(0, 0, 0, 0.0)
+	seat_st.set_corner_radius_all(22)
+	seat_st.set_border_width_all(0)
+	seat_st.shadow_color = Color(0, 0, 0, 0.55)
+	seat_st.shadow_size = 18
+	seat_st.shadow_offset = Vector2(0, 4)
+	seat.add_theme_stylebox_override("panel", seat_st)
+	root.add_child(seat)
+
+	# ── Layer 0: rarity glow rim (behind everything) ─────────────────────
+	# A rounded panel inset to the painted silhouette whose colored drop
+	# shadow bleeds past the card edge → an unmistakable rarity halo. Rare
+	# burns gold, uncommon glows cool blue, common barely whispers.
+	var glow_size := 4
+	match rarity:
+		"rare":     glow_size = 16
+		"uncommon": glow_size = 10
+		"common":   glow_size = 4
+		"starter":  glow_size = 2
+	var glow := Panel.new()
+	glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	glow.anchor_left = 0.035; glow.anchor_right = 0.965
+	glow.anchor_top = 0.02; glow.anchor_bottom = 0.985
+	var gs := StyleBoxFlat.new()
+	gs.bg_color = Color(glow_col.r, glow_col.g, glow_col.b, 0.0)
+	gs.set_corner_radius_all(20)
+	gs.set_border_width_all(0)
+	gs.shadow_color = Color(glow_col.r, glow_col.g, glow_col.b, 0.6)
+	gs.shadow_size = glow_size
+	glow.add_theme_stylebox_override("panel", gs)
+	root.add_child(glow)
+
+	# ── Layer 1: painted frame, tinted per rarity (Marvel-Snap read) ─────
+	var v3_frame: Texture2D = GameTheme.get_card_frame(card_data)
+	if v3_frame:
+		_frame_tex = TextureRect.new()
+		_frame_tex.texture = v3_frame
+		_frame_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		_frame_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		_frame_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_frame_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var fm := Color(1, 1, 1)
+		match rarity:
+			"rare":     fm = Color(1.18, 0.98, 0.58)  # hot gold
+			"uncommon": fm = Color(0.74, 0.86, 1.10)  # cool steel-blue
+			"common":   fm = Color(1.02, 0.96, 0.88)  # warm neutral
+			"starter":  fm = Color(0.86, 0.84, 0.80)  # muted pewter
+		if is_sp:
+			fm = Color(fm.r * 0.90, fm.g * 0.84, fm.b * 1.16)  # violet bias
+		_frame_tex.self_modulate = fm
+		root.add_child(_frame_tex)
+
+	# ── Layer 2: aged-parchment description page ─────────────────────────
+	# Replaces v3's flat dark overlay. A warm tan page with a dark-brown
+	# engraved border + grain — dark text on it reads as a real page, which
+	# is the single biggest "this card is finished" upgrade.
+	var page := Panel.new()
+	page.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	page.anchor_left = 0.105; page.anchor_right = 0.895
+	page.anchor_top = 0.620; page.anchor_bottom = 0.905
+	var pst := StyleBoxFlat.new()
+	pst.bg_color = Color(0.737, 0.651, 0.494, 0.98)  # #BCA67E aged parchment
+	pst.set_corner_radius_all(7)
+	pst.border_color = Color(0.286, 0.196, 0.094, 0.95)  # dark walnut edge
+	pst.set_border_width_all(2)
+	pst.shadow_color = Color(0, 0, 0, 0.45)
+	pst.shadow_size = 4
+	page.add_theme_stylebox_override("panel", pst)
+	root.add_child(page)
+	# Aged-parchment surface: a clipped overlay stack — paper-fiber grain →
+	# warm sunlit top sheen → walnut gravity-shade at the bottom → darkened
+	# corner vignette — turns the flat tan fill into a lit, weathered page.
+	# All baked Gradient/Noise textures (no shaders → GL-compat safe). Added
+	# before the description so the text always sits on top.
+	var page_surf := Control.new()
+	page_surf.clip_contents = true
+	page_surf.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	page_surf.anchor_left = 0.0; page_surf.anchor_right = 1.0
+	page_surf.anchor_top = 0.0; page_surf.anchor_bottom = 1.0
+	page_surf.offset_left = 2; page_surf.offset_right = -2
+	page_surf.offset_top = 2; page_surf.offset_bottom = -2
+	page.add_child(page_surf)
+	if GameTheme.tex_card_grain:
+		var pg := TextureRect.new()
+		pg.texture = GameTheme.tex_card_grain
+		pg.stretch_mode = TextureRect.STRETCH_TILE
+		pg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		pg.set_anchors_preset(Control.PRESET_FULL_RECT)
+		pg.modulate = Color(0.33, 0.22, 0.10, 0.34)  # browner, stronger fiber
+		pg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		page_surf.add_child(pg)
+	if GameTheme.tex_card_top_light:
+		var tl := TextureRect.new()
+		tl.texture = GameTheme.tex_card_top_light
+		tl.stretch_mode = TextureRect.STRETCH_SCALE
+		tl.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tl.set_anchors_preset(Control.PRESET_FULL_RECT)
+		tl.modulate = Color(1.0, 0.95, 0.80, 0.30)  # warm sunlit top edge
+		tl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		page_surf.add_child(tl)
+	if GameTheme.tex_card_bottom_shade:
+		var bs := TextureRect.new()
+		bs.texture = GameTheme.tex_card_bottom_shade
+		bs.stretch_mode = TextureRect.STRETCH_SCALE
+		bs.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		bs.set_anchors_preset(Control.PRESET_FULL_RECT)
+		bs.modulate = Color(0.28, 0.18, 0.09, 0.34)  # walnut gravity-shade
+		bs.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		page_surf.add_child(bs)
+	if GameTheme.tex_card_vignette:
+		var vg := TextureRect.new()
+		vg.texture = GameTheme.tex_card_vignette
+		vg.stretch_mode = TextureRect.STRETCH_SCALE
+		vg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		vg.set_anchors_preset(Control.PRESET_FULL_RECT)
+		vg.modulate = Color(0.22, 0.13, 0.06, 0.30)  # aged darkened edges
+		vg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		page_surf.add_child(vg)
+
+	# ── Layer 3: art with rounded top corners (reused v3 shader) ─────────
+	var card_art: Texture2D = _find_card_art()
+	if card_art:
+		var art_clip := Control.new()
+		art_clip.clip_contents = true
+		art_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		art_clip.anchor_left = 0.020; art_clip.anchor_right = 0.980
+		art_clip.anchor_top = 0.015; art_clip.anchor_bottom = 0.470
+		root.add_child(art_clip)
+		_art_rect = art_clip
+		var art_tex := TextureRect.new()
+		art_tex.texture = card_art
+		art_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		art_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		art_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+		art_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var art_shader := Shader.new()
+		art_shader.code = """
+shader_type canvas_item;
+uniform float radius_x : hint_range(0.0, 0.5) = 0.057;
+uniform float radius_y : hint_range(0.0, 0.5) = 0.085;
+void fragment() {
+	vec2 uv = UV;
+	float d_x = min(uv.x, 1.0 - uv.x);
+	float d_y = uv.y;
+	if (d_x < radius_x && d_y < radius_y) {
+		vec2 offset = vec2(radius_x - d_x, radius_y - d_y);
+		float ed = (offset.x * offset.x) / (radius_x * radius_x) +
+				   (offset.y * offset.y) / (radius_y * radius_y);
+		if (ed > 1.0) { COLOR.a = 0.0; }
+	}
+}
+"""
+		var art_mat := ShaderMaterial.new()
+		art_mat.shader = art_shader
+		art_mat.set_shader_parameter("radius_x", 0.090)
+		art_mat.set_shader_parameter("radius_y", 0.135)
+		art_tex.material = art_mat
+		art_clip.add_child(art_tex)
+	else:
+		# No dedicated art → a deliberately-styled "empty plate" so it reads as
+		# an intentional sealed frame, not a failed image load. Rounded top
+		# corners (native StyleBox, matches the real-art window) + muted slate
+		# fill + a ghosted gilt monogram of the card's initial.
+		var ph := Panel.new()
+		ph.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ph.anchor_left = 0.020; ph.anchor_right = 0.980
+		ph.anchor_top = 0.015; ph.anchor_bottom = 0.470
+		var phst := StyleBoxFlat.new()
+		phst.bg_color = Color(0.169, 0.157, 0.192)
+		phst.corner_radius_top_left = 16
+		phst.corner_radius_top_right = 16
+		phst.shadow_color = Color(0, 0, 0, 0.0)
+		ph.add_theme_stylebox_override("panel", phst)
+		root.add_child(ph)
+		_art_rect = ph
+		var ph_name := String(card_data.get("name", "")).strip_edges()
+		var mono_ch := ph_name.substr(0, 1).to_upper() if ph_name.length() > 0 else "?"
+		var mono := _make_styled_label(mono_ch, GameTheme.font_display, 40,
+			Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.26))
+		mono.add_theme_constant_override("outline_size", 0)
+		_center_at_point(mono, Vector2(150, 96), Vector2(80, 80))
+		ph.add_child(mono)
+
+	var stat_font: Font = GameTheme.font_stat
+	var display_font: Font = GameTheme.font_display
+
+	# ── Layer 4: cost gem (top-left, reused) ─────────────────────────────
+	# Full glossy orb (not simple_mode): the prototype renders only 8 cards,
+	# so the perf reason for the flat recipe doesn't apply here — the full
+	# stack (glow halo + drop shadow + rim + specular) makes each orb read as
+	# a distinct 3D object sitting ON the card, so neighbouring orbs no longer
+	# bleed into one another.
+	var cost_orb := _make_stat_orb(GameTheme.COST_BLUE_GEM, 0.0, false)
+	cost_orb.anchor_left = 0.0; cost_orb.anchor_right = 0.0
+	cost_orb.anchor_top = 0.0; cost_orb.anchor_bottom = 0.0
+	cost_orb.offset_left = -9; cost_orb.offset_right = 47
+	cost_orb.offset_top = -9; cost_orb.offset_bottom = 47
+	root.add_child(cost_orb)
+	_cost_label = _make_styled_label(
+		"" if bake_strip_stats else str(card_data.get("cost", 0)),
+		stat_font, 14, Color(0.996, 0.941, 0.800))
+	_cost_label.add_theme_constant_override("outline_size", 4)
+	_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
+	_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
+	_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cost_orb.add_child(_cost_label)
+
+	# ── Layer 4b: rarity gem (top-right) — only uncommon / rare ──────────
+	if rarity == "uncommon" or rarity == "rare":
+		# Rare's rarity_color is a lemon-gold that read cheap on the faceted
+		# gem; push it to a warm amber/topaz. Uncommon keeps its sapphire.
+		var gem_col: Color = glow_col
+		if rarity == "rare":
+			gem_col = Color(0.949, 0.616, 0.137)
+		var gem := _make_stat_orb(gem_col, 0.0, false)
+		gem.anchor_left = 1.0; gem.anchor_right = 1.0
+		gem.anchor_top = 0.0; gem.anchor_bottom = 0.0
+		gem.offset_left = -38; gem.offset_right = 6
+		gem.offset_top = -6; gem.offset_bottom = 38
+		root.add_child(gem)
+
+	# ── Layer 5: name in the painted banner (nudged to true center) ──────
+	# Spells get a deep-aubergine ink instead of the mid-violet tribe colour.
+	# Mid-violet (0.38,0.18,0.55) on the cream banner was the weakest text on
+	# the card; this is the same hue family darkened to ~5.5:1 contrast so the
+	# spell name reads as crisply as the dark-brown creature names.
+	var name_col: Color = GameTheme.get_name_color(card_data)
+	if is_sp:
+		name_col = Color(0.212, 0.063, 0.290)
+	_name_label = _make_styled_label(card_data.get("name", ""), display_font,
+		13, name_col)
+	_name_label.add_theme_constant_override("outline_size", 0)
+	_name_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.30))
+	_name_label.add_theme_constant_override("shadow_offset_x", 0)
+	_name_label.add_theme_constant_override("shadow_offset_y", 1)
+	_name_label.clip_text = true
+	_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_center_at_point(_name_label, Vector2(150, 213), SIZE_NAME)
+	root.add_child(_name_label)
+
+	# ── Layer 6: keyword treatment (A/B via kw_variant) ──────────────────
+	# `medallions` = every keyword that has an icon. `combat_meds` drops floop,
+	# which has its own battlefield indicator and is always spelled "Floop:" in
+	# the description, so it's pure redundancy in an icon row.
+	var medallions: Array = []
+	var combat_meds: Array = []
+	for k in card_data.get("keywords", []):
+		var k_str := String(k)
+		var icon_tex: Texture2D = GameTheme.get_keyword_icon(k_str)
+		if icon_tex == null:
+			continue
+		medallions.append(icon_tex)
+		if k_str != "floop":
+			combat_meds.append(icon_tex)
+		if medallions.size() >= 5:
+			break
+	if not is_sp:
+		match kw_variant:
+			1:
+				pass  # DROP — keywords already named (colorized) in description.
+			2:
+				_kw_shelf_engraved(root, combat_meds)
+			3:
+				_kw_stamps_on_art(root, combat_meds)
+			4:
+				_kw_orbs_rail(root, combat_meds)
+			5:
+				_kw_orbs_rail(root, combat_meds, 48.0)
+			_:
+				_kw_shelf_pill(root, medallions)
+
+	# ── Layer 7: description, vertically centered on the parchment page ──
+	var center_box := CenterContainer.new()
+	center_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	center_box.anchor_left = 0.0; center_box.anchor_right = 1.0
+	center_box.anchor_top = 0.0; center_box.anchor_bottom = 1.0
+	center_box.offset_left = 7; center_box.offset_right = -7
+	center_box.offset_top = 5; center_box.offset_bottom = -5
+	page.add_child(center_box)
+
+	var desc_rt := RichTextLabel.new()
+	desc_rt.bbcode_enabled = true
+	desc_rt.fit_content = true
+	desc_rt.scroll_active = false
+	desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	desc_rt.custom_minimum_size = Vector2(150, 0)
+	var desc_font: Font = GameTheme.font_body
+	var desc_bold_font: Font = GameTheme.font_body_bold
+	if desc_font:
+		desc_rt.add_theme_font_override("normal_font", desc_font)
+		desc_rt.add_theme_font_override("bold_font",
+			desc_bold_font if desc_bold_font else desc_font)
+	# Auto-shrink long descriptions so 4-5 line rares stay inside the page.
+	var raw_desc: String = card_data.get("desc", "")
+	var dsz := 11
+	if raw_desc.length() > 105:
+		dsz = 9
+	elif raw_desc.length() > 72:
+		dsz = 10
+	desc_rt.add_theme_font_size_override("normal_font_size", dsz)
+	desc_rt.add_theme_font_size_override("bold_font_size", dsz)
+	# DARK ink on the light parchment page (inverted from v3's cream-on-dark).
+	desc_rt.add_theme_color_override("default_color", Color(0.176, 0.118, 0.063))
+	desc_rt.text = "[center]%s[/center]" % KeywordEffects.colorize_keywords(raw_desc)
+	center_box.add_child(desc_rt)
+
+	# ── Layer 8: creature ATK/HP orbs OR spell footer cartouche ──────────
+	if is_creature():
+		var atk_orb := _make_stat_orb(GameTheme.ATK_GOLD_SHIELD, 0.0, false)
+		atk_orb.anchor_left = 0.0; atk_orb.anchor_right = 0.0
+		atk_orb.anchor_top = 1.0; atk_orb.anchor_bottom = 1.0
+		atk_orb.offset_left = -9; atk_orb.offset_right = 47
+		atk_orb.offset_top = -47; atk_orb.offset_bottom = 9
+		root.add_child(atk_orb)
+		_atk_label = _make_styled_label(
+			"" if bake_strip_stats else str(current_atk), stat_font, 14,
+			Color(1.000, 0.957, 0.839))
+		_atk_label.add_theme_constant_override("outline_size", 4)
+		_atk_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_atk_label.offset_top = ORB_NUMERAL_Y_OFFSET
+		_atk_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
+		_atk_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		atk_orb.add_child(_atk_label)
+
+		var hp_orb := _make_stat_orb(GameTheme.HEALTH_RED_DROP, 0.0, false)
+		hp_orb.anchor_left = 1.0; hp_orb.anchor_right = 1.0
+		hp_orb.anchor_top = 1.0; hp_orb.anchor_bottom = 1.0
+		hp_orb.offset_left = -47; hp_orb.offset_right = 9
+		hp_orb.offset_top = -47; hp_orb.offset_bottom = 9
+		root.add_child(hp_orb)
+		_hp_label = _make_styled_label(
+			"" if bake_strip_stats else str(current_hp), stat_font, 14,
+			Color(1.000, 0.941, 0.898))
+		_hp_label.add_theme_constant_override("outline_size", 4)
+		_hp_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_hp_label.offset_top = ORB_NUMERAL_Y_OFFSET
+		_hp_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
+		_hp_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		hp_orb.add_child(_hp_label)
+	else:
+		var footer_text := "INSTANT"
+		var kws: Array = card_data.get("keywords", [])
+		if CardDB.is_curse(String(card_data.get("id", ""))):
+			footer_text = "CURSE"
+		else:
+			match String(card_data.get("targeting", "none")):
+				"enemy_creature":    footer_text = "TARGET ENEMY"
+				"friendly_creature": footer_text = "TARGET ALLY"
+				"any_creature":      footer_text = "ANY CREATURE"
+				"any":               footer_text = "ANY TARGET"
+				_:
+					if "exhaust" in kws:
+						footer_text = "EXHAUST"
+					elif "retain" in kws:
+						footer_text = "RETAIN"
+		var footer := Panel.new()
+		footer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_center_at_point(footer, Vector2(150, 374), Vector2(150, 28))
+		var fst := StyleBoxFlat.new()
+		fst.bg_color = Color(0.110, 0.075, 0.110, 0.92)  # arcane near-black
+		fst.set_corner_radius_all(13)
+		fst.border_color = Color(0.65, 0.52, 0.85, 0.85)  # violet trim
+		fst.set_border_width_all(1)
+		fst.shadow_color = Color(0.4, 0.2, 0.6, 0.35)
+		fst.shadow_size = 4
+		footer.add_theme_stylebox_override("panel", fst)
+		root.add_child(footer)
+		var ftl := _make_styled_label(footer_text, display_font, 9,
+			Color(0.92, 0.86, 1.0))
+		ftl.add_theme_constant_override("outline_size", 2)
+		_center_at_point(ftl, Vector2(150, 374), Vector2(140, 24))
+		root.add_child(ftl)
+		# flanking arcane gems
+		for sx in [110.0, 190.0]:
+			var fg := _make_stat_orb(Color(0.55, 0.35, 0.75), 0.0, true)
+			_center_at_point(fg, Vector2(sx, 374), Vector2(14, 14))
+			root.add_child(fg)
+
+
+# Keyword-treatment variants for the redesign prototype (selected by
+# kw_variant). All three sit in the banner→parchment gap or on the art.
+
+# Variant 0 (default): bright-gilt glyphs inlaid in a rounded dark pill.
+func _kw_shelf_pill(root: Control, meds: Array) -> void:
+	if meds.is_empty():
+		return
+	var shelf_w: float = float(meds.size()) * 27.0 + 16.0
+	var shelf := Panel.new()
+	shelf.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_center_at_point(shelf, Vector2(150, 238), Vector2(shelf_w, 25))
+	var shst := StyleBoxFlat.new()
+	shst.bg_color = Color(0.070, 0.054, 0.042, 0.92)
+	shst.set_corner_radius_all(12)
+	shst.border_color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.75)
+	shst.set_border_width_all(1)
+	shst.shadow_color = Color(0, 0, 0, 0.40)
+	shst.shadow_size = 3
+	shelf.add_theme_stylebox_override("panel", shst)
+	root.add_child(shelf)
+	var kw_strip := HBoxContainer.new()
+	kw_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	kw_strip.alignment = BoxContainer.ALIGNMENT_CENTER
+	kw_strip.add_theme_constant_override("separation", 9)
+	_center_at_point(kw_strip, Vector2(150, 238), Vector2(shelf_w, 22))
+	root.add_child(kw_strip)
+	for icon_tex in meds:
+		var ic := TextureRect.new()
+		ic.texture = icon_tex
+		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		ic.custom_minimum_size = Vector2(17, 17)
+		ic.modulate = GameTheme.GILT_BRIGHT
+		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		kw_strip.add_child(ic)
+
+
+# Variant 2: a recessed engraved plaque — rectangular, dark inner edge (no
+# bright ring), antique-gold glyphs. Reads as carved INTO the frame, not a
+# button stuck ON it.
+func _kw_shelf_engraved(root: Control, meds: Array) -> void:
+	if meds.is_empty():
+		return
+	var w: float = float(meds.size()) * 26.0 + 14.0
+	var slot := Panel.new()
+	slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_center_at_point(slot, Vector2(150, 238), Vector2(w, 21))
+	var st := StyleBoxFlat.new()
+	st.bg_color = Color(0.055, 0.043, 0.034, 0.80)
+	st.set_corner_radius_all(4)
+	st.border_color = Color(0.015, 0.010, 0.008, 0.90)  # dark top lip → recessed
+	st.border_width_top = 2
+	st.border_width_left = 1
+	st.border_width_right = 1
+	st.border_width_bottom = 0
+	slot.add_theme_stylebox_override("panel", st)
+	root.add_child(slot)
+	var strip := HBoxContainer.new()
+	strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	strip.alignment = BoxContainer.ALIGNMENT_CENTER
+	strip.add_theme_constant_override("separation", 9)
+	_center_at_point(strip, Vector2(150, 238), Vector2(w, 19))
+	root.add_child(strip)
+	for icon_tex in meds:
+		var ic := TextureRect.new()
+		ic.texture = icon_tex
+		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		ic.custom_minimum_size = Vector2(15, 15)
+		ic.modulate = GameTheme.GILT  # antique, not bright
+		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		strip.add_child(ic)
+
+
+# Variant 3: small gold "set-symbol" coins stamped into the art's lower-left,
+# away from the text entirely. Each coin is a dark disc (guaranteed contrast on
+# any art) with a gilt glyph.
+func _kw_stamps_on_art(root: Control, meds: Array) -> void:
+	var n := meds.size()
+	if n == 0:
+		return
+	for i in range(n):
+		var px := 24.0 + float(i) * 25.0
+		var coin := Panel.new()
+		coin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_center_at_point(coin, Vector2(px, 175), Vector2(22, 22))
+		var cst := StyleBoxFlat.new()
+		cst.bg_color = Color(0.050, 0.040, 0.030, 0.82)
+		cst.set_corner_radius_all(11)
+		cst.border_color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.70)
+		cst.set_border_width_all(1)
+		cst.shadow_color = Color(0, 0, 0, 0.55)
+		cst.shadow_size = 2
+		coin.add_theme_stylebox_override("panel", cst)
+		root.add_child(coin)
+		var ic := TextureRect.new()
+		ic.texture = meds[i]
+		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		ic.set_anchors_preset(Control.PRESET_FULL_RECT)
+		ic.offset_left = 3; ic.offset_right = -3
+		ic.offset_top = 3; ic.offset_bottom = -3
+		ic.modulate = GameTheme.GILT_BRIGHT
+		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		coin.add_child(ic)
+
+
+func _kw_orbs_rail(root: Control, meds: Array, box: float = 40.0) -> void:
+	# Keyword affordance as a vertical rail of glossy orbs on the card's right
+	# edge, growing downward from just below the rarity gem. Unlike a text shelf
+	# or flat stamps, big solid spheres stay readable at the 0.6x battlefield
+	# scale — the same reason the four stat orbs survive the shrink while the
+	# description text turns to mush. Arcane-violet so they never read as a stat
+	# orb (cost=blue, atk=gold, hp=red, rarity=amber). The caller passes
+	# combat_meds (floop already dropped — it owns the floop border + indicator
+	# on the field), capped at 3 so the rail clears the bottom ATK/HP orbs.
+	# `box` is the orb diameter: 40 = subordinate rail, 56 = stat-orb parity
+	# (most legible at field scale). Top-anchored so a bigger box never collides
+	# with the rarity gem (which ends at ~y=38) — the rail just grows downward.
+	var n: int = min(meds.size(), 3)
+	if n == 0:
+		return
+	var pitch: float = box + 8.0
+	const TOP0 := 46.0        # just below the rarity gem
+	var inset: float = box * 0.225   # ~9 px at box=40, scales with the orb
+	for i in range(n):
+		# Same deep-violet, low-gloss GemOrb as the battlefield token's keyword
+		# orbs (_build_compact_layout) so hand and field read consistently — not
+		# the bright glossy SphereOrb from _make_stat_orb.
+		var orb := GemOrb.new()
+		orb.shape = "circle"
+		orb.style = "smooth"
+		orb.fill_color = Color(0.247, 0.153, 0.376)  # deep arcane violet
+		orb.gloss = 0.42  # calmer than stat orbs so the gilt glyph reads
+		orb.anchor_left = 1.0; orb.anchor_right = 1.0
+		orb.anchor_top = 0.0; orb.anchor_bottom = 0.0
+		orb.offset_right = -3
+		orb.offset_left = -3 - box
+		orb.offset_top = TOP0 + float(i) * pitch
+		orb.offset_bottom = orb.offset_top + box
+		orb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(orb)
+		var glyph := TextureRect.new()
+		glyph.texture = meds[i]
+		glyph.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		glyph.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		glyph.set_anchors_preset(Control.PRESET_FULL_RECT)
+		glyph.offset_left = inset; glyph.offset_right = -inset
+		glyph.offset_top = inset; glyph.offset_bottom = -inset
+		glyph.modulate = GameTheme.GILT_BRIGHT
+		glyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		orb.add_child(glyph)
 
 
 # ═══════════════════════════════════════════
@@ -2096,7 +2790,7 @@ func _build_full_layout_v4() -> void:
 
 	var rarity: String = String(card_data.get("rarity", "common"))
 	var trim_color: Color = GameTheme.rarity_frame_trim(rarity)
-	var is_curse: bool = (String(card_data.get("id", "")) == "curse"
+	var is_curse: bool = (CardDB.is_curse(String(card_data.get("id", "")))
 		or String(card_data.get("type", "")) == "curse")
 	if is_curse:
 		trim_color = Color(0.55, 0.25, 0.55, 1.0)
@@ -2440,8 +3134,11 @@ func _build_full_layout_v4() -> void:
 	# engraved metal / wood. Beats the previous flat outline treatment
 	# on every rarity background tested (cool blue plate, warm gold
 	# plate, neutral walnut, brass).
+	# Tribe accent: the engraved top-light hue shifts to the card's tribe
+	# color (soldier gold / undead red / fae cyan / etc.) so faction reads
+	# at a glance. The walnut + black shadow layers keep the 3D relief.
 	_name_label.add_theme_color_override("font_color",
-		Color(0.985, 0.965, 0.890))
+		GameTheme.get_name_color(card_data))
 	_name_label.add_theme_color_override("font_outline_color",
 		Color(0.18, 0.10, 0.05, 0.95))  # warm walnut shadow, not pure black
 	_name_label.add_theme_constant_override("outline_size", 3)
@@ -2758,10 +3455,10 @@ func _build_full_layout_v5() -> void:
 	if name_text.length() > 24:
 		name_size = 9
 	_name_label.add_theme_font_size_override("font_size", name_size)
-	var name_color: Color = GameTheme.IVORY
-	if rarity == "rare":
-		name_color = Color(1.0, 0.92, 0.55, 1.0)
-	_name_label.add_theme_color_override("font_color", name_color)
+	# Tribe accent wins over the old rarity override — rarity is still readable
+	# from the frame trim, but tribe was previously not encoded anywhere.
+	_name_label.add_theme_color_override("font_color",
+		GameTheme.get_name_color(card_data))
 	_name_label.add_theme_color_override("font_outline_color",
 		Color(0, 0, 0, 0.85))
 	_name_label.add_theme_constant_override("outline_size", 3)
@@ -3133,9 +3830,13 @@ func _make_stat_number(text: String, color: Color, vertical_offset: int = 0,
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
-	if vertical_offset != 0:
-		lbl.offset_top = vertical_offset
-		lbl.offset_bottom = vertical_offset
+	# Apply ORB_NUMERAL_Y_OFFSET unconditionally so every _make_stat_number
+	# caller (baked overlay, v4 layout, v5 layout) gets the same optical-
+	# centering nudge. `vertical_offset` callers add on top of that for any
+	# additional asymmetric overlay needs.
+	var total_y_offset := ORB_NUMERAL_Y_OFFSET + vertical_offset
+	lbl.offset_top = total_y_offset
+	lbl.offset_bottom = total_y_offset
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return lbl
 
@@ -3409,6 +4110,12 @@ func _build_orb_number_label(text: String, font_sz: int,
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
+	# Same optical-centering nudge as the hand orbs — see ORB_NUMERAL_Y_OFFSET.
+	# Field orbs are smaller (30 px vs 56 px), but the cap-high-in-line-box
+	# phenomenon is font-metric driven so it applies at every size; the
+	# painted shadow ratio is similar too. One value works for both.
+	lbl.offset_top = ORB_NUMERAL_Y_OFFSET
+	lbl.offset_bottom = ORB_NUMERAL_Y_OFFSET
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return lbl
 
@@ -3426,6 +4133,9 @@ func update_stat_display() -> void:
 			_hp_label.add_theme_color_override("font_color", _hp_base_color)
 	if _atk_label:
 		var display_atk = effective_atk()
+		if _displayed_effective_atk != -999 and display_atk != _displayed_effective_atk:
+			_spawn_atk_change_popup(display_atk - _displayed_effective_atk)
+		_displayed_effective_atk = display_atk
 		_atk_label.text = str(display_atk)
 		if display_atk > card_data.atk:
 			_atk_label.add_theme_color_override("font_color", GameTheme.ATK_BUFFED)
@@ -3436,34 +4146,71 @@ func update_stat_display() -> void:
 
 
 func update_floop_display() -> void:
+	# Three visible states:
+	#   - toggled (will_floop): solid cyan badge + cyan border + cool art tint
+	#   - available (on battlefield, has_floop, not yet used): "CLICK · FLOOP"
+	#     pulsing in cyan with a cyan border so the player can SEE the
+	#     affordance from across the room. Previously this was dim brown text
+	#     reading "click: floop" — players reported they couldn't tell the
+	#     mechanic existed.
+	#   - hidden (anything else): pulse killed, label off, default border.
+	var toggled := will_floop
+	var available := is_on_battlefield and has_floop() and not is_opponent and not toggled
 	if _floop_indicator:
-		if will_floop:
+		if toggled:
 			_floop_indicator.text = "FLOOP"
 			_floop_indicator.add_theme_color_override("font_color", GameTheme.FLOOP_BLUE)
+			_floop_indicator.modulate = Color(1, 1, 1, 1)
 			_floop_indicator.visible = true
-		elif is_on_battlefield and has_floop() and not is_opponent:
-			_floop_indicator.text = "click: floop"
+			_stop_floop_pulse()
+		elif available:
+			_floop_indicator.text = "CLICK · FLOOP"
+			_floop_indicator.add_theme_color_override("font_color", GameTheme.FLOOP_BLUE)
 			_floop_indicator.visible = true
-			_floop_indicator.add_theme_color_override("font_color", Color(0.6, 0.5, 0.3, 0.7))
+			_start_floop_pulse()
 		else:
 			_floop_indicator.visible = false
+			_floop_indicator.modulate = Color(1, 1, 1, 1)
+			_stop_floop_pulse()
 	# Type plate occupies the same bottom strip as FLOOP — hide one when
 	# the other is showing so they don't overlap into mush.
 	if _type_plate:
 		_type_plate.visible = (_floop_indicator == null
 			or not _floop_indicator.visible)
-	if will_floop:
+	if toggled:
 		_set_border_color(GameTheme.FLOOP_BLUE)
 		if _art_rect:
 			_art_rect.modulate = Color(0.6, 0.7, 1.0, 0.9)
-	elif is_on_battlefield and has_floop() and not is_opponent:
-		_set_border_color(Color(0.5, 0.4, 0.2, 0.6))
+	elif available:
+		_set_border_color(Color(GameTheme.FLOOP_BLUE.r, GameTheme.FLOOP_BLUE.g, GameTheme.FLOOP_BLUE.b, 0.85))
 		if _art_rect:
 			_art_rect.modulate = Color.WHITE
 	else:
 		_set_border_color(_get_default_frame_tint())
 		if _art_rect:
 			_art_rect.modulate = Color.WHITE
+
+
+func _start_floop_pulse() -> void:
+	# Gentle alpha oscillation on the FLOOP label so it reads as "interactable"
+	# from the corner of the eye. Kept slow (1.4s full cycle) and shallow
+	# (alpha 0.55-1.0) so it never crosses into "distracting" territory.
+	if _floop_indicator == null:
+		return
+	if _floop_pulse_tween and _floop_pulse_tween.is_valid():
+		return
+	_floop_pulse_tween = create_tween()
+	_floop_pulse_tween.set_loops()
+	_floop_pulse_tween.tween_property(_floop_indicator, "modulate:a", 0.55, 0.7).set_trans(Tween.TRANS_SINE)
+	_floop_pulse_tween.tween_property(_floop_indicator, "modulate:a", 1.0, 0.7).set_trans(Tween.TRANS_SINE)
+
+
+func _stop_floop_pulse() -> void:
+	if _floop_pulse_tween and _floop_pulse_tween.is_valid():
+		_floop_pulse_tween.kill()
+	_floop_pulse_tween = null
+	if _floop_indicator:
+		_floop_indicator.modulate.a = 1.0
 
 
 func toggle_floop() -> void:
@@ -3478,9 +4225,23 @@ func toggle_floop() -> void:
 # ═══════════════════════════════════════════
 
 func take_damage(amount: int) -> void:
+	# Shield: absorb the entire first hit, then pop the shield.
+	if state.has_shield:
+		state.has_shield = false
+		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
+		update_stat_display()
+		_flash_hit()
+		return
 	var original := amount
 	if has_keyword("armored"):
-		amount = maxi(1, amount - 1)
+		# Fortress Stone relic makes the player's own armored creatures block 2
+		# instead of 1. Enemy armored stays at 1 (the relic is a player buff).
+		# Previously the reduction was hardcoded to 1, so Fortress Stone was a
+		# dead pickup that did nothing — a wasted shop slot / reward choice.
+		var reduction := 1
+		if not is_opponent and RunState.has_relic("fortress_stone"):
+			reduction = 2
+		amount = maxi(1, amount - reduction)
 		var blocked: int = original - amount
 		if blocked > 0:
 			_spawn_keyword_chip("BLOCKED %d" % blocked, Color(0.55, 0.78, 1.0))
@@ -3494,13 +4255,22 @@ func take_damage(amount: int) -> void:
 		_play_last_stand_flare()
 	update_stat_display()
 	_spawn_damage_number(amount)
+	if amount > 0:
+		damaged.emit(amount)
 	if current_hp <= 0:
-		_die()
+		try_die()
 	else:
 		_flash_hit()
 
 
 func take_damage_bypass_armor(amount: int) -> void:
+	# Bypasses Armored, but Shield still absorbs the whole hit and pops.
+	if state.has_shield:
+		state.has_shield = false
+		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
+		update_stat_display()
+		_flash_hit()
+		return
 	current_hp -= amount
 	if current_hp <= 0 and has_keyword("last_stand") and not last_stand_used:
 		current_hp = 1
@@ -3509,10 +4279,24 @@ func take_damage_bypass_armor(amount: int) -> void:
 		_play_last_stand_flare()
 	update_stat_display()
 	_spawn_damage_number(amount)
+	if amount > 0:
+		damaged.emit(amount)
 	if current_hp <= 0:
-		_die()
+		try_die()
 	else:
 		_flash_hit()
+
+
+# Public death entry point. Gives rescue listeners (Phantom Veil, Reborn) a
+# chance to set current_hp back > 0 before _die() runs. Call this anywhere
+# you've directly set current_hp <= 0 without going through take_damage —
+# e.g. poison kills (Combat.gd:1455/1567).
+func try_die() -> void:
+	will_die.emit()
+	if current_hp > 0:
+		update_stat_display()
+		return
+	_die()
 
 
 func _spawn_keyword_chip(text: String, color: Color) -> void:
@@ -3551,6 +4335,58 @@ func _spawn_damage_number(amount: int) -> void:
 		return
 	var anchor := global_position + Vector2(size.x * scale.x * 0.5, size.y * scale.y * 0.30)
 	vfx.spawn_floating_number(anchor, "-%d" % amount, Color(1.0, 0.32, 0.22), false)
+
+
+func _spawn_death_burst() -> void:
+	# A one-shot particle pop at the dying creature's body — Card2D's own death
+	# tween only fades + shrinks, which felt flat against the rest of the juice.
+	# Color flavors by the creature's vibe so a skeleton ashes bone-white, an
+	# undead ghosts pale green, a fire creature spits embers, etc.; default is
+	# dust brown so anything unclassified still gets a body to its exit.
+	var vfx := _combat_vfx_target()
+	if vfx == null or not vfx.has_method("spawn_spell_burst"):
+		return
+	var color := Color(0.78, 0.55, 0.32, 0.95)  # default: ash/dust brown
+	var id := String(card_data.get("id", ""))
+	var name := String(card_data.get("name", "")).to_lower()
+	var kw: Array = card_data.get("keywords", [])
+	if "bone" in id or "skeleton" in name or "warden_of_graves" in id:
+		color = Color(0.92, 0.88, 0.74, 0.95)  # bone white
+	elif "ghost" in name or "spirit" in name or "wraith" in name or "vengeful_spirit" in id:
+		color = Color(0.70, 0.92, 0.85, 0.95)  # pale green ghost
+	elif "fire" in id or "kindling" in id or "blood_pyre" in id or "torchbearer" in id:
+		color = Color(1.0, 0.50, 0.18, 0.95)  # ember orange
+	elif "demon" in name or "devil" in name or "imp" in id or "vampire" in name:
+		color = Color(0.85, 0.18, 0.20, 0.95)  # devil red
+	elif "thorn" in id or "sprite" in id or "naga" in id or "hydra" in id:
+		color = Color(0.55, 0.85, 0.45, 0.95)  # plant green
+	elif "blood" in id or "pyre" in id or kw.has("wither"):
+		color = Color(0.78, 0.20, 0.25, 0.95)  # blood red
+	var burst_pos := global_position + size * scale * 0.5
+	vfx.spawn_spell_burst(burst_pos, color)
+
+
+func _spawn_atk_change_popup(delta: int) -> void:
+	# Floating "+N ATK" / "-N ATK" so silent buffs (Battle Drummer, War Cry,
+	# Curse, Steal, Royal Guard's on-hit, Inspire, etc.) read on-screen instead
+	# of just nudging the orb numeral. Anchored slightly above and to the left
+	# of the card so it doesn't visually fight the damage number (which spawns
+	# center).
+	if delta == 0 or static_display:
+		return
+	var vfx := _combat_vfx_target()
+	if vfx == null:
+		return
+	var anchor := global_position + Vector2(size.x * scale.x * 0.25, size.y * scale.y * 0.12)
+	var text: String
+	var color: Color
+	if delta > 0:
+		text = "+%d ATK" % delta
+		color = GameTheme.ATK_BUFFED
+	else:
+		text = "%d ATK" % delta  # delta is already negative
+		color = Color(1.0, 0.42, 0.32)
+	vfx.spawn_floating_number(anchor, text, color, false)
 
 
 func show_heal_number(amount: int) -> void:
@@ -3596,6 +4432,7 @@ func _die() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	pivot_offset = size * 0.5
 	z_index = 40
+	_spawn_death_burst()
 	if _sacrifice_death:
 		# Sacrifice ritual: the body ashes away UPWARD — rises, stretches thin, and
 		# burns out to amber. Combat._sacrifice_creature plays the crimson veil,
@@ -3769,6 +4606,29 @@ func set_affordable(can_afford: bool) -> void:
 		modulate = Color(0.55, 0.55, 0.62, 0.92)
 
 
+func set_display_cost(effective_cost: int) -> void:
+	# Hearthstone convention: the cost orb shows the actual mana cost to play
+	# this card RIGHT NOW, with color encoding whether it differs from the
+	# printed base cost:
+	#   green = cheaper than printed (Ember Crown free spell, Ironclad discount)
+	#   red   = more expensive than printed (Taxed mutator)
+	#   white = matches printed
+	# This is the single fix for "Fireball says cost 1 but the game won't let
+	# me play it" — players can now see the real cost on the orb itself.
+	if is_on_battlefield or static_display:
+		return
+	if _cost_label == null:
+		return
+	_cost_label.text = str(effective_cost)
+	var base_cost: int = int(card_data.get("cost", 0))
+	if effective_cost < base_cost:
+		_cost_label.add_theme_color_override("font_color", Color(0.55, 0.95, 0.50))
+	elif effective_cost > base_cost:
+		_cost_label.add_theme_color_override("font_color", Color(1.0, 0.45, 0.40))
+	else:
+		_cost_label.remove_theme_color_override("font_color")
+
+
 func play_floop_pulse() -> void:
 	# Golden flash + small scale punch when a floop ability resolves on this card.
 	# Lets the player track which creature just acted in a busy board state.
@@ -3826,7 +4686,7 @@ func _on_mouse_exited() -> void:
 	if is_on_battlefield and will_floop:
 		_set_border_color(GameTheme.FLOOP_BLUE)
 	elif is_on_battlefield and has_floop() and not is_opponent:
-		_set_border_color(Color(0.5, 0.4, 0.2, 0.6))
+		_set_border_color(Color(GameTheme.FLOOP_BLUE.r, GameTheme.FLOOP_BLUE.g, GameTheme.FLOOP_BLUE.b, 0.85))
 	else:
 		_set_border_color(_get_default_frame_tint())
 	if not is_on_battlefield:
@@ -4013,7 +4873,7 @@ func _build_detail() -> PanelContainer:
 	if GameTheme.font_display:
 		name_lbl.add_theme_font_override("font", GameTheme.font_display)
 	name_lbl.add_theme_font_size_override("font_size", 22)
-	name_lbl.add_theme_color_override("font_color", GameTheme.IVORY)
+	name_lbl.add_theme_color_override("font_color", GameTheme.get_name_color(card_data))
 	name_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
 	name_lbl.add_theme_constant_override("outline_size", 3)
 	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL

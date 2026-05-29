@@ -2,12 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://bup2j3j2e3so"
-valid=false
+uid="uid://d1tcq4sykeq7g"
+path="res://.godot/imported/e_devil_champ.png-28603496d1dffac6ecbcf22c46556dd6.ctex"
+metadata={
+"vram_texture": false
+}
 
 [deps]
 
 source_file="res://assets/creatures/e_devil_champ.png"
+dest_files=["res://.godot/imported/e_devil_champ.png-28603496d1dffac6ecbcf22c46556dd6.ctex"]
 
 [params]
 

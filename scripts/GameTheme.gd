@@ -1,10 +1,12 @@
-extends Node
+﻿extends Node
 
 # ── Fonts ──
 var font_display: Font = null   # Lilita One — card names, type, FLOOP
 var font_stat: Font = null      # Lilita One — cost, ATK, HP numerals
 var font_body: Font = null      # Nunito Regular + embolden 0.55 — description text (Bold)
 var font_body_bold: Font = null # Nunito Regular + embolden 0.85 — keyword [b] tags (ExtraBold)
+var font_title: Font = null       # Cinzel SemiBold — combat HUD headers/captions (NOT cards)
+var font_title_black: Font = null # Cinzel Black — combat HUD numerals (HP/mana/counts)
 
 # ── Textures ──
 var tex_card_frame_ornate: Texture2D = null
@@ -145,6 +147,15 @@ func _load_assets() -> void:
 		if nunito != null:
 			lilita.fallbacks = [nunito]
 		font_display = lilita
+		# Stat numerals use the raw Lilita font — font-level spacing_bottom
+		# wasn't reliable for centering caps across orb sizes (the natural
+		# Lilita line metrics put caps in the upper portion of the line box,
+		# AND the SphereOrb's drop shadow shifts the painted "visual center"
+		# below the container's geometric center, so any single spacing
+		# value either over- or under-corrects). Instead, the orb labels in
+		# Card2D (_build_full_layout_v3 / _build_orb_number_label) apply an
+		# explicit Y offset on the label rect — pixel-deterministic, per
+		# call site. See ORB_NUMERAL_Y_OFFSET in Card2D.gd.
 		font_stat = lilita
 		print("[GameTheme] font_display and font_stat set to Lilita One")
 	else:
@@ -154,6 +165,8 @@ func _load_assets() -> void:
 		if cinzel_fallback is FontFile and nunito != null:
 			(cinzel_fallback as FontFile).fallbacks = [nunito]
 		font_display = cinzel_fallback
+		# Same approach as the Lilita branch — explicit per-label Y offset
+		# in Card2D handles centering; the font itself stays unmodified.
 		font_stat = cinzel_fallback
 
 	# Body text: Nunito Regular with HEAVIER embolden to pair with Lilita One's
@@ -174,6 +187,31 @@ func _load_assets() -> void:
 	nunito_bold.base_font = nunito
 	nunito_bold.variation_embolden = 0.85
 	font_body_bold = nunito_bold
+
+	# Combat HUD chrome uses Cinzel (engraved Roman serif) for AAA dark-fantasy
+	# gravitas. Kept SEPARATE from font_display/font_stat (Lilita One) on purpose:
+	# Card2D's orb numerals carry per-label pixel Y-offsets tuned to Lilita's
+	# metrics, so swapping the global card font would misalign every card face.
+	# The HUD has no such tuning, so it can carry the serif freely. Two weights:
+	# SemiBold (640) for header/caption text, Black (860) for big stat numerals —
+	# the chunky-numeral convention shared by Hearthstone / MtG Arena stat orbs.
+	var cinzel := load("res://assets/fonts/Cinzel-Variable.ttf") as FontFile
+	if cinzel != null:
+		if nunito != null:
+			cinzel.fallbacks = [nunito]
+		var title := FontVariation.new()
+		title.base_font = cinzel
+		title.variation_opentype = {"wght": 640}
+		font_title = title
+		var title_black := FontVariation.new()
+		title_black.base_font = cinzel
+		title_black.variation_opentype = {"wght": 860}
+		font_title_black = title_black
+		print("[GameTheme] font_title/font_title_black set to Cinzel")
+	else:
+		push_warning("[GameTheme] Cinzel unavailable — HUD falls back to display/stat font")
+		font_title = font_display
+		font_title_black = font_stat
 	# Flip USE_NEW_FRAME below to false to revert to the old card_frame_ornate.png.
 	var ornate_path = "res://assets/ui/card_frame_ornate.png"
 	if USE_NEW_FRAME:
@@ -531,6 +569,434 @@ func make_themed_button(text: String, bg: Color, min_size: Vector2 = Vector2(160
 	return btn
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  CHOICE BANNER — parchment panel + icon + title + desc, used by the rest
+#  screen (and any other "pick one of several" UI) as a lighter alternative
+#  to make_themed_button's flat colored rectangle. Reads as a torn parchment
+#  card pinned over the painted background, not a button. Critic review fed
+#  this design choice — Card2D's full frame was wrong here (cost orb +
+#  ATK/HP would invite drag attempts), and the old flat buttons were
+#  hiding the painted scene underneath.
+# ═══════════════════════════════════════════════════════════════════════════
+
+## Returns a Control containing a parchment panel + invisible overlay Button.
+## Connect to `banner.click_button.pressed` (the meta-field on the returned
+## Control), or just iterate the children to find the Button if you prefer.
+## `icon_path` may be "" — falls back to drawing a glyph from the title's
+## first character. `disabled_reason` non-empty greys the banner and shows
+## that text in the body.
+func make_choice_banner(title: String, desc: String, accent: Color,
+		icon_path: String = "", min_size: Vector2 = Vector2(340, 150),
+		disabled_reason: String = "") -> Control:
+	var root := PanelContainer.new()
+	root.custom_minimum_size = min_size
+	root.mouse_filter = Control.MOUSE_FILTER_STOP
+	var disabled: bool = (disabled_reason != "")
+
+	# Parchment panel: dark warm body, accent-tinted top/bottom strip via
+	# border. Border colors are accent-tinted so the four choices read as
+	# related-but-distinct (rest=green, upgrade=gold, remove=red, reforge=blue).
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(0.10, 0.07, 0.04, 0.92 if not disabled else 0.55)
+	s.border_color = Color(accent.r, accent.g, accent.b,
+		0.80 if not disabled else 0.30)
+	s.border_width_top = 2
+	s.border_width_bottom = 2
+	s.border_width_left = 2
+	s.border_width_right = 2
+	s.corner_radius_top_left = 8
+	s.corner_radius_top_right = 8
+	s.corner_radius_bottom_left = 8
+	s.corner_radius_bottom_right = 8
+	s.shadow_color = Color(0, 0, 0, 0.65)
+	s.shadow_size = 8
+	s.shadow_offset = Vector2(0, 4)
+	s.content_margin_left = 14
+	s.content_margin_right = 14
+	s.content_margin_top = 12
+	s.content_margin_bottom = 12
+	root.add_theme_stylebox_override("panel", s)
+
+	# Body: HBox = [icon column | text column]
+	var hbox := HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 14)
+	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(hbox)
+
+	# Icon column — TextureRect if a path was provided, else a big colored
+	# glyph from the title's first character. Sized so it visually anchors
+	# the banner without dominating it.
+	var icon_box := Control.new()
+	icon_box.custom_minimum_size = Vector2(56, 56)
+	icon_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(icon_box)
+	if icon_path != "" and ResourceLoader.exists(icon_path):
+		var tex := TextureRect.new()
+		tex.texture = load(icon_path)
+		tex.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+		tex.modulate = accent if not disabled else Color(0.5, 0.5, 0.5, 0.5)
+		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		icon_box.add_child(tex)
+	else:
+		var glyph := Label.new()
+		glyph.text = title.left(1)
+		glyph.add_theme_font_size_override("font_size", 40)
+		glyph.add_theme_color_override("font_color",
+			accent if not disabled else Color(0.5, 0.5, 0.5, 0.5))
+		glyph.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.7))
+		glyph.add_theme_constant_override("outline_size", 3)
+		if font_display:
+			glyph.add_theme_font_override("font", font_display)
+		glyph.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		glyph.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		glyph.set_anchors_preset(Control.PRESET_FULL_RECT)
+		glyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		icon_box.add_child(glyph)
+
+	# Text column — title (display font) + desc (body font). Both ignore mouse
+	# so the overlay Button below catches every click cleanly.
+	var text_vbox := VBoxContainer.new()
+	text_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	text_vbox.add_theme_constant_override("separation", 4)
+	text_vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(text_vbox)
+
+	var title_lbl := Label.new()
+	title_lbl.text = title
+	title_lbl.add_theme_font_size_override("font_size", 22)
+	title_lbl.add_theme_color_override("font_color",
+		Color(accent.r, accent.g, accent.b, 1.0) if not disabled else Color(0.6, 0.6, 0.55, 0.7))
+	title_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.6))
+	title_lbl.add_theme_constant_override("outline_size", 3)
+	if font_display:
+		title_lbl.add_theme_font_override("font", font_display)
+	title_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	text_vbox.add_child(title_lbl)
+
+	var body_text: String = disabled_reason if disabled else desc
+	var body_lbl := Label.new()
+	body_lbl.text = body_text
+	body_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	body_lbl.add_theme_font_size_override("font_size", 13)
+	body_lbl.add_theme_color_override("font_color",
+		Color(0.86, 0.82, 0.70, 0.92) if not disabled else Color(0.65, 0.55, 0.45, 0.75))
+	body_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.5))
+	body_lbl.add_theme_constant_override("outline_size", 2)
+	if font_body:
+		body_lbl.add_theme_font_override("font", font_body)
+	body_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body_lbl.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	text_vbox.add_child(body_lbl)
+
+	# Click overlay — sits over the whole panel, transparent stylebox so the
+	# painted parchment shows through. Disabled when disabled_reason is set,
+	# Godot then greys input automatically and skips the pressed signal.
+	var click_btn := Button.new()
+	click_btn.name = "ClickButton"
+	click_btn.flat = true
+	click_btn.focus_mode = Control.FOCUS_NONE
+	click_btn.disabled = disabled
+	click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+	click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
+	click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+	click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
+	click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
+	click_btn.add_theme_stylebox_override("disabled", StyleBoxEmpty.new())
+	root.add_child(click_btn)
+
+	# Hover lift: subtle modulate brighten on enter, restore on exit. Skipped
+	# when disabled so dead options don't pretend to be live.
+	if not disabled:
+		click_btn.mouse_entered.connect(func():
+			root.modulate = Color(1.10, 1.08, 1.02, 1.0)
+		)
+		click_btn.mouse_exited.connect(func():
+			root.modulate = Color.WHITE
+		)
+	else:
+		# Permanent "torn / faded" look — slight desaturation + slight rotation
+		# kept off so it doesn't look misaligned next to live banners.
+		root.modulate = Color(0.85, 0.82, 0.78, 0.95)
+
+	# Expose the click button as a child by name so callers can connect:
+	#   var b = GameTheme.make_choice_banner(...)
+	#   b.get_node("ClickButton").pressed.connect(_on_my_choice)
+	return root
+
+
+# ═══════════════════════════════════════════
+#  CARD TRIBES — name accent color by faction
+# ═══════════════════════════════════════════
+# Like Monster Train's clan accents and Legends of Runeterra's region tint,
+# but applied only to the card's name text. Lookup is name-key first (so
+# enemy-only inline creatures defined in EncounterDB by name pick up the right
+# color without needing an id), with id as a fallback for cards where the id
+# differs from the name (e.g. wolf_c, smite_spell, echo_spell).
+const CARD_TRIBES := {
+	# SOLDIER — knights, militia, paladins, disciplined fighters
+	"shieldbearer": "soldier", "pikeman": "soldier",
+	"squire_captain": "soldier", "torchbearer": "soldier",
+	"crystal_sentry": "soldier", "glass_knight": "soldier",
+	"battle_drummer": "soldier", "duelist": "soldier",
+	"adaptable": "soldier", "royal_guard": "soldier",
+	"ironclad_veteran": "soldier", "paladin": "soldier", "assassin": "soldier", "warchief": "soldier",
+	"lookout": "soldier",
+	"scout": "soldier", "archer": "soldier", "enforcer": "soldier",
+	"headsman": "soldier", "iron_champion": "soldier",
+	"fallen_knight": "soldier", "disgraced_squire": "soldier",
+	"demon_soldier": "soldier",
+
+	# WRETCH — goblins, savages, low humanoids
+	"goblin": "wretch", "brute": "wretch", "troll": "wretch",
+	"ratling": "wretch", "scavenger": "wretch", "goblin_scout": "wretch",
+	"plague_rat": "wretch",
+
+	# BEAST — animals, monsters, dragons, harpies
+	"wolf": "beast", "hound": "beast", "harpy": "beast",
+	"raven": "beast", "bloodhound": "beast", "mule": "beast",
+	"griffin": "beast",
+	"dragon_hatchling": "beast", "hydra": "beast",
+	"wind_harpy": "beast", "bog_lurker": "beast",
+	"drake": "beast", "elder_dragon": "beast",
+	"spore_beast": "beast", "mire_beast": "beast",
+	"basilisk": "beast", "cleave_hound": "beast",
+
+	# FAE — sprites, witches, mages, magical creatures, shapeshifters
+	"sprite": "fae", "naga": "fae", "mana_sprite": "fae",
+	"witch": "fae", "crow_witch": "fae", "summoner": "fae",
+	"leyline_conduit": "fae", "thornguard": "fae", "hexblade": "fae",
+	"familiar": "fae",
+	"dark_priest": "fae", "cultist": "fae",
+	"doppelganger": "fae", "copycat": "fae",
+
+	# UNDEAD/BLOOD — necromancy, vampires, demons, spirits, fire-revenants
+	"gravedigger": "undead", "necromancer": "undead", "revenant": "undead",
+	"blood_pyre": "undead", "vengeance": "undead", "corpse_eater": "undead",
+	"vampire_lord": "undead", "warden_of_graves": "undead",
+	"chaos_imp": "undead", "doom_knight": "undead", "husk": "undead",
+	"bone_knight": "undead", "fire_elemental": "undead",
+	"devils_champion": "undead", "collectors_champion": "undead",
+
+	# CONSTRUCT — stone, walls, golems, siege engines, titans
+	"stone_wall": "construct", "iron_bastion": "construct", "warding_stone": "construct",
+	"siege_golem": "construct", "riteforge": "construct",
+	"golem": "construct", "stone_sentinel": "construct",
+}
+
+# DARK tribe colors — Card2D v3 (the active render path) paints the name on a
+# CREAM banner, so the tribe color must be dark/saturated to read. Each value
+# clears 4.5:1 contrast against the cream banner and stays visually distinct
+# from its neighbors. Bright variants (for dark banners, e.g. v5 if re-
+# enabled) are kept below as TRIBE_COLORS_BRIGHT.
+const TRIBE_COLORS := {
+	"soldier":   Color(0.55, 0.35, 0.08, 1.0),  # dark amber / gold-bronze
+	"wretch":    Color(0.62, 0.30, 0.12, 1.0),  # rust brown
+	"beast":     Color(0.18, 0.40, 0.15, 1.0),  # forest green
+	"fae":       Color(0.10, 0.35, 0.55, 1.0),  # deep teal
+	"undead":    Color(0.55, 0.10, 0.10, 1.0),  # crimson
+	"construct": Color(0.25, 0.35, 0.45, 1.0),  # slate blue-grey
+	"spell":     Color(0.38, 0.18, 0.55, 1.0),  # dark violet
+	"neutral":   Color(0.165, 0.122, 0.071, 1.0),  # warm dark brown (v3 default)
+}
+
+# Bright variants — used by render paths that paint the name on a DARK banner
+# (v5 engraved path, legacy _build_full_layout). Same tribes, hand-tuned for
+# 4.5:1 contrast on near-black instead of cream.
+const TRIBE_COLORS_BRIGHT := {
+	"soldier":   Color(0.96, 0.80, 0.34, 1.0),  # warm gold
+	"wretch":    Color(0.92, 0.58, 0.26, 1.0),  # burnt orange
+	"beast":     Color(0.72, 0.88, 0.34, 1.0),  # lime green
+	"fae":       Color(0.46, 0.81, 0.95, 1.0),  # sky cyan
+	"undead":    Color(0.94, 0.36, 0.36, 1.0),  # blood red
+	"construct": Color(0.74, 0.82, 0.90, 1.0),  # slate blue
+	"spell":     Color(0.82, 0.66, 0.96, 1.0),  # lavender
+	"neutral":   Color(0.985, 0.965, 0.890, 1.0),  # warm cream
+}
+
+
+func get_card_tribe(card_data: Dictionary) -> String:
+	# Returns the tribe key for a card by id first, then name-key fallback so
+	# enemy-only creatures defined inline in EncounterDB still get colored
+	# even though they have no id field.
+	var id: String = card_data.get("id", "")
+	if id != "" and CARD_TRIBES.has(id):
+		return CARD_TRIBES[id]
+	var nm: String = card_data.get("name", "")
+	if nm != "":
+		var key := nm.to_lower().replace(" ", "_").replace("'", "")
+		if CARD_TRIBES.has(key):
+			return CARD_TRIBES[key]
+	if card_data.get("type", "") == "spell":
+		return "spell"
+	return "neutral"
+
+
+func get_name_color(card_data: Dictionary) -> Color:
+	# Convenience: tribe → name color, with neutral cream as fallback.
+	var tribe: String = get_card_tribe(card_data)
+	return TRIBE_COLORS.get(tribe, TRIBE_COLORS["neutral"])
+
+
+# ═══════════════════════════════════════════
+#  SETTINGS GEAR
+# ═══════════════════════════════════════════
+
+const GEAR_ICON_PATH := "res://assets/icons/kenney_game-icons/PNG/White/2x/gear.png"
+
+func make_settings_gear(host: Node, size: int = 48,
+		offset: Vector2 = Vector2(14, 14)) -> TextureButton:
+	# Settings gear — canonical top-LEFT position in card-game UIs (Hearthstone,
+	# Cross Blitz, Marvel Snap). Adds itself as a child of `host` so any scene
+	# can just call `GameTheme.make_settings_gear(self)` from _ready() and get
+	# the same look + behavior everywhere. `host` is typed as Node (not Control)
+	# because Combat parents to a CanvasLayer — TextureButton anchors against
+	# the viewport in that case, which is exactly what we want for a HUD overlay.
+	# Opens the persistent SettingsOverlay attached to UserSettings.
+	#
+	# Uses the Kenney gear PNG (not a font glyph) so the icon renders identically
+	# on every machine regardless of which fonts have U+2699. A prior version
+	# used `Button.text = "⚙"` but Lilita One doesn't include the gear codepoint,
+	# so the button rendered as empty space on most machines.
+	var btn := TextureButton.new()
+	var tex: Texture2D = load(GEAR_ICON_PATH) as Texture2D
+	btn.texture_normal = tex
+	btn.ignore_texture_size = true
+	btn.stretch_mode = TextureButton.STRETCH_KEEP_ASPECT_CENTERED
+	btn.anchor_left = 0.0
+	btn.anchor_right = 0.0
+	btn.anchor_top = 0.0
+	btn.anchor_bottom = 0.0
+	btn.offset_left = offset.x
+	btn.offset_right = offset.x + size
+	btn.offset_top = offset.y
+	btn.offset_bottom = offset.y + size
+	btn.custom_minimum_size = Vector2(size, size)
+	btn.tooltip_text = "Settings"
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	# Gilt tint at rest, bright gold on hover — matches the rest of the HUD's
+	# parchment palette. Modulate (not theme color) since this is a TextureButton.
+	btn.modulate = Color(0.82, 0.66, 0.30, 0.85)
+	btn.mouse_entered.connect(func():
+		var tw := btn.create_tween()
+		tw.tween_property(btn, "modulate", Color(1.0, 0.88, 0.35, 1.0), 0.12))
+	btn.mouse_exited.connect(func():
+		var tw := btn.create_tween()
+		tw.tween_property(btn, "modulate", Color(0.82, 0.66, 0.30, 0.85), 0.12))
+	btn.pressed.connect(_open_settings_overlay_from_anywhere)
+	host.add_child(btn)
+	return btn
+
+
+func _open_settings_overlay_from_anywhere() -> void:
+	# Finds the SettingsOverlay attached to the UserSettings autoload and opens
+	# it. Same lookup used by Combat / MainMenu — centralized so adding the
+	# gear button to a new scene doesn't require duplicating this snippet.
+	for child in UserSettings.get_children():
+		if child.has_method("_open"):
+			child._open()
+			return
+		elif child.has_method("open"):
+			child.open()
+			return
+
+
+func make_relic_chip(rid: String, size: int = 40) -> Panel:
+	# Ornate framed chip for a relic icon — used by the HUD strip, shop cards,
+	# the starting-relic-pick tiles, and the main-menu relic list. The frame is
+	# a dark backing + gilt rim + tier-tinted shadow halo (boss=purple,
+	# combat=warm bronze, utility=green, starting=gold) for at-a-glance rarity
+	# the way WoW item borders cue quality. SVG silhouettes get the gilt tint
+	# they were designed for; painted PNGs render at full color.
+	var chip := Panel.new()
+	chip.custom_minimum_size = Vector2(size, size)
+	chip.mouse_filter = Control.MOUSE_FILTER_STOP
+
+	var r := RelicDB.get_relic(rid)
+	chip.tooltip_text = "%s — %s" % [r.get("name", rid), r.get("desc", "")]
+
+	var tier_color: Color = RelicDB.get_tier_color(rid)
+	var radius: int = max(4, int(round(size * 0.14)))
+	var rim: int = 2 if size < 56 else 3
+
+	var frame := StyleBoxFlat.new()
+	frame.bg_color = Color(0.06, 0.05, 0.04, 0.95)
+	frame.border_color = GILT
+	for k in ["border_width_top", "border_width_bottom",
+			"border_width_left", "border_width_right"]:
+		frame.set(k, rim)
+	for k in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		frame.set(k, radius)
+	# Tier-tinted glow halo — the WoW-quality cue. Stronger on bigger chips.
+	frame.shadow_color = Color(tier_color.r, tier_color.g, tier_color.b, 0.55)
+	frame.shadow_size = max(3, int(round(size * 0.18)))
+	chip.add_theme_stylebox_override("panel", frame)
+
+	# Inner highlight ring — a second stylebox layered on a transparent Panel
+	# child gives the frame a "two-tone metal" look (bright gilt outside, dim
+	# inner shadow) without baking the icon's edges into the rim.
+	var inner_ring := Panel.new()
+	inner_ring.anchor_left = 0.0
+	inner_ring.anchor_right = 1.0
+	inner_ring.anchor_top = 0.0
+	inner_ring.anchor_bottom = 1.0
+	inner_ring.offset_left = rim
+	inner_ring.offset_right = -rim
+	inner_ring.offset_top = rim
+	inner_ring.offset_bottom = -rim
+	inner_ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var inner_style := StyleBoxFlat.new()
+	inner_style.bg_color = Color(0, 0, 0, 0)
+	inner_style.border_color = Color(0.0, 0.0, 0.0, 0.55)
+	for k in ["border_width_top", "border_width_bottom",
+			"border_width_left", "border_width_right"]:
+		inner_style.set(k, 1)
+	for k in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		inner_style.set(k, max(2, radius - 1))
+	inner_ring.add_theme_stylebox_override("panel", inner_style)
+	chip.add_child(inner_ring)
+
+	var icon: Texture2D = RelicDB.get_relic_icon(rid)
+	if icon != null:
+		var tex := TextureRect.new()
+		tex.texture = icon
+		tex.anchor_left = 0.0
+		tex.anchor_right = 1.0
+		tex.anchor_top = 0.0
+		tex.anchor_bottom = 1.0
+		var inset: int = rim + 2
+		tex.offset_left = inset
+		tex.offset_right = -inset
+		tex.offset_top = inset
+		tex.offset_bottom = -inset
+		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		# Painted PNGs render at full color; legacy SVG silhouettes get the
+		# gilt tint they were authored for.
+		if not RelicDB.is_painted_icon(rid):
+			tex.modulate = GILT
+		chip.add_child(tex)
+	else:
+		var letter := Label.new()
+		letter.text = r.get("name", "?").substr(0, 1).to_upper()
+		letter.set_anchors_preset(Control.PRESET_FULL_RECT)
+		letter.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		letter.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		letter.add_theme_font_size_override("font_size", max(14, int(size * 0.45)))
+		letter.add_theme_color_override("font_color", GILT)
+		letter.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if font_display:
+			letter.add_theme_font_override("font", font_display)
+		chip.add_child(letter)
+	return chip
+
+
 func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 120),
 		price: int = -1) -> Button:
 	# A relic "card" button: gilt-trimmed panel with the relic's icon stacked
@@ -570,17 +1036,9 @@ func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 12
 	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	btn.add_child(col)
 
-	var icon := RelicDB.get_relic_icon(rid)
-	if icon != null:
-		var tex := TextureRect.new()
-		tex.texture = icon
-		tex.custom_minimum_size = Vector2(44, 44)
-		tex.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		tex.modulate = GILT
-		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		col.add_child(tex)
+	var chip := make_relic_chip(rid, 56)
+	chip.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	col.add_child(chip)
 
 	var name_lbl := make_label(r.get("name", rid), FONT_BODY, KEYWORD_GOLD)
 	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -744,7 +1202,7 @@ func get_card_frame(card_data: Dictionary) -> Texture2D:
 	if not USE_NEW_FRAME or _new_frames.is_empty():
 		return tex_card_frame_ornate
 	var ct: String = "spell" if String(card_data.get("type", "creature")) == "spell" else "creature"
-	if String(card_data.get("type", "")) == "curse" or String(card_data.get("id", "")) == "curse":
+	if CardDB.is_curse(String(card_data.get("id", ""))) or String(card_data.get("type", "")) == "curse":
 		return _new_frames.get("curse", tex_card_frame_ornate)
 	var rarity: String = String(card_data.get("rarity", "common"))
 	if rarity not in ["starter", "common", "uncommon", "rare"]:
@@ -801,14 +1259,28 @@ const SCREEN_MOODS: Dictionary = {
 		"frame_color": Color(0.65, 0.50, 0.22, 0.28),
 	},
 	"rest": {
-		"grad_inner": Color(0.05, 0.10, 0.07, 0.25),
-		"grad_outer": Color(0.01, 0.03, 0.02, 0.60),
-		"vignette": 0.45,
-		"particle_color": Color(0.40, 0.85, 0.55, 0.30),
-		"particle_alt": Color(0.30, 0.65, 0.80, 0.20),
-		"particle_count": 18,
-		"particle_speed": 6.0,
-		"frame_color": Color(0.30, 0.55, 0.35, 0.25),
+		# Warmer, deeper inner — pulls eye toward the painted fire. Outer alpha
+		# bumped 0.60 → 0.78 so we can drop the rest.tscn self_modulate dimmer
+		# and let the painted background breathe; the vignette + alpha do the
+		# darkening that the self_modulate used to do (badly).
+		"grad_inner": Color(0.10, 0.06, 0.03, 0.10),
+		"grad_outer": Color(0.02, 0.01, 0.01, 0.78),
+		"vignette": 0.55,
+		# Glowing embers rising from the fire — orange→red fade. Old palette
+		# was green/teal "firefly" — wrong color for a campfire scene.
+		"particle_color": Color(1.0, 0.55, 0.15, 0.55),
+		"particle_alt": Color(1.0, 0.30, 0.05, 0.0),
+		"particle_count": 32,
+		"particle_speed": 28.0,
+		"frame_color": Color(0.65, 0.45, 0.22, 0.30),
+		# Ember anchor (Vector2 in 1600×900 space, or null for fullscreen).
+		# Tuned to roughly where the campfire flame sits in rest_campfire.png.
+		"particle_anchor": Vector2(820, 720),
+		"particle_anchor_extents": Vector2(110, 30),
+		# Slight upward bias + small spread so embers wobble up like real sparks.
+		"particle_spread": 30.0,
+		"particle_scale_min": 1.2,
+		"particle_scale_max": 2.6,
 	},
 	"event": {
 		"grad_inner": Color(0.08, 0.05, 0.12, 0.30),
@@ -869,11 +1341,16 @@ static func _get_atmosphere_shader() -> Shader:
 
 ## Adds vignette + gradient overlay, ambient particles, and decorative frame.
 ## Call once in _ready() — survives _build_ui() if cleanup preserves "Atmosphere".
+## `mood_override` keys merge over the screen_type's base mood — used by Rest.gd
+## to tint the screen warmer (dusk) on first visit or cooler (night) on second.
 static func add_atmosphere(parent: Control, screen_type: String,
-		include_frame: bool = true) -> void:
+		include_frame: bool = true, mood_override: Dictionary = {}) -> void:
 	if parent.has_node("Atmosphere"):
 		return
-	var mood = SCREEN_MOODS.get(screen_type, SCREEN_MOODS["main_menu"])
+	var base: Dictionary = SCREEN_MOODS.get(screen_type, SCREEN_MOODS["main_menu"])
+	var mood: Dictionary = base.duplicate()
+	for k in mood_override:
+		mood[k] = mood_override[k]
 
 	var atm := Control.new()
 	atm.name = "Atmosphere"
@@ -956,21 +1433,32 @@ static func _make_ambient_particles(mood: Dictionary) -> CPUParticles2D:
 	p.lifetime = 6.0
 	p.explosiveness = 0.0
 	p.randomness = 1.0
-	# Emit across the full viewport
-	p.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
-	p.emission_rect_extents = Vector2(800, 450)
-	p.position = Vector2(800, 450)
-	# Slow upward drift with lateral wobble
+	# Emit across the full viewport by default, but mood entries can pin the
+	# emitter to a point (e.g. campfire) by setting `particle_anchor`. When set,
+	# embers/sparks rise from that location instead of from the whole screen,
+	# which is what sells "fire" vs "fireflies."
+	var anchor = mood.get("particle_anchor", null)
+	if anchor != null and anchor is Vector2:
+		p.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+		var ext: Vector2 = mood.get("particle_anchor_extents", Vector2(80, 24))
+		p.emission_rect_extents = ext
+		p.position = anchor
+	else:
+		p.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+		p.emission_rect_extents = Vector2(800, 450)
+		p.position = Vector2(800, 450)
+	# Slow upward drift with lateral wobble. Spread tunable per mood — embers
+	# want a tight cone (~30°), ambient motes a wide one (~60°).
 	p.direction = Vector2(0, -1)
-	p.spread = 60.0
+	p.spread = mood.get("particle_spread", 60.0)
 	p.initial_velocity_min = mood.particle_speed * 0.5
 	p.initial_velocity_max = mood.particle_speed
 	p.gravity = Vector2(0, 0)
 	p.linear_accel_min = -2.0
 	p.linear_accel_max = 2.0
-	# Size
-	p.scale_amount_min = 1.5
-	p.scale_amount_max = 3.5
+	# Size — embers are smaller than ambient motes; mood overrides the defaults.
+	p.scale_amount_min = mood.get("particle_scale_min", 1.5)
+	p.scale_amount_max = mood.get("particle_scale_max", 3.5)
 	# Color ramp: transparent → glow → color-shift → transparent
 	var c1: Color = mood.particle_color
 	var c2: Color = mood.get("particle_alt", c1)
@@ -1153,268 +1641,8 @@ func make_icon_stat(icon: Texture2D, value: String, icon_tint: Color,
 	return hbox
 
 
-## Creature art aliases — map a card-name slug to an existing creature art file
-## (.png or .jpg, extension auto-resolved). Used for two cases:
-##   1. Genuine near-duplicates (Bloodhound → hound, Mana Sprite → sprite).
-##   2. Encounter-only enemy creatures (Goblin Scout, Wolf, Drake, etc.) that
-##      don't have dedicated art but share an archetype with a creature that
-##      does. Without these, enemy battlefield cards fall back to the blank
-##      hash-tinted placeholder, which looks empty next to the player's
-##      illustrated hand. EncounterDB creature names are slugged the same way
-##      Card2D._find_card_art slugs them (lower, spaces→_, apostrophes stripped).
-const CREATURE_ART_ALIASES: Dictionary = {
-	# ── Player-side near-duplicates ──────────────────────────────────────
-	"bloodhound":           "hound",
-	"war_hound":            "hound",
-	"mana_sprite":          "sprite",
-	"stone_wall":           "iron_bastion",
-	"ironclad_veteran":     "iron_bastion",
-
-	# ── Wolves / hounds ──────────────────────────────────────────────────
-	"wolf":                 "wolf_c",
-	"dire_wolf":            "wolf_c",
-	"alpha":                "wolf_c",
-	"pup":                  "wolf_c",
-	"hellhound":            "hound",
-
-	# ── Bandits / scouts / rogues ────────────────────────────────────────
-	"goblin_scout":         "e_scout",
-	"runt":                 "e_goblin",
-	"bandit":               "assassin",
-	"thug":                 "assassin",
-	"archer":               "ranger",
-	"sharpshooter":         "ranger",
-	"captain":              "royal_guard",
-	"sellsword":            "berserker",
-	"recruit":              "berserker",
-	"shadow_blade":         "assassin",
-
-	# ── Plants / fungi / swamp ───────────────────────────────────────────
-	"sprout":               "thornguard",
-	"spore_beast":          "thornguard",
-	"spore":                "thornguard",
-	"mycelium":             "hydra",
-	"mire_beast":           "e_bog_lurker",
-	"leech":                "e_bog_lurker",
-	"swamp_hag":            "witch",
-	"hydra_spawn":          "hydra",
-
-	# ── Stone / iron / siege constructs ──────────────────────────────────
-	"rock_hurler":          "e_golem",
-	"granite_guard":        "e_golem",
-	"fragment":             "e_golem",
-	"flame_golem":          "e_golem",
-	"forge_guardian":       "iron_bastion",
-	"slag_heap":            "e_golem",
-	"ice_elemental":        "e_golem",
-	"earth_elemental":      "e_golem",
-	"nexus_core":           "siege_golem",
-	"iron_sentinel":        "iron_bastion",
-	"iron_guard":           "iron_bastion",
-	"iron_vanguard":        "iron_bastion",
-	"iron_recruit":         "iron_bastion",
-	"siege_engine":         "siege_golem",
-	"wardens_champion":     "doom_knight",
-	"display_case":         "iron_bastion",
-	"trinket":              "iron_bastion",
-	"temple_guardian":      "iron_bastion",
-	"shard":                "iron_bastion",
-	"collector_golem":      "iron_bastion",
-
-	# ── Harpies / flyers ─────────────────────────────────────────────────
-	"matron":               "harpy",
-	"chick":                "harpy",
-
-	# ── Orcs / warriors ──────────────────────────────────────────────────
-	# orc.png was removed (broken import); chieftain/grunt now resolve to the
-	# e_brute portrait, which fits the same "big tribal fighter" silhouette.
-	"warrior":              "berserker",
-	"drummer":              "ratling",
-	"chieftain":            "e_brute",
-	"grunt":                "e_brute",
-
-	# ── Skeletons / liches / undead ──────────────────────────────────────
-	"skeleton":             "vengeful_spirit",
-	"bone_knight":          "doom_knight",
-	"bone_dragon":          "e_elder_dragon",
-	"skeleton_knight":      "doom_knight",
-	"lich":                 "necromancer",
-	"lich_acolyte":         "necromancer",
-	"dark_acolyte":         "e_cultist",
-	"risen_bones":          "vengeful_spirit",
-	"risen":                "vengeful_spirit",
-	"phylactery":           "warden_of_graves",
-
-	# ── Cultists ─────────────────────────────────────────────────────────
-	"zealot":               "e_cultist",
-	"fanatic":              "e_cultist",
-	"initiate":             "e_cultist",
-
-	# ── Dragons ──────────────────────────────────────────────────────────
-	"wyrm":                 "dragon_hatchling",
-	"whelp":                "dragon_hatchling",
-	"elder_drake":          "e_elder_dragon",
-
-	# ── Ghosts / spirits / hollow ────────────────────────────────────────
-	"wraith":               "vengeful_spirit",
-	"banshee":              "vengeful_spirit",
-	"specter":              "vengeful_spirit",
-	"shade":                "vengeful_spirit",
-	"gravewarden":          "warden_of_graves",
-	"hollow_knight":        "doom_knight",
-	"void_guard":           "doom_knight",
-	"hollow_champion":      "doom_knight",
-	"shade_knight":         "doom_knight",
-
-	# ── Demons / hellfire ────────────────────────────────────────────────
-	"demon_soldier":        "doom_knight",
-	"pit_fiend":            "e_devil_champ",
-	"infernal":             "e_devil_champ",
-	"imp":                  "chaos_imp",
-	"hellfire_imp":         "chaos_imp",
-	"devils_champion":      "e_devil_champ",
-	"lesser_demon":         "chaos_imp",
-	"soul_reaper":          "vengeful_spirit",
-	"cinder":               "chaos_imp",
-	"ember_elemental":      "chaos_imp",
-	"fire_elemental":       "chaos_imp",
-	"storm_elemental":      "chaos_imp",
-	"spark":                "chaos_imp",
-
-	# ── Executioners ─────────────────────────────────────────────────────
-	"torturer":             "e_headsman",
-	"executioner":          "e_headsman",
-	"jailer":               "e_headsman",
-	"condemned":            "corpse_eater",
-
-	# ── Puppets / mirrors / doubles ──────────────────────────────────────
-	"marionette":           "doppelganger",
-	"puppet_knight":        "doom_knight",
-	"shadow_double":        "doppelganger",
-	"puppeteers_guard":     "doom_knight",
-	"string":               "doppelganger",
-	"mirror_knight":        "doppelganger",
-	"reflection":           "doppelganger",
-	"doppel":               "doppelganger",
-
-	# ── Void / collector ─────────────────────────────────────────────────
-	"void_spawn":           "chaos_imp",
-	"rift_stalker":         "vengeful_spirit",
-	"null_beast":           "corpse_eater",
-	"void_maw":             "hydra",
-	"soul_cage":            "warden_of_graves",
-	"collectors_pride":     "war_titan",
-	"collectors_champion":  "doom_knight",
-}
-
-
-# Memoized art lookups — Card2D probes up to 5 ids per layout build, and each
-# probe used to fire 2-3 ResourceLoader.exists() filesystem stats. Negative
-# hits are cached too (stored as null) so the 5-probe fallback chain returns
-# instantly after the first build of each card.
-var _creature_art_cache: Dictionary = {}
-var _spell_art_cache: Dictionary = {}
-
-func try_load_creature_art(card_id: String) -> Texture2D:
-	if _creature_art_cache.has(card_id):
-		return _creature_art_cache[card_id]
-	var tex: Texture2D = null
-	var path = "res://assets/creatures/%s.png" % card_id
-	if ResourceLoader.exists(path):
-		tex = load(path)
-	elif CREATURE_ART_ALIASES.has(card_id):
-		var alias_target: String = CREATURE_ART_ALIASES[card_id]
-		var alias_png := "res://assets/creatures/%s.png" % alias_target
-		if ResourceLoader.exists(alias_png):
-			tex = load(alias_png)
-		else:
-			var alias_jpg := "res://assets/creatures/%s.jpg" % alias_target
-			if ResourceLoader.exists(alias_jpg):
-				tex = load(alias_jpg)
-	if tex == null:
-		var jpg_path = "res://assets/creatures/%s.jpg" % card_id
-		if ResourceLoader.exists(jpg_path):
-			tex = load(jpg_path)
-	_creature_art_cache[card_id] = tex
-	return tex
-
-
-# Tried a semantic-icon placeholder system (chess pieces, skulls, etc. picked
-# by card name keywords). It looked terrible — flat board-game icons clashed
-# hard with the painterly style of cards that DO have illustrations. Removed.
-# Cards without dedicated art now show a quiet hash-tinted gradient via
-# Card2D._build_placeholder_art, which doesn't pretend to be art.
-
-
-## Per-spell art overrides. The original `assets/spells/<id>.png` set had
-## clusters of look-alike fire art and a few mismatches (e.g. `slash` was
-## actually a fireball image). This map points each spell at a hand-picked
-## painterly variant from `painterly-1`/`painterly-2` so every spell reads
-## distinctly. Falls back to the loose per-id PNG if the override is missing.
-const SPELL_ART_OVERRIDES: Dictionary = {
-	# Damage spells
-	"strike":              "res://assets/spells/painterly-1/enchant-red-1.png",
-	"slash":               "res://assets/spells/painterly-1/enchant-orange-1.png",
-	"smite_spell":         "res://assets/spells/painterly-2/beam-sky-1.png",
-	"flame_bolt":          "res://assets/spells/painterly-1/fireball-red-1.png",
-	"inferno":             "res://assets/spells/painterly-1/fireball-eerie-1.png",
-	"earthquake":          "res://assets/spells/painterly-2/rock-orange-1.png",
-	"ambush":              "res://assets/spells/painterly-1/enchant-eerie-1.png",
-	"lightning":           "res://assets/spells/painterly-2/lightning-blue-1.png",
-	"quick_shot":          "res://assets/spells/painterly-2/beam-orange-1.png",
-	"cataclysm":           "res://assets/spells/painterly-2/rock-royal-1.png",
-	"apocalypse":          "res://assets/spells/painterly-2/beam-eerie-1.png",
-	"mass_grave":          "res://assets/spells/painterly-1/evil-eye-eerie-1.png",
-	"pillage":             "res://assets/spells/painterly-1/enchant-orange-2.png",
-	# Buff / heal / defensive
-	"war_cry":             "res://assets/spells/painterly-2/haste-fire-1.png",
-	"inspire":             "res://assets/spells/painterly-2/haste-royal-1.png",
-	"battle_hymn":         "res://assets/spells/painterly-2/haste-sky-1.png",
-	"kings_command":       "res://assets/spells/painterly-1/protect-royal-1.png",
-	"shield_wall":         "res://assets/spells/painterly-1/protect-blue-1.png",
-	"barricade":           "res://assets/spells/painterly-1/protect-acid-1.png",
-	"patch_up":            "res://assets/spells/painterly-1/heal-jade-1.png",
-	"second_wind":         "res://assets/spells/painterly-1/heal-sky-1.png",
-	"dark_pact":           "res://assets/spells/painterly-1/enchant-magenta-1.png",
-	"overwhelming_force":  "res://assets/spells/painterly-2/beam-red-1.png",
-	# Utility / combo
-	"provision":           "res://assets/spells/painterly-1/enchant-jade-1.png",
-	"gambit":              "res://assets/spells/painterly-1/enchant-sky-1.png",
-	"shove":               "res://assets/spells/painterly-2/rock-plain-1.png",
-	"adrenaline":          "res://assets/spells/painterly-2/haste-fire-2.png",
-	"concentrate":         "res://assets/spells/painterly-1/enchant-royal-1.png",
-	"scrap":               "res://assets/spells/painterly-2/vines-acid-1.png",
-	"reposition":          "res://assets/spells/painterly-2/vines-plain-1.png",
-	"offering":            "res://assets/spells/painterly-2/vines-eerie-1.png",
-	"grave_pact":          "res://assets/spells/painterly-1/evil-eye-eerie-2.png",
-	"fuel_the_pyre":       "res://assets/spells/painterly-1/fireball-acid-1.png",
-	"bloodletting":        "res://assets/spells/painterly-1/enchant-red-2.png",
-	"echo_spell":          "res://assets/spells/painterly-2/beam-magenta-1.png",
-	"turbo":               "res://assets/spells/painterly-2/haste-sky-2.png",
-	"recycle":             "res://assets/spells/painterly-2/vines-jade-1.png",
-	"soul_swap":           "res://assets/spells/painterly-1/enchant-eerie-2.png",
-	"war_chant":           "res://assets/spells/painterly-2/haste-royal-2.png",
-	"grave_robbery":       "res://assets/spells/painterly-1/evil-eye-red-1.png",
-	"blood_tithe":         "res://assets/spells/painterly-1/enchant-red-3.png",
-	"reckless_charge":     "res://assets/spells/painterly-2/haste-fire-3.png",
-	"unholy_bargain":      "res://assets/spells/painterly-1/evil-eye-eerie-3.png",
-}
-
-
-func try_load_spell_art(card_id: String) -> Texture2D:
-	if _spell_art_cache.has(card_id):
-		return _spell_art_cache[card_id]
-	var tex: Texture2D = null
-	if SPELL_ART_OVERRIDES.has(card_id):
-		var override_path: String = SPELL_ART_OVERRIDES[card_id]
-		if ResourceLoader.exists(override_path):
-			tex = load(override_path)
-	if tex == null:
-		var path = "res://assets/spells/%s.png" % card_id
-		if ResourceLoader.exists(path):
-			tex = load(path)
-	_spell_art_cache[card_id] = tex
-	return tex
+## Creature art aliases and loaders moved to scripts/data/CardArtAliases.gd.
+## Call CardArtAliases.try_load_creature_art() / try_load_spell_art() directly.
 
 
 # ---------------------------------------------------------------------------
@@ -1502,52 +1730,54 @@ func fade_out_then_change_scene(host: Node, target_scene: String,
 
 
 func make_back_button(label: String = "BACK", min_size: Vector2 = Vector2(140, 42),
-		font_size: int = 16) -> Button:
-	# Unified "go back / leave / close" button used by every scene. Renders as
-	# "← LABEL" with a styled gold-trimmed pill so it never looks like a default
-	# Godot rectangle. Pass label="LEAVE" or "CANCEL" or "CLOSE" — the leading
-	# arrow stays consistent so the navigation gesture is the same across scenes.
+		font_size: int = 16, rest_color: Color = IVORY) -> Button:
+	# Unified frameless text button used by every scene — "go back / leave /
+	# close / cancel" and also light primary confirms (Pick). Slay-the-Spire /
+	# Hades idiom: no filled pill at rest, the label *is* the button. On hover a
+	# gilt underline ignites beneath it and the text brightens to gilt. A heavy
+	# dark text outline keeps the label legible over busy painted backgrounds.
+	# `rest_color` defaults to IVORY (secondary); pass GILT/KEYWORD_GOLD for a
+	# primary-feeling action that should read warmer at rest.
 	var btn := Button.new()
-	btn.text = "←  %s" % label
+	btn.text = label
 	btn.custom_minimum_size = min_size
 	btn.focus_mode = Control.FOCUS_NONE
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	if font_display:
 		btn.add_theme_font_override("font", font_display)
 	btn.add_theme_font_size_override("font_size", font_size)
-	btn.add_theme_color_override("font_color", IVORY)
-	btn.add_theme_color_override("font_hover_color", Color(1.0, 0.95, 0.80))
+	btn.add_theme_color_override("font_color", rest_color)
+	btn.add_theme_color_override("font_hover_color", GILT_BRIGHT)
 	btn.add_theme_color_override("font_pressed_color", Color(0.92, 0.85, 0.65))
-	btn.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.55))
-	btn.add_theme_constant_override("outline_size", 3)
-	var bg := Color(0.18, 0.14, 0.10, 0.92)
-	var normal := StyleBoxFlat.new()
-	normal.bg_color = bg
-	normal.border_color = GILT
-	normal.border_width_left = 2
-	normal.border_width_right = 2
-	normal.border_width_top = 2
-	normal.border_width_bottom = 2
-	# Half-height corner radius gives a pill shape — distinctly different from
-	# the rounded-rectangle of primary buttons. Reads as a navigation control,
-	# not a main action.
-	var pill_corner: int = int(min_size.y * 0.5)
-	normal.corner_radius_top_left = pill_corner
-	normal.corner_radius_top_right = pill_corner
-	normal.corner_radius_bottom_left = pill_corner
-	normal.corner_radius_bottom_right = pill_corner
-	normal.content_margin_left = 22
-	normal.content_margin_right = 22
-	normal.content_margin_top = 6
-	normal.content_margin_bottom = 6
-	btn.add_theme_stylebox_override("normal", normal)
-	var hover := normal.duplicate() as StyleBoxFlat
-	hover.bg_color = bg.lightened(0.18)
+	btn.add_theme_color_override("font_outline_color", Color(0.05, 0.02, 0.0, 0.85))
+	btn.add_theme_constant_override("outline_size", 5)
+
+	# Rest state: truly frameless (no box), with content margins so the click
+	# target and text padding match the hover state — nothing reflows on hover.
+	var rest := StyleBoxEmpty.new()
+	rest.content_margin_left = 18
+	rest.content_margin_right = 18
+	rest.content_margin_top = 6
+	rest.content_margin_bottom = 8
+	btn.add_theme_stylebox_override("normal", rest)
+	btn.add_theme_stylebox_override("focus", rest)
+	btn.add_theme_stylebox_override("disabled", rest)
+
+	# Hover: a gilt underline (bottom border only, near-transparent fill) fades
+	# in beneath the label — the frameless hover signal, no pill.
+	var hover := StyleBoxFlat.new()
+	hover.bg_color = Color(0.85, 0.62, 0.25, 0.10)
 	hover.border_color = GILT_BRIGHT
-	hover.shadow_size = 8
-	hover.shadow_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.30)
+	hover.border_width_bottom = 2
+	hover.content_margin_left = 18
+	hover.content_margin_right = 18
+	hover.content_margin_top = 6
+	hover.content_margin_bottom = 8
 	btn.add_theme_stylebox_override("hover", hover)
-	var pressed := normal.duplicate() as StyleBoxFlat
-	pressed.bg_color = bg.darkened(0.18)
+
+	var pressed := hover.duplicate() as StyleBoxFlat
+	pressed.bg_color = Color(0.85, 0.62, 0.25, 0.04)
+	pressed.border_color = GILT
 	btn.add_theme_stylebox_override("pressed", pressed)
 	return btn
 
@@ -1599,12 +1829,24 @@ func show_confirm_dialog(host: Node, title: String, message: String,
 	# act on what's behind. Calls on_confirm only if the player picks confirm.
 	if host == null or not is_instance_valid(host) or host.get_tree() == null:
 		return
-	var root := host.get_tree().root
+	# Wrap the dialog in a CanvasLayer at very high `layer` so it renders on
+	# top of SettingsOverlay (layer=100) and any other HUD CanvasLayer. Pure
+	# z_index doesn't help here — CanvasLayer order beats z_index across the
+	# tree, which is why the previous z_index=999 approach left the dialog
+	# hidden behind the settings panel.
+	# Parented to current_scene (not root) so when the player confirms an
+	# action that changes the scene, the dialog dies with the old scene
+	# instead of surviving into the next one ("stuck on main menu" bug).
+	var layer := CanvasLayer.new()
+	layer.layer = 1000
+	var current_scene: Node = host.get_tree().current_scene
+	var dialog_parent: Node = current_scene if current_scene != null else host.get_tree().root
+	dialog_parent.add_child(layer)
+
 	var overlay := Control.new()
 	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
-	overlay.z_index = 999
-	root.add_child(overlay)
+	layer.add_child(overlay)
 
 	var backdrop := ColorRect.new()
 	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -1674,15 +1916,15 @@ func show_confirm_dialog(host: Node, title: String, message: String,
 	btn_row.add_theme_constant_override("separation", 16)
 	vbox.add_child(btn_row)
 
-	var cancel_btn := make_back_button(cancel_label, Vector2(150, 44), 16)
+	var cancel_btn := make_back_button(cancel_label, Vector2(150, 44))
 	cancel_btn.pressed.connect(func():
-		overlay.queue_free())
+		layer.queue_free())
 	btn_row.add_child(cancel_btn)
 
 	var confirm_btn := make_themed_button(confirm_label,
 		Color(0.40, 0.12, 0.10), Vector2(180, 44), 17)
 	confirm_btn.pressed.connect(func():
-		overlay.queue_free()
+		layer.queue_free()
 		if on_confirm.is_valid():
 			on_confirm.call())
 	btn_row.add_child(confirm_btn)
@@ -1700,6 +1942,222 @@ func show_confirm_dialog(host: Node, title: String, message: String,
 	tw.tween_property(panel, "modulate:a", 1.0, 0.22)
 	tw.tween_property(panel, "scale", Vector2.ONE, 0.30) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+# ── Reusable acquire / per-act pickers ──────────────────────────────────────
+# Shared by Combat (pen_nib), MapView (per-act totem/hourglass + Bottled
+# Talisman catch-all), and the acquire screens (Reward/Shop/Treasure). All use
+# the same CanvasLayer(1000) modal idiom as show_confirm_dialog so they render
+# above the settings overlay and die with the scene on a mid-modal transition.
+
+func show_deck_picker(host: Node, title: String, type_filter: String = "",
+		allow_cancel: bool = false) -> int:
+	## Modal grid of the run deck; the player clicks a card. Returns the chosen
+	## RunState.deck INDEX, or -1 if dismissed / nothing eligible.
+	##   type_filter: "" (any) | "creature" | "spell"
+	if host == null or not is_instance_valid(host) or host.get_tree() == null:
+		return -1
+	# Resolve eligible deck indices first — bail before building UI if empty.
+	var eligible: Array[int] = []
+	for i in RunState.deck.size():
+		var d: Dictionary = RunState.get_upgraded_card_data(i)
+		if type_filter != "" and d.get("type", "") != type_filter:
+			continue
+		eligible.append(i)
+	if eligible.is_empty():
+		return -1
+
+	var card_scene: PackedScene = load("res://scenes/card_2d.tscn")
+	var layer := CanvasLayer.new()
+	layer.layer = 1000
+	var current_scene: Node = host.get_tree().current_scene
+	var modal_parent: Node = current_scene if current_scene != null else host.get_tree().root
+	modal_parent.add_child(layer)
+
+	var overlay := ColorRect.new()
+	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	overlay.color = Color(0.03, 0.02, 0.05, 0.93)
+	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	layer.add_child(overlay)
+
+	var root := VBoxContainer.new()
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.offset_left = 60
+	root.offset_right = -60
+	root.offset_top = 24
+	root.offset_bottom = -24
+	root.add_theme_constant_override("separation", 16)
+	overlay.add_child(root)
+
+	var title_lbl := make_label(title, FONT_TITLE, GILT_BRIGHT, true)
+	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	root.add_child(title_lbl)
+
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	root.add_child(scroll)
+
+	var grid := GridContainer.new()
+	grid.columns = 6
+	grid.add_theme_constant_override("h_separation", 18)
+	grid.add_theme_constant_override("v_separation", 20)
+	scroll.add_child(grid)
+
+	# -2 = still open, -1 = cancelled, >=0 = picked deck index.
+	var result := {"index": -2}
+	var batch := 6
+	for bstart in range(0, eligible.size(), batch):
+		for k in range(batch):
+			var ei := bstart + k
+			if ei >= eligible.size():
+				break
+			var di: int = eligible[ei]
+			var data: Dictionary = RunState.get_upgraded_card_data(di)
+			var slot := Control.new()
+			slot.custom_minimum_size = Vector2(220, 300)
+			grid.add_child(slot)
+			var card = card_scene.instantiate()
+			card.card_data = data.duplicate(true)
+			card.card_id = data.get("id", "")
+			card.is_on_battlefield = true
+			card.static_display = true
+			slot.add_child(card)
+			var btn := Button.new()
+			btn.flat = true
+			btn.focus_mode = Control.FOCUS_NONE
+			btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+			var captured: int = di
+			btn.pressed.connect(func():
+				result["index"] = captured
+				layer.queue_free())
+			slot.add_child(btn)
+		if not is_instance_valid(layer):
+			return -1
+		await host.get_tree().process_frame
+
+	if allow_cancel:
+		var cancel := make_back_button("CANCEL", Vector2(170, 44))
+		cancel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		cancel.pressed.connect(func():
+			result["index"] = -1
+			layer.queue_free())
+		root.add_child(cancel)
+
+	while result["index"] == -2 and is_instance_valid(layer):
+		await host.get_tree().process_frame
+	# Layer freed by a scene change rather than a pick → treat as dismissed.
+	if result["index"] == -2:
+		return -1
+	return result["index"]
+
+
+func show_option_picker(host: Node, title: String, options: Array) -> int:
+	## Modal list of labeled choices. `options` is an Array of Dictionaries:
+	##   {"label": String, "desc": String, "color": Color (optional)}
+	## Returns the chosen index, or -1 only if dismissed by a scene change.
+	if host == null or not is_instance_valid(host) or host.get_tree() == null:
+		return -1
+	if options.is_empty():
+		return -1
+
+	var layer := CanvasLayer.new()
+	layer.layer = 1000
+	var current_scene: Node = host.get_tree().current_scene
+	var modal_parent: Node = current_scene if current_scene != null else host.get_tree().root
+	modal_parent.add_child(layer)
+
+	var overlay := Control.new()
+	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	layer.add_child(overlay)
+
+	var backdrop := ColorRect.new()
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	backdrop.color = Color(0, 0, 0, 0.6)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_STOP
+	overlay.add_child(backdrop)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	overlay.add_child(center)
+
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(540, 0)
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(0.12, 0.09, 0.07, 0.97)
+	s.border_color = GILT_BRIGHT
+	s.border_width_left = 2
+	s.border_width_right = 2
+	s.border_width_top = 2
+	s.border_width_bottom = 2
+	s.corner_radius_top_left = 16
+	s.corner_radius_top_right = 16
+	s.corner_radius_bottom_left = 16
+	s.corner_radius_bottom_right = 16
+	s.content_margin_left = 28
+	s.content_margin_right = 28
+	s.content_margin_top = 24
+	s.content_margin_bottom = 24
+	s.shadow_size = 22
+	s.shadow_color = Color(0, 0, 0, 0.6)
+	panel.add_theme_stylebox_override("panel", s)
+	center.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	panel.add_child(vbox)
+
+	var title_lbl := Label.new()
+	title_lbl.text = title
+	title_lbl.add_theme_font_size_override("font_size", 26)
+	title_lbl.add_theme_color_override("font_color", GILT_BRIGHT)
+	title_lbl.add_theme_color_override("font_outline_color", Color(0.45, 0.12, 0.05, 0.85))
+	title_lbl.add_theme_constant_override("outline_size", 5)
+	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	if font_display:
+		title_lbl.add_theme_font_override("font", font_display)
+	vbox.add_child(title_lbl)
+
+	var result := {"index": -2}
+	for oi in options.size():
+		var opt: Dictionary = options[oi]
+		var bg: Color = opt.get("color", Color(0.22, 0.16, 0.11))
+		var label_text: String = String(opt.get("label", "?"))
+		var desc_text: String = String(opt.get("desc", ""))
+		var btn := make_themed_button(label_text, bg, Vector2(480, 50), 18, desc_text)
+		var captured: int = oi
+		btn.pressed.connect(func():
+			result["index"] = captured
+			layer.queue_free())
+		vbox.add_child(btn)
+		if desc_text != "":
+			var dl := make_label(desc_text, 14, IVORY)
+			dl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			dl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			dl.custom_minimum_size = Vector2(480, 0)
+			vbox.add_child(dl)
+
+	while result["index"] == -2 and is_instance_valid(layer):
+		await host.get_tree().process_frame
+	if result["index"] == -2:
+		return -1
+	return result["index"]
+
+
+func bind_bottled_talisman(host: Node) -> void:
+	## Prompt the player to bind a deck card to Bottled Talisman, unless a valid
+	## binding already exists. Safe to call from any acquire screen or MapView —
+	## the guard makes repeat calls (e.g. MapView catch-all after an inline bind)
+	## no-ops. Re-prompts if the bound card was later removed from the deck.
+	if RunState.bottled_talisman_uid >= 0 \
+			and RunState.bottled_talisman_uid in RunState.deck_uids:
+		return
+	var idx: int = await show_deck_picker(host,
+		"Bottled Talisman — bind a card to your opening hand", "", false)
+	if idx >= 0 and idx < RunState.deck_uids.size():
+		RunState.bottled_talisman_uid = RunState.deck_uids[idx]
 
 
 func fade_in(host: Node, duration: float = 0.32) -> void:

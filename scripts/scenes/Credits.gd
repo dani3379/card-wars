@@ -51,18 +51,27 @@ const SECTIONS: Array = [
 	{
 		"heading": "MUSIC",
 		"lines": [
-			"All tracks released under CC0 (Public Domain)",
-			"main_menu — \"Tragic Ambient Main Menu\" by yd",
-			"map — \"Loopable Dungeon Ambience\" by Spring",
-			"combat — \"Battle Theme A\" by cynicmusic",
-			"combat_elite — \"Fierce Battle!\" by remaxim",
-			"combat_boss — \"Battle RPG Theme\" by CleytonRX",
-			"shop — \"Medieval: Market Day\" by RandomMind",
-			"rest — \"Forest Ambience\" by Spring",
-			"event — \"Dark Cavern Ambient\" by remaxim",
-			"victory — \"Victory Theme for RPG\" by cynicmusic",
-			"defeat — \"Sad Game Over\" by Emma_MA",
-			"All sourced from OpenGameArt.org",
+			"main_menu — \"Tragic Ambient Main Menu\" by yd (CC0)",
+			"map — \"Loopable Dungeon Ambience\" by Spring (CC0)",
+			"combat (Act 1) — random pick from:",
+			"     \"Battle Theme A\" by cynicmusic (CC0)",
+			"     \"Out Of Time\" by Jonathan Shaw (CC-BY 3.0)",
+			"combat (Act 2) — random pick from:",
+			"     \"A Fight in the Fields\" by Jonathan Shaw (CC-BY 3.0)",
+			"     \"JRPG Epic Rock Battle Theme #1\" by HydroGene (CC0)",
+			"combat (Act 3) — random pick from:",
+			"     \"The Tread of War\" by Jonathan Shaw, Johan Brodd & cynicmusic (CC-BY 3.0)",
+			"     \"Boss Battle #6 Metal\" by nene (CC0)",
+			"combat_elite — \"Fierce Battle!\" by remaxim (CC0)",
+			"combat_boss — \"Battle RPG Theme\" by CleytonRX (CC0)",
+			"boss (Act 3) — \"Boss Battle #2: Symphonic Metal\" by nene (CC0)",
+			"shop — \"Medieval: Market Day\" by RandomMind (CC0)",
+			"rest — \"Ambient Relaxing Loop\" by isaiah658 (CC0)",
+			"event — \"Dark Cavern Ambient\" by remaxim (CC0)",
+			"victory — \"Victory Theme for RPG\" by cynicmusic (CC0)",
+			"defeat — \"The Fallen\" by Jonathan Shaw (CC-BY 3.0)",
+			"Jonathan Shaw — www.jshaw.co.uk",
+			"CC0 + CC-BY 3.0 tracks from OpenGameArt.org",
 		],
 	},
 ]
@@ -111,7 +120,7 @@ func _build_ui() -> void:
 	list.add_child(thanks)
 
 	# ── Back button — bottom center, pill style ──
-	var back_btn := GameTheme.make_back_button("BACK TO MENU", Vector2(220, 48), 17)
+	var back_btn := GameTheme.make_back_button("BACK TO MENU", Vector2(220, 48))
 	# Manual bottom-center anchoring (PRESET_CENTER_BOTTOM + position pushes it
 	# off-screen because PRESET treats position relative to the anchored point).
 	back_btn.anchor_left = 0.5

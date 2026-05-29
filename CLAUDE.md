@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-"Burning Meadow" — a lane combat roguelike deckbuilder built in Godot 4.6 (gl_compatibility renderer, 2D). Inspired by Card Wars (combat) and Slay the Spire (roguelike structure). 4 lanes × 2 rows per side (front/back), simultaneous combat with Swift pre-phase, floop, sacrifice, spells. 3 acts with branching maps, shop/rest/event nodes, premade encounter lineups with fight passives.
+"Burning Meadow" — a lane combat roguelike deckbuilder built in Godot 4.6 (gl_compatibility renderer, 2D). Inspired by Card Wars (combat) and Slay the Spire (roguelike structure). 4 lanes × 2 rows per side (front/back), simultaneous combat with Swift pre-phase, floop, spells. 3 acts with branching maps, shop/rest/event nodes, premade encounter lineups with fight passives.
 
 ## Running the project
 
@@ -22,7 +22,8 @@ Scene transitions use `get_tree().change_scene_to_file()`. Each scene is a `.tsc
 
 ### Autoload singletons
 
-- **RunState** (`scripts/state/RunState.gd`) — current run state: HP, deck, relics, gold, potions, map data, card upgrades, `phoenix_heart_consumed`. `get_act()` returns 1-3. `start_new_run(starting_relic_id := "")` resets and generates map; grants the chosen starting relic. `get_current_act_map()` / `get_available_nodes()` / `visit_node()` for map navigation. Card upgrades tracked per deck index via `deck_uid`: `upgrade_card(uid, path, keyword)`, `get_upgraded_card_data(uid)`.
+- **RunState** (`scripts/state/RunState.gd`) — current run state: HP, deck, relics, gold, potions, map data, card upgrades, `phoenix_heart_consumed`. `get_act()` returns 1-3. `start_new_run(hero_id := "")` resets, builds the deck from `HeroDB`, adds the hero's signature relic, and generates the map. `get_current_act_map()` / `get_available_nodes()` / `visit_node()` for map navigation. Card upgrades tracked per deck index via `deck_uid`: `upgrade_card(uid, path, keyword)`, `get_upgraded_card_data(uid)`.
+- **HeroDB** (`scripts/data/HeroDB.gd`) — 4 playable heroes (Raider/Stalwart/Acolyte/Pyromancer). Each entry has `deck` (10-card list of CardDB ids) and `relic` (id of a `tier:"starting"` RelicDB entry). Picked at the start of every run from MainMenu — replaces the old "pick 1 of 3 starting relics" screen.
 - **MetaState** (`scripts/state/MetaState.gd`) — cross-run persistence: win/loss counts. Saved as JSON to `user://meta.save`.
 - **CardDB** (`scripts/data/CardDB.gd`) — 152 total card entries: ~104 draftable (starter + common + uncommon + rare) + 18 enemy-only + tokens/curses. Card types: "creature" (ATK/HP/keywords) and "spell" (spell effect + targeting). `roll_card_reward(act, is_elite, is_boss)` for rarity-weighted picks.
 - **RelicDB** (`scripts/data/RelicDB.gd`) — 56 relics across tiers (starting, combat, utility, including 4x4-specific relics like Vanguard Banner / Rear Guard Charm). Each has hooks, effect ID, and value.
@@ -35,12 +36,12 @@ Scene transitions use `get_tree().change_scene_to_file()`. Each scene is a `.tsc
 ### Combat scene (`scripts/scenes/Combat.gd`)
 
 Largest file (~4,500 lines). Core systems:
-- **Round flow**: draw 4 → player plays creatures/spells, toggles floop, sacrifices, banks ≤1 mana → resolve floops → Swift phase → simultaneous combat (both rows attack each turn; front attacks first and is attacked first — back row is queue space, not a separate combat tier) → deaths/on-death → discard hand → enemy places creatures (escalates at `ESCALATION_REINFORCE_ROUND`) → passives → new round. Round 1 is setup only (no combat).
+- **Round flow**: draw 4 → player plays creatures/spells, toggles floop, banks ≤1 mana → resolve floops → Swift phase → simultaneous combat (both rows attack each turn; front attacks first and is attacked first — back row is queue space, not a separate combat tier) → deaths/on-death → discard hand → enemy places creatures (escalates at `ESCALATION_REINFORCE_ROUND`) → passives → new round. Round 1 is setup only (no combat).
 - **Board (4×4)**: `_player_field[4]` and `_player_back[4]`, mirrored `_enemy_field[4]` / `_enemy_back[4]`. `_row_array(is_enemy, row)` is the canonical accessor; `ROW_FRONT = 0`, `ROW_BACK = 1`. `_all_creatures_both_sides()` iterates everything.
 - **Enemy deck**: `Array[Dictionary]` of card data, loaded from EncounterDB or built from legacy random pool. `_place_enemy_card(data, lane)` creates Card2D from card data dict directly.
 - **Spells**: targeted spells enter `_targeting_spell` mode (click to resolve). Non-targeted resolve immediately. Exhaust pile separate from discard. `_last_spell_played_this_turn` enables Echo. `_auto_target_for(card_data)` picks a sensible target for self-resolving spells (used by Chaos Imp / Echo / Reposition fallback).
-- **Sacrifice**: once per turn, free action. Triggers on-death. [S] key or HUD button. Arms `_butchers_cleaver_armed` if Butcher's Cleaver is held.
-- **Floop**: creatures with floop can toggle `will_floop`. Types include damage_any, summon_random, kill_adjacent_summon, steal_atk, heal_all_friendly, summon_token, redirect_adjacent, copy_opposing_floop, swap_atk, become_copy, drain, etc.
+- **Sacrifice**: NOT a free player action. The player cannot kill their own creatures on command. Sacrifice only happens via specific card effects: the `blood_sacrifice` floop ability, the Offering / Fuel the Pyre spells (target-friendly sacrifice via 999 damage), and any future card with the "sacrifice" keyword as its play cost. All three paths route through `_trigger_player_sacrifice(victim)` so Bone Pile, Butcher's Cleaver, Reaper's Scythe, and the `ON_PLAYER_SACRIFICE` reactive fire uniformly. Same model as Slay the Spire.
+- **Floop**: creatures with floop can toggle `will_floop`. Types include damage_any, summon_random, kill_adjacent_summon, steal_atk, heal_all_friendly, summon_token, redirect_adjacent, copy_opposing_floop, swap_atk, become_copy, drain, blood_sacrifice, etc.
 - **Keywords**: Armored (-1 dmg), Swift (pre-phase), Thorns (1 back), Piercing (excess → face), Last Stand (survive once at 1 HP), Ranged (random target, prefers back row), Regenerate/Wither (start of round). Royal Guard passive grants adjacent-friendly -1 dmg and gains +1 ATK when hit (in addition to its redirect floop).
 - **Encounter passives**: `_dispatch_passive_start_of_round()`, `_dispatch_passive_end_of_round()`, `_dispatch_encounter_on_enemy_death()`, `_dispatch_encounter_on_player_death()`, `_dispatch_encounter_on_enter()`. `_has_encounter_passive_keyword(card, kw)` grants piercing/thorns/armored to enemy creatures based on encounter passive ID.
 - **Reactive passives**: `_dispatch_reactive(trigger, source_card, lane_idx)` fires per encounter's `REACTIVE_PASSIVES` entry. Triggers: ON_PLAYER_SPELL, ON_PLAYER_SACRIFICE, ON_PLAYER_FLOOP, ON_PLAYER_SUMMON, ON_CREATURE_DEATH, ON_PLAYER_DRAW.
@@ -53,12 +54,17 @@ RunState generates a branching map per act: 15 rows tall × up to 7 columns wide
 
 ### Card upgrade system
 
-Three upgrade paths applied at rest sites:
-- **Sharpen**: +2 ATK (creature) or +2 spell damage (spell)
-- **Fortify**: +2 HP (creature) or -1 mana cost (spell)
-- **Imbue**: add keyword from [piercing, swift, thorns, regenerate] (creature) or Retain/Double+Exhaust (spell)
+Slay-the-Spire-style **"+" upgrades**: every draftable card has one hand-crafted upgraded version. Rest sites offer the "Forge +" action — the player picks a card, sees a before/after preview, and confirms. No path picking, no random rolls.
 
-Upgrades tracked in `RunState.card_upgrades` keyed by `deck_uid`. `get_upgraded_card_data(uid)` returns modified card data. **Upgrades are applied at draw time in Combat** via the `deck_uid → card_data` lookup — drawing a card looks up its uid and uses the upgraded data dict.
+- Per-card upgrade deltas live in `CardDB.UPGRADES` (atk/hp/cost/value/keywords/sub-effect bumps, plus optional desc override). `CardDB.get_plus_upgrade(id)` returns the delta; `CardDB.is_upgradeable(id)` filters out curses.
+- The upgrade is applied by `RunState._apply_upgrade` via the `"plus"` path → `_apply_plus_upgrade(data)` merges the delta into the card data and stamps `is_upgraded: true`.
+- Custom-spell resolvers in `Combat.gd` read `dmg_bonus`, `slay_draw`, `extra_draw`, `extra_mana`, `ricochet_hits`, etc. from the merged card_data, so + versions actually hit harder / draw more / give more mana.
+- A handful of creature passives (Royal Guard, Corpse Eater, Vengeance, Vampire Lord, Riteforge, Warchief) read `card_data.is_upgraded` directly and bump their tick value.
+- Event-driven specialty upgrades — `butcher` (Butcher event), `mirror_twin` (Mirror event), `fortify_neg` (Debuff Starters event) — keep their dedicated paths in `_apply_upgrade` since they're story-coupled, not generic.
+
+Upgrades are tracked in `RunState.card_upgrades` keyed by `deck_uid`. `get_upgraded_card_data(uid)` returns the modified data. **Upgrades are applied at draw time in Combat** via the `deck_uid → card_data` lookup — drawing a card looks up its uid and uses the upgraded data dict.
+
+The Whetstone relic upgrades the "Reforge" rest banner to forge **two** cards instead of one (once per act).
 
 ### Card2D (`scripts/Card2D.gd`)
 
@@ -72,10 +78,10 @@ Spells: `id, name, type:"spell", cost, rarity, keywords[], desc, spell{type,valu
 
 ### Adding content
 
-- **New card**: add to `CardDB.CARD_POOL`. Include all fields per schema above.
+- **New card**: add to `CardDB.CARD_POOL` (include all fields per schema above) AND add a `CardDB.UPGRADES` entry for its "+" version. Missing UPGRADES entries get a default fallback (+1/+1 creature or -1 cost spell) so they still upgrade cleanly, but hand-crafted entries feel better.
 - **New relic**: add to `RelicDB.RELICS`, implement effect check in Combat.gd.
 - **New keyword**: add to `KeywordEffects.KEYWORDS`, implement in dispatchers, add to Card2D display.
-- **New spell type**: add `spell.type` handler in Combat.gd `_resolve_spell()` or `_resolve_custom_spell()`.
+- **New spell type**: add `spell.type` handler in Combat.gd `_resolve_spell()` or `_resolve_custom_spell()`. If you add a custom damage spell, declare `dmg_bonus` in its UPGRADES entry and add `+ plus_dmg` to the damage line in the resolver.
 - **New encounter**: add to `EncounterDB.ENCOUNTERS` with name, act, type, hp, passive_id, passive_desc, deck, reinforcement. Add passive handler to Combat.gd if passive_id is non-empty. Optional reactive passive: add to `REACTIVE_PASSIVES` and handler case in `_dispatch_reactive`.
 - **New event**: add to `Event.gd` EVENTS dictionary with name, desc, choices with effects.
 

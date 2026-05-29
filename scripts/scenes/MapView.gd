@@ -8,6 +8,7 @@ const COMBAT_SCENE = "res://scenes/combat.tscn"
 const SHOP_SCENE = "res://scenes/shop.tscn"
 const REST_SCENE = "res://scenes/rest.tscn"
 const EVENT_SCENE = "res://scenes/event.tscn"
+const TREASURE_SCENE = "res://scenes/treasure.tscn"
 const MAIN_MENU = "res://scenes/main_menu.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 
@@ -29,13 +30,15 @@ const MAP_PAD_LEFT := 170.0       # space for the START banner before row 0
 const MAP_PAD_RIGHT := 110.0      # space past the boss icon
 const START_BANNER_W := 130.0     # width of the START asset
 
-# ── Node rendering (STS-style compact icons; was 36/64 — too dominant). ──
+# ── Node rendering (embossed metal tokens — coin-like, beveled, stamped). ──
 const ICON_SZ := 26.0
 const BOSS_SZ := 46.0
-const HIT_R := 20.0
-const BOSS_HIT := 30.0
-const GLOW_R := 22.0
-const BOSS_GLOW := 34.0
+const NODE_R := 25.0          # embossed token radius (normal node)
+const BOSS_R := 42.0          # embossed token radius (boss node)
+const HIT_R := 24.0
+const BOSS_HIT := 38.0
+const GLOW_R := 27.0
+const BOSS_GLOW := 46.0
 
 # ── Path line styling ──
 # STS-style: dashed segments along a slightly wobbly path so the graph reads
@@ -47,6 +50,7 @@ const WOBBLE_AMP := 3.5     # peak wobble offset perpendicular to the path
 const ICON_KEY: Dictionary = {
 	"combat": "sword", "elite": "skull", "boss": "crown",
 	"rest": "campfire", "shop": "diamond", "event": "question",
+	"treasure": "coins-pile",
 }
 
 # Painted/antique palette — less neon than primary colors, sits inside the
@@ -59,6 +63,7 @@ const NODE_INK: Dictionary = {
 	"rest":   Color(0.45, 0.70, 0.42),
 	"shop":   Color(0.85, 0.70, 0.28),
 	"event":  Color(0.65, 0.45, 0.78),
+	"treasure": Color(0.90, 0.75, 0.20),
 }
 
 # Path lines: dashed-ink style. Visited stays brightest cream; "next step"
@@ -75,7 +80,16 @@ const ACT_TINTS: Dictionary = {
 	3: {"parch": Color(0.94, 0.80, 0.72), "frame": Color(0.18, 0.08, 0.06)},
 }
 
+# Per-act multiply tint applied to the painted base gradient behind the
+# parchment — keeps Act 1 warm, cools Act 2 toward blue-grey, scorches Act 3.
+const ACT_BG_TINT: Dictionary = {
+	1: Color(1.00, 1.00, 1.00),
+	2: Color(0.80, 0.88, 1.06),
+	3: Color(1.12, 0.82, 0.72),
+}
+
 var _avail: Array = []
+var _grain_tex: ImageTexture = null
 var _hovered: Vector2i = Vector2i(-1, -1)
 var _canvas_ref: Control = null
 var _scroll: ScrollContainer = null
@@ -93,6 +107,7 @@ func _ready() -> void:
 		bg.self_modulate = Color(0.10, 0.08, 0.06, 1.0)
 	GameTheme.add_atmosphere(self, "map", false)
 	_build_map()
+	GameTheme.make_settings_gear(self)
 	# Checkpoint: every return to the map captures post-room state (HP, gold,
 	# deck changes, relics earned). Clear the room-in-progress fields first so a
 	# later resume lands on the map rather than re-entering the room the player
@@ -100,7 +115,53 @@ func _ready() -> void:
 	# resumes back into that room.
 	RunState.current_node_type = ""
 	RunState.current_encounter_id = ""
+	# Resolve any pending "choice" relics before saving so the picks persist:
+	# Bottled Talisman bind (Event-granted catch-all + rebind), and the per-act
+	# Totem Pole / Bone Hourglass choices.
+	await _resolve_meta_pickers()
 	RunState.save_run()
+
+
+func _resolve_meta_pickers() -> void:
+	# Bottled Talisman: catch-all bind. Reward/Shop/Treasure bind inline at
+	# acquire; this covers Event-granted copies and rebinds if the bound card
+	# was later removed. The helper no-ops when a valid binding already exists.
+	if RunState.has_relic("bottled_talisman"):
+		await GameTheme.bind_bottled_talisman(self)
+	# Totem Pole: pick a keyword once per act.
+	if RunState.has_relic("totem_pole") and RunState.totem_pole_act != RunState.get_act():
+		var kw_opts := [
+			{"label": "Thorns", "desc": "Friendlies deal 1 damage back when hit.",
+				"color": Color(0.30, 0.45, 0.22)},
+			{"label": "Swift", "desc": "Friendlies strike in the pre-combat Swift phase.",
+				"color": Color(0.25, 0.40, 0.55)},
+			{"label": "Regenerate", "desc": "Friendlies heal 1 HP at the start of each round.",
+				"color": Color(0.45, 0.35, 0.20)},
+			{"label": "Armored", "desc": "Friendlies take 1 less damage from each hit.",
+				"color": Color(0.35, 0.35, 0.42)},
+		]
+		var kw_vals := ["thorns", "swift", "regenerate", "armored"]
+		var pick: int = await GameTheme.show_option_picker(self,
+			"Totem Pole — keyword for Act %d" % RunState.get_act(), kw_opts)
+		if pick >= 0:
+			RunState.totem_pole_keyword = kw_vals[pick]
+			RunState.totem_pole_act = RunState.get_act()
+	# Bone Hourglass: pick a ramp boon once per act.
+	if RunState.has_relic("bone_hourglass") and RunState.bone_hourglass_act != RunState.get_act():
+		var ramp_opts := [
+			{"label": "Front Line", "desc": "+1 ATK to creatures you place in the front row.",
+				"color": Color(0.45, 0.25, 0.20)},
+			{"label": "Back Line", "desc": "+1 HP to creatures you place in the back row.",
+				"color": Color(0.25, 0.35, 0.45)},
+			{"label": "Mana Well", "desc": "+1 max mana while both center lanes are full.",
+				"color": Color(0.35, 0.30, 0.50)},
+		]
+		var ramp_vals := ["front_atk", "back_hp", "mana_center"]
+		var pick2: int = await GameTheme.show_option_picker(self,
+			"Bone Hourglass — boon for Act %d" % RunState.get_act(), ramp_opts)
+		if pick2 >= 0:
+			RunState.bone_hourglass_choice = ramp_vals[pick2]
+			RunState.bone_hourglass_act = RunState.get_act()
 
 
 func _build_map() -> void:
@@ -174,21 +235,46 @@ func _build_scroll(act_map: Array) -> void:
 	content.mouse_filter = Control.MOUSE_FILTER_PASS
 	_scroll.add_child(content)
 
-	# ── Parchment background (stretched across the whole wide map) ──
+	# ── Painted base gradient (behind the parchment; parchment multiplies over
+	# it so the paper picks up a warm-lit center corridor + toasted edges). ──
+	var bg_canvas = Control.new()
+	bg_canvas.name = "MapBG"
+	bg_canvas.size = Vector2(_map_content_w, inner_h)
+	bg_canvas.modulate = ACT_BG_TINT.get(RunState.get_act(), Color.WHITE)
+	bg_canvas.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bg_canvas.draw.connect(_draw_map_bg.bind(bg_canvas))
+	content.add_child(bg_canvas)
+	bg_canvas.queue_redraw()
+
+	# ── Parchment fiber, multiplied over the painted gradient — adds vellum
+	# detail the math gradient can't fake. Brightened so MUL doesn't darken. ──
 	var parch_tex: Texture2D = load("res://assets/backgrounds/map_parchment.jpg")
 	var parch = TextureRect.new()
 	parch.texture = parch_tex
 	parch.size = Vector2(_map_content_w, inner_h)
 	parch.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	parch.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-	parch.modulate = tints.parch
+	parch.modulate = Color(tints.parch.r * 1.25, tints.parch.g * 1.22,
+		tints.parch.b * 1.16)
+	parch.material = _mul_mat()
 	parch.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	content.add_child(parch)
+
+	# ── Film grain over the paper for cohesion (subtle multiply). ──
+	var grain = TextureRect.new()
+	grain.texture = _get_grain()
+	grain.size = Vector2(_map_content_w, inner_h)
+	grain.stretch_mode = TextureRect.STRETCH_TILE
+	grain.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+	grain.material = _mul_mat()
+	grain.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.add_child(grain)
 
 	# ── Compute node + line geometry ──
 	var nodes: Array = []
 	var lines: Array = []
 	var player_pos := Vector2.ZERO
+	var player_key := Vector2i(-1, -1)
 	var has_player := false
 	for ri in range(total_rows):
 		var row = act_map[ri]
@@ -199,9 +285,11 @@ func _build_scroll(act_map: Array) -> void:
 				"pos": pos, "type": nd.type,
 				"vis": nd.visited, "avail": ia,
 				"key": Vector2i(nd.row, nd.col),
+				"mutator_id": nd.get("mutator_id", ""),
 			})
 			if nd.visited:
 				player_pos = pos
+				player_key = Vector2i(nd.row, nd.col)
 				has_player = true
 			if nd.row + 1 < total_rows:
 				var next_row = act_map[nd.row + 1]
@@ -247,6 +335,7 @@ func _build_scroll(act_map: Array) -> void:
 	canvas.set_meta("nodes", nodes)
 	canvas.set_meta("lines", lines)
 	canvas.set_meta("player_pos", player_pos)
+	canvas.set_meta("player_key", player_key)
 	canvas.set_meta("has_player", has_player)
 	canvas.draw.connect(_draw_map.bind(canvas))
 	content.add_child(canvas)
@@ -323,6 +412,7 @@ func _draw_map(canvas: Control) -> void:
 	var lines: Array = canvas.get_meta("lines")
 	var has_player: bool = canvas.get_meta("has_player")
 	var player_pos: Vector2 = canvas.get_meta("player_pos")
+	var player_key: Vector2i = canvas.get_meta("player_key", Vector2i(-1, -1))
 
 	# "Focus x" — the player's current x-coordinate. Path lines that fall far
 	# from this point get a faint distance fade for a hint of depth, but node
@@ -340,69 +430,101 @@ func _draw_map(canvas: Control) -> void:
 	# paths get a gold tinge so reachable choices pop; the rest sit in dim
 	# ink that still contrasts against the parchment.
 	for ln in lines:
-		var col: Color = LINE_DIM
-		var w: float = 3.2
-		if ln.vis:
-			col = LINE_VIS
-			w = 4.2
-		elif ln.get("to_avail", false):
-			col = LINE_NEXT
-			w = 3.8
 		var mid_x: float = (ln.from.x + ln.to.x) * 0.5
 		var is_focus: bool = ln.vis or ln.get("to_avail", false)
 		var dist_fade: float = _proximity_fade(mid_x, focus_x, is_focus)
-		var faded := Color(col.r, col.g, col.b, col.a * dist_fade)
 		# Stable per-segment seed so the wobble doesn't shift between frames.
 		var seed_h: int = int(ln.from.x * 3.1 + ln.from.y * 7.3
 			+ ln.to.x * 11.7 + ln.to.y * 5.9)
 		var pts: PackedVector2Array = _wobble_pts(ln.from, ln.to, seed_h)
-		# Soft halo behind the dashes adds weight without filling the gaps.
-		var halo := Color(faded.r, faded.g, faded.b, faded.a * 0.22)
-		_draw_dashed_polyline(canvas, pts, halo, w + 3.0)
-		_draw_dashed_polyline(canvas, pts, faded, w)
+		if ln.vis:
+			# Travelled road — confident solid brown ink with a soft halo.
+			canvas.draw_polyline(pts,
+				Color(0.16, 0.09, 0.04, 0.50 * dist_fade), 8.0, true)
+			canvas.draw_polyline(pts,
+				Color(0.30, 0.16, 0.07, dist_fade), 5.0, true)
+		elif ln.get("to_avail", false):
+			# Road to a reachable node — crimson "choose me" ink.
+			canvas.draw_polyline(pts, Color(0.20, 0.06, 0.02, 0.45), 9.0, true)
+			canvas.draw_polyline(pts, Color(0.82, 0.28, 0.12, 1.0), 6.0, true)
+		else:
+			# Roads beyond — dashed sepia, the classic "route ahead" map idiom.
+			_draw_dashed_polyline(canvas, pts,
+				Color(0.34, 0.21, 0.10, 0.9 * dist_fade), 3.6)
 
-	# ── Node plates + icons ──
+	# ── Node tokens (embossed metal coins with a stamped emblem) ──
 	for nd in nodes:
-		var tex = _icon_tex(ICON_KEY.get(nd.type, "question"))
-		if not tex:
-			continue
+		var typ: String = nd.type
+		var tex = _icon_tex(ICON_KEY.get(typ, "question"))
 		var pos: Vector2 = nd.pos
-		var base_sz: float = BOSS_SZ if nd.type == "boss" else ICON_SZ
+		var is_boss: bool = typ == "boss"
 		var is_hov: bool = _hovered == nd.key
-		var sz: float = base_sz * (1.15 if is_hov else 1.0)
+		var hov: float = 1.15 if is_hov else 1.0
+		var r: float = (BOSS_R if is_boss else NODE_R) * hov
+		var is_current: bool = has_player and nd.key == player_key
+		var dim: bool = nd.vis and not is_current
+		var avail: bool = nd.avail and not nd.vis
 
-		var ink: Color = NODE_INK.get(nd.type, Color(0.3, 0.3, 0.3))
-		var plate_alpha: float = 0.82
-		if nd.vis:
-			# Visited — muted, ghost-like, with a check mark.
-			var grey: float = (ink.r + ink.g + ink.b) / 3.0
-			ink = Color(
-				lerpf(ink.r, grey, 0.70),
-				lerpf(ink.g, grey, 0.70),
-				lerpf(ink.b, grey, 0.70), 0.55)
-			plate_alpha = 0.42
-		elif not nd.avail:
-			# Future nodes — clearly visible. STS keeps upcoming icons at
-			# roughly the same legibility as the row you can click; only the
-			# gold halo / pulsing glow signals "this one's reachable next."
-			ink = Color(ink.r, ink.g, ink.b, 0.92)
-			plate_alpha = 0.70
+		# Enamel face colour (per node type), greyed when it's a spent node.
+		var face: Color = NODE_INK.get(typ, Color(0.4, 0.4, 0.4))
+		if dim:
+			var grey: float = (face.r + face.g + face.b) / 3.0
+			face = Color(lerpf(face.r, grey, 0.60), lerpf(face.g, grey, 0.60),
+				lerpf(face.b, grey, 0.60))
 
-		# Plate — dark circle behind icon.
-		canvas.draw_circle(pos, sz * 0.78,
-			Color(0.10, 0.07, 0.04, plate_alpha))
-		canvas.draw_arc(pos, sz * 0.78, 0.0, TAU, 48,
-			Color(0.62, 0.46, 0.22, plate_alpha * 0.90), 1.4, true)
-		if nd.avail and not nd.vis:
-			canvas.draw_arc(pos, sz * 0.85, 0.0, TAU, 48,
-				Color(1.0, 0.88, 0.42, 0.75), 2.2, true)
+		# Rim tone: bright gilt for the current/reachable tokens, plain bronze
+		# for the road ahead, dull pewter for spent nodes.
+		var rim_base := Color(0.50, 0.38, 0.20)
+		var rim_light := Color(0.82, 0.66, 0.34)
+		var rim_dark := Color(0.26, 0.18, 0.09)
+		if avail or is_current:
+			rim_base = Color(0.78, 0.60, 0.24)
+			rim_light = Color(1.0, 0.88, 0.48)
+			rim_dark = Color(0.46, 0.32, 0.12)
+		elif dim:
+			rim_base = Color(0.40, 0.36, 0.30)
+			rim_light = Color(0.52, 0.48, 0.40)
+			rim_dark = Color(0.24, 0.20, 0.16)
 
-		canvas.draw_texture_rect(tex,
-			Rect2(pos - Vector2(sz, sz) * 0.5, Vector2(sz, sz)),
-			false, ink)
+		var fr: float = _draw_token(canvas, pos, r, face,
+			rim_base, rim_light, rim_dark, dim, not dim)
 
-		if nd.vis:
-			_draw_check(canvas, pos, base_sz)
+		# Stamped emblem — dark drop within the well + the icon raised on top,
+		# tinted dark or cream for contrast against its enamel face.
+		if tex:
+			var isz: float = fr * (1.5 if is_boss else 1.38)
+			var lum: float = 0.299 * face.r + 0.587 * face.g + 0.114 * face.b
+			var itint := Color(0.10, 0.07, 0.05, 0.95) if lum > 0.5 \
+				else Color(0.97, 0.93, 0.82, 0.96)
+			if dim:
+				itint.a = 0.70
+			var rect := Rect2(pos - Vector2(isz, isz) * 0.5, Vector2(isz, isz))
+			canvas.draw_texture_rect(tex,
+				Rect2(rect.position + Vector2(1.5, 1.5), rect.size), false,
+				Color(0, 0, 0, 0.30))
+			canvas.draw_texture_rect(tex, rect, false, itint)
+
+		if dim:
+			_draw_check(canvas, pos, r)
+
+		# Mutator star — a small asterisk above the token when the node carries
+		# a per-fight modifier. Drawn AFTER the token so it stays legible.
+		# Positive (gift) mutators read mint green; the common tax variants amber.
+		var mut_id: String = String(nd.get("mutator_id", ""))
+		if mut_id != "" and MutatorDB.exists(mut_id) and not nd.vis:
+			var mut = MutatorDB.get_mutator(mut_id)
+			var is_gift: bool = int(mut.get("gold_bonus", 0)) == 0
+			var star_col := Color(0.55, 1.0, 0.70) if is_gift else Color(1.0, 0.62, 0.20)
+			var star_pos: Vector2 = pos + Vector2(r * 0.36, -r * 0.5)
+			var star_font: Font = GameTheme.font_display
+			if star_font:
+				var sfs: int = 22
+				canvas.draw_string_outline(star_font,
+					star_pos, "★", HORIZONTAL_ALIGNMENT_CENTER, -1, sfs, 4,
+					Color(0, 0, 0, 0.95))
+				canvas.draw_string(star_font,
+					star_pos, "★", HORIZONTAL_ALIGNMENT_CENTER, -1, sfs,
+					star_col)
 
 	# Player marker — left-pointing chevron beside the current node.
 	if has_player:
@@ -478,108 +600,290 @@ func _draw_check(canvas: Control, pos: Vector2, icon_sz: float) -> void:
 #  TERRAIN DECORATION
 # ═══════════════════════════════════════════
 
-## Scatters hand-drawn map symbols (mountain silhouettes, tree clusters, stone
-## fields) across the parchment so the background reads like an explorer's
-## chart rather than a flat grid. Terrain is deterministic per run + act, and
-## any cell falling near a node is skipped so icons stay readable.
+## Hand-drawn cartographer's landmarks — an atmospheric mountain range along the
+## top margin, a meandering river + lake along the bottom margin, clustered tree
+## groves tucked into the margins, a compass rose, and a ruled chart border. The
+## node band sits in the vertical center, so the top/bottom margins stay clear
+## and the terrain never fights the icons. Deterministic per run + act.
 func _draw_terrain(canvas: Control, nodes: Array) -> void:
 	var w: float = _map_content_w
 	var h: float = _map_content_h
-	var node_positions := PackedVector2Array()
-	for nd in nodes:
-		node_positions.append(nd.pos)
+	var band_top: float = _lane_y(0, h)
+	var band_bot: float = _lane_y(RunState.MAP_WIDTH - 1, h)
+	_draw_border_rule(canvas, w, h)
+	_draw_mountains(canvas, w, band_top - 34.0)
+	_draw_river(canvas, w, band_bot + 50.0)
+	_draw_forest(canvas, w, h, band_top, band_bot, nodes)
+	_draw_compass(canvas, h)
 
-	var cell_w := 92.0
-	var cell_h := 74.0
-	var ncols: int = int(w / cell_w) + 1
-	var nrows: int = int(h / cell_h) + 1
-	var avoid_sq: float = 58.0 * 58.0
 
-	var seed_base: int = int(RunState.run_seed) + RunState.get_act() * 7919
+## Three receding ridges → atmospheric depth instead of one heavy brown band.
+## Far is hazy/cool/low-contrast; near is warmer, taller, with subtle snow.
+func _draw_mountains(canvas: Control, w: float, near_base_y: float) -> void:
+	var s: int = int(RunState.run_seed) + RunState.get_act() * 7919
+	_ridge(canvas, w, near_base_y - 30.0, 18.0, 40.0, 54.0, 84.0, s + 0x3A71,
+		Color(0.62, 0.56, 0.48, 0.26), Color(0.56, 0.50, 0.42, 0.26), false)
+	_ridge(canvas, w, near_base_y - 14.0, 34.0, 66.0, 64.0, 104.0, s + 0x6B23,
+		Color(0.56, 0.47, 0.34, 0.52), Color(0.43, 0.34, 0.21, 0.54), false)
+	_ridge(canvas, w, near_base_y, 46.0, 86.0, 78.0, 122.0, s + 0x9C17,
+		Color(0.55, 0.44, 0.29, 0.82), Color(0.36, 0.27, 0.15, 0.84), true)
+
+
+## A continuous, overlapping range. Peaks vary in height and overlap
+## (advance < width) so the silhouette reads as a range, not a sawtooth of
+## identical triangles. Each peak splits into a lit left face and a shadowed
+## right face for consistent top-left lighting; no hard black outline.
+func _ridge(canvas: Control, w: float, base_y: float, hmin: float, hmax: float,
+		gmin: float, gmax: float, seed_v: int, lit: Color, shadow: Color,
+		snow: bool) -> void:
 	var rng := RandomNumberGenerator.new()
-	for cy in range(nrows):
-		for cx in range(ncols):
-			rng.seed = seed_base + cx * 131 + cy * 977
-			var jx: float = rng.randf_range(0.12, 0.88) * cell_w
-			var jy: float = rng.randf_range(0.12, 0.88) * cell_h
-			var pos := Vector2(float(cx) * cell_w + jx,
-				float(cy) * cell_h + jy)
-
-			# Skip cells too close to a node — terrain must yield to icons.
-			var too_close := false
-			for npos in node_positions:
-				if pos.distance_squared_to(npos) < avoid_sq:
-					too_close = true
-					break
-			if too_close:
-				continue
-
-			var roll: float = rng.randf()
-			if roll < 0.32:
-				# Empty cell — keeps the map breathing.
-				continue
-			elif roll < 0.62:
-				_draw_terrain_mountain(canvas, pos, rng)
-			elif roll < 0.86:
-				_draw_terrain_trees(canvas, pos, rng)
-			else:
-				_draw_terrain_pebbles(canvas, pos, rng)
+	rng.seed = seed_v
+	var x: float = -30.0
+	while x < w + 50.0:
+		var hh: float = rng.randf_range(hmin, hmax)
+		var half: float = rng.randf_range(gmin, gmax) * 0.5
+		var apex := Vector2(x + rng.randf_range(-half * 0.18, half * 0.18),
+			base_y - hh)
+		var mid := Vector2(x, base_y)
+		var bl := Vector2(x - half, base_y)
+		var br := Vector2(x + half, base_y)
+		canvas.draw_colored_polygon(PackedVector2Array([bl, apex, mid]), lit)
+		canvas.draw_colored_polygon(PackedVector2Array([apex, br, mid]), shadow)
+		canvas.draw_line(bl, apex, lit.lightened(0.18), 1.2, true)
+		if snow and hh > (hmin + hmax) * 0.52:
+			var sn: float = hh * 0.16
+			canvas.draw_colored_polygon(PackedVector2Array([apex,
+				apex + Vector2(-sn * 0.7, sn), apex + Vector2(0.0, sn * 1.3),
+				apex + Vector2(sn * 0.7, sn)]), Color(0.88, 0.84, 0.72, 0.72))
+		x += rng.randf_range(gmin * 0.46, gmax * 0.58)
 
 
-func _draw_terrain_mountain(canvas: Control, pos: Vector2,
-		rng: RandomNumberGenerator) -> void:
-	var body_col := Color(0.34, 0.26, 0.16, 0.42)
-	var snow_col := Color(0.58, 0.50, 0.36, 0.46)
-	var line_col := Color(0.18, 0.13, 0.08, 0.55)
-	var count: int = 1 + (rng.randi() % 2)  # 1 or 2 peaks
+## A meandering river (Catmull-Rom through jittered waypoints) with a small
+## lake — damp bank, water body, then a bright meltwater core so the brown
+## palette gets a cool accent without a hard line.
+func _draw_river(canvas: Control, w: float, base_y: float) -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = int(RunState.run_seed) + RunState.get_act() * 53 + 13
+	var n: int = maxi(6, int(w / 230.0))
+	var wp: Array = []
+	for i in range(n + 1):
+		wp.append(Vector2(float(i) / float(n) * w,
+			base_y + rng.randf_range(-20.0, 20.0)))
+	var ext: Array = [wp[0]]
+	ext.append_array(wp)
+	ext.append(wp[wp.size() - 1])
+	var pts := PackedVector2Array()
+	for i in range(1, ext.size() - 2):
+		for sgn in range(14):
+			pts.append(_catmull(ext[i - 1], ext[i], ext[i + 1], ext[i + 2],
+				float(sgn) / 14.0))
+	pts.append(wp[wp.size() - 1])
+	var lake: Vector2 = wp[int(n * 0.5)]
+	canvas.draw_polyline(pts, Color(0.40, 0.43, 0.36, 0.16), 24.0, true)
+	canvas.draw_circle(lake, 30.0, Color(0.40, 0.43, 0.36, 0.16))
+	canvas.draw_polyline(pts, Color(0.36, 0.55, 0.62, 0.42), 13.0, true)
+	canvas.draw_circle(lake, 24.0, Color(0.36, 0.55, 0.62, 0.42))
+	canvas.draw_polyline(pts, Color(0.66, 0.78, 0.80, 0.40), 4.0, true)
+	canvas.draw_circle(lake, 14.0, Color(0.62, 0.74, 0.78, 0.38))
+
+
+func _catmull(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2,
+		t: float) -> Vector2:
+	var t2: float = t * t
+	var t3: float = t2 * t
+	return 0.5 * ((2.0 * p1) + (-p0 + p2) * t
+		+ (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+		+ (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+
+
+## A few clustered groves tucked into the margins (alternating top/bottom),
+## rather than an edge-to-edge band of identical trees (amateur "confetti").
+## Any grove landing too near a node is skipped so icons stay clean.
+func _draw_forest(canvas: Control, w: float, h: float, band_top: float,
+		band_bot: float, nodes: Array) -> void:
+	var node_pos := PackedVector2Array()
+	for nd in nodes:
+		node_pos.append(nd.pos)
+	var count: int = maxi(3, int(w / 360.0))
+	var rng := RandomNumberGenerator.new()
 	for i in range(count):
-		var w_sz: float = rng.randf_range(22.0, 32.0)
-		var h_sz: float = rng.randf_range(20.0, 30.0)
-		var ox: float = (float(i) - float(count) * 0.5 + 0.5) * (w_sz * 0.7)
-		var c := pos + Vector2(ox, 0.0)
-		var base_l := c + Vector2(-w_sz * 0.5, h_sz * 0.4)
-		var base_r := c + Vector2(w_sz * 0.5, h_sz * 0.4)
-		var peak := c + Vector2(rng.randf_range(-3.0, 3.0), -h_sz * 0.6)
-		canvas.draw_colored_polygon(
-			PackedVector2Array([base_l, peak, base_r]), body_col)
-		# Snow cap
-		var snow_l := c + Vector2(-w_sz * 0.16, -h_sz * 0.28)
-		var snow_r := c + Vector2(w_sz * 0.16, -h_sz * 0.28)
-		canvas.draw_colored_polygon(
-			PackedVector2Array([snow_l, peak, snow_r]), snow_col)
-		# Outline
-		canvas.draw_polyline(
-			PackedVector2Array([base_l, peak, base_r]),
-			line_col, 1.2, true)
+		rng.seed = int(RunState.run_seed) + RunState.get_act() * 31 + i * 617
+		var top_margin: bool = (i % 2) == 0
+		var gx: float = (float(i) + 0.5) / float(count) * w \
+			+ rng.randf_range(-50.0, 50.0)
+		var gy: float = (band_top * 0.45) if top_margin \
+			else lerpf(band_bot, h, 0.72)
+		var ctr := Vector2(gx, gy)
+		var too_close := false
+		for np in node_pos:
+			if ctr.distance_squared_to(np) < 64.0 * 64.0:
+				too_close = true
+				break
+		if too_close:
+			continue
+		_grove(canvas, ctr, rng.randf_range(0.85, 1.1), int(rng.randi()))
 
 
-func _draw_terrain_trees(canvas: Control, pos: Vector2,
-		rng: RandomNumberGenerator) -> void:
-	var foliage := Color(0.22, 0.28, 0.16, 0.55)
-	var foliage_dark := Color(0.16, 0.20, 0.12, 0.55)
-	var n: int = 3 + (rng.randi() % 3)  # 3-5 trees
-	for i in range(n):
-		var ox: float = rng.randf_range(-13.0, 13.0)
-		var oy: float = rng.randf_range(-7.0, 7.0)
-		var sz: float = rng.randf_range(7.0, 11.0)
-		var c := pos + Vector2(ox, oy)
-		var col: Color = foliage if (i % 2) == 0 else foliage_dark
+func _grove(canvas: Control, ctr: Vector2, scale: float, seed_v: int) -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_v
+	# Soft canopy underglow so the cluster reads as one grove.
+	for _k in range(6):
+		var o := Vector2(rng.randf_range(-30.0, 30.0),
+			rng.randf_range(-8.0, 8.0)) * scale
+		canvas.draw_circle(ctr + o, rng.randf_range(13.0, 20.0) * scale,
+			Color(0.27, 0.32, 0.17, 0.14))
+	# Individual canopies, back-to-front by y for slight overlap depth.
+	var trees: Array = []
+	for _k in range(7):
+		trees.append(ctr + Vector2(rng.randf_range(-32.0, 32.0),
+			rng.randf_range(-6.0, 10.0)) * scale)
+	trees.sort_custom(func(a, b): return a.y < b.y)
+	for t in trees:
+		_tree_glyph(canvas, t, rng.randf_range(12.0, 17.0) * scale)
+
+
+func _tree_glyph(canvas: Control, base: Vector2, sz: float) -> void:
+	# Conifer silhouette: two stacked tiers + a short trunk, soft-shaded.
+	canvas.draw_line(base, base + Vector2(0, sz * 0.28),
+		Color(0.26, 0.17, 0.09, 0.6), maxf(1.5, sz * 0.12), true)
+	var lower := PackedVector2Array([
+		base + Vector2(-sz * 0.5, 0.0),
+		base + Vector2(0.0, -sz * 0.7),
+		base + Vector2(sz * 0.5, 0.0)])
+	var upper := PackedVector2Array([
+		base + Vector2(-sz * 0.34, -sz * 0.4),
+		base + Vector2(0.0, -sz * 1.05),
+		base + Vector2(sz * 0.34, -sz * 0.4)])
+	canvas.draw_colored_polygon(lower, Color(0.24, 0.30, 0.15, 0.62))
+	canvas.draw_colored_polygon(upper, Color(0.30, 0.37, 0.19, 0.66))
+	canvas.draw_line(base + Vector2(-sz * 0.34, -sz * 0.4),
+		base + Vector2(0.0, -sz * 1.05), Color(0.42, 0.50, 0.28, 0.5), 1.0, true)
+
+
+func _draw_compass(canvas: Control, h: float) -> void:
+	var ctr := Vector2(86.0, h - 50.0)
+	var rr := 30.0
+	var ink := Color(0.32, 0.20, 0.09, 0.74)
+	var ink2 := Color(0.30, 0.18, 0.08, 0.58)
+	canvas.draw_arc(ctr, rr + 4.0, 0.0, TAU, 48, ink2, 1.0, true)
+	canvas.draw_arc(ctr, rr, 0.0, TAU, 44, ink, 1.8, true)
+	canvas.draw_arc(ctr, rr * 0.64, 0.0, TAU, 36, ink2, 1.2, true)
+	canvas.draw_circle(ctr, 2.4, ink)
+	for a in [-PI * 0.5, 0.0, PI * 0.5, PI]:
+		var dir := Vector2(cos(a), sin(a))
+		var perp := Vector2(-dir.y, dir.x)
 		canvas.draw_colored_polygon(PackedVector2Array([
-			c + Vector2(-sz * 0.5, sz * 0.4),
-			c + Vector2(0.0, -sz * 0.85),
-			c + Vector2(sz * 0.5, sz * 0.4),
-		]), col)
+			ctr + dir * rr * 1.12, ctr + perp * rr * 0.15,
+			ctr - perp * rr * 0.15]), ink)
+	for a in [-PI * 0.75, -PI * 0.25, PI * 0.25, PI * 0.75]:
+		var dir := Vector2(cos(a), sin(a))
+		var perp := Vector2(-dir.y, dir.x)
+		canvas.draw_colored_polygon(PackedVector2Array([
+			ctr + dir * rr * 0.68, ctr + perp * rr * 0.11,
+			ctr - perp * rr * 0.11]), ink2)
 
 
-func _draw_terrain_pebbles(canvas: Control, pos: Vector2,
-		rng: RandomNumberGenerator) -> void:
-	var dot_col := Color(0.36, 0.28, 0.18, 0.48)
-	var n: int = 4 + (rng.randi() % 4)  # 4-7 dots
-	for i in range(n):
-		var ox: float = rng.randf_range(-13.0, 13.0)
-		var oy: float = rng.randf_range(-8.0, 8.0)
-		var r: float = rng.randf_range(1.4, 2.6)
-		canvas.draw_circle(pos + Vector2(ox, oy), r, dot_col)
+func _draw_border_rule(canvas: Control, w: float, h: float) -> void:
+	var ink := Color(0.34, 0.22, 0.10, 0.5)
+	var inset := 13.0
+	var r := Rect2(inset, inset, w - inset * 2.0, h - inset * 2.0)
+	canvas.draw_rect(r, ink, false, 2.0)
+	canvas.draw_rect(r.grow(-5.0), ink, false, 1.0)
+	for cn in [r.position, Vector2(r.end.x, r.position.y),
+			Vector2(r.position.x, r.end.y), r.end]:
+		canvas.draw_colored_polygon(PackedVector2Array([
+			cn + Vector2(0, -5), cn + Vector2(5, 0),
+			cn + Vector2(0, 5), cn + Vector2(-5, 0)]), ink)
+
+
+## Draws an embossed coin/token: soft shadow, beveled metal rim (lit from the
+## top-left), a recessed well, and the colored enamel face. Returns the face
+## radius so the caller can size the stamped icon.
+func _draw_token(canvas: Control, pos: Vector2, r: float, face: Color,
+		rim_base: Color, rim_light: Color, rim_dark: Color,
+		dim: bool, gloss: bool) -> float:
+	for k in range(4):
+		canvas.draw_circle(pos + Vector2(2.5, 4.0), r + 1.0 + float(k) * 1.6,
+			Color(0.10, 0.06, 0.03, 0.06 if not dim else 0.03))
+	canvas.draw_circle(pos, r, Color(0.08, 0.06, 0.04))
+	canvas.draw_circle(pos, r - 1.0, rim_base)
+	var bw: float = maxf(2.5, r * 0.12)
+	canvas.draw_arc(pos, r - 1.0 - bw * 0.5, deg_to_rad(168), deg_to_rad(288),
+		28, rim_light, bw, true)
+	canvas.draw_arc(pos, r - 1.0 - bw * 0.5, deg_to_rad(-12), deg_to_rad(108),
+		28, rim_dark, bw, true)
+	canvas.draw_circle(pos, r - bw - 2.0, Color(0.06, 0.05, 0.03))
+	var fr: float = r - bw - 3.5
+	canvas.draw_circle(pos, fr, face)
+	canvas.draw_arc(pos, fr - 1.0, deg_to_rad(190), deg_to_rad(350), 24,
+		Color(0, 0, 0, 0.22), maxf(2.0, fr * 0.16), true)
+	canvas.draw_arc(pos, fr - 1.0, deg_to_rad(20), deg_to_rad(160), 24,
+		Color(1, 1, 1, 0.10), maxf(1.5, fr * 0.10), true)
+	if gloss:
+		canvas.draw_circle(pos - Vector2(0, fr * 0.34), fr * 0.55,
+			Color(1, 1, 1, 0.08))
+	return fr
+
+
+## Painted base gradient drawn behind the parchment: a warm lit corridor through
+## the vertical-center node band, toasted at top/bottom, with a few warm pools
+## spaced along the scroll length and an edge vignette. Tinted per act via the
+## bg_canvas modulate (ACT_BG_TINT).
+func _draw_map_bg(canvas: Control) -> void:
+	var w: float = _map_content_w
+	var h: float = _map_content_h
+	var center_col := Color(0.91, 0.84, 0.65)
+	var edge_col := Color(0.46, 0.35, 0.20)
+	var bands: int = 80
+	for i in range(bands):
+		var t: float = float(i) / float(bands - 1)
+		var d: float = absf(t - 0.5) * 2.0
+		var k: float = pow(1.0 - d, 1.4)
+		canvas.draw_rect(Rect2(0.0, t * h, w, h / float(bands) + 1.5),
+			edge_col.lerp(center_col, k))
+	var rng := RandomNumberGenerator.new()
+	var pools: int = int(w / 460.0) + 2
+	for i in range(pools):
+		rng.seed = 7000 + i * 131
+		var px: float = (float(i) + 0.5) * (w / float(pools)) \
+			+ rng.randf_range(-60.0, 60.0)
+		var py: float = h * 0.5 + rng.randf_range(-40.0, 40.0)
+		for k in range(10):
+			canvas.draw_circle(Vector2(px, py),
+				lerpf(300.0, 30.0, float(k) / 9.0),
+				Color(0.93, 0.86, 0.66, 0.05))
+	var vig := Color(0.24, 0.16, 0.08, 0.10)
+	for k in range(6):
+		var ins: float = float(k) * 26.0
+		canvas.draw_rect(Rect2(0, ins, w, 4.0), vig)
+		canvas.draw_rect(Rect2(0, h - ins - 4.0, w, 4.0), vig)
+		canvas.draw_rect(Rect2(ins, 0, 4.0, h), vig)
+		canvas.draw_rect(Rect2(w - ins - 4.0, 0, 4.0, h), vig)
+
+
+func _mul_mat() -> CanvasItemMaterial:
+	var m := CanvasItemMaterial.new()
+	m.blend_mode = CanvasItemMaterial.BLEND_MODE_MUL
+	return m
+
+
+func _get_grain() -> ImageTexture:
+	if _grain_tex == null:
+		_grain_tex = _make_grain()
+	return _grain_tex
+
+
+func _make_grain() -> ImageTexture:
+	var s := 256
+	var img := Image.create(s, s, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 0xBEEF
+	for y in range(s):
+		for x in range(s):
+			var v: float = rng.randf_range(0.90, 1.0)
+			img.set_pixel(x, y, Color(v, v, v))
+	return ImageTexture.create_from_image(img)
 
 
 # ═══════════════════════════════════════════
@@ -839,6 +1143,12 @@ func _tip(node: Dictionary) -> String:
 		var enc = EncounterDB.get_encounter(node.encounter_id)
 		if not enc.is_empty():
 			label = enc.name
+	# Mutator tag — surfaces "Stormy: enemies gain Swift" etc. so the player
+	# can route around a fight they don't want without entering it first.
+	var mut_id: String = String(node.get("mutator_id", ""))
+	if mut_id != "" and MutatorDB.exists(mut_id):
+		var mut: Dictionary = MutatorDB.get_mutator(mut_id)
+		label += "\n★ %s: %s" % [mut.get("name", mut_id), mut.get("desc", "")]
 	return label
 
 
@@ -898,7 +1208,10 @@ func _build_top_hud() -> void:
 	const GAP := 12.0
 	const FONT_SZ := 26
 
-	var x := 28.0
+	# Start AFTER the top-left settings gear (gear occupies x=14..62 from
+	# GameTheme.make_settings_gear). Previously the heart icon started at
+	# x=28, overlapping the right half of the gear and partially covering it.
+	var x := 80.0
 	_place_painted_icon(GameTheme.tex_hud_heart, Vector2(x, ROW_Y),
 		ICON, Color.WHITE)
 	_place_centred_label(
@@ -932,26 +1245,57 @@ func _build_top_hud() -> void:
 			Color(0.95, 0.85, 0.55), 22)
 
 	var px := 1110.0
-	var potions: int = RunState.potions
-	for i in range(3):
-		var filled: bool = i < potions
-		var pcol: Color = Color.WHITE if filled else \
-			Color(0.45, 0.40, 0.35, 0.45)
-		_place_painted_icon(GameTheme.tex_hud_potion,
-			Vector2(px, ROW_Y), ICON, pcol)
+	for i in range(RunState.MAX_POTIONS):
+		var pid: String = RunState.potions[i] if i < RunState.potions.size() else ""
+		_place_potion_slot(pid, i, Vector2(px, ROW_Y), ICON)
 		px += ICON + 4
-	if potions > 0:
-		var pbtn = GameTheme.make_themed_button("Use Potion",
-			Color(0.20, 0.45, 0.20), Vector2(110, ROW_H))
-		pbtn.position = Vector2(px + 12, ROW_Y)
-		pbtn.pressed.connect(func():
-			if RunState.use_potion():
-				_build_map()
-		)
-		add_child(pbtn)
-		px += 130
 
 	_place_deck_button(Vector2(px + 24, ROW_Y), ICON, ROW_H, FONT_SZ)
+
+
+func _place_potion_slot(pid: String, index: int, top_left: Vector2, sz: float) -> void:
+	# Empty slot: shaded placeholder icon, not clickable.
+	if pid == "":
+		_place_painted_icon(GameTheme.tex_hud_potion, top_left, sz,
+			Color(0.45, 0.40, 0.35, 0.45))
+		return
+	var data: Dictionary = PotionDB.get_potion(pid)
+	var icon: Texture2D = PotionDB.icon_for(pid)
+	var tint: Color = data.get("color", Color.WHITE) if not data.is_empty() else Color.WHITE
+	# Drop shadow + icon, same render as other HUD chips.
+	_place_painted_icon(icon, top_left, sz, tint)
+	# Invisible button overlay handles clicks + tooltip.
+	var btn := Button.new()
+	btn.flat = true
+	btn.position = top_left
+	btn.size = Vector2(sz, sz)
+	var usable_in: String = data.get("usable_in", "combat")
+	var map_usable: bool = usable_in == "map" or usable_in == "both"
+	var label: String = "%s\n%s" % [data.get("name", pid), data.get("desc", "")]
+	if not map_usable:
+		label += "\n(Combat use only)"
+	btn.tooltip_text = label
+	if map_usable:
+		btn.pressed.connect(func():
+			_use_map_potion(index)
+		)
+	add_child(btn)
+
+
+func _use_map_potion(index: int) -> void:
+	var pid: String = RunState.potions[index] if index < RunState.potions.size() else ""
+	if pid == "":
+		return
+	var data: Dictionary = PotionDB.get_potion(pid)
+	var effect: String = data.get("effect", "")
+	match effect:
+		"heal_hp":
+			RunState.consume_potion(index)
+			RunState.heal_hero(8)
+		_:
+			# Combat-only effects shouldn't even be wired up here, but be safe.
+			return
+	_build_map()
 
 
 func _place_painted_icon(tex: Texture2D, top_left: Vector2, sz: float,
@@ -1211,7 +1555,7 @@ func _show_deck_viewer() -> void:
 			grid.add_child(card)
 		await get_tree().process_frame
 
-	var close_btn = GameTheme.make_back_button("CLOSE", Vector2(140, 40), 15)
+	var close_btn = GameTheme.make_back_button("CLOSE", Vector2(140, 40))
 	close_btn.position = Vector2(740, 800)
 	close_btn.pressed.connect(func(): overlay.queue_free())
 	overlay.add_child(close_btn)
@@ -1228,5 +1572,6 @@ func _on_node_pressed(row: int, col: int) -> void:
 		"shop": target = SHOP_SCENE
 		"rest": target = REST_SCENE
 		"event": target = EVENT_SCENE
+		"treasure": target = TREASURE_SCENE
 	if target != "":
 		GameTheme.fade_out_then_change_scene(self, target, 0.30)

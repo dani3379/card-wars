@@ -26,12 +26,19 @@ var _music_a: AudioStreamPlayer = null
 var _music_b: AudioStreamPlayer = null
 var _music_active: AudioStreamPlayer = null
 var _current_music_track: String = ""
+# Looping-ambience player, separate from one-shot SFX and music. Used for the
+# campfire crackle on the rest screen (and similar long looping textures).
+# Always exactly one ambience may play at a time; calling play_ambience("x")
+# stops the previous loop and crossfades in the new one, mirroring play_music.
+var _ambience_player: AudioStreamPlayer = null
+var _current_ambience: String = ""
 
 
 func _ready() -> void:
 	_load_sfx()
 	_build_sfx_pool()
 	_build_music_players()
+	_build_ambience_player()
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +105,16 @@ func _build_music_players() -> void:
 	add_child(_music_b)
 
 
+func _build_ambience_player() -> void:
+	_ambience_player = AudioStreamPlayer.new()
+	# Routed through the SFX bus so the player's SFX volume slider also
+	# attenuates ambience — most players treat fire-crackle / wind as "sound
+	# effects," not music, and reach for the SFX knob when they want it down.
+	_ambience_player.bus = "SFX"
+	_ambience_player.volume_db = FADE_QUIET_DB
+	add_child(_ambience_player)
+
+
 # ---------------------------------------------------------------------------
 # SFX PLAY
 # ---------------------------------------------------------------------------
@@ -157,6 +174,22 @@ func play_music(track_name: String, fade_seconds: float = 1.0) -> void:
 		tw.chain().tween_callback(outgoing.stop)
 
 
+func play_music_random(candidates: Array, fade_seconds: float = 1.0) -> void:
+	## Picks one track at random from the candidates and crossfades to it. If the
+	## currently-playing track is in the pool, it is excluded so two consecutive
+	## fights never start on the same song (assuming the pool has 2+ entries).
+	if candidates.is_empty():
+		return
+	if candidates.size() == 1:
+		play_music(String(candidates[0]), fade_seconds)
+		return
+	var pool: Array = candidates.duplicate()
+	if _current_music_track != "" and pool.has(_current_music_track):
+		pool.erase(_current_music_track)
+	var pick: String = String(pool[randi() % pool.size()])
+	play_music(pick, fade_seconds)
+
+
 func stop_music(fade_seconds: float = 0.6) -> void:
 	_current_music_track = ""
 	for p in [_music_a, _music_b]:
@@ -174,3 +207,47 @@ func _resolve_music_path(track_name: String) -> String:
 		if ResourceLoader.exists(p):
 			return p
 	return ""
+
+
+# ---------------------------------------------------------------------------
+# AMBIENCE (looping background SFX like campfire crackle, wind, rain)
+# ---------------------------------------------------------------------------
+
+func play_ambience(event_name: String, fade_seconds: float = 0.8,
+		volume_db: float = -6.0) -> void:
+	## Crossfades into a looping ambient sound. Looks up the first audio file
+	## under assets/audio/sfx/<event_name>/. No-op if the directory is empty so
+	## the game runs identically whether ambience assets exist or not.
+	if _current_ambience == event_name:
+		return
+	if not _sfx_streams.has(event_name):
+		# Ambience asset missing — silently stop any current loop so we don't
+		# leave the previous screen's crackle bleeding into this one.
+		stop_ambience(fade_seconds)
+		return
+	var streams: Array = _sfx_streams[event_name]
+	if streams.is_empty():
+		stop_ambience(fade_seconds)
+		return
+	var stream: AudioStream = streams[0]
+	# Force loop so a 4-second crackle loops indefinitely instead of playing once.
+	# Some Godot AudioStream variants (Ogg, WAV) expose `loop`; MP3 does not.
+	if "loop" in stream:
+		stream.loop = true
+	_ambience_player.stop()
+	_ambience_player.stream = stream
+	_ambience_player.volume_db = FADE_QUIET_DB
+	_ambience_player.play()
+	_current_ambience = event_name
+	var tw := create_tween()
+	tw.tween_property(_ambience_player, "volume_db", volume_db, fade_seconds)
+
+
+func stop_ambience(fade_seconds: float = 0.6) -> void:
+	if _ambience_player == null or _current_ambience == "":
+		return
+	_current_ambience = ""
+	if _ambience_player.playing:
+		var tw := create_tween()
+		tw.tween_property(_ambience_player, "volume_db", FADE_QUIET_DB, fade_seconds)
+		tw.tween_callback(_ambience_player.stop)

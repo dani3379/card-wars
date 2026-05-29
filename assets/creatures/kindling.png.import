@@ -2,12 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://wgb0oyddga3f"
-valid=false
+uid="uid://bgns84a4oqcjk"
+path="res://.godot/imported/kindling.png-aa581a7053d180e03141fcf9f1245550.ctex"
+metadata={
+"vram_texture": false
+}
 
 [deps]
 
 source_file="res://assets/creatures/kindling.png"
+dest_files=["res://.godot/imported/kindling.png-aa581a7053d180e03141fcf9f1245550.ctex"]
 
 [params]
 

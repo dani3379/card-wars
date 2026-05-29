@@ -6,7 +6,21 @@ extends Node
 var hero_max_hp: int = 25
 var hero_hp: int = 25
 var gold: int = 0
-var potions: int = 0
+# Id of the hero picked at the start of the run. Used by the rest screen to
+# pick the right silhouette / flavor strings; otherwise the run is hero-agnostic
+# (deck and signature relic are baked in at start_new_run time). Falls back to
+# HeroDB.DEFAULT_HERO if anyone reads this before start_new_run() ran.
+var current_hero_id: String = ""
+# Rest-screen counters. `rests_visited_in_act` resets when the act advances and
+# powers the time-of-day shader tint (first rest = dusk, second = night). Whetstone
+# also reads this to determine "first rest of act". Persisted via save_state below.
+var rests_visited_in_act: int = 0
+var rests_visited_total: int = 0
+var whetstone_used_this_act: bool = false
+# Array of potion ids the player currently holds (max 3). Each id is a key
+# into PotionDB.POTIONS.
+var potions: Array[String] = []
+const MAX_POTIONS: int = 3
 
 # ── Deck ──
 var deck: Array[String] = []
@@ -16,6 +30,17 @@ var _next_uid: int = 0
 
 # ── Relics ──
 var relics: Array[String] = []
+# Per-act choice stash for "Each act, pick X" relics. The MapView picker writes
+# the choice + the act it was made for; a mismatch with get_act() re-prompts at
+# the start of the next act. Empty string = no choice made yet this act.
+var totem_pole_keyword: String = ""
+var totem_pole_act: int = 0
+var bone_hourglass_choice: String = ""
+var bone_hourglass_act: int = 0
+# Bottled Talisman: deck_uid the player bound at acquisition. -1 = unbound (the
+# MapView/acquire-screen picker will prompt for a card). Combat pulls this uid
+# into the opening hand every fight.
+var bottled_talisman_uid: int = -1
 
 # ── Map ──
 var map_data: Array = []
@@ -23,6 +48,13 @@ var current_act_idx: int = 0
 var map_position: Dictionary = {"row": -1, "col": -1}
 var current_encounter_id: String = ""
 var current_node_type: String = ""
+var current_mutator_id: String = ""
+# Run statistics — surfaced on the GameOver recap screen. Reset by
+# start_new_run, updated by Combat on each victory / death, persisted in
+# the save file so a quit-mid-run resume keeps the running counts.
+var fights_won: int = 0
+var mutators_survived: Array[String] = []
+var cause_of_death: String = ""  # encounter name that killed the player
 var events_seen: Array[String] = []
 
 # ── Mana ──
@@ -33,6 +65,14 @@ var current_floor: int = 0
 var run_active: bool = false
 var run_seed: int = 0
 var phoenix_heart_consumed: bool = false
+# Marked One event delayed-payoff. Set by Event.gd, consumed by Combat.gd at
+# the START of the next combat fight and immediately cleared. Both fields
+# persist through save/load so closing the game between the event and the
+# fight doesn't drop the payoff.
+#   next_combat_gift_creature: {name, atk, hp, kw[]} placed in front-left lane
+#   next_combat_mana_bonus: int added to max mana for the entire fight
+var next_combat_gift_creature: Dictionary = {}
+var next_combat_mana_bonus: int = 0
 # Ascension level chosen for this run (0..MetaState.unlocked_ascension).
 # Each tier scales encounter face HP (see ASCENSION_HP_MULT). Set in
 # start_new_run; never modified mid-run.
@@ -52,12 +92,13 @@ const REST_ROW: int = 13
 const NUM_PATHS: int = 4         # Fewer paths than STS (6) — fits our smaller, faster runs.
 const MIN_ELITE_ROW: int = 5     # Elites/rest cannot appear before this row.
 
-# Room-type probabilities (cumulative). Mirrors STS: combat 46%, event 22%,
-# elite 10%, rest 12%, shop 10%.
+# Room-type probabilities (cumulative). combat 41%, event 22%, elite 10%,
+# rest 12%, shop 10%, treasure 5%.
 const PROB_SHOP: float = 0.10
 const PROB_REST: float = 0.22    # 0.10 + 0.12
 const PROB_ELITE: float = 0.32   # 0.22 + 0.10
 const PROB_EVENT: float = 0.54   # 0.32 + 0.22
+const PROB_TREASURE: float = 0.59  # 0.54 + 0.05
 
 
 func get_act() -> int:
@@ -66,34 +107,83 @@ func get_act() -> int:
 
 # ── Run lifecycle ──
 
-func start_new_run(starting_relic: String = "", ascension: int = -1) -> void:
+## Compute today's daily-run seed from local-time YYYYMMDD. The same date
+## across machines produces the same map, so daily runs are shareable.
+func daily_seed() -> int:
+	var d := Time.get_date_dict_from_system()
+	return int(d.year) * 10000 + int(d.month) * 100 + int(d.day)
+
+
+## Hash an arbitrary string into a deterministic seed. Used by custom-seed
+## runs so a player can type "burningmeadow" and get the same map every time.
+func seed_from_string(s: String) -> int:
+	if s == "":
+		return randi()
+	# Simple FNV-1a-style hash so identical strings always hash identically
+	# across runs (built-in `String.hash()` is also deterministic but the FNV
+	# approach is easier to mentally replay if a player is debugging a seed).
+	var h: int = 0x811c9dc5
+	for i in s.length():
+		h = (h ^ s.unicode_at(i)) & 0xffffffff
+		h = (h * 0x01000193) & 0xffffffff
+	return h
+
+
+func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int = 0) -> void:
 	hero_max_hp = 25
 	hero_hp = 25
-	gold = 0
-	potions = 0
+	gold = 100
+	potions = []
 	base_max_mana = 3
+	# Per-run trigger flags — must be reset here, not just at declaration,
+	# otherwise the value carries over from the previous run when the player
+	# starts a new run from MainMenu without restarting the executable. A
+	# fresh Phoenix Heart relic wouldn't have fired in that case.
+	phoenix_heart_consumed = false
+	next_combat_gift_creature = {}
+	next_combat_mana_bonus = 0
 	# Default to player's highest unlocked tier if caller didn't pick one.
 	if ascension < 0:
 		current_ascension = MetaState.unlocked_ascension
 	else:
 		current_ascension = clampi(ascension, 0, MetaState.unlocked_ascension)
+	# Resolve hero. "" means "use the default" — keeps any legacy code path
+	# that called start_new_run() with no args working (it'll land on Stalwart).
+	var hero_key: String = hero_id if hero_id != "" else HeroDB.DEFAULT_HERO
+	current_hero_id = hero_key
+	rests_visited_in_act = 0
+	rests_visited_total = 0
+	whetstone_used_this_act = false
+	totem_pole_keyword = ""
+	totem_pole_act = 0
+	bone_hourglass_choice = ""
+	bone_hourglass_act = 0
+	bottled_talisman_uid = -1
+	var hero: Dictionary = HeroDB.get_hero(hero_key)
 	deck = []
 	deck_uids = []
 	card_upgrades = {}
 	_next_uid = 0
-	for id in CardDB.STARTER_DECK:
+	for id in hero.get("deck", CardDB.STARTER_DECK):
 		add_card(id)
 	relics = []
-	if starting_relic != "":
-		relics.append(starting_relic)
+	var hero_relic: String = hero.get("relic", "")
+	if hero_relic != "":
+		relics.append(hero_relic)
 	current_floor = 0
 	current_act_idx = 0
 	map_position = {"row": -1, "col": -1}
 	current_encounter_id = ""
 	current_node_type = ""
+	current_mutator_id = ""
+	fights_won = 0
+	mutators_survived = []
+	cause_of_death = ""
 	events_seen = []
 	run_active = true
-	run_seed = randi()
+	# seed_override of 0 means "roll a fresh random seed". Non-zero values come
+	# from daily_seed() / seed_from_string() so the map is reproducible.
+	run_seed = seed_override if seed_override != 0 else randi()
 	CardTextureCache.clear()
 	_generate_map()
 
@@ -161,6 +251,15 @@ func _apply_upgrade(data: Dictionary, upgrade: Dictionary) -> Dictionary:
 	var d = data.duplicate(true)
 	var bonus = 3 if has_relic("blacksmiths_hammer") else 2
 	match upgrade.path:
+		"plus":
+			# Per-card "+" upgrade. Reads CardDB.UPGRADES and merges every
+			# defined delta into the card data. Blacksmith's Hammer bumps
+			# stat-style deltas by +1 (so a Brute+ goes from +1/+1 to +2/+2),
+			# matching the way the relic boosted the legacy Sharpen/Fortify
+			# paths. The is_upgraded flag is read by Combat.gd custom-spell
+			# resolvers (dmg_bonus, slay_draw, etc.) and by Card2D to pick
+			# the upgraded rarity tint.
+			d = _apply_plus_upgrade(d)
 		"sharpen":
 			if d.type == "creature":
 				d.atk += bonus
@@ -172,6 +271,30 @@ func _apply_upgrade(data: Dictionary, upgrade: Dictionary) -> Dictionary:
 				d.hp += bonus
 			else:
 				d.cost = maxi(0, d.cost - 1)
+		"fortify_neg":
+			# Event-only "negative fortify" — used by the debuff_starters event
+			# (Event.gd:420) to drop a starter creature's max HP by 1 permanently.
+			# Floored at 1 so we never store a non-positive HP that would crash
+			# combat (a 0-hp card would die instantly on placement).
+			if d.type == "creature":
+				d.hp = maxi(1, d.hp - 1)
+		"butcher":
+			# Butcher event payoff: +2 ATK and Wither 1 on a creature. The Event
+			# screen advertises both halves — previously we only applied the ATK
+			# half via the "sharpen" path so the downside was free-skipped.
+			if d.type == "creature":
+				d.atk += 2
+				if not d.keywords.has("wither"):
+					d.keywords.append("wither")
+				d.wither = maxi(1, int(d.get("wither", 0)))
+		"mirror_twin":
+			# Mirror-Twin event payoff: a glass-cannon trade — HP drops to 1, ATK
+			# gains a flat +4. Capped (not "ATK += old HP") so a 2/10 wall can't
+			# become a 12/1 freight train; this stays a calculated risk, not an
+			# auto-pick on tank cards.
+			if d.type == "creature":
+				d.atk += 4
+				d.hp = 1
 		"imbue":
 			if d.type == "creature":
 				var kw = upgrade.get("keyword", "")
@@ -183,19 +306,163 @@ func _apply_upgrade(data: Dictionary, upgrade: Dictionary) -> Dictionary:
 					if not d.keywords.has("retain"):
 						d.keywords.append("retain")
 				else:
+					# "Double effect + Exhaust" — only apply the Exhaust downside
+					# when the doubling actually landed. Custom spells (Echo,
+					# War Chant, Reanimate, etc.) don't read spell.value, so they
+					# can't be doubled — and giving them Exhaust without the
+					# upside was strictly worse than skipping the upgrade.
+					var doubled := false
 					if d.has("spell") and d.spell.has("value"):
 						d.spell.value *= 2
-					if not d.keywords.has("exhaust"):
+						doubled = true
+					if doubled and not d.keywords.has("exhaust"):
 						d.keywords.append("exhaust")
 	d.name = d.name + " +"
+	return d
+
+
+# Applies a CardDB.UPGRADES delta to a card's data dict. Every field is
+# optional; missing fields silently no-op. Stat deltas (atk/hp) get +1 from
+# Blacksmith's Hammer; numeric sub-effect bumps and dmg_bonus do not — those
+# are tuned per-card and should stay at their authored value.
+# Public preview of the "+" upgrade for a given card data dict, used by the
+# Rest screen to render the comparison without mutating deck state. Pure
+# function — caller passes a copy or accepts that the return shares no refs
+# with the input (we deep-duplicate before merging). Mirrors the " +" name
+# suffix that _apply_upgrade tacks on for live cards so the preview matches.
+func preview_plus_upgrade(data: Dictionary) -> Dictionary:
+	var out: Dictionary = _apply_plus_upgrade(data.duplicate(true))
+	out.name = String(out.get("name", "")) + " +"
+	return out
+
+
+func _apply_plus_upgrade(d: Dictionary) -> Dictionary:
+	var card_id: String = String(d.get("id", ""))
+	var u: Dictionary = CardDB.get_plus_upgrade(card_id)
+	if u.is_empty():
+		return d
+	var stat_bonus: int = 1 if has_relic("blacksmiths_hammer") else 0
+	# Creature stats
+	if d.get("type", "") == "creature":
+		if u.has("atk"):
+			d.atk = maxi(0, int(d.get("atk", 0)) + int(u.atk) + (stat_bonus if int(u.atk) > 0 else 0))
+		if u.has("hp"):
+			d.hp = maxi(1, int(d.get("hp", 1)) + int(u.hp) + (stat_bonus if int(u.hp) > 0 else 0))
+		if u.has("adj_buff_atk") and d.has("adj_buff"):
+			d.adj_buff.atk = int(d.adj_buff.get("atk", 0)) + int(u.adj_buff_atk)
+		if u.has("adj_buff_hp") and d.has("adj_buff"):
+			d.adj_buff.hp = int(d.adj_buff.get("hp", 0)) + int(u.adj_buff_hp)
+		if u.has("wither"):
+			d.wither = maxi(0, int(d.get("wither", 0)) + int(u.wither))
+		if u.has("extra_damage"):
+			d.extra_damage = int(d.get("extra_damage", 0)) + int(u.extra_damage)
+		if u.has("on_enter_value") and d.has("on_enter") and d.on_enter.has("value"):
+			d.on_enter.value = int(d.on_enter.value) + int(u.on_enter_value)
+		if u.has("on_death_value") and d.has("on_death") and d.on_death.has("value"):
+			d.on_death.value = int(d.on_death.value) + int(u.on_death_value)
+		if u.has("on_death_atk") and d.has("on_death") and d.on_death.has("atk"):
+			d.on_death.atk = int(d.on_death.atk) + int(u.on_death_atk)
+		if u.has("on_death_hp") and d.has("on_death") and d.on_death.has("hp"):
+			d.on_death.hp = int(d.on_death.hp) + int(u.on_death_hp)
+		if u.has("floop_value") and d.has("floop") and d.floop.has("value"):
+			d.floop.value = int(d.floop.value) + int(u.floop_value)
+		if u.has("floop_atk_gain") and d.has("floop") and d.floop.has("atk_gain"):
+			d.floop.atk_gain = int(d.floop.atk_gain) + int(u.floop_atk_gain)
+		if u.has("floop_atk") and d.has("floop") and d.floop.has("atk"):
+			d.floop.atk = int(d.floop.atk) + int(u.floop_atk)
+		if u.has("floop_hp") and d.has("floop") and d.floop.has("hp"):
+			d.floop.hp = int(d.floop.hp) + int(u.floop_hp)
+		if u.has("floop_heal") and d.has("floop") and d.floop.has("heal"):
+			d.floop.heal = int(d.floop.heal) + int(u.floop_heal)
+	# Cost (any card)
+	if u.has("cost"):
+		d.cost = maxi(0, int(d.get("cost", 0)) + int(u.cost))
+	# Spell value (non-custom spells with a value field)
+	if u.has("value") and d.has("spell") and d.spell.has("value"):
+		d.spell.value = int(d.spell.value) + int(u.value)
+	# Keywords add/remove
+	if u.has("add_keywords"):
+		var kw_list: Array = d.get("keywords", [])
+		for kw in u.add_keywords:
+			if not kw_list.has(kw):
+				kw_list.append(kw)
+		d.keywords = kw_list
+	if u.has("remove_keywords"):
+		var kw_list2: Array = d.get("keywords", [])
+		for kw in u.remove_keywords:
+			kw_list2.erase(kw)
+		d.keywords = kw_list2
+	# Tail-effect bonus fields that custom resolvers consult by name. These
+	# only matter if the card's resolver reads them — declaring them here is
+	# free for cards that don't (it's just a no-op merge).
+	for k in ["dmg_bonus", "slay_draw", "slay_gold", "slay_mana",
+			"extra_draw", "extra_mana", "ricochet_hits"]:
+		if u.has(k):
+			d[k] = int(u[k])
+	# Description override — applied last so it wins over any auto-generated
+	# desc. Card2D reads card_data.desc verbatim.
+	if u.has("desc"):
+		d.desc = String(u.desc)
+	# Flag for Card2D / Combat to detect the upgrade visually + behaviorally.
+	d.is_upgraded = true
 	return d
 
 
 # ── Relic manipulation ──
 
 func add_relic(id: String) -> void:
-	if not relics.has(id):
-		relics.append(id)
+	if relics.has(id):
+		return
+	relics.append(id)
+	_apply_relic_on_acquire(id)
+
+
+# Side effects that fire the moment a relic enters the player's collection.
+# Lives here (not in Combat.gd) so Reward / Shop / Treasure / Event all share
+# the same logic. Keep this branch SMALL — most relics react to combat hooks,
+# not acquisition, and belong in Combat.gd instead.
+func _apply_relic_on_acquire(id: String) -> void:
+	match id:
+		"pandoras_box":
+			_pandoras_box_transform()
+		"calling_bell":
+			_calling_bell_grant()
+		# totem_pole / bone_hourglass deliberately do NOTHING on acquire: their
+		# "each act, pick" choice is prompted by the MapView picker at the start of
+		# every act (see MapView._resolve_meta_pickers). bottled_talisman likewise
+		# binds via a picker (acquire screen or MapView catch-all), not here.
+
+
+func _pandoras_box_transform() -> void:
+	# Replace every starter-rarity CREATURE in the deck with a random rare
+	# creature id. Spells and any later additions (commons/uncommons/rares,
+	# curses, tokens) are untouched so the deck stops looking like "hero starter".
+	# card_upgrades is keyed by deck_uid: erase the entry for each replaced
+	# slot so prior upgrade payloads don't carry onto the new card identity.
+	var rare_creatures: Array[String] = []
+	for cid in CardDB.get_pool_by_rarity("rare"):
+		if CardDB.get_card_data(cid).get("type", "") == "creature":
+			rare_creatures.append(cid)
+	if rare_creatures.is_empty():
+		return
+	for i in deck.size():
+		var entry: String = deck[i]
+		var data: Dictionary = CardDB.get_card_data(entry)
+		if data.get("type", "") == "creature" and data.get("rarity", "") == "starter":
+			deck[i] = rare_creatures[randi() % rare_creatures.size()]
+			card_upgrades.erase(deck_uids[i])
+
+
+func _calling_bell_grant() -> void:
+	# Roll up to 3 boss relics the player doesn't already own and add them
+	# directly (no UI pick — this IS the payoff). Recurses through add_relic
+	# so each rolled relic gets its OWN acquire-side-effect chance. Then
+	# pad the deck with 3 random curses as the cost.
+	var picks: Array[String] = RelicDB.roll_boss_relics(relics, current_hero_id)
+	for new_id in picks:
+		add_relic(new_id)
+	for _i in 3:
+		add_card(CardDB.random_curse_id())
 
 
 func has_relic(id: String) -> bool:
@@ -218,6 +485,12 @@ func gain_gold(amount: int) -> void:
 	gold += amount
 
 
+## Jittered fight reward (±25% around `base`) so payouts land on odd numbers, not fixed amounts.
+func roll_gold_reward(base: int) -> int:
+	var spread: int = int(round(base * 0.25))
+	return base + randi_range(-spread, spread)
+
+
 func get_max_mana() -> int:
 	return base_max_mana + RelicDB.get_boss_mana_bonus(relics)
 
@@ -228,12 +501,33 @@ func has_downside(downside: String) -> bool:
 
 # ── Potions ──
 
-func use_potion() -> bool:
-	if potions <= 0:
+func can_add_potion() -> bool:
+	return potions.size() < MAX_POTIONS and not has_downside("no_potions")
+
+
+func add_potion(id: String) -> bool:
+	if not can_add_potion():
 		return false
-	potions -= 1
-	heal_hero(8)
+	if not PotionDB.POTIONS.has(id):
+		push_warning("RunState.add_potion: unknown id '%s'" % id)
+		return false
+	potions.append(id)
 	return true
+
+
+func consume_potion(index: int) -> String:
+	## Removes and returns the potion id at `index`. Used by callers that
+	## resolve the effect themselves (Combat has gameplay context; MapView
+	## handles map-applicable effects). Returns "" if index is invalid.
+	if index < 0 or index >= potions.size():
+		return ""
+	var id: String = potions[index]
+	potions.remove_at(index)
+	return id
+
+
+func first_potion_index(id: String) -> int:
+	return potions.find(id)
 
 
 # ── Map navigation ──
@@ -278,6 +572,7 @@ func visit_node(row: int, col: int) -> void:
 			n.visited = true
 			current_node_type = n.type
 			current_encounter_id = n.get("encounter_id", "")
+			current_mutator_id = n.get("mutator_id", "")
 			current_floor += 1
 			save_run()  # checkpoint: player is committing to enter a room
 			return
@@ -295,6 +590,30 @@ func advance_act() -> void:
 	map_position = {"row": -1, "col": -1}
 	current_encounter_id = ""
 	current_node_type = ""
+	current_mutator_id = ""
+	# Per-act rest counters reset so the time-of-day shader tint (dusk → night)
+	# restarts each act, and Whetstone's "first rest of act" payoff re-arms.
+	rests_visited_in_act = 0
+	whetstone_used_this_act = false
+	# Centaur Heart: reaching Act 2 (current_act_idx now == 1) grants +5 max HP
+	# and heals to full. Fires once per relic — guard via meta flag held on
+	# the relic id so a re-entry doesn't keep re-applying.
+	if has_relic("centaur_heart") and current_act_idx == 1:
+		hero_max_hp += 5
+		hero_hp = hero_max_hp
+
+
+## Called by Rest.gd when the player commits to staying at a rest node (any
+## option — Heal/Upgrade/Remove/Reforge). Increments both counters so the next
+## rest screen knows it's not the first of the act. Saves immediately because
+## the scene transition that follows can drop these values otherwise (the next
+## save normally fires on the *next* map-node visit_node, which is too late if
+## the player force-quits between rest and the map screen — Whetstone could
+## otherwise be re-spent because whetstone_used_this_act never persisted).
+func register_rest_visit() -> void:
+	rests_visited_in_act += 1
+	rests_visited_total += 1
+	save_run()
 
 
 func is_final_boss() -> bool:
@@ -374,6 +693,7 @@ func _make_node(col: int, row: int) -> Dictionary:
 	return {
 		"type": "",
 		"encounter_id": "",
+		"mutator_id": "",
 		"visited": false,
 		"connections": [],
 		"row": row,
@@ -444,9 +764,13 @@ func _pick_room_type(grid: Array, r: int, c: int,
 			t = "elite"
 		elif roll < PROB_EVENT:
 			t = "event"
+		elif roll < PROB_TREASURE:
+			t = "treasure"
 		else:
 			t = "combat"
 		if (t == "elite" or t == "rest") and r < MIN_ELITE_ROW:
+			continue
+		if t == "treasure" and r < MIN_ELITE_ROW:
 			continue
 		if t == "rest" and r == REST_ROW - 1:
 			continue
@@ -460,8 +784,8 @@ func _pick_room_type(grid: Array, r: int, c: int,
 
 func _is_consecutive_violation(grid: Array, t: String, r: int,
 		c: int) -> bool:
-	# STS: elite/shop/rest can't follow the same type on any incoming path.
-	if t != "elite" and t != "shop" and t != "rest":
+	# STS: elite/shop/rest/treasure can't follow the same type on any incoming path.
+	if t != "elite" and t != "shop" and t != "rest" and t != "treasure":
 		return false
 	if r == 0:
 		return false
@@ -528,13 +852,17 @@ func _assign_encounters(grid: Array, act: int,
 					if combat_ids.size() > 0:
 						node["encounter_id"] = combat_ids[combat_idx % combat_ids.size()]
 						combat_idx += 1
+					node["mutator_id"] = MutatorDB.roll(0.35, rng)
 				"elite":
 					if elite_ids.size() > 0:
 						node["encounter_id"] = elite_ids[elite_idx % elite_ids.size()]
 						elite_idx += 1
+					node["mutator_id"] = MutatorDB.roll(0.65, rng)
 				"boss":
 					if boss_ids.size() > 0:
 						node["encounter_id"] = boss_ids[0]
+					# Bosses keep their own complex passives — no mutator on boss
+					# fights to avoid stacking too many parallel rule changes.
 
 
 func _flatten_grid(grid: Array) -> Array:
@@ -630,12 +958,27 @@ func save_run() -> void:
 		"map_position": map_position,
 		"current_encounter_id": current_encounter_id,
 		"current_node_type": current_node_type,
+		"current_mutator_id": current_mutator_id,
+		"fights_won": fights_won,
+		"mutators_survived": mutators_survived,
+		"cause_of_death": cause_of_death,
 		"events_seen": events_seen,
 		"base_max_mana": base_max_mana,
 		"current_floor": current_floor,
 		"run_seed": run_seed,
 		"phoenix_heart_consumed": phoenix_heart_consumed,
+		"next_combat_gift_creature": next_combat_gift_creature,
+		"next_combat_mana_bonus": next_combat_mana_bonus,
 		"current_ascension": current_ascension,
+		"current_hero_id": current_hero_id,
+		"rests_visited_in_act": rests_visited_in_act,
+		"rests_visited_total": rests_visited_total,
+		"whetstone_used_this_act": whetstone_used_this_act,
+		"totem_pole_keyword": totem_pole_keyword,
+		"totem_pole_act": totem_pole_act,
+		"bone_hourglass_choice": bone_hourglass_choice,
+		"bone_hourglass_act": bone_hourglass_act,
+		"bottled_talisman_uid": bottled_talisman_uid,
 		"saved_at": int(Time.get_unix_time_from_system()),
 	}
 	var path := _save_path_for_slot(active_slot)
@@ -717,7 +1060,18 @@ func load_run(slot: int = -1) -> bool:
 	hero_max_hp = int(data.get("hero_max_hp", 25))
 	hero_hp = int(data.get("hero_hp", 25))
 	gold = int(data.get("gold", 0))
-	potions = int(data.get("potions", 0))
+	# potions was an int (count of generic heal potions) in older saves; new
+	# saves store an Array[String] of potion ids. Migrate legacy saves by
+	# expanding the int into N healing potions so existing runs don't lose them.
+	var raw_potions = data.get("potions", [])
+	potions = []
+	if typeof(raw_potions) == TYPE_ARRAY:
+		for pid in raw_potions:
+			potions.append(String(pid))
+	else:
+		var n: int = int(raw_potions)
+		for _i in range(n):
+			potions.append("healing")
 	# Rebuild typed arrays from the plain JSON arrays.
 	deck = []
 	for id in data.get("deck", []):
@@ -739,6 +1093,12 @@ func load_run(slot: int = -1) -> bool:
 	map_position = data.get("map_position", {"row": -1, "col": -1})
 	current_encounter_id = String(data.get("current_encounter_id", ""))
 	current_node_type = String(data.get("current_node_type", ""))
+	current_mutator_id = String(data.get("current_mutator_id", ""))
+	fights_won = int(data.get("fights_won", 0))
+	mutators_survived = []
+	for m in data.get("mutators_survived", []):
+		mutators_survived.append(String(m))
+	cause_of_death = String(data.get("cause_of_death", ""))
 	events_seen = []
 	for id in data.get("events_seen", []):
 		events_seen.append(String(id))
@@ -746,7 +1106,18 @@ func load_run(slot: int = -1) -> bool:
 	current_floor = int(data.get("current_floor", 0))
 	run_seed = int(data.get("run_seed", 0))
 	phoenix_heart_consumed = bool(data.get("phoenix_heart_consumed", false))
+	next_combat_gift_creature = data.get("next_combat_gift_creature", {})
+	next_combat_mana_bonus = int(data.get("next_combat_mana_bonus", 0))
 	current_ascension = int(data.get("current_ascension", 0))
+	current_hero_id = String(data.get("current_hero_id", HeroDB.DEFAULT_HERO))
+	rests_visited_in_act = int(data.get("rests_visited_in_act", 0))
+	rests_visited_total = int(data.get("rests_visited_total", 0))
+	whetstone_used_this_act = bool(data.get("whetstone_used_this_act", false))
+	totem_pole_keyword = String(data.get("totem_pole_keyword", ""))
+	totem_pole_act = int(data.get("totem_pole_act", 0))
+	bone_hourglass_choice = String(data.get("bone_hourglass_choice", ""))
+	bone_hourglass_act = int(data.get("bone_hourglass_act", 0))
+	bottled_talisman_uid = int(data.get("bottled_talisman_uid", -1))
 	run_active = true
 	active_slot = s
 	CardTextureCache.clear()

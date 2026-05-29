@@ -14,7 +14,6 @@ config/name="Burning Meadow"
 config/description="A lane combat roguelike deckbuilder."
 run/main_scene="res://scenes/main_menu.tscn"
 config/features=PackedStringArray("4.6", "GL Compatibility")
-config/icon="res://icon.svg"
 
 [autoload]
 
@@ -22,8 +21,12 @@ RunState="*uid://dcq27ifbf3e7g"
 MetaState="*uid://cyts2mfhubru2"
 CardDB="*uid://c0ddf4qlhb4bb"
 RelicDB="*uid://2p6cly80x3np"
+HeroDB="*res://scripts/data/HeroDB.gd"
+PotionDB="*res://scripts/data/PotionDB.gd"
 KeywordEffects="*res://scripts/data/KeywordEffects.gd"
+EncounterEffects="*res://scripts/data/EncounterEffects.gd"
 EncounterDB="*res://scripts/data/EncounterDB.gd"
+MutatorDB="*res://scripts/data/MutatorDB.gd"
 GameTheme="*res://scripts/GameTheme.gd"
 UserSettings="*res://scripts/state/UserSettings.gd"
 CardTextureCache="*res://scripts/state/CardTextureCache.gd"
