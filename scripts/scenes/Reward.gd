@@ -87,6 +87,10 @@ func _build_ui() -> void:
 		for id in _relic_choices:
 			var btn = GameTheme.make_relic_card(id, Color(0.55, 0.30, 0.20),
 				Vector2(220, 150))
+			# Shrink-center: the row owns the freed vertical space now that
+			# the card rack is gone, and HBox children stretch by default —
+			# without this the relic panels render as full-height columns.
+			btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 			btn.pressed.connect(_pick_relic.bind(id))
 			relic_row.add_child(btn)
 
