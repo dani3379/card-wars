@@ -363,13 +363,18 @@ func _test_finale() -> void:
 	RS.finale_stage = 0
 	_check(RS.load_run(2) and RS.finale_stage == 1,
 		"throne-door save resumes at stage 1")
-	# A spared rival with no amalgam kit ends the run at act 3, as before.
+	# All five amalgams are authored now: every spared rival routes to the
+	# throne. The graceful missing-kit branch stays covered by fabricating a
+	# rival with no amalgam_<id> entry.
 	for s in range(1, 400):
 		RS.start_new_run("raider", 0, s)
 		if RS.finale_rival != "acolyte":
 			break
 	RS.current_act_idx = 2
 	RS.current_node_type = "boss"
+	_check(RS.should_enter_finale() and not RS.is_final_boss(),
+		"all amalgams authored: act-3 boss always routes to the throne")
+	RS.finale_rival = "nobody"
 	_check(not RS.should_enter_finale() and RS.is_final_boss(),
 		"missing amalgam kit ends the run at the act-3 boss (graceful)")
 	_check(not EDB.get_ids_for(3, "boss").has("amalgam_acolyte"),
