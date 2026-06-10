@@ -1420,12 +1420,22 @@ func _draw_keep() -> void:
 		pole_top + Vector2(28, 6), pole_top + Vector2(0, 13)]), CRIMSON)
 	draw_circle(Vector2(kp.x, base_y - 7), 4.5, Color(1.0, 0.55, 0.20, 0.9))
 	if _boss_name != "" and GameTheme.font_display != null:
-		var plaque := Rect2(kp.x - 95.0, base_y + 12.0, 190.0, 24.0)
+		# Each act's keep is a place before it is a fight: name the seat,
+		# then the holder. Common-noun names only (lore rule), one per leg —
+		# the passes, the grain country, the lava country.
+		var keep_names := ["THE PASS GATE", "THE GRANARY KEEP",
+			"THE CINDER SEAT"]
+		var plaque := Rect2(kp.x - 95.0, base_y + 12.0, 190.0, 38.0)
 		draw_rect(plaque, Color(0.05, 0.04, 0.035, 0.85))
 		draw_rect(plaque, Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.8),
 			false, 1.0)
 		draw_string(GameTheme.font_display,
-			Vector2(kp.x - 120.0, base_y + 29.0), _boss_name,
+			Vector2(kp.x - 120.0, base_y + 26.0),
+			keep_names[clampi(_act - 1, 0, 2)],
+			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 10,
+			Color(0.74, 0.66, 0.52, 0.95))
+		draw_string(GameTheme.font_display,
+			Vector2(kp.x - 120.0, base_y + 44.0), _boss_name,
 			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 14, Color(0.92, 0.80, 0.62))
 
 

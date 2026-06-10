@@ -87,12 +87,6 @@ const ALIASES: Dictionary = {
 	"footman":              "shieldbearer",
 	"squire":               "shieldbearer",
 	"veteran":              "pikeman",
-	# Fallback for Pikeman itself: the master pikeman.png is currently
-	# corrupted (Godot logs "Error loading image" on import). Until a
-	# clean PNG is dropped in, fall back to the shieldbearer portrait so
-	# the card has SOME soldier-tribe art instead of a black window.
-	# Direct-load fails → loader now retries via this alias.
-	"pikeman":              "shieldbearer",
 	"lieutenant":           "squire_captain",
 	"standard_bearer":      "royal_guard",
 	"banner-bearer":        "royal_guard",

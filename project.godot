@@ -14,6 +14,9 @@ config/name="Burning Meadow"
 config/description="A lane combat roguelike deckbuilder."
 run/main_scene="res://scenes/main_menu.tscn"
 config/features=PackedStringArray("4.6", "GL Compatibility")
+config/icon="res://icon.png"
+boot_splash/bg_color=Color(0.03, 0.025, 0.02, 1)
+boot_splash/image="res://assets/backgrounds/main_menu.png"
 
 [autoload]
 

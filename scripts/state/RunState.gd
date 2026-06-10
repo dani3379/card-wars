@@ -193,11 +193,37 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 
 func end_run(victorious: bool) -> void:
 	run_active = false
+	_append_run_log(victorious)
 	clear_save()  # save only persists in-progress runs; ended ones are gone
 	if victorious:
 		MetaState.record_victory()
 	else:
 		MetaState.record_defeat()
+
+
+## Local balance telemetry: one CSV row per finished run (user://runs.csv).
+## Turns playtests into data — where runs die, on what, with which hero —
+## instead of vibes. Local file only; never leaves the machine.
+func _append_run_log(victorious: bool) -> void:
+	var path := "user://runs.csv"
+	var exists := FileAccess.file_exists(path)
+	var f := FileAccess.open(path,
+		FileAccess.READ_WRITE if exists else FileAccess.WRITE)
+	if f == null:
+		return
+	if exists:
+		f.seek_end()
+	else:
+		f.store_line("ended_at,result,hero,ascension,seed,act,floor,hp," +
+			"max_hp,gold,fights_won,deck_size,relics,cause_of_death")
+	f.store_line("%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s" % [
+		Time.get_datetime_string_from_system(),
+		"victory" if victorious else "defeat",
+		current_hero_id, current_ascension, run_seed,
+		get_act(), current_floor, hero_hp, hero_max_hp, gold,
+		fights_won, deck.size(), relics.size(),
+		cause_of_death.replace(",", ";")])
+	f.close()
 
 
 # ── Deck manipulation ──
