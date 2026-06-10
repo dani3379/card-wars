@@ -208,20 +208,13 @@ func _clamp_into_island(p: Vector2, inset: float = 26.0) -> Vector2:
 	return q
 
 
-func _island_y_span(x: float) -> Vector2:
-	# Usable N–S band (inset from the surf) at a given longitude.
-	var ymin := 1e9
-	var ymax := -1e9
-	var y := 140.0
-	while y < 960.0:
-		if _inside_island(Vector2(x, y), 30.0):
-			ymin = minf(ymin, y)
-			ymax = maxf(ymax, y)
-		y += 10.0
-	if ymin > ymax:
-		return Vector2(420.0, 560.0)
-	var pad := minf(36.0, (ymax - ymin) * 0.18)
-	return Vector2(ymin + pad, ymax - pad)
+func _perp_extent(base: Vector2, dirv: Vector2) -> float:
+	# Contiguous on-island distance from `base` along `dirv`, inset from the
+	# surf — measures the usable cross-spine band for lane fanning.
+	var d := 0.0
+	while d < 240.0 and _inside_island(base + dirv * (d + 10.0), 30.0):
+		d += 10.0
+	return d
 
 
 # ═══════════════════ RUN DATA ═══════════════════
@@ -234,30 +227,49 @@ func _read_run_map() -> void:
 	for n in RunState.get_available_nodes():
 		avail.append(Vector2i(n.row, n.col))
 	var total_rows: int = act_map.size()
-	var camp := _geo(12.55, 37.72)
-	var keep := _geo(14.90, 37.66)   # Etna's south-west foot — the boss seat
+	# The war sweeps the island — one leg per act, and each act's camp is
+	# pitched where the last keep fell: west landing → a keep in the northern
+	# passes (act 1) → down through the southern grain country (act 2) → up
+	# into the lava country at Etna's foot (act 3). Keeps are clamped well
+	# inland so the boss pin never lands in the surf.
+	var keep_lls := [Vector2(13.58, 37.88), Vector2(14.22, 37.20),
+		Vector2(14.90, 37.66)]
+	var act_i: int = clampi(_act - 1, 0, 2)
+	var camp: Vector2 = _geo(12.55, 37.72) if act_i == 0 else \
+		_clamp_into_island(_geo(keep_lls[act_i - 1].x, keep_lls[act_i - 1].y), 34.0)
+	var keep: Vector2 = _clamp_into_island(
+		_geo(keep_lls[act_i].x, keep_lls[act_i].y), 34.0)
+	# March spine as a vector — legs are no longer pure west→east, so sites
+	# advance along camp→keep and lanes fan perpendicular to the march.
+	var leg: Vector2 = keep - camp
+	var leg_len: float = maxf(leg.length(), 1.0)
+	var dirv: Vector2 = leg / leg_len
+	var perp: Vector2 = dirv.orthogonal()
+	var pad_a: float = clampf(leg_len * 0.18, 55.0, 110.0)
+	var pad_b: float = clampf(leg_len * 0.22, 75.0, 130.0)
+	var row_step: float = (leg_len - pad_a - pad_b) / float(maxi(total_rows - 1, 1))
+	# Along-spine jitter scales with the row step so rows can't visually
+	# reorder on short legs; cross-spine jitter stays generous.
+	var j_along_amp: float = minf(row_step * 0.42, 28.0)
 	var pos_lut: Dictionary = {}
 	var row0: Array = []   # {pos, avail, vis} — for camp trails
-	# Pass 1 — place every site on the march spine: west tip (camp) → Etna
-	# (keep); columns fan N–S in a band that fits the island's narrow west
-	# half (the clamp only nudges; relocation would stack nodes).
+	# Pass 1 — place every site on the leg's march spine. The cross-spine
+	# band measures the island's real extent perpendicular to the march, so
+	# lanes compress in narrow country instead of falling off the coast.
 	var entries: Array = []
 	for ri in range(total_rows):
 		for nd in act_map[ri]:
 			var t: float = float(nd.row) / float(total_rows - 1)
-			var fx: float = lerpf(camp.x + 110.0, keep.x - 120.0, t)
+			var base: Vector2 = camp + dirv * (pad_a + (leg_len - pad_a - pad_b) * t)
 			var lanes: float = float(RunState.MAP_WIDTH - 1)
-			# Adaptive column band: measure the island's real N–S extent at
-			# this longitude, so lanes compress into the narrow west wedge
-			# instead of falling off the coast and clamp-bunching.
-			var span := _island_y_span(fx)
-			var fy: float = lerpf(span.x, span.y, float(nd.col) / lanes)
-			# Generous deterministic jitter so site rows stop reading as
-			# parallel rails; the island clamp pulls strays inland.
+			var en: float = _perp_extent(base, -perp)
+			var ep: float = _perp_extent(base, perp)
+			var foff: float = lerpf(-en * 0.82, ep * 0.82, float(nd.col) / lanes)
 			var hsh: int = nd.row * 31 + nd.col * 47
-			fx += fmod(float(hsh * 13 + 5), 56.0) - 28.0
-			fy += fmod(float(hsh * 7 + 3), 44.0) - 22.0
-			var p := Vector2(fx, fy)
+			var j_a: float = (fmod(float(hsh * 13 + 5), 56.0) - 28.0) \
+				* (j_along_amp / 28.0)
+			var j_p: float = fmod(float(hsh * 7 + 3), 44.0) - 22.0
+			var p: Vector2 = base + dirv * j_a + perp * (foff + j_p)
 			if String(nd.type) == "boss":
 				p = keep
 			else:
@@ -681,11 +693,12 @@ func _assign_moisture_biomes() -> void:
 			continue
 		var e := _elev[i2]
 		var m2 := _moist[i2]
-		# Scorch = the volcano's lava country. The domain grows by act —
-		# the deeper the run, the more of the land the enemy has burned.
+		# Scorch = the volcano's lava country, centered on Etna itself (NOT
+		# whichever keep this act besieges — acts 1–2 fight far from the
+		# mountain; act 3 marches into it). It grows by act: the deeper the
+		# run, the more of the land has burned.
 		var scorch_r: float = [0.0, 175.0, 205.0, 235.0][_act]
-		var scorched := _boss_pos != Vector2.ZERO \
-			and _seed_pts[i2].distance_to(_boss_pos) < scorch_r
+		var scorched := _seed_pts[i2].distance_to(_etna_peak) < scorch_r
 		if scorched:
 			_biome[i2] = B_SCORCH
 		elif e < 0.06:
@@ -716,7 +729,10 @@ func _assign_provinces() -> void:
 			if d < best_d:
 				best_d = d
 				best = n
-		_prov[i] = best
+		# The political layer hugs the campaign corridor: land farther than
+		# ~240px from any site is wilds, not someone's province — with one
+		# leg per act, the rest of the island is past or future marches.
+		_prov[i] = best if best_d < 240.0 * 240.0 else -1
 
 
 func _compute_hillshade() -> void:
