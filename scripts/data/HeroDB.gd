@@ -5,7 +5,8 @@ extends Node
 ## Each hero entry:
 ##   id, name, tagline (one-line vibe), lore (one-line in-world stakes), desc (longer pitch), deck (Array[String]
 ##   of card ids — always 10 cards), relic (id of a tier:"starting" relic from
-##   RelicDB), portrait (optional res:// path).
+##   RelicDB), faction (id into FACTIONS — the kingdom this hero rules as a
+##   rival lord), portrait (optional res:// path).
 
 const HEROES: Dictionary = {
 	"raider": {
@@ -21,6 +22,7 @@ const HEROES: Dictionary = {
 			"fireball", "fireball",
 		],
 		"relic": "veterans_medal",
+		"faction": "grasswake",
 	},
 	"stalwart": {
 		"id": "stalwart",
@@ -35,6 +37,7 @@ const HEROES: Dictionary = {
 			"strike", "strike", "strike",
 		],
 		"relic": "iron_buckler",
+		"faction": "last_wall",
 	},
 	"acolyte": {
 		"id": "acolyte",
@@ -49,6 +52,7 @@ const HEROES: Dictionary = {
 			"strike", "strike",
 		],
 		"relic": "soul_lantern",
+		"faction": "owed",
 	},
 	"pyromancer": {
 		"id": "pyromancer",
@@ -63,6 +67,7 @@ const HEROES: Dictionary = {
 			"hexblade", "hexblade",
 		],
 		"relic": "worn_spellbook",
+		"faction": "lanternhall",
 	},
 	"kindler": {
 		"id": "kindler",
@@ -80,6 +85,7 @@ const HEROES: Dictionary = {
 			"concentrate",
 		],
 		"relic": "ember_censer",
+		"faction": "everflame",
 	},
 }
 
@@ -89,6 +95,70 @@ const HERO_ORDER: Array[String] = ["raider", "stalwart", "acolyte", "pyromancer"
 # Fallback hero id used by RunState.start_new_run when no hero is specified
 # (e.g. legacy save migration or a code path that forgot to pass one).
 const DEFAULT_HERO: String = "stalwart"
+
+# ── Successor Wars: the five kingdoms ──
+# hero ↔ faction is 1:1 — each hero rules one kingdom, and the heroes you
+# didn't pick are the rival lords you march on. Display data lives here (not
+# a separate DB) because the mapping IS the hero roster. Names locked per
+# CONQUEST_REDESIGN.md §15.1 (#7).
+#   name — banner name shown on map/intro surfaces.
+#   element / engine — the kingdom's color and its mechanical identity.
+#   engine_line — one-line intro flavor for "what this kingdom does to you".
+#   lord_title — subtitle under the rival's name on boss surfaces.
+#   hero — the lord's hero id (inverse of HEROES[x].faction).
+#   color — banner/political-wash tint for map skinning (tuned later in pixels).
+const FACTIONS: Dictionary = {
+	"grasswake": {
+		"id": "grasswake",
+		"name": "The Grasswake",
+		"element": "Storm",
+		"engine": "Overrun",
+		"engine_line": "The empty lane is their highway.",
+		"lord_title": "Lord of the Grasswake",
+		"hero": "raider",
+		"color": Color(0.33, 0.50, 0.55),
+	},
+	"last_wall": {
+		"id": "last_wall",
+		"name": "The Last Wall",
+		"element": "Stone",
+		"engine": "Formation",
+		"engine_line": "The longer they stand, the stronger they stand.",
+		"lord_title": "Lord of the Last Wall",
+		"hero": "stalwart",
+		"color": Color(0.58, 0.55, 0.47),
+	},
+	"owed": {
+		"id": "owed",
+		"name": "The Owed",
+		"element": "Rot",
+		"engine": "The Tithe",
+		"engine_line": "Every death here is a deposit. They collect.",
+		"lord_title": "Lord of the Owed",
+		"hero": "acolyte",
+		"color": Color(0.47, 0.52, 0.30),
+	},
+	"lanternhall": {
+		"id": "lanternhall",
+		"name": "The Lanternhall",
+		"element": "Frost & Star",
+		"engine": "Foresight",
+		"engine_line": "They have already seen this turn.",
+		"lord_title": "Lord of the Lanternhall",
+		"hero": "pyromancer",
+		"color": Color(0.52, 0.60, 0.78),
+	},
+	"everflame": {
+		"id": "everflame",
+		"name": "The Everflame",
+		"element": "Fire",
+		"engine": "The Fuse",
+		"engine_line": "Nothing pays now. Everything pays later, bigger.",
+		"lord_title": "Lord of the Everflame",
+		"hero": "kindler",
+		"color": Color(0.78, 0.36, 0.20),
+	},
+}
 
 
 static func get_hero(id: String) -> Dictionary:
@@ -100,3 +170,21 @@ static func get_hero(id: String) -> Dictionary:
 
 static func has_hero(id: String) -> bool:
 	return HEROES.has(id)
+
+
+## Faction id for a hero ("" never happens for live data — every hero entry
+## carries one).
+static func get_faction(hero_id: String) -> String:
+	return String(get_hero(hero_id).get("faction", ""))
+
+
+static func faction_info(faction_id: String) -> Dictionary:
+	if FACTIONS.has(faction_id):
+		return FACTIONS[faction_id]
+	push_warning("HeroDB: unknown faction id '%s'" % faction_id)
+	return {}
+
+
+## The hero id of the lord who rules a faction (inverse of get_faction).
+static func faction_lord(faction_id: String) -> String:
+	return String(faction_info(faction_id).get("hero", ""))

@@ -57,6 +57,20 @@ var mutators_survived: Array[String] = []
 var cause_of_death: String = ""  # encounter name that killed the player
 var events_seen: Array[String] = []
 
+# ── Successor Wars: rivals & kingdoms ──
+# The three rival lords this run marches on (hero ids; index = act_idx) and
+# the spared fourth who waits on the throne as the finale amalgam. act_faction
+# mirrors rival_lords with each lord's faction id — the kingdom each act
+# takes place in. All dealt by _select_rivals() from run_seed; empty arrays
+# mean a legacy save (pre-conquest), and consumers must fall back gracefully.
+var rival_lords: Array[String] = []
+var finale_rival: String = ""
+var act_faction: Array[String] = []
+# Combat/elite victories this act. The rival lord's keep unlocks at
+# HOLDS_TO_OPEN_LORD broken holds (incremented by Combat on victory, reset by
+# advance_act). Kept in RunState so it saves with the run.
+var holds_broken_in_act: int = 0
+
 # ── Mana ──
 var base_max_mana: int = 3
 
@@ -183,12 +197,60 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	mutators_survived = []
 	cause_of_death = ""
 	events_seen = []
+	holds_broken_in_act = 0
 	run_active = true
 	# seed_override of 0 means "roll a fresh random seed". Non-zero values come
 	# from daily_seed() / seed_from_string() so the map is reproducible.
 	run_seed = seed_override if seed_override != 0 else randi()
+	_select_rivals()
 	CardTextureCache.clear()
 	_generate_map()
+
+
+## Successor Wars rival deal. The pool is every hero the player didn't pick;
+## a run_seed-derived shuffle deals the first three as act bosses (index =
+## act_idx) and spares the fourth for the throne. Seeded order for now — the
+## player-chosen order screen (CONQUEST_REDESIGN.md §15.1 #4) will re-deal
+## the remaining acts at each act transition once it exists.
+func _select_rivals() -> void:
+	rival_lords = []
+	act_faction = []
+	finale_rival = ""
+	var exclude: String = current_hero_id if HeroDB.has_hero(current_hero_id) \
+		else HeroDB.DEFAULT_HERO
+	var pool: Array = []
+	for hid in HeroDB.HERO_ORDER:
+		if hid != exclude:
+			pool.append(hid)
+	if pool.size() < ACTS + 1:
+		# Roster shrank below 5 — leave rivals empty; map gen and boss wiring
+		# fall back to the legacy unfiltered pools.
+		push_warning("RunState: rival pool too small (%d), running legacy bosses" % pool.size())
+		return
+	var rng := RandomNumberGenerator.new()
+	# Sub-seed (same trick as _generate_act_map) so the rival deal and the map
+	# generator draw from independent streams of the same run seed.
+	rng.seed = run_seed ^ 0x52495641
+	_shuffle_array(pool, rng)
+	for i in range(ACTS):
+		rival_lords.append(String(pool[i]))
+		act_faction.append(HeroDB.get_faction(String(pool[i])))
+	finale_rival = String(pool[ACTS])
+
+
+## Faction id of the kingdom the current act takes place in ("" on legacy
+## runs with no rival deal — callers treat that as "no faction filter").
+func get_act_faction() -> String:
+	if current_act_idx < act_faction.size():
+		return act_faction[current_act_idx]
+	return ""
+
+
+## The rival lord (hero id) ruling the current act's kingdom, "" on legacy runs.
+func get_act_rival() -> String:
+	if current_act_idx < rival_lords.size():
+		return rival_lords[current_act_idx]
+	return ""
 
 
 func end_run(victorious: bool) -> void:
@@ -204,8 +266,28 @@ func end_run(victorious: bool) -> void:
 ## Local balance telemetry: one CSV row per finished run (user://runs.csv).
 ## Turns playtests into data — where runs die, on what, with which hero —
 ## instead of vibes. Local file only; never leaves the machine.
+## The rival columns feed the Successor Wars matchup matrix (the project's
+## dominant balancing cost): every dev run records who was marched on, in
+## what order, who was spared, and how many holds the act had fallen.
+const _RUN_LOG_HEADER: String = ("ended_at,result,hero,ascension,seed,act," +
+	"floor,hp,max_hp,gold,fights_won,deck_size,relics,cause_of_death," +
+	"rival_act1,rival_act2,rival_act3,finale_rival,holds_broken")
+
+
 func _append_run_log(victorious: bool) -> void:
 	var path := "user://runs.csv"
+	# Schema change (rival columns): a file written with the old header can't
+	# take the new rows — shelve it under a timestamped name and start fresh
+	# rather than mixing two schemas in one CSV.
+	if FileAccess.file_exists(path):
+		var probe := FileAccess.open(path, FileAccess.READ)
+		if probe != null:
+			var first_line := probe.get_line()
+			probe.close()
+			if first_line != _RUN_LOG_HEADER:
+				DirAccess.rename_absolute(ProjectSettings.globalize_path(path),
+					ProjectSettings.globalize_path("user://runs_legacy_%d.csv"
+						% int(Time.get_unix_time_from_system())))
 	var exists := FileAccess.file_exists(path)
 	var f := FileAccess.open(path,
 		FileAccess.READ_WRITE if exists else FileAccess.WRITE)
@@ -214,15 +296,18 @@ func _append_run_log(victorious: bool) -> void:
 	if exists:
 		f.seek_end()
 	else:
-		f.store_line("ended_at,result,hero,ascension,seed,act,floor,hp," +
-			"max_hp,gold,fights_won,deck_size,relics,cause_of_death")
-	f.store_line("%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s" % [
+		f.store_line(_RUN_LOG_HEADER)
+	var r1: String = rival_lords[0] if rival_lords.size() > 0 else ""
+	var r2: String = rival_lords[1] if rival_lords.size() > 1 else ""
+	var r3: String = rival_lords[2] if rival_lords.size() > 2 else ""
+	f.store_line("%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%s,%s,%s,%s,%d" % [
 		Time.get_datetime_string_from_system(),
 		"victory" if victorious else "defeat",
 		current_hero_id, current_ascension, run_seed,
 		get_act(), current_floor, hero_hp, hero_max_hp, gold,
 		fights_won, deck.size(), relics.size(),
-		cause_of_death.replace(",", ";")])
+		cause_of_death.replace(",", ";"),
+		r1, r2, r3, finale_rival, holds_broken_in_act])
 	f.close()
 
 
@@ -624,6 +709,8 @@ func advance_act() -> void:
 	# restarts each act, and Whetstone's "first rest of act" payoff re-arms.
 	rests_visited_in_act = 0
 	whetstone_used_this_act = false
+	# Fresh kingdom, fresh siege: the next rival's keep starts locked.
+	holds_broken_in_act = 0
 	# Centaur Heart: reaching Act 2 (current_act_idx now == 1) grants +5 max HP
 	# and heals to full. Fires once per relic — guard via meta flag held on
 	# the relic id so a re-entry doesn't keep re-applying.
@@ -943,7 +1030,10 @@ func _shuffle_array(arr: Array, rng: RandomNumberGenerator) -> void:
 # v2: campaign-map act shrink (15→8 rows, 11–15 sites). v1 saves carry
 # 15-row map_data the Sicily plate was never sized for; the strict version
 # check below retires them as empty slots rather than migrating.
-const SAVE_VERSION: int = 2
+# v3: Successor Wars — rival_lords / finale_rival / act_faction /
+# holds_broken_in_act enter the schema. A v2 save has no rival deal, so its
+# kingdoms and boss would silently fall back to legacy pools mid-run; retire.
+const SAVE_VERSION: int = 3
 const SAVE_SLOTS: int = 3
 const LEGACY_SAVE_PATH: String = "user://run.save"
 
@@ -1020,6 +1110,10 @@ func save_run() -> void:
 		"next_combat_mana_bonus": next_combat_mana_bonus,
 		"current_ascension": current_ascension,
 		"current_hero_id": current_hero_id,
+		"rival_lords": rival_lords,
+		"finale_rival": finale_rival,
+		"act_faction": act_faction,
+		"holds_broken_in_act": holds_broken_in_act,
 		"rests_visited_in_act": rests_visited_in_act,
 		"rests_visited_total": rests_visited_total,
 		"whetstone_used_this_act": whetstone_used_this_act,
@@ -1159,6 +1253,14 @@ func load_run(slot: int = -1) -> bool:
 	next_combat_mana_bonus = int(data.get("next_combat_mana_bonus", 0))
 	current_ascension = int(data.get("current_ascension", 0))
 	current_hero_id = String(data.get("current_hero_id", HeroDB.DEFAULT_HERO))
+	rival_lords = []
+	for hid in data.get("rival_lords", []):
+		rival_lords.append(String(hid))
+	finale_rival = String(data.get("finale_rival", ""))
+	act_faction = []
+	for fid in data.get("act_faction", []):
+		act_faction.append(String(fid))
+	holds_broken_in_act = int(data.get("holds_broken_in_act", 0))
 	rests_visited_in_act = int(data.get("rests_visited_in_act", 0))
 	rests_visited_total = int(data.get("rests_visited_total", 0))
 	whetstone_used_this_act = bool(data.get("whetstone_used_this_act", false))

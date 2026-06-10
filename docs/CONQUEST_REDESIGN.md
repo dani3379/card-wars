@@ -228,3 +228,31 @@ User direction: route choice should have mechanical weight, not just length. The
 3. **Render a mockup** — a faction-skinned, shortened act map through the screenshot probe, so you react to real pixels before we commit the live flow.
 
 *(These map cleanly onto the harness task system; say the word and I'll convert the phases into tracked tasks.)*
+
+---
+
+## 15. Pre-build pass (2026-06-10) — PATH B PICKED; recommended calls & authoring rules
+**The user picked Path B: this redesign ships in 1.0** (sequence M0 ✓ → trimmed M1 → M3 → M4 → M2 → M5 → launch). The calls below were *recommended* in-session; **build has not started — get the user's go / adjustments on these, then execute §15.3.** (Ending #1 and rival order #4 are the most taste-driven — confirm those two especially.)
+
+### 15.1 Recommended §13 calls (proposed, not yet confirmed)
+1. **Ending:** the eternal cycle — winning makes you the next thing on the throne; hold "true escape" as a hidden ascension capstone later (the StS act-4 move).
+2.+8. **Recruit: free 1-of-3** (Inscryption model — the node visit is the cost). A *paid* draft would collide with Shop, which already sells cards for gold: Shop = paid broad stock, Recruit = free curated faction draft. **No new currency** for MVP.
+3. **Holds: one fight each**; the rival lord is the only multi-phase siege (fights end round 2–3 — a 2-fight siege would just read as two fights).
+4. **Rival order: player-chosen at each act transition** (one small UI screen; the slice may run seeded until it exists).
+5. **Boss gate:** keep **visible from the start** (the Sicily plate already shows it), **locked until 2–3 holds broken**. "Always-open but scaled" deferred to an ascension modifier.
+6. **Map: the live Sicily plate IS the territorial map** — provinces become kingdoms, the per-act leg flies the army standard to the chosen rival's seat, the keep plaque takes the rival's name, the political wash takes their colour. No new map engine; what remains is faction-skinning.
+7. **Names: lock** Grasswake / Last Wall / Owed / Lanternhall / Everflame.
+9. **Terrain: flavour-only** weighting for 1.0 (encounter/event/recruit pools by meadow/woods/pass/ash); stat modifiers later as an ascension layer.
+
+### 15.2 Authoring rules from live-build findings (the spec above predates these)
+- **Engines must fire by round 2 in normal holds.** Live normal fights last 2–3 rounds and snowball; Formation/Tithe/Fuse as written would never show themselves. In normal holds: Formation pairs arrive pre-formed (opening formations are live), Tithe enemies enter with corpses already banked, Fuse dooms run 1–2. True slow-burn versions only for strongholds and rival lords.
+- **Per-faction reinforcement wave schedules** replace the uniform 1/round drip (the last structural samey-ness lever): Grasswake floods early then runs dry; Last Wall trickles forever, every body tough; the Owed re-raise from their own dead; Lanternhall barely reinforces (casts instead); Everflame escalates as dooms tick down.
+- **Legibility is half the faction work** (playtest finding: samey-ness is presentation — players ignore effects and charge). Per-faction combat mood presets (mood system is per-act today), a visible Tithe corpse-counter, Overrun empty-lane warning glow, the quick-intro banner naming the faction engine.
+- **The bill is smaller than spec'd:** 41 encounters exist (not 26), ~80% pre-mappable; the Everflame engine is fully live (Kindler Doom/Rampage/Lifelink); scry half-exists; act sizing + the territorial map already shipped. Rival-lord portraits: redress existing hero art before commissioning. Net-new work concentrates in Lanternhall content, 5 boss kits + amalgams, `overrun`/`formation`, and the matchup matrix.
+
+### 15.3 Amended build order (replaces §14 sequencing)
+1. ~~**Faction worksheet**~~ **DONE 2026-06-10 → [`FACTION_WORKSHEET.md`](FACTION_WORKSHEET.md)** — all **40** live encounters tagged (the "41" count was off by one: A1 13 / A2 13 / A3 14), coverage matrix + gap list included. Net-new estimate drops to ~8–12 encounters after re-leveling existing fights via their deck variants; Owed is the donor faction, Lanternhall still the front-load.
+2. **Phase 0–1 scaffolding** — RunState fields, `faction` tag, `get_ids_for` filter, rival selection; **SAVE_VERSION 2→3**.
+3. **One-matchup vertical slice** — invade **the Last Wall** in act 1 (wall/armor is the best-stocked theme), seeded order, one free recruit node, one pre-authored amalgam: a full run end-to-end **before** authoring the ~13–17 gap encounters.
+4. **Telemetry day one** — extend `user://runs.csv` (`RunState._append_run_log`) with rival/faction columns in Phase 1; every dev run feeds the matchup matrix (the project's dominant cost).
+5. **No Combat.gd pre-refactor** — Phases 0–2 barely touch it; extract the reward-flow seam only when Phase 4 actually hurts.
