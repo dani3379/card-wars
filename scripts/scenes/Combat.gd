@@ -256,6 +256,20 @@ var _encounter_id: String = ""
 var _boss_current_phase: int = 0
 var _boss_phases: Array = []
 var _reactive_passive: Dictionary = {}
+# ── Successor Wars: per-faction reinforcement wave schedules (§15.2). ──
+# Faction tag of the current encounter ("" = legacy/untagged). The schedule
+# only ARMS for normal holds — elites/bosses/rival lords keep their kit pacing.
+var _encounter_faction: String = ""
+var _wave_schedule_active: bool = false
+# The Owed: enemy deaths banked since the last wave ("every death is a deposit").
+var _wave_deaths_banked: int = 0
+# The Everflame: one-time surge when the hold is first half-broken.
+var _wave_surge_fired: bool = false
+# "NEXT WAVE" telegraph chip (lazy-built; mirrors the incoming-damage chip).
+var _wave_chip: PanelContainer = null
+var _wave_chip_caption: Label = null
+var _wave_chip_num: Label = null
+var _wave_chip_icon: TextureRect = null
 var _extra_draws_this_turn: int = 0
 var _last_dead_enemy_data: Dictionary = {}
 var _sundial_count: int = 0
@@ -404,12 +418,14 @@ func _ready() -> void:
 	_apply_combat_start_relics()
 	# Boss / elite encounters get a dramatic intro banner (name + passive)
 	# before the first round begins. Normal fights get a quick one only when
-	# there is something to announce — a fight passive or a mutator — so the
-	# threat is read before it fires; vanilla skirmishes start instantly.
+	# there is something to announce — a fight passive, a mutator, or a
+	# faction wave schedule (the intro names the kingdom's engine, §15.2) —
+	# so the threat is read before it fires; untagged vanilla skirmishes
+	# still start instantly.
 	# node_type was already captured above for the music branch — reuse it.
 	if node_type == "boss" or node_type == "elite":
 		await _show_encounter_intro(node_type == "boss")
-	elif _encounter_passive_desc != "" or has_mutator():
+	elif _encounter_passive_desc != "" or has_mutator() or _wave_schedule_active:
 		await _show_encounter_intro(false, true)
 	_start_round()
 
@@ -589,6 +605,13 @@ func _setup_fight_state() -> void:
 		var enc = EncounterDB.get_encounter(enc_id)
 		if not enc.is_empty():
 			_encounter_id = enc_id
+			# Successor Wars: per-faction reinforcement wave schedules arm for
+			# NORMAL holds only — elites/bosses/rival lords keep their kit
+			# pacing (§15.2: true slow-burn belongs to strongholds and lords),
+			# and untagged fights keep the legacy uniform drip exactly.
+			_encounter_faction = String(enc.get("faction", ""))
+			_wave_schedule_active = String(enc.get("type", "")) == "combat" \
+				and FACTION_WAVE_SCHEDULES.has(_encounter_faction)
 			# Successor Wars cross-act borrows: scale the fight to the map
 			# slot it actually landed in (kingdoms pull their faction's
 			# fights from other acts; demoted bosses fight at elite band).
@@ -1131,6 +1154,17 @@ func _start_round() -> void:
 	# on the board itself — not only as text. Read-only; uses the passive's own
 	# target picker.
 	_refresh_passive_threat_glow()
+
+	# Successor Wars: telegraph what the faction's wave schedule musters at
+	# the end of this round (the chip under the enemy plate), and call out
+	# flood-sized waves on the info line so the warning is unmissable.
+	_update_wave_telegraph()
+	var wave_warn: int = _next_wave_count()
+	if wave_warn >= 2:
+		if _wave_surge_pending():
+			_show_info("The fuse catches — the Everflame surges")
+		else:
+			_show_info("A wave musters — %d reinforcements next round" % wave_warn)
 
 	# Escalation check
 	_check_escalation()
@@ -2865,17 +2899,283 @@ func _hourglass_grant_rare() -> void:
 	draw_one()
 
 
+# =====================================================================
+#  SUCCESSOR WARS — PER-FACTION REINFORCEMENT WAVE SCHEDULES (§15.2)
+# =====================================================================
+# Replaces the uniform 1/round drip in NORMAL holds whose encounter carries a
+# faction tag — the last structural "fights feel samey" lever. Keyed by the
+# encounter's faction tag. A wave lands at the END of a round and fights from
+# the next round on; normal holds end by round 2-3, so every schedule shows
+# its face by round 2 (R1-end musters: grasswake 2 / last_wall 1 / owed 0 /
+# lanternhall 1 / everflame 0). Elites, bosses, and untagged encounters keep
+# the live drip exactly, and every schedule yields to the legacy anti-stall
+# escalation at ESCALATION_REINFORCE_ROUND.
+#
+#   waves        — per-round wave sizes; index 0 = the wave at the end of
+#                  round 1.
+#   after        — wave size once `waves` runs out (default 1).
+#   cycle        — true: loop `waves` forever instead of falling to `after`.
+#   collect      — true: wave size = enemy deaths banked since the last wave
+#                  (capped at `cap`); ignores `waves`/`after`. Uncollected
+#                  deaths stay banked.
+#   cap          — max bodies per collected wave (collect mode only).
+#   tough_hp     — rider: every wave body arrives with +N HP.
+#   surge_bonus  — one-time +N wave the first time the hold is half-broken
+#                  (face HP at or below half).
+const FACTION_WAVE_SCHEDULES: Dictionary = {
+	# The Grasswake (Overrun) — floods early, then the wake passes and they
+	# run dry: 2, 2, then nothing. Empty lanes are their highway; outlast the
+	# crest and you push into open grass.
+	"grasswake": {"waves": [2, 2], "after": 0},
+	# The Last Wall (Formation) — trickles forever, every body tough: exactly
+	# 1 per round, no flood rolls ever, and each relief arrives +1 HP.
+	"last_wall": {"waves": [], "after": 1, "tough_hp": 1},
+	# The Owed (the Tithe) — they re-raise from their own dead: each enemy
+	# death banks a deposit; every round they collect up to 2. Kill nothing
+	# and nothing comes back.
+	"owed": {"collect": true, "cap": 2},
+	# The Lanternhall (Foresight) — barely reinforces (casts instead): one
+	# body every other round, nothing between.
+	"lanternhall": {"waves": [1, 0], "cycle": true},
+	# The Everflame (the Fuse) — nothing pays now, everything pays later,
+	# bigger: 0, 1, then 2 a round — plus a one-time surge the first time
+	# the hold is half-broken.
+	"everflame": {"waves": [0, 1], "after": 2, "surge_bonus": 1},
+}
+
+# Wave-chip captions per faction (caps to match the HUD chip voice — the
+# INCOMING caption, the intent pills). "wave" = bodies muster, "none" = the
+# schedule rests this round, "surge" = the Everflame's fuse moment.
+const FACTION_WAVE_CAPTIONS: Dictionary = {
+	"grasswake": {"wave": "THE WAKE CRESTS", "none": "THE WAKE HAS PASSED"},
+	"last_wall": {"wave": "FRESH STONE — TOUGHER", "none": "THE WALL HOLDS"},
+	"owed": {"wave": "THE OWED COLLECT", "none": "NO DEBTS TO COLLECT"},
+	"lanternhall": {"wave": "A LANTERN SIGNALS", "none": "THE HALL ONLY WATCHES"},
+	"everflame": {"wave": "THE FUSE BURNS DOWN", "none": "THE EVERFLAME HOLDS",
+		"surge": "THE FUSE CATCHES"},
+}
+
+
+func _wave_schedule() -> Dictionary:
+	return FACTION_WAVE_SCHEDULES.get(_encounter_faction, {})
+
+
+func _wave_surge_pending() -> bool:
+	# The Everflame's one-time surge: pending while the hold is half-broken
+	# and the surge hasn't been spent. Read by both the telegraph and the
+	# placement, so the warning can never disagree with what actually lands.
+	var bonus: int = int(_wave_schedule().get("surge_bonus", 0))
+	return bonus > 0 and not _wave_surge_fired and enemy_hp * 2 <= enemy_max_hp
+
+
+func _next_wave_count() -> int:
+	# Bodies the faction schedule will place at the END of the current round
+	# (they fight from next round on). -1 = no schedule applies → callers use
+	# the legacy uniform drip. The round-start telegraph and the end-of-round
+	# placement both call this with the same round_number, so the chip always
+	# matches the muster.
+	if not _wave_schedule_active or round_number >= ESCALATION_REINFORCE_ROUND:
+		return -1
+	var sched: Dictionary = _wave_schedule()
+	if sched.is_empty():
+		return -1
+	var n: int = 0
+	if bool(sched.get("collect", false)):
+		n = clampi(_wave_deaths_banked, 0, int(sched.get("cap", 2)))
+	else:
+		var waves: Array = sched.get("waves", [])
+		var idx: int = round_number - 1
+		if idx >= 0 and idx < waves.size():
+			n = int(waves[idx])
+		elif bool(sched.get("cycle", false)) and waves.size() > 0:
+			n = int(waves[idx % waves.size()])
+		else:
+			n = int(sched.get("after", 1))
+	if _wave_surge_pending():
+		n += int(sched.get("surge_bonus", 0))
+	return n
+
+
+func _update_wave_telegraph() -> void:
+	# Successor Wars legibility hook: the "next wave" chip pinned under the
+	# incoming-damage chip telegraphs what the faction schedule will muster at
+	# the end of this round — same diegetic-threat language as the INCOMING
+	# chip, same color vocabulary as the intent pills (gray RETREAT = nothing
+	# comes, purple SUMMON = a body musters, hot amber/red = a flood). Hidden
+	# for legacy/elite/boss fights and once the round-8 escalation takes over.
+	# Also re-run when the Owed bank a death, so the chip doubles as the
+	# visible Tithe corpse-counter.
+	if _hud_layer == null:
+		return
+	var n: int = _next_wave_count()
+	if n < 0:
+		if _wave_chip != null:
+			_wave_chip.visible = false
+		return
+	if _wave_chip == null:
+		_build_wave_chip()
+	_wave_chip.visible = true
+	_wave_chip_num.text = str(n)
+	var caps: Dictionary = FACTION_WAVE_CAPTIONS.get(_encounter_faction, {})
+	var caption: String
+	if n > 0 and _wave_surge_pending() and caps.has("surge"):
+		caption = String(caps.get("surge"))
+	elif n > 0:
+		caption = String(caps.get("wave", "A WAVE MUSTERS"))
+	else:
+		caption = String(caps.get("none", "THE LINES HOLD"))
+	_wave_chip_caption.text = caption
+	var col := Color(0.78, 0.74, 0.70)
+	if n == 1:
+		col = Color(0.80, 0.55, 1.0)
+	elif n == 2:
+		col = Color(1.0, 0.62, 0.28)
+	elif n >= 3:
+		col = Color(1.0, 0.36, 0.28)
+	_wave_chip_caption.add_theme_color_override("font_color", col.lerp(Color.WHITE, 0.25))
+	_wave_chip_num.add_theme_color_override("font_color", col)
+	if _wave_chip_icon != null:
+		_wave_chip_icon.modulate = col
+	var st: StyleBoxFlat = _wave_chip.get_theme_stylebox("panel")
+	if st != null:
+		st.border_color = Color(col.r, col.g, col.b, 0.85) if n > 0 \
+			else Color(0.45, 0.40, 0.36, 0.8)
+
+
+func _build_wave_chip() -> void:
+	# Built lazily on the first scheduled round — legacy fights never pay for
+	# it. Mirrors _build_incoming_damage_chip: a framed chip pinned in the
+	# enemy corner with a caption + icon + numeral that reads in one glance.
+	var chip := PanelContainer.new()
+	chip.name = "NextWaveChip"
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.07, 0.05, 0.09, 0.92)
+	style.border_color = Color(0.55, 0.40, 0.75, 1.0)
+	for k in ["border_width_top", "border_width_bottom",
+			"border_width_left", "border_width_right"]:
+		style.set(k, 2)
+	for k in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		style.set(k, 7)
+	style.shadow_color = Color(0, 0, 0, 0.6)
+	style.shadow_size = 6
+	style.shadow_offset = Vector2(0, 3)
+	style.content_margin_left = 10
+	style.content_margin_right = 12
+	style.content_margin_top = 5
+	style.content_margin_bottom = 5
+	chip.add_theme_stylebox_override("panel", style)
+	# Pinned directly below the incoming-damage chip (y 324-382) in the enemy
+	# corner — the muster belongs next to its source. Full banner width so
+	# the faction captions fit on one line.
+	chip.anchor_left = 1.0
+	chip.anchor_right = 1.0
+	chip.anchor_top = 0.0
+	chip.anchor_bottom = 0.0
+	chip.offset_left = -250
+	chip.offset_right = -14
+	chip.offset_top = 388
+	chip.offset_bottom = 446
+	chip.z_index = 5
+	chip.visible = false
+
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 0)
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_child(col)
+
+	var caption := Label.new()
+	caption.name = "WaveCaption"
+	caption.text = "NEXT WAVE"
+	caption.add_theme_font_size_override("font_size", 10)
+	caption.add_theme_color_override("font_color", Color(0.85, 0.72, 1.0))
+	caption.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	caption.add_theme_constant_override("outline_size", 3)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if GameTheme.font_display:
+		caption.add_theme_font_override("font", GameTheme.font_display)
+	col.add_child(caption)
+	_wave_chip_caption = caption
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 7)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(row)
+
+	var icon := TextureRect.new()
+	icon.name = "WaveIcon"
+	icon.custom_minimum_size = Vector2(22, 22)
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.modulate = Color(0.80, 0.55, 1.0)
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var flag_path := "res://assets/icons/game-icons/flying-flag.svg"
+	if ResourceLoader.exists(flag_path):
+		icon.texture = load(flag_path)
+	row.add_child(icon)
+	_wave_chip_icon = icon
+
+	var num := Label.new()
+	num.name = "WaveNum"
+	num.text = ""
+	num.add_theme_font_size_override("font_size", 22)
+	num.add_theme_color_override("font_color", Color(0.85, 0.65, 1.0))
+	num.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	num.add_theme_constant_override("outline_size", 5)
+	num.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	num.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if GameTheme.font_title_black:
+		num.add_theme_font_override("font", GameTheme.font_title_black)
+	row.add_child(num)
+	_wave_chip_num = num
+
+	var suffix := Label.new()
+	suffix.name = "WaveSuffix"
+	suffix.text = "NEXT ROUND"
+	suffix.add_theme_font_size_override("font_size", 10)
+	suffix.add_theme_color_override("font_color", Color(0.72, 0.66, 0.78))
+	suffix.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	suffix.add_theme_constant_override("outline_size", 3)
+	suffix.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	suffix.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if GameTheme.font_display:
+		suffix.add_theme_font_override("font", GameTheme.font_display)
+	row.add_child(suffix)
+
+	_hud_layer.add_child(chip)
+	_wave_chip = chip
+
+
 func _enemy_place_creatures() -> void:
 	var enc = EncounterDB.get_encounter(_encounter_id) if _encounter_id != "" else {}
 	var enc_type = enc.get("type", "combat")
 	var max_place := 1
-	if round_number <= 2:
+	# Successor Wars: a faction wave schedule overrides the uniform drip in
+	# normal holds (rounds 1-7). _next_wave_count() returns -1 when no
+	# schedule applies — untagged/elite/boss fights and the round-8+
+	# anti-stall escalation keep the exact legacy behavior below.
+	var wave_n: int = _next_wave_count()
+	if wave_n >= 0:
+		max_place = wave_n
+		if _wave_surge_pending():
+			# Spend the Everflame's one-time surge and give the spike the
+			# climax-banner treatment (rides _show_combat_banner like
+			# Ignition / Lich Rises) so it never reads as random.
+			_wave_surge_fired = true
+			_show_combat_banner("THE FUSE CATCHES",
+				"The hold is half-broken — the Everflame surges", Color(1.0, 0.45, 0.20))
+	elif round_number <= 2:
 		max_place = 1
 	elif enc_type == "elite" or enc_type == "boss":
 		max_place = 2
 	else:
 		max_place = 1 if randi() % ENEMY_FLOOP_CHANCE_DENOM != 0 else 2
 
+	var tough_hp: int = int(_wave_schedule().get("tough_hp", 0)) if wave_n >= 0 else 0
 	var placed := 0
 	# 4x4: priority is a list of {row, lane} slots — front first, then back.
 	var slot_priority: Array = _get_placement_priority_4x4(enc_type)
@@ -2892,8 +3192,16 @@ func _enemy_place_creatures() -> void:
 				var eid = CardDB.random_enemy_for_act(RunState.get_act())
 				_enemy_deck.append(CardDB.get_card_data(eid))
 		var card_data = _enemy_deck.pop_front()
+		# The Last Wall's rider: every scheduled body arrives a touch tougher.
+		if tough_hp > 0:
+			card_data = card_data.duplicate(true)
+			card_data["hp"] = int(card_data.get("hp", 1)) + tough_hp
 		_place_enemy_card(card_data, slot.lane, slot.row)
 		placed += 1
+	# The Owed collect their banked dead — only as many as actually mustered;
+	# anything uncollected (board full) stays banked for the next round.
+	if wave_n >= 0 and bool(_wave_schedule().get("collect", false)):
+		_wave_deaths_banked = maxi(0, _wave_deaths_banked - placed)
 
 
 func _get_placement_priority_4x4(enc_type: String) -> Array:
@@ -3035,6 +3343,18 @@ const COMBAT_MOODS := {
 		"sat": 1.08, "con": 1.05, "bright": 1.08, "sh": Vector3(0.85, 0.95, 0.8), "li": Vector3(1.0, 1.08, 0.85), "tint": Vector3(0.98, 1.04, 0.92)},
 }
 
+# Successor Wars: normal holds wear their kingdom's mood (§15.2 — per-faction
+# combat presets; the mood system was per-act before). Maps faction tag →
+# COMBAT_MOODS key. Boss/elite overrides in _resolve_combat_mood still win,
+# and untagged fights keep the act/biome pick.
+const FACTION_COMBAT_MOODS := {
+	"grasswake": "verdant",    # storm over green country
+	"last_wall": "navy_gold",  # stone, standards, lamplight
+	"owed": "noir",            # the rot drains the color out
+	"lanternhall": "frost",    # frost & star
+	"everflame": "infernal",   # fire country
+}
+
 
 func _build_grade_overlay() -> void:
 	var sh := Shader.new()
@@ -3060,6 +3380,10 @@ func _resolve_combat_mood() -> String:
 			return "infernal"
 		"elite":
 			return "noir"
+	# Successor Wars: a tagged hold wears its kingdom's colors so the five
+	# factions read as different enemies before a card is played.
+	if FACTION_COMBAT_MOODS.has(_encounter_faction):
+		return FACTION_COMBAT_MOODS[_encounter_faction]
 	var eid: String = String(RunState.current_encounter_id).to_lower()
 	for kw in ["frost", "ice", "winter", "snow", "glaci"]:
 		if kw in eid:
@@ -8756,6 +9080,14 @@ func _on_card_destroyed(card: Control) -> void:
 	# see the freshly-dead card (Doppelganger, Phoenix Feather).
 	if was_enemy:
 		_last_dead_enemy_data = card.card_data.duplicate(true)
+		# Successor Wars (the Owed): every fallen enemy banks a deposit that
+		# the wave schedule collects at end of round. Structures are
+		# furniture, not dead. Refreshing the chip here keeps the visible
+		# corpse-count live as the round plays out.
+		if _wave_schedule_active and bool(_wave_schedule().get("collect", false)) \
+				and not card.has_keyword("structure"):
+			_wave_deaths_banked += 1
+			_update_wave_telegraph()
 
 	# Fire on_death effects. dispatch_on_death handles its own doubling for
 	# the player passive "double_on_death" / "Frenzied" mutator.
@@ -11801,6 +12133,27 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	holder.add_child(name_label)
+
+	# Successor Wars: quick intros name the kingdom and its engine (§15.2 —
+	# legibility is half the faction work). Tinted with the faction's banner
+	# color so the five kingdoms read as different enemies, not just
+	# different names.
+	if quick and _wave_schedule_active and _encounter_faction != "":
+		var fac: Dictionary = HeroDB.faction_info(_encounter_faction)
+		if not fac.is_empty():
+			var eng_label := Label.new()
+			eng_label.text = "%s — %s" % [String(fac.get("name", "")).to_upper(),
+				String(fac.get("engine_line", ""))]
+			eng_label.add_theme_font_size_override("font_size", 18)
+			var fac_col: Color = fac.get("color", Color(0.9, 0.85, 0.8))
+			eng_label.add_theme_color_override("font_color", fac_col.lerp(Color.WHITE, 0.55))
+			eng_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.92))
+			eng_label.add_theme_constant_override("outline_size", 5)
+			eng_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			eng_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			eng_label.custom_minimum_size = Vector2(vp.x * 0.6, 0)
+			eng_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			holder.add_child(eng_label)
 
 	# Boss/elite preamble — one diegetic line of ill omen, above the mechanical
 	# passive. Ambient voice only: never names the unnameable, never references
