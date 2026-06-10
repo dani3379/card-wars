@@ -136,6 +136,14 @@ var overlay_handles_standard := false
 
 
 var _act := 1
+# Successor Wars skin — the kingdom this act invades, resolved from the run's
+# rival deal in build_map(). Empty/neutral on legacy saves and in the render
+# sandbox (map_proto.tscn), where every surface keeps the old war-crimson
+# dressing. Resolved once per build: this is static-plate state, never
+# re-read per frame (the animated overlay stays faction-blind).
+var _faction_id := ""
+var _faction_name := ""
+var _faction_color: Color = CRIMSON
 
 
 func _ready() -> void:
@@ -148,6 +156,7 @@ func build_map() -> void:
 	# Draws once into a static plate; dynamic UI lives in child controls.
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 	_act = clampi(RunState.get_act(), 1, 3)
+	_resolve_faction()
 	_rng.seed = 1207 + _act * 101
 	_build_geo()
 	_read_run_map()
@@ -161,6 +170,43 @@ func build_map() -> void:
 	_build_roads()
 	_place_labels()
 	queue_redraw()
+
+
+## The kingdom this act marches into, off the run's rival deal. Legacy saves
+## and the sandbox have no deal — get_act_faction() returns "" there and the
+## plate keeps its neutral dressing (must never crash without run data).
+func _resolve_faction() -> void:
+	_faction_id = ""
+	_faction_name = ""
+	_faction_color = CRIMSON
+	var fid: String = RunState.get_act_faction()
+	if fid == "" or not HeroDB.FACTIONS.has(fid):
+		return
+	var info: Dictionary = HeroDB.faction_info(fid)
+	_faction_id = fid
+	_faction_name = String(info.get("name", "")).to_upper()
+	_faction_color = info.get("color", CRIMSON)
+
+
+## The rival's banner color as dyed cloth: desaturated a step and deepened so
+## it sits in the plate's earth palette instead of floating as a pure hue.
+## Falls back to the old war-crimson when no kingdom rules the act.
+func _banner_color() -> Color:
+	if _faction_id == "":
+		return CRIMSON
+	var g := (_faction_color.r + _faction_color.g + _faction_color.b) / 3.0
+	return Color(lerpf(g, _faction_color.r, 0.85) * 0.92,
+		lerpf(g, _faction_color.g, 0.85) * 0.92,
+		lerpf(g, _faction_color.b, 0.85) * 0.92)
+
+
+## The same dye thinned into a political wash — heavily desaturated, darkened
+## and faint, so the invaded kingdom tints the parchment without flooding it.
+func _faction_wash() -> Color:
+	var g := (_faction_color.r + _faction_color.g + _faction_color.b) / 3.0
+	return Color(lerpf(g, _faction_color.r, 0.55) * 0.88,
+		lerpf(g, _faction_color.g, 0.55) * 0.88,
+		lerpf(g, _faction_color.b, 0.55) * 0.88, 0.13)
 
 
 # ═══════════════════ GEOGRAPHY ═══════════════════
@@ -1096,7 +1142,11 @@ func _draw_furniture() -> void:
 
 
 func _draw_political(count: int) -> void:
-	# Claimed wash.
+	# Claimed wash — and, on conquest runs, the rival's wash on every province
+	# you haven't taken yet: the kingdom starts in his colors and your amber
+	# eats them site by site. The dye is thinned (_faction_wash) so the
+	# antique plate holds; wilds beyond the corridor stay unwashed.
+	var rival_wash := _faction_wash()
 	for i in range(count):
 		var p := _prov[i]
 		if p < 0 or _polys[i].size() < 3:
@@ -1104,6 +1154,8 @@ func _draw_political(count: int) -> void:
 		if bool(_nodes[p].vis):
 			draw_colored_polygon(_polys[i], Color(PLAYER_AMBER.r,
 				PLAYER_AMBER.g, PLAYER_AMBER.b, 0.22))
+		elif _faction_id != "":
+			draw_colored_polygon(_polys[i], rival_wash)
 	# Province borders along true cell edges; frontier rim bright.
 	for i2 in range(count):
 		if _prov[i2] < 0:
@@ -1413,11 +1465,15 @@ func _draw_keep() -> void:
 		var tower := Rect2(kp.x + kw * toff - tw * 0.5, base_y - th, tw, th)
 		draw_rect(tower, Color(0.13, 0.10, 0.09, 0.98))
 		draw_rect(tower, Color(0.04, 0.03, 0.03), false, 2.0)
+	# The pennant over the keep flies the rival lord's banner — the one spot
+	# on the plate where his color shows at full cloth strength (the political
+	# wash below is the same dye thinned). Crimson on legacy runs.
+	var banner := _banner_color()
 	var pole_top := Vector2(kp.x, base_y - kh * 1.45 - 24.0)
 	draw_line(Vector2(kp.x, base_y - kh * 1.45), pole_top,
 		Color(0.04, 0.03, 0.03), 2.0, true)
 	draw_colored_polygon(PackedVector2Array([pole_top,
-		pole_top + Vector2(28, 6), pole_top + Vector2(0, 13)]), CRIMSON)
+		pole_top + Vector2(28, 6), pole_top + Vector2(0, 13)]), banner)
 	draw_circle(Vector2(kp.x, base_y - 7), 4.5, Color(1.0, 0.55, 0.20, 0.9))
 	if _boss_name != "" and GameTheme.font_display != null:
 		# Each act's keep is a place before it is a fight: name the seat,
@@ -1427,7 +1483,7 @@ func _draw_keep() -> void:
 			"THE CINDER SEAT"]
 		var plaque := Rect2(kp.x - 95.0, base_y + 12.0, 190.0, 38.0)
 		draw_rect(plaque, Color(0.05, 0.04, 0.035, 0.85))
-		draw_rect(plaque, Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.8),
+		draw_rect(plaque, Color(banner.r, banner.g, banner.b, 0.8),
 			false, 1.0)
 		draw_string(GameTheme.font_display,
 			Vector2(kp.x - 120.0, base_y + 26.0),
@@ -1494,15 +1550,25 @@ func _draw_ui() -> void:
 		if bool(nd.vis):
 			owned += 1
 	if GameTheme.font_display != null:
-		# Per-act campaign name — three sieges of the same keep need at least
-		# the fiction of three different campaigns.
-		var marches := ["T H E   F I R S T   M A R C H",
-			"T H E   S E C O N D   M A R C H", "T H E   L A S T   M A R C H"]
+		# Per-act campaign name — three sieges, three campaigns. On conquest
+		# runs the line also names the kingdom marched against, set in a hint
+		# of the rival's banner dye: THE FIRST MARCH · AGAINST THE LAST WALL.
+		var marches := ["THE FIRST MARCH", "THE SECOND MARCH",
+			"THE LAST MARCH"]
+		var sub: String = marches[clampi(RunState.get_act() - 1, 0, 2)]
+		if _faction_name != "":
+			sub += " · AGAINST " + _faction_name
+		var sub_txt := _letterspace(sub)
+		if GameTheme.font_display.get_string_size(sub_txt,
+				HORIZONTAL_ALIGNMENT_CENTER, -1, 12).x > band_w - 28.0:
+			sub_txt = sub   # longest kingdom names drop the letterspacing
+		var sub_col := Color(0.82, 0.70, 0.48, 0.95)
+		if _faction_name != "":
+			var bn := _banner_color()
+			sub_col = Color(bn.r, bn.g, bn.b, 0.95).lerp(sub_col, 0.40)
 		draw_string(GameTheme.font_display,
 			Vector2(band.position.x, band.position.y + 72),
-			marches[clampi(RunState.get_act() - 1, 0, 2)],
-			HORIZONTAL_ALIGNMENT_CENTER, band_w, 12,
-			Color(0.82, 0.70, 0.48, 0.95))
+			sub_txt, HORIZONTAL_ALIGNMENT_CENTER, band_w, 12, sub_col)
 		draw_string(GameTheme.font_display,
 			Vector2(band.position.x, band.position.y + 92),
 			"PROVINCES CLAIMED  %d / %d" % [owned, _nodes.size()],
@@ -1536,6 +1602,21 @@ func _draw_ui() -> void:
 			it[1], HORIZONTAL_ALIGNMENT_LEFT, 90, 12,
 			Color(0.70, 0.64, 0.50, 0.85))
 		lx += 118.0
+
+
+## "THE FIRST MARCH" → "T H E   F I R S T   M A R C H" — the chart's
+## letterspaced small-caps convention for campaign furniture (one space
+## between letters, three between words, same as the hand-set labels).
+func _letterspace(s: String) -> String:
+	var out := ""
+	for i in range(s.length()):
+		var ch := s[i]
+		out += ch
+		if ch == " ":
+			out += " "
+		elif i < s.length() - 1:
+			out += " "
+	return out
 
 
 func _draw_star(c: Vector2, r: float, col: Color) -> void:
