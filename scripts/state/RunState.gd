@@ -792,6 +792,7 @@ func _generate_act_map(act: int, rng: RandomNumberGenerator) -> Array:
 			grid.append(row)
 		_generate_paths(grid, arng)
 		_assign_node_types(grid, arng)
+		_place_recruit_nodes(grid, arng)
 		_add_boss_node(grid)
 		_assign_encounters(grid, act, arng)
 		flat = _flatten_grid(grid)
@@ -1007,6 +1008,29 @@ func _has_sibling_with_type(grid: Array, t: String, r: int,
 			if sibling.get("type", "") == t:
 				return true
 	return false
+
+
+## Successor Wars: deck growth lives at muster camps (a free 1-of-3 draft),
+## not post-fight rewards — so every kingdom guarantees up to two recruit
+## sites, one on the early leg and one late. They convert from combat/event
+## sites so the generator's path and type rules stay intact; the acceptance
+## loop re-validates the boss-gate fight minimum AFTER conversion, so a
+## recruit can never eat the gate.
+func _place_recruit_nodes(grid: Array, rng: RandomNumberGenerator) -> void:
+	var bands: Array = [[1, 3], [4, REST_ROW - 1]]
+	for band in bands:
+		var candidates: Array = []
+		for r in range(band[0], band[1] + 1):
+			for c in range(MAP_WIDTH):
+				var node = grid[r][c]
+				if node == null:
+					continue
+				if node["type"] in ["combat", "event"] \
+						and not _has_sibling_with_type(grid, "recruit", r, c):
+					candidates.append(node)
+		if not candidates.is_empty():
+			var pick = candidates[rng.randi() % candidates.size()]
+			pick["type"] = "recruit"
 
 
 func _add_boss_node(grid: Array) -> void:

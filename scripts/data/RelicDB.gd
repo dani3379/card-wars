@@ -30,7 +30,7 @@ const RELICS: Dictionary = {
 		"desc": "Your damage spells deal +1 damage.",
 		"hooks": ["spell_damage"], "effect": "spell_damage_bonus", "value": 1},
 	"scouts_emblem": {"id": "scouts_emblem", "name": "Scout's Emblem", "tier": "starting",
-		"desc": "Card rewards show 4 choices instead of 3.",
+		"desc": "Recruit camps show 4 choices instead of 3.",
 		"hooks": [], "effect": "extra_reward_choice", "value": 1},
 	"soul_lantern": {"id": "soul_lantern", "name": "Soul Lantern", "tier": "starting",
 		"desc": "When the first friendly dies each round: gain 1 mana next turn.",
@@ -141,7 +141,7 @@ const RELICS: Dictionary = {
 		"desc": "Shop prices reduced by 25%.",
 		"hooks": [], "effect": "shop_discount", "value": 25},
 	"collectors_tome": {"id": "collectors_tome", "name": "Collector's Tome", "tier": "utility",
-		"desc": "Pick 2 cards from reward instead of 1.",
+		"desc": "Enlist 2 cards at recruit camps instead of 1.",
 		"hooks": [], "effect": "double_reward_pick", "value": 0},
 	"blacksmiths_hammer": {"id": "blacksmiths_hammer", "name": "Blacksmith's Hammer", "tier": "utility",
 		"desc": "Sharpen/Fortify give +3 instead of +2. Imbue offers 3 choices.",
@@ -157,7 +157,7 @@ const RELICS: Dictionary = {
 	#  BOSS RELICS (pick 1 of 3 after boss kill, all +1 max mana with downside)
 	# ═══════════════════════════════════════════
 	"cursed_key": {"id": "cursed_key", "name": "Cursed Key", "tier": "boss",
-		"desc": "+1 max mana. Gain a Curse after every fight reward.",
+		"desc": "+1 max mana. Gain a Curse after every fight.",
 		"hooks": ["combat_end"], "effect": "boss_mana", "value": 1,
 		"downside": "curse_on_reward"},
 	"coffee_dripper": {"id": "coffee_dripper", "name": "Coffee Dripper", "tier": "boss",
@@ -173,7 +173,7 @@ const RELICS: Dictionary = {
 		"hooks": [], "effect": "boss_mana", "value": 1,
 		"downside": "no_gold"},
 	"busted_crown": {"id": "busted_crown", "name": "Busted Crown", "tier": "boss",
-		"desc": "+1 max mana. Card rewards show 1 choice instead of 3.",
+		"desc": "+1 max mana. Recruit camps show 1 choice instead of 3.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
 		"downside": "fewer_rewards"},
 	"sozu": {"id": "sozu", "name": "Sozu", "tier": "boss",
@@ -435,7 +435,7 @@ const RELICS: Dictionary = {
 		"desc": "When you reach Act 2: gain +5 max HP and heal to full.",
 		"hooks": ["act_start"], "effect": "centaur_heart", "value": 5},
 	"stardust_vial": {"id": "stardust_vial", "name": "Stardust Vial", "tier": "utility",
-		"desc": "Card rewards also show 1 boss-rarity card option.",
+		"desc": "Recruit camps also offer 1 rare card.",
 		"hooks": [], "effect": "stardust_vial", "value": 1},
 
 	# ═══════════════════════════════════════════════════════════════════════

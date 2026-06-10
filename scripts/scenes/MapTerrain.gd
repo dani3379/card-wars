@@ -1517,7 +1517,8 @@ func _draw_ui() -> void:
 		present[String(nd2.type)] = true
 	var items: Array = []
 	for it0 in [["combat", "FIGHT"], ["elite", "ELITE"], ["rest", "REST"],
-			["shop", "SHOP"], ["event", "EVENT"], ["treasure", "TREASURE"]]:
+			["shop", "SHOP"], ["event", "EVENT"], ["treasure", "TREASURE"],
+			["recruit", "RECRUIT"]]:
 		if present.has(it0[0]):
 			items.append(it0)
 	var lwid := float(items.size()) * 118.0
@@ -1556,4 +1557,5 @@ func _node_icon(typ: String) -> Texture2D:
 		"event": return GameTheme.tex_node_event
 		"boss": return GameTheme.tex_node_boss
 		"treasure": return GameTheme.tex_node_treasure
+		"recruit": return GameTheme.tex_node_recruit
 	return null

@@ -61,6 +61,7 @@ func _process(_delta: float) -> bool:
 	_test_act_scaling()
 	_test_map_wiring()
 	_test_boss_gate()
+	_test_recruit_nodes()
 	_test_save_roundtrip()
 	_test_v2_retirement()
 	_test_telemetry_migration()
@@ -300,6 +301,39 @@ func _test_boss_gate() -> void:
 		if String(n.type) == "boss":
 			legacy_open = true
 	_check(legacy_open, "legacy run (no rival deal) keeps the keep open")
+
+
+func _test_recruit_nodes() -> void:
+	print("— recruit camps")
+	var counts_ok: bool = true
+	var gate_ok: bool = true
+	var total: int = 0
+	for s in [19, 5, 77, 123, 4242, 31337]:
+		RS.start_new_run("raider", 0, s)
+		for a in range(3):
+			var recruits: int = 0
+			for row in RS.map_data[a]:
+				for node in row:
+					if String(node.type) == "recruit":
+						recruits += 1
+			if recruits < 1 or recruits > 2:
+				counts_ok = false
+			if RS._min_fights_to_rest(RS.map_data[a]) < RS.HOLDS_TO_OPEN_LORD:
+				gate_ok = false
+			total += recruits
+	_check(counts_ok, "every act carries 1-2 recruit camps (%d across 18 acts)" % total)
+	_check(gate_ok, "fight-count guarantee survives recruit conversion")
+	# The muster draft itself (script-level, no UI).
+	var rec = load("res://scripts/scenes/Recruit.gd").new()
+	RS.start_new_run("raider", 0, 19)   # act 1 = the Last Wall kingdom
+	var offer: Array = rec._roll_offer()
+	_check(offer.size() == 3, "muster offers 3 banners (got %d)" % offer.size())
+	var armored_s: int = rec._affinity(
+		{"keywords": ["armored"], "type": "creature", "cost": 2}, "last_wall")
+	var swift_s: int = rec._affinity(
+		{"keywords": ["swift"], "type": "creature", "cost": 2}, "last_wall")
+	_check(armored_s > swift_s, "last_wall affinity prefers armored over swift")
+	rec.free()
 
 
 func _test_save_roundtrip() -> void:

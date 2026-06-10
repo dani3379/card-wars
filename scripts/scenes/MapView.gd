@@ -14,6 +14,7 @@ const SHOP_SCENE := "res://scenes/shop.tscn"
 const REST_SCENE := "res://scenes/rest.tscn"
 const EVENT_SCENE := "res://scenes/event.tscn"
 const TREASURE_SCENE := "res://scenes/treasure.tscn"
+const RECRUIT_SCENE := "res://scenes/recruit.tscn"
 const MAIN_MENU := "res://scenes/main_menu.tscn"
 const CARD_SCENE := preload("res://scenes/card_2d.tscn")
 
@@ -136,6 +137,8 @@ func _tip(nd: Dictionary) -> String:
 		var enc: Dictionary = EncounterDB.get_encounter(String(nd.encounter_id))
 		if not enc.is_empty():
 			label = enc.name
+	if t == "recruit":
+		label += "\nChoose 1 of 3 cards to join your deck. Free."
 	if t == "boss":
 		# Rival-lord intel: whose keep this is, and whether the road is open.
 		var rival: String = RunState.get_act_rival()
@@ -185,6 +188,7 @@ func _on_node_pressed(row: int, col: int) -> void:
 		"rest": target = REST_SCENE
 		"event": target = EVENT_SCENE
 		"treasure": target = TREASURE_SCENE
+		"recruit": target = RECRUIT_SCENE
 	# The army marches down the carved road to the chosen site, then the
 	# scene fades — the commit reads as a move on the campaign map, not a
 	# menu click.

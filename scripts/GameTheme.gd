@@ -21,6 +21,7 @@ var tex_node_shop: Texture2D = null
 var tex_node_event: Texture2D = null
 var tex_node_boss: Texture2D = null
 var tex_node_treasure: Texture2D = null
+var tex_node_recruit: Texture2D = null
 
 # ── HUD silhouettes (Kenney CC0). ──
 var tex_hud_heart: Texture2D = null
@@ -239,6 +240,7 @@ func _load_assets() -> void:
 	tex_node_event = load(gi_dir + "scroll-unfurled.svg")
 	tex_node_boss = load(gi_dir + "dragon-head.svg")
 	tex_node_treasure = load(gi_dir + "coins-pile.svg")
+	tex_node_recruit = load(gi_dir + "flying-flag.svg")
 	# Painted icons (downloaded CC0 from OpenGameArt) prefer over silhouettes
 	# where available — they match Slay-the-Spire's painted HUD aesthetic.
 	var heart_painted = "res://assets/icons/map/hud_heart_painted.png"

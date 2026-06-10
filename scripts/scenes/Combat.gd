@@ -7,6 +7,7 @@
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 const REWARD_SCENE = "res://scenes/reward.tscn"
 const GAMEOVER_SCENE = "res://scenes/game_over.tscn"
+const MAP_SCENE = "res://scenes/map.tscn"
 
 enum Phase { PLAYER_TURN, RESOLVING, GAME_OVER }
 var phase := Phase.PLAYER_TURN
@@ -6282,12 +6283,29 @@ func _check_game_over() -> void:
 		# Use the explicit counter so the relic does what it says.
 		if _has_relic("thiefs_gloves") and _face_damage_taken_this_fight == 0:
 			RunState.gain_gold(5)
-		# Gold reward
+		# Gold reward — fights pay ground, not cards (Successor Wars Phase 4):
+		# the card drip moved to recruit stops, so the gold base is bumped to
+		# keep the shop a real deck-growth lever.
 		var node_type = RunState.current_node_type
+		var gold_won: int = 0
 		match node_type:
-			"combat": RunState.gain_gold(RunState.roll_gold_reward(30))
-			"elite": RunState.gain_gold(RunState.roll_gold_reward(48))
-			"boss": RunState.gain_gold(RunState.roll_gold_reward(48))
+			"combat": gold_won = RunState.roll_gold_reward(40)
+			"elite": gold_won = RunState.roll_gold_reward(60)
+			"boss": gold_won = RunState.roll_gold_reward(55)
+		if gold_won > 0:
+			RunState.gain_gold(gold_won)
+			_phase_label.text = "VICTORY!  +%d gold" % gold_won
+		# Mutator bonus pays out here now (Reward no longer fronts normal
+		# fights). Clear the id so a save/reload can't double-pay.
+		if _mutator_id != "" and MutatorDB.exists(_mutator_id):
+			var mut_bonus: int = int(MutatorDB.get_mutator(_mutator_id).get("gold_bonus", 0))
+			if mut_bonus > 0:
+				RunState.gain_gold(mut_bonus)
+				_show_info("★ Mutator bonus: +%d gold" % mut_bonus)
+			RunState.current_mutator_id = ""
+		# Cursed Key: the curse lands on victory (used to ride the Reward roll).
+		if RunState.has_downside("curse_on_reward"):
+			RunState.add_card(CardDB.random_curse_id())
 
 		if node_type == "boss":
 			# Post-boss heal: 75% of missing HP
@@ -6299,14 +6317,21 @@ func _check_game_over() -> void:
 					GameTheme.fade_out_then_change_scene(self, GAMEOVER_SCENE, 0.5)
 				else:
 					# Don't advance_act here — that would clear current_node_type,
-					# so Reward would render as a normal fight (wrong card pool,
-					# no boss relic offer). Reward handles the act advance after
-					# the player finishes picking, on its way back to the map.
+					# so Reward would render as a normal fight (no boss relic
+					# offer). Reward handles the act advance after the player
+					# finishes picking, on its way back to the map.
 					GameTheme.fade_out_then_change_scene(self, REWARD_SCENE, 0.35)
 			)
-		else:
+		elif node_type == "elite":
+			# Elites still detour through Reward for their relic pick.
 			get_tree().create_timer(1.0).timeout.connect(func():
 				GameTheme.fade_out_then_change_scene(self, REWARD_SCENE, 0.35)
+			)
+		else:
+			# Normal holds pay out inline and march straight back to the map —
+			# no card pick, no interstitial screen. Pace is the point.
+			get_tree().create_timer(1.2).timeout.connect(func():
+				GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.35)
 			)
 
 
