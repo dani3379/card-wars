@@ -39,13 +39,17 @@ const SECTIONS: Array = [
 			"Kenney Fantasy UI Borders — CC0",
 			"Kenney Board Game Icons — CC0",
 			"Kenney Game Icons — CC0",
+			"game-icons.net — Lorc, Delapouite, willdabeast, sbed",
+			"     & contributors — CC-BY 3.0",
+			"Fantasy RPG Icons — Lucas (pbmojART) — CC-BY 3.0",
+			"Painterly Spell Icons — J. W. Bjerk (eleazzaar) — CC-BY 3.0",
 		],
 	},
 	{
 		"heading": "ART — CARDS & PORTRAITS",
 		"lines": [
 			"Public-domain masters: Gustave Doré, Mikhail Vrubel,",
-			"Henry Fuseli, Goya, Bruegel, Bosch, Beksiński, and others",
+			"Henry Fuseli, Goya, Bruegel, Bosch, and others",
 		],
 	},
 	{

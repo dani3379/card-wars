@@ -45,7 +45,7 @@ Tinted near-black on a cream medallion at runtime. Source: https://game-icons.ne
 Kenney — CC0 (https://kenney.nl)
 - board-game-icons, game-icons, fantasy-ui-borders
 
-PirataOne, Nunito fonts — SIL Open Font License
+Cinzel, Lilita One, Nunito fonts — SIL Open Font License
 
 ## Card stat icons (cost / ATK)
 **pbmojART** — CC BY 3.0
@@ -55,3 +55,10 @@ PirataOne, Nunito fonts — SIL Open Font License
   (`assets/icons/stats/cost_runestone.png`, `assets/icons/stats/atk_sword.png`).
   Heart icon (HP) is reused from Kenney's painted HUD set above
   (`assets/icons/map/hud_heart_painted.png`).
+
+## Card spell icons (`assets/spells/`)
+**J. W. Bjerk ("eleazzaar")** — CC BY 3.0
+- "Painterly Spell Icons" pack — used as spell-card art.
+  https://opengameart.org/content/painterly-spell-icons-part-1
+  License text bundled at `assets/spells/painterly-3/README.txt` and
+  `assets/spells/painterly-4/README.txt`.

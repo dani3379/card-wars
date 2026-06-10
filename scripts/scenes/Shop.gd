@@ -111,7 +111,7 @@ func _build_ui() -> void:
 		slot.add_child(card)
 
 		var color = Color(0.15, 0.12, 0.30) if data.type == "spell" else Color(0.20, 0.25, 0.35)
-		var buy_btn = GameTheme.make_themed_button("— %dg —" % price, color,
+		var buy_btn = GameTheme.make_themed_button("Buy — %dg" % price, color,
 			Vector2(160, 38), 15, data.desc)
 		buy_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		buy_btn.disabled = RunState.gold < price
@@ -119,7 +119,7 @@ func _build_ui() -> void:
 		slot.add_child(buy_btn)
 
 	# Relic + Services — one centered row below the cards.
-	var svc_label = GameTheme.make_label("Relic & Services", GameTheme.FONT_SUBHEADER, GameTheme.DESC_DIM)
+	var svc_label = GameTheme.make_label("Relics & Services", GameTheme.FONT_SUBHEADER, GameTheme.DESC_DIM)
 	svc_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	svc_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	svc_label.offset_top = 486
@@ -156,30 +156,30 @@ func _build_ui() -> void:
 	if not ResourceLoader.exists(picon_path):
 		picon_path = "res://assets/icons/downloaded/potion1.png"
 	var potion = _make_service_slot(picon_path,
-		"%s\n%s\n— %dg —" % [pname, pdesc, potion_price],
+		"%s\n%s\nBuy — %dg" % [pname, pdesc, potion_price],
 		pcolor)
 	if RunState.has_downside("no_potions"):
 		potion.button.disabled = true
-		potion.label.text = "%s\n(Blocked by Sozu)" % pname
+		potion.label.text = "%s\nBlocked by Sozu" % pname
 	elif RunState.gold < potion_price:
 		potion.button.disabled = true
 	elif not RunState.can_add_potion():
 		potion.button.disabled = true
-		potion.label.text = "%s\n(Potion slots full)" % pname
+		potion.label.text = "%s\nPotion slots full" % pname
 	potion.button.pressed.connect(_buy_potion.bind(potion_price))
 	svc_row.add_child(potion.slot)
 
 	# Card removal service
 	var remove_price = _price(REMOVE_COST)
 	var removal = _make_service_slot("res://assets/icons/downloaded/cards1.png",
-		"Remove a Card\n— %dg —" % remove_price,
+		"Remove a Card\nBuy — %dg" % remove_price,
 		Color(0.45, 0.15, 0.15))
 	removal.button.disabled = RunState.gold < remove_price or RunState.deck.size() <= 1
 	removal.button.pressed.connect(_start_remove_mode.bind(remove_price))
 	svc_row.add_child(removal.slot)
 
 	# Leave button — gold pill with ← arrow, distinct from the buy buttons.
-	var leave_btn = GameTheme.make_back_button("LEAVE SHOP", Vector2(180, 44))
+	var leave_btn = GameTheme.make_back_button("Leave Shop", Vector2(180, 44))
 	leave_btn.position = Vector2(710, 820)
 	leave_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
 	add_child(leave_btn)
@@ -335,7 +335,7 @@ func _start_remove_mode(price: int) -> void:
 		wrapper.add_child(click_btn)
 		grid.add_child(wrapper)
 
-	var cancel_btn = GameTheme.make_back_button("CANCEL", Vector2(140, 40))
+	var cancel_btn = GameTheme.make_back_button("Cancel", Vector2(140, 40))
 	cancel_btn.position = Vector2(740, 800)
 	cancel_btn.pressed.connect(func(): _build_ui())
 	add_child(cancel_btn)

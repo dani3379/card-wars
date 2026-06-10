@@ -132,7 +132,7 @@ func _build_ui() -> void:
 
 	# Card choices — real Card2D instances with pick buttons
 	if _card_choices.size() > 0:
-		var subtitle = GameTheme.make_label("Add a card to your deck",
+		var subtitle = GameTheme.make_label("Add a Card to Your Deck",
 			GameTheme.FONT_SUBHEADER, GameTheme.IVORY)
 		subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		outer.add_child(subtitle)
@@ -157,7 +157,7 @@ func _build_ui() -> void:
 			card.is_on_battlefield = true
 			slot.add_child(card)
 
-			var pick_btn = GameTheme.make_back_button("PICK", Vector2(120, 36), 16,
+			var pick_btn = GameTheme.make_back_button("Pick", Vector2(120, 36), 16,
 				GameTheme.KEYWORD_GOLD)
 			pick_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 			pick_btn.pressed.connect(_pick_card.bind(id))
@@ -174,7 +174,7 @@ func _build_ui() -> void:
 		var sep := GameTheme.make_separator(GameTheme.GILT, 200.0)
 		outer.add_child(sep)
 
-		var relic_title = GameTheme.make_label("Choose a relic",
+		var relic_title = GameTheme.make_label("Choose a Relic",
 			GameTheme.FONT_SUBHEADER, GameTheme.KEYWORD_GOLD)
 		relic_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		outer.add_child(relic_title)
@@ -199,14 +199,14 @@ func _build_ui() -> void:
 		outer.add_child(skip_row)
 		var skip_gold = SKIP_CARD_GOLD
 		var skip_gold_btn = GameTheme.make_back_button(
-			"Skip card  →  +%d gold" % skip_gold, Vector2(220, 40), 16)
+			"Skip Card  →  +%d gold" % skip_gold, Vector2(220, 40), 16)
 		skip_gold_btn.pressed.connect(_skip_for_gold)
 		skip_row.add_child(skip_gold_btn)
-		var skip_btn = GameTheme.make_back_button("SKIP", Vector2(140, 40))
+		var skip_btn = GameTheme.make_back_button("Skip", Vector2(140, 40))
 		skip_btn.pressed.connect(_skip)
 		skip_row.add_child(skip_btn)
 	else:
-		var skip_btn = GameTheme.make_back_button("CONTINUE", Vector2(160, 42))
+		var skip_btn = GameTheme.make_back_button("Continue", Vector2(160, 42))
 		skip_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		skip_btn.pressed.connect(_skip)
 		outer.add_child(skip_btn)

@@ -41,6 +41,14 @@ var _parallax_mouse: Vector2 = Vector2.ZERO  # smoothed cursor offset, each axis
 var _kb_time: float = 0.0                   # Ken Burns clock
 var _title_shimmer_tween: Tween = null
 
+# Hero-select (cast lineup + shared detail pane). The row brightens the focused
+# hero; the pane below shows only that hero's loadout — so each card stays down
+# to portrait + name + tagline instead of six stacked text blocks.
+var _hero_detail: VBoxContainer = null
+var _hero_cards: Dictionary = {}       # hid -> Button (for selected-state styling)
+var _hero_portraits: Dictionary = {}   # hid -> Control (for focus brighten/dim)
+var _selected_hero: String = ""
+
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "main_menu")
@@ -93,6 +101,20 @@ func _rebuild_menu() -> void:
 	sub.name = "Subtitle"
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	col.add_child(sub)
+
+	# ── Epigraph: the fiction, in the meadow's voice. Deliberately the SAME text
+	# as the Steam short description — a buyer and a new player are converted by
+	# the same words. Direction C (you are an effigy the burning meadow keeps
+	# re-casting); "they always are" lands the roguelike loop as a tonal promise,
+	# not a spoiler. Left-flush + autowrapped to the column width.
+	var epigraph := _make_display_label(
+		"You lit the first flame so long ago you've forgotten it was you. The road remembers. Everything on it is already expecting you — they always are.",
+		14, IVORY)
+	epigraph.name = "Epigraph"
+	epigraph.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	epigraph.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	epigraph.custom_minimum_size = Vector2(560, 0)
+	col.add_child(epigraph)
 
 	# ── Ornament: gilt line with central rosette glyph (a diamond, NOT a triangle).
 	# This is the "card-game opening flourish" — it sells the screen as a deck-
@@ -392,7 +414,7 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 	var sub_text: String
 	if has_save:
 		if overwrite_mode:
-			title_text = "SLOT %d  ·  Overwrite" % (slot + 1)
+			title_text = "SLOT %d  ·  Overwrite This Run" % (slot + 1)
 		else:
 			title_text = "SLOT %d  ·  Continue Run" % (slot + 1)
 		var act_floor := "Act %d · Floor %d" % [int(summary.act), int(summary.floor)]
@@ -665,10 +687,10 @@ func _show_load_screen(overwrite_mode: bool) -> void:
 
 
 func _show_hero_select() -> void:
-	# StS-style hero pick: each tile is a deck + 1 mild signature relic. Picking
-	# one starts the run immediately — no separate relic-pick step afterwards.
-	# Uses a 2×2 grid (4 heroes, 4 tiles) centered in the same subscreen rect as
-	# the old relic pick so the surrounding atmosphere/background stay put.
+	# Cast-lineup hero pick (StS/Hades pattern): a row of frameless portrait cards
+	# over the burning-meadow background. Each card stays down to portrait + name +
+	# tagline; hovering a hero spotlights it and fills the shared detail pane below
+	# with that hero's lore / loadout / relic. Clicking a card starts the run.
 	var menu := get_node_or_null("Menu")
 	if menu == null:
 		# Fallback: never block starting a run if the menu node is missing.
@@ -677,163 +699,218 @@ func _show_hero_select() -> void:
 		return
 	for child in menu.get_children():
 		child.queue_free()
-	# Wider rect than the relic pick — hero tiles are richer (deck preview +
-	# relic chip) so they want more horizontal room.
-	_center_menu_for_subscreen(920.0, 680.0)
+	_hero_cards.clear()
+	_hero_portraits.clear()
+	_selected_hero = ""
+	_center_menu_for_subscreen(960.0, 700.0)
 
 	var title := _make_display_label("CHOOSE YOUR HERO", 30, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	menu.add_child(title)
 	menu.add_child(_make_ornament_row(260.0))
 	var spacer := Control.new()
-	spacer.custom_minimum_size = Vector2(0, 12)
+	spacer.custom_minimum_size = Vector2(0, 8)
 	menu.add_child(spacer)
 
-	# 2×2 grid: two rows of two tiles each. GridContainer keeps the columns
-	# evenly sized regardless of tile content width.
-	var grid := GridContainer.new()
-	grid.columns = 2
-	grid.add_theme_constant_override("h_separation", 14)
-	grid.add_theme_constant_override("v_separation", 14)
-	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	menu.add_child(grid)
-
+	# The cast: one frameless portrait card per hero, in a row.
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 18)
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	menu.add_child(row)
 	for hid in HeroDB.HERO_ORDER:
-		grid.add_child(_make_hero_tile(hid))
+		row.add_child(_make_hero_card(hid))
+
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(0, 12)
+	menu.add_child(gap)
+
+	# Shared detail pane — filled for the focused hero only, so the dense loadout
+	# text appears once (with room to breathe) instead of on all four cards. A soft
+	# dark scrim sits behind it (no hard border) so the small text stays legible
+	# over the busy fire background.
+	var detail_frame := PanelContainer.new()
+	var detail_bg := StyleBoxFlat.new()
+	detail_bg.bg_color = Color(0.05, 0.035, 0.045, 0.55)
+	detail_bg.set_corner_radius_all(8)
+	detail_bg.content_margin_left = 26
+	detail_bg.content_margin_right = 26
+	detail_bg.content_margin_top = 14
+	detail_bg.content_margin_bottom = 14
+	detail_frame.add_theme_stylebox_override("panel", detail_bg)
+	detail_frame.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	detail_frame.custom_minimum_size = Vector2(700, 190)
+	menu.add_child(detail_frame)
+	_hero_detail = VBoxContainer.new()
+	_hero_detail.add_theme_constant_override("separation", 5)
+	detail_frame.add_child(_hero_detail)
 
 	var back_spacer := Control.new()
-	back_spacer.custom_minimum_size = Vector2(0, 12)
+	back_spacer.custom_minimum_size = Vector2(0, 6)
 	menu.add_child(back_spacer)
 
 	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 15, 40)
 	back.pressed.connect(_rebuild_menu)
 	menu.add_child(back)
 
+	# Default the spotlight to the first hero so the pane is never blank.
+	_focus_hero(HeroDB.HERO_ORDER[0])
 
-func _make_hero_tile(hid: String) -> Button:
-	# Hero card: gold-trimmed panel matching the relic-tile pattern, but two-
-	# column inside — left has name/tagline/deck preview, right has the
-	# signature relic chip with its own name + desc. Click anywhere starts
-	# the run with that hero.
+
+func _make_hero_card(hid: String) -> Button:
+	# One frameless portrait card. The clickable Button has empty styleboxes in
+	# every state (no boxy rectangle); the focus spotlight + gilt underline are
+	# applied in _focus_hero. All children are MOUSE_FILTER_IGNORE so hover/click
+	# fall through to the Button.
 	var hero := HeroDB.get_hero(hid)
-	var bg := Color(0.18, 0.20, 0.32)
 	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(0, 200)
-	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	btn.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	btn.custom_minimum_size = Vector2(188, 292)
 	btn.focus_mode = Control.FOCUS_NONE
-	var normal := _make_button_stylebox(bg, GILT, 8)
-	btn.add_theme_stylebox_override("normal", normal)
-	var hover := normal.duplicate() as StyleBoxFlat
-	hover.bg_color = bg.lightened(0.18)
-	hover.border_color = GILT_BRIGHT
-	hover.shadow_size = 10
-	hover.shadow_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.35)
-	btn.add_theme_stylebox_override("hover", hover)
-	var pressed := normal.duplicate() as StyleBoxFlat
-	pressed.bg_color = bg.darkened(0.18)
-	pressed.border_color = bg.lightened(0.25)
-	btn.add_theme_stylebox_override("pressed", pressed)
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+	btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
+	btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
+	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
 
-	# Horizontal split: [portrait | text column]. Portrait uses the painted
-	# hero_portrait_<id>.png if it exists, falls back to no-portrait layout when
-	# the asset hasn't been generated yet (so the tile keeps working through the
-	# whole art pipeline).
-	var split := HBoxContainer.new()
-	split.set_anchors_preset(Control.PRESET_FULL_RECT)
-	split.add_theme_constant_override("separation", 12)
-	split.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	btn.add_child(split)
+	var col := VBoxContainer.new()
+	col.set_anchors_preset(Control.PRESET_FULL_RECT)
+	col.add_theme_constant_override("separation", 6)
+	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(col)
 
-	var left_pad := Control.new()
-	left_pad.custom_minimum_size = Vector2(1, 0)
-	left_pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	split.add_child(left_pad)
-
+	# Portrait (or a color-wash fallback if its art isn't painted yet). Stored so
+	# _focus_hero can brighten the spotlighted hero and dim the rest.
+	var port_size := Vector2(168, 210)
 	var portrait_path := "res://assets/portraits/hero_portrait_%s.png" % hid
 	if ResourceLoader.exists(portrait_path):
-		# CenterContainer forces children to their min size and centers them,
-		# unlike HBox + SIZE_SHRINK_CENTER which (in this layout) lets the
-		# TextureRect stretch to the row height.
-		var portrait_wrap := CenterContainer.new()
-		portrait_wrap.custom_minimum_size = Vector2(140, 186)
-		portrait_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		split.add_child(portrait_wrap)
-
 		var portrait := TextureRect.new()
 		portrait.texture = load(portrait_path)
 		portrait.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		portrait.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		portrait.custom_minimum_size = Vector2(140, 186)
+		portrait.custom_minimum_size = port_size
+		portrait.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		portrait.modulate = Color(1.02, 1.0, 0.95, 1.0)
-		portrait_wrap.add_child(portrait)
-
-	var col := VBoxContainer.new()
-	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	col.add_theme_constant_override("separation", 4)
-	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	split.add_child(col)
+		portrait.modulate = Color(0.70, 0.68, 0.66)
+		col.add_child(portrait)
+		_hero_portraits[hid] = portrait
+	else:
+		var wash := ColorRect.new()
+		wash.custom_minimum_size = port_size
+		wash.color = Color(0.16, 0.14, 0.20)
+		wash.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		wash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wash.modulate = Color(0.70, 0.68, 0.66)
+		col.add_child(wash)
+		_hero_portraits[hid] = wash
 
 	var name_lbl := _make_display_label(String(hero.get("name", hid)), 22, GILT_BRIGHT)
-	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	col.add_child(name_lbl)
 
-	var tagline := _make_display_label(String(hero.get("tagline", "")), 13, Color(0.95, 0.82, 0.55))
-	tagline.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	tagline.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(tagline)
+	var tag_lbl := _make_display_label(String(hero.get("tagline", "")), 12, Color(0.95, 0.82, 0.55))
+	tag_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	tag_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	tag_lbl.custom_minimum_size = Vector2(168, 0)
+	tag_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(tag_lbl)
 
-	var desc_lbl := _make_display_label(String(hero.get("desc", "")), 12, IVORY)
+	btn.mouse_entered.connect(_focus_hero.bind(hid))
+	btn.pressed.connect(_begin_run_with.bind(hid))
+	_hero_cards[hid] = btn
+	return btn
+
+
+func _focus_hero(hid: String) -> void:
+	# Spotlight one hero: brighten its portrait, dim the rest, light its gilt
+	# underline, and repaint the shared detail pane. Pane-only update — never
+	# rebuilds the cards (which would re-load() portrait textures and flicker).
+	if _selected_hero == hid and _hero_detail != null and _hero_detail.get_child_count() > 0:
+		return
+	_selected_hero = hid
+	for k in _hero_portraits:
+		var p = _hero_portraits[k]
+		if is_instance_valid(p):
+			p.modulate = Color(1.08, 1.04, 0.98) if k == hid else Color(0.62, 0.60, 0.60)
+	for k in _hero_cards:
+		var b = _hero_cards[k]
+		if is_instance_valid(b):
+			var box: StyleBox = _hero_focus_box() if k == hid else StyleBoxEmpty.new()
+			b.add_theme_stylebox_override("normal", box)
+			b.add_theme_stylebox_override("hover", box)
+			b.add_theme_stylebox_override("pressed", box)
+	_build_hero_detail(hid)
+
+
+func _hero_focus_box() -> StyleBoxFlat:
+	# Frameless-friendly selection: a faint warm wash, a gilt underline, and a
+	# soft glow — no full rectangle border (the dev dislikes boxy tiles).
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.07)
+	sb.border_width_bottom = 3
+	sb.border_color = GILT_BRIGHT
+	sb.corner_radius_top_left = 4
+	sb.corner_radius_top_right = 4
+	sb.corner_radius_bottom_left = 4
+	sb.corner_radius_bottom_right = 4
+	sb.shadow_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.28)
+	sb.shadow_size = 10
+	return sb
+
+
+func _build_hero_detail(hid: String) -> void:
+	# Fills the shared pane with the focused hero's lore + mechanical pitch + deck
+	# composition + starting relic. This is where the text we pulled off the cards
+	# now lives — once, with reading room.
+	if _hero_detail == null:
+		return
+	for c in _hero_detail.get_children():
+		c.queue_free()
+	var hero := HeroDB.get_hero(hid)
+
+	var lore := String(hero.get("lore", ""))
+	if lore != "":
+		var lore_lbl := _make_display_label(lore, 15, Color(0.82, 0.76, 0.88))
+		lore_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		lore_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_hero_detail.add_child(lore_lbl)
+
+	var desc_lbl := _make_display_label(String(hero.get("desc", "")), 14, IVORY)
+	desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_lbl.custom_minimum_size = Vector2(0, 0)
-	desc_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(desc_lbl)
+	_hero_detail.add_child(desc_lbl)
 
-	# Deck composition summary: "4× Goblin · 2× Brute · ..." Aggregates duplicate
-	# card ids so the tile stays compact even on a 10-card list.
-	var deck_text := _summarize_deck(hero.get("deck", []))
-	var deck_lbl := _make_display_label(deck_text, 11, Color(0.78, 0.74, 0.62))
+	_hero_detail.add_child(_make_ornament_row(300.0, true))
+
+	var deck_lbl := _make_display_label("DECK    " + _summarize_deck(hero.get("deck", [])), 12, Color(0.80, 0.76, 0.64))
+	deck_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	deck_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	deck_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(deck_lbl)
+	_hero_detail.add_child(deck_lbl)
 
-	# Relic strip: little chip + relic name/desc, separated from the deck text
-	# by a thin gilt divider so the eye reads it as "starting gear".
-	var divider := ColorRect.new()
-	divider.custom_minimum_size = Vector2(0, 1)
-	divider.color = Color(GILT.r, GILT.g, GILT.b, 0.4)
-	divider.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(divider)
-
-	var relic_row := HBoxContainer.new()
-	relic_row.add_theme_constant_override("separation", 10)
-	relic_row.alignment = BoxContainer.ALIGNMENT_BEGIN
-	relic_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(relic_row)
-
-	var relic_id: String = String(hero.get("relic", ""))
+	var relic_id := String(hero.get("relic", ""))
 	if relic_id != "":
-		var chip := GameTheme.make_relic_chip(relic_id, 44)
+		var relic_row := HBoxContainer.new()
+		relic_row.add_theme_constant_override("separation", 10)
+		relic_row.alignment = BoxContainer.ALIGNMENT_BEGIN
+		var chip := GameTheme.make_relic_chip(relic_id, 40)
 		chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		relic_row.add_child(chip)
-		var relic_text_col := VBoxContainer.new()
-		relic_text_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		relic_text_col.add_theme_constant_override("separation", 1)
-		relic_text_col.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		relic_row.add_child(relic_text_col)
-		var relic_data := RelicDB.get_relic(relic_id)
-		var rname := _make_display_label(String(relic_data.get("name", relic_id)), 13, GILT_BRIGHT)
-		rname.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		relic_text_col.add_child(rname)
-		var rdesc := _make_display_label(String(relic_data.get("desc", "")), 11, IVORY)
+		var rcol := VBoxContainer.new()
+		rcol.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		rcol.add_theme_constant_override("separation", 1)
+		relic_row.add_child(rcol)
+		var rd := RelicDB.get_relic(relic_id)
+		var rname := _make_display_label(String(rd.get("name", relic_id)), 13, GILT_BRIGHT)
+		rcol.add_child(rname)
+		var rdesc := _make_display_label(String(rd.get("desc", "")), 11, IVORY)
+		rdesc.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		rdesc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		rdesc.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		relic_text_col.add_child(rdesc)
+		rcol.add_child(rdesc)
+		_hero_detail.add_child(relic_row)
 
-	btn.pressed.connect(_begin_run_with.bind(hid))
-	return btn
+	var hint := _make_display_label("Click a hero to begin the run.", 11, ASH)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_hero_detail.add_child(hint)
 
 
 func _summarize_deck(deck: Array) -> String:

@@ -1,4 +1,5 @@
 extends PanelContainer
+class_name Card2D
 ## Card2D.gd — 225x300 card. Three layout modes, picked in _build_layout:
 ##   - v4 (USE_PROCEDURAL_FRAME on): pure Godot-drawn frame, no PNG dep
 ##   - v3 (USE_NEW_FRAME on): painted PNG frame with POINT_*-anchored labels
@@ -23,6 +24,17 @@ signal floop_clicked
 # `played` (so highlights are cleared whether or not the drop is valid).
 signal dragging(global_pos: Vector2)
 signal drag_ended
+# Battlefield repositioning ("move"). A friendly creature already on the board
+# can be dragged to an empty friendly slot during the player's turn. Combat
+# owns the slot grid + hand layer, so Card2D only signals intent:
+#   field_move_started — the grab crossed the move threshold and lifted off its
+#       slot; Combat re-parents the card onto the free-layout hand layer so it
+#       can follow the cursor (slot cells are CenterContainers that would fight
+#       manual positioning).
+#   field_move_dropped — released after a lift; Combat resolves it to the
+#       nearest empty friendly slot or snaps it back home.
+signal field_move_started
+signal field_move_dropped(global_pos: Vector2)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -969,6 +981,14 @@ var temp_atk_buff: int = 0
 # start of each round (in Combat); when it reaches 0 the bonus is removed.
 var persistent_atk_buff: int = 0
 var persistent_atk_buff_rounds: int = 0
+# Doom keyword — per-creature countdown to detonation. Lazily seeded from
+# card_data.doom the first time it's needed (card_data is often assigned AFTER
+# _ready, e.g. enemy placement), via _ensure_doom_init(). -999 = "not yet seeded".
+var doom_counter: int = -999
+# Doom badge widgets, built in the compact battlefield layout. The badge shows
+# the live countdown; the panel gives the red disc its frame.
+var _doom_badge: Control = null
+var _doom_label: Label = null
 # Battlefield cards render at ~73% size so 4 rows fit on screen without
 # clipping. Hand cards stay full size for readability. Set before _ready
 # (e.g. on instantiate) or via set_compact_mode() after.
@@ -1009,6 +1029,14 @@ var _is_being_dragged := false
 static var _any_card_dragging: bool = false
 var _is_playing := false
 var _drag_offset := Vector2.ZERO
+# Battlefield move-drag state — distinct from the hand "play" drag above.
+var _field_grabbing := false      # a left-press is active on a board creature
+var _field_lifted := false        # the grab crossed the threshold → real drag
+var _field_grab_start := Vector2.ZERO
+const FIELD_MOVE_THRESHOLD := 10.0  # px the cursor must travel to start a move
+# Gate for board interaction (move-drag + floop click). Combat sets this false
+# while combat resolves / the enemy acts, so the player can't grab mid-swing.
+static var board_interactive := true
 var _hand_target_position := Vector2.ZERO
 var _hand_target_rotation := 0.0
 # Resting scale for hand cards. Set via set_hand_target by Combat._layout_hand
@@ -1037,11 +1065,18 @@ const BATTLEFIELD_W := 200
 const BATTLEFIELD_H := 150
 const BATTLEFIELD_SIZE := Vector2(BATTLEFIELD_W, BATTLEFIELD_H)
 const COMPACT_SCALE := 0.50
-# Cards count as "played" when their CENTER crosses above this fraction of
-# viewport height. Centered (not top-left) so the player can drop on the
-# back row — which sits just above the hand — without the card "not being
-# high enough." 0.72 puts the cutoff right at the top of the hand zone.
-const PLAY_THRESHOLD_Y := 0.72
+# Single source of truth for the board/hand seam — also read by Combat's slot
+# highlight so the slot lights up EXACTLY when a release there would play (no
+# dead band). A hand card is "played" when its CENTRE is released above this
+# fraction of viewport height; below it (over the resting hand) the drag
+# cancels back to hand. Wildfrost-style: the WHOLE board is a live drop zone,
+# so this sits at the board's bottom edge (≈ back-row bottom / hand top), NOT
+# up at mid-screen. The old 0.72 demanded the card centre clear y≈648 on the
+# 1600×900 design space — above the entire board (back row ends at y≈737) — so
+# the player had to overshoot the board to drop on the back row. Raise toward
+# 1.0 to shrink the cancel band; lower to force a longer drag before a drop
+# counts.
+const PLAY_THRESHOLD_Y := 0.82
 
 # Painted-frame zone rects, in pixel coords of the 300x400 source frame
 # (assets/frames/frame_creature_*.png). Each rect is the readable interior of a
@@ -1178,6 +1213,8 @@ func set_compact_mode(enabled: bool) -> void:
 	_frame_tex = null
 	_atk_badge = null
 	_hp_badge = null
+	_doom_badge = null
+	_doom_label = null
 	for child in get_children():
 		child.free()
 	_build_layout()
@@ -1393,6 +1430,11 @@ func _build_compact_layout() -> void:
 	# set_display_cost guards on is_on_battlefield + a null check.
 
 	# Bottom-left ATK and bottom-right HP gems (creatures only).
+	# 38px orbs / 18px light-faced numerals: at battlefield distance the old
+	# 32px orb + 14px dark-on-gold numeral washed into the gem's gloss
+	# highlight (verified on a 1920×1080 capture — ATK was illegible while
+	# the light-on-red HP read fine). White-with-dark-outline reads on any
+	# fill, which is why every AAA card game stamps stats that way.
 	if is_creature():
 		var c_atk := GemOrb.new()
 		c_atk.shape = "circle"
@@ -1400,11 +1442,11 @@ func _build_compact_layout() -> void:
 		c_atk.fill_color = GameTheme.ATK_GOLD_SHIELD
 		c_atk.anchor_left = 0.0; c_atk.anchor_right = 0.0
 		c_atk.anchor_top = 1.0;  c_atk.anchor_bottom = 1.0
-		c_atk.offset_left = 4;   c_atk.offset_right = 36
-		c_atk.offset_top = -36;  c_atk.offset_bottom = -4
+		c_atk.offset_left = 3;   c_atk.offset_right = 41
+		c_atk.offset_top = -41;  c_atk.offset_bottom = -3
 		root.add_child(c_atk)
-		_atk_base_color = Color(0.118, 0.078, 0.024)
-		_atk_label = _build_orb_number_label(str(current_atk), 14, false)
+		_atk_base_color = Color(1, 0.98, 0.90)
+		_atk_label = _build_orb_number_label(str(current_atk), 18, true)
 		c_atk.add_child(_atk_label)
 		_atk_badge = null
 
@@ -1414,11 +1456,11 @@ func _build_compact_layout() -> void:
 		c_hp.fill_color = GameTheme.HEALTH_RED_DROP
 		c_hp.anchor_left = 1.0; c_hp.anchor_right = 1.0
 		c_hp.anchor_top = 1.0;  c_hp.anchor_bottom = 1.0
-		c_hp.offset_left = -36; c_hp.offset_right = -4
-		c_hp.offset_top = -36;  c_hp.offset_bottom = -4
+		c_hp.offset_left = -41; c_hp.offset_right = -3
+		c_hp.offset_top = -41;  c_hp.offset_bottom = -3
 		root.add_child(c_hp)
 		_hp_base_color = Color(1, 0.97, 0.92)
-		_hp_label = _build_orb_number_label(str(current_hp), 14, true)
+		_hp_label = _build_orb_number_label(str(current_hp), 18, true)
 		c_hp.add_child(_hp_label)
 		_hp_badge = null
 
@@ -1489,6 +1531,91 @@ func _build_compact_layout() -> void:
 				kglyph.modulate = GameTheme.GILT_BRIGHT
 				kglyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
 				korb.add_child(kglyph)
+
+	# Doom countdown badge — a big red disc in the TOP-LEFT (keyword orbs own
+	# top-right, ATK/HP own the bottom corners). THIS is the telegraph: a boss
+	# "Doom 2" must read as a scary clock from across the board.
+	if has_keyword("doom"):
+		_ensure_doom_init()
+		var doom_box := 38.0
+		_doom_badge = GemOrb.new()
+		_doom_badge.shape = "circle"
+		_doom_badge.style = "smooth"
+		_doom_badge.fill_color = Color(0.78, 0.10, 0.10)  # alarm red
+		_doom_badge.gloss = 0.9
+		_doom_badge.anchor_left = 0.0; _doom_badge.anchor_right = 0.0
+		_doom_badge.anchor_top = 0.0; _doom_badge.anchor_bottom = 0.0
+		_doom_badge.offset_left = 3.0
+		_doom_badge.offset_right = 3.0 + doom_box
+		_doom_badge.offset_top = 3.0
+		_doom_badge.offset_bottom = 3.0 + doom_box
+		_doom_badge.pivot_offset = Vector2(doom_box * 0.5, doom_box * 0.5)
+		_doom_badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(_doom_badge)
+		_doom_label = Label.new()
+		_doom_label.text = str(maxi(doom_counter, 0))
+		if GameTheme.font_stat:
+			_doom_label.add_theme_font_override("font", GameTheme.font_stat)
+		elif GameTheme.font_display:
+			_doom_label.add_theme_font_override("font", GameTheme.font_display)
+		_doom_label.add_theme_font_size_override("font_size", 18)
+		_doom_label.add_theme_color_override("font_color", Color(1, 1, 1))
+		_doom_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+		_doom_label.add_theme_constant_override("outline_size", 4)
+		_doom_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_doom_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		_doom_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_doom_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_doom_badge.add_child(_doom_label)
+
+	# Icon-less combat keywords (rampage / lifelink) have no SVG glyph, so the
+	# icon rail above skips them. Show them as short violet text orbs on the
+	# LEFT edge (below the doom badge, if any) so they're not invisible on the
+	# battlefield token. Matches the arcane-violet keyword-orb look.
+	_build_text_keyword_chips(root, keywords, _doom_badge != null)
+
+
+# Abbreviations for keywords that render as text chips (no icon asset).
+const _TEXT_KW_ABBR := {"rampage": "RMP", "lifelink": "LL"}
+
+func _build_text_keyword_chips(root: Control, keywords: Array, below_doom: bool) -> void:
+	var labels: Array[String] = []
+	for kw in keywords:
+		var ks := String(kw)
+		if _TEXT_KW_ABBR.has(ks) and not labels.has(_TEXT_KW_ABBR[ks]):
+			labels.append(_TEXT_KW_ABBR[ks])
+	if labels.is_empty():
+		return
+	var chip_box := 30.0
+	var chip_gap := 4.0
+	var top0: float = (3.0 + 38.0 + chip_gap) if below_doom else 3.0
+	for i in range(labels.size()):
+		var chip := GemOrb.new()
+		chip.shape = "circle"
+		chip.style = "smooth"
+		chip.fill_color = Color(0.247, 0.153, 0.376)  # deep arcane violet (keyword idiom)
+		chip.gloss = 0.42
+		chip.anchor_left = 0.0; chip.anchor_right = 0.0
+		chip.anchor_top = 0.0; chip.anchor_bottom = 0.0
+		chip.offset_left = 3.0
+		chip.offset_right = 3.0 + chip_box
+		chip.offset_top = top0 + float(i) * (chip_box + chip_gap)
+		chip.offset_bottom = chip.offset_top + chip_box
+		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(chip)
+		var lbl := Label.new()
+		lbl.text = labels[i]
+		if GameTheme.font_display:
+			lbl.add_theme_font_override("font", GameTheme.font_display)
+		lbl.add_theme_font_size_override("font_size", 10)
+		lbl.add_theme_color_override("font_color", GameTheme.GILT_BRIGHT)
+		lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+		lbl.add_theme_constant_override("outline_size", 3)
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
+		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		chip.add_child(lbl)
 
 
 # ═══════════════════════════════════════════
@@ -4221,6 +4348,49 @@ func toggle_floop() -> void:
 
 
 # ═══════════════════════════════════════════
+#  DOOM — ticking-bomb countdown badge
+# ═══════════════════════════════════════════
+
+func _ensure_doom_init() -> void:
+	# Seed doom_counter from card_data.doom the first time it's read. card_data
+	# is frequently assigned after _ready (enemy placement, tokens), so we can't
+	# rely on a constructor — lazy-init on first display/tick instead.
+	if doom_counter == -999:
+		doom_counter = int(card_data.get("doom", 0))
+
+
+func update_doom_display() -> void:
+	# Refresh the red countdown badge. Built lazily so it works no matter which
+	# layout this card uses; only meaningful on battlefield tokens (the compact
+	# layout owns the badge node).
+	if not has_keyword("doom"):
+		if _doom_badge != null and is_instance_valid(_doom_badge):
+			_doom_badge.visible = false
+		return
+	_ensure_doom_init()
+	if _doom_label != null and is_instance_valid(_doom_label):
+		_doom_label.text = str(maxi(doom_counter, 0))
+		if _doom_badge != null and is_instance_valid(_doom_badge):
+			_doom_badge.visible = true
+
+
+func flash_doom_tick() -> void:
+	# LOUD per-tick telegraph: a red punch + shake on the badge (and a light
+	# body flash) so the player feels the clock advance each round.
+	if static_display:
+		return
+	if _doom_badge != null and is_instance_valid(_doom_badge):
+		var tw := create_tween()
+		tw.tween_property(_doom_badge, "scale", Vector2(1.5, 1.5), 0.10).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tw.tween_property(_doom_badge, "scale", Vector2(1.0, 1.0), 0.18).set_ease(Tween.EASE_OUT)
+	# A brief red wash on the card body underscores the danger.
+	var base := modulate
+	var btw := create_tween()
+	btw.tween_property(self, "modulate", Color(base.r * 1.6, base.g * 0.55, base.b * 0.5, base.a), 0.08)
+	btw.tween_property(self, "modulate", base, 0.24).set_ease(Tween.EASE_OUT)
+
+
+# ═══════════════════════════════════════════
 #  DAMAGE
 # ═══════════════════════════════════════════
 
@@ -4334,7 +4504,17 @@ func _spawn_damage_number(amount: int) -> void:
 	if vfx == null:
 		return
 	var anchor := global_position + Vector2(size.x * scale.x * 0.5, size.y * scale.y * 0.30)
-	vfx.spawn_floating_number(anchor, "-%d" % amount, Color(1.0, 0.32, 0.22), false)
+	# JUICE — scale the number's prominence to the blow so a 1-dmg plink and a
+	# 7-dmg haymaker don't read identically. Heavy hits get the "big" treatment
+	# (larger font in spawn_floating_number) and a hotter, gold-shifted red.
+	var heavy: bool = amount >= 5
+	var col := Color(1.0, 0.38, 0.26) if not heavy else Color(1.0, 0.62, 0.20)
+	vfx.spawn_floating_number(anchor, "-%d" % amount, col, heavy)
+	# Magnitude-scaled board shake routed through Combat so light chip damage
+	# barely ripples while big blows rock the screen. Guarded by has_method so
+	# non-combat scenes (gallery/bake) stay silent.
+	if vfx.has_method("creature_hit_feedback"):
+		vfx.creature_hit_feedback(amount)
 
 
 func _spawn_death_burst() -> void:
@@ -4364,6 +4544,13 @@ func _spawn_death_burst() -> void:
 		color = Color(0.78, 0.20, 0.25, 0.95)  # blood red
 	var burst_pos := global_position + size * scale * 0.5
 	vfx.spawn_spell_burst(burst_pos, color)
+	# JUICE — a bigger creature dies bigger. Scale a rising ash/ember burst to
+	# the body's max stat (a 1/1 token puffs; a 6/8 bruiser erupts) so death
+	# weight reads at a glance. Only when the combat scene exposes the helper.
+	if vfx.has_method("spawn_ash_burst"):
+		var bulk: int = maxi(int(card_data.get("atk", 1)), int(card_data.get("hp", 1)))
+		var ash_amount: int = int(clampf(10.0 + float(bulk) * 2.4, 12.0, 40.0))
+		vfx.spawn_ash_burst(burst_pos, color, ash_amount)
 
 
 func _spawn_atk_change_popup(delta: int) -> void:
@@ -4487,9 +4674,13 @@ func set_hand_target(pos: Vector2, rot: float, scl: Vector2 = Vector2.ONE) -> vo
 
 
 func play_attack_lunge() -> void:
-	# Quick thrust toward the opponent's side, then recoil back. Player creatures
-	# lunge up, enemy creatures lunge down. Position is restored exactly, so the
-	# slot's CenterContainer layout is unaffected once the tween completes.
+	# Quick wind-up → thrust toward the opponent's side → recoil back. Player
+	# creatures lunge up, enemy creatures lunge down. The brief anticipation
+	# pull-back (away from the target) before the strike makes simultaneous combat
+	# read as DISCRETE clashes — you see a creature cock back and snap forward —
+	# rather than numbers silently changing. Kept fast so the forward apex still
+	# lands near the combat code's LUNGE_APEX (0.09s) impact beat, and position is
+	# restored exactly so the slot's CenterContainer layout is unaffected.
 	if static_display or get_tree() == null:
 		return
 	var dir := 1.0 if is_opponent else -1.0
@@ -4497,8 +4688,14 @@ func play_attack_lunge() -> void:
 	if _lunge_tween != null and _lunge_tween.is_valid():
 		_lunge_tween.kill()
 	_lunge_tween = create_tween()
-	_lunge_tween.tween_property(self, "position", rest + Vector2(0, dir * 24.0), 0.10) \
+	# Anticipation: a small hop backward (away from the foe) — very short so the
+	# strike still peaks on time.
+	_lunge_tween.tween_property(self, "position", rest - Vector2(0, dir * 7.0), 0.05) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	# Strike: drive forward into the target.
+	_lunge_tween.tween_property(self, "position", rest + Vector2(0, dir * 26.0), 0.08) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	# Settle home.
 	_lunge_tween.tween_property(self, "position", rest, 0.16) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
@@ -4546,6 +4743,123 @@ func _play_last_stand_flare() -> void:
 	tw.chain().tween_property(self, "modulate", base, 0.42).set_ease(Tween.EASE_OUT)
 	tw.parallel().tween_property(self, "scale", rest_scale, 0.32) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
+
+var _danger_tween: Tween = null
+var _danger_overlay: Control = null
+
+func set_danger_marked(on: bool, amount: int = 0) -> void:
+	# Persistent danger mark: a bright crimson ring around the creature PLUS a
+	# high-contrast badge above it showing the HP it will lose to the boss's
+	# start-of-round passive. The badge (bold text + heavy dark outline) is what
+	# makes it read against the red board. Pure overlay children with their own
+	# z_index — they never touch the card's size / slot, so they can't fight the
+	# lane container or the idle bob.
+	if static_display:
+		return
+	if on:
+		if is_instance_valid(_danger_overlay):
+			return
+		var ov := Control.new()
+		ov.name = "DangerMark"
+		ov.set_anchors_preset(Control.PRESET_FULL_RECT)
+		ov.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ov.z_index = 7
+		add_child(ov)
+		var ring := Panel.new()
+		ring.set_anchors_preset(Control.PRESET_FULL_RECT)
+		ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.55, 0.04, 0.03, 0.0)
+		sb.set_border_width_all(4)
+		sb.border_color = Color(1.0, 0.26, 0.18)
+		sb.set_corner_radius_all(10)
+		sb.shadow_color = Color(1.0, 0.18, 0.10, 0.6)
+		sb.shadow_size = 11
+		ring.add_theme_stylebox_override("panel", sb)
+		ov.add_child(ring)
+		var badge := Label.new()
+		badge.text = ("-%d" % amount) if amount > 0 else "!"
+		badge.add_theme_font_size_override("font_size", 17)
+		badge.add_theme_color_override("font_color", Color(1.0, 0.52, 0.40))
+		badge.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.96))
+		badge.add_theme_constant_override("outline_size", 6)
+		badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		badge.set_anchors_preset(Control.PRESET_TOP_WIDE)
+		badge.offset_top = -26
+		badge.offset_bottom = -4
+		badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ov.add_child(badge)
+		_danger_overlay = ov
+		var tw := create_tween().set_loops()
+		tw.tween_property(ov, "modulate:a", 0.5, 0.55).set_trans(Tween.TRANS_SINE)
+		tw.tween_property(ov, "modulate:a", 1.0, 0.55).set_trans(Tween.TRANS_SINE)
+		_danger_tween = tw
+	else:
+		if _danger_tween != null:
+			_danger_tween.kill()
+			_danger_tween = null
+		if is_instance_valid(_danger_overlay):
+			_danger_overlay.queue_free()
+			_danger_overlay = null
+
+
+var _threat_flagged: bool = false
+var _threat_tween: Tween = null
+var _threat_overlay: Control = null
+
+func set_threat_flagged(on: bool) -> void:
+	# JUICE — a pulsing crimson outline on enemy attackers that pose an immediate
+	# threat (will smash the player's face this round, or swing a heavy blow).
+	# Lets the player SEE danger instead of reading it out of the numbers. This
+	# is intentionally distinct from set_danger_marked (boss start-of-round
+	# passive, which carries a "-N" badge) — threat flags are a lighter, badge-
+	# less ring and use their own overlay so the two can coexist. Idempotent.
+	if static_display:
+		return
+	# If a boss danger-mark ring is already on this creature, don't stack a second
+	# ring — the danger mark (with its "-N" badge) is the stronger read. Clear any
+	# existing threat ring so the danger mark cleanly supersedes it.
+	if on and is_instance_valid(_danger_overlay):
+		if _threat_flagged:
+			set_threat_flagged(false)
+		return
+	if on == _threat_flagged:
+		return
+	_threat_flagged = on
+	if on:
+		if not is_instance_valid(_threat_overlay):
+			var ov := Control.new()
+			ov.name = "ThreatFlag"
+			ov.set_anchors_preset(Control.PRESET_FULL_RECT)
+			ov.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			ov.z_index = 6  # below DangerMark (7) so a boss badge still reads on top
+			add_child(ov)
+			var ring := Panel.new()
+			ring.set_anchors_preset(Control.PRESET_FULL_RECT)
+			ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			var sb := StyleBoxFlat.new()
+			sb.bg_color = Color(0.55, 0.05, 0.04, 0.0)
+			sb.set_border_width_all(3)
+			sb.border_color = Color(1.0, 0.30, 0.22)
+			sb.set_corner_radius_all(10)
+			sb.shadow_color = Color(1.0, 0.22, 0.14, 0.5)
+			sb.shadow_size = 8
+			ring.add_theme_stylebox_override("panel", sb)
+			ov.add_child(ring)
+			_threat_overlay = ov
+		_threat_overlay.visible = true
+		if _threat_tween != null and _threat_tween.is_valid():
+			_threat_tween.kill()
+		_threat_tween = create_tween().set_loops()
+		_threat_tween.tween_property(_threat_overlay, "modulate:a", 0.35, 0.50).set_trans(Tween.TRANS_SINE)
+		_threat_tween.tween_property(_threat_overlay, "modulate:a", 1.0, 0.50).set_trans(Tween.TRANS_SINE)
+	else:
+		if _threat_tween != null:
+			_threat_tween.kill()
+			_threat_tween = null
+		if is_instance_valid(_threat_overlay):
+			_threat_overlay.visible = false
 
 
 func mark_sacrifice_death() -> void:
@@ -4714,17 +5028,31 @@ func _set_border_color(color: Color) -> void:
 # ═══════════════════════════════════════════
 
 func _gui_input(event: InputEvent) -> void:
-	if event is InputEventMouseButton:
-		if event.button_index == MOUSE_BUTTON_LEFT:
-			if event.pressed:
-				if is_on_battlefield and not is_opponent and has_floop():
-					floop_clicked.emit()
-				else:
-					_start_drag(event.global_position)
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			if is_on_battlefield and not is_opponent and is_creature() \
+					and not has_keyword("structure") \
+					and field_move_dropped.get_connections().size() > 0:
+				# Friendly board creature whose move-drag is wired by Combat →
+				# begin a potential move. A press that releases without travelling
+				# stays a floop click (below). The connection check means creatures
+				# Combat didn't wire (e.g. tokens) fall through instead of lifting
+				# off into a handler-less drag.
+				_begin_field_grab(event.global_position)
+			elif is_on_battlefield and not is_opponent and has_floop():
+				floop_clicked.emit()
+			elif not is_on_battlefield:
+				_start_drag(event.global_position)
+		else:
+			if _field_grabbing:
+				_end_field_grab(event.global_position)
 			else:
 				_end_drag()
-	elif event is InputEventMouseMotion and _is_being_dragged:
-		_update_drag(event.global_position)
+	elif event is InputEventMouseMotion:
+		if _field_grabbing:
+			_update_field_grab(event.global_position)
+		elif _is_being_dragged:
+			_update_drag(event.global_position)
 
 
 func _start_drag(mouse_pos: Vector2) -> void:
@@ -4741,19 +5069,30 @@ func _start_drag(mouse_pos: Vector2) -> void:
 	# fill most of the field. 0.85 matches Hearthstone/Cross Blitz drag size
 	# where the picked card is a touch smaller than its hover preview.
 	scale = Vector2(0.85, 0.85)
-	# Pivot to center so the dragged card scales around the cursor naturally,
-	# not from the bottom-center used by hand fans.
+	# Straighten the card on grab. Hand cards carry a fan rotation; a tilted
+	# card stuck under the cursor reads as a glitch. (Hover already zeroes this,
+	# but a fast grab or touch press can skip the hover step.)
+	rotation = 0.0
+	# Pivot to centre so the dragged card scales around its middle, then place
+	# that middle under the cursor. With a CENTRED pivot the card's on-screen
+	# centre is global_position + size*0.5 INDEPENDENT of scale — so the offset
+	# must use the UNSCALED half-size. The old -size*scale*0.5 left the card
+	# floating ~(17,22)px down-right of the cursor and, worse, disagreeing with
+	# the drop point Combat computed from the `dragging` signal (the highlight
+	# lit one slot while the card dropped toward another). Keep this in lockstep
+	# with _update_drag / _end_drag below — all three read size*0.5.
 	pivot_offset = size * 0.5
-	# Adjust drag offset for the new scale: mouse should sit at the visual
-	# center of the dragged card.
-	_drag_offset = -size * scale * 0.5
+	_drag_offset = -size * 0.5
 	global_position = mouse_pos + _drag_offset
 	z_index = 20
 
 
 func _update_drag(mouse_pos: Vector2) -> void:
 	global_position = mouse_pos + _drag_offset
-	dragging.emit(global_position + size * scale * 0.5)
+	# Centre is scale-independent because the drag pivot is centred (see
+	# _start_drag); reporting size*0.5 makes the highlight + drop point track
+	# the cursor exactly, with no (17,22)px skew.
+	dragging.emit(global_position + size * 0.5)
 
 
 func _end_drag() -> void:
@@ -4764,21 +5103,66 @@ func _end_drag() -> void:
 	z_index = 0
 	drag_ended.emit()
 	var viewport_h = get_viewport_rect().size.y
-	# Use the card's visual center, not its top-left corner: a card grabbed
-	# at the center has its top ~120px above the cursor, so a top-edge check
-	# made the back row (which sits closest to the hand) unreachable.
-	var card_center_y: float = global_position.y + size.y * scale.y * 0.5
+	# Wildfrost-style drop: the whole board above the resting hand is a live
+	# drop zone. Release with the card's CENTRE on the board → play (Combat
+	# snaps it to the nearest slot); release down over the resting hand →
+	# cancel. No "drag past mid-screen" gate. Centre is global_position +
+	# size*0.5 (scale-independent — the drag pivot is centred, see _start_drag).
+	var card_center_y: float = global_position.y + size.y * 0.5
 	if card_center_y < viewport_h * PLAY_THRESHOLD_Y:
 		played.emit()
 	else:
-		# Not high enough to play — snap back into the hand. Restore scale,
-		# rotation, position, and pivot from set_hand_target. (Drag moved the
-		# pivot to center so the card scaled around the cursor; reset to the
-		# bottom-center pivot hand cards expect.)
+		# Released over the hand — cancel. Restore the resting hand pose
+		# (set_hand_target values) and the bottom-centre pivot hand fans use.
 		scale = _hand_target_scale
 		rotation = _hand_target_rotation
 		position = _hand_target_position
 		pivot_offset = Vector2(size.x * 0.5, size.y)
+
+
+# ═══════════════════════════════════════════
+#  DRAG TO MOVE (battlefield repositioning)
+# ═══════════════════════════════════════════
+
+func _begin_field_grab(mouse_pos: Vector2) -> void:
+	if not board_interactive:
+		return
+	_field_grabbing = true
+	_field_lifted = false
+	_field_grab_start = mouse_pos
+
+
+func _update_field_grab(mouse_pos: Vector2) -> void:
+	if not board_interactive:
+		return
+	if not _field_lifted:
+		if mouse_pos.distance_to(_field_grab_start) <= FIELD_MOVE_THRESHOLD:
+			return
+		# Cross the threshold → lift off the slot. Combat re-parents us onto the
+		# free-layout hand layer (slot cells centre their child and would fight
+		# manual positioning).
+		_field_lifted = true
+		_any_card_dragging = true
+		# Centre pivot + unscaled half-size offset (same as the hand drag) so the
+		# card's visual centre == cursor regardless of any future drag scale.
+		pivot_offset = size * 0.5
+		_drag_offset = -size * 0.5
+		z_index = 50
+		field_move_started.emit()
+	global_position = mouse_pos + _drag_offset
+	dragging.emit(global_position + size * 0.5)
+
+
+func _end_field_grab(_mouse_pos: Vector2) -> void:
+	_field_grabbing = false
+	_any_card_dragging = false
+	if _field_lifted:
+		_field_lifted = false
+		drag_ended.emit()
+		field_move_dropped.emit(global_position + size * 0.5)
+	elif has_floop() and not is_opponent:
+		# A press that never travelled is a floop toggle, not a move.
+		floop_clicked.emit()
 
 
 # ═══════════════════════════════════════════
@@ -4909,8 +5293,14 @@ func _build_detail() -> PanelContainer:
 		stats.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		vbox.add_child(stats)
 
+		# Show LIVE stats, not the printed base. A creature that has grown on the
+		# battlefield (Hexblade's +1/spell, Corpse Eater, Vengeance, buffs, etc.)
+		# or taken damage must read its current values here — otherwise a Hexblade
+		# sitting at 4 ATK still showed "ATK 1" on hover, which read as "the buff
+		# didn't stack." For hand cards current_atk/current_hp == the base, so this
+		# is identical there. effective_atk() folds in temp + persistent buffs.
 		var atk_lbl := Label.new()
-		atk_lbl.text = "ATK  %d" % card_data.get("atk", 0)
+		atk_lbl.text = "ATK  %d" % (effective_atk() if is_creature() else card_data.get("atk", 0))
 		if GameTheme.font_display:
 			atk_lbl.add_theme_font_override("font", GameTheme.font_display)
 		atk_lbl.add_theme_font_size_override("font_size", 18)
@@ -4921,7 +5311,7 @@ func _build_detail() -> PanelContainer:
 		stats.add_child(atk_lbl)
 
 		var hp_lbl := Label.new()
-		hp_lbl.text = "HP  %d" % card_data.get("hp", 0)
+		hp_lbl.text = "HP  %d" % current_hp
 		if GameTheme.font_display:
 			hp_lbl.add_theme_font_override("font", GameTheme.font_display)
 		hp_lbl.add_theme_font_size_override("font_size", 18)
@@ -5007,15 +5397,18 @@ func _build_detail() -> PanelContainer:
 		el.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		vbox.add_child(el)
 
-	# Position the detail popup on the RIGHT side, just below the enemy
-	# banner (which ends at y~254). The relic grid moved to the LEFT
-	# column so this slot is free, and the popup ends up tucked into the
-	# enemy column where the player's eye is already going. Uses the
-	# actual viewport width so it works at any resolution.
+	# Position the detail popup on the RIGHT side, BELOW the enemy banner. The
+	# combat enemy banner now runs y=14..318 with the incoming-damage chip just
+	# under it (ending ~382), so the popup starts at y=388 to clear both — at the
+	# old y=270 the popup's header tucked behind the enemy HP medallion (the HUD
+	# is a CanvasLayer that draws over this root-parented popup). The relic grid
+	# is on the LEFT column, so this right slot is free. Non-combat scenes have no
+	# banner here, so a lower start just centres the popup a touch — harmless.
+	# Uses the actual viewport width so it works at any resolution.
 	var vp_w := 1600.0
 	if get_viewport() != null:
 		vp_w = get_viewport().get_visible_rect().size.x
-	panel.position = Vector2(vp_w - PW - MARGIN, 270)
+	panel.position = Vector2(vp_w - PW - MARGIN, 388)
 	panel.size = Vector2(PW, 0)
 	return panel
 

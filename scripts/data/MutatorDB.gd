@@ -60,7 +60,7 @@ const MUTATORS: Dictionary = {
 	},
 	"burning": {
 		"name": "Burning",
-		"desc": "Your front-row creatures lose 1 HP at the start of every round.",
+		"desc": "Start of each round: your front-row creatures take 1 damage.",
 		"icon": "fire",
 		"on_round_start": {"kind": "damage_player_front", "value": 1},
 		"gold_bonus": 25,
@@ -68,7 +68,7 @@ const MUTATORS: Dictionary = {
 	},
 	"taxed": {
 		"name": "Taxed",
-		"desc": "Spells cost 1 more mana (minimum 1).",
+		"desc": "Spells cost 1 more mana, minimum 1.",
 		"icon": "book",
 		"on_combat_start": {"kind": "spell_cost_increase", "value": 1},
 		"gold_bonus": 25,
@@ -92,7 +92,7 @@ const MUTATORS: Dictionary = {
 	},
 	"frenzied": {
 		"name": "Frenzied",
-		"desc": "Enemy on-death effects trigger twice.",
+		"desc": "Enemy On-Death effects trigger twice.",
 		"icon": "skull",
 		"on_combat_start": {"kind": "enemy_double_on_death", "value": 1},
 		"gold_bonus": 25,
@@ -114,13 +114,29 @@ const MUTATORS: Dictionary = {
 		"gold_bonus": 20,
 		"weight": 8,
 	},
+	"doomed": {
+		"name": "Doomed",
+		"desc": "Enemy front-liners enter with Doom 3. Kill them before the clock runs out, or the blast hits your face.",
+		"icon": "skull",
+		"on_enemy_enter": {"kind": "grant_doom", "value": 3},
+		"gold_bonus": 25,
+		"weight": 7,
+	},
+	"overgrown": {
+		"name": "Overgrown",
+		"desc": "Enemy creatures enter with +2 HP and Regenerate. Whatever you don't finish knits itself back together.",
+		"icon": "shield",
+		"on_enemy_enter": {"kind": "buff_hp_regen", "value": 2},
+		"gold_bonus": 30,
+		"weight": 6,
+	},
 
 	# ═══════════════════════════════════════════
 	#  Positive — gifts the player can stumble into
 	# ═══════════════════════════════════════════
 	"bountiful": {
 		"name": "Bountiful",
-		"desc": "Earn +25 gold from this fight. (No combat effect.)",
+		"desc": "Earn +25 gold from this fight. No other effect.",
 		"icon": "diamond",
 		"gold_bonus": 25,
 		"weight": 6,
@@ -153,6 +169,22 @@ const MUTATORS: Dictionary = {
 		"desc": "Draw 1 extra card per turn.",
 		"icon": "book",
 		"on_combat_start": {"kind": "hand_draw_increase", "value": 1},
+		"gold_bonus": 0,
+		"weight": 4,
+	},
+	"vampiric": {
+		"name": "Vampiric",
+		"desc": "Your creatures have Lifelink. Every drop they spill heals you a little.",
+		"icon": "heart",
+		"on_player_creature_enter": {"kind": "grant_player_keyword", "value": "lifelink"},
+		"gold_bonus": 0,
+		"weight": 4,
+	},
+	"bloodthirsty": {
+		"name": "Bloodthirsty",
+		"desc": "Your creatures have Rampage — every kill they land makes them permanently stronger this fight.",
+		"icon": "sword",
+		"on_player_creature_enter": {"kind": "grant_player_keyword", "value": "rampage"},
 		"gold_bonus": 0,
 		"weight": 4,
 	},

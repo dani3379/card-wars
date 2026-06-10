@@ -27,6 +27,8 @@ const ALIASES: Dictionary = {
 	"familiar":             "stray_cat",
 	"vengeance":            "vengeful_spirit",
 	"adaptable":            "mirror_knight",
+	"tallow_doll":          "copycat",
+	"the_glutton":          "corpse_eater",
 
 	# ── Wolves / hounds ──────────────────────────────────────────────────
 	"wolf":                 "hound",

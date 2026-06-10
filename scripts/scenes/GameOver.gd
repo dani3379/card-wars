@@ -3,6 +3,16 @@ extends Control
 
 const MAIN_MENU = "res://scenes/main_menu.tscn"
 
+# Diegetic run-end refrains (Direction C: the player is an effigy the burning
+# meadow keeps re-casting). Rotated by total defeat count so the framing shifts
+# a little each loop. Hard cap of 3 by design — more reads as content churn, not
+# as a refrain the meadow recites.
+const DEATH_REFRAINS := [
+	"The meadow makes another of you. It always has spares.",
+	"You stop here. The road doesn't.",
+	"That's one more walk that didn't reach the fire. There will be others.",
+]
+
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "game_over")
@@ -39,10 +49,13 @@ func _ready() -> void:
 		var death_line: String = ""
 		if RunState.cause_of_death != "":
 			death_line = "\nFelled by %s" % RunState.cause_of_death
-		$Subtitle.text = "The meadow burned without you.\nFloors reached: %d%s%s" % [
-			RunState.current_floor, asc_suffix, death_line]
+		# Rotate the loop refrain by defeat count. Modulo keeps the index valid
+		# even on a mid-run quit (total_defeats may be 0 → index 0).
+		var refrain: String = DEATH_REFRAINS[MetaState.total_defeats % DEATH_REFRAINS.size()]
+		$Subtitle.text = "%s\nFloors reached: %d%s%s" % [
+			refrain, RunState.current_floor, asc_suffix, death_line]
 
-	$Stats.text = "Total runs %d  •  Victories %d" % [
+	$Stats.text = "Total Runs %d  •  Victories %d" % [
 		MetaState.total_runs, MetaState.total_victories,
 	]
 

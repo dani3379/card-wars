@@ -25,7 +25,7 @@ const POTIONS: Dictionary = {
 		"effect": "heal_hp", "color": Color(0.85, 0.30, 0.30)},
 	"bottled_fury": {
 		"id": "bottled_fury", "name": "Bottled Fury",
-		"desc": "Target friendly creature gains +3 ATK this turn.",
+		"desc": "A friendly creature gains +3 ATK this turn.",
 		"usable_in": "combat", "targeting": "friendly_creature",
 		"effect": "buff_atk", "color": Color(0.95, 0.45, 0.10)},
 	"mana_surge": {
@@ -45,9 +45,44 @@ const POTIONS: Dictionary = {
 		"effect": "draw", "color": Color(0.80, 0.65, 0.95)},
 	"phoenix_brew": {
 		"id": "phoenix_brew", "name": "Phoenix Brew",
-		"desc": "Summon the last friendly creature to die as a 1/1 in a random empty lane (keeps its keywords).",
+		"desc": "Summon the last friendly creature to die as a 1/1 in a random empty lane. Keeps its keywords.",
 		"usable_in": "combat", "targeting": "none",
 		"effect": "revive_last_dead", "color": Color(1.00, 0.70, 0.25)},
+
+	# ── Combat swingers (added) ──────────────────────────────────────────────
+	# Each is built to visibly tilt a fight: a buff that snowballs, a burst that
+	# clears a wing, a synergy payoff, a panic button. Targeted ones reuse the
+	# potion-targeting flow; the rest resolve on click.
+	"war_paint": {
+		"id": "war_paint", "name": "War Paint",
+		"desc": "A friendly creature gains Rampage 2 and +1 ATK for the rest of the fight. Every kill makes it bigger.",
+		"usable_in": "combat", "targeting": "friendly_creature",
+		"effect": "grant_rampage", "color": Color(0.85, 0.30, 0.18)},
+	"vampiric_draught": {
+		"id": "vampiric_draught", "name": "Vampiric Draught",
+		"desc": "A friendly creature gains Lifelink 2 for the fight. Heal 4 HP now.",
+		"usable_in": "combat", "targeting": "friendly_creature",
+		"effect": "grant_lifelink", "color": Color(0.55, 0.10, 0.20)},
+	"chain_flask": {
+		"id": "chain_flask", "name": "Chain-Lightning Flask",
+		"desc": "Loose a bolt that arcs 4 times, dealing 2 damage to a random enemy creature each jump.",
+		"usable_in": "combat", "targeting": "none",
+		"effect": "chain_lightning", "color": Color(0.55, 0.80, 1.00)},
+	"doomsday_draught": {
+		"id": "doomsday_draught", "name": "Doomsday Draught",
+		"desc": "Every friendly Doom creature detonates right now. No more waiting for the clock.",
+		"usable_in": "combat", "targeting": "none",
+		"effect": "detonate_doom_all", "color": Color(1.00, 0.32, 0.16)},
+	"aegis_brew": {
+		"id": "aegis_brew", "name": "Aegis Brew",
+		"desc": "Raise a shield wall: every friendly creature gains Shield, blocking the next hit it takes.",
+		"usable_in": "combat", "targeting": "none",
+		"effect": "shield_wall", "color": Color(0.70, 0.85, 1.00)},
+	"conscript_brew": {
+		"id": "conscript_brew", "name": "Conscription Brew",
+		"desc": "Two 3/3 Recruits muster into your empty lanes. Bodies on demand.",
+		"usable_in": "combat", "targeting": "none",
+		"effect": "summon_recruits", "color": Color(0.65, 0.55, 0.40)},
 }
 
 

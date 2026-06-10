@@ -688,7 +688,7 @@ func _apply_effect(effect: Dictionary) -> String:
 				return "The card turns up blank. Nothing answers."
 			for _i in range(n_curse):
 				RunState.add_card(CardDB.random_curse_id())
-			return "The card turns up a wound. %d curse(s) settle into your deck." % n_curse
+			return "The card turns up a wound. %d Curse(s) settle into your deck." % n_curse
 		"debuff_starters":
 			# Hero-agnostic: weaken every starter-rarity CREATURE in the deck by
 			# 1 HP. The old version hardcoded troll/sprite/naga, so the "downside"
@@ -813,6 +813,13 @@ func _apply_effect(effect: Dictionary) -> String:
 					if amt > 0:
 						RunState.gain_gold(amt)
 					return "Gained %d gold." % amt
+				"lose_gold":
+					# Build-scaled COST (The Ledger). Charge min(amt, gold) so a
+					# broke player pays only what they have, never negative -
+					# mirroring lose_gold_partial's floor.
+					var to_lose_scaled: int = mini(amt, RunState.gold)
+					RunState.gold -= to_lose_scaled
+					return "Lost %d gold." % to_lose_scaled
 				"heal":
 					RunState.heal_hero(amt)
 					return "Healed %d HP." % amt
@@ -1058,7 +1065,7 @@ func _filter_prompt(filter: String) -> String:
 func _filter_empty_message(filter: String) -> String:
 	match filter:
 		"curse":
-			return "You carry no curse for him to eat."
+			return "You carry no Curse for him to eat."
 		"starter":
 			return "Nothing green enough is left to give."
 	return "Nothing here he'll take."
@@ -1242,7 +1249,7 @@ func _start_stranger_hand_mode() -> void:
 	var costs: Array = [
 		{"kind": "hp", "value": 8, "label": "Pay 8 HP"},
 		{"kind": "gold", "value": 80, "label": "Pay 80 gold"},
-		{"kind": "curse", "value": 0, "label": "Owe a curse"},
+		{"kind": "curse", "value": 0, "label": "Owe a Curse"},
 	]
 
 	# Horizontal row of card+cost columns, centered on the screen. The math
@@ -1337,7 +1344,7 @@ func _on_stranger_hand_pick(card_id: String, cost: Dictionary) -> void:
 			msg = "Paid %d gold. " % to_lose_g
 		"curse":
 			RunState.add_card(CardDB.random_curse_id())
-			msg = "A curse settles into your deck. "
+			msg = "A Curse settles into your deck. "
 	RunState.add_card(card_id)
 	msg += "Gained %s." % data.name
 	_show_result(msg)
@@ -1548,7 +1555,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Buy a slab off the hook\n\nForty coins. It bleeds in your pack\nand stands in your line come the next fight.",
-				"desc": "-40 gold; next combat starts with a 3/5 Hooked Slab",
+				"desc": "-40 gold; next fight starts with a 3/5 Hooked Slab",
 				"effects": [
 					{"type": "gold", "value": -40},
 					{"type": "gift_creature", "name": "Hooked Slab", "atk": 3, "hp": 5, "kw": [],
@@ -1564,15 +1571,15 @@ const EVENTS: Dictionary = {
 		"gate": {"type": "hp_below_pct", "value": 0.75},
 		"choices": [
 			{
-				"label": "One Sip\n\nHeal 6. A starter weakens.",
-				"desc": "+6 HP, starters -1 HP",
+				"label": "One Sip\n\nHeal 6 HP. Your starting creatures weaken.",
+				"desc": "+6 HP; starting creatures -1 HP each",
 				"effects": [
 					{"type": "heal", "value": 6},
 					{"type": "debuff_starters"},
 				],
 			},
 			{
-				"label": "Two Sips\n\nHeal 14. Lose 30 gold to the dregs.",
+				"label": "Two Sips\n\nHeal 14 HP. Lose 30 gold to the dregs.",
 				"desc": "+14 HP, -30 gold",
 				"effects": [
 					{"type": "heal", "value": 14},
@@ -1580,8 +1587,8 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Drink Deep\n\nHeal fully. Gain a curse.",
-				"desc": "Full heal, +curse",
+				"label": "Drink Deep\n\nHeal to full. Gain a Curse.",
+				"desc": "Heal to full, +1 Curse",
 				"effects": [
 					{"type": "heal_full"},
 					{"type": "add_curse"},
@@ -1596,7 +1603,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Trade Steel\n\nLose 6 HP.\nPick a card to remove.",
-				"desc": "-6 HP, remove 1 chosen",
+				"desc": "-6 HP, remove a chosen card",
 				"effects": [
 					{"type": "damage", "value": 6},
 					{"type": "remove_choice"},
@@ -1604,15 +1611,15 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Trade Coin\n\nLeave 60 gold on the sill.\nUpgrade a card you choose.",
-				"desc": "-60 gold, upgrade 1 chosen",
+				"desc": "-60 gold, upgrade a chosen card",
 				"effects": [
 					{"type": "gold", "value": -60},
 					{"type": "upgrade_choice"},
 				],
 			},
 			{
-				"label": "Trade Future\n\nGain a curse.\nTake a rare card.",
-				"desc": "+curse, +rare card",
+				"label": "Trade Future\n\nGain a Curse.\nTake a rare card.",
+				"desc": "+1 Curse, +1 rare card",
 				"effects": [
 					{"type": "add_curse"},
 					{"type": "add_rare"},
@@ -1650,7 +1657,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Take the honey jar\n\nIt is warm.\nIt is moving.",
-				"desc": "+10 HP, +curse",
+				"desc": "+10 HP, +1 Curse",
 				"effects": [
 					{"type": "heal", "value": 10},
 					{"type": "add_curse"},
@@ -1769,7 +1776,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Lay 2 cards in the grave\n\nThe choir sings them down.\nThe song takes a little of you with them.",
-				"desc": "Remove 2 chosen, +rare, -6 HP",
+				"desc": "-6 HP, remove 2 chosen cards, +1 rare card",
 				"effects": [
 					{"type": "damage", "value": 6},
 					{"type": "remove_choice_multi", "value": 2},
@@ -1785,7 +1792,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Pocket the offering plate and leave\n\nThe coins are heavy. The humming\nfollows you down the road, sour now.",
-				"desc": "+50 gold, +1 curse",
+				"desc": "+50 gold, +1 Curse",
 				"effects": [
 					{"type": "gold", "value": 50},
 					{"type": "add_curse"},
@@ -1817,7 +1824,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Crack off a shard\n\nNo coin, no blood — just a hairline\nfracture that follows you home.",
-				"desc": "Copy a card once; gain a Curse",
+				"desc": "Copy a card once, +1 Curse",
 				"effects": [
 					{"type": "copy_card"},
 					{"type": "add_curse"},
@@ -1832,15 +1839,15 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Sign in blood\n\nThe word costs flesh to learn.\nIt gives back something rare.",
-				"desc": "-8 HP, +rare card",
+				"desc": "-8 HP, +1 rare card",
 				"effects": [
 					{"type": "damage", "value": 8},
 					{"type": "add_rare"},
 				],
 			},
 			{
-				"label": "Speak the word aloud\n\nIt feeds on every spell you carry — the more\nyou know, the more it pays, and it lingers.",
-				"desc": "Gold per spell you own (cap 90); +1 mana next combat",
+				"label": "Speak the word aloud\n\nIt feeds on every spell you carry. The more\nyou know, the more it pays — and the longer it lingers.",
+				"desc": "Gold per spell you own (up to 90); +1 mana next fight",
 				"effects": [
 					{"type": "scaled", "count": "spells", "per": 7, "cap": 90, "outcome": "gold"},
 					{"type": "combat_mana", "value": 1, "text": "The true word hums behind your teeth — +1 mana next fight."},
@@ -1872,7 +1879,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Press your ear to the hive\n\nThe hum gets into your teeth.\nIt teaches you two things you did not want to know.",
-				"desc": "-9 HP, upgrade 2 chosen",
+				"desc": "-9 HP, upgrade 2 chosen cards",
 				"effects": [
 					{"type": "damage", "value": 9},
 					{"type": "upgrade_choice_multi", "value": 2},
@@ -1888,7 +1895,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Tell her you don't want to know\n\nShe nods. The hive does not.\nSomething small and heavy lands in your pocket.",
-				"desc": "+random relic, +1 curse",
+				"desc": "+random relic, +1 Curse",
 				"effects": [
 					{"type": "random_relic"},
 					{"type": "add_curse"},
@@ -1907,7 +1914,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Pay the toll in gold\n\nShe counts each coin slowly,\nlike she counts the years.",
-				"desc": "Up to -200 gold, +rare, +random relic",
+				"desc": "Up to -200 gold, +1 rare card, +random relic",
 				"effects": [
 					{"type": "lose_gold_partial", "value": 200},
 					{"type": "add_rare"},
@@ -1954,7 +1961,7 @@ const EVENTS: Dictionary = {
 						},
 						{
 							"label": "Crush it\n\nIt does not resist.\nIt leaves a smear of light.",
-							"desc": "+random relic, +1 curse",
+							"desc": "+random relic, +1 Curse",
 							"effects": [
 								{"type": "random_relic"},
 								{"type": "add_curse"},
@@ -1999,7 +2006,7 @@ const EVENTS: Dictionary = {
 					"choices": [
 						{
 							"label": "Take the warmth\n\nYou rest a while in the road.\nSome of its heat stays in your chest.",
-							"desc": "Heal 10, +2 max HP",
+							"desc": "+10 HP, +2 max HP",
 							"effects": [
 								{"type": "heal", "value": 10},
 								{"type": "gain_max_hp", "value": 2},
@@ -2007,7 +2014,7 @@ const EVENTS: Dictionary = {
 						},
 						{
 							"label": "Cut a lock of its hair\n\nIt does not flinch.\nNothing in this calf has ever flinched.",
-							"desc": "+random relic, +1 curse",
+							"desc": "+random relic, +1 Curse",
 							"effects": [
 								{"type": "random_relic"},
 								{"type": "add_curse"},
@@ -2029,8 +2036,8 @@ const EVENTS: Dictionary = {
 							],
 						},
 						{
-							"label": "Lie\n\nIt smiles like a calf should not smile\nand drops a small coin-purse in the road.",
-							"desc": "+50 gold, +1 curse",
+							"label": "Lie\n\nIt smiles the way a calf should not,\nand drops a small coin-purse in the road.",
+							"desc": "+50 gold, +1 Curse",
 							"effects": [
 								{"type": "gold", "value": 50},
 								{"type": "add_curse"},
@@ -2057,7 +2064,7 @@ const EVENTS: Dictionary = {
 		"gate": {"type": "has_curse"},
 		"choices": [
 			{
-				"label": "Feed him a curse\n\nHe swallows it without water.\nThe price, he said, is meat.",
+				"label": "Feed him a Curse\n\nHe swallows it without water.\nThe price, he said, is meat.",
 				"desc": "-3 HP, eat a chosen Curse",
 				"effects": [
 					{"type": "damage", "value": 3},
@@ -2092,7 +2099,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Sit and eat with him\n\nHe carves like he means it.\nThe portion he gives you is his own.",
-				"desc": "Full heal, +2 max HP, -30 gold, remove 1 chosen",
+				"desc": "Heal to full, +2 max HP, -30 gold, remove 1 chosen card",
 				"effects": [
 					{"type": "heal_full"},
 					{"type": "gain_max_hp", "value": 2},
@@ -2101,7 +2108,7 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Trade him another curse\n\nHe takes it gently and lays it\non the side of his plate.",
+				"label": "Trade him another Curse\n\nHe takes it gently and lays it\non the side of his plate.",
 				"desc": "+random relic, eat a chosen Curse",
 				"effects": [
 					{"type": "random_relic"},
@@ -2196,8 +2203,8 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Pry it up and take it\n\nThe mud comes off cleaner than you'd expect.\nThe price has already been paid by someone.",
-				"desc": "+60 gold, +1 curse",
+				"label": "Pry it up and take it\n\nThe mud slides off cleaner than it should.\nSomeone has already paid the price for this.",
+				"desc": "+60 gold, +1 Curse",
 				"effects": [
 					{"type": "gold", "value": 60},
 					{"type": "add_curse"},
@@ -2219,7 +2226,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Take the map\n\nIt shows a road that wasn't here\nbefore he started drawing it.",
-				"desc": "+random relic, +1 curse",
+				"desc": "+random relic, +1 Curse",
 				"effects": [
 					{"type": "random_relic"},
 					{"type": "add_curse"},
@@ -2244,11 +2251,11 @@ const EVENTS: Dictionary = {
 
 	"rotting_carnival": {
 		"name": "The Rotting Carnival",
-		"desc": "Three tents stand in a field. The barker is asleep at his post, or dead at his post; you can't tell and he won't say. A handwritten sign reads: PICK ONE. WE ARE NOT RESPONSIBLE FOR WHAT THE TENTS REMEMBER.",
+		"desc": "Three tents stand in a field. The barker is asleep at his post, or dead at his post; you can't tell, and he won't say. A handwritten sign reads: PICK ONE. WE ARE NOT RESPONSIBLE FOR WHAT THE TENTS REMEMBER.",
 		"choices": [
 			{
 				"label": "The red tent\n\nThe knife-thrower nicks you\non the way out.",
-				"desc": "Upgrade a random card, -4 HP",
+				"desc": "-4 HP, upgrade a random card",
 				"effects": [
 					{"type": "upgrade_random"},
 					{"type": "damage", "value": 4},
@@ -2256,7 +2263,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "The yellow tent\n\nThe fortune-teller takes\na piece of your name.",
-				"desc": "+80 gold, +1 curse",
+				"desc": "+80 gold, +1 Curse",
 				"effects": [
 					{"type": "gold", "value": 80},
 					{"type": "add_curse"},
@@ -2280,7 +2287,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Sit and eat\n\nThe wine is good. The bread is warm.\nThe candles do not burn down. Neither, now, do you.",
-				"desc": "Heal to full, +1 curse",
+				"desc": "Heal to full, +1 Curse",
 				"effects": [
 					{"type": "heal_full"},
 					{"type": "add_curse"},
@@ -2327,10 +2334,10 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Send a twin to fight\n\nThe surface bulges. Something with your\nshape steps out and walks the road beside you.",
-				"desc": "Next combat starts with a 3/3 Reflection",
+				"desc": "Next fight starts with a 3/3 Reflection",
 				"effects": [
 					{"type": "gift_creature", "name": "Reflection", "atk": 3, "hp": 3, "kw": [],
-						"text": "Your reflection will fight beside you next battle."},
+						"text": "Your reflection will fight beside you next fight."},
 				],
 			},
 		],
@@ -2358,7 +2365,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Tell her something true\n\nShe nods. You walk on.\nThere is a hole in your sentences now.",
-				"desc": "+1 curse, -1 random card",
+				"desc": "+1 Curse, -1 random card",
 				"effects": [
 					{"type": "add_curse"},
 					{"type": "remove_cards", "value": 1},
@@ -2444,21 +2451,21 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "On the hand\n\nThe smudge crawls under your fingernail.\nIt will be there when you raise your hand to fight.",
-				"desc": "Next combat: start with a 2/3 Vanguard in front-left",
+				"desc": "Next fight: start with a 2/3 Vanguard in front-left",
 				"effects": [
 					{"type": "mark_hand"},
 				],
 			},
 			{
 				"label": "On the heart\n\nIt sinks in. There is a second heartbeat\nbehind your own, just for a while.",
-				"desc": "Next combat: +1 max mana for the whole fight",
+				"desc": "Next fight: +1 max mana the whole fight",
 				"effects": [
 					{"type": "mark_heart"},
 				],
 			},
 			{
 				"label": "On the blood\n\nThey press the thumb to an open cut. It costs\nyou now and stands huge beside you later.",
-				"desc": "-6 HP now; next combat starts with a 4/5 Effigy",
+				"desc": "-6 HP now; next fight starts with a 4/5 Effigy",
 				"effects": [
 					{"type": "damage", "value": 6},
 					{"type": "gift_creature", "name": "Charcoal Effigy", "atk": 4, "hp": 5, "kw": [],
@@ -2476,7 +2483,7 @@ const EVENTS: Dictionary = {
 
 	"strangers_hand": {
 		"name": "The Wet Cards",
-		"desc": "A stranger sits in the road, dealing cards face-up onto a flat stone. The cards are wet. They look up only once. \"Each of these is owed to someone. Pay it off — and you take what they leave behind.\"",
+		"desc": "A stranger sits in the road, dealing cards face-up onto a flat stone. The cards are wet. The stranger looks up only once. \"Each of these is owed to someone. Pay it off — and you take what they leave behind.\"",
 		"choices": [
 			{
 				"label": "Step closer\n\nThe stone is warm.\nSo are the cards.",
@@ -2511,7 +2518,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Cut the red card\n\nYou do not pay to turn it.\nThat is the part that frightens you.",
-				"desc": "Free flip: a relic, or two curses",
+				"desc": "Free flip: a relic, or 2 Curses",
 				"effects": [
 					{"type": "wager_relic_or_curse", "curses": 2},
 				],
@@ -2599,7 +2606,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Press your hand to the runes\n\nThey are ice, and they are teaching.\nYour fingers will ache for a week. You will be better for it.",
-				"desc": "Upgrade a chosen card, -4 HP",
+				"desc": "-4 HP, upgrade a chosen card",
 				"effects": [
 					{"type": "damage", "value": 4},
 					{"type": "upgrade_choice"},
@@ -2651,7 +2658,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Open your own wrist\n\nNo creature, no problem. The groove takes\nblood just as well, and teaches a dark word for it.",
-				"desc": "-8 HP, +rare card, +1 Curse",
+				"desc": "-8 HP, +1 rare card, +1 Curse",
 				"effects": [
 					{"type": "damage", "value": 8},
 					{"type": "add_rare"},
@@ -2692,6 +2699,243 @@ const EVENTS: Dictionary = {
 					{"type": "remove_choice"},
 					{"type": "gold", "value": 40},
 				],
+			},
+		],
+	},
+
+	# ── Comic single (absurd register) ──
+	# A stage-fright understudy who has been "playing your part" insists on going
+	# on in your place. Pure next-fight gift; the gag is that he is sincerely
+	# terrible at it. Ungated — a gift creature is useful at any HP, no dead reward.
+	"the_understudy": {
+		"name": "The Understudy",
+		"desc": "A man in a costume of YOU — same cloak, same scowl, the stitching all wrong — bars the road, trembling. \"I've understudied your part for years,\" he whispers, clutching a script soaked through with notes. \"Let me go on in the next scene. I know all your lines. Most of them. Please.\"",
+		"choices": [
+			{
+				"label": "Let him have the stage\n\nHe weeps with gratitude, fumbles his cloak,\nand marches off the wrong way. He'll find the fight.",
+				"desc": "Next fight starts with a 2/6 Understudy in front-left",
+				"effects": [
+					{"type": "gift_creature", "name": "The Understudy", "atk": 2, "hp": 6, "kw": [],
+						"text": "He will throw himself into the next scene, badly."},
+				],
+			},
+			{
+				"label": "Coach him for an hour\n\nYou drill the part into him until your throat is raw.\nHe is better for it. You are hoarse for it.",
+				"desc": "-4 HP; next fight starts with a 4/7 Understudy",
+				"effects": [
+					{"type": "damage", "value": 4},
+					{"type": "gift_creature", "name": "The Understudy", "atk": 4, "hp": 7, "kw": [],
+						"text": "He has the lines now. Mostly. He will not let you down. Much."},
+				],
+			},
+			{
+				"label": "Buy his script off him\n\nHe surrenders the soaked pages for coin and slinks away.\nThe margins are full of notes in your own hand. You don't remember writing them.",
+				"desc": "+45 gold, +1 Curse",
+				"effects": [
+					{"type": "gold", "value": 45},
+					{"type": "add_curse"},
+				],
+			},
+		],
+	},
+
+	# ── Grim bargain (currency-of-choice debt) ──
+	# A polite ledger-keeper collecting an "old debt" you don't remember owing.
+	# Three currencies; the gold cost is build-scaled (per curse you carry), so a
+	# clean deck pays little and a cursed deck pays dearly — the debt knows you.
+	"the_debt_collector": {
+		"name": "The Ledger",
+		"desc": "A thin clerk sits at a writing-desk planted in the open road, turning the pages of a ledger longer than he is tall. He runs one inked finger down a column, stops, and looks up — not unkindly. \"Ah. You. There's a balance outstanding from a long way back. I'm only here to settle it. How will you pay?\"",
+		"choices": [
+			{
+				"label": "Pay in coin\n\nHe tallies it against the column.\nThe heavier your ledger, the longer the sum.",
+				"desc": "Lose gold (12 per Curse you carry, up to 120)",
+				"effects": [
+					{"type": "scaled", "count": "curses", "per": 12, "cap": 120, "outcome": "lose_gold"},
+				],
+			},
+			{
+				"label": "Pay in blood\n\nHe pricks your thumb, presses it to the page,\nand the ink runs red where you touched it.",
+				"desc": "-9 HP, +1 rare card",
+				"effects": [
+					{"type": "damage", "value": 9},
+					{"type": "add_rare"},
+				],
+			},
+			{
+				"label": "Sign it over to someone else\n\nHe shrugs, dips his pen, and writes a name in your place.\nYou do not ask whose. The debt does not vanish — it moves.",
+				"desc": "Lose a chosen card; gain a random relic",
+				"effects": [
+					{"type": "random_relic"},
+					{"type": "remove_choice"},
+				],
+			},
+		],
+	},
+
+	# ── Bleak / horror (face-fruit orchard) ──
+	# Trees grow fruit shaped like faces. Heal path gated behind hp_below_pct so a
+	# full-HP player never sees a dead "eat to heal" option; the harvest-for-gold
+	# path stays live at any HP and carries its own cost (a watching curse).
+	"the_weeping_orchard": {
+		"name": "The Weeping Orchard",
+		"desc": "Rows of pale trees stand in dead air. The fruit hangs heavy and low, and each one has a [color=#c98a3a]face[/color] — eyes shut, mouths slightly open, all of them faintly familiar. As you pass, a few of them begin, very quietly, to cry. The ground beneath is wet, and it is not with rain.",
+		"gate": {"type": "hp_below_pct", "value": 0.6},
+		"choices": [
+			{
+				"label": "Eat until you're full\n\nThe fruit is sweet and warm and tastes of someone\nyou loved. You feel it knit you back together. You try not to chew.",
+				"desc": "Heal to full; -2 max HP",
+				"effects": [
+					{"type": "heal_full"},
+					{"type": "lose_max_hp", "value": 2},
+				],
+			},
+			{
+				"label": "Fill your pack and sell the harvest\n\nThey keep weeping in the sack, all the way down the road,\nuntil — somewhere past the third hill — they stop. Something noticed.",
+				"desc": "+70 gold, +1 Curse",
+				"effects": [
+					{"type": "gold", "value": 70},
+					{"type": "add_curse"},
+				],
+			},
+			{
+				"label": "Bury the one that has your face\n\nYou dig with your hands. It does not struggle.\nThe orchard goes quiet, grateful, and leaves a gift in the dirt.",
+				"desc": "-5 HP, +random relic",
+				"effects": [
+					{"type": "damage", "value": 5},
+					{"type": "random_relic"},
+				],
+			},
+		],
+	},
+
+	# ── Pure gamble (absurd register) — reuses wager handlers from The Gambler ──
+	# A coin spinning on its edge that will not fall. Two independent bets plus a
+	# small consolation so leaving is never a fully dead option.
+	"coin_on_edge": {
+		"name": "The Coin That Won't Land",
+		"desc": "A silver coin spins on its edge in the middle of the path. It has been spinning, by the look of the worn groove beneath it, for a very long time. It does not wobble. It does not slow. A small sign, propped against a stone, reads in a neat hand: CALL IT.",
+		"choices": [
+			{
+				"label": "Bet a fistful of coin on heads\n\nYou throw your gold down beside the spinning silver.\nThe coin keeps turning, deciding, taking its time about you.",
+				"desc": "Bet 50 gold — even odds to win 120",
+				"effects": [
+					{"type": "wager_gold", "stake": 50, "payout": 120},
+				],
+			},
+			{
+				"label": "Stop it with your finger\n\nNo wager, no warning — just the nerve to touch it.\nWhatever side it shows when it stops, it shows to you.",
+				"desc": "Free flip: a relic, or 2 Curses",
+				"effects": [
+					{"type": "wager_relic_or_curse", "curses": 2},
+				],
+			},
+			{
+				"label": "Leave it spinning\n\nYou step around it. A single coin has fallen flat in the dust\nnearby — heads — left by someone who also knew better.",
+				"desc": "+10 gold",
+				"effects": [
+					{"type": "gold", "value": 10},
+				],
+			},
+		],
+	},
+
+	# ── War / grim bargain (recruiter for an army that isn't there) ──
+	# A sergeant enlisting for a war no one remembers. Trade a creature for back
+	# pay (sacrifice_pick → gold, scales with ATK), buy a soldier for the next
+	# fight, or take the bounty and a curse. Routes sacrifice through the existing
+	# modal, honoring the no-free-sacrifice rule.
+	"the_quiet_recruiter": {
+		"name": "The Recruiter",
+		"desc": "A sergeant in a uniform fifty years out of fashion sits behind a folding table, a muster-roll spread before him and not one other soul in sight. \"Recruiting,\" he says, tapping the empty roll. \"For the campaign. You'll have heard of it.\" You have not. \"No matter. Everyone marches eventually. Sign something over and I'll see you're looked after.\"",
+		"choices": [
+			{
+				"label": "Enlist one of your own\n\nHe enters the name on the roll with great ceremony, then\ncounts out back pay from a strongbox — by the recruit's measure.",
+				"desc": "Enlist a creature for gold (scales with its ATK)",
+				"effects": [
+					{"type": "sacrifice_pick", "reward": "gold", "base": 25, "per_atk": 7,
+						"prompt": "Sign which creature onto the roll? He pays by their measure."},
+				],
+			},
+			{
+				"label": "Hire a soldier off the roll\n\nFifty coins, and a grey-faced veteran rises from the bench,\nshoulders his pack without a word, and falls in beside you.",
+				"desc": "-50 gold; next fight starts with a 3/5 Conscript",
+				"effects": [
+					{"type": "gold", "value": -50},
+					{"type": "gift_creature", "name": "Grey Conscript", "atk": 3, "hp": 5, "kw": [],
+						"text": "The conscript will hold the line beside you next fight."},
+				],
+			},
+			{
+				"label": "Take the signing bounty and walk\n\nHe presses coin into your hand and stamps the roll anyway.\nYou are on it now. You feel the ink settle somewhere behind your ribs.",
+				"desc": "+55 gold, +1 Curse",
+				"effects": [
+					{"type": "gold", "value": 55},
+					{"type": "add_curse"},
+				],
+			},
+		],
+	},
+
+	# ── Two-stage branching (folk horror) — answering well ──
+	# A well that answers questions you haven't asked. Each branch swaps to a
+	# follow_up screen. Deliberately NOT heal-centered, so it stays ungated with
+	# no dead reward; every leaf carries a real cost or variance.
+	"the_answering_well": {
+		"name": "The Answering Well",
+		"desc": "An old stone well stands in a clearing, its bucket long rotted from the rope. As you lean over the lip, a voice rises out of the dark below — calm, patient, and pitched exactly like your own. It answers a question you are quite certain you did not ask aloud.",
+		"choices": [
+			{
+				"label": "Ask it something you've always feared to\n\nThe water far below shifts.\nThe voice draws a slow breath it does not have.",
+				"follow_up": {
+					"desc": "It tells you. It is worse than you guessed, and truer, and the knowing settles into you like cold water into cloth. \"There,\" it says. \"Now you carry it too. Will you keep what I've given, or pour it back?\"",
+					"choices": [
+						{
+							"label": "Keep the knowing\n\nIt sharpens something in you — a lesson\nyou will not be able to unlearn.",
+							"desc": "-6 HP, upgrade a chosen card",
+							"effects": [
+								{"type": "damage", "value": 6},
+								{"type": "upgrade_choice"},
+							],
+						},
+						{
+							"label": "Pour it back down the well\n\nYou let the answer go. It falls a long way.\nSomething heavy in your pack falls with it.",
+							"desc": "Remove a chosen card",
+							"effects": [
+								{"type": "remove_choice"},
+							],
+						},
+					],
+				},
+			},
+			{
+				"label": "Drop a coin and make a wish\n\nIt does not splash. You wait\nfor the sound. It never comes.",
+				"follow_up": {
+					"desc": "The voice laughs, softly, the way you laugh when no one is meant to hear. \"A wish. How quaint. The well grants — it simply never grants the part you wanted.\" Something rattles up out of the dark and catches on the lip of the stone.",
+					"choices": [
+						{
+							"label": "Take what the well gives\n\nIt is not what you wished for.\nIt is, the voice insists, what you needed.",
+							"desc": "+random relic, +1 Curse",
+							"effects": [
+								{"type": "random_relic"},
+								{"type": "add_curse"},
+							],
+						},
+						{
+							"label": "Reach deeper for the rest\n\nYour arm goes in to the shoulder.\nThe stone is wet. Something down there is warm.",
+							"desc": "-7 HP, +80 gold",
+							"effects": [
+								{"type": "damage", "value": 7},
+								{"type": "gold", "value": 80},
+							],
+						},
+					],
+				},
+			},
+			{
+				"label": "Say nothing and walk away\n\nThe voice keeps talking behind you,\nanswering questions, for a long time.",
+				"desc": "No effect",
+				"effects": [],
 			},
 		],
 	},

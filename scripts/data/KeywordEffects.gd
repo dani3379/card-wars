@@ -4,27 +4,29 @@ extends Node
 
 const KEYWORDS: Dictionary = {
 	"armored":    {"display": "Armored",     "desc": "Takes 1 less damage from each creature attack (minimum 1)."},
-	"swift":      {"display": "Swift",       "desc": "Attacks before normal combat resolves, while opposing creatures are still untapped."},
-	"ranged":     {"display": "Ranged",      "desc": "Targets a random back-row enemy first; falls back to front row if back is empty. Ignores blocking."},
-	"thorns":     {"display": "Thorns",      "desc": "Deals 1 damage back to each creature that attacks it."},
+	"swift":      {"display": "Swift",       "desc": "Attacks in the Swift pre-phase, before normal combat, while opposing creatures can't strike back."},
+	"ranged":     {"display": "Ranged",      "desc": "Attacks a random back-row enemy first, or the front row if the back is empty. Ignores blocking."},
+	"thorns":     {"display": "Thorns",      "desc": "Deals 1 damage back to each creature that attacks this."},
 	"regenerate": {"display": "Regenerate",  "desc": "Heals 1 HP at the start of each round."},
 	"summon":     {"display": "Summon",      "desc": "When played, also summons a 1/1 token in an adjacent empty lane."},
 	"last_stand": {"display": "Last Stand",  "desc": "The first lethal hit leaves this creature at 1 HP instead of killing it. Once per fight."},
 	"piercing":   {"display": "Piercing",    "desc": "When this kills its target, excess damage hits the enemy back row, then enemy face."},
 	"sacrifice":  {"display": "Sacrifice",   "desc": "Cost: destroy one of your own creatures to play this card."},
-	"exhaust":    {"display": "Exhaust",     "desc": "After playing, this card is removed from the fight (not added back to your discard)."},
+	"exhaust":    {"display": "Exhaust",     "desc": "After you play it, this card is removed for the rest of the fight instead of going to your discard pile."},
 	"retain":     {"display": "Retain",      "desc": "Stays in your hand at end of turn instead of being discarded."},
-	"wither":     {"display": "Wither N",    "desc": "Loses N ATK at the start of each round (minimum 0). The N on the card is how much it loses per round."},
-	"on_enter":   {"display": "On-Enter",    "desc": "Effect triggers immediately when this creature is placed on the board."},
+	"wither":     {"display": "Wither N",    "desc": "Loses N ATK at the start of each round (minimum 0). The number on the card is how much it loses each round."},
+	"on_enter":   {"display": "On-Enter",    "desc": "Effect triggers the moment this creature is placed on the board."},
 	"on_death":   {"display": "On-Death",    "desc": "Effect triggers when this creature dies (HP reaches 0)."},
-	"floop":      {"display": "Floop",       "desc": "Click this creature during your turn to use its Floop ability instead of attacking this round. Free (no mana). Once per creature per round."},
-	"adj_buff":   {"display": "Adj. Buff",   "desc": "Adjacent friendly creatures (same row, left/right columns) get a stat bonus while this is in play."},
+	"adj_buff":   {"display": "Adj. Buff",   "desc": "Adjacent friendlies (same row, left and right columns) get a stat bonus while this is in play."},
 	"poison":     {"display": "Poison",      "desc": "Any creature damaged by this dies, regardless of remaining HP."},
 	"shield":     {"display": "Shield",      "desc": "Absorbs the first hit completely, then Shield is removed."},
-	"guardian":   {"display": "Guardian",    "desc": "Adjacent enemy creatures are forced to attack this creature instead of their normal target."},
-	"structure":  {"display": "Structure",   "desc": "Cannot be attacked or targeted by spells. May hold a charge counter that bosses use for triggers."},
-	"slay":       {"display": "Slay",        "desc": "Effect that triggers when the card or creature kills its target. (Inline keyword used in card text, not a chip.)"},
+	"guardian":   {"display": "Guardian",    "desc": "Adjacent enemies are forced to attack this creature instead of their normal target."},
+	"structure":  {"display": "Structure",   "desc": "Can't be attacked or targeted by spells. May hold a charge counter that bosses use for triggers."},
+	"slay":       {"display": "Slay",        "desc": "Triggers when this card or creature kills its target. (Inline keyword in card text, not a chip.)"},
 	"adjacent":   {"display": "Adjacent",    "desc": "The creatures in the lanes to your immediate left and right. In 4×4 layouts, neighbors in both the front and back row of those columns count for adjacency buffs."},
+	"doom":       {"display": "Doom N",      "desc": "A ticking bomb. The counter drops by 1 at the start of each round; at 0 this creature detonates, dealing its ATK to the enemy face and then dying."},
+	"rampage":    {"display": "Rampage",     "desc": "Each time this kills an enemy creature in combat, it gains +1 ATK for the rest of the fight."},
+	"lifelink":   {"display": "Lifelink",    "desc": "Whenever this deals combat damage — to a creature or to the face — you heal 1 HP."},
 }
 
 
@@ -127,6 +129,10 @@ static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx) -> void
 
 static func dispatch_start_of_round(ctx) -> void:
 	# 4x4: iterate every creature on both sides, both rows.
+	# Doom detonations destroy creatures, so collect them during the tick and
+	# fire them AFTER the loop — mutating the field arrays mid-iteration would
+	# skip neighbours.
+	var doomed: Array = []
 	for card in ctx._all_creatures_both_sides():
 		if card.has_keyword("regenerate"):
 			card.current_hp = mini(card.current_hp + 1, card.card_data.hp)
@@ -135,6 +141,21 @@ static func dispatch_start_of_round(ctx) -> void:
 			var w = card.card_data.get("wither", 1)
 			card.current_atk = maxi(0, card.current_atk - w)
 			card.update_stat_display()
+		# Doom: tick the per-creature countdown. At 0 the creature is queued to
+		# detonate (damage opposing face + destroy via the canonical routine).
+		if card.has_keyword("doom"):
+			if card.has_method("_ensure_doom_init"):
+				card._ensure_doom_init()
+			card.doom_counter -= 1
+			if card.has_method("update_doom_display"):
+				card.update_doom_display()
+			if card.has_method("flash_doom_tick"):
+				card.flash_doom_tick()
+			if card.doom_counter <= 0:
+				doomed.append(card)
+	for card in doomed:
+		if is_instance_valid(card) and card.current_hp > 0:
+			ctx._detonate_doom(card)
 
 
 const COMBAT_KEYWORDS := ["armored", "swift", "ranged", "thorns", "regenerate", "last_stand", "piercing", "poison", "shield", "guardian"]
@@ -177,7 +198,7 @@ static func _copy_creature_onto(card, src: Dictionary) -> void:
 	for kw in src.get("keywords", []):
 		if not card.card_data.keywords.has(kw):
 			card.card_data.keywords.append(kw)
-	for dict_key in ["on_death", "floop", "adj_buff"]:
+	for dict_key in ["on_death", "on_play", "adj_buff"]:
 		if src.has(dict_key):
 			card.card_data[dict_key] = src[dict_key].duplicate(true)
 	if src.has("passive"):
@@ -315,6 +336,13 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 						continue
 					var victim = field[adj_lane]
 					if victim != null and victim != card:
+						# Eating your own creature IS a sacrifice — route it through
+						# the sacrifice hook so Bone Pile, Butcher's Cleaver, Reaper's
+						# Scythe and the ON_PLAYER_SACRIFICE reactive fire, the same as
+						# Offering / Fuel the Pyre. (take_damage(999) below still does
+						# the actual kill, which fires the victim's on_death payoffs.)
+						if not is_enemy:
+							ctx._trigger_player_sacrifice(victim)
 						victim.take_damage(999)
 						devoured += 1
 				if devoured > 0:

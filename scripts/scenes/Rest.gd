@@ -285,7 +285,7 @@ func _add_choice_reforge_if_available(row: HBoxContainer) -> void:
 			upgradeable_count += 1
 		if upgradeable_count < 2:
 			disabled_reason = "Need 2+ un-upgraded cards."
-	var desc := "%s\n◈ Forge TWO + versions (Whetstone)" % _flavor_for("reforge", "")
+	var desc := "%s\n◈ Forge two + versions (Whetstone)" % _flavor_for("reforge", "")
 	var banner = GameTheme.make_choice_banner("REFORGE", desc, _accent_reforge,
 		ICON_REFORGE, Vector2(340, 160), disabled_reason)
 	_wire_banner(banner, row, _accent_reforge, _start_reforge_mode)
@@ -527,11 +527,11 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	btn_row.add_theme_constant_override("separation", 30)
 	add_child(btn_row)
 
-	var upgrade_btn = GameTheme.make_themed_button("⚒ FORGE +", GameTheme.GILT, Vector2(240, 60), 22)
+	var upgrade_btn = GameTheme.make_themed_button("⚒ Forge +", GameTheme.GILT, Vector2(240, 60), 22)
 	upgrade_btn.pressed.connect(_do_upgrade.bind("plus", ""))
 	btn_row.add_child(upgrade_btn)
 
-	var back_btn = GameTheme.make_back_button("← BACK", Vector2(180, 60), 18)
+	var back_btn = GameTheme.make_back_button("← Back", Vector2(180, 60), 18)
 	back_btn.pressed.connect(_back_to_pick_card)
 	btn_row.add_child(back_btn)
 
@@ -628,7 +628,7 @@ func _build_change_summary(base: Dictionary, upgraded: Dictionary) -> String:
 	if not removed.is_empty():
 		parts.append("- " + ", ".join(removed))
 	if parts.is_empty():
-		return "Tail bonuses enhanced. Hover the upgraded card for the new text."
+		return "Bonus effects improved. Hover the upgraded card to read the new text."
 	return "   ·   ".join(parts)
 
 
@@ -665,7 +665,7 @@ func _do_upgrade(path: String, keyword: String = "") -> void:
 # Reforge was in flight, the in-flight counter is reset so cancelling truly
 # backs out instead of leaving 1 upgrade dangling.
 func _add_cancel_btn() -> void:
-	var btn = GameTheme.make_back_button("CANCEL", Vector2(140, 40))
+	var btn = GameTheme.make_back_button("Cancel", Vector2(140, 40))
 	btn.position = Vector2(740, 810)
 	btn.pressed.connect(func():
 		_reforge_remaining = 0

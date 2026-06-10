@@ -15,6 +15,21 @@ var round_number := 0
 const MAX_BANKED_MANA: int = 2
 const HAND_DRAW_PER_TURN: int = 4
 const MAX_HAND_SIZE := 10
+# ── Persistent-hand A/B toggle ────────────────────────────────────────────
+# true  = PERSISTENT hand: unplayed cards are KEPT at end of turn, and the
+#         start-of-round draw REFILLS up to HAND_REFILL_TARGET (draw-to-N).
+#         You hold cards across turns and choose when to play them.
+# false = original FRESH hand: discard the whole hand each turn and draw a
+#         fixed HAND_DRAW_PER_TURN. Flip this const to A/B the two loops.
+const PERSISTENT_HAND := true
+const HAND_REFILL_TARGET := 5
+# Battlefield repositioning — how many friendly creatures the player may drag to
+# a new slot per turn. The cap is the opportunity cost: you can't re-solve the
+# whole board every turn, so a move is a real commitment.
+const MOVES_PER_TURN: int = 2
+# Living Antagonist panel footprint (left margin of the enemy half).
+const PRESENCE_W: int = 200
+const PRESENCE_H: int = 372
 
 # 4x4 field: 4 columns (lanes) x 2 rows (front, back) per side.
 # Front row = closer to the midline. Back row = closer to its hero.
@@ -57,6 +72,7 @@ var _reinforcement: Dictionary = {}
 var _encounter_passive: String = ""
 var _encounter_name: String = ""
 var _encounter_passive_desc: String = ""
+var _encounter_preamble: String = ""
 var _encounter_script: Array = []
 
 # ── Mutator state — derived from RunState.current_mutator_id at setup.
@@ -75,6 +91,8 @@ var _mutator_max_mana_increase: int = 0    # blessed
 var _mutator_double_enemy_on_death: bool = false  # frenzied
 var _mutator_hand_draw_increase: int = 0   # wisdom — additive vs the reduce field
 var _mutator_scarred_dmg: int = 0          # scarred — applied once at fight setup
+var _mutator_enemy_doom: int = 0           # doomed — Doom N on enemy front-liners
+var _mutator_enemy_regen_hp: int = 0       # overgrown — +N HP + Regenerate on enemies
 
 var _hand: Array[Control] = []
 # Front rows — column-aligned with the midline (legacy name kept for compat).
@@ -112,6 +130,8 @@ var _standard_bearer_fired_this_turn: bool = false
 # persists for 2 rounds). Resets each turn.
 var _butchers_cleaver_armed: bool = false
 var _cards_played_this_turn: int = 0
+# Battlefield repositions used this turn (see MOVES_PER_TURN). Reset each round.
+var _moves_used_this_turn: int = 0
 # [PACING] temp debug — flips true once any non-ATK intent badge shows this fight.
 var _pacing_any_intent_shown: bool = false
 # Number of upcoming card plays that get -1 cost (Ironclad Veteran floop).
@@ -227,6 +247,7 @@ var _grave_pact_active: bool = false
 var _soul_lantern_used_this_round: bool = false
 var _battle_scars_triggered_this_fight: bool = false
 var _resonance_crystal_used_this_fight: bool = false
+var _gravewardens_rebirths: int = 0  # Gravewarden's Pact — Imp rebirths used this fight
 var _starting_hp: int = 0
 
 # Intent system
@@ -283,6 +304,33 @@ var _relic_panel: GridContainer
 # animation instead of stacking competing tweens.
 var _player_hp_tween: Tween = null
 var _enemy_hp_tween: Tween = null
+# ── Low-HP dread overlay (JUICE) ──
+# A breathing red screen-edge vignette + soft heartbeat that engages when the
+# player drops to/below the danger line and clears the moment HP recovers.
+var _low_hp_active: bool = false
+var _low_hp_vignette: Panel = null
+var _low_hp_tween: Tween = null
+var _low_hp_vignette_peak: float = 0.42  # max alpha of the breathe, deepens near 0 HP
+# ── Notable-death hitstop (JUICE) ──
+# Coalesces multiple deaths that land in the same frame so a wipe of several
+# creatures produces ONE weighty hit-stop instead of stacking pauses. Armed by
+# _note_death and consumed by a deferred call.
+var _deaths_this_frame: int = 0
+var _death_hitstop_armed: bool = false
+
+# ── Living Antagonist (enemy presence) ────────────────────────────────────
+# The encounter's signature creature, looming on the left of their half: lit,
+# emerging from shadow, and REACTING to the fight (flinch on damage, lean-in on
+# phase shifts, spoken barks). Replaces the old 84px "FOE" disc. This is the
+# "someone is across the table from you" lever — see _build_enemy_presence.
+var _enemy_presence: Control = null
+var _presence_art: TextureRect = null
+var _presence_flash: ColorRect = null         # red hit-flash overlay
+var _presence_hp_fill: ColorRect = null       # antagonist health bar fill
+var _presence_bark: Label = null              # spoken-line caption
+var _presence_bark_scrim: Panel = null        # soft dark scrim behind the bark
+var _presence_bark_tween: Tween = null
+var _presence_react_tween: Tween = null
 
 # Board container (no effects)
 var _board_container: Control
@@ -322,9 +370,16 @@ func _ready() -> void:
 			AudioBank.play_music_random(pool)
 	_build_board()
 	_build_ambient_fx()
+	# Cinematic per-act/per-encounter grade — must follow _build_ambient_fx so
+	# the CombatBg / Vignette / HearthGlow / StageLight / AmbientEmbers nodes it
+	# re-tones already exist.
+	_build_grade_overlay()
+	_apply_combat_mood()
 	_build_hud()
 	_init_decks()
 	_place_starting_board()
+	# Living Antagonist makes its entrance once the board is set.
+	get_tree().create_timer(0.45).timeout.connect(presence_enter)
 	# Pre-bake static-display textures for every unique card in the draw
 	# pile so when _draw_card spins up a Card2D with live_baked_mode=true
 	# the cache is warm. ~2 frames per uncached card; if the deck has 15
@@ -533,6 +588,7 @@ func _setup_fight_state() -> void:
 			_encounter_passive = enc.get("passive_id", "")
 			_encounter_name = enc.get("name", "")
 			_encounter_passive_desc = enc.get("passive_desc", "")
+			_encounter_preamble = enc.get("preamble", "")
 			_enemy_deck = EncounterDB.build_enemy_deck(enc_id)
 			_enemy_deck.shuffle()
 			_reinforcement = EncounterDB.get_reinforcement(enc_id)
@@ -957,7 +1013,7 @@ func _evenly_spread_lanes(n: int) -> Array:
 
 func _start_round() -> void:
 	round_number += 1
-	print("[PACING] R%d open   | P_board:%d E_board:%d | P_HP:%d E_HP:%d" % [round_number, _all_player_creatures().size(), _all_enemy_creatures().size(), player_hp, enemy_hp])
+	_dbgp("[PACING] R%d open   | P_board:%d E_board:%d | P_HP:%d E_HP:%d" % [round_number, _all_player_creatures().size(), _all_enemy_creatures().size(), player_hp, enemy_hp])
 	# Champion's Belt: turn-1-only ATK buff. Clear at round 2 start so the
 	# bonus stops applying after the first round of combat.
 	if round_number >= 2:
@@ -985,6 +1041,7 @@ func _start_round() -> void:
 				c.persistent_atk_buff = 0
 			c.update_stat_display()
 	_cards_played_this_turn = 0
+	_moves_used_this_turn = 0
 	_card_cost_discount = 0
 	_last_spell_played_this_turn = {}
 	_last_spell_target_ref = null
@@ -1013,6 +1070,26 @@ func _start_round() -> void:
 			_wc.current_atk = wc_base
 			_wc.update_stat_display()
 	_dispatch_passive_start_of_round()
+	# Warlord's Standard: snowballing front-row aggro. Every round after the
+	# first, front-row friendlies gain permanent +1 ATK. Round 1 is setup-only,
+	# so gating on round_number >= 2 means the first buff lands going into the
+	# first real combat round.
+	if _has_relic("warlords_standard") and round_number >= 2:
+		var ws: int = int(RelicDB.get_relic("warlords_standard").get("value", 1))
+		for c in _all_player_creatures():
+			if c.current_row == ROW_FRONT:
+				c.persistent_atk_buff += ws
+				c.persistent_atk_buff_rounds = 99  # effectively permanent this fight
+				c.update_stat_display()
+	# Bulwark Engine: turtle/Armored payoff. Every round, Armored friendlies gain
+	# +1 max HP (and heal the point) so a wall deck thickens over time.
+	if _has_relic("bulwark_engine"):
+		var be: int = int(RelicDB.get_relic("bulwark_engine").get("value", 1))
+		for c in _all_player_creatures():
+			if c.has_keyword("armored"):
+				c.card_data["hp"] = int(c.card_data.get("hp", 0)) + be
+				c.current_hp += be
+				c.update_stat_display()
 	# Reset phantom_veil one-per-round flag.
 	set_meta("phantom_veil_used", false)
 	# Mutator round-start chip damage (currently "burning").
@@ -1028,6 +1105,10 @@ func _start_round() -> void:
 	# what's coming. Non-boss enemies without intent cycles default to ATK
 	# which now renders as a visible damage chip via _update_intent_display.
 	_assign_intents()
+	# Mark the creature the start-of-round passive will snipe, so the threat reads
+	# on the board itself — not only as text. Read-only; uses the passive's own
+	# target picker.
+	_refresh_passive_threat_glow()
 
 	# Escalation check
 	_check_escalation()
@@ -1115,21 +1196,47 @@ func _start_round() -> void:
 	# simultaneously. Each card already tweens from the deck into its hand slot
 	# (Card2D.set_hand_target); spacing the spawns by ~80 ms makes the deal
 	# read as a real motion sequence instead of a single fanned poof.
-	var draw_count = HAND_DRAW_PER_TURN
-	# Snecko Eye: draws 6 instead of 4 (boss-relic trade for the cost chaos).
-	if _has_relic("snecko_eye"):
-		draw_count = int(RelicDB.get_relic("snecko_eye").get("value", 6))
-	# Mutator: "Famine" trims the per-turn draw, never below 1 card.
-	if _mutator_hand_draw_reduce > 0:
-		draw_count = maxi(1, draw_count - _mutator_hand_draw_reduce)
-	# Mutator: "Wisdom" — opposite of Famine, bumps the per-turn draw.
-	if _mutator_hand_draw_increase > 0:
-		draw_count += _mutator_hand_draw_increase
-	if _has_relic("couriers_bag") and round_number == 1:
-		draw_count += 1
-	# Tome of Many: deck has 20+ cards → +2 extra draw.
-	if _has_relic("tome_of_many") and RunState.deck.size() >= 20:
-		draw_count += int(RelicDB.get_relic("tome_of_many").get("value", 2))
+	# Per-turn draw. PERSISTENT_HAND switches the model (see the const header):
+	#   • persistent → REFILL up to a target (draw-to-N). Draw-boosting relics
+	#     raise the target; if the hand is already at/over target, draw_count = 0.
+	#   • fresh → the original fixed HAND_DRAW_PER_TURN (+ relic/mutator mods).
+	var draw_count: int
+	if PERSISTENT_HAND:
+		var target := HAND_REFILL_TARGET
+		if _has_relic("snecko_eye"):
+			target = int(RelicDB.get_relic("snecko_eye").get("value", 6))
+		if _has_relic("couriers_bag") and round_number == 1:
+			target += 1
+		if _has_relic("tome_of_many") and RunState.deck.size() >= 20:
+			target += int(RelicDB.get_relic("tome_of_many").get("value", 2))
+		if _mutator_hand_draw_increase > 0:
+			target += _mutator_hand_draw_increase
+		if _mutator_hand_draw_reduce > 0:
+			target = maxi(1, target - _mutator_hand_draw_reduce)
+		draw_count = maxi(0, target - _hand.size())
+		# Always deal at least one fresh card per turn. With the persistent hand,
+		# holding a full hand (5+ at the default target) refilled to 0 cards, so a
+		# turn could open with no new option — which felt dead. Guarantee a single
+		# draw instead. draw_one() still respects MAX_HAND_SIZE, so a hand already
+		# at 10 simply no-ops here (no overflow).
+		if draw_count == 0:
+			draw_count = 1
+	else:
+		draw_count = HAND_DRAW_PER_TURN
+		# Snecko Eye: draws 6 instead of 4 (boss-relic trade for the cost chaos).
+		if _has_relic("snecko_eye"):
+			draw_count = int(RelicDB.get_relic("snecko_eye").get("value", 6))
+		# Mutator: "Famine" trims the per-turn draw, never below 1 card.
+		if _mutator_hand_draw_reduce > 0:
+			draw_count = maxi(1, draw_count - _mutator_hand_draw_reduce)
+		# Mutator: "Wisdom" — opposite of Famine, bumps the per-turn draw.
+		if _mutator_hand_draw_increase > 0:
+			draw_count += _mutator_hand_draw_increase
+		if _has_relic("couriers_bag") and round_number == 1:
+			draw_count += 1
+		# Tome of Many: deck has 20+ cards → +2 extra draw.
+		if _has_relic("tome_of_many") and RunState.deck.size() >= 20:
+			draw_count += int(RelicDB.get_relic("tome_of_many").get("value", 2))
 	for i in draw_count:
 		if i == 0:
 			draw_one()
@@ -1143,6 +1250,9 @@ func _start_round() -> void:
 		var delay: float = 0.08 * float(draw_count) + 0.05
 		get_tree().create_timer(delay).timeout.connect(_apply_pact_of_embers)
 
+	# Board is interactive again — the player can reposition creatures (and floop)
+	# during their turn. Cleared in _on_end_turn so grabs can't start mid-combat.
+	Card2D.board_interactive = true
 	_end_turn_btn.disabled = false
 	_update_hud()
 	_show_turn_banner()
@@ -1170,7 +1280,9 @@ func _on_end_turn() -> void:
 	_end_turn_confirmed = false
 	_end_turn_btn.disabled = true
 	phase = Phase.RESOLVING
-	print("[PACING] R%d commit | played:%d | P_board:%d E_board:%d | P_HP:%d E_HP:%d" % [round_number, _cards_played_this_turn, _all_player_creatures().size(), _all_enemy_creatures().size(), player_hp, enemy_hp])
+	_clear_threat_flags()  # JUICE: drop the pre-combat threat outlines; the clash itself now reads
+	Card2D.board_interactive = false
+	_dbgp("[PACING] R%d commit | played:%d | P_board:%d E_board:%d | P_HP:%d E_HP:%d" % [round_number, _cards_played_this_turn, _all_player_creatures().size(), _all_enemy_creatures().size(), player_hp, enemy_hp])
 	# Art of War: if no cards played, bonus mana next turn
 	if _has_relic("art_of_war") and _cards_played_this_turn == 0:
 		_bonus_mana_next_turn += 1
@@ -1180,43 +1292,14 @@ func _on_end_turn() -> void:
 		await _mime_trigger_floop_from_hand()
 	_update_hud()
 
-	# Resolve floop abilities (with reactive passive check).
-	# `_resolve_floops` is a coroutine — it awaits modal pickers (filter_draw,
-	# scry, reorder) and per-floop pauses. Without `await` here, combat would
-	# resolve underneath an open modal, making the picker appear to auto-select.
-	await _resolve_floops()
-
 	# Resolve enemy intents (non-attack intents execute now)
 	_resolve_intents()
 
 	await _do_combat()
 
 
-func _resolve_floops() -> void:
-	# Player floops (both rows). Player floops are explicit (will_floop flag).
-	for row in [ROW_FRONT, ROW_BACK]:
-		var p_arr = _row_array(false, row)
-		for lane_idx in range(LANES_PER_ROW):
-			var card = p_arr[lane_idx]
-			if card != null and card.will_floop and card.has_floop():
-				await _resolve_floop_ability(card, lane_idx, false)
-				if is_instance_valid(card):
-					card.will_floop = false
-					card.has_flooped_this_turn = true
-					card.has_attacked_this_turn = true
-					card.update_floop_display()
-				_dispatch_reactive("ON_PLAYER_FLOOP", card, lane_idx)
-	# Enemy floops (both rows). 1-in-N chance, gated by ENEMY_FLOOP_CHANCE_DENOM.
-	for row in [ROW_FRONT, ROW_BACK]:
-		var e_arr = _row_array(true, row)
-		for lane_idx in range(LANES_PER_ROW):
-			var e_card = e_arr[lane_idx]
-			if e_card != null and e_card.has_floop() and randi() % ENEMY_FLOOP_CHANCE_DENOM == 0:
-				await _resolve_floop_ability(e_card, lane_idx, true)
-
-
-func _resolve_floop_ability(card: Control, lane_idx: int, is_enemy: bool) -> void:
-	var floop_data = card.card_data.get("floop", {})
+func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> void:
+	var floop_data = card.card_data.get("on_play", {})
 	var times = 1
 	if not is_enemy and _has_relic("echo_staff"):
 		times = 2
@@ -1427,16 +1510,21 @@ func _resolve_floop_ability(card: Control, lane_idx: int, is_enemy: bool) -> voi
 					await _show_reorder_modal(int(floop_data.value))
 			"filter_draw":
 				if not is_enemy:
+					# Mule: draw FIRST, then pitch the worst card you now hold — you
+					# choose the discard with full information and never end down a
+					# card (the old discard-then-draw-1 was card-negative on a body
+					# nobody picked). Net: replace Mule with a 1/3 + a free filter.
+					draw_one()
+					draw_one()
 					if _hand.size() > 0:
 						var picked: Array = await _show_discard_picker(1,
-							"Mule — discard a card, draw a card")
+							"Mule — discard a card")
 						for c in picked:
 							_hand.erase(c)
 							_player_discard_pile.append(_pile_entry(c.card_id, c.deck_uid))
 							if c.get_parent() != null:
 								c.get_parent().remove_child(c)
 							c.queue_free()
-					draw_one()
 			"raise_dead":
 				if not is_enemy and _player_discard_pile.size() > 0:
 					var creature_indices: Array = []
@@ -1481,8 +1569,8 @@ func _resolve_floop_ability(card: Control, lane_idx: int, is_enemy: bool) -> voi
 					var token_data = {
 						"id": "token_hand", "name": "Cat Token", "type": "creature",
 						"cost": 0, "atk": floop_data.get("atk", 1), "hp": floop_data.get("hp", 1),
-						"rarity": "starter", "keywords": ["floop"], "desc": "Token. Floop: deal 1 to opposing.",
-						"floop": {"type": "damage_opposing", "value": 1}, "is_token": true
+						"rarity": "starter", "keywords": [], "desc": "Token. When played: deal 1 damage to the opposing creature.",
+						"on_play": {"type": "damage_opposing", "value": 1}, "is_token": true
 					}
 					_draw_card(token_data.id)
 			"buff_familiar_pick":
@@ -1599,13 +1687,13 @@ func _resolve_floop_ability(card: Control, lane_idx: int, is_enemy: bool) -> voi
 						victim.take_damage(999)
 			"copy_opposing_floop":
 				var opp = get_opposing_card(lane_idx, not is_enemy)
-				if opp != null and opp.card_data.has("floop"):
-					var copied_floop = opp.card_data.floop.duplicate(true)
-					var orig_floop = card.card_data.floop
-					card.card_data.floop = copied_floop
-					await _resolve_floop_ability(card, lane_idx, is_enemy)
+				if opp != null and opp.card_data.has("on_play"):
+					var copied_floop = opp.card_data.on_play.duplicate(true)
+					var orig_floop = card.card_data.on_play
+					card.card_data.on_play = copied_floop
+					await _resolve_on_play_ability(card, lane_idx, is_enemy)
 					if is_instance_valid(card):
-						card.card_data.floop = orig_floop
+						card.card_data.on_play = orig_floop
 			"swap_atk":
 				var opp = get_opposing_card(lane_idx, not is_enemy)
 				if opp != null:
@@ -1644,7 +1732,7 @@ func _resolve_floop_ability(card: Control, lane_idx: int, is_enemy: bool) -> voi
 							"current_hp": card.current_hp,
 							"keywords": card.card_data.get("keywords", []).duplicate(),
 							"passive": card.card_data.get("passive", ""),
-							"floop": card.card_data.get("floop", {}).duplicate(true) if card.card_data.has("floop") else null,
+							"floop": card.card_data.get("on_play", {}).duplicate(true) if card.card_data.has("on_play") else null,
 						})
 					# Become the opposing creature for the round: stats, keywords,
 					# passive, and (rare-tier) floop. We deliberately don't copy
@@ -1656,8 +1744,8 @@ func _resolve_floop_ability(card: Control, lane_idx: int, is_enemy: bool) -> voi
 					card.card_data["keywords"] = opp.card_data.get("keywords", []).duplicate()
 					if opp.card_data.has("passive"):
 						card.card_data["passive"] = opp.card_data["passive"]
-					if opp.card_data.has("floop"):
-						card.card_data["floop"] = opp.card_data["floop"].duplicate(true)
+					if opp.card_data.has("on_play"):
+						card.card_data["on_play"] = opp.card_data["on_play"].duplicate(true)
 					card.update_stat_display()
 					card.set_meta("is_copy", true)
 			"blood_sacrifice":
@@ -1819,7 +1907,9 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool,
 		if opponent.has_method("play_hit_recoil"):
 			opponent.play_hit_recoil(is_enemy)
 		_apply_thorns(opponent, card, is_enemy)
+		var swift_hp_before: int = opponent.current_hp
 		opponent.take_damage(atk)
+		var swift_dealt: bool = opponent.current_hp < swift_hp_before
 		# Poison: swift attacker with Poison kills defender on any hit
 		if opponent.current_hp > 0 and atk > 0 and card.has_keyword("poison"):
 			opponent.current_hp = 0
@@ -1830,6 +1920,8 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool,
 		var was_lethal: bool = opponent.current_hp <= 0
 		if was_lethal and (card.has_keyword("piercing") or (is_enemy and _has_encounter_passive_keyword(card, "piercing")) or card.get_meta("inspire_piercing", false)):
 			_apply_piercing_overflow(card, opponent, lane_idx, is_enemy)
+		# Keyword riders: Lifelink (heal on damage) + Rampage (+ATK on kill).
+		_apply_combat_strike_riders(card, swift_dealt, was_lethal, is_enemy)
 		if was_lethal:
 			screen_shake(6.0)
 			await _short_pause(HITSTOP_BEAT)
@@ -1897,6 +1989,94 @@ func _apply_piercing_overflow(attacker: Control, victim: Control, lane_idx: int,
 		damage_enemy_hero(total)
 
 
+# ═══════════════════════════════════════════
+#  KEYWORD RIDERS — doom / rampage / lifelink
+# ═══════════════════════════════════════════
+
+func _detonate_doom(card: Control) -> void:
+	# Doom hit 0: the creature explodes. Damage = its doom_damage override, else
+	# its current effective ATK, dealt to the OPPOSING face (enemy doom → player
+	# face, player doom → enemy face). Then it dies through the canonical destroy
+	# path (take_damage(999) → try_die → _on_card_destroyed) so on_death effects,
+	# relics, and reactive passives all fire normally — no hand-rolled death.
+	if card == null or not is_instance_valid(card):
+		return
+	var is_enemy: bool = card.is_opponent
+	var dmg: int = int(card.card_data.get("doom_damage", card.effective_atk()))
+	# Ember Censer (Kindler signature) — YOUR Doom creatures detonate for +1.
+	# Gated to player-side detonations so the relic reads as "your Doom" and
+	# doesn't buff enemy bombs aimed at the player's face.
+	if not is_enemy and _has_relic("ember_censer"):
+		dmg += int(RelicDB.get_relic("ember_censer").get("value", 1))
+	# Doom Herald — YOUR Doom creatures detonating draws a card. Gated to
+	# player-side so enemy bombs don't fuel the player's hand. Drawn before the
+	# detonation destroy so a full draw pile still feels the payoff.
+	if not is_enemy and _has_relic("doom_herald"):
+		for _i in int(RelicDB.get_relic("doom_herald").get("value", 1)):
+			draw_one()
+	# LOUD telegraph payoff: a red bloom + hard shake so the clock hitting zero
+	# is unmistakable.
+	screen_shake(12.0)
+	spawn_ash_burst(_card_center(card), Color(1.0, 0.32, 0.16), 22)
+	var chip_pos := card.global_position + Vector2(card.size.x * card.scale.x * 0.5, -14)
+	spawn_floating_number(chip_pos, "DOOM!", Color(1.0, 0.30, 0.18), true)
+	if AudioBank != null:
+		AudioBank.play_sfx("hit_hero")
+	if dmg > 0:
+		if is_enemy:
+			damage_player_hero(dmg)
+		else:
+			damage_enemy_hero(dmg)
+	# Canonical destroy — fires on_death / relics / reactives uniformly.
+	if is_instance_valid(card) and card.current_hp > 0:
+		card.take_damage(999)
+
+
+func _apply_combat_strike_riders(attacker: Control, dealt_damage: bool, defender_was_killed: bool, attacker_is_enemy: bool) -> void:
+	# Shared post-strike rider for every combat-damage path (column / swift /
+	# ranged / hydra / face). Keeps Rampage + Lifelink behaving identically no
+	# matter which attack routine landed the hit.
+	#   dealt_damage  — this strike landed > 0 damage (Lifelink heals).
+	#   defender_was_killed — the target died to this strike (Rampage grows).
+	if attacker == null or not is_instance_valid(attacker):
+		return
+	# Lifelink — heal the PLAYER once per strike (not per damage point) whenever
+	# a friendly creature deals combat damage. Generic, reusable version of the
+	# Vampire Lord passive (which also bundles +ATK and is kill-gated).
+	if dealt_damage and not attacker_is_enemy and attacker.has_keyword("lifelink") and player_hp < player_max_hp:
+		var ll: int = int(attacker.card_data.get("lifelink", 1))
+		# Crimson Chalice — Lifelink heals an extra point per strike.
+		if _has_relic("crimson_chalice"):
+			ll += int(RelicDB.get_relic("crimson_chalice").get("value", 1))
+		if ll > 0:
+			player_hp = mini(player_hp + ll, player_max_hp)
+			_show_lifelink_heal(ll)
+			_update_hud()
+	# Rampage — permanent +ATK on every combat kill, for the rest of the fight.
+	if defender_was_killed and attacker.has_keyword("rampage"):
+		var amt: int = int(attacker.card_data.get("rampage", 1))
+		if bool(attacker.card_data.get("is_upgraded", false)):
+			amt += 1
+		# Berserker's Totem — every Rampage trigger grows an extra point.
+		if not attacker_is_enemy and _has_relic("berserkers_totem"):
+			amt += int(RelicDB.get_relic("berserkers_totem").get("value", 1))
+		if amt > 0:
+			attacker.persistent_atk_buff += amt
+			attacker.persistent_atk_buff_rounds = 99  # effectively permanent this fight
+			attacker.update_stat_display()
+			var rp_pos := attacker.global_position + Vector2(attacker.size.x * attacker.scale.x * 0.5, -10)
+			spawn_floating_number(rp_pos, "RAMPAGE +%d" % amt, Color(1.0, 0.62, 0.20), false)
+
+
+func _show_lifelink_heal(amount: int) -> void:
+	# Small green heal number near the player HP medallion.
+	if amount <= 0:
+		return
+	if _player_hp_label != null:
+		spawn_floating_number(_player_hp_label.get_global_rect().get_center() + Vector2(0, -6),
+			"+%d" % amount, Color(0.40, 0.95, 0.45), false)
+		_punch_label(_player_hp_label, 1.12)
+
 
 func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: int, attacker_is_enemy: bool) -> void:
 	if attacker.has_method("play_attack_lunge"):
@@ -1922,7 +2102,7 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 			atk = maxi(0, defender.current_hp - 1)
 	var who = "ENEMY" if attacker_is_enemy else "PLAYER"
 	var defender_side = "PLAYER" if attacker_is_enemy else "ENEMY"
-	print("[COMBAT] %s %s (%d ATK) hits %s %s (%d/%d HP) in lane %d → %d dmg → %d HP left" % [
+	_dbgp("[COMBAT] %s %s (%d ATK) hits %s %s (%d/%d HP) in lane %d → %d dmg → %d HP left" % [
 		who, attacker.card_data.name, atk,
 		defender_side, defender.card_data.name, defender.current_hp, defender.card_data.hp,
 		lane_idx, atk, maxi(0, defender.current_hp - atk)])
@@ -1930,7 +2110,11 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 	_play_attack_tracer(_card_center(attacker), _card_center(defender), attacker_is_enemy)
 	if defender.has_method("play_hit_recoil"):
 		defender.play_hit_recoil(attacker_is_enemy)
+	var hp_before: int = defender.current_hp
 	defender.take_damage(atk)
+	# Did this strike actually remove HP? (A Shield absorbs the whole hit, so
+	# atk > 0 but no damage was dealt — Lifelink shouldn't trigger on that.)
+	var strike_dealt_damage: bool = defender.current_hp < hp_before
 	attacker.has_attacked_this_turn = true
 	# Poison: if attacker has Poison and dealt damage, defender dies regardless
 	# of remaining HP. Shield absorbing the hit means no damage was dealt.
@@ -1959,6 +2143,9 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 		attacker.current_atk += vamp_gain
 		attacker.update_stat_display()
 
+	# Keyword riders: Lifelink (heal on damage) + Rampage (+ATK on kill).
+	_apply_combat_strike_riders(attacker, strike_dealt_damage, was_lethal, attacker_is_enemy)
+
 	# Weighted punctuation: a kill or heavy blow gets a stronger shake + a brief
 	# hit-stop; ordinary hits take just a short breath before the next attacker.
 	if was_lethal:
@@ -1978,6 +2165,7 @@ func _creature_hits_face(card: Control, lane_idx: int, is_enemy: bool) -> void:
 	if not is_instance_valid(card):
 		return
 	var atk = _effective_attack(card, lane_idx, is_enemy)
+	var face_dealt: bool = false
 	if is_enemy:
 		if _encounter_passive == "harpy_swift_face" and card.has_keyword("swift"):
 			atk += 1
@@ -1985,10 +2173,15 @@ func _creature_hits_face(card: Control, lane_idx: int, is_enemy: bool) -> void:
 		atk = maxi(0, atk - reduction)
 		if atk > 0:
 			damage_player_hero(atk)
+			face_dealt = true
 	else:
 		damage_enemy_hero(atk)
+		face_dealt = atk > 0
 
 	card.has_attacked_this_turn = true
+	# Keyword riders: Lifelink heals when this creature lands face damage (no
+	# defender to kill, so Rampage never fires here).
+	_apply_combat_strike_riders(card, face_dealt, false, is_enemy)
 	# Hero-damage functions already shake + flash; just pace the cascade.
 	await _short_pause(HITSTOP_BEAT if atk > 0 else POST_HIT_BEAT)
 
@@ -2014,16 +2207,28 @@ func _resolve_hydra_attack(attacker: Control, lane_idx: int, is_enemy: bool) -> 
 			damage_player_hero(atk)
 		else:
 			damage_enemy_hero(atk)
+		# Lifelink heals once for the unblocked face swing.
+		_apply_combat_strike_riders(attacker, atk > 0, false, is_enemy)
 		await _short_pause(HITSTOP_BEAT)
 		return
 	# Bites through the whole line at once — streak + recoil on every target.
+	# Lifelink heals once for the swing; Rampage grows once if anything died.
+	var hydra_dealt: bool = false
+	var hydra_killed: bool = false
 	for t in live:
 		_play_attack_tracer(_card_center(attacker), _card_center(t), is_enemy)
 		if t.has_method("play_hit_recoil"):
 			t.play_hit_recoil(is_enemy)
+		var t_hp_before: int = t.current_hp
 		t.take_damage(atk)
+		if t.current_hp < t_hp_before:
+			hydra_dealt = true
+		if t.current_hp <= 0:
+			hydra_killed = true
 		if attacker.current_hp > 0:
 			attacker.take_damage(1)
+	if is_instance_valid(attacker):
+		_apply_combat_strike_riders(attacker, hydra_dealt, hydra_killed, is_enemy)
 	screen_shake(6.0)
 	await _short_pause(HITSTOP_BEAT)
 
@@ -2093,13 +2298,20 @@ func _resolve_ranged_attacks() -> void:
 					_play_attack_tracer(_card_center(card), _card_center(ranged_target), is_enemy)
 					if ranged_target.has_method("play_hit_recoil"):
 						ranged_target.play_hit_recoil(is_enemy)
+					var rng_hp_before: int = ranged_target.current_hp
 					ranged_target.take_damage(atk)
+					var rng_dealt: bool = ranged_target.current_hp < rng_hp_before
+					var rng_killed: bool = ranged_target.current_hp <= 0
+					# Keyword riders: Lifelink (heal on damage) + Rampage (+ATK on kill).
+					_apply_combat_strike_riders(card, rng_dealt, rng_killed, is_enemy)
 					await _short_pause(HITSTOP_BEAT if ranged_target.current_hp <= 0 else POST_HIT_BEAT)
 				else:
 					if is_enemy:
 						damage_player_hero(atk)
 					else:
 						damage_enemy_hero(atk)
+					# Lifelink heals on the unblocked face shot.
+					_apply_combat_strike_riders(card, atk > 0, false, is_enemy)
 					await _short_pause(POST_HIT_BEAT)
 
 
@@ -2217,7 +2429,7 @@ func _mime_trigger_floop_from_hand() -> void:
 	# Cancellable: closing the picker skips Mime for this turn.
 	var candidates: Array[Control] = []
 	for c in _hand:
-		if c != null and is_instance_valid(c) and c.is_creature() and c.has_floop():
+		if c != null and is_instance_valid(c) and c.is_creature() and c.card_data.has("on_play"):
 			candidates.append(c)
 	if candidates.is_empty():
 		return
@@ -2237,10 +2449,11 @@ func _mime_trigger_floop_from_hand() -> void:
 	candidate.current_row = slot.row
 	candidate.current_lane = slot.lane
 	candidate.set_compact_mode(true)
-	candidate.will_floop = true
 	_place_card_in_slot(candidate, slot.lane, slot.row)
 	_first_creature_played = true
-	candidate.update_floop_display()
+	# Mime triggers the card's on-play ability for free.
+	if candidate.card_data.has("on_play"):
+		_resolve_on_play_ability(candidate, slot.lane, false)
 
 
 func _show_mime_picker(candidates: Array[Control]) -> Control:
@@ -2505,6 +2718,17 @@ func _on_friendly_death(card: Control, _lane_idx: int) -> void:
 	# fight. _friendly_deaths_this_round was incremented above already.
 	if _has_relic("skull_throne") and _friendly_deaths_this_round == 5:
 		_mana_drunkard_bonus += int(RelicDB.get_relic("skull_throne").get("value", 2))
+	# Gravewarden's Pact: the first N non-token friendly deaths each fight are
+	# reborn as 1/1 Imps in the lane/row they fell in (summon_token falls through
+	# to the other row if the column is somehow occupied). Tokens are excluded so
+	# reborn Imps don't chain the rebirth — it's "your 3 real creatures return".
+	if _has_relic("gravewardens_pact") and not card.is_token:
+		var gw_cap: int = int(RelicDB.get_relic("gravewardens_pact").get("value", 3))
+		if _gravewardens_rebirths < gw_cap:
+			_gravewardens_rebirths += 1
+			var gw_row: int = card.current_row if card.current_row in [ROW_FRONT, ROW_BACK] else ROW_FRONT
+			var gw_lane: int = card.current_lane if (card.current_lane >= 0 and card.current_lane < LANES_PER_ROW) else 0
+			summon_token(1, 1, gw_lane, false, gw_row)
 	# Soul Ledger: every Nth lifetime friendly death summons a 4/4 token in
 	# any empty lane (front preferred, back fallback).
 	if _has_relic("soul_ledger"):
@@ -2727,10 +2951,128 @@ func _place_enemy_card(data: Dictionary, lane_idx: int, row: int = ROW_FRONT) ->
 	_mutator_apply_to_enemy(card)
 	card.update_stat_display()
 	KeywordEffects.dispatch_on_enter(card, lane_idx, true, self)
+	if card.card_data.has("on_play"):
+		_resolve_on_play_ability(card, lane_idx, true)
 	_dispatch_encounter_on_enter(data, lane_idx)
 	# Show the freshly-placed creature's intent immediately so it's never
 	# blank between placement and the next intent-assignment pass.
 	_update_intent_display(card, "ATK")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  CINEMATIC COLOUR GRADE — per-act / per-encounter "mood"
+# ─────────────────────────────────────────────────────────────────────────
+# One screen-read grade shader sits above the board + HUD + hand and re-tones
+# the whole frame; _apply_combat_mood() drives its params (plus the existing
+# vignette / hearth-glow / stage-light / ember layers) from a small mood table,
+# so every act, boss, and elite gets its own identity at ~zero cost. The param
+# sets were tuned in the look-lab (tools/screenshot/_probe_look.gd) and picked
+# from rendered comparisons against genre hits.
+var _grade_mat: ShaderMaterial = null
+
+const COMBAT_GRADE_CODE := """
+shader_type canvas_item;
+uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
+uniform float u_sat = 1.0;
+uniform float u_con = 1.0;
+uniform float u_bright = 1.0;
+uniform vec3 u_shadow = vec3(1.0);
+uniform vec3 u_light = vec3(1.0);
+uniform vec3 u_tint = vec3(1.0);
+void fragment() {
+	vec3 c = texture(screen_tex, SCREEN_UV).rgb;
+	c *= u_bright;
+	float l = dot(c, vec3(0.299, 0.587, 0.114));
+	vec3 tone = mix(u_shadow, u_light, smoothstep(0.12, 0.78, l));
+	c *= tone;
+	c = (c - 0.5) * u_con + 0.5;
+	float l2 = dot(c, vec3(0.299, 0.587, 0.114));
+	c = mix(vec3(l2), c, u_sat);
+	c *= u_tint;
+	COLOR = vec4(clamp(c, 0.0, 1.0), 1.0);
+}
+"""
+
+# mood → { backdrop tint, vignette strength/outer, glow/stage tint, ember count/tint,
+#          grade saturation/contrast/brightness, split-tone shadow/light, overall tint }
+const COMBAT_MOODS := {
+	"navy_gold": {"bg": Color(0.24, 0.27, 0.34), "vig": 0.70, "vig_out": Color(0.02, 0.03, 0.07, 0.90),
+		"glow": Color(1, 0.85, 0.55), "stage": Color(1, 0.82, 0.5), "emberN": 48, "ember": Color(1, 0.82, 0.45),
+		"sat": 1.05, "con": 1.12, "bright": 1.04, "sh": Vector3(0.72, 0.8, 1.0), "li": Vector3(1.1, 1.0, 0.78), "tint": Vector3(0.98, 0.99, 1.03)},
+	"infernal": {"bg": Color(0.30, 0.16, 0.12), "vig": 0.86, "vig_out": Color(0.05, 0.01, 0.0, 0.96),
+		"glow": Color(1, 0.5, 0.2), "stage": Color(1, 0.45, 0.18), "emberN": 80, "ember": Color(1, 0.5, 0.18),
+		"sat": 1.10, "con": 1.20, "bright": 0.98, "sh": Vector3(1.0, 0.8, 0.7), "li": Vector3(1.1, 0.7, 0.5), "tint": Vector3(1.03, 0.95, 0.9)},
+	"noir": {"bg": Color(0.22, 0.20, 0.20), "vig": 0.90, "vig_out": Color(0, 0, 0, 0.98),
+		"glow": Color(1, 0.7, 0.45), "stage": Color(1, 0.6, 0.35), "emberN": 36, "ember": Color(1, 0.6, 0.3),
+		"sat": 0.70, "con": 1.35, "bright": 0.95, "sh": Vector3(0.8, 0.78, 0.82), "li": Vector3(1.1, 1.0, 0.9), "tint": Vector3(1, 1, 1)},
+	"frost": {"bg": Color(0.42, 0.46, 0.52), "vig": 0.55, "vig_out": Color(0.04, 0.06, 0.09, 0.80),
+		"glow": Color(0.7, 0.85, 1.0), "stage": Color(0.8, 0.92, 1.0), "emberN": 40, "ember": Color(0.8, 0.92, 1.0),
+		"sat": 0.95, "con": 1.05, "bright": 1.12, "sh": Vector3(0.85, 0.93, 1.05), "li": Vector3(0.98, 1.02, 1.1), "tint": Vector3(0.97, 1.0, 1.04)},
+	"verdant": {"bg": Color(0.32, 0.38, 0.28), "vig": 0.60, "vig_out": Color(0.02, 0.04, 0.02, 0.85),
+		"glow": Color(0.9, 1.0, 0.6), "stage": Color(0.85, 1.0, 0.6), "emberN": 44, "ember": Color(0.85, 1.0, 0.55),
+		"sat": 1.08, "con": 1.05, "bright": 1.08, "sh": Vector3(0.85, 0.95, 0.8), "li": Vector3(1.0, 1.08, 0.85), "tint": Vector3(0.98, 1.04, 0.92)},
+}
+
+
+func _build_grade_overlay() -> void:
+	var sh := Shader.new()
+	sh.code = COMBAT_GRADE_CODE
+	_grade_mat = ShaderMaterial.new()
+	_grade_mat.shader = sh
+	var layer := CanvasLayer.new()
+	layer.name = "GradeLayer"
+	layer.layer = 40   # above hand (20) + HUD (12): grades the whole frame
+	add_child(layer)
+	var rect := ColorRect.new()
+	rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	rect.color = Color.WHITE
+	rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rect.material = _grade_mat
+	layer.add_child(rect)
+
+
+func _resolve_combat_mood() -> String:
+	# Boss / elite override everything; otherwise pick by biome keyword, then act.
+	match RunState.current_node_type:
+		"boss":
+			return "infernal"
+		"elite":
+			return "noir"
+	var eid: String = String(RunState.current_encounter_id).to_lower()
+	for kw in ["frost", "ice", "winter", "snow", "glaci"]:
+		if kw in eid:
+			return "frost"
+	if RunState.get_act() == 1:
+		return "verdant"
+	return "navy_gold"
+
+
+func _apply_combat_mood() -> void:
+	var m: Dictionary = COMBAT_MOODS.get(_resolve_combat_mood(), COMBAT_MOODS["navy_gold"])
+	var bg = get_node_or_null("CombatBg")
+	if bg != null:
+		bg.self_modulate = m["bg"]
+	var vig = get_node_or_null("Vignette")
+	if vig != null and vig.material is ShaderMaterial:
+		vig.material.set_shader_parameter("vignette_strength", float(m["vig"]))
+		vig.material.set_shader_parameter("grad_outer", m["vig_out"])
+	var hg = get_node_or_null("HearthGlow")
+	if hg != null:
+		hg.modulate = m["glow"]
+	var sl = get_node_or_null("StageLight")
+	if sl != null:
+		sl.modulate = m["stage"]
+	var em = get_node_or_null("AmbientEmbers")
+	if em != null:
+		em.amount = int(m["emberN"])
+		em.modulate = m["ember"]
+	if _grade_mat != null:
+		_grade_mat.set_shader_parameter("u_sat", float(m["sat"]))
+		_grade_mat.set_shader_parameter("u_con", float(m["con"]))
+		_grade_mat.set_shader_parameter("u_bright", float(m["bright"]))
+		_grade_mat.set_shader_parameter("u_shadow", m["sh"])
+		_grade_mat.set_shader_parameter("u_light", m["li"])
+		_grade_mat.set_shader_parameter("u_tint", m["tint"])
 
 
 func _build_ambient_fx() -> void:
@@ -2972,6 +3314,7 @@ func _effective_cost(card: Control) -> int:
 
 func _on_card_played(card: Control) -> void:
 	if phase != Phase.PLAYER_TURN:
+		_layout_hand()  # bounce the dragged card back into the fan
 		return
 	if _targeting_spell != null:
 		_cancel_targeting()
@@ -2979,6 +3322,7 @@ func _on_card_played(card: Control) -> void:
 	# Velvet Choker: max 5 cards per turn
 	if _has_relic("velvet_choker") and _cards_played_this_turn >= 5:
 		_show_info("Velvet Choker: can't play more than 5 cards!")
+		_layout_hand()  # bounce the dragged card back into the fan
 		return
 
 	# Effective cost factors in mutators (Taxed +N), Ember Crown (free first
@@ -2991,6 +3335,7 @@ func _on_card_played(card: Control) -> void:
 	var cost = _effective_cost(card)
 	if player_mana < cost:
 		_show_info("Not enough mana!")
+		_layout_hand()  # bounce the dragged card back into the fan
 		return
 	# Consume the Ironclad Veteran discount charge ONLY if it actually applied
 	# (i.e. cost was still > 0 after mutator+Ember adjustments). _effective_cost
@@ -3027,15 +3372,17 @@ func _on_card_played(card: Control) -> void:
 func _play_creature(card: Control, cost: int) -> void:
 	if card.has_keyword("sacrifice"):
 		_show_info("Click a creature to sacrifice for this card.")
+		_layout_hand()  # bounce the dragged card back into the fan
 		return
 
 	# 4x4: derive both lane and row from the drop position. Use the card's CENTER
 	# (not its top-left origin) so the slot we pick matches the one the drag
-	# highlight lit up — `dragging` emits `global_position + size*scale*0.5`, and
-	# reading the raw origin here biased every drop one row up into the front row.
+	# highlight lit up — `dragging` emits `global_position + size*0.5`, and the
+	# drag pivot is centred, so size*0.5 (NOT size*scale*0.5) is the true on-screen
+	# centre = the cursor. Reading the raw origin biased every drop one row up.
 	# Drops on occupied slots are rejected (no replace) — creatures stay where
 	# they were placed unless an explicit effect moves them.
-	var drop = _nearest_player_slot(card.global_position + card.size * card.scale * 0.5)
+	var drop = _nearest_player_slot(card.global_position + card.size * 0.5)
 	var lane_idx: int = drop.lane
 	var row: int = drop.row
 	var field = _row_array(false, row)
@@ -3099,6 +3446,17 @@ func _play_creature(card: Control, cost: int) -> void:
 					card.card_data.hp += 1
 		card.update_stat_display()
 
+	# Hourglass of Ruin: your Doom creatures detonate sooner. Seed the per-creature
+	# countdown low on placement (floored at 1 so it still gets one live round on
+	# the board to threaten — "1 round sooner", not "instantly").
+	if _has_relic("hourglass_of_ruin") and card.is_creature() and card.has_keyword("doom"):
+		if card.has_method("_ensure_doom_init"):
+			card._ensure_doom_init()
+		var ruin: int = int(RelicDB.get_relic("hourglass_of_ruin").get("value", 1))
+		card.doom_counter = maxi(1, card.doom_counter - ruin)
+		if card.has_method("update_doom_display"):
+			card.update_doom_display()
+
 	# Shield keyword: grant shield on placement
 	if card.has_keyword("shield"):
 		card.state.has_shield = true
@@ -3158,6 +3516,10 @@ func _play_creature(card: Control, cost: int) -> void:
 
 	# On-enter effects
 	KeywordEffects.dispatch_on_enter(card, lane_idx, false, self)
+	# On-play ability (formerly floop): fires immediately when the creature
+	# lands. Fire-and-forget so any modal pickers match the on-enter convention.
+	if card.card_data.has("on_play"):
+		_resolve_on_play_ability(card, lane_idx, false)
 
 	# Blueprint: replay the previously-played friendly creature's on-enter on
 	# this card, then cache this card's own on-enter for the NEXT play. Chains
@@ -3169,19 +3531,12 @@ func _play_creature(card: Control, cost: int) -> void:
 		if card.card_data.has("on_enter"):
 			_blueprint_last_on_enter = card.card_data["on_enter"].duplicate(true)
 
-	# Reaper's Scythe: a floop stolen from a sacrificed creature is grafted onto
-	# the next-played creature, overwriting any existing floop. Connect the
-	# floop_clicked signal here in case _place_card_in_slot skipped it (card had
-	# no floop at placement time).
+	# Reaper's Scythe: an on-play ability stolen from a sacrificed creature is
+	# grafted onto the next-played creature and fires immediately.
 	if _has_relic("reapers_scythe") and card.is_creature() \
 			and not _reapers_scythe_pending_floop.is_empty():
-		card.card_data["floop"] = _reapers_scythe_pending_floop.duplicate(true)
-		if not card.card_data.keywords.has("floop"):
-			card.card_data.keywords.append("floop")
-		card.has_flooped_this_turn = false
-		if not card.floop_clicked.is_connected(_on_floop_clicked.bind(card)):
-			card.floop_clicked.connect(_on_floop_clicked.bind(card))
-		card.update_floop_display()
+		card.card_data["on_play"] = _reapers_scythe_pending_floop.duplicate(true)
+		_resolve_on_play_ability(card, lane_idx, false)
 		card.update_stat_display()
 		_reapers_scythe_pending_floop = {}
 
@@ -3361,6 +3716,18 @@ func _resolve_spell(data: Dictionary, target: Control, target_lane: int) -> void
 	# color for any spell missing from SPELL_FAMILIES.
 	_play_spell_cast_vfx(data, target)
 
+	# JUICE — board-wide and heavy spells earn an extra jolt on cast + a brief
+	# hit-stop AFTER they land, so a screen-clearing Earthquake / Apocalypse hits
+	# with the weight it deserves rather than every creature's HP just dropping at
+	# once. Single-target chip spells skip this so casting stays snappy. The jolt
+	# fires now (with the cast VFX); the hit-stop is applied just below, after the
+	# match block resolves the damage. Awaitable: all callers of _resolve_spell
+	# already await it, so this never desyncs the turn.
+	var _aoe_spell: bool = spell_type in ["damage_all_enemies", "damage_all", "buff_all_atk"]
+	var _big_spell: bool = spell_type in ["damage", "damage_face"] and int(value) >= HEAVY_HIT_DAMAGE
+	if _aoe_spell or _big_spell:
+		screen_shake(10.0 if _aoe_spell else 7.0)
+
 	match spell_type:
 		"damage":
 			if target != null:
@@ -3408,6 +3775,11 @@ func _resolve_spell(data: Dictionary, target: Control, target_lane: int) -> void
 				c.update_stat_display()
 		"custom":
 			await _resolve_custom_spell(spell.get("id", ""), target, target_lane, data)
+
+	# JUICE (cont.) — the post-impact hit-stop for AoE / heavy spells. Lands after
+	# the damage above so the player sees the board get hit, THEN feels the beat.
+	if _aoe_spell or _big_spell:
+		await _short_pause(HITSTOP_BEAT)
 
 	_last_spell_played_this_turn = data
 	# Echo replays against the same target. Skip the bookkeeping for Echo
@@ -3570,18 +3942,21 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				if target.current_hp <= 0:
 					RunState.gain_gold(10 + plus_slay_gold)
 		"war_chant":
-			# Player-picked discard of 2, then draw 2 (3 if upgraded).
-			var max_disc: int = mini(2, _hand.size())
+			# Rally: pitch cards to muster one Soldier each (3/2 if upgraded). Bodies
+			# on the board beat card draw under the persistent-hand economy.
+			var max_disc: int = mini(3, _hand.size())
+			var picked: Array = []
 			if max_disc > 0:
-				var picked: Array = await _show_discard_picker(max_disc,
-					"War Chant — discard 2, then draw %d" % (2 + plus_draw))
+				picked = await _show_discard_picker(max_disc,
+					"War Chant — discard up to %d to muster that many Soldiers" % max_disc, true)
+					# (one Soldier summoned per pitched card, below)
 				for c in picked:
 					_hand.erase(c)
 					_player_discard_pile.append(_pile_entry(c.card_id, c.deck_uid))
 					if c.get_parent() != null:
 						c.get_parent().remove_child(c)
 					c.queue_free()
-			for i in 2 + plus_draw:
+			for i in picked.size() + 1 + plus_draw:
 				draw_one()
 		"battle_hymn":
 			for c in _all_player_creatures():
@@ -3696,6 +4071,57 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 			for c in _all_enemy_creatures():
 				c.take_damage(4 + spell_dmg_bonus + plus_dmg)
 			damage_enemy_hero(4 + spell_dmg_bonus + plus_dmg)
+		"immolate":
+			# Pyre single-target burn (card "Immolate"). Deal 4 (+bonuses) to the
+			# chosen creature; if it dies, the fire jumps to the enemy face for the
+			# same amount — a finisher that rewards killing blows. Fire-VFX on the
+			# target so the burn reads, plus a face burst when the bonus lands.
+			if target != null:
+				var imm_dmg: int = 4 + spell_dmg_bonus + plus_dmg
+				_vfx_fire(target.get_global_rect().get_center())
+				target.take_damage(imm_dmg)
+				if target.current_hp <= 0:
+					if _enemy_hp_label != null:
+						_vfx_fire(_enemy_hp_label.get_global_rect().get_center())
+					damage_enemy_hero(imm_dmg)
+		"wildfire":
+			# Pyre board-clear (card "Wildfire", Exhaust). Deal 2 (+bonuses) to every
+			# enemy creature, then 1 face damage for each creature that was actually
+			# present to take the hit — a scaling finish that grows with their board.
+			# Snapshot the list first so the per-creature face tally is stable even
+			# as bodies die and _cleanup_dead prunes them.
+			var wf_targets: Array = _all_enemy_creatures()
+			var wf_hit: int = wf_targets.size()
+			var wf_dmg: int = 2 + spell_dmg_bonus + plus_dmg
+			for c in wf_targets:
+				if c != null and is_instance_valid(c):
+					_vfx_fire(c.get_global_rect().get_center())
+					c.take_damage(wf_dmg)
+			_cleanup_dead()
+			if wf_hit > 0:
+				if _enemy_hp_label != null:
+					_vfx_fire(_enemy_hp_label.get_global_rect().get_center())
+				damage_enemy_hero(wf_hit)
+		"censer_light":
+			# Pyre sustain anointing (card "Censer Light"). A friendly creature gains
+			# Lifelink (added to its runtime keywords so the chip shows AND
+			# _apply_combat_strike_riders heals off it) and +1 (+upgrade) ATK for the
+			# rest of the fight via persistent_atk_buff. Reuses the same runtime
+			# keyword-grant + chip pattern as Adaptable (_show_keyword_choice).
+			if target != null:
+				if "lifelink" not in target.card_data.get("keywords", []):
+					target.card_data.keywords.append("lifelink")
+				# Make sure the lifelink heal amount is at least 1 so the keyword
+				# isn't a no-op on a creature that never had a lifelink value.
+				if int(target.card_data.get("lifelink", 0)) < 1:
+					target.card_data["lifelink"] = 1
+				var cl_atk: int = 1 + plus_dmg
+				target.persistent_atk_buff += cl_atk
+				target.persistent_atk_buff_rounds = 99  # rest of this fight
+				if target.has_method("_spawn_keyword_chip"):
+					target._spawn_keyword_chip("LIFELINK", Color(0.95, 0.35, 0.45))
+				_vfx_blessing(target.get_global_rect().get_center())
+				target.update_stat_display()
 		"overwhelming_force":
 			var of_atk: int = 3 + plus_dmg
 			for c in _all_player_creatures():
@@ -3930,6 +4356,20 @@ func _after_spell(card: Control) -> void:
 		if ink_threshold > 0 and _inkpot_counter >= ink_threshold:
 			_inkpot_counter = 0
 			_inkpot_copy_random_spell()
+	# Runebound Idol: spell-matters payoff. Each spell cast permanently buffs a
+	# random friendly creature +value/+value, turning a spell-heavy deck into a
+	# board-growth engine. No-op cleanly when the board is empty.
+	if _has_relic("runebound_idol"):
+		var ri_targets: Array = _all_player_creatures()
+		if ri_targets.size() > 0:
+			var ri: int = int(RelicDB.get_relic("runebound_idol").get("value", 1))
+			var pick: Control = ri_targets[randi() % ri_targets.size()]
+			pick.current_atk += ri
+			pick.card_data["hp"] = int(pick.card_data.get("hp", 0)) + ri
+			pick.current_hp += ri
+			pick.update_stat_display()
+			var ri_pos := pick.global_position + Vector2(pick.size.x * pick.scale.x * 0.5, -10)
+			spawn_floating_number(ri_pos, "+%d/+%d" % [ri, ri], Color(0.70, 0.55, 1.0), false)
 	# Mummified Hand: pick a random creature in hand and zero its cost. Marks
 	# the chosen card with a meta so _effective_cost picks it up; cleared at
 	# end of turn alongside the discard.
@@ -4141,6 +4581,86 @@ func _resolve_combat_potion(pid: String, target: Control) -> void:
 				draw_one()
 		"revive_last_dead":
 			_revive_last_dead_friendly()
+		"grant_rampage":
+			# War Paint: bolt Rampage 2 + +1 ATK onto a friendly for the fight.
+			# Adds the runtime keyword so _apply_combat_strike_riders grows it on
+			# every kill, and bumps the rampage value so the trigger is +2.
+			if target != null and target.is_creature():
+				if "rampage" not in target.card_data.get("keywords", []):
+					target.card_data.keywords.append("rampage")
+				target.card_data["rampage"] = maxi(2, int(target.card_data.get("rampage", 0)))
+				target.persistent_atk_buff += 1
+				target.persistent_atk_buff_rounds = 99  # rest of this fight
+				if target.has_method("_spawn_keyword_chip"):
+					target._spawn_keyword_chip("RAMPAGE", Color(1.0, 0.62, 0.20))
+				_vfx_fire(target.get_global_rect().get_center())
+				target.update_stat_display()
+		"grant_lifelink":
+			# Vampiric Draught: friendly gains Lifelink 2 for the fight + a 4 HP
+			# top-up now. Mirrors Censer Light's runtime keyword-grant pattern so
+			# _apply_combat_strike_riders heals off it.
+			if target != null and target.is_creature():
+				if "lifelink" not in target.card_data.get("keywords", []):
+					target.card_data.keywords.append("lifelink")
+				target.card_data["lifelink"] = maxi(2, int(target.card_data.get("lifelink", 0)))
+				if target.has_method("_spawn_keyword_chip"):
+					target._spawn_keyword_chip("LIFELINK", Color(0.95, 0.35, 0.45))
+				_vfx_blight(target.get_global_rect().get_center())
+				target.update_stat_display()
+			RunState.heal_hero(4)
+			player_hp = RunState.hero_hp
+		"chain_lightning":
+			# Chain-Lightning Flask: 4 jumps of 2 damage to random enemy creatures.
+			# Re-rolls the pool each jump so it spreads across the board (and keeps
+			# arcing even as bodies drop). Mirrors the Ricochet spell shape.
+			for _i in range(4):
+				var pool := _all_enemy_creatures()
+				if pool.is_empty():
+					break
+				var pick: Control = pool[randi() % pool.size()]
+				_vfx_shock(pick.get_global_rect().get_center())
+				pick.take_damage(2)
+				if pick.current_hp <= 0:
+					_cleanup_dead()
+		"detonate_doom_all":
+			# Doomsday Draught: fire every friendly Doom creature's detonation now.
+			# Snapshot the list first — _detonate_doom destroys via the canonical
+			# path, mutating the field arrays mid-iteration would skip neighbours.
+			var bombs: Array = []
+			for c in _all_player_creatures():
+				if c.has_keyword("doom"):
+					bombs.append(c)
+			for c in bombs:
+				if is_instance_valid(c) and c.current_hp > 0:
+					_detonate_doom(c)
+			_cleanup_dead()
+		"shield_wall":
+			# Aegis Brew: every friendly creature gains Shield (one free hit).
+			for c in _all_player_creatures():
+				c.state.has_shield = true
+				if c.has_method("_spawn_keyword_chip"):
+					c._spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
+				_vfx_blessing(c.get_global_rect().get_center())
+				c.update_stat_display()
+		"summon_recruits":
+			# Conscription Brew: muster two 3/3 Recruits into empty lanes (front
+			# preferred). summon_token falls through to the other row of a column
+			# if the front slot is taken, so this fills sensibly on a busy board.
+			var made: int = 0
+			for r in [ROW_FRONT, ROW_BACK]:
+				if made >= 2:
+					break
+				var arr = _row_array(false, r)
+				for l in range(LANES_PER_ROW):
+					if made >= 2:
+						break
+					if arr[l] == null:
+						summon_token(3, 3, l, false, r)
+						var nt = _row_array(false, r)[l]
+						if nt != null and is_instance_valid(nt):
+							nt.card_data["name"] = "Recruit"
+							_vfx_blessing(nt.get_global_rect().get_center())
+						made += 1
 		_:
 			push_warning("Combat: unknown potion effect '%s'" % data.get("effect", ""))
 
@@ -4451,17 +4971,22 @@ func _layout_hand() -> void:
 
 
 func _discard_hand() -> void:
-	# Runic Pyramid (boss relic): the whole hand is retained at end of turn.
-	var keep_all: bool = _has_relic("runic_pyramid")
-	var to_keep: Array[Control] = []
-	for card in _hand:
-		if keep_all or card.has_keyword("retain"):
-			to_keep.append(card)
-		else:
-			_player_discard_pile.append(_pile_entry(card.card_id, card.deck_uid))
-			_animate_card_to_discard(card)
-	_hand = to_keep
-	# Reset temp buffs on every creature, both rows, both sides.
+	# PERSISTENT_HAND: keep the whole hand across turns — the start-of-round
+	# refill (draw-to-N) tops it up instead of redrawing fresh. When off, the
+	# original fresh-hand discard runs (minus Retain / Runic Pyramid).
+	if not PERSISTENT_HAND:
+		# Runic Pyramid (boss relic): the whole hand is retained at end of turn.
+		var keep_all: bool = _has_relic("runic_pyramid")
+		var to_keep: Array[Control] = []
+		for card in _hand:
+			if keep_all or card.has_keyword("retain"):
+				to_keep.append(card)
+			else:
+				_player_discard_pile.append(_pile_entry(card.card_id, card.deck_uid))
+				_animate_card_to_discard(card)
+		_hand = to_keep
+	# Reset temp buffs on every creature, both rows, both sides. (Always — this
+	# is end-of-turn creature upkeep, independent of the hand model.)
 	for c in _all_creatures_both_sides():
 		c.temp_atk_buff = 0
 		c.has_attacked_this_turn = false
@@ -4519,13 +5044,30 @@ func damage_player_hero(amount: int) -> void:
 		player_mana += 2
 		_update_hud()
 	_on_hero_damaged(amount)
-	screen_shake(clampf(amount * 3.0, 6.0, 25.0))
-	screen_flash(Color(0.8, 0.1, 0.05, 0.25), 0.2)
-	if _player_hp_label != null and amount > 0:
-		spawn_floating_number(_player_hp_label.get_global_rect().get_center(),
-			"-%d" % amount, Color(1.0, 0.3, 0.25), true)
-	if AudioBank != null and amount > 0:
-		AudioBank.play_sfx("hit_hero")
+	# JUICE — taking face damage is the loudest, most legible moment in the game.
+	# This is the feedback that makes players STOP ignoring threats: a heavy
+	# magnitude-scaled shake, a deep red vignette pulse, and a big number that
+	# punches the HP counter. (The hit-stop beat is supplied by the combat
+	# cascade after the hit — see the note at the end of this block.)
+	if amount > 0:
+		screen_shake(clampf(8.0 + amount * 3.4, 10.0, 28.0))
+		_play_face_damage_flash(amount)
+		presence_react_player_hit(amount)   # the foe surges as it lands the blow
+		if _player_hp_label != null:
+			# Bigger + gold-outlined the harder the hit; a soft punch-up tells the
+			# player exactly how much life just evaporated.
+			var fc := Color(1.0, 0.28, 0.22)
+			spawn_floating_number(_player_hp_label.get_global_rect().get_center() + Vector2(0, -6),
+				"-%d" % amount, fc, true)
+			_punch_label(_player_hp_label, 1.22)
+		if AudioBank != null:
+			AudioBank.play_sfx("hit_hero")
+		# Note: the combat cascade (_creature_hits_face / _resolve_ranged_attacks)
+		# already supplies an awaited HITSTOP_BEAT after a face hit, so the pause
+		# is handled there — we keep this function synchronous so every caller
+		# (most of which don't await) gets the loud shake/flash/number instantly.
+	else:
+		presence_react_player_hit(amount)
 	_update_hud()
 
 
@@ -4537,6 +5079,7 @@ func damage_enemy_hero(amount: int) -> void:
 		amount += int(RelicDB.get_relic("pyre_stoker").get("value", 1))
 	enemy_hp -= amount
 	screen_shake(clampf(amount * 2.0, 4.0, 15.0))
+	presence_flinch(amount)   # the antagonist recoils + reddens
 	if _enemy_hp_label != null and amount > 0:
 		spawn_floating_number(_enemy_hp_label.get_global_rect().get_center(),
 			"-%d" % amount, Color(1.0, 0.45, 0.2), true)
@@ -4701,8 +5244,8 @@ func _trigger_player_sacrifice(victim: Control) -> void:
 	# creature inherits (or has its own floop replaced by) it. blood_sacrifice
 	# is itself a floop dict, so the chain holds; spell-sacrificed targets
 	# may or may not have one, and the relic check handles both cases.
-	if _has_relic("reapers_scythe") and victim.card_data.has("floop"):
-		_reapers_scythe_pending_floop = victim.card_data["floop"].duplicate(true)
+	if _has_relic("reapers_scythe") and victim.card_data.has("on_play"):
+		_reapers_scythe_pending_floop = victim.card_data["on_play"].duplicate(true)
 	_dispatch_reactive("ON_PLAYER_SACRIFICE", null, lane)
 
 
@@ -5667,7 +6210,8 @@ func _check_game_over() -> void:
 		return
 	if player_hp <= 0:
 		phase = Phase.GAME_OVER
-		print("[PACING] FIGHT END | %s | DEFEAT  | ended R%d | P_HP:%d E_HP:%d | intents_shown:%s" % [_encounter_name, round_number, player_hp, enemy_hp, str(_pacing_any_intent_shown)])
+		_stop_low_hp_dread()  # JUICE: kill the heartbeat/vignette before the defeat sting
+		_dbgp("[PACING] FIGHT END | %s | DEFEAT  | ended R%d | P_HP:%d E_HP:%d | intents_shown:%s" % [_encounter_name, round_number, player_hp, enemy_hp, str(_pacing_any_intent_shown)])
 		_phase_label.text = "DEFEAT"
 		_phase_label.add_theme_color_override("font_color", Color(0.95, 0.25, 0.25))
 		RunState.hero_hp = 0
@@ -5675,6 +6219,7 @@ func _check_game_over() -> void:
 		# is the most useful unit of "killed by" — players remember "I died
 		# to the Pyre Cult," not "I died to Burning Martyr's on-death."
 		RunState.cause_of_death = _encounter_name if _encounter_name != "" else "an unknown foe"
+		_presence_say(_pick_bark("slay"), Color(0.95, 0.85, 0.5))   # the foe's parting line
 		if AudioBank != null:
 			AudioBank.play_sfx("defeat")
 		get_tree().create_timer(1.5).timeout.connect(func():
@@ -5683,7 +6228,8 @@ func _check_game_over() -> void:
 		)
 	elif enemy_hp <= 0:
 		phase = Phase.GAME_OVER
-		print("[PACING] FIGHT END | %s | VICTORY | ended R%d | P_HP:%d E_HP:%d | intents_shown:%s" % [_encounter_name, round_number, player_hp, enemy_hp, str(_pacing_any_intent_shown)])
+		_stop_low_hp_dread()  # JUICE: clear dread overlay on victory
+		_dbgp("[PACING] FIGHT END | %s | VICTORY | ended R%d | P_HP:%d E_HP:%d | intents_shown:%s" % [_encounter_name, round_number, player_hp, enemy_hp, str(_pacing_any_intent_shown)])
 		_phase_label.text = "VICTORY!"
 		_phase_label.add_theme_color_override("font_color", Color(1.0, 0.82, 0.34))
 		if AudioBank != null:
@@ -5788,17 +6334,38 @@ func _update_intent_display(card: Control, intent: String) -> void:
 	var label_text: String = intent
 	if lbl == null:
 		lbl = Label.new()
-		lbl.add_theme_font_size_override("font_size", 11)
+		# Intent text is the enemy's telegraph — it has to read from across the
+		# board. The old 11px bare label vanished against the art on a 1080p
+		# capture; a dark pill + 15px caps gives it a nameplate's presence.
+		if GameTheme.font_display:
+			lbl.add_theme_font_override("font", GameTheme.font_display)
+		lbl.add_theme_font_size_override("font_size", 15)
 		lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
 		lbl.add_theme_constant_override("outline_size", 4)
+		var pill := StyleBoxFlat.new()
+		pill.bg_color = Color(0.05, 0.04, 0.035, 0.82)
+		pill.border_color = Color(0, 0, 0, 0.65)
+		for k in ["border_width_top", "border_width_bottom",
+				"border_width_left", "border_width_right"]:
+			pill.set(k, 1)
+		for k in ["corner_radius_top_left", "corner_radius_top_right",
+				"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+			pill.set(k, 9)
+		pill.content_margin_left = 8
+		pill.content_margin_right = 8
+		pill.content_margin_top = 1
+		pill.content_margin_bottom = 1
+		lbl.add_theme_stylebox_override("normal", pill)
 		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		lbl.anchor_left = 0.0
 		lbl.anchor_right = 1.0
 		lbl.anchor_top = 0.0
 		lbl.anchor_bottom = 0.0
-		lbl.offset_top = -16
-		lbl.offset_bottom = 0
+		lbl.offset_left = 22
+		lbl.offset_right = -22
+		lbl.offset_top = -26
+		lbl.offset_bottom = -2
 		lbl.z_index = 5
 		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		card.add_child(lbl)
@@ -5989,6 +6556,7 @@ func _check_boss_phase_transition() -> void:
 		_show_combat_banner(phase_title, phase_subtitle, phase_color)
 		screen_shake(15.0)
 		screen_flash(Color(phase_color.r, phase_color.g, phase_color.b, 0.30), 0.35)
+		presence_phase(phase_color)   # the antagonist leans in; the world tightens
 		if AudioBank != null:
 			AudioBank.play_sfx("spell_cast", 0.0, 2.0)
 		# Also keep the info-label hint for accessibility (some players miss
@@ -6140,7 +6708,7 @@ func _post_combat_cleanup() -> void:
 						elif card.card_data.has("passive"):
 							card.card_data.erase("passive")
 						if orig.get("floop") != null:
-							card.card_data["floop"] = orig.get("floop").duplicate(true)
+							card.card_data["on_play"] = orig.get("floop").duplicate(true)
 						card.update_stat_display()
 						card.remove_meta("become_copy_original")
 					card.remove_meta("is_copy")
@@ -6270,10 +6838,73 @@ func _show_event_banner(msg: String) -> void:
 
 func _dispatch_passive_start_of_round() -> void:
 	EncounterEffects.dispatch_passive_start_of_round(self)
+	# THE BELLRINGER boss (Act 2). Its doom_bell passive lives here rather than
+	# in EncounterEffects so the whole signature — the toll cadence, the host
+	# buff, the deploy — sits in one readable place alongside the combat helpers
+	# (_find_empty_enemy_slot / _place_enemy_card / _show_combat_banner) it
+	# reuses. Runs AFTER KeywordEffects.dispatch_start_of_round (which ticks the
+	# existing Doomspawn countdowns), so a freshly-tolled bomb starts its clock
+	# clean this round instead of losing a tick the instant it lands.
+	if _encounter_passive == "doom_bell":
+		_doom_bell_start_of_round()
 
 
 func _dispatch_passive_end_of_round() -> void:
 	EncounterEffects.dispatch_passive_end_of_round(self)
+
+
+# ── THE BELLRINGER — doom_bell signature ─────────────────────────────────────
+# A telegraphed doomsday clock built on the `doom` keyword. Every other round
+# the bell TOLLS and deploys a "Cinder" bomb-creature (Doom 2) into an empty
+# enemy lane; its on-board countdown ticks 2 → 1 → DETONATE (face damage via the
+# canonical KeywordEffects doom path). The player must triage and kill it in
+# time. The "ignoring it is costly" lever: while ANY Doomspawn is still ticking,
+# every other enemy creature swings +1 ATK this round (the toll empowers the
+# host). Round 6 cracks the bell — a DOUBLE peal drops two bombs at once.
+func _doom_bell_start_of_round() -> void:
+	# Setup round is combat-free; the first toll lands going into round 2.
+	if round_number < 2:
+		return
+	# Host buff: if a bomb is currently ticking on the board, the Bellringer's
+	# standing creatures hit harder this round. temp_atk_buff (cleared each
+	# round) keeps it a per-round pressure beat, not permanent snowball.
+	var has_live_bomb := false
+	for c in _all_enemy_creatures():
+		if c.has_keyword("doom"):
+			has_live_bomb = true
+			break
+	if has_live_bomb:
+		for c in _all_enemy_creatures():
+			if not c.has_keyword("doom"):
+				c.temp_atk_buff += 1
+				c.update_stat_display()
+	# Toll cadence: every other round (2, 4, 6, …). Round 6 is the cracked
+	# double peal. Skip the toll if the board is full — no empty lane to drop
+	# a bomb into — so it never silently no-ops mid-swarm.
+	if round_number % 2 != 0:
+		return
+	var peals: int = 2 if round_number >= 6 else 1
+	var tolled := false
+	for _i in range(peals):
+		var slot := _find_empty_enemy_slot()
+		if slot.is_empty():
+			break
+		var bomb := {
+			"id": "doom_bell_%d" % randi(),
+			"name": "Cinder",  # reuses the torchbearer art alias (a walking fuse)
+			"type": "creature", "cost": 0,
+			"atk": 2, "hp": 3, "rarity": "enemy",
+			"keywords": ["doom"], "doom": 2, "doom_damage": 6,
+			"desc": "",
+		}
+		_place_enemy_card(bomb, slot.lane, slot.row)
+		tolled = true
+	if tolled:
+		var subtitle := "Two fuses are lit." if peals >= 2 else "A fuse is lit — kill it before it blows."
+		_show_combat_banner("☼ THE BELL TOLLS ☼", subtitle, Color(1.0, 0.42, 0.16))
+		screen_shake(8.0)
+		if AudioBank != null:
+			AudioBank.play_sfx("hit_hero")
 
 
 # =====================================================================
@@ -6299,6 +6930,13 @@ func _init_mutator_state() -> void:
 			_mutator_enemy_atk_buff = int(e_enter.get("value", 0))
 		"buff_hp":
 			_mutator_enemy_hp_buff = int(e_enter.get("value", 0))
+		"grant_doom":
+			# "Doomed" — front-row enemies enter as ticking bombs (handled in
+			# _mutator_apply_to_enemy so back-row queue creatures stay clean).
+			_mutator_enemy_doom = int(e_enter.get("value", 0))
+		"buff_hp_regen":
+			# "Overgrown" — +N HP AND Regenerate on every enemy.
+			_mutator_enemy_regen_hp = int(e_enter.get("value", 0))
 	# on_player_creature_enter: grant keyword OR weaken HP on player plays.
 	var p_enter: Dictionary = _mutator_data.get("on_player_creature_enter", {})
 	match String(p_enter.get("kind", "")):
@@ -6348,6 +6986,26 @@ func _mutator_apply_to_enemy(card: Control) -> void:
 	if _mutator_enemy_hp_buff != 0:
 		card.current_hp += _mutator_enemy_hp_buff
 		card.card_data.hp = int(card.card_data.get("hp", 1)) + _mutator_enemy_hp_buff
+	# "Overgrown": +N HP and Regenerate on every enemy. Stacks on top of the
+	# card's own keywords; the start-of-round Regenerate tick heals it back up.
+	if _mutator_enemy_regen_hp > 0:
+		card.current_hp += _mutator_enemy_regen_hp
+		card.card_data.hp = int(card.card_data.get("hp", 1)) + _mutator_enemy_regen_hp
+		if not card.has_keyword("regenerate"):
+			card.card_data.keywords.append("regenerate")
+	# "Doomed": only FRONT-row enemies become ticking bombs. Seed the doom keyword
+	# + counter + a fixed detonation value so it reads the same as a real Doom
+	# creature; the canonical dispatch_start_of_round tick + _detonate_doom path
+	# handles the countdown and explosion. Skip if it's already a Doom creature.
+	if _mutator_enemy_doom > 0 and card.current_row == ROW_FRONT and not card.has_keyword("doom"):
+		card.card_data.keywords.append("doom")
+		card.card_data["doom"] = _mutator_enemy_doom
+		if not card.card_data.has("doom_damage"):
+			card.card_data["doom_damage"] = maxi(1, card.current_atk)
+		if card.has_method("_ensure_doom_init"):
+			card._ensure_doom_init()
+		if card.has_method("update_doom_display"):
+			card.update_doom_display()
 
 
 func _mutator_apply_to_player_creature(card: Control) -> void:
@@ -6796,6 +7454,27 @@ func _highest_atk_enemy_creature() -> Control:
 	return best
 
 
+# The player creature currently flagged as the start-of-round passive's victim,
+# so we can clear the old flag before moving it elsewhere.
+var _passive_threat_marked: Control = null
+
+func _refresh_passive_threat_glow() -> void:
+	# Glow the player creature the boss's start-of-round passive will snipe, using
+	# the SAME picker the passive itself calls (_highest_atk_player_creature), so
+	# the warning can never disagree with what actually happens. Presentation only
+	# — nothing here mutates the board.
+	var target: Control = null
+	if _encounter_passive == "hollow_king_snipe" or _encounter_passive == "hollow_king_phase2":
+		target = _highest_atk_player_creature()
+	if target == _passive_threat_marked:
+		return
+	if _passive_threat_marked != null and is_instance_valid(_passive_threat_marked):
+		_passive_threat_marked.set_danger_marked(false)
+	_passive_threat_marked = target
+	if target != null and is_instance_valid(target):
+		target.set_danger_marked(true, 3)
+
+
 func _find_empty_enemy_slot() -> Dictionary:
 	# 4x4: fill front-row first, then back-row. Returns {row, lane} or {}.
 	for row in [ROW_FRONT, ROW_BACK]:
@@ -6821,6 +7500,14 @@ func _pick_empty_for_summon(is_enemy: bool, preferred_row: int) -> Dictionary:
 		if not empties.is_empty():
 			return {"row": row, "lane": empties[randi() % empties.size()]}
 	return {}
+
+
+func _summon_one_soldier(atk: int, hp: int) -> void:
+	# Summon one player token into the first empty lane (front preferred). Board
+	# presence in place of card draw (Provision / War Chant) under persistent hand.
+	var slot := _pick_empty_for_summon(false, ROW_FRONT)
+	if not slot.is_empty():
+		summon_token(atk, hp, slot.lane, false, slot.row)
 
 
 func _summon_enemy_token(atk: int, hp: int) -> void:
@@ -7079,16 +7766,10 @@ func _build_portrait_columns() -> void:
 	# STS-style anchor: a vertical sliver on the far-left edge carries the
 	# player and enemy hero portraits. Both placed against the corresponding
 	# half of the board so the eye reads "me vs them" instantly.
-	var enemy_portrait := _make_portrait_card(true)
-	enemy_portrait.anchor_left = 0.0
-	enemy_portrait.anchor_right = 0.0
-	enemy_portrait.anchor_top = 0.0
-	enemy_portrait.anchor_bottom = 0.0
-	enemy_portrait.offset_left = 12
-	enemy_portrait.offset_top = 160
-	enemy_portrait.offset_right = 96
-	enemy_portrait.offset_bottom = 280
-	_board_container.add_child(enemy_portrait)
+	# Enemy side: the Living Antagonist (looming, lit, reactive) instead of the
+	# old "FOE" disc. The player keeps the compact disc — the drama belongs to
+	# the foe across the table.
+	_build_enemy_presence()
 
 	var player_portrait := _make_portrait_card(false)
 	player_portrait.anchor_left = 0.0
@@ -7100,6 +7781,420 @@ func _build_portrait_columns() -> void:
 	player_portrait.offset_right = 96
 	player_portrait.offset_bottom = -330
 	_board_container.add_child(player_portrait)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  LIVING ANTAGONIST — enemy presence + reactions + barks
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Atmosphere = presence + reaction, not decoration. The encounter's signature
+# creature looms on the left of the enemy half — lit by the board glow, emerging
+# from a dark pocket (Inscryption dread + Slay-the-Spire presence). It flinches
+# and reddens when the foe-hero is hurt, surges when it hits you, leans in while
+# the world tightens on a boss phase shift, and SPEAKS short barks on entry /
+# pain / phase / your death (Darkest-Dungeon / Inscryption voice).
+
+const PRESENCE_ART_ALIAS := {
+	"alpha": "wolf_c", "den_mother": "wolf_c", "chief": "goblin",
+	"elder_drake": "e_elder_dragon", "ancient_wyrm": "e_elder_dragon",
+	"lich": "risen_lich", "devils_champion": "e_devil_champ",
+	"executioner": "e_headsman", "matron": "e_wind_harpy",
+	"fire_giant": "e_fire_elemental", "forsworn_champion": "e_warden_champ",
+	"collectors_champion": "e_collector_champ", "mad_shepherd": "bloodhound",
+	"withered_king": "whisper_king", "tusker": "troll", "nexus_core": "e_golem",
+	"hollow_champion": "doom_knight", "conflagrant": "blood_pyre",
+	"iron_vanguard": "e_warden_champ", "the_black_tide": "the_black_tide",
+}
+
+# Authored voice — multi-register (witchy / sly / dread / grim / eerie-funny).
+const PRESENCE_BARKS := {
+	"_generic": {
+		"enter": ["The meadow remembers your kind.", "You should not have come this far.",
+			"Another little flame, come to be snuffed."],
+		"hurt": ["Is that all you carry?", "It will cost you more than that.",
+			"You only make me certain."],
+		"phase": ["Now you have my attention.", "Enough play.", "Let me show you the rest of me."],
+		"slay": ["Lie down. The meadow is warm.", "As all the others before you.", "Rest now."],
+	},
+	"the_crone": {
+		"enter": "Sit, child. The cauldron has been waiting for you.",
+		"hurt": ["Stir, stir...", "Every little cut only sweetens the brew."],
+		"phase": "DOUBLE, DOUBLE. Now it truly boils.",
+		"slay": "Into the pot you go.",
+	},
+	"the_black_tide": {
+		"enter": "You stand on the shore of something with no bottom.",
+		"hurt": ["The tide does not bruise.", "More of me is already coming."],
+		"phase": "THE WATER RISES.",
+		"slay": "Down. Down. Down you go.",
+	},
+	"the_devil": {
+		"enter": "I have read your whole little ledger. Shall we settle up?",
+		"hurt": ["A fair price.", "You burn so brightly when you're afraid."],
+		"phase": "DID YOU THINK THIS WAS THE BARGAIN?",
+		"slay": "Sign here.",
+	},
+	"wolf_pack": {
+		"enter": "The brood has not eaten. You are late — and you are meat.",
+		"hurt": ["The pack closes in.", "Bleed. They can smell it now."],
+		"phase": "The Mother rises.",
+		"slay": "The brood feeds tonight.",
+	},
+	"scarecrow_field": {
+		"enter": "The field has been watching you the whole way in.",
+		"hurt": ["Straw grows back.", "The crows are still hungry."],
+		"phase": "Caw.",
+		"slay": "Stand here a while. Become a post.",
+	},
+	"necromancer_tower": {
+		"enter": "Death is only a door I keep propping back open.",
+		"hurt": ["You free them, nothing more.", "Kill it. Then watch."],
+		"phase": "Rise. RISE.",
+		"slay": "Welcome to the choir.",
+	},
+}
+
+
+func _build_enemy_presence() -> void:
+	if _board_container == null:
+		return
+	var root := Control.new()
+	root.name = "EnemyPresence"
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.anchor_left = 0.0; root.anchor_right = 0.0
+	root.anchor_top = 0.0; root.anchor_bottom = 0.0
+	root.offset_left = 16
+	root.offset_top = 60
+	root.offset_right = 16 + PRESENCE_W
+	root.offset_bottom = 60 + PRESENCE_H
+	root.pivot_offset = Vector2(PRESENCE_W * 0.5, PRESENCE_H * 0.5)
+	_board_container.add_child(root)
+	_enemy_presence = root
+
+	# 1) Dark pocket the antagonist emerges from — near-black fill, bronze-red
+	#    rim, deep soft shadow ("lit figure in a dark alcove", not "photo on a board").
+	var pocket := Panel.new()
+	pocket.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	pocket.set_anchors_preset(Control.PRESET_FULL_RECT)
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.05, 0.035, 0.03, 0.98)
+	sb.border_color = Color(0.42, 0.16, 0.12, 1.0)
+	for k in ["border_width_top", "border_width_bottom", "border_width_left", "border_width_right"]:
+		sb.set(k, 2)
+	for k in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		sb.set(k, 14)
+	sb.shadow_color = Color(0, 0, 0, 0.6)
+	sb.shadow_size = 14
+	sb.shadow_offset = Vector2(0, 6)
+	pocket.add_theme_stylebox_override("panel", sb)
+	root.add_child(pocket)
+
+	# 2) Art window (clipped; leaves a band at the bottom for the nameplate).
+	var art_window := Control.new()
+	art_window.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	art_window.clip_contents = true
+	art_window.anchor_left = 0.0; art_window.anchor_right = 1.0
+	art_window.anchor_top = 0.0; art_window.anchor_bottom = 1.0
+	art_window.offset_left = 5; art_window.offset_right = -5
+	art_window.offset_top = 5; art_window.offset_bottom = -66
+	root.add_child(art_window)
+
+	var art := TextureRect.new()
+	art.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	art.set_anchors_preset(Control.PRESET_FULL_RECT)
+	art.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	art.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	var tex := _resolve_antagonist_art()
+	if tex != null:
+		art.texture = tex
+	# Cooled + darkened so the warm board rim-light and the red flash read as
+	# light landing ON the figure.
+	art.modulate = Color(0.82, 0.80, 0.86, 1.0)
+	art_window.add_child(art)
+	_presence_art = art
+
+	# 3) Inner vignette — the art's edges melt into shadow (no hard rectangle).
+	var vig := TextureRect.new()
+	vig.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vig.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vig.texture = _make_presence_vignette_tex()
+	vig.stretch_mode = TextureRect.STRETCH_SCALE
+	art_window.add_child(vig)
+
+	# 4) Warm rim-light down the board-facing (right) edge — additive, so the
+	#    figure looks lit from the glowing stage.
+	var rim := TextureRect.new()
+	rim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rim.anchor_left = 1.0; rim.anchor_right = 1.0
+	rim.anchor_top = 0.0; rim.anchor_bottom = 1.0
+	rim.offset_left = -36; rim.offset_right = 0
+	var rim_grad := Gradient.new()
+	rim_grad.offsets = PackedFloat32Array([0.0, 1.0])
+	rim_grad.colors = PackedColorArray([Color(1.0, 0.62, 0.30, 0.0), Color(1.0, 0.66, 0.34, 0.5)])
+	var rim_tex := GradientTexture2D.new()
+	rim_tex.gradient = rim_grad
+	rim_tex.fill_from = Vector2(0, 0.5); rim_tex.fill_to = Vector2(1, 0.5)
+	rim_tex.width = 64; rim_tex.height = 8
+	rim.texture = rim_tex
+	rim.stretch_mode = TextureRect.STRETCH_SCALE
+	var rim_mat := CanvasItemMaterial.new()
+	rim_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	rim.material = rim_mat
+	art_window.add_child(rim)
+
+	# 5) Red hit-flash overlay (hidden by default).
+	var flash := ColorRect.new()
+	flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	flash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	flash.color = Color(0.85, 0.10, 0.06, 1.0)
+	flash.modulate = Color(1, 1, 1, 0.0)
+	var flash_mat := CanvasItemMaterial.new()
+	flash_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	flash.material = flash_mat
+	art_window.add_child(flash)
+	_presence_flash = flash
+
+	# 6) Nameplate band — encounter title in display font, blood rule, HP bar.
+	var plate := Panel.new()
+	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	plate.anchor_left = 0.0; plate.anchor_right = 1.0
+	plate.anchor_top = 1.0; plate.anchor_bottom = 1.0
+	plate.offset_top = -60; plate.offset_bottom = -6
+	plate.offset_left = 5; plate.offset_right = -5
+	var pb := StyleBoxFlat.new()
+	pb.bg_color = Color(0.07, 0.05, 0.04, 0.94)
+	pb.set("corner_radius_bottom_left", 10)
+	pb.set("corner_radius_bottom_right", 10)
+	pb.border_color = Color(0.55, 0.18, 0.14, 0.9)
+	pb.set("border_width_top", 2)
+	plate.add_theme_stylebox_override("panel", pb)
+	root.add_child(plate)
+
+	var name_lbl := Label.new()
+	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	name_lbl.text = _encounter_name if _encounter_name != "" else _antagonist_name()
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	name_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	name_lbl.anchor_left = 0.0; name_lbl.anchor_right = 1.0
+	name_lbl.anchor_top = 0.0; name_lbl.anchor_bottom = 1.0
+	name_lbl.offset_left = 6; name_lbl.offset_right = -6
+	name_lbl.offset_top = 4; name_lbl.offset_bottom = -16
+	if GameTheme.font_display != null:
+		name_lbl.add_theme_font_override("font", GameTheme.font_display)
+	name_lbl.add_theme_font_size_override("font_size", 17)
+	name_lbl.add_theme_color_override("font_color", Color(0.93, 0.80, 0.42))
+	name_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	name_lbl.add_theme_constant_override("outline_size", 4)
+	plate.add_child(name_lbl)
+
+	var track := ColorRect.new()
+	track.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	track.color = Color(0.12, 0.05, 0.05, 0.95)
+	track.anchor_left = 0.0; track.anchor_right = 1.0
+	track.anchor_top = 1.0; track.anchor_bottom = 1.0
+	track.offset_left = 10; track.offset_right = -10
+	track.offset_top = -13; track.offset_bottom = -5
+	plate.add_child(track)
+	var fill := ColorRect.new()
+	fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	fill.color = Color(0.78, 0.16, 0.13, 1.0)
+	fill.anchor_left = 0.0; fill.anchor_right = 0.0
+	fill.anchor_top = 0.0; fill.anchor_bottom = 1.0
+	fill.offset_left = 0; fill.offset_top = 0; fill.offset_bottom = 0
+	var fw := float(PRESENCE_W - 20)
+	fill.offset_right = fw
+	fill.set_meta("full_w", fw)
+	track.add_child(fill)
+	_presence_hp_fill = fill
+
+	# 7) Spoken-line caption to the right of the figure — frameless ivory italic
+	#    over a soft scrim. Reads as the foe (the game itself) speaking, not UI.
+	var scrim := Panel.new()
+	scrim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	scrim.anchor_left = 0.0; scrim.anchor_right = 0.0
+	scrim.anchor_top = 0.0; scrim.anchor_bottom = 0.0
+	scrim.offset_left = PRESENCE_W + 24
+	scrim.offset_right = PRESENCE_W + 24 + 330
+	scrim.offset_top = 34
+	scrim.offset_bottom = 118
+	var ssb := StyleBoxFlat.new()
+	ssb.bg_color = Color(0.03, 0.02, 0.02, 0.66)
+	for k in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		ssb.set(k, 8)
+	ssb.set("border_width_left", 3)
+	ssb.border_color = Color(0.62, 0.20, 0.16, 0.9)
+	scrim.add_theme_stylebox_override("panel", ssb)
+	scrim.modulate = Color(1, 1, 1, 0.0)
+	root.add_child(scrim)
+	_presence_bark_scrim = scrim
+
+	var bark := Label.new()
+	bark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bark.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bark.offset_left = 14; bark.offset_right = -12
+	bark.offset_top = 8; bark.offset_bottom = -8
+	bark.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	bark.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	if GameTheme.font_body != null:
+		bark.add_theme_font_override("font", GameTheme.font_body)
+	bark.add_theme_font_size_override("font_size", 16)
+	bark.add_theme_color_override("font_color", Color(0.96, 0.92, 0.80))
+	bark.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	bark.add_theme_constant_override("outline_size", 4)
+	scrim.add_child(bark)
+	_presence_bark = bark
+
+	_update_presence_hp()
+
+
+func _antagonist_name() -> String:
+	# The encounter's centerpiece is authored last in its deck list (Chief, Alpha,
+	# Elder Drake, The Crone...). Read it from the source encounter so a shuffled
+	# board never changes who "the foe" is. Falls back to the encounter title.
+	if _encounter_id != "":
+		var enc: Dictionary = EncounterDB.get_encounter(_encounter_id)
+		var deck: Array = enc.get("deck", [])
+		if deck.size() > 0:
+			return String(deck[deck.size() - 1].get("name", ""))
+	return _encounter_name
+
+
+func _resolve_antagonist_art() -> Texture2D:
+	# Mirrors Card2D's resolution chain: slugged name → e_-prefixed → alias map.
+	var slug := _antagonist_name().to_lower().replace(" ", "_").replace("'", "").replace("-", "_")
+	var tex: Texture2D = CardArtAliases.try_load_creature_art(slug)
+	if tex == null:
+		tex = CardArtAliases.try_load_creature_art("e_" + slug)
+	if tex == null and PRESENCE_ART_ALIAS.has(slug):
+		tex = CardArtAliases.try_load_creature_art(PRESENCE_ART_ALIAS[slug])
+	return tex
+
+
+func _make_presence_vignette_tex() -> GradientTexture2D:
+	# Transparent core → black edges, bottom-biased so the figure's base melts
+	# fully into the dark pocket.
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 0.5, 0.82, 1.0])
+	g.colors = PackedColorArray([
+		Color(0, 0, 0, 0.0), Color(0.02, 0.015, 0.015, 0.0),
+		Color(0.03, 0.02, 0.02, 0.45), Color(0.02, 0.012, 0.012, 0.96)])
+	var t := GradientTexture2D.new()
+	t.gradient = g
+	t.fill = GradientTexture2D.FILL_RADIAL
+	t.fill_from = Vector2(0.5, 0.46)
+	t.fill_to = Vector2(0.5, 1.04)
+	t.width = 160; t.height = 256
+	return t
+
+
+func _update_presence_hp() -> void:
+	if _presence_hp_fill == null:
+		return
+	var full: float = _presence_hp_fill.get_meta("full_w", float(PRESENCE_W - 20))
+	var ratio := clampf(float(enemy_hp) / float(maxi(enemy_max_hp, 1)), 0.0, 1.0)
+	var tw := _presence_hp_fill.create_tween()
+	tw.tween_property(_presence_hp_fill, "offset_right", full * ratio, 0.3) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_presence_hp_fill.color = Color(0.78, 0.16, 0.13, 1.0).lerp(Color(0.35, 0.05, 0.05, 1.0), 1.0 - ratio)
+
+
+func _pick_bark(kind: String) -> String:
+	var bset: Dictionary = PRESENCE_BARKS.get(_encounter_id, {})
+	var lines = bset.get(kind, null)
+	if lines == null:
+		lines = PRESENCE_BARKS["_generic"].get(kind, null)
+	if lines is String:
+		return lines
+	if lines is Array and not lines.is_empty():
+		return String(lines[randi() % lines.size()])
+	return ""
+
+
+func _presence_say(text: String, col: Color = Color(0.96, 0.92, 0.80)) -> void:
+	if _presence_bark == null or _presence_bark_scrim == null or text == "":
+		return
+	_presence_bark.text = text
+	_presence_bark.add_theme_color_override("font_color", col)
+	if _presence_bark_tween != null and _presence_bark_tween.is_valid():
+		_presence_bark_tween.kill()
+	_presence_bark_scrim.modulate.a = 0.0
+	var hold := clampf(1.4 + text.length() * 0.035, 1.6, 4.5)
+	_presence_bark_tween = _presence_bark_scrim.create_tween()
+	_presence_bark_tween.tween_property(_presence_bark_scrim, "modulate:a", 1.0, 0.18)
+	_presence_bark_tween.tween_interval(hold)
+	_presence_bark_tween.tween_property(_presence_bark_scrim, "modulate:a", 0.0, 0.5)
+
+
+func presence_enter() -> void:
+	if _enemy_presence == null:
+		return
+	# Scale punch (the plate is a persistent HUD element, so no alpha fade —
+	# that would blink the portrait + HP). Then the foe speaks its opening line.
+	_enemy_presence.scale = Vector2(0.9, 0.9)
+	var t := _enemy_presence.create_tween()
+	t.tween_property(_enemy_presence, "scale", Vector2.ONE, 0.55) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_presence_say(_pick_bark("enter"), Color(0.96, 0.90, 0.78))
+
+
+func presence_flinch(amount: int) -> void:
+	if _enemy_presence == null or amount <= 0:
+		return
+	if _presence_flash != null:
+		_presence_flash.modulate.a = 0.0
+		var ft := _presence_flash.create_tween()
+		ft.tween_property(_presence_flash, "modulate:a", clampf(0.30 + amount * 0.06, 0.30, 0.7), 0.05)
+		ft.tween_property(_presence_flash, "modulate:a", 0.0, 0.22).set_ease(Tween.EASE_OUT)
+	if _presence_react_tween != null and _presence_react_tween.is_valid():
+		_presence_react_tween.kill()
+	_enemy_presence.scale = Vector2.ONE
+	_enemy_presence.rotation = 0.0
+	var mag := clampf(0.012 + amount * 0.004, 0.012, 0.05)
+	var t := _enemy_presence.create_tween()
+	t.tween_property(_enemy_presence, "scale", Vector2(0.95, 0.95), 0.05)
+	t.parallel().tween_property(_enemy_presence, "rotation", mag, 0.05)
+	t.tween_property(_enemy_presence, "rotation", -mag, 0.06)
+	t.tween_property(_enemy_presence, "scale", Vector2.ONE, 0.14) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	t.parallel().tween_property(_enemy_presence, "rotation", 0.0, 0.14)
+	_presence_react_tween = t
+	if amount >= 4:
+		_presence_say(_pick_bark("hurt"), Color(1.0, 0.72, 0.62))
+
+
+func presence_react_player_hit(amount: int) -> void:
+	if _enemy_presence == null or amount <= 0:
+		return
+	if _presence_react_tween != null and _presence_react_tween.is_valid():
+		return  # don't stomp an in-flight flinch
+	var t := _enemy_presence.create_tween()
+	t.tween_property(_enemy_presence, "scale", Vector2(1.04, 1.04), 0.10).set_trans(Tween.TRANS_SINE)
+	t.tween_property(_enemy_presence, "scale", Vector2.ONE, 0.22).set_trans(Tween.TRANS_SINE)
+	_presence_react_tween = t
+
+
+func presence_phase(col: Color = Color(1.0, 0.35, 0.28)) -> void:
+	if _enemy_presence == null:
+		return
+	if _presence_react_tween != null and _presence_react_tween.is_valid():
+		_presence_react_tween.kill()
+	var t := _enemy_presence.create_tween()
+	t.tween_property(_enemy_presence, "scale", Vector2(1.10, 1.10), 0.18) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	t.tween_interval(0.5)
+	t.tween_property(_enemy_presence, "scale", Vector2.ONE, 0.4).set_trans(Tween.TRANS_SINE)
+	_presence_react_tween = t
+	var vnode := get_node_or_null("Vignette")
+	if vnode != null and vnode.material != null:
+		var base: float = float(vnode.material.get_shader_parameter("vignette_strength"))
+		var vt := vnode.create_tween()
+		vt.tween_method(func(v): vnode.material.set_shader_parameter("vignette_strength", v), base, base + 0.16, 0.2)
+		vt.tween_interval(0.5)
+		vt.tween_method(func(v): vnode.material.set_shader_parameter("vignette_strength", v), base + 0.16, base, 0.5)
+	_presence_say(_pick_bark("phase"), col)
 
 
 func _make_portrait_card(is_enemy: bool) -> Panel:
@@ -7439,6 +8534,18 @@ func _place_card_in_slot(card: Control, lane_idx: int, row: int = ROW_FRONT,
 	if card.has_floop() and not card.is_opponent:
 		if not card.floop_clicked.is_connected(_on_floop_clicked.bind(card)):
 			card.floop_clicked.connect(_on_floop_clicked.bind(card))
+	# Battlefield move-drag wiring (friendly creatures only). dragging/drag_ended
+	# may already be connected from the card's hand days; guard so we don't
+	# double-fire the slot highlight.
+	if not card.is_opponent and card.is_creature():
+		if not card.field_move_started.is_connected(_on_field_move_started.bind(card)):
+			card.field_move_started.connect(_on_field_move_started.bind(card))
+		if not card.field_move_dropped.is_connected(_on_field_move_dropped.bind(card)):
+			card.field_move_dropped.connect(_on_field_move_dropped.bind(card))
+		if not card.dragging.is_connected(_on_card_dragging.bind(card)):
+			card.dragging.connect(_on_card_dragging.bind(card))
+		if not card.drag_ended.is_connected(_clear_slot_highlights):
+			card.drag_ended.connect(_clear_slot_highlights)
 	# Friendly damage hook. Used by Stalwart's Anvil, Wormwood, Spike Driver,
 	# and any future relic that reacts to "ally took a hit". The Card2D signal
 	# fires only when amount > 0, so guard logic stays in the handler.
@@ -7590,6 +8697,10 @@ func _on_card_destroyed(card: Control) -> void:
 	if lane < 0:
 		return
 
+	# JUICE — register this death for the coalesced "notable kill" hit-stop so a
+	# multi-creature wipe or a chunky bruiser dying lands with weight.
+	_note_death(card, was_enemy)
+
 	# Snapshot enemy data so on_death effects that look up "last dead enemy"
 	# see the freshly-dead card (Doppelganger, Phoenix Feather).
 	if was_enemy:
@@ -7722,11 +8833,18 @@ var _highlighted_slot: Control = null
 func _on_card_dragging(global_pos: Vector2, card: Control) -> void:
 	if card == null or not is_instance_valid(card):
 		return
-	# Drag must have actually crossed into the play zone — otherwise mousing
-	# inside the hand bands lit-up slots while the player wasn't even trying
-	# to play yet. Use the same threshold the drop check uses.
+	# Spells don't occupy a slot (they enter targeting on play), so lighting a
+	# board slot under a dragged spell is misleading — skip it.
+	if card.has_method("is_creature") and not card.is_creature():
+		_clear_slot_highlights()
+		return
+	# Only highlight once the drag crosses into the play zone, and share the
+	# EXACT play gate (Card2D.PLAY_THRESHOLD_Y) so a slot lights up precisely
+	# when a release there would play. Previously this used 0.78 while the drop
+	# check used 0.72 — a 6%-tall band where the slot glowed but releasing
+	# snapped the card back to hand.
 	var viewport_h := get_viewport_rect().size.y
-	if global_pos.y >= viewport_h * 0.78:
+	if global_pos.y >= viewport_h * Card2D.PLAY_THRESHOLD_Y:
 		_clear_slot_highlights()
 		return
 	var drop := _nearest_player_slot(global_pos)
@@ -7757,6 +8875,86 @@ func _set_slot_highlight(slot: Control, on: bool) -> void:
 	var c := hl.color
 	c.a = 0.42 if on else 0.0
 	hl.color = c
+
+
+# ── Battlefield creature repositioning ("move") ─────────────────────────────
+# The player can drag a friendly creature already on the board to an empty
+# friendly slot during their turn (up to MOVES_PER_TURN times). Card2D handles
+# the click-vs-drag distinction and emits field_move_started / field_move_dropped;
+# Combat owns the slot grid + hand layer, so the actual re-parenting lives here.
+
+func _on_field_move_started(card: Control) -> void:
+	# The grab lifted off its slot. Detach the card from its CenterContainer cell
+	# and float it on the hand layer so it can track the cursor. The slot's
+	# board-array entry keeps pointing at the card until the drop resolves, so
+	# mid-drag board state stays consistent (nothing iterates it during the
+	# player's idle turn).
+	if not is_instance_valid(card):
+		return
+	var home_global: Vector2 = card.global_position
+	var cell = card.get_parent()
+	if cell != null:
+		cell.remove_child(card)
+	# Hide the contact shadow under the vacated slot while the card is lifted.
+	var src_slot: Control = _slot_array(false, card.current_row)[card.current_lane]
+	if src_slot != null:
+		var sh = src_slot.get_node_or_null("ContactShadow")
+		if sh != null:
+			sh.visible = false
+	_hand_container.add_child(card)
+	card.global_position = home_global
+
+
+func _on_field_move_dropped(card: Control, global_pos: Vector2) -> void:
+	if not is_instance_valid(card):
+		return
+	_clear_slot_highlights()
+	var moved := false
+	if phase == Phase.PLAYER_TURN and _moves_used_this_turn < MOVES_PER_TURN:
+		var drop := _nearest_player_slot(global_pos)
+		var dest_row: int = drop.row
+		var dest_lane: int = drop.lane
+		var src_row: int = card.current_row
+		var src_lane: int = card.current_lane
+		var same_slot: bool = (dest_row == src_row and dest_lane == src_lane)
+		if not same_slot and _row_array(false, dest_row)[dest_lane] == null:
+			_row_array(false, src_row)[src_lane] = null
+			card.current_row = dest_row
+			card.current_lane = dest_lane
+			_reset_card_after_drag(card)
+			_slot_set_card(_slot_array(false, dest_row)[dest_lane], card)
+			_row_array(false, dest_row)[dest_lane] = card
+			_moves_used_this_turn += 1
+			_play_landing_pop(card)
+			if AudioBank != null:
+				AudioBank.play_sfx("card_play")
+			moved = true
+		elif not same_slot:
+			_show_info("That slot is occupied.")
+	elif _moves_used_this_turn >= MOVES_PER_TURN:
+		_show_info("No moves left this turn.")
+	if not moved:
+		_return_card_to_slot(card)
+
+
+func _return_card_to_slot(card: Control) -> void:
+	# Snap a lifted creature back into the slot it came from. current_row/
+	# current_lane were never changed, and its board-array entry still points here.
+	if not is_instance_valid(card):
+		return
+	_reset_card_after_drag(card)
+	_slot_set_card(_slot_array(false, card.current_row)[card.current_lane], card)
+	_row_array(false, card.current_row)[card.current_lane] = card
+
+
+func _reset_card_after_drag(card: Control) -> void:
+	# Detach from the transient drag parent (hand layer) and restore the neutral
+	# transform a slotted creature expects before it's added to a cell.
+	if card.get_parent() != null:
+		card.get_parent().remove_child(card)
+	card.scale = Vector2.ONE
+	card.z_index = 0
+	card.pivot_offset = card.size * 0.5
 
 
 # =====================================================================
@@ -7829,28 +9027,52 @@ func _build_incoming_damage_chip() -> void:
 	style.content_margin_top = 5
 	style.content_margin_bottom = 5
 	chip.add_theme_stylebox_override("panel", style)
-	# Pinned directly UNDER the enemy plate (top-right) — the threat belongs next
+	# Pinned directly BELOW the enemy plate (top-right) — the threat belongs next
 	# to its source, so the player reads "this foe will hit me for N" in one
-	# glance at the enemy corner instead of hunting for a number on their own
-	# side. Right edge aligns with the enemy plate (offset_right -14); the chip's
-	# content centers in the reserved box. Enemy banner ends at y=254 (top 14 +
-	# H 240), so the chip sits just below at y=258.
+	# glance at the enemy corner. The enemy banner is H=304 from y=14, so it ends
+	# at y=318; the chip sits just under that at y=324. (It used to be pinned at
+	# y=258 from when the banner was only 240 tall — once the banner was enlarged
+	# the chip ended up ON TOP of the enemy HP medallion, mashing the HP numeral
+	# and the threat numeral into one unreadable blob. Keep offset_top a few px
+	# below the banner's offset_bottom in _build_enemy_banner_diegetic.)
 	chip.anchor_left = 1.0
 	chip.anchor_right = 1.0
 	chip.anchor_top = 0.0
 	chip.anchor_bottom = 0.0
-	chip.offset_left = -150
+	chip.offset_left = -160
 	chip.offset_right = -14
-	chip.offset_top = 258
-	chip.offset_bottom = 300
+	chip.offset_top = 324
+	chip.offset_bottom = 382
 	chip.z_index = 5
 	chip.visible = false
+
+	# Two-line layout: a small "INCOMING" caption over the icon + numeral so the
+	# chip explains itself. The bare "⚔ N" read as a mystery glyph to players who
+	# didn't know it meant "face damage headed your way this round".
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 0)
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_child(col)
+
+	var caption := Label.new()
+	caption.name = "ThreatCaption"
+	caption.text = "INCOMING"
+	caption.add_theme_font_size_override("font_size", 10)
+	caption.add_theme_color_override("font_color", Color(0.96, 0.66, 0.46))
+	caption.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	caption.add_theme_constant_override("outline_size", 3)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if GameTheme.font_display:
+		caption.add_theme_font_override("font", GameTheme.font_display)
+	col.add_child(caption)
 
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 7)
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	chip.add_child(row)
+	col.add_child(row)
 
 	var icon := TextureRect.new()
 	icon.name = "ThreatIcon"
@@ -8002,10 +9224,10 @@ func _build_enemy_banner_diegetic() -> void:
 	# a centered title strip at top-center; relics tucked underneath this
 	# banner. Slim banner reads cleaner than the previous tall column that
 	# stacked portrait + HP + encounter info + round counter.
-	# W matches the player plate (210) so the two combatant plates read as a
-	# matched, mirrored pair across the board.
-	const W := 210
-	const H := 240
+	# Enlarged past the player plate so the antagonist LOOMS rather than mirrors
+	# you — the foe should dominate its corner, not match yours.
+	const W := 236
+	const H := 304
 	var banner := Control.new()
 	banner.anchor_left = 1.0
 	banner.anchor_right = 1.0
@@ -8018,6 +9240,10 @@ func _build_enemy_banner_diegetic() -> void:
 	banner.mouse_filter = Control.MOUSE_FILTER_PASS
 	_hud_layer.add_child(banner)
 	_enemy_banner_for_info = banner
+	# This plate IS the Living Antagonist — reactions (flinch / lean-in) scale
+	# about its centre.
+	_enemy_presence = banner
+	banner.pivot_offset = Vector2(W * 0.5, H * 0.5)
 
 	# Dark backdrop so the portrait never blends into the meadow background.
 	var bg := ColorRect.new()
@@ -8027,8 +9253,10 @@ func _build_enemy_banner_diegetic() -> void:
 	banner.add_child(bg)
 
 	# Portrait region: from the top down to where the HP medallion starts.
-	# HP medallion lives in the bottom 72px of the banner. With H=240, HP
-	# spans y=168..234 of the banner box.
+	# HP medallion lives in the bottom 72px of the banner. With H=304 (banner
+	# y=14..318), the medallion spans absolute y=246..302. The incoming-damage
+	# chip is pinned just below that (y=324) in _build_incoming_damage_chip — if
+	# you change H here, move the chip too or it lands back on the HP numeral.
 	const HP_TOP := -72
 	const HP_BOTTOM := -8
 	var demon_tex: Texture2D = _resolve_enemy_portrait()
@@ -8044,6 +9272,48 @@ func _build_enemy_banner_diegetic() -> void:
 		img.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 		img.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		banner.add_child(img)
+	_presence_art = null
+
+	# ── Living Antagonist treatment: emerge-from-shadow + reaction overlays ──
+	# Inner vignette so the foe's edges melt into the dark pocket (Inscryption).
+	var pvig := TextureRect.new()
+	pvig.set_anchors_preset(Control.PRESET_FULL_RECT)
+	pvig.offset_bottom = HP_TOP
+	pvig.texture = _make_presence_vignette_tex()
+	pvig.stretch_mode = TextureRect.STRETCH_SCALE
+	pvig.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner.add_child(pvig)
+	# Warm rim-light down the board-facing (left) edge — additive, "lit by the stage".
+	var prim := TextureRect.new()
+	prim.anchor_left = 0.0; prim.anchor_right = 0.0
+	prim.anchor_top = 0.0; prim.anchor_bottom = 1.0
+	prim.offset_right = 42; prim.offset_bottom = HP_TOP
+	var prim_grad := Gradient.new()
+	prim_grad.offsets = PackedFloat32Array([0.0, 1.0])
+	prim_grad.colors = PackedColorArray([Color(1.0, 0.64, 0.32, 0.5), Color(1.0, 0.64, 0.32, 0.0)])
+	var prim_tex := GradientTexture2D.new()
+	prim_tex.gradient = prim_grad
+	prim_tex.fill_from = Vector2(0, 0.5); prim_tex.fill_to = Vector2(1, 0.5)
+	prim_tex.width = 64; prim_tex.height = 8
+	prim.texture = prim_tex
+	prim.stretch_mode = TextureRect.STRETCH_SCALE
+	var prim_mat := CanvasItemMaterial.new()
+	prim_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	prim.material = prim_mat
+	prim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner.add_child(prim)
+	# Red hit-flash overlay (hidden; driven by presence_flinch).
+	var pflash := ColorRect.new()
+	pflash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	pflash.offset_bottom = HP_TOP
+	pflash.color = Color(0.85, 0.10, 0.06, 1.0)
+	pflash.modulate = Color(1, 1, 1, 0.0)
+	var pflash_mat := CanvasItemMaterial.new()
+	pflash_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	pflash.material = pflash_mat
+	pflash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner.add_child(pflash)
+	_presence_flash = pflash
 
 	# Painted border wraps the WHOLE plate (portrait + HP bar) so the bar reads
 	# as the base of one framed panel — not a pill hanging outside the frame.
@@ -8074,6 +9344,47 @@ func _build_enemy_banner_diegetic() -> void:
 	hp.offset_left = 14
 	hp.offset_right = -14
 	banner.add_child(hp)
+
+	# Spoken-line caption — floats just LEFT of the foe, out into the board, so
+	# its words read as coming from the figure. Frameless ivory over a soft
+	# scrim; hidden until a bark fires.
+	var scrim := Panel.new()
+	scrim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	scrim.anchor_left = 0.0; scrim.anchor_right = 0.0
+	scrim.anchor_top = 0.0; scrim.anchor_bottom = 0.0
+	scrim.offset_right = -16
+	scrim.offset_left = -16 - 340
+	# Sits at the foe's mid-height, extending left into open board — clear of the
+	# center-top encounter title + passive-description band.
+	scrim.offset_top = 150
+	scrim.offset_bottom = 150 + 92
+	var ssb := StyleBoxFlat.new()
+	ssb.bg_color = Color(0.03, 0.02, 0.02, 0.66)
+	for k in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		ssb.set(k, 8)
+	ssb.set("border_width_right", 3)
+	ssb.border_color = Color(0.62, 0.20, 0.16, 0.9)
+	scrim.add_theme_stylebox_override("panel", ssb)
+	scrim.modulate = Color(1, 1, 1, 0.0)
+	banner.add_child(scrim)
+	_presence_bark_scrim = scrim
+	var bark := Label.new()
+	bark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bark.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bark.offset_left = 14; bark.offset_right = -14
+	bark.offset_top = 6; bark.offset_bottom = -6
+	bark.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	bark.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	bark.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	if GameTheme.font_body != null:
+		bark.add_theme_font_override("font", GameTheme.font_body)
+	bark.add_theme_font_size_override("font_size", 16)
+	bark.add_theme_color_override("font_color", Color(0.96, 0.92, 0.80))
+	bark.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	bark.add_theme_constant_override("outline_size", 4)
+	scrim.add_child(bark)
+	_presence_bark = bark
 
 
 func _build_player_banner_diegetic() -> void:
@@ -8321,13 +9632,30 @@ func _build_encounter_scroll_diegetic() -> void:
 
 	if _encounter_passive != "":
 		var enc = EncounterDB.get_encounter(RunState.current_encounter_id)
-		var passive := _make_text_label(enc.get("passive_desc", ""), 15,
-			Color(0.95, 0.85, 0.55))
+		# The boss's passive IS its threat — promote it from faint text to a
+		# persistent ominous plaque (dark scrim + crimson underline) so it reads as
+		# a standing danger every turn, not a caption you scroll past.
+		var threat_frame := PanelContainer.new()
+		var threat_bg := StyleBoxFlat.new()
+		threat_bg.bg_color = Color(0.12, 0.03, 0.03, 0.62)
+		threat_bg.set_corner_radius_all(6)
+		threat_bg.border_width_bottom = 2
+		threat_bg.border_color = Color(0.82, 0.22, 0.16, 0.9)
+		threat_bg.content_margin_left = 18
+		threat_bg.content_margin_right = 18
+		threat_bg.content_margin_top = 6
+		threat_bg.content_margin_bottom = 7
+		threat_frame.add_theme_stylebox_override("panel", threat_bg)
+		threat_frame.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		var passive := _make_text_label(enc.get("passive_desc", ""), 18,
+			Color(1.0, 0.80, 0.50))
 		passive.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
-		passive.add_theme_constant_override("outline_size", 4)
+		passive.add_theme_constant_override("outline_size", 5)
 		passive.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		passive.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		stack.add_child(passive)
+		passive.custom_minimum_size = Vector2(440, 0)
+		threat_frame.add_child(passive)
+		stack.add_child(threat_frame)
 
 
 func _build_mana_post_diegetic() -> void:
@@ -8925,7 +10253,7 @@ var _glossary_layer: CanvasLayer = null
 
 const MECHANICS_HELP: Array = [
 	{"name": "Floop", "desc": "Skip a creature's attack this turn to use its special ability. Toggle the indicator before ending your turn."},
-	{"name": "Sacrifice", "desc": "Kill one of your own creatures as a free action (once per turn). Triggers its On-Death effect."},
+	{"name": "Sacrifice", "desc": "Certain cards and abilities destroy one of your own creatures as a cost — never a free action. The dying creature's On-Death effect still triggers."},
 	{"name": "Banking", "desc": "Carry up to 2 unused mana into next turn. Pay it like normal mana."},
 	{"name": "Front / Back row", "desc": "Both rows attack each turn — front goes first and is attacked first. Back is queue space, not a separate combat tier."},
 	{"name": "Swift phase", "desc": "Creatures with Swift attack BEFORE simultaneous combat resolves. They strike first and take damage normally."},
@@ -9305,7 +10633,12 @@ func _update_hud() -> void:
 		_mana_label.text = "%d / %d" % [player_mana, player_max_mana]
 	_refresh_hand_affordability()
 	_refresh_relic_counters()
+	# JUICE: re-evaluate low-HP dread and enemy threat outlines on every HUD
+	# refresh (i.e. after every damage / heal / board change).
+	_update_low_hp_dread()
+	_refresh_threat_flags()
 	_turn_label.text = "Round %d" % round_number
+	_update_presence_hp()
 	if _deck_count_label:
 		# Frozen Eye: append the top card's name to the count so the player can
 		# plan around the next draw. Keep the count up front so the chip's main
@@ -9324,7 +10657,7 @@ func _update_hud() -> void:
 			_phase_label.text = "YOUR TURN"
 			_phase_label.add_theme_color_override("font_color", IVORY)
 		Phase.RESOLVING:
-			_phase_label.text = "COMBAT"
+			_phase_label.text = "FIGHT"
 			_phase_label.add_theme_color_override("font_color", Color(1.00, 0.60, 0.25))
 		Phase.GAME_OVER:
 			pass
@@ -9392,6 +10725,269 @@ func spawn_floating_number(global_pos: Vector2, text: String, color: Color, big:
 	tw.tween_property(lbl, "position:y", lbl.position.y + rise, 0.72).set_ease(Tween.EASE_OUT)
 	tw.tween_property(lbl, "modulate:a", 0.0, 0.72).set_ease(Tween.EASE_IN).set_delay(0.18)
 	tw.chain().tween_callback(lbl.queue_free)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Magnitude-scaled combat hit feedback (JUICE)
+#  Card2D.take_damage routes here so every creature hit shakes the screen in
+#  proportion to the blow — a 1-dmg plink barely ripples, a 7-dmg haymaker
+#  rocks the board. Centralized so both armor-respecting and armor-bypass hits
+#  feel consistent. Purely additive: no game logic, just shake.
+# ─────────────────────────────────────────────────────────────────────────
+
+func creature_hit_feedback(amount: int) -> void:
+	# Called by Card2D after a creature absorbs a hit. Light hits get a whisper of
+	# shake; bigger hits ramp up so the player FEELS the weight without the screen
+	# jackhammering on chip damage. Kept modest on purpose because the combat
+	# cascade ALSO fires an explicit screen_shake on heavy/lethal blows
+	# (_creature_attacks_creature etc.) — this layers under that, it doesn't
+	# replace it. 1 dmg → ~1.6px, 3 dmg → ~3.5px, 6+ dmg → capped ~6.5px.
+	if amount <= 0:
+		return
+	var mag: float = clampf(0.9 + float(amount) * 0.95, 1.6, 6.5)
+	screen_shake(mag)
+
+
+func _play_face_damage_flash(amount: int) -> void:
+	# A layered crimson vignette pulse for player-face damage — louder than the
+	# generic screen_flash so a hit to the hero never gets lost. Two stacked
+	# ColorRects: a brief full-screen wash (alpha scales with damage) plus a
+	# thick red edge frame that snaps in and fades, reading as "blood at the
+	# edges of your vision." Both self-free; pure overlay, no game logic.
+	var parent: Node = _hud_layer if _hud_layer != null else self
+	var wash_a: float = clampf(0.18 + float(amount) * 0.045, 0.20, 0.42)
+	# Full-screen red wash.
+	var wash := ColorRect.new()
+	wash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	wash.color = Color(0.72, 0.06, 0.04, wash_a)
+	wash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wash.z_index = 232
+	parent.add_child(wash)
+	var tw := wash.create_tween()
+	tw.tween_property(wash, "color:a", 0.0, 0.34).set_ease(Tween.EASE_IN)
+	tw.tween_callback(wash.queue_free)
+	# Hard red edge frame that hits + recedes for the "took a real blow" punch.
+	var frame := Panel.new()
+	frame.set_anchors_preset(Control.PRESET_FULL_RECT)
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	frame.z_index = 233
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0, 0, 0, 0)
+	sb.border_color = Color(0.85, 0.07, 0.05, clampf(0.45 + float(amount) * 0.04, 0.45, 0.85))
+	sb.set_border_width_all(int(clampf(70.0 + float(amount) * 12.0, 80.0, 180.0)))
+	sb.shadow_color = Color(0.9, 0.08, 0.05, 0.5)
+	sb.shadow_size = 50
+	frame.add_theme_stylebox_override("panel", sb)
+	parent.add_child(frame)
+	var ft := frame.create_tween()
+	ft.tween_property(frame, "modulate:a", 0.0, 0.40).set_ease(Tween.EASE_IN)
+	ft.tween_callback(frame.queue_free)
+
+
+func _punch_label(lbl: Control, amount_scale: float) -> void:
+	# Quick scale-pop on a HUD label (HP counter) so a value change reads as an
+	# impact, not a silent tick. Restores to the label's resting scale.
+	if lbl == null or not is_instance_valid(lbl):
+		return
+	var rest := lbl.scale
+	lbl.pivot_offset = lbl.size * 0.5
+	var tw := lbl.create_tween()
+	tw.tween_property(lbl, "scale", rest * amount_scale, 0.08) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(lbl, "scale", rest, 0.22) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Notable-death weight (JUICE)
+#  A heavy creature dying, or several creatures dying in the same frame, earns
+#  an extra punctuation of shake on top of the per-creature death burst. Frame-
+#  coalesced so a board wipe produces a single emphasis rather than a stutter.
+#  Runs synchronously (no await) so it never desyncs the attack cascade — the
+#  attack functions already supply the awaited HITSTOP_BEAT after a kill.
+# ─────────────────────────────────────────────────────────────────────────
+
+func _note_death(card: Control, _was_enemy: bool) -> void:
+	_deaths_this_frame += 1
+	var bulk: int = 1
+	if is_instance_valid(card):
+		bulk = maxi(int(card.card_data.get("atk", 1)), int(card.card_data.get("hp", 1)))
+	# Notable if it's the 2nd+ death this frame (a wipe) OR a chunky body (a
+	# 6/6+ bruiser, an elite/boss centerpiece). Emphasis fires once per frame.
+	var notable: bool = _deaths_this_frame >= 2 or bulk >= 6
+	# Boss / elite encounters: any death of a sizable enemy reads as a milestone.
+	if not notable and _was_enemy and bulk >= 4:
+		var enc_type := String(RunState.current_node_type)
+		if enc_type == "boss" or enc_type == "elite":
+			notable = true
+	if notable and not _death_hitstop_armed:
+		_death_hitstop_armed = true
+		# A stronger jolt than the per-hit shake, scaled up for a multi-kill.
+		var mag: float = clampf(7.0 + float(_deaths_this_frame) * 2.5 + float(bulk) * 0.6, 8.0, 18.0)
+		screen_shake(mag)
+		_reset_death_frame_counter.call_deferred()
+
+func _reset_death_frame_counter() -> void:
+	# Deferred to end-of-frame so all deaths in one combat step share the same
+	# emphasis, then the gate reopens for the next frame's deaths.
+	_deaths_this_frame = 0
+	_death_hitstop_armed = false
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Low-HP dread (JUICE)
+#  When the player drops to/below a danger threshold, a red screen-edge
+#  vignette breathes around the frame and a soft heartbeat plays. The effect
+#  removes itself the instant HP recovers above the line. Driven from
+#  _update_hud so every damage / heal event re-evaluates it.
+# ─────────────────────────────────────────────────────────────────────────
+
+const LOW_HP_ABS_THRESHOLD: int = 6        # at/below this HP the dread kicks in
+const LOW_HP_PCT_THRESHOLD: float = 0.25   # ...or at/below 25% of max, whichever is higher
+
+func _low_hp_danger_line() -> int:
+	# The HP value at/below which dread activates: the larger of the flat floor
+	# and the 25%-of-max line, so a 25-max hero and a 40-max hero both feel it.
+	return maxi(LOW_HP_ABS_THRESHOLD, int(ceil(float(player_max_hp) * LOW_HP_PCT_THRESHOLD)))
+
+func _update_low_hp_dread() -> void:
+	# Toggle the persistent dread overlay based on current HP vs the danger line.
+	if _hud_layer == null:
+		return
+	var in_danger: bool = player_hp > 0 and player_hp <= _low_hp_danger_line()
+	if in_danger and not _low_hp_active:
+		_start_low_hp_dread()
+	elif not in_danger and _low_hp_active:
+		_stop_low_hp_dread()
+	elif in_danger and _low_hp_active:
+		# Pitch the heartbeat up a touch as HP approaches zero so the dread
+		# intensifies on the final sliver of life.
+		var t: float = clampf(float(player_hp) / float(maxi(1, _low_hp_danger_line())), 0.0, 1.0)
+		_low_hp_vignette_peak = lerpf(0.50, 0.30, t)  # closer to 0 HP → deeper red
+
+func _start_low_hp_dread() -> void:
+	_low_hp_active = true
+	_low_hp_vignette_peak = 0.42
+	# Build the vignette once. Asset-free edge-darkening: a Panel whose StyleBox
+	# has a thick red border + shadow hugging the screen edge, leaving the center
+	# clear. Reads as "blood creeping in at the edges of vision." Pulses alpha on
+	# a looping tween so it breathes.
+	if not is_instance_valid(_low_hp_vignette):
+		var pan := Panel.new()
+		pan.name = "LowHpVignette"
+		pan.set_anchors_preset(Control.PRESET_FULL_RECT)
+		pan.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		pan.z_index = 230  # above board, below banners (245) and floating numbers
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0, 0, 0, 0)            # transparent center
+		sb.border_color = Color(0.62, 0.04, 0.03, 1.0)
+		sb.set_border_width_all(120)               # thick red frame = edge vignette
+		sb.shadow_color = Color(0.85, 0.05, 0.04, 0.55)
+		sb.shadow_size = 60
+		# Soft inner falloff so the red bleeds toward the center instead of a hard line.
+		sb.anti_aliasing = true
+		pan.add_theme_stylebox_override("panel", sb)
+		pan.modulate = Color(1, 1, 1, 0.0)
+		_hud_layer.add_child(pan)
+		_low_hp_vignette = pan
+	# Looping breathe tween: fade the whole vignette in/out so it pulses like a
+	# pulse. Uses a method tween so the peak can drift with HP (set above).
+	if _low_hp_tween != null and _low_hp_tween.is_valid():
+		_low_hp_tween.kill()
+	_low_hp_vignette.visible = true
+	_low_hp_tween = create_tween().set_loops()
+	_low_hp_tween.tween_method(_set_low_hp_vignette_alpha, 0.12, 1.0, 0.62) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_low_hp_tween.tween_callback(_low_hp_heartbeat)
+	_low_hp_tween.tween_method(_set_low_hp_vignette_alpha, 1.0, 0.12, 0.62) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_low_hp_tween.tween_interval(0.10)
+
+func _set_low_hp_vignette_alpha(t: float) -> void:
+	# t in [0,1] → scaled by the current peak so the breathe deepens near death.
+	if is_instance_valid(_low_hp_vignette):
+		_low_hp_vignette.modulate.a = t * _low_hp_vignette_peak
+
+func _low_hp_heartbeat() -> void:
+	# Soft thud at the crest of each pulse. Reuses the existing "hit_hero" cue at
+	# low volume + low pitch so it reads as a muffled heartbeat, not a strike.
+	# (No dedicated heartbeat SFX exists — flagged in the report.)
+	if AudioBank != null and AudioBank.has_sfx("hit_hero"):
+		AudioBank.play_sfx("hit_hero", 0.02, -16.0)
+
+func _stop_low_hp_dread() -> void:
+	_low_hp_active = false
+	if _low_hp_tween != null and _low_hp_tween.is_valid():
+		_low_hp_tween.kill()
+		_low_hp_tween = null
+	if is_instance_valid(_low_hp_vignette):
+		var v := _low_hp_vignette
+		var tw := create_tween()
+		tw.tween_property(v, "modulate:a", 0.0, 0.35)
+		tw.tween_callback(func(): if is_instance_valid(v): v.visible = false)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Threat flagging (JUICE)
+#  Enemy creatures that pose an immediate threat — they will smash the player's
+#  face this round, or they swing for a heavy blow — get a pulsing crimson
+#  outline so the danger is visible at a glance, not buried in the numbers.
+#  Re-evaluated whenever the board changes (via _update_hud).
+# ─────────────────────────────────────────────────────────────────────────
+
+const THREAT_HEAVY_ATK: int = 5   # an attacker swinging this hard gets flagged even if blocked
+
+func _clear_threat_flags() -> void:
+	# Drop every enemy threat outline (e.g. when combat begins resolving).
+	for row in [ROW_FRONT, ROW_BACK]:
+		var arr = _row_array(true, row)
+		for lane in range(LANES_PER_ROW):
+			var c = arr[lane]
+			if c != null and is_instance_valid(c) and c.has_method("set_threat_flagged"):
+				c.set_threat_flagged(false)
+
+func _refresh_threat_flags() -> void:
+	# Only meaningful during the player's turn — once combat resolves the board
+	# is mid-flux. Skip outside PLAYER_TURN so flags don't flicker during the
+	# attack cascade.
+	if phase != Phase.PLAYER_TURN:
+		return
+	for row in [ROW_FRONT, ROW_BACK]:
+		var arr = _row_array(true, row)
+		for lane in range(LANES_PER_ROW):
+			var c = arr[lane]
+			if c == null or not is_instance_valid(c):
+				continue
+			if not c.has_method("set_threat_flagged"):
+				continue
+			var threat: bool = _enemy_is_threatening(c, lane, row)
+			c.set_threat_flagged(threat)
+
+func _enemy_is_threatening(c: Control, lane: int, row: int) -> bool:
+	# A creature is "threatening" if it can attack and either (a) its column is
+	# open so it will hit the player's face this round, or (b) it swings for a
+	# heavy blow regardless of target. Structures / stunned / frozen never flag.
+	if c.has_keyword("structure"):
+		return false
+	if not c.can_attack():
+		return false
+	var intent: String = String(c.get_meta("current_intent", "ATK"))
+	# Non-attacking intents (GUARD/HEAL/RETREAT/SUMMON) aren't an incoming hit.
+	if intent != "ATK" and intent != "CHARGE" and intent != "ENRAGE":
+		return false
+	var atk: int = c.effective_atk()
+	if atk <= 0:
+		return false
+	# Heavy hitter — always worth flagging.
+	if atk >= THREAT_HEAVY_ATK:
+		return true
+	# Face threat: both player slots in this column are empty, so the blow lands
+	# on the hero. Back-row attacker blocked by its own front partner can't reach.
+	if row == ROW_BACK and _enemy_field[lane] != null:
+		return false
+	if _player_field[lane] == null and _player_back[lane] == null:
+		return true
+	return false
 
 
 func _refresh_hand_affordability() -> void:
@@ -10151,6 +11747,22 @@ func _show_encounter_intro(is_boss: bool) -> void:
 	name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	holder.add_child(name_label)
 
+	# Boss/elite preamble — one diegetic line of ill omen, above the mechanical
+	# passive. Ambient voice only: never names the unnameable, never references
+	# another encounter (each preamble is a standalone card of ill omen).
+	if _encounter_preamble != "":
+		var pre_label := Label.new()
+		pre_label.text = _encounter_preamble
+		pre_label.add_theme_font_size_override("font_size", 18)
+		pre_label.add_theme_color_override("font_color", Color(0.92, 0.86, 0.92))
+		pre_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.92))
+		pre_label.add_theme_constant_override("outline_size", 5)
+		pre_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		pre_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		pre_label.custom_minimum_size = Vector2(vp.x * 0.6, 0)
+		pre_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		holder.add_child(pre_label)
+
 	if _encounter_passive_desc != "":
 		var desc_label := Label.new()
 		desc_label.text = _encounter_passive_desc
@@ -10201,7 +11813,12 @@ func _show_encounter_intro(is_boss: bool) -> void:
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	# Hold the intro on screen — bosses get longer for the player to read the
 	# passive description; elites are quicker.
-	tw.chain().tween_interval(1.5 if is_boss else 1.0)
+	var hold := 1.5 if is_boss else 1.0
+	if _encounter_preamble != "":
+		# Give the player time to actually read the ill-omen line, scaled to its
+		# length and capped so it never drags.
+		hold += clampf(_encounter_preamble.length() * 0.025, 1.5, 3.5)
+	tw.chain().tween_interval(hold)
 	tw.chain().tween_property(dim, "color:a", 0.0, 0.32)
 	tw.parallel().tween_property(holder, "modulate:a", 0.0, 0.32)
 	tw.chain().tween_callback(dim.queue_free)
@@ -10246,6 +11863,17 @@ func _show_info(msg: String) -> void:
 	_info_label.text = msg
 	_info_label.modulate = Color(1, 1, 1, 1)
 	get_tree().create_timer(2.0).timeout.connect(func(): _info_label.text = "")
+
+
+# Balance-telemetry switch — MUST stay false in release. When true, _dbgp() prints
+# per-round and per-attack [PACING]/[COMBAT] lines for pacing analysis. These fire
+# every round and on every attack, so they are silenced for shipping builds.
+const DEBUG_PACING := false
+
+
+func _dbgp(msg: String) -> void:
+	if DEBUG_PACING:
+		print(msg)
 
 
 func _unhandled_input(event: InputEvent) -> void:

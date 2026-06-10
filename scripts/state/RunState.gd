@@ -82,15 +82,18 @@ const ASCENSION_HP_MULT: Array[float] = [1.0, 1.20, 1.40, 1.60, 1.80, 2.0]
 
 const ACTS: int = 3
 
-# ── Slay-the-Spire-style map constants ──
-# 7 columns wide, 15 rows tall (rows 0..13 are explorable, row 14 = boss).
-# 6 paths walk from row 0 to row 13; rest sites occupy row 13; boss is row 14.
+# ── Campaign-map constants ──
+# 7 columns wide, 8 rows tall (rows 0..6 are explorable, row 7 = boss).
+# Shrunk from 15 rows on 2026-06-10: at ~38 sites the map reads as an
+# abstract lattice; at 11–15 sites it reads as a campaign over real terrain
+# (the Sicily plate in MapTerrain/MapView). _generate_act_map enforces the
+# 11–15 window with an acceptance loop.
 const MAP_WIDTH: int = 7
-const MAP_HEIGHT: int = 15
-const BOSS_ROW: int = 14
-const REST_ROW: int = 13
-const NUM_PATHS: int = 4         # Fewer paths than STS (6) — fits our smaller, faster runs.
-const MIN_ELITE_ROW: int = 5     # Elites/rest cannot appear before this row.
+const MAP_HEIGHT: int = 8
+const BOSS_ROW: int = 7
+const REST_ROW: int = 6
+const NUM_PATHS: int = 3
+const MIN_ELITE_ROW: int = 3     # Elites/rest cannot appear before this row.
 
 # Room-type probabilities (cumulative). combat 41%, event 22%, elite 10%,
 # rest 12%, shop 10%, treasure 5%.
@@ -364,16 +367,16 @@ func _apply_plus_upgrade(d: Dictionary) -> Dictionary:
 			d.on_death.atk = int(d.on_death.atk) + int(u.on_death_atk)
 		if u.has("on_death_hp") and d.has("on_death") and d.on_death.has("hp"):
 			d.on_death.hp = int(d.on_death.hp) + int(u.on_death_hp)
-		if u.has("floop_value") and d.has("floop") and d.floop.has("value"):
-			d.floop.value = int(d.floop.value) + int(u.floop_value)
-		if u.has("floop_atk_gain") and d.has("floop") and d.floop.has("atk_gain"):
-			d.floop.atk_gain = int(d.floop.atk_gain) + int(u.floop_atk_gain)
-		if u.has("floop_atk") and d.has("floop") and d.floop.has("atk"):
-			d.floop.atk = int(d.floop.atk) + int(u.floop_atk)
-		if u.has("floop_hp") and d.has("floop") and d.floop.has("hp"):
-			d.floop.hp = int(d.floop.hp) + int(u.floop_hp)
-		if u.has("floop_heal") and d.has("floop") and d.floop.has("heal"):
-			d.floop.heal = int(d.floop.heal) + int(u.floop_heal)
+		if u.has("on_play_value") and d.has("on_play") and d.on_play.has("value"):
+			d.on_play.value = int(d.on_play.value) + int(u.on_play_value)
+		if u.has("on_play_atk_gain") and d.has("on_play") and d.on_play.has("atk_gain"):
+			d.on_play.atk_gain = int(d.on_play.atk_gain) + int(u.on_play_atk_gain)
+		if u.has("on_play_atk") and d.has("on_play") and d.on_play.has("atk"):
+			d.on_play.atk = int(d.on_play.atk) + int(u.on_play_atk)
+		if u.has("on_play_hp") and d.has("on_play") and d.on_play.has("hp"):
+			d.on_play.hp = int(d.on_play.hp) + int(u.on_play_hp)
+		if u.has("on_play_heal") and d.has("on_play") and d.on_play.has("heal"):
+			d.on_play.heal = int(d.on_play.heal) + int(u.on_play_heal)
 	# Cost (any card)
 	if u.has("cost"):
 		d.cost = maxi(0, int(d.get("cost", 0)) + int(u.cost))
@@ -640,18 +643,32 @@ func _generate_map() -> void:
 ##      REST_ROW node connecting up to it.
 ##   4. Walk through and assign encounter IDs to combat/elite/boss nodes.
 func _generate_act_map(act: int, rng: RandomNumberGenerator) -> Array:
-	var grid: Array = []
-	for r in range(MAP_HEIGHT):
-		var row: Array = []
-		for c in range(MAP_WIDTH):
-			row.append(null)
-		grid.append(row)
-
-	_generate_paths(grid, rng)
-	_assign_node_types(grid, rng)
-	_add_boss_node(grid)
-	_assign_encounters(grid, act, rng)
-	return _flatten_grid(grid)
+	# Acceptance loop: only acts with 11–15 sites (incl. boss) read as a
+	# campaign map — fewer is degenerate, more re-grows the lattice. One
+	# value is drawn from the shared rng per act so later acts stay
+	# deterministic regardless of how many attempts this act needed.
+	var base_seed: int = rng.randi()
+	var flat: Array = []
+	for attempt in range(60):
+		var arng := RandomNumberGenerator.new()
+		arng.seed = base_seed + attempt * 7919
+		var grid: Array = []
+		for r in range(MAP_HEIGHT):
+			var row: Array = []
+			for c in range(MAP_WIDTH):
+				row.append(null)
+			grid.append(row)
+		_generate_paths(grid, arng)
+		_assign_node_types(grid, arng)
+		_add_boss_node(grid)
+		_assign_encounters(grid, act, arng)
+		flat = _flatten_grid(grid)
+		var n: int = 0
+		for row_nodes in flat:
+			n += (row_nodes as Array).size()
+		if n >= 11 and n <= 15:
+			return flat
+	return flat
 
 
 func _generate_paths(grid: Array, rng: RandomNumberGenerator) -> void:
@@ -717,6 +734,9 @@ func _pick_next_col(grid: Array, r: int, cur_col: int,
 			continue
 		candidates.append(nc)
 		if grid[r + 1][nc] != null:
+			# Strong merge bias (3×): paths converge into a trunk road with
+			# branches — the validated campaign-map look.
+			candidates.append(nc)
 			candidates.append(nc)
 	if candidates.is_empty():
 		return cur_col
@@ -894,7 +914,10 @@ func _shuffle_array(arr: Array, rng: RandomNumberGenerator) -> void:
 # quitting and relaunching restores them on the map at the room they were
 # about to enter. The save is cleared on death or victory (end_run).
 
-const SAVE_VERSION: int = 1
+# v2: campaign-map act shrink (15→8 rows, 11–15 sites). v1 saves carry
+# 15-row map_data the Sicily plate was never sized for; the strict version
+# check below retires them as empty slots rather than migrating.
+const SAVE_VERSION: int = 2
 const SAVE_SLOTS: int = 3
 const LEGACY_SAVE_PATH: String = "user://run.save"
 

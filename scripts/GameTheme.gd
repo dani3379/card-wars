@@ -20,6 +20,7 @@ var tex_node_rest: Texture2D = null
 var tex_node_shop: Texture2D = null
 var tex_node_event: Texture2D = null
 var tex_node_boss: Texture2D = null
+var tex_node_treasure: Texture2D = null
 
 # ── HUD silhouettes (Kenney CC0). ──
 var tex_hud_heart: Texture2D = null
@@ -235,8 +236,9 @@ func _load_assets() -> void:
 	tex_node_elite = load(gi_dir + "horned-skull.svg")
 	tex_node_rest = load(gi_dir + "campfire.svg")
 	tex_node_shop = load(gi_dir + "shop.svg")
-	tex_node_event = load(gi_dir + "perspective-dice-six-faces-random.svg")
+	tex_node_event = load(gi_dir + "scroll-unfurled.svg")
 	tex_node_boss = load(gi_dir + "dragon-head.svg")
+	tex_node_treasure = load(gi_dir + "coins-pile.svg")
 	# Painted icons (downloaded CC0 from OpenGameArt) prefer over silhouettes
 	# where available — they match Slay-the-Spire's painted HUD aesthetic.
 	var heart_painted = "res://assets/icons/map/hud_heart_painted.png"
@@ -932,8 +934,11 @@ func make_relic_chip(rid: String, size: int = 40) -> Panel:
 			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
 		frame.set(k, radius)
 	# Tier-tinted glow halo — the WoW-quality cue. Stronger on bigger chips.
-	frame.shadow_color = Color(tier_color.r, tier_color.g, tier_color.b, 0.55)
-	frame.shadow_size = max(3, int(round(size * 0.18)))
+	# Kept subtle: at 0.55 alpha the gold starting-tier halo was the single
+	# brightest element on the combat screen (verified on a 1080p capture),
+	# outshining the board it sits beside. A quality cue should murmur.
+	frame.shadow_color = Color(tier_color.r, tier_color.g, tier_color.b, 0.30)
+	frame.shadow_size = max(3, int(round(size * 0.12)))
 	chip.add_theme_stylebox_override("panel", frame)
 
 	# Inner highlight ring — a second stylebox layered on a transparent Panel
@@ -963,25 +968,36 @@ func make_relic_chip(rid: String, size: int = 40) -> Panel:
 
 	var icon: Texture2D = RelicDB.get_relic_icon(rid)
 	if icon != null:
+		var inset: int = rim + 2
+		var icon_clip := Control.new()
+		icon_clip.clip_contents = true
+		icon_clip.set_anchors_preset(Control.PRESET_FULL_RECT)
+		icon_clip.offset_left = inset
+		icon_clip.offset_right = -inset
+		icon_clip.offset_top = inset
+		icon_clip.offset_bottom = -inset
+		icon_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		chip.add_child(icon_clip)
 		var tex := TextureRect.new()
 		tex.texture = icon
-		tex.anchor_left = 0.0
-		tex.anchor_right = 1.0
-		tex.anchor_top = 0.0
-		tex.anchor_bottom = 1.0
-		var inset: int = rim + 2
-		tex.offset_left = inset
-		tex.offset_right = -inset
-		tex.offset_top = inset
-		tex.offset_bottom = -inset
+		tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+		# Painted icons are full-scene squares with a baked-in outer glow and
+		# scenery behind the subject; rendered 1:1 at chip size the glow reads
+		# as a UI highlight ring and the scenery turns to mud. Overscan past
+		# the canvas edge so the subject fills the chip and the baked frame
+		# stays outside the clip. SVG silhouettes render 1:1 with gilt tint.
+		if RelicDB.is_painted_icon(rid):
+			var over: float = float(size) * 0.16
+			tex.offset_left = -over
+			tex.offset_right = over
+			tex.offset_top = -over
+			tex.offset_bottom = over
+		else:
+			tex.modulate = GILT
 		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		# Painted PNGs render at full color; legacy SVG silhouettes get the
-		# gilt tint they were authored for.
-		if not RelicDB.is_painted_icon(rid):
-			tex.modulate = GILT
-		chip.add_child(tex)
+		icon_clip.add_child(tex)
 	else:
 		var letter := Label.new()
 		letter.text = r.get("name", "?").substr(0, 1).to_upper()

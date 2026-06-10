@@ -35,7 +35,7 @@ func make_card_data(creature: Dictionary) -> Dictionary:
 		"keywords": creature.get("kw", []).duplicate(),
 		"desc": "",
 	}
-	for key in ["on_enter", "on_death", "floop", "adj_buff"]:
+	for key in ["on_enter", "on_death", "on_play", "adj_buff"]:
 		if creature.has(key):
 			data[key] = creature[key].duplicate(true)
 	if creature.has("wither"):
@@ -153,10 +153,10 @@ const BOSS_PHASES: Dictionary = {
 	],
 	"the_black_tide": [
 		{"threshold": 26, "passive_id": "tide_swell", "passive_desc": "End of each round: if there are fewer than 4 enemy creatures on the board, summon a 2/3 Deepling."},
-		{"threshold": 13, "passive_id": "tide_surge", "passive_desc": "Deepling summon AND all enemy creatures gain +1 ATK each round.",
+		{"threshold": 13, "passive_id": "tide_surge", "passive_desc": "End of each round: summon a Deepling and all enemy creatures gain +1 ATK.",
 			"transition_msg": "The tide rises higher!",
 			"transition_effect": {"type": "summon", "name": "Anglerfish", "atk": 4, "hp": 3}},
-		{"threshold": 0, "passive_id": "tide_drown", "passive_desc": "All previous effects AND each round: deal 3 damage to your weakest creature.",
+		{"threshold": 0, "passive_id": "tide_drown", "passive_desc": "All previous effects continue. Each round: deal 3 damage to your weakest creature.",
 			"transition_msg": "THE BLACK TIDE DRAGS YOU UNDER!",
 			"transition_effect": {"type": "buff_all_enemies_atk", "value": 2}},
 	],
@@ -299,10 +299,10 @@ const ENCOUNTER_SCRIPTS: Dictionary = {
 const REACTIVE_PASSIVES: Dictionary = {
 	"cultist_enclave": {"trigger": "ON_PLAYER_SACRIFICE", "effect": "face_damage",
 		"value": 2, "desc": "Deal 2 face damage when player sacrifices."},
-	"haunted_crypt": {"trigger": "ON_PLAYER_FLOOP", "effect": "damage_flooper",
-		"value": 1, "desc": "Deal 1 to the flooping creature."},
-	"demon_vanguard": {"trigger": "ON_PLAYER_FLOOP", "effect": "damage_flooper",
-		"value": 1, "desc": "Deal 1 to the flooping creature."},
+	"haunted_crypt": {"trigger": "ON_PLAYER_SPELL", "effect": "face_damage",
+		"value": 1, "desc": "Deal 1 face damage when you cast a spell."},
+	"demon_vanguard": {"trigger": "ON_PLAYER_SPELL", "effect": "face_damage",
+		"value": 1, "desc": "Deal 1 face damage when you cast a spell."},
 	"puppeteer": {"trigger": "ON_PLAYER_SUMMON", "effect": "summon_puppet",
 		"atk": 2, "hp": 2, "desc": "Summon a 2/2 Puppet when player summons."},
 }
@@ -500,7 +500,7 @@ const ENCOUNTERS: Dictionary = {
 	"mushroom_grove": {
 		"name": "The Spore-Cathedral", "act": 1, "type": "combat", "hp": 9,
 		"passive_id": "mushroom_heal",
-		"passive_desc": "End of each round: heal every enemy creature for 1 HP.",
+		"passive_desc": "End of each round: heal every enemy creature 1 HP.",
 		# Mushroom Grove — IT JUST GROWS BACK. Almost every fungus regenerates
 		# or seeds another on death; the grove passive heals everything at
 		# round-end. The damage is low but trading is futile. AoE clears
@@ -591,7 +591,7 @@ const ENCOUNTERS: Dictionary = {
 		# the whole flock hits harder.
 		"name": "The Stooping Wings", "act": 1, "type": "combat", "hp": 12,
 		"passive_id": "harpy_swift_face",
-		"passive_desc": "Enemy Swift creatures deal +1 extra face damage when attacking through empty lanes.",
+		"passive_desc": "Enemy Swift creatures deal +1 face damage when attacking through empty lanes.",
 		"deck": [
 			{"name": "Chick", "atk": 1, "hp": 1, "kw": ["swift", "last_stand"]},
 			{"name": "Wind Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
@@ -637,11 +637,12 @@ const ENCOUNTERS: Dictionary = {
 	"scarecrow_field": {
 		# Scarecrow Field — DRESSED IN THORNS. Half the field is straw-stuffed
 		# walls that hurt to touch (thorns), the rest decay (wither) or peck
-		# at your face (Crow swift). The Crow Witch heals it all back up at
-		# end of round if you don't clear fast.
+		# at your face (Crow swift). The Crow Witch is the sustain LEVER: she
+		# telegraphs a heal-the-whole-field ABILITY every couple rounds — kill
+		# her and the field stops growing back. The heal is a creature you can
+		# answer, not an invisible passive (no more phantom mushroom_heal).
 		"name": "The Field That Watches Back", "act": 1, "type": "combat", "hp": 10,
-		"passive_id": "mushroom_heal",
-		"passive_desc": "End of each round: heal every enemy creature for 1 HP.",
+		"passive_id": "", "passive_desc": "",
 		"deck": [
 			{"name": "Scarecrow", "atk": 1, "hp": 5, "kw": ["thorns"]},
 			{"name": "Straw Man", "atk": 2, "hp": 3, "kw": ["thorns"], "wither": 1},
@@ -651,14 +652,56 @@ const ENCOUNTERS: Dictionary = {
 				"on_enter": {"type": "damage_random_player", "value": 1}},
 			{"name": "Stitched Hand", "atk": 2, "hp": 3, "kw": ["thorns", "regenerate"]},
 			{"name": "Crow", "atk": 2, "hp": 2, "kw": ["swift"]},
-			{"name": "Crow Witch", "atk": 2, "hp": 4, "kw": ["thorns"],
-				"on_enter": {"type": "damage_random_player", "value": 1}},
+			{"name": "Crow Witch", "atk": 2, "hp": 5, "kw": ["thorns"],
+				"intents": ["ATK", "ABILITY", "ATK", "ABILITY"],
+				"ability": {"type": "heal_all", "value": 2}},
 		],
 		"reinforcement": {"name": "Scrap Crow", "atk": 2, "hp": 1, "kw": ["swift"]},
 		"reinforcement_pool": [
 			{"name": "Field Mouse", "atk": 1, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_random_player", "value": 1}},
 			{"name": "Straw Man", "atk": 2, "hp": 3, "kw": ["thorns"], "wither": 1},
+		],
+	},
+
+	"powderkeg_run": {
+		# The Powderkeg Run (Act 1 combat) — KILL THE KEGS OR EAT THE BLAST.
+		# A goblin demolition crew. The signature is the Doom keyword introduced
+		# at the normal-fight level: two "Cinder" walking bombs carry Doom 2 — a
+		# loud on-board countdown (2 → 1 → BOOM into your face for 4). Low HP, so
+		# you CAN defuse them, but the swift goblins crowd your lanes and make you
+		# choose between blocking the rush and reaching the fuse. Fast, snappy,
+		# and the player's first lesson in the clock that the Bellringer will
+		# later weaponise. No passive — the bombs telegraph themselves.
+		"name": "The Powderkeg Run", "act": 1, "type": "combat", "hp": 12,
+		"passive_id": "", "passive_desc": "",
+		"deck": [
+			{"name": "Runt", "atk": 1, "hp": 2, "kw": ["swift"]},
+			{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
+			{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
+			{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": ["ranged"]},
+			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+			{"name": "Chief", "atk": 3, "hp": 3, "kw": ["swift"],
+				"on_enter": {"type": "damage_face", "value": 1}},
+		],
+		"deck_variants": [
+			# Variant: demolition surplus — three live kegs, fewer bodies. The
+			# whole fight becomes a triage drill: which fuse do you reach first?
+			[
+				{"name": "Runt", "atk": 1, "hp": 2, "kw": ["swift"]},
+				{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
+				{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
+				{"name": "Cinder", "atk": 2, "hp": 3, "kw": ["doom"], "doom": 3, "doom_damage": 5},
+				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+				{"name": "Chief", "atk": 3, "hp": 3, "kw": ["swift"],
+					"on_enter": {"type": "damage_face", "value": 1}},
+			],
+		],
+		"reinforcement": {"name": "Whelp", "atk": 1, "hp": 1, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
 		],
 	},
 
@@ -732,6 +775,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "The Iron Warden", "act": 1, "type": "boss", "hp": 23,
 		"passive_id": "siege_ritual",
 		"passive_desc": "Each enemy death loads the Trebuchet (+1 Charge). At 3 Charges it FIRES: deal 3 damage to all your creatures and 4 face damage.",
+		"preamble": "It was built to hold a wall that no longer stands. No one has told it the siege is over, and it would not believe you. Every death you hand it only loads it again.",
 		"structures": [
 			{"name": "Trebuchet", "atk": 0, "hp": 99,
 				"kw": ["structure"], "charge_max": 3, "lane": 1},
@@ -757,6 +801,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "The Wyrm-Father", "act": 1, "type": "boss", "hp": 21,
 		"passive_id": "dragon_lord_piercing",
 		"passive_desc": "All enemy creatures have Piercing.",
+		"preamble": "Something old coils across the road and calls it a nest. It has guarded this way longer than the meadow has burned. It does not know your name, and it does not need to.",
 		"deck": [
 			{"name": "Drake", "atk": 3, "hp": 3, "kw": ["swift"]},
 			{"name": "Drake", "atk": 3, "hp": 3, "kw": ["swift"]},
@@ -1027,6 +1072,61 @@ const ENCOUNTERS: Dictionary = {
 		],
 	},
 
+	"carrion_choir": {
+		# The Carrion Choir (Act 2 combat) — DEATH FROM THE BACK ROW, AND IT
+		# SCREAMS. A murder of carrion birds + scavengers that lives in the back
+		# row: almost everything is Ranged (the flock snipes past your blockers),
+		# and every bird shrieks a chip of face damage when it dies (on_death
+		# damage_face), so trading INTO them costs you life too. The cultist_buff
+		# passive makes a random bird swell +1/+1 each round — the murder grows
+		# louder the longer you let it sing. Distinct from the crypt (no endless
+		# summons) and the act-3 Killing Choir (no snipe): here the threat is
+		# pure back-row volume you have to reach and silence. Push damage onto the
+		# singers fast or get pecked to death.
+		"name": "The Carrion Choir", "act": 2, "type": "combat", "hp": 16,
+		"passive_id": "cultist_buff",
+		"passive_desc": "Start of each round: a random bird gains +1/+1. The murder always grows.",
+		"deck": [
+			{"name": "Crow", "atk": 2, "hp": 2, "kw": ["swift"],
+				"on_death": {"type": "damage_face", "value": 1}},
+			{"name": "Raven", "atk": 2, "hp": 2, "kw": ["ranged"],
+				"on_death": {"type": "damage_face", "value": 1}},
+			{"name": "Raven", "atk": 2, "hp": 2, "kw": ["ranged"],
+				"on_death": {"type": "damage_face", "value": 1}},
+			{"name": "Smoldering Crow", "atk": 3, "hp": 3, "kw": ["ranged"],
+				"on_death": {"type": "damage_face", "value": 2}},
+			{"name": "Stitched Hand", "atk": 2, "hp": 4, "kw": ["thorns"]},
+			{"name": "Gravedigger", "atk": 2, "hp": 4, "kw": ["ranged"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Maestro", "atk": 3, "hp": 5, "kw": ["ranged"],
+				"on_death": {"type": "damage_all_enemies", "value": 2}},
+		],
+		"deck_variants": [
+			# Variant: open grave — scavengers up front, fewer fliers. The
+			# corpse-eaters wall while the back row still shrieks.
+			[
+				{"name": "Crow", "atk": 2, "hp": 2, "kw": ["swift"],
+					"on_death": {"type": "damage_face", "value": 1}},
+				{"name": "Raven", "atk": 2, "hp": 2, "kw": ["ranged"],
+					"on_death": {"type": "damage_face", "value": 1}},
+				{"name": "Husk", "atk": 3, "hp": 4, "kw": ["thorns"]},
+				{"name": "Husk", "atk": 3, "hp": 4, "kw": ["thorns"]},
+				{"name": "Smoldering Crow", "atk": 3, "hp": 3, "kw": ["ranged"],
+					"on_death": {"type": "damage_face", "value": 2}},
+				{"name": "Maestro", "atk": 3, "hp": 5, "kw": ["ranged"],
+					"on_death": {"type": "damage_all_enemies", "value": 2}},
+			],
+		],
+		"reinforcement": {"name": "Crow", "atk": 2, "hp": 2, "kw": ["swift"],
+			"on_death": {"type": "damage_face", "value": 1}},
+		"reinforcement_pool": [
+			{"name": "Raven", "atk": 2, "hp": 2, "kw": ["ranged"],
+				"on_death": {"type": "damage_face", "value": 1}},
+			{"name": "Smoldering Crow", "atk": 3, "hp": 3, "kw": ["ranged"],
+				"on_death": {"type": "damage_face", "value": 2}},
+		],
+	},
+
 	# =================== ACT 2 — ELITE ============================
 
 	"demon_vanguard": {
@@ -1104,7 +1204,8 @@ const ENCOUNTERS: Dictionary = {
 		# board, you lose your win condition (the boss heals back up).
 		"name": "The Collector", "act": 2, "type": "boss", "hp": 31,
 		"passive_id": "collector_heal",
-		"passive_desc": "When you play a creature from your hand: The Collector heals 1 HP.",
+		"passive_desc": "When you play a creature from your hand: the Collector heals 1 HP.",
+		"preamble": "It keeps things. Faces, mostly — the ones the road wears out. It has been saving a place for yours, and it is patient about filling it.",
 		"deck": [
 			{"name": "Collector Golem", "atk": 3, "hp": 4, "kw": ["armored"]},
 			{"name": "Collector Golem", "atk": 3, "hp": 4, "kw": ["armored"]},
@@ -1129,7 +1230,8 @@ const ENCOUNTERS: Dictionary = {
 		# pressure is the passive, not the creatures.
 		"name": "The Hollow King", "act": 2, "type": "boss", "hp": 29,
 		"passive_id": "hollow_king_snipe",
-		"passive_desc": "Start of each round: your highest-ATK creature takes 3 damage.",
+		"passive_desc": "Start of each round: deal 3 damage to your highest-ATK creature.",
+		"preamble": "There is an eye here that decides what gets to continue. It has looked at you before and found you wanting. It is willing to look again.",
 		"deck": [
 			{"name": "Hollow Knight", "atk": 2, "hp": 4, "kw": ["armored"]},
 			{"name": "Hollow Knight", "atk": 2, "hp": 4, "kw": ["armored"]},
@@ -1142,6 +1244,40 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement": {"name": "Shade Knight", "atk": 2, "hp": 2, "kw": ["swift"]},
 	},
 
+	"the_bellringer": {
+		# THE BELLRINGER (Act 2 boss) — THE BELL TOLLS, THE CLOCK STARTS.
+		# The signature, telegraphed mechanic, built entirely on the `doom`
+		# keyword. The Bellringer is a doomsday zealot who rings a great cracked
+		# bell: the doom_bell passive (handler in Combat.gd's
+		# _dispatch_passive_start_of_round wrapper) makes him DEPLOY a "Doomspawn"
+		# bomb-creature into an empty lane every other round. Each Doomspawn shows
+		# an unmistakable on-board countdown — Doom 2 → 1 → it DETONATES straight
+		# into your face for 6. They have low HP, so you CAN defuse them in time
+		# — but while any Doomspawn is ticking, every other enemy gets +1 ATK
+		# (the toll empowers the host), so ignoring the clock is doubly costly.
+		# At round 6 the bell cracks wide open and tolls a DOUBLE peal (two bombs
+		# at once). The standing deck — demons and reapers — punishes you for
+		# turtling, so you can't just hide behind walls and wait the fuses out.
+		# Triage or die: the loudest clock in the game.
+		"name": "THE BELLRINGER", "act": 2, "type": "boss", "hp": 30,
+		"passive_id": "doom_bell",
+		"passive_desc": "Every other round the Bell TOLLS and deploys a Doomspawn (Doom 2) — kill it before it detonates into your face. While any Doomspawn is ticking, all other enemies gain +1 ATK.",
+		"preamble": "He has been ringing for the end since before you were born, and he is patient, and he is nearly finished. Every toll is a number, and the numbers only go down. You are standing inside the count.",
+		"deck": [
+			{"name": "Demon Soldier", "atk": 3, "hp": 4, "kw": ["armored"]},
+			{"name": "Demon Soldier", "atk": 3, "hp": 4, "kw": ["armored"]},
+			{"name": "Hellfire Imp", "atk": 2, "hp": 3, "kw": ["swift"],
+				"on_enter": {"type": "damage_face", "value": 1}},
+			{"name": "Cinder", "atk": 1, "hp": 3, "kw": ["doom"], "doom": 2, "doom_damage": 5},
+			{"name": "Soul Reaper", "atk": 3, "hp": 4, "kw": ["swift", "piercing"]},
+			{"name": "Pit Fiend", "atk": 4, "hp": 5, "kw": ["regenerate"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Dark Priest", "atk": 2, "hp": 5, "kw": ["thorns"],
+				"on_death": {"type": "damage_face", "value": 3}},
+		],
+		"reinforcement": {"name": "Lesser Demon", "atk": 3, "hp": 3, "kw": ["piercing"]},
+	},
+
 	# =================== ACT 3 — COMBAT ===========================
 
 	"mirror_temple": {
@@ -1151,7 +1287,7 @@ const ENCOUNTERS: Dictionary = {
 		# barely work — every kill triggers a fresh enemy beat.
 		"name": "The Hall of Wrong Reflections", "act": 3, "type": "combat", "hp": 20,
 		"passive_id": "mirror_instant_place",
-		"passive_desc": "When one of your creatures dies: the enemy draws and places a creature immediately.",
+		"passive_desc": "When a friendly creature dies: the enemy draws and places a creature immediately.",
 		"deck": [
 			{"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
 			{"name": "Glass Sniper", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
@@ -1245,7 +1381,7 @@ const ENCOUNTERS: Dictionary = {
 		# leave their heavy hitter alive bleed you out fast.
 		"name": "The Executioner's Block", "act": 3, "type": "combat", "hp": 19,
 		"passive_id": "executioner_face",
-		"passive_desc": "Each round: the highest-ATK enemy also deals damage equal to its ATK to your face.",
+		"passive_desc": "Each round: the highest-ATK enemy also deals its ATK as face damage.",
 		"deck": [
 			{"name": "Jailer", "atk": 2, "hp": 3, "kw": ["piercing"]},
 			{"name": "Crossbow Guard", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
@@ -1392,7 +1528,7 @@ const ENCOUNTERS: Dictionary = {
 		# back-row singers fast or get sung to death.
 		"name": "The Killing Choir", "act": 3, "type": "combat", "hp": 21,
 		"passive_id": "hollow_king_snipe",
-		"passive_desc": "Start of each round: your highest-ATK creature takes 3 damage.",
+		"passive_desc": "Start of each round: deal 3 damage to your highest-ATK creature.",
 		"deck": [
 			{"name": "Echo Twin", "atk": 3, "hp": 2, "kw": ["swift", "ranged"]},
 			{"name": "Soprano", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
@@ -1501,6 +1637,56 @@ const ENCOUNTERS: Dictionary = {
 		],
 	},
 
+	"glass_menagerie": {
+		# The Glass Menagerie (Act 3 elite) — EVERYTHING HITS LIKE A TRUCK AND
+		# DIES LIKE A WINDOW. A hall of living glass: nearly every creature is a
+		# high-ATK / 1-2-HP glass cannon (Piercing or Swift) that you can pop
+		# with a feather — but it'll gut you first if you don't, and several are
+		# Ranged so blocking a lane doesn't save your face. The executioner_face
+		# passive turns the single biggest shard into face damage every round, so
+		# a stalled board bleeds you out. The counter-pressure: a couple of
+		# fragile copycats that mirror YOUR keywords, so your buffs come back as
+		# glass. This is a RACE, not a grind — the opposite of the act's other
+		# elites (the immortal Bone-Crowned, the attrition Void Walker). Trade
+		# fast, sweep wide, end it before the menagerie reflects your whole deck.
+		"name": "The Glass Menagerie", "act": 3, "type": "elite", "hp": 24,
+		"passive_id": "executioner_face",
+		"passive_desc": "Each round: the highest-ATK enemy also deals its ATK as face damage. The biggest shard cuts deepest.",
+		"deck": [
+			{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["ranged", "piercing"]},
+			{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["ranged", "piercing"]},
+			{"name": "Mirror Wisp", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Shattered Twin", "atk": 4, "hp": 2, "kw": ["swift", "piercing"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 1}},
+			{"name": "Reflection", "atk": 3, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "copy_opposing_keywords"}},
+			{"name": "Hall-Watcher", "atk": 1, "hp": 6, "kw": ["thorns", "armored"]},
+			{"name": "Glass Knight", "atk": 6, "hp": 3, "kw": ["piercing"],
+				"on_death": {"type": "damage_opposing_lane", "value": 3}},
+		],
+		"deck_variants": [
+			# Variant: house of mirrors — copycats stack, so a buffed player deck
+			# gets its own keywords flung back across the glass.
+			[
+				{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["ranged", "piercing"]},
+				{"name": "Reflection", "atk": 3, "hp": 2, "kw": ["swift"],
+					"on_enter": {"type": "copy_opposing_keywords"}},
+				{"name": "Doppel", "atk": 3, "hp": 3, "kw": ["swift"],
+					"on_enter": {"type": "copy_opposing_keywords"}},
+				{"name": "Shattered Twin", "atk": 4, "hp": 2, "kw": ["swift", "piercing"],
+					"on_death": {"type": "summon", "atk": 2, "hp": 1}},
+				{"name": "Mirror Wisp", "atk": 3, "hp": 2, "kw": ["swift"]},
+				{"name": "Glass Knight", "atk": 6, "hp": 3, "kw": ["piercing"],
+					"on_death": {"type": "damage_opposing_lane", "value": 3}},
+			],
+		],
+		"reinforcement": {"name": "Glass Shard", "atk": 3, "hp": 1, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["ranged", "piercing"]},
+			{"name": "Mirror Wisp", "atk": 3, "hp": 2, "kw": ["swift"]},
+		],
+	},
+
 	# =================== ACT 3 — BOSS =============================
 
 	"the_devil": {
@@ -1514,6 +1700,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE DEVIL", "act": 3, "type": "boss", "hp": 36,
 		"passive_id": "devil_cycle",
 		"passive_desc": "Three-round cycle (repeats). Round 1: deal 2 face damage. Round 2: heal 1 HP for every enemy on the board. Round 3: deal 3 damage to your highest-ATK creature.",
+		"preamble": "It deals fairly — that is the worst of it. Everything it offers, it takes back with interest, and you put your mark to the page a long walk ago. It is only here to collect.",
 		"deck": [
 			{"name": "Demon Soldier", "atk": 3, "hp": 4, "kw": ["armored", "piercing"]},
 			{"name": "Demon Soldier", "atk": 3, "hp": 4, "kw": ["armored", "piercing"]},
@@ -1541,6 +1728,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE CRONE", "act": 3, "type": "boss", "hp": 32,
 		"passive_id": "cauldron_brew",
 		"passive_desc": "End of each round: the Cauldron gains 1 Charge and adds 1 Curse to your discard pile. At 5 Charges the Cauldron OVERFLOWS: summons a Wraith, adds 2 more Curses, and deals 3 face damage.",
+		"preamble": "She was old when the meadow was green. She has watched a great many of you climb this road, and she has never once been wrong about the ending. The kettle is already warm.",
 		"structures": [
 			{"name": "Cauldron", "atk": 0, "hp": 99,
 				"kw": ["structure"], "charge_max": 5, "lane": 1},
@@ -1566,7 +1754,8 @@ const ENCOUNTERS: Dictionary = {
 		# enough single-target damage to finish off the high-HP centerpieces.
 		"name": "THE BLACK TIDE", "act": 3, "type": "boss", "hp": 34,
 		"passive_id": "tide_swell",
-		"passive_desc": "End of round: if fewer than 4 enemy creatures, summon a 2/3 Deepling.",
+		"passive_desc": "End of each round: if there are fewer than 4 enemy creatures, summon a 2/3 Deepling.",
+		"preamble": "It is not water, though it rises like water. It has been climbing toward this place one drowned thing at a time, since long before you. It is patient about the rest of you.",
 		# Black Tide (Act 3 boss) — THE WATER RISES. Inspired by Subnautica
 		# deep-horror + MtG Emrakul: the tide_swell passive summons a Deepling
 		# every round you don't keep the board full. Phase 2 (tide_surge)
