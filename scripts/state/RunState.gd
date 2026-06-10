@@ -272,6 +272,23 @@ func get_act_rival() -> String:
 	return ""
 
 
+## Successor Wars: the player picks which remaining rival to march on next
+## (boss Reward, between acts — the player-chosen rival order). Swaps that
+## lord into the next act's slot and keeps act_faction mirrored. No map regen
+## needed — boss kits and kingdom pools read the deal late, at visit time.
+func choose_next_rival(hero_id: String) -> void:
+	var next_idx := current_act_idx + 1
+	for i in range(next_idx, rival_lords.size()):
+		if rival_lords[i] == hero_id:
+			if i != next_idx:
+				rival_lords[i] = rival_lords[next_idx]
+				rival_lords[next_idx] = hero_id
+				act_faction[i] = HeroDB.get_faction(rival_lords[i])
+				act_faction[next_idx] = HeroDB.get_faction(hero_id)
+			return
+	push_warning("RunState: choose_next_rival('%s') not in remaining deal" % hero_id)
+
+
 func end_run(victorious: bool) -> void:
 	run_active = false
 	_append_run_log(victorious)

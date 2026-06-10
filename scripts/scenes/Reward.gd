@@ -106,10 +106,73 @@ func _pick_relic(id: String) -> void:
 		AudioBank.play_sfx("coin")
 	if id == "bottled_talisman":
 		await GameTheme.bind_bottled_talisman(self)
-	_go_to_map()
+	_proceed()
 
 
 func _skip() -> void:
+	_proceed()
+
+
+## After the spoils: a boss victory with more than one kingdom left to invade
+## asks the player where the war goes next (Successor Wars player-chosen
+## rival order). Everything else marches straight out.
+func _proceed() -> void:
+	if RunState.current_node_type == "boss" and not RunState.should_enter_finale():
+		var next_idx: int = RunState.current_act_idx + 1
+		if RunState.rival_lords.size() - next_idx >= 2:
+			_show_march_choice(next_idx)
+			return
+	_go_to_map()
+
+
+func _show_march_choice(next_idx: int) -> void:
+	for child in get_children():
+		if child.name != "Background" and child.name != "Atmosphere":
+			child.queue_free()
+
+	var margin := MarginContainer.new()
+	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
+	margin.add_theme_constant_override("margin_left", 40)
+	margin.add_theme_constant_override("margin_right", 40)
+	margin.add_theme_constant_override("margin_top", 20)
+	margin.add_theme_constant_override("margin_bottom", 20)
+	add_child(margin)
+
+	var outer := VBoxContainer.new()
+	outer.add_theme_constant_override("separation", 18)
+	outer.alignment = BoxContainer.ALIGNMENT_CENTER
+	margin.add_child(outer)
+
+	var title = GameTheme.make_screen_title("THE NEXT MARCH",
+		GameTheme.GILT_BRIGHT, GameTheme.FONT_HEADER)
+	outer.add_child(title)
+
+	var sub = GameTheme.make_label("Choose whose kingdom burns next.",
+		GameTheme.FONT_SUBHEADER, GameTheme.KEYWORD_GOLD)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	outer.add_child(sub)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 32)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	outer.add_child(row)
+
+	for i in range(next_idx, RunState.rival_lords.size()):
+		var lord: String = RunState.rival_lords[i]
+		var info: Dictionary = HeroDB.faction_info(HeroDB.get_faction(lord))
+		var lord_name := String(HeroDB.get_hero(lord).get("name", lord)).to_upper()
+		var desc := "%s — %s\n%s" % [String(info.get("name", "")),
+			String(info.get("engine", "")), String(info.get("engine_line", ""))]
+		var banner = GameTheme.make_choice_banner(lord_name, desc,
+			info.get("color", Color(0.60, 0.51, 0.34)), "", Vector2(380, 170))
+		var click := banner.get_node_or_null("ClickButton") as Button
+		if click != null:
+			click.pressed.connect(_pick_march.bind(lord))
+		row.add_child(banner)
+
+
+func _pick_march(lord: String) -> void:
+	RunState.choose_next_rival(lord)
 	_go_to_map()
 
 
