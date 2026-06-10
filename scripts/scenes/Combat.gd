@@ -588,15 +588,32 @@ func _setup_fight_state() -> void:
 		var enc = EncounterDB.get_encounter(enc_id)
 		if not enc.is_empty():
 			_encounter_id = enc_id
-			enemy_max_hp = _scale_enemy_hp(enc.hp)
+			# Successor Wars cross-act borrows: scale the fight to the map
+			# slot it actually landed in (kingdoms pull their faction's
+			# fights from other acts; demoted bosses fight at elite band).
+			var t_act: int = RunState.get_act()
+			var t_type: String = RunState.current_node_type \
+				if RunState.current_node_type in ["combat", "elite", "boss"] else ""
+			enemy_max_hp = _scale_enemy_hp(EncounterDB.get_face_hp(enc_id, t_act, t_type))
 			_encounter_passive = enc.get("passive_id", "")
 			_encounter_name = enc.get("name", "")
 			_encounter_passive_desc = enc.get("passive_desc", "")
 			_encounter_preamble = enc.get("preamble", "")
-			_enemy_deck = EncounterDB.build_enemy_deck(enc_id)
+			_enemy_deck = EncounterDB.build_enemy_deck(enc_id, t_act)
 			_enemy_deck.shuffle()
-			_reinforcement = EncounterDB.get_reinforcement(enc_id)
+			_reinforcement = EncounterDB.get_reinforcement(enc_id, t_act)
 			_boss_phases = EncounterDB.get_boss_phases(enc_id)
+			# Phase thresholds are authored against the kit's own face HP —
+			# rescale by the act ratio so a lord fought in act 3 still turns
+			# phases at the same point in the bar. (Ascension deliberately
+			# does NOT rescale thresholds; that drift is live behavior.)
+			# Duplicate first: get_boss_phases returns the const array.
+			var base_hp: int = int(enc.hp)
+			var act_scaled_hp: int = EncounterDB.get_face_hp(enc_id, t_act, t_type)
+			if act_scaled_hp != base_hp and base_hp > 0 and not _boss_phases.is_empty():
+				_boss_phases = _boss_phases.duplicate(true)
+				for ph in _boss_phases:
+					ph.threshold = int(round(float(ph.threshold) * act_scaled_hp / base_hp))
 			_reactive_passive = EncounterDB.get_reactive_passive(enc_id)
 			_encounter_script = EncounterDB.get_encounter_script(enc_id)
 			enemy_hp = enemy_max_hp
@@ -6241,6 +6258,10 @@ func _check_game_over() -> void:
 		RunState.hero_hp = max(player_hp, 1)
 		# Run-stat bookkeeping for the GameOver recap.
 		RunState.fights_won += 1
+		# Successor Wars: every garrison/stronghold that falls counts toward
+		# opening the rival lord's keep (RunState.is_lord_gate_open).
+		if RunState.current_node_type in ["combat", "elite"]:
+			RunState.holds_broken_in_act += 1
 		if _mutator_id != "" and not RunState.mutators_survived.has(_mutator_id):
 			RunState.mutators_survived.append(_mutator_id)
 		# Vulture's Feast
@@ -9211,7 +9232,7 @@ func _resolve_enemy_portrait() -> Texture2D:
 		if ResourceLoader.exists(bpath):
 			return load(bpath)
 	if _enemy_deck.is_empty() and _encounter_id != "":
-		_enemy_deck = EncounterDB.build_enemy_deck(_encounter_id)
+		_enemy_deck = EncounterDB.build_enemy_deck(_encounter_id, RunState.get_act())
 	if not _enemy_deck.is_empty():
 		var lead: Dictionary = _enemy_deck[0]
 		for cd in _enemy_deck:

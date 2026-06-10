@@ -136,6 +136,18 @@ func _tip(nd: Dictionary) -> String:
 		var enc: Dictionary = EncounterDB.get_encounter(String(nd.encounter_id))
 		if not enc.is_empty():
 			label = enc.name
+	if t == "boss":
+		# Rival-lord intel: whose keep this is, and whether the road is open.
+		var rival: String = RunState.get_act_rival()
+		if rival != "" and String(nd.get("encounter_id", "")) == "rival_%s" % rival:
+			var title: String = String(HeroDB.faction_info(
+				HeroDB.get_faction(rival)).get("lord_title", ""))
+			if title != "":
+				label += "\n%s" % title
+		if not RunState.is_lord_gate_open():
+			var left: int = RunState.HOLDS_TO_OPEN_LORD - RunState.holds_broken_in_act
+			label += "\nThe gates are barred — break %d more %s to open the road." \
+				% [left, "hold" if left == 1 else "holds"]
 	# Mutator tag — surfaces "Stormy: enemies gain Swift" etc. so the player
 	# can route around a fight they don't want without entering it first.
 	var mut_id: String = String(nd.get("mutator_id", ""))

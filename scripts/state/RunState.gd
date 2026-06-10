@@ -70,6 +70,18 @@ var act_faction: Array[String] = []
 # HOLDS_TO_OPEN_LORD broken holds (incremented by Combat on victory, reset by
 # advance_act). Kept in RunState so it saves with the run.
 var holds_broken_in_act: int = 0
+# The boss gate (§15.1 #5): the keep is visible from the first step but
+# locked until this many holds have fallen. Map generation guarantees every
+# route to the keep carries at least this many fight nodes (no softlock).
+const HOLDS_TO_OPEN_LORD: int = 2
+
+
+## False only while a conquest run still owes holds this act. Legacy runs
+## (no rival deal) keep the old always-open keep.
+func is_lord_gate_open() -> bool:
+	if rival_lords.is_empty():
+		return true
+	return holds_broken_in_act >= HOLDS_TO_OPEN_LORD
 
 # ── Mana ──
 var base_max_mana: int = 3
@@ -672,6 +684,13 @@ func get_available_nodes() -> Array:
 	for target_col in current_node.connections:
 		var n = _find_node_by_col(act_map[next_row], target_col)
 		if not n.is_empty():
+			# The boss gate: the keep stays painted on the plate but its road
+			# doesn't open until enough holds have fallen. Filtering here is
+			# the single source of truth — buttons, road tint, and the pulse
+			# overlay all read availability from this list. No softlock:
+			# _generate_act_map guarantees every route carries enough fights.
+			if String(n.type) == "boss" and not is_lord_gate_open():
+				continue
 			available.append(n)
 	return available
 
@@ -779,9 +798,43 @@ func _generate_act_map(act: int, rng: RandomNumberGenerator) -> Array:
 		var n: int = 0
 		for row_nodes in flat:
 			n += (row_nodes as Array).size()
-		if n >= 11 and n <= 15:
+		# Site-count window AND boss-gate guarantee: the worst route a player
+		# can walk must still pass HOLDS_TO_OPEN_LORD fight nodes, or the
+		# locked keep could softlock the act.
+		if n >= 11 and n <= 15 and _min_fights_to_rest(flat) >= HOLDS_TO_OPEN_LORD:
 			return flat
 	return flat
+
+
+## Minimum number of combat/elite nodes along ANY root→rest-row route — the
+## fewest fights a player can reach the keep with. Memoized DFS over the DAG.
+func _min_fights_to_rest(flat: Array) -> int:
+	if flat.is_empty() or (flat[0] as Array).is_empty():
+		return 0
+	var memo: Dictionary = {}
+	var best: int = 999
+	for start in flat[0]:
+		best = mini(best, _min_fights_from(flat, 0, int(start.col), memo))
+	return best
+
+
+func _min_fights_from(flat: Array, row: int, col: int, memo: Dictionary) -> int:
+	var node: Dictionary = _find_node_by_col(flat[row], col)
+	if node.is_empty():
+		return 999
+	var key: int = row * 100 + col
+	if memo.has(key):
+		return memo[key]
+	var self_cost: int = 1 if String(node.type) in ["combat", "elite"] else 0
+	if row >= REST_ROW:
+		memo[key] = self_cost
+		return self_cost
+	var best: int = 999
+	for nc in node.connections:
+		best = mini(best, _min_fights_from(flat, row + 1, int(nc), memo))
+	var total: int = self_cost + (best if best < 999 else 0)
+	memo[key] = total
+	return total
 
 
 func _generate_paths(grid: Array, rng: RandomNumberGenerator) -> void:
@@ -967,12 +1020,16 @@ func _add_boss_node(grid: Array) -> void:
 
 func _assign_encounters(grid: Array, act: int,
 		rng: RandomNumberGenerator) -> void:
-	var combat_ids: Array = EncounterDB.get_ids_for(act, "combat").duplicate()
+	# Successor Wars: every hold in the kingdom belongs to the act's faction
+	# (the rival being marched on). Thin factions borrow their own fights
+	# from other acts — Combat rescales them via the target_act rails. On a
+	# legacy run with no rival deal, faction is "" and the pools fall back
+	# to the unfiltered act lists (get_kingdom_pool passes through).
+	var faction: String = act_faction[act - 1] if act - 1 < act_faction.size() else ""
+	var combat_ids: Array = EncounterDB.get_kingdom_pool(act, "combat", faction)
 	_shuffle_array(combat_ids, rng)
-	var elite_ids: Array = EncounterDB.get_ids_for(act, "elite").duplicate()
+	var elite_ids: Array = EncounterDB.get_kingdom_pool(act, "elite", faction)
 	_shuffle_array(elite_ids, rng)
-	var boss_ids: Array = EncounterDB.get_ids_for(act, "boss").duplicate()
-	_shuffle_array(boss_ids, rng)
 	var combat_idx: int = 0
 	var elite_idx: int = 0
 	for r in range(MAP_HEIGHT):
@@ -992,10 +1049,33 @@ func _assign_encounters(grid: Array, act: int,
 						elite_idx += 1
 					node["mutator_id"] = MutatorDB.roll(0.65, rng)
 				"boss":
-					if boss_ids.size() > 0:
-						node["encounter_id"] = boss_ids[0]
+					node["encounter_id"] = _boss_encounter_for_act(act, rng)
 					# Bosses keep their own complex passives — no mutator on boss
 					# fights to avoid stacking too many parallel rule changes.
+
+
+## The act's boss fight: the rival lord's kit if authored (rival_<hero>),
+## else a stand-in boss from his own faction (nearest act first, rescaled by
+## the cross-act rails), else the legacy unfiltered act roll. Stand-ins keep
+## runs completable while the five lord kits are authored one at a time.
+func _boss_encounter_for_act(act: int, rng: RandomNumberGenerator) -> String:
+	var rival: String = rival_lords[act - 1] if act - 1 < rival_lords.size() else ""
+	if rival != "":
+		var kit_id := "rival_%s" % rival
+		if EncounterDB.ENCOUNTERS.has(kit_id):
+			return kit_id
+		var stand_ins: Array = EncounterDB.get_kingdom_pool(
+			act, "boss", HeroDB.get_faction(rival))
+		# get_kingdom_pool can top up from the unfiltered act pool when a
+		# faction has no boss anywhere (grasswake) — that's fine here too:
+		# better an off-banner boss than no keep to take.
+		if not stand_ins.is_empty():
+			return stand_ins[rng.randi() % stand_ins.size()]
+	var boss_ids: Array = EncounterDB.get_ids_for(act, "boss")
+	if boss_ids.is_empty():
+		return ""
+	_shuffle_array(boss_ids, rng)
+	return boss_ids[0]
 
 
 func _flatten_grid(grid: Array) -> Array:

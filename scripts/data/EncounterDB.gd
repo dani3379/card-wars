@@ -15,14 +15,101 @@ func get_encounter(id: String) -> Dictionary:
 func get_ids_for(act: int, type: String, faction: String = "") -> Array:
 	# Optional faction filter (Successor Wars): "" keeps the legacy behavior,
 	# a faction id narrows the pool to that kingdom's fights.
+	# Rival-lord kits (rival_*) never enter random pools — they are placed
+	# by direct lookup in RunState._boss_encounter_for_act only.
 	var result: Array = []
 	for id in ENCOUNTERS:
+		if String(id).begins_with("rival_"):
+			continue
 		var enc = ENCOUNTERS[id]
 		if enc.act == act and enc.type == type:
 			if faction != "" and String(enc.get("faction", "")) != faction:
 				continue
 			result.append(id)
 	return result
+
+
+## Successor Wars: the fight pool for one kingdom act. The faction's own-act
+## fights come first; thin pools borrow the faction's fights from neighboring
+## acts (consumers rescale them via get_face_hp / build_enemy_deck's
+## target_act). Elite pools short even after borrowing pull the faction's
+## BOSSES as capital-stronghold stand-ins (the worksheet's demotion: rival
+## lords took the act-boss slot, so the old bosses become elite-plus fights
+## inside their kingdom). A last-resort top-up from the unfiltered act pool
+## keeps a kingdom playable while a faction's bench is still being authored
+## (lanternhall, per the worksheet gap list).
+func get_kingdom_pool(act: int, type: String, faction: String) -> Array:
+	if faction == "":
+		return get_ids_for(act, type)
+	var pool: Array = get_ids_for(act, type, faction)
+	var need: int = 4 if type == "combat" else 2
+	for dist in [1, 2]:
+		if pool.size() >= need:
+			return pool
+		for other_act in [act - dist, act + dist]:
+			if other_act < 1 or other_act > 3:
+				continue
+			for id in get_ids_for(other_act, type, faction):
+				if not pool.has(id):
+					pool.append(id)
+	if type == "elite" and pool.size() < need:
+		for boss_act in [act, act - 1, act + 1, act - 2, act + 2]:
+			if boss_act < 1 or boss_act > 3 or pool.size() >= need:
+				continue
+			for id in get_ids_for(boss_act, "boss", faction):
+				if not pool.has(id):
+					pool.append(id)
+	if pool.size() < 2:
+		for id in get_ids_for(act, type):
+			if not pool.has(id):
+				pool.append(id)
+	return pool
+
+
+# Face-HP norms per act band, read off the live ENCOUNTERS data (A1 combats
+# run 9–13, elites 18, bosses 21–23; A2 15–18 / 23–25 / 29–31; A3 19–22 /
+# 24–29 / 32–36). Used to rescale fights placed outside their authored act —
+# index = act - 1.
+const ACT_FACE_HP_NORM: Dictionary = {
+	"combat": [11.4, 16.4, 20.7],
+	"elite": [18.0, 24.0, 26.8],
+	"boss": [22.0, 30.0, 34.0],
+}
+
+
+## Face HP for an encounter as fought at `target_act` / `target_type` (the
+## map slot it actually landed in). Same act + type = the authored value.
+## Cross-act borrows and boss→elite demotions scale by the band norms above.
+## Phase thresholds stay absolute — phases just fire proportionally earlier
+## or later, the same drift ascension HP scaling already ships with.
+func get_face_hp(encounter_id: String, target_act: int, target_type: String = "") -> int:
+	var enc = get_encounter(encounter_id)
+	if enc.is_empty():
+		return 0
+	var hp: int = int(enc.hp)
+	var from_act: int = clampi(int(enc.get("act", 1)), 1, 3)
+	var from_type: String = String(enc.get("type", "combat"))
+	var to_type: String = target_type if ACT_FACE_HP_NORM.has(target_type) else from_type
+	if target_act < 1 or target_act > 3:
+		return hp
+	if from_act == target_act and to_type == from_type:
+		return hp
+	var from_norm: float = ACT_FACE_HP_NORM[from_type][from_act - 1]
+	var to_norm: float = ACT_FACE_HP_NORM[to_type][target_act - 1]
+	return maxi(4, int(round(hp * to_norm / from_norm)))
+
+
+## ±1 ATK / ±1 HP per act step for creatures fighting outside their authored
+## band. 0-ATK utility bodies stay 0; HP floors at 1. First-cut tuning — the
+## per-faction content pass will replace the worst offenders with hand-tuned
+## variants (worksheet §3: "re-level before authoring net-new").
+func _act_scale_creature(data: Dictionary, delta: int) -> Dictionary:
+	if delta == 0:
+		return data
+	if int(data.get("atk", 0)) > 0:
+		data.atk = maxi(1, int(data.atk) + delta)
+	data.hp = maxi(1, int(data.get("hp", 1)) + delta)
+	return data
 
 
 func make_card_data(creature: Dictionary) -> Dictionary:
@@ -51,7 +138,7 @@ func make_card_data(creature: Dictionary) -> Dictionary:
 	return data
 
 
-func build_enemy_deck(encounter_id: String) -> Array[Dictionary]:
+func build_enemy_deck(encounter_id: String, target_act: int = 0) -> Array[Dictionary]:
 	var enc = get_encounter(encounter_id)
 	if enc.is_empty():
 		return []
@@ -67,16 +154,24 @@ func build_enemy_deck(encounter_id: String) -> Array[Dictionary]:
 		for v in variants:
 			options.append(v)
 		source_deck = options[randi() % options.size()]
+	# Cross-act borrow (Successor Wars): a fight placed outside its authored
+	# act scales each body by the act delta. target_act 0 = authored act.
+	var delta: int = 0
+	if target_act >= 1 and target_act <= 3:
+		delta = target_act - clampi(int(enc.get("act", target_act)), 1, 3)
 	var deck: Array[Dictionary] = []
 	for creature in source_deck:
-		deck.append(make_card_data(creature))
+		deck.append(_act_scale_creature(make_card_data(creature), delta))
 	return deck
 
 
-func get_reinforcement(encounter_id: String) -> Dictionary:
+func get_reinforcement(encounter_id: String, target_act: int = 0) -> Dictionary:
 	var enc = get_encounter(encounter_id)
 	if enc.is_empty():
 		return {}
+	var delta: int = 0
+	if target_act >= 1 and target_act <= 3:
+		delta = target_act - clampi(int(enc.get("act", target_act)), 1, 3)
 	# Reinforcement pool: same pattern as deck variants. If the encounter has
 	# a `reinforcement_pool` list, pick one at random; otherwise fall back to
 	# the single `reinforcement` field. Empty pool = stick with base.
@@ -85,8 +180,8 @@ func get_reinforcement(encounter_id: String) -> Dictionary:
 		var options: Array = [enc.reinforcement]
 		for p in pool:
 			options.append(p)
-		return make_card_data(options[randi() % options.size()])
-	return make_card_data(enc.reinforcement)
+		return _act_scale_creature(make_card_data(options[randi() % options.size()]), delta)
+	return _act_scale_creature(make_card_data(enc.reinforcement), delta)
 
 
 func get_boss_phases(encounter_id: String) -> Array:
@@ -113,6 +208,15 @@ func get_encounter_script(encounter_id: String) -> Array:
 # Boss phase definitions: each phase has threshold, passive_id, passive_desc,
 # and an optional transition effect.
 const BOSS_PHASES: Dictionary = {
+	"rival_stalwart": [
+		{"threshold": 11, "passive_id": "formation_drill",
+			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1."},
+		{"threshold": 0, "passive_id": "formation_lockstep",
+			"passive_desc": "The drill continues, and enemy front-row creatures gain Armored.",
+			"transition_msg": "THE WALL CLOSES RANKS!",
+			"transition_effect": {"type": "summon", "name": "Shieldbearer",
+				"atk": 2, "hp": 5, "kw": ["armored", "thorns"]}},
+	],
 	"iron_warden": [
 		{"threshold": 13, "passive_id": "", "passive_desc": ""},
 		{"threshold": 0, "passive_id": "iron_warden_siege", "passive_desc": "All enemies gain Armored.",
@@ -317,6 +421,45 @@ const REACTIVE_PASSIVES: Dictionary = {
 # =====================================================================
 
 const ENCOUNTERS: Dictionary = {
+
+	# =================== RIVAL LORDS (Successor Wars) ====================
+	# One kit per hero — under conquest the act bosses are the heroes you
+	# didn't pick. Kits are authored at the act-1 band; get_face_hp /
+	# build_enemy_deck scale a lord up when his kingdom is invaded in act 2
+	# or 3, so a rival faced late is the same lord with deeper ranks (the §9
+	# Phase-7 scaling requirement, answered by the cross-act rails).
+	# Un-authored rivals fall back to a faction stand-in boss in
+	# RunState._boss_encounter_for_act until all five kits exist.
+
+	"rival_stalwart": {
+		# THE STALWART — Lord of the Last Wall (Formation). The wall grows
+		# while it stands: each body holding a line beside another gains
+		# +1/+1 at the top of every round (from round 2 — the player gets
+		# one clean read of the board first). Phase 2 closes ranks: the
+		# drill continues AND the front row goes Armored. Counterplay is
+		# reading the line — kill the middle, isolate the ends, never let
+		# two of his walls stand touching for free.
+		"name": "THE STALWART", "act": 1, "type": "boss", "faction": "last_wall", "hp": 23,
+		"passive_id": "formation_drill",
+		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
+		"preamble": "He was holding this line before you had a name, and he intends to hold it after. Stone does not argue. It waits. Every round you leave his wall standing, it stands harder.",
+		"deck": [
+			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns"]},
+			{"name": "Shieldbearer", "atk": 1, "hp": 5, "kw": ["armored"]},
+			{"name": "Standard Bearer", "atk": 1, "hp": 3,
+				"adj_buff": {"atk": 1, "hp": 0},
+				"on_death": {"type": "debuff_all_player_atk", "value": 1}},
+			{"name": "Veteran", "atk": 3, "hp": 4, "kw": ["armored"]},
+			{"name": "Captain", "atk": 2, "hp": 5, "kw": ["armored"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns"]},
+			{"name": "Iron Vanguard", "atk": 4, "hp": 4, "kw": ["armored", "last_stand"]},
+		],
+		"reinforcement": {"name": "Recruit", "atk": 2, "hp": 3, "kw": ["armored"]},
+		"reinforcement_pool": [
+			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns"]},
+		],
+	},
 
 	# =================== ACT 1 — COMBAT ===========================
 

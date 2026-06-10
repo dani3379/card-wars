@@ -62,6 +62,12 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 	match ctx._encounter_passive:
 		"orc_random_buff":
 			ctx._buff_random_enemy_atk(1)
+		"formation_drill":
+			# THE STALWART phase 1 — the Last Wall's Formation engine.
+			formation_drill_tick(ctx, false)
+		"formation_lockstep":
+			# THE STALWART phase 2 — the drill continues, the front armors up.
+			formation_drill_tick(ctx, true)
 		"pyre_ritual":
 			# Climax beat: check each Pyre and ignite if it crossed the
 			# threshold last round. Telegraphed at end of last round when
@@ -332,6 +338,42 @@ static func has_encounter_passive_keyword(ctx, card, keyword: String) -> bool:
 # ---------------------------------------------------------------------------
 # Helpers used only by the dispatchers above
 # ---------------------------------------------------------------------------
+
+## THE STALWART's Formation engine: bodies holding a line grow together.
+## "Beside" = same row, adjacent column, both alive. The buff is permanent
+## (+1 ATK, +1 max HP) so breaking the line — kill the middle, isolate the
+## ends — is the counterplay, not waiting it out. Skips the setup round so
+## the player gets one clean read of the opening formation; ticks from
+## round 2 (engines must fire by round 2 — CONQUEST_REDESIGN.md §15.2).
+## Lockstep (phase 2) additionally hard-grants Armored to the front row via
+## the keywords array so the armor shows on the card chips.
+static func formation_drill_tick(ctx, lockstep: bool) -> void:
+	if ctx.round_number < 2:
+		return
+	var grew := false
+	for row in [ctx.ROW_FRONT, ctx.ROW_BACK]:
+		var arr: Array = ctx._row_array(true, row)
+		for i in arr.size():
+			var c = arr[i]
+			if c == null:
+				continue
+			var left = arr[i - 1] if i > 0 else null
+			var right = arr[i + 1] if i < arr.size() - 1 else null
+			if left == null and right == null:
+				continue
+			c.current_atk += 1
+			c.card_data.hp += 1
+			c.current_hp = mini(c.current_hp + 1, c.card_data.hp)
+			c.update_stat_display()
+			grew = true
+	if lockstep:
+		for c in ctx._row_array(true, ctx.ROW_FRONT):
+			if c != null and "armored" not in c.card_data.keywords:
+				c.card_data.keywords.append("armored")
+				c.update_stat_display()
+	if grew:
+		ctx._show_info("The wall holds — its line grows +1/+1.")
+
 
 static func curses_in_deck(ctx) -> int:
 	var n := 0

@@ -57,6 +57,10 @@ func _process(_delta: float) -> bool:
 	_test_faction_data()
 	_test_rival_deal()
 	_test_encounter_filter()
+	_test_kingdom_pools()
+	_test_act_scaling()
+	_test_map_wiring()
+	_test_boss_gate()
 	_test_save_roundtrip()
 	_test_v2_retirement()
 	_test_telemetry_migration()
@@ -135,8 +139,18 @@ func _test_encounter_filter() -> void:
 		if not HDB.FACTIONS.has(fid):
 			untagged += 1
 			print("    untagged/bad: ", id, " -> '", fid, "'")
-	_check(untagged == 0, "all 40 encounters tagged with real factions")
-	_check(EDB.ENCOUNTERS.size() == 40, "encounter count is 40")
+	_check(untagged == 0, "all encounters tagged with real factions")
+	# Legacy roster stays 40; rival kits (rival_*) land on top of it.
+	var legacy_count: int = 0
+	var rival_kits: int = 0
+	for id in EDB.ENCOUNTERS:
+		if String(id).begins_with("rival_"):
+			rival_kits += 1
+		else:
+			legacy_count += 1
+	_check(legacy_count == 40, "legacy encounter count is 40 (+%d rival kits)" % rival_kits)
+	_check(not EDB.get_ids_for(1, "boss").has("rival_stalwart"),
+		"rival kits excluded from random pools")
 	var cases := [
 		[1, "combat", "", 9], [1, "elite", "", 2], [1, "boss", "", 2],
 		[2, "combat", "", 8], [2, "elite", "", 2], [2, "boss", "", 3],
@@ -152,6 +166,140 @@ func _test_encounter_filter() -> void:
 		var got: int = EDB.get_ids_for(c[0], c[1], c[2]).size()
 		_check(got == c[3], "get_ids_for(%d, %s, '%s') == %d (got %d)"
 			% [c[0], c[1], c[2], c[3], got])
+
+
+func _test_kingdom_pools() -> void:
+	print("— kingdom pools (cross-act borrow + boss demotion)")
+	var lw_combat: Array = EDB.get_kingdom_pool(1, "combat", "last_wall")
+	var pure: bool = lw_combat.size() == 4
+	for id in lw_combat:
+		if String(EDB.ENCOUNTERS[id].get("faction", "")) != "last_wall":
+			pure = false
+	_check(pure, "act-1 last_wall combat pool: 4 ids, faction-pure (%s)" % str(lw_combat))
+	var lw_elite: Array = EDB.get_kingdom_pool(1, "elite", "last_wall")
+	_check(lw_elite.has("iron_warden"), "iron_warden demotes into last_wall elite pool")
+	var has_rival: bool = false
+	for id in lw_elite:
+		if String(id).begins_with("rival_"):
+			has_rival = true
+	_check(not has_rival, "rival kits never demote to elites")
+	var gw_combat: Array = EDB.get_kingdom_pool(1, "combat", "grasswake")
+	_check(gw_combat.size() == 5, "act-1 grasswake combat pool stays own-act (5)")
+	var lh_combat: Array = EDB.get_kingdom_pool(1, "combat", "lanternhall")
+	_check(lh_combat.has("mirror_temple") and lh_combat.size() > 1,
+		"thin lanternhall pool borrows + tops up, stays playable (%d ids)" % lh_combat.size())
+
+
+func _test_act_scaling() -> void:
+	print("— cross-act scaling")
+	_check(EDB.get_face_hp("mercenary_company", 2) == 15,
+		"same-act face HP untouched")
+	var down: int = EDB.get_face_hp("mercenary_company", 1)
+	_check(down >= 9 and down <= 11, "A2 combat pulled to act 1 lands in band (got %d)" % down)
+	var elite_demote: int = EDB.get_face_hp("iron_warden", 1, "elite")
+	_check(elite_demote >= 17 and elite_demote <= 20,
+		"boss demoted to act-1 elite lands in elite band (got %d)" % elite_demote)
+	var up: int = EDB.get_face_hp("rival_stalwart", 3, "boss")
+	_check(up >= 33 and up <= 38, "rival lord scaled to act 3 lands in boss band (got %d)" % up)
+	var deck: Array = EDB.build_enemy_deck("mercenary_company", 1)
+	var ok: bool = not deck.is_empty()
+	for cd in deck:
+		match String(cd.get("name", "")):
+			"Recruit":
+				if int(cd.atk) != 1 or int(cd.hp) != 2:
+					ok = false
+			"Pikeman":
+				if int(cd.atk) != 1 or int(cd.hp) != 3:
+					ok = false
+	_check(ok, "deck bodies scale -1/-1 with ATK/HP floors on act-1 pull")
+	var same: Array = EDB.build_enemy_deck("mercenary_company", 2)
+	var untouched: bool = true
+	for cd in same:
+		if String(cd.get("name", "")) == "Recruit" and (int(cd.atk) != 2 or int(cd.hp) != 3):
+			untouched = false
+	_check(untouched, "same-act deck untouched")
+
+
+func _test_map_wiring() -> void:
+	print("— map wiring (faction-pure kingdoms, rival boss)")
+	# Find a raider run whose ACT-1 rival is the Stalwart (the slice matchup).
+	var found_seed: int = -1
+	for s in range(1, 400):
+		RS.start_new_run("raider", 0, s)
+		if RS.rival_lords[0] == "stalwart":
+			found_seed = s
+			break
+	_check(found_seed > 0, "found a seed with act-1 rival = stalwart (seed %d)" % found_seed)
+	if found_seed < 0:
+		return
+	var act_map: Array = RS.map_data[0]
+	var boss_id: String = ""
+	var combat_pure: bool = true
+	var combat_seen: int = 0
+	for row in act_map:
+		for node in row:
+			var t: String = String(node.type)
+			var eid: String = String(node.get("encounter_id", ""))
+			if t == "boss":
+				boss_id = eid
+			elif t == "combat":
+				combat_seen += 1
+				if eid == "" or String(EDB.ENCOUNTERS.get(eid, {}).get("faction", "")) != "last_wall":
+					combat_pure = false
+	_check(boss_id == "rival_stalwart", "act-1 keep is THE STALWART (got '%s')" % boss_id)
+	_check(combat_seen > 0 and combat_pure, "all %d act-1 holds are last_wall fights" % combat_seen)
+	# Every act's keep resolves to SOME boss (kits or stand-ins).
+	var all_bosses_ok: bool = true
+	for a in range(3):
+		var found: String = ""
+		for row in RS.map_data[a]:
+			for node in row:
+				if String(node.type) == "boss":
+					found = String(node.get("encounter_id", ""))
+		if found == "" or not EDB.ENCOUNTERS.has(found):
+			all_bosses_ok = false
+	_check(all_bosses_ok, "every act's keep has a real boss (kit or stand-in)")
+
+
+func _test_boss_gate() -> void:
+	print("— boss gate (keep locked until %d holds)" % RS.HOLDS_TO_OPEN_LORD)
+	# Generation guarantee: the worst route a player can walk still carries
+	# enough fights to open the gate — across acts, heroes, and seeds.
+	var guarantee_ok: bool = true
+	for s in [19, 5, 77, 123, 4242]:
+		RS.start_new_run("raider" if s % 2 == 1 else "kindler", 0, s)
+		for a in range(3):
+			if RS._min_fights_to_rest(RS.map_data[a]) < RS.HOLDS_TO_OPEN_LORD:
+				guarantee_ok = false
+	_check(guarantee_ok, "worst route carries >= %d fights (5 seeds x 3 acts)"
+		% RS.HOLDS_TO_OPEN_LORD)
+	# The availability filter: park at a rest-row site; with 0 holds the keep
+	# road is withheld, at the gate it opens.
+	RS.start_new_run("raider", 0, 19)
+	var rest_node: Dictionary = {}
+	for row in RS.map_data[0]:
+		for node in row:
+			if String(node.type) == "rest":
+				rest_node = node
+	_check(not rest_node.is_empty(), "act has a rest-row site to park on")
+	RS.map_position = {"row": int(rest_node.row), "col": int(rest_node.col)}
+	RS.holds_broken_in_act = 0
+	_check(RS.get_available_nodes().is_empty(),
+		"keep road shut at 0 holds (nothing offered from the rest row)")
+	RS.holds_broken_in_act = RS.HOLDS_TO_OPEN_LORD
+	var has_boss: bool = false
+	for n in RS.get_available_nodes():
+		if String(n.type) == "boss":
+			has_boss = true
+	_check(has_boss, "keep road opens at %d holds" % RS.HOLDS_TO_OPEN_LORD)
+	# Legacy runs (no rival deal) keep the always-open keep.
+	RS.holds_broken_in_act = 0
+	RS.rival_lords.clear()
+	var legacy_open: bool = false
+	for n in RS.get_available_nodes():
+		if String(n.type) == "boss":
+			legacy_open = true
+	_check(legacy_open, "legacy run (no rival deal) keeps the keep open")
 
 
 func _test_save_roundtrip() -> void:
