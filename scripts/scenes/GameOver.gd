@@ -35,8 +35,14 @@ func _ready() -> void:
 		$Title.add_theme_color_override("font_color", vcol)
 		$Title.add_theme_color_override("font_outline_color", Color(vcol.r, vcol.g, vcol.b, 0.25))
 		$Title.add_theme_constant_override("outline_size", 8)
-		$Subtitle.text = "The first flame is extinguished.\nFloors cleared: %d%s" % [
-			RunState.current_floor, asc_suffix]
+		# A conquest run ends on the throne — and the throne is the eternal
+		# cycle (§15.1 #1): winning makes you the next thing worth marching on.
+		if RunState.finale_stage == 1:
+			$Subtitle.text = "The throne is yours, and everything it owes.\nFloors cleared: %d%s" % [
+				RunState.current_floor, asc_suffix]
+		else:
+			$Subtitle.text = "The first flame is extinguished.\nFloors cleared: %d%s" % [
+				RunState.current_floor, asc_suffix]
 	else:
 		$Title.text = "DEFEAT"
 		var dcol := Color(1.0, 0.3, 0.3)

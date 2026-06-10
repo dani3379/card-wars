@@ -6646,7 +6646,8 @@ func _execute_phase_transition(effect: Dictionary) -> void:
 					"name": effect.get("name", "Minion"),
 					"type": "creature", "cost": 0,
 					"atk": effect.get("atk", 2), "hp": effect.get("hp", 3),
-					"rarity": "enemy", "keywords": [], "desc": "",
+					"rarity": "enemy",
+					"keywords": effect.get("kw", []).duplicate(), "desc": "",
 				}
 				_place_enemy_card(data, slot2.lane, slot2.row)
 		"heal_all_enemies":

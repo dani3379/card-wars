@@ -74,6 +74,12 @@ var holds_broken_in_act: int = 0
 # locked until this many holds have fallen. Map generation guarantees every
 # route to the keep carries at least this many fight nodes (no softlock).
 const HOLDS_TO_OPEN_LORD: int = 2
+# 0 = the three marches; 1 = the throne. After the act-3 rival falls, a
+# conquest run routes into one last fight — the spared rival as an amalgam
+# (amalgam_<finale_rival>) — before the real victory. Set by enter_finale,
+# persisted so a quit at the throne door resumes into the fight (MapView
+# redirects stage-1 resumes back into Combat; the throne is not a map node).
+var finale_stage: int = 0
 
 
 ## False only while a conquest run still owes holds this act. Legacy runs
@@ -210,6 +216,7 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	cause_of_death = ""
 	events_seen = []
 	holds_broken_in_act = 0
+	finale_stage = 0
 	run_active = true
 	# seed_override of 0 means "roll a fresh random seed". Non-zero values come
 	# from daily_seed() / seed_from_string() so the map is reproducible.
@@ -751,8 +758,30 @@ func register_rest_visit() -> void:
 	save_run()
 
 
+## True when the act-3 rival just fell and the throne still waits: the run
+## should route into the amalgam finale instead of ending. False on legacy
+## runs and when the spared rival's amalgam kit isn't authored yet — those
+## runs end at the act-3 boss exactly as before.
+func should_enter_finale() -> bool:
+	return finale_stage == 0 and current_act_idx >= ACTS - 1 \
+		and current_node_type == "boss" and finale_rival != "" \
+		and EncounterDB.ENCOUNTERS.has("amalgam_" + finale_rival)
+
+
+## Routes the run into the throne fight. Saves immediately — the checkpoint
+## at the throne door survives a quit.
+func enter_finale() -> void:
+	finale_stage = 1
+	current_encounter_id = "amalgam_" + finale_rival
+	current_mutator_id = ""
+	save_run()
+
+
 func is_final_boss() -> bool:
-	return current_act_idx >= ACTS - 1 and current_node_type == "boss"
+	if finale_stage == 1:
+		return true
+	return current_act_idx >= ACTS - 1 and current_node_type == "boss" \
+		and not should_enter_finale()
 
 
 # ── Map generation ──
@@ -1218,6 +1247,7 @@ func save_run() -> void:
 		"finale_rival": finale_rival,
 		"act_faction": act_faction,
 		"holds_broken_in_act": holds_broken_in_act,
+		"finale_stage": finale_stage,
 		"rests_visited_in_act": rests_visited_in_act,
 		"rests_visited_total": rests_visited_total,
 		"whetstone_used_this_act": whetstone_used_this_act,
@@ -1365,6 +1395,7 @@ func load_run(slot: int = -1) -> bool:
 	for fid in data.get("act_faction", []):
 		act_faction.append(String(fid))
 	holds_broken_in_act = int(data.get("holds_broken_in_act", 0))
+	finale_stage = int(data.get("finale_stage", 0))
 	rests_visited_in_act = int(data.get("rests_visited_in_act", 0))
 	rests_visited_total = int(data.get("rests_visited_total", 0))
 	whetstone_used_this_act = bool(data.get("whetstone_used_this_act", false))

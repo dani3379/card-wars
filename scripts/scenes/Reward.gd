@@ -6,6 +6,7 @@ extends Control
 ## Fully programmatic UI.
 
 const MAP_SCENE = "res://scenes/map.tscn"
+const COMBAT_SCENE = "res://scenes/combat.tscn"
 
 var _relic_choices: Array[String] = []
 var _is_elite_reward: bool = false
@@ -115,5 +116,11 @@ func _go_to_map() -> void:
 	# now lets Reward read node_type == "boss" while still putting the player
 	# on the next act's map on exit.
 	if RunState.current_node_type == "boss":
+		# Successor Wars: when the act-3 rival falls, the road leads to the
+		# throne, not a fourth map — straight into the amalgam fight.
+		if RunState.should_enter_finale():
+			RunState.enter_finale()
+			GameTheme.fade_out_then_change_scene(self, COMBAT_SCENE)
+			return
 		RunState.advance_act()
 	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)

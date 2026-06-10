@@ -15,11 +15,12 @@ func get_encounter(id: String) -> Dictionary:
 func get_ids_for(act: int, type: String, faction: String = "") -> Array:
 	# Optional faction filter (Successor Wars): "" keeps the legacy behavior,
 	# a faction id narrows the pool to that kingdom's fights.
-	# Rival-lord kits (rival_*) never enter random pools — they are placed
-	# by direct lookup in RunState._boss_encounter_for_act only.
+	# Rival-lord kits (rival_*) and throne amalgams (amalgam_*) never enter
+	# random pools — rivals are placed by direct lookup in
+	# RunState._boss_encounter_for_act, amalgams by RunState.enter_finale.
 	var result: Array = []
 	for id in ENCOUNTERS:
-		if String(id).begins_with("rival_"):
+		if String(id).begins_with("rival_") or String(id).begins_with("amalgam_"):
 			continue
 		var enc = ENCOUNTERS[id]
 		if enc.act == act and enc.type == type:
@@ -208,6 +209,19 @@ func get_encounter_script(encounter_id: String) -> Array:
 # Boss phase definitions: each phase has threshold, passive_id, passive_desc,
 # and an optional transition effect.
 const BOSS_PHASES: Dictionary = {
+	"amalgam_acolyte": [
+		{"threshold": 27, "passive_id": "throne_husks",
+			"passive_desc": "Start of each round: summon a 2/2 Swift creature in an empty enemy lane."},
+		{"threshold": 14, "passive_id": "formation_drill",
+			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
+			"transition_msg": "THE WALL YOU BURNED CLOSES RANKS!",
+			"transition_effect": {"type": "summon_multiple", "name": "Shieldbearer",
+				"atk": 2, "hp": 4, "count": 2, "kw": ["armored"]}},
+		{"threshold": 0, "passive_id": "doom_bell",
+			"passive_desc": "Every other round the throne tolls: a ticking Cinder drops into an empty lane, and other enemies swing +1 ATK while one ticks.",
+			"transition_msg": "THE EVERFLAME ANSWERS THE THRONE!",
+			"transition_effect": {"type": "buff_all_enemies_atk", "value": 1}},
+	],
 	"rival_stalwart": [
 		{"threshold": 11, "passive_id": "formation_drill",
 			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1."},
@@ -459,6 +473,41 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement_pool": [
 			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns"]},
 		],
+	},
+
+	# =================== THE THRONE (amalgam finales) ====================
+	# One per hero — fought when that hero is the SPARED rival (the one you
+	# never invaded), waiting on the throne empowered by the three kingdoms
+	# you burned. Pre-authored MVP (§6): three phases channel the other
+	# kingdoms' engines under the spared lord's banner. Keyed
+	# amalgam_<hero>; RunState.enter_finale places them, never random pools.
+	# Runs whose spared rival has no amalgam yet simply end at the act-3
+	# boss, exactly as before (should_enter_finale checks the kit exists).
+
+	"amalgam_acolyte": {
+		# THE ACOLYTE ASCENDANT — the Owed on the throne. You handed him
+		# three kingdoms' worth of funerals, and the dead still hold office:
+		# phase 1 raises the fallen as a Swift trickle (the storm-dead),
+		# phase 2 the burned Wall closes ranks (formation_drill, the same
+		# engine THE STALWART drills), phase 3 the Everflame answers with
+		# ticking Cinders (the doom_bell toll). Each phase is a kingdom the
+		# player already learned to fight — now stacked into one climb.
+		"name": "THE ACOLYTE ASCENDANT", "act": 3, "type": "boss", "faction": "owed", "hp": 40,
+		"passive_id": "throne_husks",
+		"passive_desc": "Start of each round: summon a 2/2 Swift creature in an empty enemy lane.",
+		"preamble": "You burned three kingdoms to reach this chair, and he thanks you for every funeral — they all marched here ahead of you. Win, and the throne is yours. Everything it owes comes with it.",
+		"deck": [
+			{"name": "Wraith", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Skeleton", "atk": 2, "hp": 1, "kw": ["last_stand"]},
+			{"name": "Bone Walker", "atk": 2, "hp": 2, "kw": ["last_stand"],
+				"on_death": {"type": "summon", "atk": 1, "hp": 1}},
+			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
+			{"name": "Shieldbearer", "atk": 1, "hp": 5, "kw": ["armored"]},
+			{"name": "Gravewarden", "atk": 2, "hp": 6, "kw": ["armored", "last_stand"]},
+			{"name": "Risen Lich", "atk": 4, "hp": 4, "kw": ["piercing"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+		],
+		"reinforcement": {"name": "Risen", "atk": 2, "hp": 2, "kw": ["last_stand"]},
 	},
 
 	# =================== ACT 1 — COMBAT ===========================

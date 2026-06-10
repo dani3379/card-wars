@@ -62,6 +62,7 @@ func _process(_delta: float) -> bool:
 	_test_map_wiring()
 	_test_boss_gate()
 	_test_recruit_nodes()
+	_test_finale()
 	_test_save_roundtrip()
 	_test_v2_retirement()
 	_test_telemetry_migration()
@@ -141,15 +142,16 @@ func _test_encounter_filter() -> void:
 			untagged += 1
 			print("    untagged/bad: ", id, " -> '", fid, "'")
 	_check(untagged == 0, "all encounters tagged with real factions")
-	# Legacy roster stays 40; rival kits (rival_*) land on top of it.
+	# Legacy roster stays 40; rival kits (rival_*) and throne amalgams
+	# (amalgam_*) land on top of it.
 	var legacy_count: int = 0
-	var rival_kits: int = 0
+	var hand_placed: int = 0
 	for id in EDB.ENCOUNTERS:
-		if String(id).begins_with("rival_"):
-			rival_kits += 1
+		if String(id).begins_with("rival_") or String(id).begins_with("amalgam_"):
+			hand_placed += 1
 		else:
 			legacy_count += 1
-	_check(legacy_count == 40, "legacy encounter count is 40 (+%d rival kits)" % rival_kits)
+	_check(legacy_count == 40, "legacy encounter count is 40 (+%d hand-placed kits)" % hand_placed)
 	_check(not EDB.get_ids_for(1, "boss").has("rival_stalwart"),
 		"rival kits excluded from random pools")
 	var cases := [
@@ -334,6 +336,44 @@ func _test_recruit_nodes() -> void:
 		{"keywords": ["swift"], "type": "creature", "cost": 2}, "last_wall")
 	_check(armored_s > swift_s, "last_wall affinity prefers armored over swift")
 	rec.free()
+
+
+func _test_finale() -> void:
+	print("— amalgam finale routing")
+	# Find a run whose spared rival is the Acolyte (the authored amalgam).
+	var seed_found: int = -1
+	for s in range(1, 400):
+		RS.start_new_run("raider", 0, s)
+		if RS.finale_rival == "acolyte":
+			seed_found = s
+			break
+	_check(seed_found > 0, "found a seed sparing the Acolyte (seed %d)" % seed_found)
+	if seed_found < 0:
+		return
+	# Stand on the act-3 keep, boss just fallen.
+	RS.current_act_idx = 2
+	RS.current_node_type = "boss"
+	_check(RS.should_enter_finale(), "act-3 boss with amalgam kit routes to the throne")
+	_check(not RS.is_final_boss(), "act-3 rival is NOT the final fight on a conquest run")
+	RS.active_slot = 2
+	RS.enter_finale()
+	_check(RS.current_encounter_id == "amalgam_acolyte", "finale encounter set")
+	_check(RS.is_final_boss(), "the throne IS the final fight")
+	# The throne-door checkpoint survives a quit.
+	RS.finale_stage = 0
+	_check(RS.load_run(2) and RS.finale_stage == 1,
+		"throne-door save resumes at stage 1")
+	# A spared rival with no amalgam kit ends the run at act 3, as before.
+	for s in range(1, 400):
+		RS.start_new_run("raider", 0, s)
+		if RS.finale_rival != "acolyte":
+			break
+	RS.current_act_idx = 2
+	RS.current_node_type = "boss"
+	_check(not RS.should_enter_finale() and RS.is_final_boss(),
+		"missing amalgam kit ends the run at the act-3 boss (graceful)")
+	_check(not EDB.get_ids_for(3, "boss").has("amalgam_acolyte"),
+		"amalgam excluded from random pools")
 
 
 func _test_save_roundtrip() -> void:

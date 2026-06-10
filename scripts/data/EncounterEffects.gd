@@ -64,10 +64,16 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 			ctx._buff_random_enemy_atk(1)
 		"formation_drill":
 			# THE STALWART phase 1 — the Last Wall's Formation engine.
+			# (Also the amalgam finale's wall phase.)
 			formation_drill_tick(ctx, false)
 		"formation_lockstep":
 			# THE STALWART phase 2 — the drill continues, the front armors up.
 			formation_drill_tick(ctx, true)
+		"throne_husks":
+			# Amalgam finale phase 1 — the burned kingdoms' dead trickle back
+			# as Swift chaff. Skips the setup round like every engine.
+			if ctx.round_number >= 2:
+				ctx._summon_enemy_token_with_keyword(2, 2, "swift")
 		"pyre_ritual":
 			# Climax beat: check each Pyre and ignite if it crossed the
 			# threshold last round. Telegraphed at end of last round when

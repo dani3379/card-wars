@@ -30,6 +30,11 @@ func _ready() -> void:
 	if not RunState.run_active:
 		get_tree().change_scene_to_file(MAIN_MENU)
 		return
+	if RunState.finale_stage == 1:
+		# The run was saved at the throne door (the finale isn't a map node) —
+		# a resume lands here, and the only way out is through.
+		get_tree().change_scene_to_file(COMBAT_SCENE)
+		return
 	AudioBank.play_music("map")
 	# No atmosphere overlay here: the chart plate carries its own mood, and
 	# the menu-style vignette just dims it.
