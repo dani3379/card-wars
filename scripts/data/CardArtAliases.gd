@@ -331,6 +331,19 @@ const ALIASES: Dictionary = {
 	"puffer":               "thornguard",
 	"spawn":                "e_goblin",
 	"kobold_hurler":        "e_goblin",
+
+	# ── Successor Wars rival kits ────────────────────────────────────────
+	"outrider":             "e_scout",
+	"rider":                "e_scout",
+	"grass_runner":         "hound",
+	"storm_chief":          "e_brute",
+	"tithe_collector":      "e_dark_priest",
+	"altar":                "blood_pyre",
+	"star-reader":          "summoner",
+	"frost_adept":          "e_cultist",
+	"frost_lector":         "e_dark_priest",
+	"glass_sentinel":       "mirror_knight",
+	"pyre_tender":          "torchbearer",
 }
 
 static var _creature_art_cache: Dictionary = {}
