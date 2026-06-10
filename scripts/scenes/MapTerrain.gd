@@ -130,6 +130,9 @@ var _has_player := false
 var _island_center := Vector2.ZERO
 var _island_rad := Vector2.ONE
 var _rng := RandomNumberGenerator.new()
+# MapView's animated overlay replaces the static player standard; the
+# render-only sandbox (map_proto.tscn) leaves this false.
+var overlay_handles_standard := false
 
 
 var _act := 1
@@ -780,6 +783,18 @@ func _build_roads() -> void:
 				break
 
 
+## The carved-road curve between two site positions (camp trails included),
+## for marching the army standard along on commit. Falls back to a straight
+## segment if no edge matches — the march still reads, just unbent.
+func road_path_between(from_p: Vector2, to_p: Vector2) -> PackedVector2Array:
+	for ei in range(_edges.size()):
+		var e: Dictionary = _edges[ei]
+		if (e.a as Vector2).distance_to(from_p) < 1.0 \
+				and (e.b as Vector2).distance_to(to_p) < 1.0:
+			return _edge_curves[ei]
+	return PackedVector2Array([from_p, to_p])
+
+
 func _place_labels() -> void:
 	# Landmark names on the biggest terrain features — map furniture is half
 	# of what makes a game map read as a place. Descriptive common-noun names
@@ -1410,6 +1425,11 @@ func _draw_camp() -> void:
 		draw_string(GameTheme.font_display, camp + Vector2(-60, 32),
 			"YOUR CAMP", HORIZONTAL_ALIGNMENT_CENTER, 120, 12,
 			Color(0.88, 0.80, 0.64))
+	# The army standard at the player's position is normally drawn (and
+	# animated) by MapView's pulse overlay; this static fallback keeps the
+	# render-only sandbox (map_proto.tscn) showing a complete picture.
+	if overlay_handles_standard:
+		return
 	var stand_p := _player_pos if _has_player else camp + Vector2(30, -4)
 	draw_line(stand_p + Vector2(0, 4), stand_p + Vector2(0, -28),
 		Color(0.05, 0.04, 0.03), 2.2, true)
@@ -1448,16 +1468,38 @@ func _draw_ui() -> void:
 		if bool(nd.vis):
 			owned += 1
 	if GameTheme.font_display != null:
+		# Per-act campaign name — three sieges of the same keep need at least
+		# the fiction of three different campaigns.
+		var marches := ["T H E   F I R S T   M A R C H",
+			"T H E   S E C O N D   M A R C H", "T H E   L A S T   M A R C H"]
 		draw_string(GameTheme.font_display,
-			Vector2(band.position.x, band.position.y + 70),
+			Vector2(band.position.x, band.position.y + 72),
+			marches[clampi(RunState.get_act() - 1, 0, 2)],
+			HORIZONTAL_ALIGNMENT_CENTER, band_w, 12,
+			Color(0.82, 0.70, 0.48, 0.95))
+		draw_string(GameTheme.font_display,
+			Vector2(band.position.x, band.position.y + 92),
 			"PROVINCES CLAIMED  %d / %d" % [owned, _nodes.size()],
-			HORIZONTAL_ALIGNMENT_CENTER, band_w, 13,
-			Color(0.74, 0.66, 0.52, 0.9))
+			HORIZONTAL_ALIGNMENT_CENTER, band_w, 12,
+			Color(0.72, 0.64, 0.50, 0.80))
 	if GameTheme.font_display == null:
 		return
-	var items := [["combat", "FIGHT"], ["elite", "ELITE"], ["rest", "REST"],
-		["shop", "SHOP"], ["event", "EVENT"]]
-	var lx := w * 0.5 - 280.0
+	# Legend lists only the site types actually on this act's map (treasure
+	# is a 5% roll — most acts shouldn't advertise it).
+	var present := {}
+	for nd2 in _nodes:
+		present[String(nd2.type)] = true
+	var items: Array = []
+	for it0 in [["combat", "FIGHT"], ["elite", "ELITE"], ["rest", "REST"],
+			["shop", "SHOP"], ["event", "EVENT"], ["treasure", "TREASURE"]]:
+		if present.has(it0[0]):
+			items.append(it0)
+	var lwid := float(items.size()) * 118.0
+	var lx := w * 0.5 - lwid * 0.5 + 15.0
+	# A faint band seats the legend on the sea instead of floating loose.
+	draw_rect(Rect2(lx - 32, h - 64, lwid + 34, 34), Color(0.02, 0.025, 0.03, 0.45))
+	draw_line(Vector2(lx - 32, h - 64), Vector2(lx + lwid + 2, h - 64),
+		Color(0.55, 0.48, 0.36, 0.25), 1.0, true)
 	for it in items:
 		var tex: Texture2D = _node_icon(it[0])
 		if tex != null:
@@ -1487,4 +1529,5 @@ func _node_icon(typ: String) -> Texture2D:
 		"shop": return GameTheme.tex_node_shop
 		"event": return GameTheme.tex_node_event
 		"boss": return GameTheme.tex_node_boss
+		"treasure": return GameTheme.tex_node_treasure
 	return null

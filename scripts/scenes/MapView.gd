@@ -21,6 +21,8 @@ const HIT_R := 26.0           # click radius, normal site chip
 const BOSS_HIT := 46.0        # click radius, the keep
 
 var _hud_root: Control = null
+var _overlay: MapPulseOverlay = null
+var _marching := false        # commit march in flight — ignore further clicks
 
 
 func _ready() -> void:
@@ -30,9 +32,15 @@ func _ready() -> void:
 	AudioBank.play_music("map")
 	# No atmosphere overlay here: the chart plate carries its own mood, and
 	# the menu-style vignette just dims it.
+	overlay_handles_standard = true
 	await get_tree().process_frame
 	build_map()
 	_build_node_buttons()
+	# The one animated layer over the static 25k-primitive plate: available-
+	# site pulses, the player's army standard, Etna embers, the commit march.
+	_overlay = MapPulseOverlay.new()
+	_overlay.map = self
+	add_child(_overlay)
 	_build_top_hud()
 	GameTheme.make_settings_gear(self)
 	# Checkpoint: every return to the map captures post-room state (HP, gold,
@@ -97,7 +105,8 @@ func _build_node_buttons() -> void:
 	for nd in _nodes:
 		var is_boss: bool = String(nd.type) == "boss"
 		var r: float = BOSS_HIT if is_boss else HIT_R
-		var btn := Button.new()
+		var btn := MapTipButton.new()
+		btn.view = self
 		btn.position = (nd.pos as Vector2) - Vector2(r, r)
 		btn.size = Vector2(r * 2.0, r * 2.0)
 		btn.flat = true
@@ -137,6 +146,8 @@ func _tip(nd: Dictionary) -> String:
 
 
 func _on_node_pressed(row: int, col: int) -> void:
+	if _marching:
+		return
 	var ok := false
 	for n in RunState.get_available_nodes():
 		if int(n.row) == row and int(n.col) == col:
@@ -144,6 +155,15 @@ func _on_node_pressed(row: int, col: int) -> void:
 			break
 	if not ok:
 		return
+	var dest := Vector2.ZERO
+	for nd in _nodes:
+		if int(nd.row) == row and int(nd.col) == col:
+			dest = nd.pos
+			break
+	# Capture the march origin before visiting flips availability state.
+	var from_p: Vector2 = _player_pos if _has_player else _camp_pos
+	_marching = true
+	AudioBank.play_sfx("button_click")
 	RunState.visit_node(row, col)
 	var ntype: String = RunState.current_node_type
 	var target := ""
@@ -153,8 +173,15 @@ func _on_node_pressed(row: int, col: int) -> void:
 		"rest": target = REST_SCENE
 		"event": target = EVENT_SCENE
 		"treasure": target = TREASURE_SCENE
+	# The army marches down the carved road to the chosen site, then the
+	# scene fades — the commit reads as a move on the campaign map, not a
+	# menu click.
+	if _overlay != null:
+		await _overlay.march_along(road_path_between(from_p, dest))
 	if target != "":
 		GameTheme.fade_out_then_change_scene(self, target, 0.30)
+	else:
+		_marching = false
 
 
 # ═══════════════════ TOP HUD ═══════════════════
@@ -228,7 +255,8 @@ func _place_potion_slot(pid: String, index: int, top_left: Vector2, sz: float) -
 	var tint: Color = data.get("color", Color.WHITE) if not data.is_empty() else Color.WHITE
 	_place_painted_icon(icon, top_left, sz, tint)
 	# Invisible button overlay handles clicks + tooltip.
-	var btn := Button.new()
+	var btn := MapTipButton.new()
+	btn.view = self
 	btn.flat = true
 	btn.position = top_left
 	btn.size = Vector2(sz, sz)
@@ -313,7 +341,8 @@ func _place_deck_button(right_edge: float, top_y: float, icon_sz: float,
 	const COUNT_W := 50.0
 	var btn_w: float = PADDING + icon_sz + 8 + COUNT_W + PADDING
 	var top_left := Vector2(right_edge - btn_w, top_y)
-	var btn := Button.new()
+	var btn := MapTipButton.new()
+	btn.view = self
 	btn.size = Vector2(btn_w, row_h)
 	btn.position = top_left
 	btn.flat = true
@@ -428,3 +457,167 @@ func _show_deck_viewer() -> void:
 	close_btn.position = Vector2(740, 800)
 	close_btn.pressed.connect(func(): overlay.queue_free())
 	overlay.add_child(close_btn)
+
+
+# ═══════════════════ PARCHMENT TOOLTIP ═══════════════════
+
+## Chart-styled tooltip: gilt name line + dim body on a dark ink panel with
+## a tan rule. Replaces the stock gray tooltip box — the one engine-default
+## element that would otherwise sit on the hand-drawn plate.
+func _build_map_tooltip(text: String) -> Control:
+	var panel := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.055, 0.048, 0.040, 0.97)
+	sb.border_color = Color(0.60, 0.51, 0.34, 0.95)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(3)
+	sb.content_margin_left = 12.0
+	sb.content_margin_right = 12.0
+	sb.content_margin_top = 8.0
+	sb.content_margin_bottom = 9.0
+	panel.add_theme_stylebox_override("panel", sb)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 3)
+	panel.add_child(box)
+	var lines := text.split("\n")
+	var name_lbl := Label.new()
+	name_lbl.text = lines[0]
+	if GameTheme.font_display != null:
+		name_lbl.add_theme_font_override("font", GameTheme.font_display)
+	name_lbl.add_theme_font_size_override("font_size", 15)
+	name_lbl.add_theme_color_override("font_color", Color(0.90, 0.78, 0.52))
+	box.add_child(name_lbl)
+	if lines.size() > 1:
+		var body := Label.new()
+		body.text = "\n".join(lines.slice(1))
+		if body.text.length() > 36:
+			body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			body.custom_minimum_size = Vector2(280, 0)
+		if GameTheme.font_body != null:
+			body.add_theme_font_override("font", GameTheme.font_body)
+		body.add_theme_font_size_override("font_size", 13)
+		body.add_theme_color_override("font_color", Color(0.82, 0.78, 0.68))
+		box.add_child(body)
+	return panel
+
+
+## Button whose tooltip renders as the chart-styled panel above.
+class MapTipButton extends Button:
+	var view = null   # the owning MapView
+
+	func _make_custom_tooltip(for_text: String) -> Object:
+		if view != null and for_text != "":
+			return view._build_map_tooltip(for_text)
+		return null
+
+
+# ═══════════════════ ANIMATED OVERLAY ═══════════════════
+
+## The single animated layer over the static plate: (1) breathing rings on
+## reachable sites (crimson on the keep when the boss road opens), (2) the
+## player's army standard — a swallow-tailed banner with a ground glow,
+## unmistakable among the small conquered pennants, (3) ember puffs drifting
+## NE off Etna, (4) the commit march — the standard walks the carved road to
+## the chosen site. The 25k-primitive terrain plate never redraws; this node
+## redraws a dozen primitives per frame instead.
+class MapPulseOverlay extends Control:
+	var map = null                # the MapView (MapTerrain state lives there)
+	var _t := 0.0
+	var _march_pts: PackedVector2Array = PackedVector2Array()
+	var _march_cum: PackedFloat32Array = PackedFloat32Array()
+	var _march_len := 0.0
+	var _march_prog := -1.0       # <0 idle · 0..1 marching (stays at 1 after)
+
+	func _ready() -> void:
+		set_anchors_preset(Control.PRESET_FULL_RECT)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _process(delta: float) -> void:
+		_t += delta
+		queue_redraw()
+
+	## Walk the standard along a road curve. Awaitable; progress sticks at 1
+	## so the banner stays planted at the destination through the scene fade.
+	func march_along(path: PackedVector2Array, duration := 0.55) -> void:
+		_march_pts = path
+		_march_cum = PackedFloat32Array()
+		_march_cum.append(0.0)
+		_march_len = 0.0
+		for i in range(1, path.size()):
+			_march_len += path[i - 1].distance_to(path[i])
+			_march_cum.append(_march_len)
+		_march_prog = 0.0
+		var tw := create_tween()
+		tw.tween_property(self, "_march_prog", 1.0, duration) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		await tw.finished
+
+	func _march_pos() -> Vector2:
+		if _march_pts.size() < 2 or _march_len <= 0.0:
+			return _march_pts[-1] if _march_pts.size() > 0 else Vector2.ZERO
+		var d := clampf(_march_prog, 0.0, 1.0) * _march_len
+		for i in range(1, _march_pts.size()):
+			if d <= _march_cum[i]:
+				var seg := _march_cum[i] - _march_cum[i - 1]
+				var t := 0.0 if seg <= 0.0 else (d - _march_cum[i - 1]) / seg
+				return _march_pts[i - 1].lerp(_march_pts[i], t)
+		return _march_pts[-1]
+
+	func _draw() -> void:
+		if map == null:
+			return
+		var amber: Color = map.PLAYER_AMBER
+		var crimson: Color = map.CRIMSON
+		# 1 — breathing rings on the frontier (quiet during the march).
+		if _march_prog < 0.0:
+			var pulse := 0.5 + 0.5 * sin(_t * 2.6)
+			for nd in map._nodes:
+				if not bool(nd.avail) or bool(nd.vis):
+					continue
+				var p: Vector2 = nd.pos
+				var is_boss := String(nd.type) == "boss"
+				var col := crimson if is_boss else amber
+				var rr := (34.0 if is_boss else 24.0) + 3.0 * pulse
+				draw_arc(p, rr, 0, TAU, 48,
+					Color(col.r, col.g, col.b, 0.10 + 0.24 * pulse), 2.0, true)
+				draw_circle(p, rr,
+					Color(col.r, col.g, col.b, 0.015 + 0.035 * pulse))
+		# 2 — ember puffs off Etna's plume, drifting NE on the strait wind.
+		var apex: Vector2 = (map._etna_peak as Vector2) + Vector2(0, -34.0)
+		for k in range(3):
+			var ph := fmod(_t * 0.16 + float(k) / 3.0, 1.0)
+			var pp := apex + Vector2(30.0, -38.0) * ph \
+				+ Vector2(sin(_t * 0.9 + float(k) * 2.1) * 4.0, 0)
+			draw_circle(pp, 3.5 + 9.0 * ph,
+				Color(0.75, 0.70, 0.64, (1.0 - ph) * 0.085))
+		# 3 — the army standard: walking the road while marching, otherwise
+		# planted at the player's latest conquest (or the camp gate).
+		var sp: Vector2
+		if _march_prog >= 0.0:
+			sp = _march_pos()
+		elif bool(map._has_player):
+			sp = map._player_pos
+		else:
+			sp = (map._camp_pos as Vector2) + Vector2(30, -4)
+		var sway := sin(_t * 2.3)
+		if _march_prog >= 0.0 and _march_prog < 1.0:
+			sway = sin(_t * 9.0)   # the banner snaps in the wind on the move
+		draw_circle(sp + Vector2(0, 2), 13.0 + 2.0 * sway,
+			Color(amber.r, amber.g, amber.b, 0.07))
+		draw_arc(sp, 19.0 + 1.5 * sway, 0, TAU, 40,
+			Color(amber.r, amber.g, amber.b, 0.22), 1.4, true)
+		draw_circle(sp + Vector2(1, 3), 3.4, Color(0, 0, 0, 0.45))
+		draw_line(sp + Vector2(0, 4), sp + Vector2(0, -36),
+			Color(0.05, 0.04, 0.03), 2.4, true)
+		draw_circle(sp + Vector2(0, -36), 1.8, Color(0.92, 0.78, 0.42))
+		var tip_x := 26.0 + 2.0 * sway
+		var flag := PackedVector2Array([
+			sp + Vector2(0, -36),
+			sp + Vector2(tip_x, -33.0 + 1.2 * sway),
+			sp + Vector2(16, -28.5),
+			sp + Vector2(tip_x, -24.0 - 1.2 * sway),
+			sp + Vector2(0, -21)])
+		draw_colored_polygon(flag, amber)
+		var outline := flag.duplicate()
+		outline.append(flag[0])
+		draw_polyline(outline, Color(0.16, 0.11, 0.05, 0.9), 1.2, true)
