@@ -1568,15 +1568,16 @@ func _build_compact_layout() -> void:
 		_doom_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		_doom_badge.add_child(_doom_label)
 
-	# Icon-less combat keywords (rampage / lifelink) have no SVG glyph, so the
-	# icon rail above skips them. Show them as short violet text orbs on the
-	# LEFT edge (below the doom badge, if any) so they're not invisible on the
-	# battlefield token. Matches the arcane-violet keyword-orb look.
+	# Icon-less combat keywords (rampage / lifelink / overrun / formation) have
+	# no SVG glyph, so the icon rail above skips them. Show them as short violet
+	# text orbs on the LEFT edge (below the doom badge, if any) so they're not
+	# invisible on the battlefield token. Matches the arcane-violet keyword-orb
+	# look.
 	_build_text_keyword_chips(root, keywords, _doom_badge != null)
 
 
 # Abbreviations for keywords that render as text chips (no icon asset).
-const _TEXT_KW_ABBR := {"rampage": "RMP", "lifelink": "LL"}
+const _TEXT_KW_ABBR := {"rampage": "RMP", "lifelink": "LL", "overrun": "OVR", "formation": "FRM"}
 
 func _build_text_keyword_chips(root: Control, keywords: Array, below_doom: bool) -> void:
 	var labels: Array[String] = []

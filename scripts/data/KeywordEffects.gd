@@ -1,5 +1,5 @@
 extends Node
-## KeywordEffects.gd — 16 keywords from design doc.
+## KeywordEffects.gd — the 26 keywords.
 ## Combat.gd calls dispatch_* hooks. Display helpers used by Card2D.
 
 const KEYWORDS: Dictionary = {
@@ -27,6 +27,8 @@ const KEYWORDS: Dictionary = {
 	"doom":       {"display": "Doom N",      "desc": "A ticking bomb. The counter drops by 1 at the start of each round; at 0 this creature detonates, dealing its ATK to the enemy face and then dying."},
 	"rampage":    {"display": "Rampage",     "desc": "Each time this kills an enemy creature in combat, it gains +1 ATK for the rest of the fight."},
 	"lifelink":   {"display": "Lifelink",    "desc": "Whenever this deals combat damage — to a creature or to the face — you heal 1 HP."},
+	"overrun":    {"display": "Overrun",     "desc": "Start of each round: if the front of the opposing lane is empty, this gains +1 ATK this round."},
+	"formation":  {"display": "Formation",   "desc": "Start of each round: if this stands beside a friendly creature in its row, it gains +1/+1 this fight."},
 }
 
 
@@ -156,6 +158,55 @@ static func dispatch_start_of_round(ctx) -> void:
 	for card in doomed:
 		if is_instance_valid(card) and card.current_hp > 0:
 			ctx._detonate_doom(card)
+
+	# Overrun / Formation — positional start-of-round engines (the conquest
+	# keywords; the enemy-side twin of Formation is
+	# EncounterEffects.formation_drill_tick — keep the semantics in lockstep).
+	# Both skip the setup round so the opening read stays clean (engines fire
+	# from round 2 — CONQUEST_REDESIGN.md §15.2; for player creatures this is a
+	# no-op gate, since the player board is empty at round 1 start anyway).
+	# Runs AFTER the doom detonations above so a lane opened — or a line
+	# broken — by a bomb this round is read correctly.
+	if ctx.round_number >= 2:
+		for side_is_enemy in [false, true]:
+			for row in [ctx.ROW_FRONT, ctx.ROW_BACK]:
+				var arr: Array = ctx._row_array(side_is_enemy, row)
+				for i in arr.size():
+					var c = arr[i]
+					if c == null or not is_instance_valid(c) or c.current_hp <= 0:
+						continue
+					# Overrun: an open opposing front lane is the carrier's
+					# highway — +N ATK this round (temp buff; clears in the
+					# end-of-turn upkeep, so it covers this round's combat).
+					if c.has_keyword("overrun") \
+							and ctx._row_array(not side_is_enemy, ctx.ROW_FRONT)[i] == null:
+						var ov: int = int(c.card_data.get("overrun", 1))
+						# "+" versions charge harder (Overrun 2) — same
+						# is_upgraded bump idiom as Rampage in Combat.gd.
+						if bool(c.card_data.get("is_upgraded", false)):
+							ov += 1
+						if ov > 0:
+							c.temp_atk_buff += ov
+							c.update_stat_display()
+							ctx.spawn_floating_number(
+								c.global_position + Vector2(c.size.x * c.scale.x * 0.5, -10),
+								"OVERRUN +%d" % ov, Color(1.0, 0.78, 0.25), false)
+					# Formation: a friendly in the same row, adjacent column —
+					# the carrier grows +N/+N permanently (max HP rises and the
+					# body heals into it, mirroring formation_drill_tick).
+					if c.has_keyword("formation"):
+						var left = arr[i - 1] if i > 0 else null
+						var right = arr[i + 1] if i < arr.size() - 1 else null
+						if left != null or right != null:
+							var fm: int = int(c.card_data.get("formation", 1))
+							if fm > 0:
+								c.current_atk += fm
+								c.card_data.hp = int(c.card_data.get("hp", 1)) + fm
+								c.current_hp = mini(c.current_hp + fm, c.card_data.hp)
+								c.update_stat_display()
+								ctx.spawn_floating_number(
+									c.global_position + Vector2(c.size.x * c.scale.x * 0.5, -10),
+									"FORMATION +%d/+%d" % [fm, fm], Color(0.62, 0.78, 0.95), false)
 
 
 const COMBAT_KEYWORDS := ["armored", "swift", "ranged", "thorns", "regenerate", "last_stand", "piercing", "poison", "shield", "guardian"]

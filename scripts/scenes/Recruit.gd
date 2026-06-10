@@ -17,8 +17,8 @@ const SLATE_SIZE := 8
 
 # What "fits the kingdom" means per faction, read off existing card fields.
 const AFFINITY := {
-	"grasswake": {"kw": ["swift", "ranged", "piercing"], "cheap": true},
-	"last_wall": {"kw": ["armored", "thorns", "guardian", "shield", "last_stand"], "adj": true},
+	"grasswake": {"kw": ["swift", "ranged", "piercing", "overrun"], "cheap": true},
+	"last_wall": {"kw": ["armored", "thorns", "guardian", "shield", "last_stand", "formation"], "adj": true},
 	"owed": {"kw": ["sacrifice", "lifelink"], "on_death": true},
 	"lanternhall": {"kw": ["echo", "retain", "exhaust"], "spell": true},
 	"everflame": {"kw": ["doom", "rampage", "lifelink"], "burn": true},
