@@ -595,21 +595,22 @@ func make_choice_banner(title: String, desc: String, accent: Color,
 	root.mouse_filter = Control.MOUSE_FILTER_STOP
 	var disabled: bool = (disabled_reason != "")
 
-	# Parchment panel: dark warm body, accent-tinted top/bottom strip via
-	# border. Border colors are accent-tinted so the four choices read as
-	# related-but-distinct (rest=green, upgrade=gold, remove=red, reforge=blue).
+	# Chart-language panel: dark ink body with a tan rule (the map screen's
+	# tooltip/cartouche kit). The accent survives as a small rule under the
+	# title and the hotspot glow behind the banner, so choices still read
+	# related-but-distinct without becoming colored rectangles.
 	var s := StyleBoxFlat.new()
-	s.bg_color = Color(0.10, 0.07, 0.04, 0.92 if not disabled else 0.55)
-	s.border_color = Color(accent.r, accent.g, accent.b,
-		0.80 if not disabled else 0.30)
-	s.border_width_top = 2
-	s.border_width_bottom = 2
-	s.border_width_left = 2
-	s.border_width_right = 2
-	s.corner_radius_top_left = 8
-	s.corner_radius_top_right = 8
-	s.corner_radius_bottom_left = 8
-	s.corner_radius_bottom_right = 8
+	s.bg_color = Color(0.055, 0.048, 0.040, 0.96 if not disabled else 0.60)
+	s.border_color = Color(0.60, 0.51, 0.34,
+		0.90 if not disabled else 0.35)
+	s.border_width_top = 1
+	s.border_width_bottom = 1
+	s.border_width_left = 1
+	s.border_width_right = 1
+	s.corner_radius_top_left = 3
+	s.corner_radius_top_right = 3
+	s.corner_radius_bottom_left = 3
+	s.corner_radius_bottom_right = 3
 	s.shadow_color = Color(0, 0, 0, 0.65)
 	s.shadow_size = 8
 	s.shadow_offset = Vector2(0, 4)
@@ -633,20 +634,32 @@ func make_choice_banner(title: String, desc: String, accent: Color,
 	icon_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(icon_box)
 	if icon_path != "" and ResourceLoader.exists(icon_path):
-		var tex := TextureRect.new()
-		tex.texture = load(icon_path)
-		tex.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
-		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		tex.set_anchors_preset(Control.PRESET_FULL_RECT)
-		tex.modulate = accent if not disabled else Color(0.5, 0.5, 0.5, 0.5)
-		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		icon_box.add_child(tex)
+		# Engraved-sigil treatment: drop shadow + parchment tint, like the map
+		# legend icons. Flooding the white glyph with the accent color turns
+		# it into a flat toy — the accent belongs on the rule, not the icon.
+		var icon_tex: Texture2D = load(icon_path)
+		for layer in range(2):
+			var tex := TextureRect.new()
+			tex.texture = icon_tex
+			tex.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+			tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+			if layer == 0:
+				for prop in ["offset_left", "offset_top",
+						"offset_right", "offset_bottom"]:
+					tex.set(prop, 2.0)
+				tex.modulate = Color(0, 0, 0, 0.55 if not disabled else 0.30)
+			else:
+				tex.modulate = Color(0.82, 0.74, 0.56) if not disabled \
+					else Color(0.50, 0.48, 0.44, 0.55)
+			tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			icon_box.add_child(tex)
 	else:
 		var glyph := Label.new()
 		glyph.text = title.left(1)
 		glyph.add_theme_font_size_override("font_size", 40)
 		glyph.add_theme_color_override("font_color",
-			accent if not disabled else Color(0.5, 0.5, 0.5, 0.5))
+			Color(0.82, 0.74, 0.56) if not disabled else Color(0.5, 0.5, 0.5, 0.5))
 		glyph.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.7))
 		glyph.add_theme_constant_override("outline_size", 3)
 		if font_display:
@@ -669,13 +682,23 @@ func make_choice_banner(title: String, desc: String, accent: Color,
 	title_lbl.text = title
 	title_lbl.add_theme_font_size_override("font_size", 22)
 	title_lbl.add_theme_color_override("font_color",
-		Color(accent.r, accent.g, accent.b, 1.0) if not disabled else Color(0.6, 0.6, 0.55, 0.7))
+		Color(0.90, 0.78, 0.52) if not disabled else Color(0.6, 0.6, 0.55, 0.7))
 	title_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.6))
 	title_lbl.add_theme_constant_override("outline_size", 3)
 	if font_display:
 		title_lbl.add_theme_font_override("font", font_display)
 	title_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	text_vbox.add_child(title_lbl)
+
+	# The accent's home: a short rule under the title, echoing the chart's
+	# ruled furniture while keeping the choice's identity color.
+	var rule := ColorRect.new()
+	rule.color = Color(accent.r, accent.g, accent.b,
+		0.80 if not disabled else 0.30)
+	rule.custom_minimum_size = Vector2(38, 2)
+	rule.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	text_vbox.add_child(rule)
 
 	var body_text: String = disabled_reason if disabled else desc
 	var body_lbl := Label.new()

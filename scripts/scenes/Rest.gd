@@ -51,7 +51,7 @@ const HERO_SILHOUETTE_PATTERN := "res://assets/portraits/hero_silhouette_%s.png"
 const HERO_SILHOUETTE_FALLBACK := "res://assets/portraits/player_knight.png"
 
 # Banner icons (use existing assets/icons/ entries). Each banner picks one.
-const ICON_REST := "res://assets/icons/heart.png"
+const ICON_REST := "res://assets/icons/game-icons/campfire.svg"
 const ICON_UPGRADE := "res://assets/icons/sword.png"
 const ICON_REFORGE := "res://assets/icons/diamond.png"
 

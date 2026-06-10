@@ -402,10 +402,14 @@ func _ready() -> void:
 	# begins, after enemies are placed but before round 1 draws".
 	_apply_combat_start_relics()
 	# Boss / elite encounters get a dramatic intro banner (name + passive)
-	# before the first round begins. Normal combats skip the intro.
+	# before the first round begins. Normal fights get a quick one only when
+	# there is something to announce — a fight passive or a mutator — so the
+	# threat is read before it fires; vanilla skirmishes start instantly.
 	# node_type was already captured above for the music branch — reuse it.
 	if node_type == "boss" or node_type == "elite":
 		await _show_encounter_intro(node_type == "boss")
+	elif _encounter_passive_desc != "" or has_mutator():
+		await _show_encounter_intro(false, true)
 	_start_round()
 
 
@@ -11699,10 +11703,12 @@ func _spawn_spell_cast_ghost(card_data: Dictionary, start_global: Vector2,
 	get_tree().create_timer(duration + 0.1).timeout.connect(ghost.queue_free)
 
 
-func _show_encounter_intro(is_boss: bool) -> void:
+func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 	# Big dramatic banner with encounter name + passive description that holds
 	# for ~1.6s before combat begins. Awaitable so _ready blocks on the intro
-	# completing — the round banner / actual play follows after.
+	# completing — the round banner / actual play follows after. `quick` is
+	# the normal-fight variant: smaller, shorter, no type prefix — just long
+	# enough to read the passive/mutator that makes this fight different.
 	if _hud_layer == null:
 		return
 	var vp := get_viewport_rect().size
@@ -11725,20 +11731,22 @@ func _show_encounter_intro(is_boss: bool) -> void:
 	holder.modulate.a = 0.0
 	_hud_layer.add_child(holder)
 
-	var prefix_label := Label.new()
-	prefix_label.text = "— BOSS —" if is_boss else "— ELITE —"
-	prefix_label.add_theme_font_size_override("font_size", 26)
-	prefix_label.add_theme_color_override("font_color",
-		Color(1.0, 0.45, 0.20) if is_boss else Color(1.0, 0.78, 0.30))
-	prefix_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
-	prefix_label.add_theme_constant_override("outline_size", 6)
-	prefix_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	prefix_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	holder.add_child(prefix_label)
+	if not quick:
+		var prefix_label := Label.new()
+		prefix_label.text = "— BOSS —" if is_boss else "— ELITE —"
+		prefix_label.add_theme_font_size_override("font_size", 26)
+		prefix_label.add_theme_color_override("font_color",
+			Color(1.0, 0.45, 0.20) if is_boss else Color(1.0, 0.78, 0.30))
+		prefix_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+		prefix_label.add_theme_constant_override("outline_size", 6)
+		prefix_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		prefix_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		holder.add_child(prefix_label)
 
 	var name_label := Label.new()
 	name_label.text = _encounter_name if _encounter_name != "" else "UNKNOWN FOE"
-	name_label.add_theme_font_size_override("font_size", 86 if is_boss else 72)
+	name_label.add_theme_font_size_override("font_size",
+		86 if is_boss else (54 if quick else 72))
 	name_label.add_theme_color_override("font_color", IVORY)
 	name_label.add_theme_color_override("font_outline_color",
 		Color(0.55, 0.16, 0.04, 0.95))
@@ -11803,17 +11811,20 @@ func _show_encounter_intro(is_boss: bool) -> void:
 	holder.scale = Vector2(0.88, 0.88)
 
 	if AudioBank != null:
-		AudioBank.play_sfx("turn_start", 0.0, 3.0)  # louder than normal turn
+		# Boss/elite hits louder than a normal turn cue; the quick variant
+		# fires every passive/mutator fight, so it stays at normal volume.
+		AudioBank.play_sfx("turn_start", 0.0, 0.0 if quick else 3.0)
 
 	var tw := create_tween()
 	tw.set_parallel(true)
-	tw.tween_property(dim, "color:a", 0.55, 0.28)
+	tw.tween_property(dim, "color:a", 0.38 if quick else 0.55, 0.28)
 	tw.tween_property(holder, "modulate:a", 1.0, 0.32)
 	tw.tween_property(holder, "scale", Vector2.ONE, 0.42) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	# Hold the intro on screen — bosses get longer for the player to read the
-	# passive description; elites are quicker.
-	var hold := 1.5 if is_boss else 1.0
+	# passive description; elites are quicker; the quick variant is just long
+	# enough to register the one line that matters.
+	var hold := 1.5 if is_boss else (0.8 if quick else 1.0)
 	if _encounter_preamble != "":
 		# Give the player time to actually read the ill-omen line, scaled to its
 		# length and capped so it never drags.
