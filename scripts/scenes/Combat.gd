@@ -7913,6 +7913,50 @@ func _summon_enemy_token_with_keyword(atk: int, hp: int, keyword: String) -> voi
 #  BOARD LAYOUT
 # =====================================================================
 
+## A unit station drawn ON the war chart: corner brackets, a hairline
+## rule, a faint ownership wash, and a small center cross — positions
+## marked on the map, not holes carved into it. Replaces the old full-size
+## dark wells, which covered nearly the whole table and turned the board
+## into 16 voids. The drawn marks stay quiet when empty and disappear
+## behind a creature when filled; Highlight/ContactShadow/Cell (the slot's
+## behavioral children) are untouched.
+class StationMark extends Control:
+	var warm := true       # enemy half (warm) vs player half (cool) wash
+	var strong := true     # front row reads stronger than back
+
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		if size.x < 20.0 or size.y < 20.0:
+			return
+		var a_mul := 1.0 if strong else 0.62
+		# Faint ownership wash — low enough that the table reads through.
+		var wash := Color(0.50, 0.14, 0.09, 0.11 * a_mul) if warm \
+			else Color(0.14, 0.26, 0.46, 0.11 * a_mul)
+		draw_rect(Rect2(Vector2(3, 3), size - Vector2(6, 6)), wash, true)
+		# Hairline inset rule.
+		draw_rect(Rect2(Vector2(3.5, 3.5), size - Vector2(7, 7)),
+			Color(0.78, 0.62, 0.38, 0.18 * a_mul), false, 1.0, true)
+		# Corner brackets — the drawn-station read.
+		var bk := Color(0.82, 0.66, 0.38, 0.55 * a_mul)
+		var L := 15.0
+		for cx in [0.0, 1.0]:
+			for cy in [0.0, 1.0]:
+				var corner := Vector2(cx * size.x, cy * size.y)
+				var dx := 1.0 if cx == 0.0 else -1.0
+				var dy := 1.0 if cy == 0.0 else -1.0
+				draw_line(corner + Vector2(0, dy * 1.0),
+					corner + Vector2(dx * L, dy * 1.0), bk, 2.0, true)
+				draw_line(corner + Vector2(dx * 1.0, 0),
+					corner + Vector2(dx * 1.0, dy * L), bk, 2.0, true)
+		# Center cross: the survey mark where a unit will stand.
+		var c := size * 0.5
+		var fc := Color(0.78, 0.62, 0.38, 0.15 * a_mul)
+		draw_line(c - Vector2(7, 0), c + Vector2(7, 0), fc, 1.0, true)
+		draw_line(c - Vector2(0, 7), c + Vector2(0, 7), fc, 1.0, true)
+
+
 ## The war-table surface: a faded campaign chart inked straight onto the
 ## scorched table the battle is fought across — a double-ruled coast with
 ## sea hatching, dashed march routes, site rings, a compass, cup stains,
@@ -8116,7 +8160,11 @@ func _build_board() -> void:
 	substrate.set_anchors_preset(Control.PRESET_FULL_RECT)
 	substrate.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var sub_style := StyleBoxFlat.new()
-	sub_style.bg_color = Color(0.05, 0.038, 0.032, 0.85)
+	# Lamplit wood-brown, near-opaque. The play surface must sit VISIBLY
+	# lighter than the dark room around it (the Hearthstone value structure)
+	# — at the old 0.05 near-black the table and the void were one tone and
+	# the whole midscreen read empty.
+	sub_style.bg_color = Color(0.118, 0.088, 0.062, 0.96)
 	sub_style.border_color = Color(0.0, 0.0, 0.0, 0.45)
 	for k in ["border_width_top", "border_width_bottom",
 			"border_width_left", "border_width_right"]:
@@ -8145,9 +8193,22 @@ func _build_board() -> void:
 		wood.offset_top = 6
 		wood.offset_right = -6
 		wood.offset_bottom = -6
-		wood.modulate = Color(0.78, 0.56, 0.34, 0.14)
+		wood.modulate = Color(0.78, 0.56, 0.34, 0.22)
 		wood.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		board_zone.add_child(wood)
+	if GameTheme.tex_card_grain:
+		var fiber := TextureRect.new()
+		fiber.texture = GameTheme.tex_card_grain
+		fiber.stretch_mode = TextureRect.STRETCH_TILE
+		fiber.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		fiber.set_anchors_preset(Control.PRESET_FULL_RECT)
+		fiber.offset_left = 6
+		fiber.offset_top = 6
+		fiber.offset_right = -6
+		fiber.offset_bottom = -6
+		fiber.modulate = Color(0.55, 0.40, 0.24, 0.10)
+		fiber.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		board_zone.add_child(fiber)
 	var chart := TablePlate.new()
 	chart.clip_contents = true
 	chart.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -8225,7 +8286,7 @@ func _build_board() -> void:
 		track.size_flags_vertical = Control.SIZE_FILL
 		track.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var track_style := StyleBoxFlat.new()
-		track_style.bg_color = Color(0.015, 0.012, 0.01, 0.22)
+		track_style.bg_color = Color(0.015, 0.012, 0.01, 0.10)
 		track_style.border_color = Color(GILT.r, GILT.g, GILT.b, 0.08)
 		for k in ["border_width_left", "border_width_right",
 				"border_width_top", "border_width_bottom"]:
@@ -8932,43 +8993,17 @@ func _make_lane_slot(is_enemy: bool, lane_idx: int, row: int = ROW_FRONT) -> Con
 	slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	slot.clip_contents = false
 
-	# Carved socket — a recessed station the creature stands in, VISIBLE even when
-	# empty. This is a lane game; the player must read where the 16 stations are
-	# and which are filled, so the board can't hide them. Depth, not fill: a dark
-	# well + faint ownership tint (warm enemy / cool player) + a subtle gilt rim,
-	# with an inner-shadow gradient on top for the "pressed into the table" recess.
-	# (The previous board hid sockets at ≤0.16 alpha to dodge a debug-grid look;
-	# for a lane game that erased the board. The lane tracks + dark substrate do
-	# the grouping work now, so the sockets are free to read as real stations.)
-	var well := Panel.new()
-	well.set_anchors_preset(Control.PRESET_FULL_RECT)
-	well.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var well_style := StyleBoxFlat.new()
-	if is_enemy:
-		well_style.bg_color = Color(0.21, 0.06, 0.05, 0.50) if row == ROW_FRONT \
-			else Color(0.15, 0.05, 0.045, 0.34)
-	else:
-		well_style.bg_color = Color(0.06, 0.10, 0.17, 0.50) if row == ROW_FRONT \
-			else Color(0.05, 0.08, 0.13, 0.34)
-	well_style.border_color = Color(GILT.r, GILT.g, GILT.b,
-		0.18 if row == ROW_FRONT else 0.10)
-	for k in ["border_width_top", "border_width_bottom",
-			"border_width_left", "border_width_right"]:
-		well_style.set(k, 1)
-	for k in ["corner_radius_top_left", "corner_radius_top_right",
-			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
-		well_style.set(k, 8)
-	well.add_theme_stylebox_override("panel", well_style)
-	slot.add_child(well)
-
-	# Inner shadow — dark along the top edge fading down, so the socket reads as a
-	# recess pressed into the table rather than a flat tinted rectangle.
-	var inner := TextureRect.new()
-	inner.texture = _get_socket_shadow_tex()
-	inner.stretch_mode = TextureRect.STRETCH_SCALE
-	inner.set_anchors_preset(Control.PRESET_FULL_RECT)
-	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	slot.add_child(inner)
+	# Station drawn ON the chart — corner brackets + hairline + faint
+	# ownership wash + survey cross (see StationMark). The old carved wells
+	# were full-size dark fills: with 16 of them they COVERED the table and
+	# the board read as a grid of voids — the user's "still dark and empty".
+	# A lane game needs the 16 stations readable, but readable means marked,
+	# not excavated: the table material now runs continuously underneath.
+	var station := StationMark.new()
+	station.set_anchors_preset(Control.PRESET_FULL_RECT)
+	station.warm = is_enemy
+	station.strong = row == ROW_FRONT
+	slot.add_child(station)
 
 	# Drop-target highlight overlay — only visible (alpha tweened up by
 	# _set_slot_highlight) while the player is dragging a creature card over
