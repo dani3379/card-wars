@@ -122,12 +122,19 @@ canonical display names:
 
 ---
 
-## 6. Mana & cost
+## 6. Command & cost
 
+- **The per-turn resource is `Command` — capitalized, always.** Never `mana`,
+  `energy`, or `action points` in player text (renamed 2026-06-11; the codebase
+  still says `mana` in identifiers — `player_mana`, `gain_mana`, `boss_mana` —
+  and those NEVER change). It is a mass noun: `gain 2 Command`, `+1 max
+  Command`, `Not enough Command!`, `spend all your Command`.
 - `costs 1 less` / `costs 0` — **no parentheses.** Convert `costs (1) less` →
   `costs 1 less`.
-- `gain 1 mana` = permanent-ish; `gain 1 mana this turn` = expires. Preserve the
-  qualifier exactly as written.
+- `gain 1 Command` = permanent-ish; `gain 1 Command this turn` = expires.
+  Preserve the qualifier exactly as written.
+- Carryover is **banking**: `bank`, `unspent Command carries over`. The glossary
+  entry is named "Banking" — keep that vocabulary, don't invent "reserve"/"save".
 
 ---
 

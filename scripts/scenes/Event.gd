@@ -1847,10 +1847,10 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Speak the word aloud\n\nIt feeds on every spell you carry. The more\nyou know, the more it pays — and the longer it lingers.",
-				"desc": "Gold per spell you own (up to 90); +1 mana next fight",
+				"desc": "Gold per spell you own (up to 90); +1 Command next fight",
 				"effects": [
 					{"type": "scaled", "count": "spells", "per": 7, "cap": 90, "outcome": "gold"},
-					{"type": "combat_mana", "value": 1, "text": "The true word hums behind your teeth — +1 mana next fight."},
+					{"type": "combat_mana", "value": 1, "text": "The true word hums behind your teeth — +1 Command next fight."},
 				],
 			},
 			{
@@ -2458,7 +2458,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "On the heart\n\nIt sinks in. There is a second heartbeat\nbehind your own, just for a while.",
-				"desc": "Next fight: +1 max mana the whole fight",
+				"desc": "Next fight: +1 max Command the whole fight",
 				"effects": [
 					{"type": "mark_heart"},
 				],

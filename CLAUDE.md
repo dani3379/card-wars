@@ -99,7 +99,7 @@ Spells: `id, name, type:"spell", cost, rarity, keywords[], desc, spell{type,valu
 ## Key constants
 
 - Player HP: 25
-- Mana: starts at 3/turn (`base_max_mana`); can grow via relics. Up to 2 banked carryover by default (`MAX_BANKED_MANA`; Ice Cream relic uncaps banking).
+- Command (player-facing name for the turn resource; ALL code identifiers still say mana — `base_max_mana`, `player_mana`, `gain_mana`): starts at 3/turn; can grow via relics. Up to 2 banked carryover by default (`MAX_BANKED_MANA`; Ice Cream relic uncaps banking). See COPY_STYLE §6 before writing any resource text.
 - Hand draw: 4/turn (HAND_DRAW_PER_TURN), max hand: 10
 - 3 acts. Map: 8 rows × ≤7 columns, 11–15 sites per act. Boss at row 7, elites/rest start row 3.
 - Lanes: 4 per row × 2 rows per side (front/back) = 8 slots per side.

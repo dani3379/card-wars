@@ -68,7 +68,7 @@ const MUTATORS: Dictionary = {
 	},
 	"taxed": {
 		"name": "Taxed",
-		"desc": "Spells cost 1 more mana, minimum 1.",
+		"desc": "Spells cost 1 more Command, minimum 1.",
 		"icon": "book",
 		"on_combat_start": {"kind": "spell_cost_increase", "value": 1},
 		"gold_bonus": 25,
@@ -158,7 +158,7 @@ const MUTATORS: Dictionary = {
 	},
 	"blessed": {
 		"name": "Blessed",
-		"desc": "Start the fight with 1 extra mana max.",
+		"desc": "Start the fight with +1 max Command.",
 		"icon": "crown",
 		"on_combat_start": {"kind": "max_mana_increase", "value": 1},
 		"gold_bonus": 0,

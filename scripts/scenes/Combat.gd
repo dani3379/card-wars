@@ -1328,7 +1328,7 @@ func _on_end_turn() -> void:
 			and not _end_turn_confirmed and _has_playable_action():
 		GameTheme.show_confirm_dialog(self,
 			"End Turn?",
-			"You still have mana or an action available.\n(Disable in Settings)",
+			"You still have Command or an action available.\n(Disable in Settings)",
 			"END TURN",
 			"KEEP PLAYING",
 			Callable(self, "_on_end_turn_confirmed"))
@@ -3682,7 +3682,7 @@ func _on_card_played(card: Control) -> void:
 	# a 1-cost Fireball looked "affordable" at 1 mana but failed to play.
 	var cost = _effective_cost(card)
 	if player_mana < cost:
-		_show_info("Not enough mana!")
+		_show_info("Not enough Command!")
 		_layout_hand()  # bounce the dragged card back into the fan
 		return
 	# Consume the Ironclad Veteran discount charge ONLY if it actually applied
@@ -5117,7 +5117,7 @@ func _maybe_show_banking_tutorial() -> void:
 		return
 	_banking_tutorial_shown = true
 	UserSettings.mark_banking_tutorial_seen()
-	_show_tutorial_tip("BANK: Unspent mana carries over to next turn (max 2). End turns early to save up.")
+	_show_tutorial_tip("BANK: Unspent Command carries over to next turn (max 2). End turns early to save up.")
 
 
 func _maybe_show_intents_tutorial() -> void:
@@ -5710,7 +5710,7 @@ func _show_recycle_modal() -> Control:
 	center.add_child(col)
 
 	var title := Label.new()
-	title.text = "Exhaust a card for mana"
+	title.text = "Exhaust a card for Command"
 	title.add_theme_font_override("font", GameTheme.font_display)
 	title.add_theme_font_size_override("font_size", 30)
 	title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.30))
@@ -10328,19 +10328,19 @@ func _build_encounter_scroll_diegetic() -> void:
 
 
 func _build_mana_post_diegetic() -> void:
-	# Bottom-LEFT, directly RIGHT of the player banner: a faceted, glowing
-	# mana CRYSTAL (replacing the old flat blue disc, which read as a generic
-	# UI button). A cut sapphire silhouette — two mirrored facets with a
-	# vertical bright→deep gradient, a center ridge, a top "table" light-catch,
-	# a specular glint, a bright outline, and a soft radial aura behind it. The
-	# whole gem breathes (slow scale pulse) and the aura throbs so the resource
-	# feels arcane and alive. The count rides front-and-center as a single bold
-	# numeral so it's still readable from across the screen.
+	# Bottom-LEFT, directly RIGHT of the player banner: the COMMAND SEAL — a
+	# big pressed disc of sealing-wax navy (the same wax every card's cost
+	# seal is pressed in, so "blue wax = Command" reads as one system). The
+	# old faceted sapphire said "arcane mana"; the campaign fiction is a
+	# commander stamping writs at a war table, so the per-turn resource is
+	# the signet itself. Card2D.WaxSeal paints the blob (seeded deckle, stamp
+	# ring, sheen); a dim lamp-glow behind it flickers like the table light.
+	# The count rides front-and-center as a single bold numeral so it's still
+	# readable from across the screen.
 	const GEM_W := 124
 	const GEM_H := 152
-	const HW := 42.0   # crystal half-width
-	const HH := 56.0   # crystal half-height
-	const CY := 62.0   # crystal center Y within the post
+	const HH := 56.0   # instrument half-height (plinth band + numeral box anchor)
+	const CY := 62.0   # seal center Y within the post
 	var post := Control.new()
 	post.anchor_left = 0.0
 	post.anchor_right = 0.0
@@ -10355,14 +10355,14 @@ func _build_mana_post_diegetic() -> void:
 	post.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_hud_layer.add_child(post)
 
-	# Soft radial aura behind the crystal — sells the "glowing gem" read and
-	# bleeds a little blue light onto the dark frame. Pulses via a looping tween.
+	# Soft lamp-glow behind the seal — warm table light, not arcane radiance.
+	# Kept dim so the wax stays matte; a looping tween flickers it gently.
 	var aura_grad := Gradient.new()
 	aura_grad.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
 	aura_grad.colors = PackedColorArray([
-		Color(0.38, 0.68, 1.0, 0.60),
-		Color(0.24, 0.50, 0.96, 0.24),
-		Color(0.18, 0.40, 0.92, 0.0)])
+		Color(1.0, 0.76, 0.42, 0.26),
+		Color(0.92, 0.62, 0.30, 0.11),
+		Color(0.80, 0.50, 0.24, 0.0)])
 	var aura_tex := GradientTexture2D.new()
 	aura_tex.gradient = aura_grad
 	aura_tex.fill = GradientTexture2D.FILL_RADIAL
@@ -10381,13 +10381,23 @@ func _build_mana_post_diegetic() -> void:
 	aura.modulate.a = 0.7
 	post.add_child(aura)
 
-	# Ink plinth under the crystal — the gem is MOUNTED on the rail like the
-	# other instruments, not floating in the dark. Sits behind the gem's
-	# bottom tip; the caption hangs just below it.
+	# Round-seal radius. 48 (96px disc) — wide enough that the wax bottom
+	# reaches the plinth band at CY+HH-10 (a round seal is shorter than the
+	# old crystal; at the crystal-derived 42 it floated 4px clear of the
+	# band), while the 96px face still clears the 124px post side margins.
+	var seal_r := 48.0
+
+	# Ink plinth under the seal — the wax is MOUNTED on the rail like the
+	# other instruments, not floating in the dark. Sits behind the seal's
+	# bottom edge; the caption hangs just below it.
 	var plinth := Panel.new()
 	plinth.offset_left = GEM_W / 2.0 - 40
 	plinth.offset_right = GEM_W / 2.0 + 40
-	plinth.offset_top = CY + HH - 10
+	# Top tucks well behind the wax: the seal blob is inset ~1.5px in its rect
+	# and its deckle wobbles up to ~7%, so its visual bottom sits ~5px above
+	# the rect edge. The band draws BEFORE the seal, so the overlap is hidden
+	# and the visible strip always meets the wax with no float gap.
+	plinth.offset_top = CY + seal_r - 14
 	plinth.offset_bottom = CY + HH + 10
 	plinth.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var plinth_st := StyleBoxFlat.new()
@@ -10401,83 +10411,22 @@ func _build_mana_post_diegetic() -> void:
 	plinth.add_theme_stylebox_override("panel", plinth_st)
 	post.add_child(plinth)
 
-	# Crystal body lives in a Node2D so the facet Polygon2D / Line2D children
-	# use centered local coords and the breathing scale pivots from the middle.
-	var gem := Node2D.new()
-	gem.position = Vector2(GEM_W / 2.0, CY)
-	post.add_child(gem)
+	# The pressed seal itself. Card2D.WaxSeal draws a seeded irregular wax
+	# blob with a stamp-impression ring — the exact painter the cards use for
+	# their cost seals, in the exact cost wax (#264167), scaled up to an
+	# instrument. seal_r is set above the plinth block, which seats against
+	# the wax's bottom edge.
+	var seal := Card2D.WaxSeal.new()
+	seal.wax = GameTheme.COST_BLUE_GEM
+	seal.seed_text = "command_post"
+	seal.position = Vector2(GEM_W / 2.0 - seal_r, CY - seal_r)
+	seal.size = Vector2(seal_r * 2.0, seal_r * 2.0)
+	post.add_child(seal)
 
-	# Hexagonal cut-gem silhouette (taller than wide → reads as a crystal).
-	var T := Vector2(0, -HH)
-	var UR := Vector2(HW, -HH * 0.40)
-	var LR := Vector2(HW, HH * 0.40)
-	var B := Vector2(0, HH)
-	var LL := Vector2(-HW, HH * 0.40)
-	var UL := Vector2(-HW, -HH * 0.40)
-	var MT := Vector2(0, -HH * 0.18)  # top-table apex (center, just above mid)
-
-	# Left facet — the shaded half. Vertical gradient bright→deep via per-vertex
-	# colors; slightly dimmer than the right half so the center ridge catches.
-	var left_facet := Polygon2D.new()
-	left_facet.polygon = PackedVector2Array([T, UL, LL, B])
-	left_facet.vertex_colors = PackedColorArray([
-		Color(0.40, 0.70, 0.95), Color(0.12, 0.31, 0.70),
-		Color(0.05, 0.12, 0.40), Color(0.04, 0.10, 0.34)])
-	left_facet.antialiased = true
-	gem.add_child(left_facet)
-
-	# Right facet — the lit half (brighter).
-	var right_facet := Polygon2D.new()
-	right_facet.polygon = PackedVector2Array([T, UR, LR, B])
-	right_facet.vertex_colors = PackedColorArray([
-		Color(0.54, 0.86, 1.0), Color(0.18, 0.43, 0.90),
-		Color(0.08, 0.20, 0.52), Color(0.05, 0.13, 0.42)])
-	right_facet.antialiased = true
-	gem.add_child(right_facet)
-
-	# Top "table" facet — a bright translucent diamond catching the light at the
-	# crown, so the gem reads as cut, not a flat blue lozenge.
-	var table_hi := Polygon2D.new()
-	table_hi.polygon = PackedVector2Array([UL, T, UR, MT])
-	table_hi.color = Color(0.78, 0.95, 1.0, 0.34)
-	table_hi.antialiased = true
-	gem.add_child(table_hi)
-
-	# Specular glint — a small white sliver on the upper-left crown.
-	var glint := Polygon2D.new()
-	glint.polygon = PackedVector2Array([
-		Vector2(-9, -42), Vector2(-1, -35), Vector2(-7, -27), Vector2(-15, -33)])
-	glint.color = Color(0.95, 0.99, 1.0, 0.72)
-	glint.antialiased = true
-	gem.add_child(glint)
-
-	# Bright facet OUTLINE around the whole silhouette.
-	var outline := Line2D.new()
-	outline.points = PackedVector2Array([T, UR, LR, B, LL, UL, T])
-	outline.width = 2.5
-	outline.default_color = Color(0.64, 0.91, 1.0, 0.95)
-	outline.joint_mode = Line2D.LINE_JOINT_ROUND
-	outline.antialiased = true
-	gem.add_child(outline)
-
-	# Center ridge (T→B) + the two table edges (UL→MT→UR) → the "cut" lines.
-	var ridge := Line2D.new()
-	ridge.points = PackedVector2Array([T, B])
-	ridge.width = 1.5
-	ridge.default_color = Color(0.58, 0.84, 1.0, 0.50)
-	ridge.antialiased = true
-	gem.add_child(ridge)
-
-	var table_lines := Line2D.new()
-	table_lines.points = PackedVector2Array([UL, MT, UR])
-	table_lines.width = 1.3
-	table_lines.default_color = Color(0.62, 0.88, 1.0, 0.45)
-	table_lines.antialiased = true
-	gem.add_child(table_lines)
-
-	# Big numeric — current / max mana, dominant readout, centered ON the gem.
+	# Big numeric — current / max Command, dominant readout, pressed INTO the
+	# wax face: cream numeral + deep-navy outline, same ink as card cost seals.
 	_mana_label = _make_text_label("%d / %d" % [player_mana, player_max_mana],
-		37, Color(0.93, 0.98, 1.0))
+		37, Color(0.996, 0.941, 0.800))
 	if GameTheme.font_title_black:
 		_mana_label.add_theme_font_override("font", GameTheme.font_title_black)
 	_mana_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -10491,14 +10440,14 @@ func _build_mana_post_diegetic() -> void:
 	_mana_label.offset_top = CY - HH
 	_mana_label.offset_bottom = CY + HH
 	_mana_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_mana_label.add_theme_color_override("font_outline_color", Color(0.02, 0.06, 0.14, 0.95))
+	_mana_label.add_theme_color_override("font_outline_color", Color(0.04, 0.08, 0.16, 0.95))
 	_mana_label.add_theme_constant_override("outline_size", 6)
 	post.add_child(_mana_label)
 
 	# Caption below — letterspaced Cinzel in dim gilt, the chart-caption
 	# voice (the old light-blue Nunito "MANA" read as a debug label and was
 	# the loudest cheap note on the bottom rail).
-	var caption := _make_text_label("M A N A", 11,
+	var caption := _make_text_label("C O M M A N D", 11,
 		Color(GILT.r, GILT.g, GILT.b, 0.85))
 	if GameTheme.font_title != null:
 		caption.add_theme_font_override("font", GameTheme.font_title)
@@ -10513,17 +10462,12 @@ func _build_mana_post_diegetic() -> void:
 	caption.add_theme_constant_override("outline_size", 3)
 	post.add_child(caption)
 
-	# Arcane "breathing": the gem swells/settles and the aura throbs in sync, so
-	# the resource feels magical and alive instead of a static icon.
-	var breathe := gem.create_tween().set_loops()
-	breathe.tween_property(gem, "scale", Vector2(1.035, 1.035), 1.0) \
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	breathe.tween_property(gem, "scale", Vector2(1.0, 1.0), 1.0) \
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	# Lamp flicker: the wax is inert (no arcane breathing) — only the table
+	# light moves. Uneven up/down times keep the loop from reading metronomic.
 	var aura_tw := aura.create_tween().set_loops()
-	aura_tw.tween_property(aura, "modulate:a", 0.95, 1.0) \
+	aura_tw.tween_property(aura, "modulate:a", 0.95, 1.3) \
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	aura_tw.tween_property(aura, "modulate:a", 0.55, 1.0) \
+	aura_tw.tween_property(aura, "modulate:a", 0.55, 0.9) \
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 
 
@@ -10993,10 +10937,10 @@ var _glossary_layer: CanvasLayer = null
 const MECHANICS_HELP: Array = [
 	{"name": "Floop", "desc": "Skip a creature's attack this turn to use its special ability. Toggle the indicator before ending your turn."},
 	{"name": "Sacrifice", "desc": "Certain cards and abilities destroy one of your own creatures as a cost — never a free action. The dying creature's On-Death effect still triggers."},
-	{"name": "Banking", "desc": "Carry up to 2 unused mana into next turn. Pay it like normal mana."},
+	{"name": "Banking", "desc": "Carry up to 2 unused Command into next turn. Pay it like normal Command."},
 	{"name": "Front / Back row", "desc": "Both rows attack each turn — front goes first and is attacked first. Back is queue space, not a separate combat tier."},
 	{"name": "Swift phase", "desc": "Creatures with Swift attack BEFORE simultaneous combat resolves. They strike first and take damage normally."},
-	{"name": "Mana", "desc": "3 per turn baseline. Spent on creatures and spells. Relics can grow your pool."},
+	{"name": "Command", "desc": "Your orders for the turn — 3 per turn baseline, spent to play creatures and spells. Relics can grow your pool."},
 	{"name": "Draw", "desc": "4 cards per turn, max hand size 10. Unplayed cards discard at end of turn unless they have Retain."},
 ]
 
@@ -11737,7 +11681,7 @@ func _refresh_hand_affordability() -> void:
 	# (Taxed bumps spell cost), Ember Crown (free first spell), and Ironclad
 	# Veteran discounts. Previously read raw card_data.cost — a 1-cost spell
 	# under Taxed +1 would falsely look affordable at 1 mana and then fail at
-	# play time with "Not enough mana!".
+	# play time with "Not enough Command!".
 	for card in _hand:
 		if card == null or not is_instance_valid(card):
 			continue

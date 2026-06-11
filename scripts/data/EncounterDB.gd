@@ -987,7 +987,7 @@ const ENCOUNTERS: Dictionary = {
 	"bandit_camp": {
 		"name": "The Toll-Takers", "act": 1, "type": "combat", "faction": "grasswake", "hp": 13,
 		"passive_id": "bandit_mana_steal",
-		"passive_desc": "When the enemy places its first reinforcement each round: you lose 1 mana next turn.",
+		"passive_desc": "When the enemy places its first reinforcement each round: you lose 1 Command next turn.",
 		# Bandit Camp — mixed combat archetypes. Cutpurse (eco), Archer (range),
 		# Brawler (front), Hexer (debuff), Captain (lead), Saboteur (curse).
 		# Bandit Camp — STEAL AND STING. Every bandit chips at face on entry

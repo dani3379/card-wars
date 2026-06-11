@@ -29,8 +29,8 @@ const POTIONS: Dictionary = {
 		"usable_in": "combat", "targeting": "friendly_creature",
 		"effect": "buff_atk", "color": Color(0.95, 0.45, 0.10)},
 	"mana_surge": {
-		"id": "mana_surge", "name": "Mana Surge",
-		"desc": "Gain 2 mana this turn.",
+		"id": "mana_surge", "name": "Rallying Horn",
+		"desc": "Gain 2 Command this turn.",
 		"usable_in": "combat", "targeting": "none",
 		"effect": "gain_mana", "color": Color(0.30, 0.55, 0.95)},
 	"inferno_vial": {

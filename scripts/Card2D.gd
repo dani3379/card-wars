@@ -6437,7 +6437,7 @@ func _describe_trigger(data: Dictionary) -> String:
 		"discard_random": return "Discard %d random card(s)" % v
 		"damage_opposing_lane": return "Deal %d to opposing lane" % v
 		"summon": return "Summon a %d/%d token" % [data.get("atk", 1), data.get("hp", 1)]
-		"bonus_mana": return "Gain %d bonus mana" % v
+		"bonus_mana": return "Gain %d bonus Command" % v
 		"debuff_all_player_atk": return "Reduce all friendly ATK by %d" % v
 		"damage_adjacent": return "Deal %d to adjacent creatures" % v
 		"damage_any": return "Deal %d to any target" % v

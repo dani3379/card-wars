@@ -100,7 +100,7 @@ func _resolve_meta_pickers() -> void:
 				"color": Color(0.45, 0.25, 0.20)},
 			{"label": "Back Line", "desc": "+1 HP to creatures you place in the back row.",
 				"color": Color(0.25, 0.35, 0.45)},
-			{"label": "Mana Well", "desc": "+1 max mana while both center lanes are full.",
+			{"label": "Command Tent", "desc": "+1 max Command while both center lanes are full.",
 				"color": Color(0.35, 0.30, 0.50)},
 		]
 		var ramp_vals := ["front_atk", "back_hp", "mana_center"]
