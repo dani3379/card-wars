@@ -650,6 +650,35 @@ class MapPulseOverlay extends Control:
 					Color(col.r, col.g, col.b, 0.10 + 0.24 * pulse), 2.0, true)
 				draw_circle(p, rr,
 					Color(col.r, col.g, col.b, 0.015 + 0.035 * pulse))
+		# 1.5 — march glints: a short runner sliding camp-side → door along
+		# each open leg. Direction without shouting — the baked amber dashes
+		# carry the state; this just says "that way". Quiet during the march.
+		if _march_prog < 0.0:
+			for ei in range(map._edges.size()):
+				var e: Dictionary = map._edges[ei]
+				if not bool(e.to_avail):
+					continue
+				var pts: PackedVector2Array = map._edge_curves[ei]
+				if pts.size() < 2:
+					continue
+				var cum := PackedFloat32Array()
+				cum.append(0.0)
+				var total := 0.0
+				for i in range(1, pts.size()):
+					total += pts[i - 1].distance_to(pts[i])
+					cum.append(total)
+				if total < 60.0:
+					continue
+				var ph := fmod(_t * 0.45 + float(ei) * 0.37, 1.0)
+				var run := total - 46.0
+				var hd := 20.0 + run * ph
+				var head: Vector2 = map._route_arc_point(pts, cum, hd)
+				var tail: Vector2 = map._route_arc_point(pts, cum,
+					maxf(hd - 14.0, 6.0))
+				var fade := sin(ph * PI)
+				draw_line(tail, head,
+					Color(1.0, 0.86, 0.50, 0.30 * fade), 3.0, true)
+				draw_circle(head, 2.2, Color(1.0, 0.90, 0.60, 0.50 * fade))
 		# 2 — ember puffs off Etna's plume, drifting NE on the strait wind.
 		var apex: Vector2 = (map._etna_peak as Vector2) + Vector2(0, -34.0)
 		for k in range(3):

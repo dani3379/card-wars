@@ -119,7 +119,7 @@ enum { B_DEEP, B_SHALLOW, B_BEACH, B_GRASS, B_FOREST, B_HILLS, B_ROCK,
 
 var _rivers: Array[PackedVector2Array] = []
 var _nodes: Array = []      # {pos, type, vis, avail, encounter_id}
-var _edges: Array = []      # {a, b, from_vis, to_avail}
+var _edges: Array = []      # {a, b, from_vis, to_vis, to_avail}
 var _edge_curves: Array[PackedVector2Array] = []   # terrain-bent road curves
 var _bridges: Array = []    # {pos: Vector2, dirv: Vector2}
 var _labels: Array = []     # {pos, text, size, crimson}
@@ -619,10 +619,12 @@ func _read_run_map() -> void:
 					if String((eb.nd as Dictionary).type) != "boss":
 						eb.pos = _clamp_into_island((eb.pos as Vector2) + push)
 	# Pass 3 — commit relaxed positions.
+	var vis_lut: Dictionary = {}   # (row,col) → visited, for edge to_vis
 	for ent in entries:
 		var nd: Dictionary = ent.nd
 		var p: Vector2 = ent.pos
 		pos_lut[Vector2i(nd.row, nd.col)] = p
+		vis_lut[Vector2i(nd.row, nd.col)] = bool(nd.visited)
 		_nodes.append({"pos": p, "type": String(nd.type),
 			"vis": bool(nd.visited),
 			"avail": avail.has(Vector2i(nd.row, nd.col)),
@@ -648,14 +650,18 @@ func _read_run_map() -> void:
 				if pos_lut.has(tk):
 					_edges.append({"a": a, "b": pos_lut[tk],
 						"from_vis": bool(nd2.visited),
+						"to_vis": bool(vis_lut.get(tk, false)),
 						"to_avail": bool(nd2.visited) and avail.has(tk)})
 	_camp_pos = camp
 	# Camp trails: the journey starts AT the camp, not floating beside it.
 	# These ride the normal edge pipeline (valley carve, terrain bend, state
 	# tint) — marched once its start node is visited, amber while available.
 	for r0 in row0:
+		# Camp legs: the army "came from" the camp, so the leg to a visited
+		# row-0 site is marched ink (from_vis true by construction).
 		_edges.append({"a": _camp_pos, "b": r0.pos,
-			"from_vis": bool(r0.vis), "to_avail": bool(r0.avail)})
+			"from_vis": true, "to_vis": bool(r0.vis),
+			"to_avail": bool(r0.avail)})
 	# Island footprint from everything that must be on land.
 	var lo := Vector2(INF, INF)
 	var hi := Vector2(-INF, -INF)
@@ -1699,26 +1705,48 @@ func _draw_decorations(tgt: CanvasItem, count: int) -> void:
 
 
 func _draw_routes(tgt: CanvasItem) -> void:
-	# Roads carved INTO the map: an incised groove. With light from the NW,
-	# the groove's near lip throws a shadow (dark line offset NW) and the far
-	# wall catches the light (pale line offset SE); between them the dark
-	# channel, a packed-earth floor, and the campaign state tint riding in
-	# the cut — amber where you can march next, crimson where you have.
+	# Two layers, two jobs (the genre split — StS, HoMM, every war-room map):
+	#
+	# 1. The road NETWORK is terrain — a quiet incised groove (NW light:
+	#    shadow lip / lit lip / dark channel / packed-earth floor). It says
+	#    "the island has roads", nothing about your war.
+	# 2. The CAMPAIGN is ink stamped OVER the roads — cased dashes, the
+	#    dashed-line journey convention of antique charts:
+	#      amber dashes + chevron → legs you can march NOW (the decision)
+	#      crimson dashes         → legs the army actually marched
+	#      bare groove            → passed-by doors and the far future
+	#
+	# The old uniform treatment (full groove everywhere + a 1.9px state
+	# thread riding inside it) gave every leg equal weight and the state
+	# color died on olive terrain at chart zoom — the run's decision
+	# structure didn't read. Dark iron-gall casings under the dashes keep
+	# the ink alive on any biome (cartographic route casing).
 	var lightv := Vector2(-0.707, -0.707)
-	for ei in range(_edge_curves.size()):
-		var pts := _edge_curves[ei]
-		var e: Dictionary = _edges[ei]
+	for pts in _edge_curves:
 		tgt.draw_polyline(_offset_pts(pts, lightv * 1.9),
-			Color(0.020, 0.015, 0.010, 0.55), 6.0, true)
+			Color(0.020, 0.015, 0.010, 0.42), 5.2, true)
 		tgt.draw_polyline(_offset_pts(pts, lightv * -1.9),
-			Color(0.88, 0.80, 0.60, 0.30), 5.4, true)
-		tgt.draw_polyline(pts, Color(0.055, 0.045, 0.032, 0.88), 4.6, true)
-		tgt.draw_polyline(pts, Color(0.47, 0.395, 0.262, 0.95), 2.1, true)
+			Color(0.88, 0.80, 0.60, 0.22), 4.6, true)
+		tgt.draw_polyline(pts, Color(0.055, 0.045, 0.032, 0.72), 4.0, true)
+		tgt.draw_polyline(pts, Color(0.47, 0.395, 0.262, 0.80), 1.9, true)
+	# Campaign ink in a second pass so no groove ever carves through a
+	# neighbouring leg's dashes.
+	for ei in range(_edge_curves.size()):
+		var e: Dictionary = _edges[ei]
 		if bool(e.to_avail):
-			tgt.draw_polyline(pts, PLAYER_AMBER, 1.9, true)
-		elif bool(e.from_vis):
-			tgt.draw_polyline(pts, Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.85),
-				1.9, true)
+			# Soft lamplight underglow along the whole open leg — the
+			# frontier outranks the marched history in the hierarchy, and
+			# short legs (2-3 dashes) keep presence even at chart zoom.
+			tgt.draw_polyline(_edge_curves[ei],
+				Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b, 0.16),
+				9.0, true)
+			_stamp_route_dashes(tgt, _edge_curves[ei], ei,
+				PLAYER_AMBER, 4.2, 11.0, 7.5, true)
+		elif bool(e.from_vis) and bool(e.get("to_vis", false)):
+			# Brighter than the political CRIMSON wash — the marched line
+			# sits over a dark casing and must not silt into it.
+			_stamp_route_dashes(tgt, _edge_curves[ei], ei,
+				Color(0.80, 0.24, 0.16, 0.97), 3.6, 9.0, 6.5, false)
 	for br in _bridges:
 		var p: Vector2 = br.pos
 		var dirv: Vector2 = br.dirv
@@ -1734,6 +1762,61 @@ func _offset_pts(pts: PackedVector2Array, v: Vector2) -> PackedVector2Array:
 	for p in pts:
 		out.append(p + v)
 	return out
+
+
+## Campaign-ink dash run along a road curve: short strokes with a dark
+## iron-gall casing, hand-jittered (seeded per edge, so every bake of the
+## same act lays the same ink). Dashes inset from both chip ends; `arrow`
+## caps the destination end with a march chevron just short of the chip.
+func _stamp_route_dashes(tgt: CanvasItem, pts: PackedVector2Array, seed_i: int,
+		ink: Color, w: float, dash: float, gap: float, arrow: bool) -> void:
+	if pts.size() < 2:
+		return
+	var cum := PackedFloat32Array()
+	cum.append(0.0)
+	var total := 0.0
+	for i in range(1, pts.size()):
+		total += pts[i - 1].distance_to(pts[i])
+		cum.append(total)
+	var inset_a := 19.0
+	var inset_b := 30.0 if arrow else 19.0
+	var casing := Color(0.06, 0.045, 0.025, 0.78)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("campaign_ink") * 31 + seed_i
+	var d := inset_a + rng.randf() * 2.5
+	while d + dash <= total - inset_b:
+		var a := _route_arc_point(pts, cum, d)
+		var b := _route_arc_point(pts, cum, d + dash)
+		var jit: Vector2 = (b - a).normalized().orthogonal() \
+			* rng.randf_range(-0.7, 0.7)
+		tgt.draw_line(a + jit, b + jit, casing, w + 3.2, true)
+		tgt.draw_line(a + jit, b + jit, ink, w, true)
+		d += dash + gap + rng.randf_range(-0.8, 1.2)
+	if arrow and total > inset_a + 32.0:
+		# Chevron at the door: tip ~20px short of the chip center so it
+		# kisses the ring without crossing it; wings sweep back along the
+		# road tangent (HoMM's "you can reach this" arrow, chart-inked).
+		var tip := _route_arc_point(pts, cum, total - 20.0)
+		var back := _route_arc_point(pts, cum, total - 29.0)
+		var tv := (tip - back).normalized()
+		var nv := tv.orthogonal()
+		for s in [1.0, -1.0]:
+			var wing: Vector2 = tip - tv * 11.0 + nv * 8.0 * s
+			tgt.draw_line(tip, wing, casing, w + 3.2, true)
+			tgt.draw_line(tip, wing, ink, w, true)
+
+
+## Point at arc-distance `d` along a polyline whose cumulative segment
+## lengths are `cum` (same convention as MapPulseOverlay's march walk).
+func _route_arc_point(pts: PackedVector2Array, cum: PackedFloat32Array,
+		d: float) -> Vector2:
+	d = clampf(d, 0.0, cum[cum.size() - 1])
+	for i in range(1, pts.size()):
+		if d <= cum[i]:
+			var seg := cum[i] - cum[i - 1]
+			var t := 0.0 if seg <= 0.0 else (d - cum[i - 1]) / seg
+			return pts[i - 1].lerp(pts[i], t)
+	return pts[pts.size() - 1]
 
 
 func _draw_sea_segments(tgt: CanvasItem, a: Vector2, b: Vector2, col: Color) -> void:
