@@ -10373,6 +10373,26 @@ func _build_mana_post_diegetic() -> void:
 	aura.modulate.a = 0.7
 	post.add_child(aura)
 
+	# Ink plinth under the crystal — the gem is MOUNTED on the rail like the
+	# other instruments, not floating in the dark. Sits behind the gem's
+	# bottom tip; the caption hangs just below it.
+	var plinth := Panel.new()
+	plinth.offset_left = GEM_W / 2.0 - 40
+	plinth.offset_right = GEM_W / 2.0 + 40
+	plinth.offset_top = CY + HH - 10
+	plinth.offset_bottom = CY + HH + 10
+	plinth.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var plinth_st := StyleBoxFlat.new()
+	plinth_st.bg_color = Color(0.092, 0.070, 0.052, 0.96)
+	plinth_st.border_color = Color(0.62, 0.48, 0.26, 0.75)
+	plinth_st.set_border_width_all(1)
+	plinth_st.set_corner_radius_all(3)
+	plinth_st.shadow_color = Color(0, 0, 0, 0.5)
+	plinth_st.shadow_size = 5
+	plinth_st.shadow_offset = Vector2(0, 2)
+	plinth.add_theme_stylebox_override("panel", plinth_st)
+	post.add_child(plinth)
+
 	# Crystal body lives in a Node2D so the facet Polygon2D / Line2D children
 	# use centered local coords and the breathing scale pivots from the middle.
 	var gem := Node2D.new()
@@ -10653,58 +10673,94 @@ func _make_pile_panel_diegetic(caption_text: String, kind: int) -> Control:
 	art.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	pile.add_child(art)
 
-	var card_back_path := "res://assets/ui/card_back.png"
-	var cb_tex: Texture2D = null
-	if ResourceLoader.exists(card_back_path):
-		cb_tex = load(card_back_path)
-
-	# Two stack cards behind the main one, nudged up-left, progressively darker —
-	# a cheap, convincing "this is a thick deck" read. Drawn first so the front
-	# card sits on top.
+	# Writ-stack: the piles are stacks of the same parchment the hand cards
+	# are cut from — the deck is your sealed orders (wax dot on the top
+	# leaf), the discard is the spent dispatches (cooler, grayer paper).
+	# Replaces the dark ornate card-back texture, which read as a separate
+	# product from the v9 parchment writs fanned right next to it.
+	var is_discard := kind == 1
+	# Two back leaves nudged up-left — the stack's physical thickness.
 	for layer_i in [2, 1]:
 		var off := float(layer_i) * 3.0
-		var stack: Control
-		if cb_tex != null:
-			var tex_stack := TextureRect.new()
-			tex_stack.texture = cb_tex
-			tex_stack.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			tex_stack.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-			tex_stack.modulate = Color(0.45, 0.40, 0.34, 1.0)  # darkened, recedes
-			stack = tex_stack
-		else:
-			var rect_stack := ColorRect.new()
-			rect_stack.color = Color(0.06, 0.045, 0.03, 0.92)
-			stack = rect_stack
-		stack.set_anchors_preset(Control.PRESET_FULL_RECT)
-		stack.offset_left = -off
-		stack.offset_top = -off
-		stack.offset_right = -off
-		stack.offset_bottom = -off
-		stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		art.add_child(stack)
+		var leaf := Panel.new()
+		leaf.set_anchors_preset(Control.PRESET_FULL_RECT)
+		leaf.offset_left = -off
+		leaf.offset_top = -off
+		leaf.offset_right = -off
+		leaf.offset_bottom = -off
+		leaf.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var lst := StyleBoxFlat.new()
+		var shade := 0.78 - float(layer_i) * 0.09
+		lst.bg_color = Color(0.851 * shade, 0.792 * shade, 0.671 * shade) \
+			if not is_discard else \
+			Color(0.760 * shade, 0.730 * shade, 0.660 * shade)
+		lst.border_color = Color(0.165, 0.125, 0.082, 0.9)
+		lst.set_border_width_all(1)
+		lst.set_corner_radius_all(2)
+		leaf.add_theme_stylebox_override("panel", lst)
+		art.add_child(leaf)
 
-	# Soft drop shadow under the front card so the stack sits above the board.
+	# Soft drop shadow under the front leaf so the stack sits above the rail.
 	var shadow := Panel.new()
 	shadow.set_anchors_preset(Control.PRESET_FULL_RECT)
 	shadow.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var shadow_style := StyleBoxFlat.new()
 	shadow_style.bg_color = Color(0.06, 0.04, 0.03, 0.96)
-	shadow_style.set_corner_radius_all(4)
+	shadow_style.set_corner_radius_all(2)
 	shadow_style.shadow_color = Color(0, 0, 0, 0.55)
 	shadow_style.shadow_size = 7
 	shadow_style.shadow_offset = Vector2(0, 4)
 	shadow.add_theme_stylebox_override("panel", shadow_style)
 	art.add_child(shadow)
 
-	# Front card back.
-	if cb_tex != null:
-		var back := TextureRect.new()
-		back.texture = cb_tex
-		back.set_anchors_preset(Control.PRESET_FULL_RECT)
-		back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		back.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		art.add_child(back)
+	# Front leaf: clean writ paper with a bronze hairline; the deck's carries
+	# a small oxblood wax seal (orders still sealed), the discard's stays
+	# bare and cooler (already opened and spent).
+	var front := Panel.new()
+	front.set_anchors_preset(Control.PRESET_FULL_RECT)
+	front.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var fst := StyleBoxFlat.new()
+	fst.bg_color = Color(0.851, 0.792, 0.671) if not is_discard \
+		else Color(0.745, 0.718, 0.648)
+	fst.border_color = Color(0.165, 0.125, 0.082)
+	fst.set_border_width_all(1)
+	fst.set_corner_radius_all(2)
+	front.add_theme_stylebox_override("panel", fst)
+	art.add_child(front)
+	var front_rule := Panel.new()
+	front_rule.set_anchors_preset(Control.PRESET_FULL_RECT)
+	front_rule.offset_left = 4
+	front_rule.offset_top = 4
+	front_rule.offset_right = -4
+	front_rule.offset_bottom = -4
+	front_rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var frst := StyleBoxFlat.new()
+	frst.draw_center = false
+	frst.border_color = Color(GILT.r, GILT.g, GILT.b, 0.35)
+	frst.set_border_width_all(1)
+	front_rule.add_theme_stylebox_override("panel", frst)
+	front.add_child(front_rule)
+	if not is_discard:
+		var seal := Panel.new()
+		seal.anchor_left = 0.5
+		seal.anchor_right = 0.5
+		seal.anchor_top = 0.0
+		seal.anchor_bottom = 0.0
+		seal.offset_left = -9
+		seal.offset_right = 9
+		seal.offset_top = 22
+		seal.offset_bottom = 40
+		seal.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var sst := StyleBoxFlat.new()
+		sst.bg_color = Color(0.52, 0.13, 0.10)
+		sst.border_color = Color(0.34, 0.08, 0.06, 0.9)
+		sst.set_border_width_all(1)
+		sst.set_corner_radius_all(999)
+		sst.shadow_color = Color(0, 0, 0, 0.35)
+		sst.shadow_size = 2
+		sst.shadow_offset = Vector2(0, 1)
+		seal.add_theme_stylebox_override("panel", sst)
+		front.add_child(seal)
 
 	# Count badge — dark disc clipped to the bottom-right corner of the card.
 	var badge := Panel.new()
@@ -10736,7 +10792,16 @@ func _make_pile_panel_diegetic(caption_text: String, kind: int) -> Control:
 		count_label.add_theme_font_override("font", GameTheme.font_title_black)
 	badge.add_child(count_label)
 
-	var caption := _make_text_label(caption_text, 10, GILT)
+	# Letterspaced Cinzel caption — the same chart-caption voice as M A N A.
+	var spaced := ""
+	for ci in range(caption_text.length()):
+		spaced += caption_text[ci]
+		if ci < caption_text.length() - 1:
+			spaced += " "
+	var caption := _make_text_label(spaced, 10,
+		Color(GILT.r, GILT.g, GILT.b, 0.85))
+	if GameTheme.font_title != null:
+		caption.add_theme_font_override("font", GameTheme.font_title)
 	caption.anchor_left = 0.0
 	caption.anchor_right = 1.0
 	caption.anchor_top = 1.0
