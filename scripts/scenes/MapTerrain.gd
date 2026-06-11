@@ -99,6 +99,7 @@ var _elev: PackedFloat32Array = PackedFloat32Array()
 var _moist: PackedFloat32Array = PackedFloat32Array()
 var _biome: PackedInt32Array = PackedInt32Array()   # see B_* enum below
 var _prov: PackedInt32Array = PackedInt32Array()    # node index, -1 = none
+var _zone: PackedInt32Array = PackedInt32Array()    # rival realm 0-2, -1 = none
 var _shade: PackedFloat32Array = PackedFloat32Array()
 var _grad: PackedVector2Array = PackedVector2Array()   # uphill gradient (hachures)
 var _road_d: PackedFloat32Array = PackedFloat32Array() # px to nearest road
@@ -134,6 +135,55 @@ var _rng := RandomNumberGenerator.new()
 # render-only sandbox (map_proto.tscn) leaves this false.
 var overlay_handles_standard := false
 
+# ── View transform (zoom & pan) ──────────────────────────────────────────
+# Every plate layer draws through this transform — the chart can be leaned
+# into like a real table map. Wheel zooms toward the cursor, dragging pans
+# (any mouse button; only when zoomed in). The screen furniture (_draw_ui
+# cartouche/legend/counters) resets to identity and stays put. MapView
+# focuses the view on the army standard when the map opens; the sandbox
+# keeps the full-island view until scrolled.
+const VIEW_ZOOM_MIN := 1.0
+const VIEW_ZOOM_MAX := 2.4
+var _view_zoom := 1.0
+var _view_pan := Vector2.ZERO
+var _view_drag := false
+var _view_drag_last := Vector2.ZERO
+
+# ── Plate item + bakes + per-act cache ───────────────────────────────────
+# Three layers of structure keep the map fast (the plate used to lag both
+# on every scroll AND as a constant per-frame GPU replay of thousands of
+# primitives):
+#  1. The whole plate is painted on _plate_item, a child canvas item that
+#     re-records ONLY when content changes. Zoom and pan just move its
+#     transform — view changes cost ~zero script time.
+#  2. Two offscreen 2× bakes collapse the plate to ONE textured quad:
+#     the GEOGRAPHY (ocean/terrain/coast/rivers/decorations — constant per
+#     act, ~22k primitives) bakes once per act and is cached; the COMPLETE
+#     plate (geo quad + the campaign ink: political wash, roads, chips,
+#     keep/camp, labels) bakes once per OPEN — ink depends on claims, and
+#     a few thousand live AA ink commands cost ~12ms of GPU replay every
+#     frame if left vector. While bakes are in flight the vector path
+#     still paints, so the map is never blank.
+#  3. The generated mesh + geo texture park per act in
+#     RunState.map_plate_cache: only the FIRST open of an act pays
+#     generation + geo bake; later opens restore in a frame, and their
+#     plate bake re-records ink over the cached quad in a few frames.
+# The pipeline is fully seeded (run map + act), so clones bake
+# pixel-identical plates.
+const PLATE_BAKE_SCALE := 2.0
+var _plate_item = null   # untyped: typed Control fails on script-only members
+var _geo_tex: ImageTexture = null     # per act, cached in RunState
+var _plate_tex: ImageTexture = null   # per open (geo + ink), never cached
+var _plate_bake_pending := false
+var _bake_gen := 0
+# "" = the live map · "geo" = clone baking geography only · "plate" = clone
+# baking the complete plate (geo quad + ink). Clones never bake or draw UI.
+var bake_mode := ""
+
+signal plate_baked   # fired when the per-open bake lands (or fails) —
+                     # MapView gates the opening focus ease on it so the
+                     # ease never plays over heavy frames
+
 
 var _act := 1
 # Successor Wars skin — the kingdom this act invades, resolved from the run's
@@ -145,20 +195,105 @@ var _faction_id := ""
 var _faction_name := ""
 var _faction_color: Color = CRIMSON
 
+# The three act keeps (lon/lat) — each rival lord's seat, and the anchor the
+# island's realm partition is carved around. Shared by _read_run_map (camp →
+# keep march legs) and _assign_zones (nearest-seat kingdom zones).
+const KEEP_LLS := [Vector2(13.58, 37.88), Vector2(14.22, 37.20),
+	Vector2(14.90, 37.66)]
+# The run's three rival realms over those seats, resolved per build by
+# _resolve_kingdoms(): {name, color, centroid, state} where state is
+# "taken" (acts already won — wears your gold), "front" (this act), or
+# "future". Empty on legacy runs with no rival deal — no realm overlay.
+var _kingdoms: Array = []
+
 
 func _ready() -> void:
 	await get_tree().process_frame
 	build_map()
 
 
+func _gui_input(event: InputEvent) -> void:
+	# Chart navigation. Site buttons sit on top and consume their own clicks,
+	# so a drag that starts on open plate can never fire a site; wheel events
+	# bubble up from the buttons (Button doesn't consume scroll).
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
+			_zoom_at(event.position, 1.18)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.pressed:
+			_zoom_at(event.position, 1.0 / 1.18)
+		elif event.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT,
+				MOUSE_BUTTON_MIDDLE]:
+			_view_drag = event.pressed and _view_zoom > 1.001
+			_view_drag_last = event.position
+	elif event is InputEventMouseMotion and _view_drag:
+		_set_view(_view_zoom, _view_pan + event.position - _view_drag_last)
+		_view_drag_last = event.position
+
+
+func _zoom_at(screen_pos: Vector2, factor: float) -> void:
+	var nz := clampf(_view_zoom * factor, VIEW_ZOOM_MIN, VIEW_ZOOM_MAX)
+	if is_equal_approx(nz, _view_zoom):
+		return
+	# Keep the plate point under the cursor fixed while the scale changes.
+	var world := (screen_pos - _view_pan) / _view_zoom
+	_set_view(nz, screen_pos - world * nz)
+
+
+func _set_view(z: float, pan: Vector2) -> void:
+	_view_zoom = clampf(z, VIEW_ZOOM_MIN, VIEW_ZOOM_MAX)
+	# pan ≤ 0 and ≥ size·(1-z): the scaled plate always covers the canvas, so
+	# zooming can never expose void past an edge.
+	var lim := size * (1.0 - _view_zoom)
+	_view_pan = Vector2(clampf(pan.x, lim.x, 0.0), clampf(pan.y, lim.y, 0.0))
+	# View changes only move the plate item's transform — nothing re-records.
+	if _plate_item != null:
+		_plate_item.position = _view_pan
+		_plate_item.scale = Vector2(_view_zoom, _view_zoom)
+	_on_view_changed()
+
+
+func _on_view_changed() -> void:
+	pass   # MapView re-seats its site buttons here.
+
+
 func build_map() -> void:
 	# Shared by the render sandbox (map_proto.tscn) and the live map screen.
 	# Draws once into a static plate; dynamic UI lives in child controls.
-	set_anchors_preset(Control.PRESET_FULL_RECT)
+	if bake_mode == "":
+		# Bake clones keep their hand-set 1600×900 size — full-rect anchors
+		# inside the 2× SubViewport would balloon them to the viewport rect.
+		set_anchors_preset(Control.PRESET_FULL_RECT)
+	# Mipmapped sampling so the baked plate stays calm when panned at 1×
+	# (2× texture minified without mips would shimmer). Vectors unaffected.
+	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	_act = clampi(RunState.get_act(), 1, 3)
 	_resolve_faction()
 	_rng.seed = 1207 + _act * 101
 	_build_geo()
+	if _plate_item == null:
+		# The plate's own canvas item: drawn behind the root item so the
+		# screen-fixed UI band (root _draw) stays on top of the chart.
+		_plate_item = PlateItem.new()
+		_plate_item.map = self
+		_plate_item.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_plate_item.show_behind_parent = true
+		# A zero-size Control gets CULLED whenever its transform isn't
+		# identity (custom draws ignore size, the renderer's rect cull
+		# doesn't) — give it the real plate rect.
+		_plate_item.size = size
+		add_child(_plate_item)
+	# Per-act cache: every open after the first restores the mesh + baked
+	# geography in one frame; only run state (vis/avail/player) is re-read.
+	var cache: Dictionary = RunState.map_plate_cache.get(_act, {})
+	if cache.has("mesh"):
+		_mesh_restore(cache.mesh)
+		_read_run_map()
+		_resolve_kingdoms()
+		_geo_tex = cache.get("geo", null)
+		_redraw_plate()
+		if bake_mode == "":
+			_ensure_plate_bake()
+		return
 	_read_run_map()
 	_build_mesh()
 	_assign_land()
@@ -166,10 +301,121 @@ func build_map() -> void:
 	_carve_rivers()
 	_assign_moisture_biomes()
 	_assign_provinces()
+	_assign_zones()
 	_compute_hillshade()
 	_build_roads()
 	_place_labels()
+	_resolve_kingdoms()
+	_redraw_plate()
+	if bake_mode != "":
+		return
+	RunState.map_plate_cache[_act] = {"mesh": _mesh_snapshot()}
+	_ensure_plate_bake()
+
+
+## Content changed (build, bake landing, state flip) — re-record the plate
+## item and the root UI band. View changes never come through here.
+func _redraw_plate() -> void:
+	if _plate_item != null:
+		_plate_item.queue_redraw()
 	queue_redraw()
+
+
+## Everything the generation pipeline computes that is constant for the act.
+## Run state (_nodes/_edges vis·avail, player/camp/boss) is NOT here — it is
+## re-read on every open. References are shared with the cache, not copied:
+## nothing mutates these after build (draw code only reads them), and
+## _edge_curves stays index-paired with the deterministically rebuilt _edges.
+func _mesh_snapshot() -> Dictionary:
+	return {"seed_pts": _seed_pts, "polys": _polys, "nbrs": _nbrs,
+		"land": _land, "region": _region, "elev": _elev, "moist": _moist,
+		"biome": _biome, "prov": _prov, "zone": _zone, "shade": _shade,
+		"grad": _grad, "road_d": _road_d, "wdepth": _wdepth, "gx": _gx,
+		"gy": _gy, "rivers": _rivers, "edge_curves": _edge_curves,
+		"bridges": _bridges, "labels": _labels}
+
+
+func _mesh_restore(m: Dictionary) -> void:
+	_seed_pts = m.seed_pts
+	_polys.assign(m.polys)
+	_nbrs.assign(m.nbrs)
+	_land.assign(m.land)
+	_region = m.region
+	_elev = m.elev
+	_moist = m.moist
+	_biome = m.biome
+	_prov = m.prov
+	_zone = m.zone
+	_shade = m.shade
+	_grad = m.grad
+	_road_d = m.road_d
+	_wdepth = m.wdepth
+	_gx = m.gx
+	_gy = m.gy
+	_rivers.assign(m.rivers)
+	_edge_curves.assign(m.edge_curves)
+	_bridges = m.bridges
+	_labels = m.labels
+
+
+## The per-open bake chain (live map only). Ensures the act's geography
+## texture exists (baking + caching it on the act's first open), then bakes
+## the COMPLETE plate — geo quad + campaign ink — for this open, collapsing
+## the live plate item to a single quad. Fire-and-forget coroutine; any
+## failed readback leaves the (correct, just slower) vector path in place,
+## and plate_baked fires in every outcome so MapView's gate can't hang.
+func _ensure_plate_bake() -> void:
+	_bake_gen += 1
+	var gen := _bake_gen
+	_plate_bake_pending = true
+	if _geo_tex == null:
+		var g: ImageTexture = await _bake_via_clone("geo")
+		if gen == _bake_gen and g != null:
+			_geo_tex = g
+			if RunState.map_plate_cache.has(_act):
+				RunState.map_plate_cache[_act]["geo"] = g
+			_redraw_plate()
+	if gen == _bake_gen:
+		var p: ImageTexture = await _bake_via_clone("plate")
+		if gen == _bake_gen and p != null:
+			_plate_tex = p
+			_redraw_plate()
+	if gen == _bake_gen:
+		_plate_bake_pending = false
+	plate_baked.emit()
+
+
+## Render this map once through an offscreen clone in a 2× SubViewport and
+## return the readback as a mipmapped texture (null on failure). The clone
+## hits the mesh/geo cache, so its build is cheap; "geo" mode paints the
+## geography layers only, "plate" mode paints geo (quad if cached) + ink.
+func _bake_via_clone(mode: String) -> ImageTexture:
+	var sub := SubViewport.new()
+	sub.size = Vector2i(size * PLATE_BAKE_SCALE)
+	sub.disable_3d = true
+	sub.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	sub.canvas_transform = Transform2D().scaled(
+		Vector2(PLATE_BAKE_SCALE, PLATE_BAKE_SCALE))
+	var clone: Control = (load("res://scripts/scenes/MapTerrain.gd")
+		as GDScript).new()
+	clone.bake_mode = mode
+	# Without this the "plate" clone would bake a STATIC standard under the
+	# live overlay's animated one (geo mode never reaches _draw_camp).
+	clone.overlay_handles_standard = overlay_handles_standard
+	clone.size = size
+	sub.add_child(clone)
+	add_child(sub)
+	# Clone _ready waits a frame, builds, paints the frame after — wait those
+	# out (plus margin), then read the render target back.
+	for _i in 4:
+		await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	var img: Image = sub.get_texture().get_image()
+	sub.queue_free()
+	if img == null or img.is_empty():
+		return null
+	img.generate_mipmaps()
+	return ImageTexture.create_from_image(img)
 
 
 ## The kingdom this act marches into, off the run's rival deal. Legacy saves
@@ -200,13 +446,51 @@ func _banner_color() -> Color:
 		lerpf(g, _faction_color.b, 0.85) * 0.92)
 
 
-## The same dye thinned into a political wash — heavily desaturated, darkened
-## and faint, so the invaded kingdom tints the parchment without flooding it.
+## The same dye thinned into a political wash — desaturated, darkened and
+## translucent, so the invaded kingdom reads clearly as HIS land while the
+## antique plate still shows through. (Was 0.13 alpha — too shy to read as
+## territory; the player asked for kingdoms they can actually see flip.)
 func _faction_wash() -> Color:
-	var g := (_faction_color.r + _faction_color.g + _faction_color.b) / 3.0
-	return Color(lerpf(g, _faction_color.r, 0.55) * 0.88,
-		lerpf(g, _faction_color.g, 0.55) * 0.88,
-		lerpf(g, _faction_color.b, 0.55) * 0.88, 0.13)
+	return _realm_wash(_faction_color, 0.20)
+
+
+## A banner dye thinned into a territory wash — desaturated a step and
+## darkened so a kingdom tints the plate without flooding the terrain art.
+func _realm_wash(col: Color, a: float) -> Color:
+	var g := (col.r + col.g + col.b) / 3.0
+	return Color(lerpf(g, col.r, 0.62) * 0.90,
+		lerpf(g, col.g, 0.62) * 0.90,
+		lerpf(g, col.b, 0.62) * 0.90, a)
+
+
+## The island carved into the run's three rival realms (the player asked for
+## unclaimed land to wear ALL the kingdoms' colors, not just the active
+## front's). Whole zones flip to your gold once their act is won — the
+## conquest spreads across the chart march by march.
+func _resolve_kingdoms() -> void:
+	_kingdoms = []
+	if RunState.act_faction.size() < 3 or _zone.is_empty():
+		return
+	for a in range(3):
+		var fid := String(RunState.act_faction[a])
+		if not HeroDB.FACTIONS.has(fid):
+			_kingdoms = []   # broken deal — all realms or none
+			return
+		var info: Dictionary = HeroDB.faction_info(fid)
+		var cen := Vector2.ZERO
+		var n := 0
+		for i in range(_zone.size()):
+			if _zone[i] == a:
+				cen += _seed_pts[i]
+				n += 1
+		var state := "front"
+		if a < _act - 1:
+			state = "taken"
+		elif a > _act - 1:
+			state = "future"
+		_kingdoms.append({"name": String(info.get("name", "")).to_upper(),
+			"color": info.get("color", CRIMSON) as Color,
+			"centroid": cen / maxf(float(n), 1.0), "state": state})
 
 
 # ═══════════════════ GEOGRAPHY ═══════════════════
@@ -278,13 +562,11 @@ func _read_run_map() -> void:
 	# passes (act 1) → down through the southern grain country (act 2) → up
 	# into the lava country at Etna's foot (act 3). Keeps are clamped well
 	# inland so the boss pin never lands in the surf.
-	var keep_lls := [Vector2(13.58, 37.88), Vector2(14.22, 37.20),
-		Vector2(14.90, 37.66)]
 	var act_i: int = clampi(_act - 1, 0, 2)
 	var camp: Vector2 = _geo(12.55, 37.72) if act_i == 0 else \
-		_clamp_into_island(_geo(keep_lls[act_i - 1].x, keep_lls[act_i - 1].y), 34.0)
+		_clamp_into_island(_geo(KEEP_LLS[act_i - 1].x, KEEP_LLS[act_i - 1].y), 34.0)
 	var keep: Vector2 = _clamp_into_island(
-		_geo(keep_lls[act_i].x, keep_lls[act_i].y), 34.0)
+		_geo(KEEP_LLS[act_i].x, KEEP_LLS[act_i].y), 34.0)
 	# March spine as a vector — legs are no longer pure west→east, so sites
 	# advance along camp→keep and lanes fan perpendicular to the march.
 	var leg: Vector2 = keep - camp
@@ -781,6 +1063,28 @@ func _assign_provinces() -> void:
 		_prov[i] = best if best_d < 240.0 * 240.0 else -1
 
 
+## Successor Wars realms: every Sicilian land cell belongs to the rival
+## kingdom whose keep seat is nearest. Pure geometry (the seats are fixed
+## constants), so it caches with the mesh — which lord owns a zone, and in
+## what state, is resolved per act by _resolve_kingdoms.
+func _assign_zones() -> void:
+	var seats: Array = []
+	for ll in KEEP_LLS:
+		seats.append(_clamp_into_island(_geo(ll.x, ll.y), 34.0))
+	var count := _seed_pts.size()
+	_zone.resize(count)
+	for i in range(count):
+		var z := -1
+		if _land[i] and _region[i] == 1:
+			var best := INF
+			for s in range(seats.size()):
+				var d: float = _seed_pts[i].distance_squared_to(seats[s])
+				if d < best:
+					best = d
+					z = s
+		_zone[i] = z
+
+
 func _compute_hillshade() -> void:
 	# Per-cell normal from neighbour elevation differences, lit from NW.
 	var count := _seed_pts.size()
@@ -972,11 +1276,62 @@ func _biome_color_base(i: int) -> Color:
 
 
 func _draw() -> void:
-	if _nodes.is_empty() or _polys.is_empty():
+	# The plate lives on _plate_item (drawn behind this item); the root item
+	# carries only the screen-fixed UI band, so it never rides the view
+	# transform and only re-records via _redraw_plate.
+	if bake_mode != "" or _nodes.is_empty() or _polys.is_empty():
 		return
-	var count := _seed_pts.size()
+	_draw_ui()
+
+
+## The plate's canvas item. Steady state is ONE quad (the per-open complete
+## bake); until that lands it paints geography (cached quad or vectors) +
+## the campaign ink. Re-records only when _redraw_plate fires — zoom/pan
+## just move this item's transform.
+class PlateItem extends Control:
+	# Untyped on purpose: hard-typed vars fail compile on script-only members.
+	var map = null
+
+	func _draw() -> void:
+		if map == null or map._nodes.is_empty() or map._polys.is_empty():
+			return
+		if map._plate_tex != null:
+			# The complete plate (geography + ink) in a single command.
+			draw_texture_rect(map._plate_tex,
+				Rect2(Vector2.ZERO, map.size), false)
+			return
+		var count: int = map._seed_pts.size()
+		if map._geo_tex != null:
+			# Baked geography: ocean/terrain/coast/rivers/decorations in one
+			# quad. The vector path runs only while the act's one-time bake
+			# is in flight (or if its readback failed).
+			draw_texture_rect(map._geo_tex,
+				Rect2(Vector2.ZERO, map.size), false)
+		else:
+			map._paint_geo(self, count)
+		if map.bake_mode == "geo":
+			return   # geography-bake clone: no ink in the cached texture
+		# Campaign ink — political wash, roads, chips, keep/camp, labels.
+		# Painted by the live map only while its plate bake is in flight,
+		# and by the "plate" clone to produce that bake.
+		map._draw_political(self, count)
+		map._draw_etna(self)
+		map._draw_routes(self)
+		map._draw_sites(self)
+		map._draw_keep(self)
+		map._draw_camp(self)
+		map._draw_kingdom_names(self)
+		map._draw_labels(self)
+		map._draw_furniture(self)
+
+
+## Geography — every layer that is constant for the act, baked once per act
+## into _geo_tex. NOTE: decorations (trees/hachures/furrows) moved UNDER the
+## political wash with the bake split — territory dye now tints them too,
+## which reads as a coherent realm rather than stickers over the wash.
+func _paint_geo(tgt: CanvasItem, count: int) -> void:
 	# 1 — ocean base (rect, then shallow/deep cells refine it).
-	draw_rect(Rect2(Vector2.ZERO, size), OCEAN_DEEP)
+	tgt.draw_rect(Rect2(Vector2.ZERO, size), OCEAN_DEEP)
 	# 2 — every cell, hillshaded.
 	for i in range(count):
 		if _polys[i].size() < 3:
@@ -986,19 +1341,19 @@ func _draw() -> void:
 			var s := _shade[i]
 			col = Color(clampf(col.r * s, 0.0, 1.0),
 				clampf(col.g * s, 0.0, 1.0), clampf(col.b * s, 0.0, 1.0))
-		draw_colored_polygon(_polys[i], col)
+		tgt.draw_colored_polygon(_polys[i], col)
 	# 2.5 — graticule ruled over open water only (charts rule the sea, not
 	# the land); land cells were drawn already, so we sample and skip them.
 	var grat := Color(FOAM.r, FOAM.g, FOAM.b, 0.07)
 	var glon := GEO_LON0
 	while glon < GEO_LON0 + 4.3:
 		var gp := _geo(glon, GEO_LAT0)
-		_draw_sea_segments(Vector2(gp.x, 0), Vector2(gp.x, size.y), grat)
+		_draw_sea_segments(tgt, Vector2(gp.x, 0), Vector2(gp.x, size.y), grat)
 		glon += 0.5
 	var glat := GEO_LAT0
 	while glat > GEO_LAT0 - 2.6:
 		var gp2 := _geo(GEO_LON0, glat)
-		_draw_sea_segments(Vector2(0, gp2.y), Vector2(size.x, gp2.y), grat)
+		_draw_sea_segments(tgt, Vector2(0, gp2.y), Vector2(size.x, gp2.y), grat)
 		glat -= 0.5
 	# 3 — coastline ink along true land/water cell edges: double-ruled (thick
 	# outer + thin inner, like engraved charts) with waterline rings fading
@@ -1011,20 +1366,20 @@ func _draw() -> void:
 				var seg := _shared_edge(i2, j)
 				if seg.size() >= 2:
 					var sea_dir := (_seed_pts[j] - _seed_pts[i2]).normalized()
-					draw_line(seg[0] + sea_dir * 7.0, seg[1] + sea_dir * 7.0,
+					tgt.draw_line(seg[0] + sea_dir * 7.0, seg[1] + sea_dir * 7.0,
 						Color(FOAM.r, FOAM.g, FOAM.b, 0.34), 1.1, true)
 					if _region[i2] != 3:
 						# Tiny islets keep a single ring — the full set
 						# overlaps itself and turns them to stripes.
-						draw_line(seg[0] + sea_dir * 14.0,
+						tgt.draw_line(seg[0] + sea_dir * 14.0,
 							seg[1] + sea_dir * 14.0,
 							Color(FOAM.r, FOAM.g, FOAM.b, 0.20), 1.0, true)
-						draw_line(seg[0] + sea_dir * 22.0,
+						tgt.draw_line(seg[0] + sea_dir * 22.0,
 							seg[1] + sea_dir * 22.0,
 							Color(FOAM.r, FOAM.g, FOAM.b, 0.10), 1.0, true)
-					draw_line(seg[0] - sea_dir * 3.2, seg[1] - sea_dir * 3.2,
+					tgt.draw_line(seg[0] - sea_dir * 3.2, seg[1] - sea_dir * 3.2,
 						Color(0.02, 0.03, 0.03, 0.30), 1.2, true)
-					draw_line(seg[0], seg[1], COAST_INK, 2.4, true)
+					tgt.draw_line(seg[0], seg[1], COAST_INK, 2.4, true)
 	# 3.5 — shoal stipple in the shallows + sparse wave ticks on open water.
 	var wrng := RandomNumberGenerator.new()
 	wrng.seed = 4117
@@ -1034,7 +1389,7 @@ func _draw() -> void:
 		if _wdepth[iw] <= 2:
 			if wrng.randf() < 0.5:
 				for _d in range(wrng.randi_range(2, 4)):
-					draw_circle(_seed_pts[iw] + Vector2(
+					tgt.draw_circle(_seed_pts[iw] + Vector2(
 						wrng.randf_range(-9.0, 9.0),
 						wrng.randf_range(-8.0, 8.0)),
 						wrng.randf_range(0.6, 1.2),
@@ -1042,7 +1397,7 @@ func _draw() -> void:
 		elif _biome[iw] == B_DEEP and wrng.randf() < 0.035:
 			var wp := _seed_pts[iw] + Vector2(wrng.randf_range(-9.0, 9.0),
 				wrng.randf_range(-7.0, 7.0))
-			draw_arc(wp, wrng.randf_range(4.5, 7.5), PI + 0.45, TAU - 0.45,
+			tgt.draw_arc(wp, wrng.randf_range(4.5, 7.5), PI + 0.45, TAU - 0.45,
 				8, Color(FOAM.r, FOAM.g, FOAM.b, 0.15), 1.1, true)
 	# 4 — rivers (smoothed, widening downstream; width scales with length
 	# so tributaries stay thin where they join).
@@ -1050,23 +1405,64 @@ func _draw() -> void:
 		var wmax := minf(3.4, float(rv.size()) * 0.22)
 		for k in range(rv.size() - 1):
 			var t := float(k) / float(maxi(rv.size() - 1, 1))
-			draw_line(rv[k], rv[k + 1], RIVER_COL, 1.2 + t * wmax, true)
-	# 5 — political layer.
-	_draw_political(count)
-	# 6 — terrain decorations.
-	_draw_decorations(count)
-	# 7 — landmark volcano, routes, sites, keep, camp, furniture, UI.
-	_draw_etna()
-	_draw_routes()
-	_draw_sites()
-	_draw_keep()
-	_draw_camp()
-	_draw_labels()
-	_draw_furniture()
-	_draw_ui()
+			tgt.draw_line(rv[k], rv[k + 1], RIVER_COL, 1.2 + t * wmax, true)
+	# 5 — terrain decorations (part of the geography bake).
+	_draw_decorations(tgt, count)
+	# 6 — the realms: all unclaimed Sicilian land wears its kingdom's dye,
+	# not just the active front. Faint washes — the front's corridor gets
+	# the strong wash in the ink layer on top — with conquered kingdoms
+	# turned to your gold, so the campaign reads across the whole chart.
+	# Legacy runs carry no rival deal and skip the overlay entirely.
+	if not _kingdoms.is_empty():
+		for i in range(count):
+			var z := _zone[i]
+			if z < 0 or _prov[i] >= 0 or _polys[i].size() < 3:
+				continue
+			var k: Dictionary = _kingdoms[z]
+			var wash: Color
+			if String(k.state) == "taken":
+				wash = Color(PLAYER_AMBER.r, PLAYER_AMBER.g,
+					PLAYER_AMBER.b, 0.13)
+			else:
+				wash = _realm_wash(k.color, 0.15)
+			tgt.draw_colored_polygon(_polys[i], wash)
+		# Realm borders along true cell edges — quiet ink, beneath the
+		# corridor's brighter dyed province rims.
+		for i2 in range(count):
+			if _zone[i2] < 0:
+				continue
+			for j in _nbrs[i2]:
+				if j > i2 and _zone[j] >= 0 and _zone[j] != _zone[i2]:
+					var seg := _shared_edge(i2, j)
+					if seg.size() >= 2:
+						tgt.draw_line(seg[0], seg[1],
+							Color(0.05, 0.05, 0.04, 0.38), 1.6, true)
 
 
-func _draw_labels() -> void:
+## Realm names over their land — your gold once an act is won, the lord's
+## brightened dye while he waits his turn. The active FRONT skips its land
+## name: the cartouche already names it, and its zone is busy with the
+## corridor's sites — the name would fight the chips and the keep plaque.
+func _draw_kingdom_names(tgt: CanvasItem) -> void:
+	if _kingdoms.is_empty() or GameTheme.font_display == null:
+		return
+	for k in _kingdoms:
+		var col: Color
+		if String(k.state) == "front":
+			continue
+		elif String(k.state) == "taken":
+			col = Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b, 0.62)
+		else:
+			var c: Color = k.color
+			col = Color(minf(c.r * 1.35, 1.0), minf(c.g * 1.35, 1.0),
+				minf(c.b * 1.35, 1.0), 0.72)
+		tgt.draw_string(GameTheme.font_display,
+			(k.centroid as Vector2) + Vector2(-150.0, 4.0),
+			_letterspace(String(k.name)), HORIZONTAL_ALIGNMENT_CENTER,
+			300, 13, col)
+
+
+func _draw_labels(tgt: CanvasItem) -> void:
 	if GameTheme.font_display == null:
 		return
 	for lb in _labels:
@@ -1075,58 +1471,58 @@ func _draw_labels() -> void:
 		var sz: int = lb.size
 		if bool(lb.get("harbor", false)):
 			# Harbour mark: a tiny town cluster + ring, name set off right.
-			draw_rect(Rect2(p + Vector2(-9.0, -10.0), Vector2(5.0, 4.5)),
+			tgt.draw_rect(Rect2(p + Vector2(-9.0, -10.0), Vector2(5.0, 4.5)),
 				Color(0.17, 0.13, 0.10, 0.92))
-			draw_rect(Rect2(p + Vector2(-3.0, -12.5), Vector2(4.0, 6.5)),
+			tgt.draw_rect(Rect2(p + Vector2(-3.0, -12.5), Vector2(4.0, 6.5)),
 				Color(0.20, 0.155, 0.115, 0.92))
-			draw_rect(Rect2(p + Vector2(2.5, -9.5), Vector2(4.5, 4.0)),
+			tgt.draw_rect(Rect2(p + Vector2(2.5, -9.5), Vector2(4.5, 4.0)),
 				Color(0.14, 0.11, 0.085, 0.92))
-			draw_arc(p, 4.2, 0, TAU, 14, Color(0.85, 0.80, 0.66, 0.65),
+			tgt.draw_arc(p, 4.2, 0, TAU, 14, Color(0.85, 0.80, 0.66, 0.65),
 				1.2, true)
-			draw_circle(p, 1.6, Color(0.85, 0.80, 0.66, 0.8))
-			draw_string(GameTheme.font_display, p + Vector2(9, 4), txt,
+			tgt.draw_circle(p, 1.6, Color(0.85, 0.80, 0.66, 0.8))
+			tgt.draw_string(GameTheme.font_display, p + Vector2(9, 4), txt,
 				HORIZONTAL_ALIGNMENT_LEFT, 160, sz,
 				Color(0.82, 0.76, 0.62, 0.60))
 			continue
 		var col := Color(0.93, 0.87, 0.70, 0.80)
 		if bool(lb.crimson):
 			col = Color(0.95, 0.55, 0.40, 0.85)
-		draw_string(GameTheme.font_display, p + Vector2(-199, 2),
+		tgt.draw_string(GameTheme.font_display, p + Vector2(-199, 2),
 			txt, HORIZONTAL_ALIGNMENT_CENTER, 400, sz,
 			Color(0, 0, 0, 0.65))
-		draw_string(GameTheme.font_display, p + Vector2(-200, 0),
+		tgt.draw_string(GameTheme.font_display, p + Vector2(-200, 0),
 			txt, HORIZONTAL_ALIGNMENT_CENTER, 400, sz, col)
 
 
-func _draw_furniture() -> void:
+func _draw_furniture(tgt: CanvasItem) -> void:
 	var w: float = size.x
 	var h: float = size.y
 	# Compass rose — top-left ocean.
 	var cp := Vector2(108.0, 132.0)
-	draw_arc(cp, 26.0, 0, TAU, 40, Color(0.62, 0.66, 0.62, 0.45), 1.4, true)
-	draw_arc(cp, 20.0, 0, TAU, 40, Color(0.62, 0.66, 0.62, 0.25), 1.0, true)
+	tgt.draw_arc(cp, 26.0, 0, TAU, 40, Color(0.62, 0.66, 0.62, 0.45), 1.4, true)
+	tgt.draw_arc(cp, 20.0, 0, TAU, 40, Color(0.62, 0.66, 0.62, 0.25), 1.0, true)
 	for k in range(8):
 		var ang := TAU * float(k) / 8.0
 		var lng: float = 24.0 if k % 2 == 0 else 12.0
-		draw_line(cp, cp + Vector2(cos(ang), sin(ang)) * lng,
+		tgt.draw_line(cp, cp + Vector2(cos(ang), sin(ang)) * lng,
 			Color(0.70, 0.74, 0.68, 0.55 if k % 2 == 0 else 0.30),
 			1.6 if k % 2 == 0 else 1.0, true)
-	draw_colored_polygon(PackedVector2Array([cp + Vector2(0, -26),
+	tgt.draw_colored_polygon(PackedVector2Array([cp + Vector2(0, -26),
 		cp + Vector2(4, -8), cp + Vector2(-4, -8)]),
 		Color(0.85, 0.80, 0.66, 0.8))
 	if GameTheme.font_display != null:
-		draw_string(GameTheme.font_display, cp + Vector2(-8, -32), "N",
+		tgt.draw_string(GameTheme.font_display, cp + Vector2(-8, -32), "N",
 			HORIZONTAL_ALIGNMENT_CENTER, 16, 13, Color(0.85, 0.80, 0.66, 0.8))
 	# Scale bar — bottom-right ocean.
 	var sb := Vector2(w - 264.0, h - 64.0)
-	draw_line(sb, sb + Vector2(150, 0), Color(0.70, 0.74, 0.68, 0.6),
+	tgt.draw_line(sb, sb + Vector2(150, 0), Color(0.70, 0.74, 0.68, 0.6),
 		1.6, true)
 	for k2 in range(4):
 		var x := sb.x + 150.0 * float(k2) / 3.0
-		draw_line(Vector2(x, sb.y - 4), Vector2(x, sb.y + 4),
+		tgt.draw_line(Vector2(x, sb.y - 4), Vector2(x, sb.y + 4),
 			Color(0.70, 0.74, 0.68, 0.6), 1.4, true)
 	if GameTheme.font_display != null:
-		draw_string(GameTheme.font_display, sb + Vector2(0, -10),
+		tgt.draw_string(GameTheme.font_display, sb + Vector2(0, -10),
 			"TWELVE LEAGUES", HORIZONTAL_ALIGNMENT_CENTER, 150, 11,
 			Color(0.72, 0.74, 0.66, 0.65))
 	# Sea serpent — every honest chart has one.
@@ -1134,14 +1530,14 @@ func _draw_furniture() -> void:
 	var scol := Color(0.16, 0.30, 0.28, 0.85)
 	for hump in range(3):
 		var hc := sp + Vector2(float(hump) * 30.0, 0)
-		draw_arc(hc, 13.0, PI, TAU, 16, scol, 4.0, true)
+		tgt.draw_arc(hc, 13.0, PI, TAU, 16, scol, 4.0, true)
 	var head := sp + Vector2(-22.0, -4.0)
-	draw_colored_polygon(PackedVector2Array([head + Vector2(6, -8),
+	tgt.draw_colored_polygon(PackedVector2Array([head + Vector2(6, -8),
 		head + Vector2(-12, -2), head + Vector2(6, 4)]), scol)
-	draw_circle(head + Vector2(-1, -3), 1.4, Color(0.9, 0.85, 0.6, 0.9))
+	tgt.draw_circle(head + Vector2(-1, -3), 1.4, Color(0.9, 0.85, 0.6, 0.9))
 
 
-func _draw_political(count: int) -> void:
+func _draw_political(tgt: CanvasItem, count: int) -> void:
 	# Claimed wash — and, on conquest runs, the rival's wash on every province
 	# you haven't taken yet: the kingdom starts in his colors and your amber
 	# eats them site by site. The dye is thinned (_faction_wash) so the
@@ -1152,10 +1548,10 @@ func _draw_political(count: int) -> void:
 		if p < 0 or _polys[i].size() < 3:
 			continue
 		if bool(_nodes[p].vis):
-			draw_colored_polygon(_polys[i], Color(PLAYER_AMBER.r,
-				PLAYER_AMBER.g, PLAYER_AMBER.b, 0.22))
+			tgt.draw_colored_polygon(_polys[i], Color(PLAYER_AMBER.r,
+				PLAYER_AMBER.g, PLAYER_AMBER.b, 0.30))
 		elif _faction_id != "":
-			draw_colored_polygon(_polys[i], rival_wash)
+			tgt.draw_colored_polygon(_polys[i], rival_wash)
 	# Province borders along true cell edges; frontier rim bright.
 	for i2 in range(count):
 		if _prov[i2] < 0:
@@ -1171,16 +1567,22 @@ func _draw_political(count: int) -> void:
 			var a_avail: bool = _nodes[_prov[i2]].avail or _nodes[_prov[j]].avail
 			var a_vis: bool = _nodes[_prov[i2]].vis or _nodes[_prov[j]].vis
 			if a_avail and a_vis:
-				draw_line(seg[0], seg[1], PLAYER_AMBER, 2.6, true)
+				tgt.draw_line(seg[0], seg[1], PLAYER_AMBER, 2.6, true)
 			elif a_vis:
-				draw_line(seg[0], seg[1], Color(PLAYER_AMBER.r,
+				tgt.draw_line(seg[0], seg[1], Color(PLAYER_AMBER.r,
 					PLAYER_AMBER.g, PLAYER_AMBER.b, 0.55), 1.8, true)
+			elif _faction_id != "":
+				# Interior borders of the unconquered kingdom carry his dye —
+				# the land reads as provinces of HIS realm, not neutral ink.
+				tgt.draw_line(seg[0], seg[1], Color(_faction_color.r * 0.6,
+					_faction_color.g * 0.6, _faction_color.b * 0.6, 0.55),
+					1.4, true)
 			else:
-				draw_line(seg[0], seg[1],
+				tgt.draw_line(seg[0], seg[1],
 					Color(0.05, 0.05, 0.04, 0.38), 1.4, true)
 
 
-func _draw_decorations(count: int) -> void:
+func _draw_decorations(tgt: CanvasItem, count: int) -> void:
 	var drng := RandomNumberGenerator.new()
 	drng.seed = 808
 	for i in range(count):
@@ -1200,7 +1602,7 @@ func _draw_decorations(count: int) -> void:
 					* (float(hk) - float(n_h - 1) * 0.5) * 5.0 \
 					+ Vector2(drng.randf_range(-2.5, 2.5),
 						drng.randf_range(-2.5, 2.5))
-				draw_line(hp, hp + down * drng.randf_range(5.0, 8.5),
+				tgt.draw_line(hp, hp + down * drng.randf_range(5.0, 8.5),
 					Color(0.05, 0.04, 0.03,
 						clampf(0.05 + slope * 0.11, 0.0, 0.20)), 1.0, true)
 		match _biome[i]:
@@ -1215,13 +1617,13 @@ func _draw_decorations(count: int) -> void:
 						var shade := drng.randf_range(0.80, 1.22)
 						var col := Color(0.085 * shade, 0.140 * shade,
 							0.075 * shade, 0.95)
-						draw_circle(tp + Vector2(1.4, 1.6), s * 0.85,
+						tgt.draw_circle(tp + Vector2(1.4, 1.6), s * 0.85,
 							Color(0.02, 0.04, 0.02, 0.30))
-						draw_colored_polygon(PackedVector2Array([
+						tgt.draw_colored_polygon(PackedVector2Array([
 							tp + Vector2(0, -s * 1.5),
 							tp + Vector2(s * 0.8, s * 0.5),
 							tp + Vector2(-s * 0.8, s * 0.5)]), col)
-						draw_line(tp + Vector2(0, s * 0.5),
+						tgt.draw_line(tp + Vector2(0, s * 0.5),
 							tp + Vector2(0, s * 1.0),
 							Color(0.07, 0.06, 0.04, 0.8), 1.0, true)
 			B_ROCK, B_SNOW:
@@ -1233,22 +1635,22 @@ func _draw_decorations(count: int) -> void:
 							drng.randf_range(-6.0, 6.0))
 						var s2 := drng.randf_range(4.0, 7.5)
 						var apex := pc + Vector2(0, -s2 * 1.3)
-						draw_colored_polygon(PackedVector2Array([apex,
+						tgt.draw_colored_polygon(PackedVector2Array([apex,
 							pc + Vector2(s2, s2 * 0.6),
 							pc + Vector2(-s2, s2 * 0.6)]),
 							Color(0.30, 0.28, 0.25, 0.9))
-						draw_colored_polygon(PackedVector2Array([apex,
+						tgt.draw_colored_polygon(PackedVector2Array([apex,
 							pc + Vector2(s2, s2 * 0.6),
 							pc + Vector2(s2 * 0.1, s2 * 0.6)]),
 							Color(0.16, 0.14, 0.12, 0.9))
 						if _biome[i] == B_SNOW:
-							draw_colored_polygon(PackedVector2Array([apex,
+							tgt.draw_colored_polygon(PackedVector2Array([apex,
 								apex + Vector2(s2 * 0.45, s2 * 0.75),
 								apex + Vector2(-s2 * 0.45, s2 * 0.75)]),
 								Color(0.88, 0.90, 0.92, 0.95))
 			B_SCORCH:
 				if drng.randf() < 0.20:
-					draw_circle(p + Vector2(drng.randf_range(-8, 8),
+					tgt.draw_circle(p + Vector2(drng.randf_range(-8, 8),
 						drng.randf_range(-8, 8)), drng.randf_range(1.0, 2.0),
 						Color(1.0, 0.50, 0.15, 0.6))
 				if drng.randf() < 0.22:
@@ -1257,7 +1659,7 @@ func _draw_decorations(count: int) -> void:
 					var cv := Vector2(cos(ca), sin(ca))
 					var cp2 := p + Vector2(drng.randf_range(-7.0, 7.0),
 						drng.randf_range(-7.0, 7.0))
-					draw_line(cp2 - cv * drng.randf_range(3.0, 6.0),
+					tgt.draw_line(cp2 - cv * drng.randf_range(3.0, 6.0),
 						cp2 + cv * drng.randf_range(3.0, 6.0),
 						Color(0.05, 0.02, 0.015, 0.55), 1.2, true)
 			B_HILLS:
@@ -1265,16 +1667,16 @@ func _draw_decorations(count: int) -> void:
 					# Foothill peak — bridges the hills into the ranges.
 					var s3 := drng.randf_range(3.2, 5.2)
 					var apex3 := p + Vector2(0, -s3 * 1.2)
-					draw_colored_polygon(PackedVector2Array([apex3,
+					tgt.draw_colored_polygon(PackedVector2Array([apex3,
 						p + Vector2(s3, s3 * 0.55),
 						p + Vector2(-s3, s3 * 0.55)]),
 						Color(0.26, 0.23, 0.17, 0.85))
-					draw_colored_polygon(PackedVector2Array([apex3,
+					tgt.draw_colored_polygon(PackedVector2Array([apex3,
 						p + Vector2(s3, s3 * 0.55),
 						p + Vector2(s3 * 0.1, s3 * 0.55)]),
 						Color(0.15, 0.13, 0.10, 0.85))
 				elif drng.randf() < 0.22:
-					draw_arc(p, drng.randf_range(4.0, 6.5), PI, TAU, 10,
+					tgt.draw_arc(p, drng.randf_range(4.0, 6.5), PI, TAU, 10,
 						Color(0.18, 0.15, 0.09, 0.5), 1.5, true)
 			B_GRASS:
 				if _road_d[i] < 150.0 and slope < 0.45 \
@@ -1286,17 +1688,17 @@ func _draw_decorations(count: int) -> void:
 					for fk in range(3):
 						var fp := p + ax.orthogonal() \
 							* (float(fk) - 1.0) * 4.2
-						draw_line(fp - ax * 5.5, fp + ax * 5.5,
+						tgt.draw_line(fp - ax * 5.5, fp + ax * 5.5,
 							Color(0.22, 0.19, 0.10, 0.16), 1.0, true)
 				elif drng.randf() < 0.13:
 					# Scrub dots in the open meadow.
-					draw_circle(p + Vector2(drng.randf_range(-7.0, 7.0),
+					tgt.draw_circle(p + Vector2(drng.randf_range(-7.0, 7.0),
 						drng.randf_range(-6.0, 6.0)),
 						drng.randf_range(0.9, 1.6),
 						Color(0.20, 0.20, 0.10, 0.35))
 
 
-func _draw_routes() -> void:
+func _draw_routes(tgt: CanvasItem) -> void:
 	# Roads carved INTO the map: an incised groove. With light from the NW,
 	# the groove's near lip throws a shadow (dark line offset NW) and the far
 	# wall catches the light (pale line offset SE); between them the dark
@@ -1306,16 +1708,16 @@ func _draw_routes() -> void:
 	for ei in range(_edge_curves.size()):
 		var pts := _edge_curves[ei]
 		var e: Dictionary = _edges[ei]
-		draw_polyline(_offset_pts(pts, lightv * 1.9),
+		tgt.draw_polyline(_offset_pts(pts, lightv * 1.9),
 			Color(0.020, 0.015, 0.010, 0.55), 6.0, true)
-		draw_polyline(_offset_pts(pts, lightv * -1.9),
+		tgt.draw_polyline(_offset_pts(pts, lightv * -1.9),
 			Color(0.88, 0.80, 0.60, 0.30), 5.4, true)
-		draw_polyline(pts, Color(0.055, 0.045, 0.032, 0.88), 4.6, true)
-		draw_polyline(pts, Color(0.47, 0.395, 0.262, 0.95), 2.1, true)
+		tgt.draw_polyline(pts, Color(0.055, 0.045, 0.032, 0.88), 4.6, true)
+		tgt.draw_polyline(pts, Color(0.47, 0.395, 0.262, 0.95), 2.1, true)
 		if bool(e.to_avail):
-			draw_polyline(pts, PLAYER_AMBER, 1.9, true)
+			tgt.draw_polyline(pts, PLAYER_AMBER, 1.9, true)
 		elif bool(e.from_vis):
-			draw_polyline(pts, Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.85),
+			tgt.draw_polyline(pts, Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.85),
 				1.9, true)
 	for br in _bridges:
 		var p: Vector2 = br.pos
@@ -1323,7 +1725,7 @@ func _draw_routes() -> void:
 		var pp := dirv.orthogonal()
 		for k in range(-2, 3):
 			var c := p + dirv * float(k) * 3.6
-			draw_line(c + pp * 7.0, c - pp * 7.0,
+			tgt.draw_line(c + pp * 7.0, c - pp * 7.0,
 				Color(0.24, 0.17, 0.10, 0.95), 2.2, true)
 
 
@@ -1334,7 +1736,7 @@ func _offset_pts(pts: PackedVector2Array, v: Vector2) -> PackedVector2Array:
 	return out
 
 
-func _draw_sea_segments(a: Vector2, b: Vector2, col: Color) -> void:
+func _draw_sea_segments(tgt: CanvasItem, a: Vector2, b: Vector2, col: Color) -> void:
 	# Rule a line in short dashes, skipping every dash whose midpoint falls
 	# on land — cheap clipping for the graticule.
 	var n := maxi(int(a.distance_to(b) / 22.0), 1)
@@ -1343,10 +1745,10 @@ func _draw_sea_segments(a: Vector2, b: Vector2, col: Color) -> void:
 		var p1 := a.lerp(b, (float(k) + 0.8) / float(n))
 		var ci := _cell_at((p0 + p1) * 0.5)
 		if ci >= 0 and not _land[ci]:
-			draw_line(p0, p1, col, 1.0, true)
+			tgt.draw_line(p0, p1, col, 1.0, true)
 
 
-func _draw_sites() -> void:
+func _draw_sites(tgt: CanvasItem) -> void:
 	# Marker hierarchy — the cool of a campaign map is reading the campaign:
 	#   conquered  → planted amber pennant (the land is yours)
 	#   reachable  → big glowing chip (your next moves)
@@ -1359,10 +1761,10 @@ func _draw_sites() -> void:
 		var visited: bool = nd.vis
 		var open_now: bool = nd.avail
 		if visited:
-			draw_circle(p + Vector2(1, 5), 3.0, Color(0, 0, 0, 0.5))
-			draw_line(p + Vector2(0, 5), p + Vector2(0, -19),
+			tgt.draw_circle(p + Vector2(1, 5), 3.0, Color(0, 0, 0, 0.5))
+			tgt.draw_line(p + Vector2(0, 5), p + Vector2(0, -19),
 				Color(0.07, 0.06, 0.04), 2.2, true)
-			draw_colored_polygon(PackedVector2Array([p + Vector2(0, -19),
+			tgt.draw_colored_polygon(PackedVector2Array([p + Vector2(0, -19),
 				p + Vector2(15, -14.5), p + Vector2(0, -10)]), PLAYER_AMBER)
 			continue
 		# Future sites stay clearly readable — at 13 sites every location is
@@ -1378,28 +1780,28 @@ func _draw_sites() -> void:
 			rim = Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.85)
 		if typ == "rest":
 			# Hearth glow — a safe light on the road.
-			draw_circle(p, r + 7.0, Color(1.0, 0.62, 0.25,
+			tgt.draw_circle(p, r + 7.0, Color(1.0, 0.62, 0.25,
 				0.16 if open_now else 0.09))
-		draw_circle(p + Vector2(2, 3), r + 1.0, Color(0, 0, 0, 0.45))
-		draw_circle(p, r, chip_c)
-		draw_arc(p, r, 0, TAU, 30, rim, 2.2 if open_now else 1.4, true)
+		tgt.draw_circle(p + Vector2(2, 3), r + 1.0, Color(0, 0, 0, 0.45))
+		tgt.draw_circle(p, r, chip_c)
+		tgt.draw_arc(p, r, 0, TAU, 30, rim, 2.2 if open_now else 1.4, true)
 		if open_now:
-			draw_arc(p, r + 5.0, 0, TAU, 30, Color(PLAYER_AMBER.r,
+			tgt.draw_arc(p, r + 5.0, 0, TAU, 30, Color(PLAYER_AMBER.r,
 				PLAYER_AMBER.g, PLAYER_AMBER.b, 0.38), 1.6, true)
-			draw_circle(p, r + 14.0,
+			tgt.draw_circle(p, r + 14.0,
 				Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b, 0.06))
 		var tex: Texture2D = _node_icon(typ)
 		var ipx := r * 1.25
 		if tex != null:
-			draw_texture_rect(tex, Rect2(p - Vector2(ipx, ipx) * 0.5,
+			tgt.draw_texture_rect(tex, Rect2(p - Vector2(ipx, ipx) * 0.5,
 				Vector2(ipx, ipx)), false, icon_tint)
 		if String(nd.get("mutator_id", "")) != "":
 			# Mutator star — same signal as the old chart, on the chip's rim.
-			_draw_star(p + Vector2(r * 0.78, -r * 0.78), 6.0,
+			_draw_star(tgt, p + Vector2(r * 0.78, -r * 0.78), 6.0,
 				Color(1.0, 0.84, 0.30, 0.95))
 
 
-func _draw_etna() -> void:
+func _draw_etna(tgt: CanvasItem) -> void:
 	# The volcano — the act's villain rendered as geography. A cone with lit
 	# and shadowed faces, a glowing caldera, lava threads, and a smoke plume
 	# drifting north-east on the strait wind.
@@ -1409,16 +1811,16 @@ func _draw_etna() -> void:
 	var bl := _etna_peak + Vector2(-bw, bh * 0.52)
 	var br_ := _etna_peak + Vector2(bw, bh * 0.58)
 	var bm := _etna_peak + Vector2(10.0, bh * 0.62)
-	draw_colored_polygon(PackedVector2Array([apex + Vector2(4, 5),
+	tgt.draw_colored_polygon(PackedVector2Array([apex + Vector2(4, 5),
 		bl + Vector2(7, 8), br_ + Vector2(9, 8)]), Color(0, 0, 0, 0.30))
-	draw_colored_polygon(PackedVector2Array([apex, bl, bm]),
+	tgt.draw_colored_polygon(PackedVector2Array([apex, bl, bm]),
 		Color(0.245, 0.180, 0.140))            # lit west face
-	draw_colored_polygon(PackedVector2Array([apex, bm, br_]),
+	tgt.draw_colored_polygon(PackedVector2Array([apex, bm, br_]),
 		Color(0.108, 0.078, 0.066))            # shadowed east face
-	draw_circle(apex + Vector2(0, 3), 26.0, Color(1.0, 0.42, 0.10, 0.10))
-	draw_circle(apex + Vector2(0, 2), 15.0, Color(1.0, 0.45, 0.12, 0.22))
-	draw_circle(apex, 6.5, Color(0.07, 0.04, 0.03))
-	draw_circle(apex, 4.0, Color(1.0, 0.52, 0.14, 0.95))
+	tgt.draw_circle(apex + Vector2(0, 3), 26.0, Color(1.0, 0.42, 0.10, 0.10))
+	tgt.draw_circle(apex + Vector2(0, 2), 15.0, Color(1.0, 0.45, 0.12, 0.22))
+	tgt.draw_circle(apex, 6.5, Color(0.07, 0.04, 0.03))
+	tgt.draw_circle(apex, 4.0, Color(1.0, 0.52, 0.14, 0.95))
 	var lrng := RandomNumberGenerator.new()
 	lrng.seed = 666
 	for k in range(4):
@@ -1430,16 +1832,16 @@ func _draw_etna() -> void:
 			lp += Vector2(dirx * lrng.randf_range(4.0, 9.0),
 				lrng.randf_range(7.0, 12.0))
 			run.append(lp)
-		draw_polyline(run, Color(0.95, 0.36, 0.10,
+		tgt.draw_polyline(run, Color(0.95, 0.36, 0.10,
 			0.75 - float(k) * 0.12), 1.5, true)
 	var puffs := [[10.0, -18.0, 6.0, 0.40], [22.0, -34.0, 9.0, 0.32],
 		[37.0, -52.0, 12.5, 0.24], [55.0, -71.0, 16.5, 0.15]]
 	for pf in puffs:
-		draw_circle(apex + Vector2(float(pf[0]), float(pf[1])),
+		tgt.draw_circle(apex + Vector2(float(pf[0]), float(pf[1])),
 			float(pf[2]), Color(0.58, 0.55, 0.54, float(pf[3])))
 
 
-func _draw_keep() -> void:
+func _draw_keep(tgt: CanvasItem) -> void:
 	var kp := _boss_pos if _boss_pos != Vector2.ZERO \
 		else Vector2(size.x - MARGIN_R, size.y * 0.5)
 	# Smaller than the procedural version — Etna looms behind it; the keep
@@ -1447,14 +1849,14 @@ func _draw_keep() -> void:
 	var kw := 70.0
 	var kh := 44.0
 	var base_y := kp.y + kh * 0.5
-	draw_circle(kp + Vector2(4, kh * 0.5), kw * 0.62, Color(0, 0, 0, 0.4))
+	tgt.draw_circle(kp + Vector2(4, kh * 0.5), kw * 0.62, Color(0, 0, 0, 0.4))
 	var wall := Rect2(kp.x - kw * 0.5, base_y - kh * 0.62, kw, kh * 0.62)
-	draw_rect(wall, Color(0.16, 0.12, 0.10, 0.97))
-	draw_rect(wall, Color(0.04, 0.03, 0.03), false, 2.0)
+	tgt.draw_rect(wall, Color(0.16, 0.12, 0.10, 0.97))
+	tgt.draw_rect(wall, Color(0.04, 0.03, 0.03), false, 2.0)
 	var teeth := 6
 	for i in range(teeth):
 		var tx := wall.position.x + wall.size.x * float(i) / float(teeth)
-		draw_rect(Rect2(tx, wall.position.y - 6,
+		tgt.draw_rect(Rect2(tx, wall.position.y - 6,
 			wall.size.x / float(teeth) * 0.55, 6),
 			Color(0.16, 0.12, 0.10, 0.97))
 	for tdef in [[-0.42, 0.9], [0.42, 0.9], [0.0, 1.45]]:
@@ -1463,18 +1865,18 @@ func _draw_keep() -> void:
 		var tw := 21.0
 		var th := kh * tscale
 		var tower := Rect2(kp.x + kw * toff - tw * 0.5, base_y - th, tw, th)
-		draw_rect(tower, Color(0.13, 0.10, 0.09, 0.98))
-		draw_rect(tower, Color(0.04, 0.03, 0.03), false, 2.0)
+		tgt.draw_rect(tower, Color(0.13, 0.10, 0.09, 0.98))
+		tgt.draw_rect(tower, Color(0.04, 0.03, 0.03), false, 2.0)
 	# The pennant over the keep flies the rival lord's banner — the one spot
 	# on the plate where his color shows at full cloth strength (the political
 	# wash below is the same dye thinned). Crimson on legacy runs.
 	var banner := _banner_color()
 	var pole_top := Vector2(kp.x, base_y - kh * 1.45 - 24.0)
-	draw_line(Vector2(kp.x, base_y - kh * 1.45), pole_top,
+	tgt.draw_line(Vector2(kp.x, base_y - kh * 1.45), pole_top,
 		Color(0.04, 0.03, 0.03), 2.0, true)
-	draw_colored_polygon(PackedVector2Array([pole_top,
+	tgt.draw_colored_polygon(PackedVector2Array([pole_top,
 		pole_top + Vector2(28, 6), pole_top + Vector2(0, 13)]), banner)
-	draw_circle(Vector2(kp.x, base_y - 7), 4.5, Color(1.0, 0.55, 0.20, 0.9))
+	tgt.draw_circle(Vector2(kp.x, base_y - 7), 4.5, Color(1.0, 0.55, 0.20, 0.9))
 	if _boss_name != "" and GameTheme.font_display != null:
 		# Each act's keep is a place before it is a fight: name the seat,
 		# then the holder. Common-noun names only (lore rule), one per leg —
@@ -1482,29 +1884,29 @@ func _draw_keep() -> void:
 		var keep_names := ["THE PASS GATE", "THE GRANARY KEEP",
 			"THE CINDER SEAT"]
 		var plaque := Rect2(kp.x - 95.0, base_y + 12.0, 190.0, 38.0)
-		draw_rect(plaque, Color(0.05, 0.04, 0.035, 0.85))
-		draw_rect(plaque, Color(banner.r, banner.g, banner.b, 0.8),
+		tgt.draw_rect(plaque, Color(0.05, 0.04, 0.035, 0.85))
+		tgt.draw_rect(plaque, Color(banner.r, banner.g, banner.b, 0.8),
 			false, 1.0)
-		draw_string(GameTheme.font_display,
+		tgt.draw_string(GameTheme.font_display,
 			Vector2(kp.x - 120.0, base_y + 26.0),
 			keep_names[clampi(_act - 1, 0, 2)],
 			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 10,
 			Color(0.74, 0.66, 0.52, 0.95))
-		draw_string(GameTheme.font_display,
+		tgt.draw_string(GameTheme.font_display,
 			Vector2(kp.x - 120.0, base_y + 44.0), _boss_name,
 			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 14, Color(0.92, 0.80, 0.62))
 
 
-func _draw_camp() -> void:
+func _draw_camp(tgt: CanvasItem) -> void:
 	var camp := _camp_pos
-	draw_colored_polygon(PackedVector2Array([camp + Vector2(-18, 11),
+	tgt.draw_colored_polygon(PackedVector2Array([camp + Vector2(-18, 11),
 		camp + Vector2(0, -14), camp + Vector2(18, 11)]),
 		Color(0.30, 0.24, 0.16, 0.96))
-	draw_polyline(PackedVector2Array([camp + Vector2(-18, 11),
+	tgt.draw_polyline(PackedVector2Array([camp + Vector2(-18, 11),
 		camp + Vector2(0, -14), camp + Vector2(18, 11),
 		camp + Vector2(-18, 11)]), Color(0.05, 0.04, 0.03), 1.8, true)
 	if GameTheme.font_display != null:
-		draw_string(GameTheme.font_display, camp + Vector2(-60, 32),
+		tgt.draw_string(GameTheme.font_display, camp + Vector2(-60, 32),
 			"YOUR CAMP", HORIZONTAL_ALIGNMENT_CENTER, 120, 12,
 			Color(0.88, 0.80, 0.64))
 	# The army standard at the player's position is normally drawn (and
@@ -1513,9 +1915,9 @@ func _draw_camp() -> void:
 	if overlay_handles_standard:
 		return
 	var stand_p := _player_pos if _has_player else camp + Vector2(30, -4)
-	draw_line(stand_p + Vector2(0, 4), stand_p + Vector2(0, -28),
+	tgt.draw_line(stand_p + Vector2(0, 4), stand_p + Vector2(0, -28),
 		Color(0.05, 0.04, 0.03), 2.2, true)
-	draw_colored_polygon(PackedVector2Array([stand_p + Vector2(0, -28),
+	tgt.draw_colored_polygon(PackedVector2Array([stand_p + Vector2(0, -28),
 		stand_p + Vector2(22, -22), stand_p + Vector2(0, -16)]), PLAYER_AMBER)
 
 
@@ -1619,14 +2021,14 @@ func _letterspace(s: String) -> String:
 	return out
 
 
-func _draw_star(c: Vector2, r: float, col: Color) -> void:
-	draw_circle(c, r + 2.0, Color(0, 0, 0, 0.55))
+func _draw_star(tgt: CanvasItem, c: Vector2, r: float, col: Color) -> void:
+	tgt.draw_circle(c, r + 2.0, Color(0, 0, 0, 0.55))
 	var pts := PackedVector2Array()
 	for k in range(10):
 		var ang := -PI / 2.0 + TAU * float(k) / 10.0
 		var rr := r if k % 2 == 0 else r * 0.45
 		pts.append(c + Vector2(cos(ang), sin(ang)) * rr)
-	draw_colored_polygon(pts, col)
+	tgt.draw_colored_polygon(pts, col)
 
 
 func _node_icon(typ: String) -> Texture2D:

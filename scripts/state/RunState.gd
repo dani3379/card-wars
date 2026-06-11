@@ -46,6 +46,11 @@ var bottled_talisman_uid: int = -1
 var map_data: Array = []
 var current_act_idx: int = 0
 var map_position: Dictionary = {"row": -1, "col": -1}
+# Per-act campaign-plate cache (NOT saved): MapTerrain parks its generated
+# mesh arrays + baked geography texture here, so re-opening the map after a
+# room restores in one frame instead of regenerating ~hundreds of ms of
+# terrain. Keyed by act index (1-3). Cleared on new run / load / act change.
+var map_plate_cache: Dictionary = {}
 var current_encounter_id: String = ""
 var current_node_type: String = ""
 var current_mutator_id: String = ""
@@ -132,8 +137,11 @@ const MIN_ELITE_ROW: int = 3     # Elites/rest cannot appear before this row.
 const PROB_SHOP: float = 0.10
 const PROB_REST: float = 0.22    # 0.10 + 0.12
 const PROB_ELITE: float = 0.32   # 0.22 + 0.10
-const PROB_EVENT: float = 0.54   # 0.32 + 0.22
-const PROB_TREASURE: float = 0.59  # 0.54 + 0.05
+const PROB_EVENT: float = 0.58   # 0.32 + 0.26 — events up a notch...
+const PROB_TREASURE: float = 0.63  # 0.58 + 0.05 — ...so raw fights drop
+# (combat = the 0.37 remainder; was 0.41. Paired with a third muster camp —
+# deck growth over grind. The acceptance loop still guarantees every route
+# carries HOLDS_TO_OPEN_LORD fights, so the boss gate can't starve.)
 
 
 func get_act() -> int:
@@ -177,6 +185,7 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	phoenix_heart_consumed = false
 	next_combat_gift_creature = {}
 	next_combat_mana_bonus = 0
+	map_plate_cache.clear()
 	# Default to player's highest unlocked tier if caller didn't pick one.
 	if ascension < 0:
 		current_ascension = MetaState.unlocked_ascension
@@ -745,6 +754,8 @@ func _find_node_by_col(row_nodes: Array, col: int) -> Dictionary:
 func advance_act() -> void:
 	current_act_idx += 1
 	map_position = {"row": -1, "col": -1}
+	# Last act's plate (mesh + ~23MB geo texture) can't be revisited — drop it.
+	map_plate_cache.clear()
 	current_encounter_id = ""
 	current_node_type = ""
 	current_mutator_id = ""
@@ -1057,23 +1068,30 @@ func _has_sibling_with_type(grid: Array, t: String, r: int,
 
 
 ## Successor Wars: deck growth lives at muster camps (a free 1-of-3 draft),
-## not post-fight rewards — so every kingdom guarantees up to two recruit
-## sites, one on the early leg and one late. They convert from combat/event
-## sites so the generator's path and type rules stay intact; the acceptance
-## loop re-validates the boss-gate fight minimum AFTER conversion, so a
-## recruit can never eat the gate.
+## not post-fight rewards — so every kingdom guarantees up to three recruit
+## sites, one per leg of the march (early / mid / late). They convert from
+## existing sites so the generator's path and type rules stay intact, and
+## they eat COMBAT sites first (the explicit fewer-fights-more-musters
+## lever), falling back to events only when a band has no eligible fight.
+## The acceptance loop re-validates the boss-gate fight minimum AFTER
+## conversion, so a recruit can never eat the gate.
 func _place_recruit_nodes(grid: Array, rng: RandomNumberGenerator) -> void:
-	var bands: Array = [[1, 3], [4, REST_ROW - 1]]
+	var bands: Array = [[1, 2], [3, 4], [5, REST_ROW - 1]]
 	for band in bands:
-		var candidates: Array = []
+		var fights: Array = []
+		var fallback: Array = []
 		for r in range(band[0], band[1] + 1):
 			for c in range(MAP_WIDTH):
 				var node = grid[r][c]
 				if node == null:
 					continue
-				if node["type"] in ["combat", "event"] \
-						and not _has_sibling_with_type(grid, "recruit", r, c):
-					candidates.append(node)
+				if _has_sibling_with_type(grid, "recruit", r, c):
+					continue
+				if node["type"] == "combat":
+					fights.append(node)
+				elif node["type"] == "event":
+					fallback.append(node)
+		var candidates: Array = fights if not fights.is_empty() else fallback
 		if not candidates.is_empty():
 			var pick = candidates[rng.randi() % candidates.size()]
 			pick["type"] = "recruit"
@@ -1383,6 +1401,7 @@ func load_run(slot: int = -1) -> bool:
 	for id in data.get("relics", []):
 		relics.append(String(id))
 	map_data = data.get("map_data", [])
+	map_plate_cache.clear()
 	current_act_idx = int(data.get("current_act_idx", 0))
 	map_position = data.get("map_position", {"row": -1, "col": -1})
 	current_encounter_id = String(data.get("current_encounter_id", ""))

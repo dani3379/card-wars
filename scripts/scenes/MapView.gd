@@ -24,6 +24,7 @@ const BOSS_HIT := 46.0        # click radius, the keep
 var _hud_root: Control = null
 var _overlay: MapPulseOverlay = null
 var _marching := false        # commit march in flight — ignore further clicks
+var _site_buttons: Array = []  # MapTipButtons re-seated on every zoom/pan
 
 
 func _ready() -> void:
@@ -49,6 +50,14 @@ func _ready() -> void:
 	add_child(_overlay)
 	_build_top_hud()
 	GameTheme.make_settings_gear(self)
+	# Open leaning over the army's position on the chart — the player can
+	# wheel out to the full island (or back in) at any time. The per-open
+	# plate bake is in flight for a few frames (longer on the act's first
+	# open, which also generates + bakes the geography) — wait it out so
+	# the ease glides over a single-quad plate instead of heavy frames.
+	if _plate_tex == null and _plate_bake_pending:
+		await plate_baked
+	_animate_focus(_player_pos if _has_player else _camp_pos, 1.45)
 	# Checkpoint: every return to the map captures post-room state (HP, gold,
 	# deck changes, relics earned). Clear the room-in-progress fields first so a
 	# later resume lands on the map rather than re-entering the room the player
@@ -132,7 +141,40 @@ func _build_node_buttons() -> void:
 				hover.set(pr, int(r))
 			btn.add_theme_stylebox_override("hover", hover)
 		btn.pressed.connect(_on_node_pressed.bind(int(nd.row), int(nd.col)))
+		btn.set_meta("plate_pos", nd.pos as Vector2)
+		btn.set_meta("hit_r", r)
+		_site_buttons.append(btn)
 		add_child(btn)
+	_apply_view_to_buttons()
+
+
+## The plate draws through the view transform; the invisible hit buttons are
+## real Controls, so they get re-seated (and re-scaled) to match every time
+## the zoom or pan changes.
+func _on_view_changed() -> void:
+	_apply_view_to_buttons()
+
+
+func _apply_view_to_buttons() -> void:
+	for btn in _site_buttons:
+		if not is_instance_valid(btn):
+			continue
+		var p: Vector2 = btn.get_meta("plate_pos")
+		var r: float = btn.get_meta("hit_r")
+		btn.scale = Vector2(_view_zoom, _view_zoom)
+		btn.position = p * _view_zoom + _view_pan - Vector2(r, r) * _view_zoom
+
+
+## Ease the view from wherever it is onto a plate point — used on map open so
+## returning from a fight reads as picking the chart back up where you stand.
+func _animate_focus(world: Vector2, target_zoom: float, duration := 0.55) -> void:
+	var z0 := _view_zoom
+	var p0 := _view_pan
+	var tw := create_tween()
+	tw.tween_method(func(t: float):
+		var z: float = lerpf(z0, target_zoom, t)
+		_set_view(z, p0.lerp(size * 0.5 - world * target_zoom, t)),
+		0.0, 1.0, duration).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 
 
 func _tip(nd: Dictionary) -> String:
@@ -587,6 +629,11 @@ class MapPulseOverlay extends Control:
 	func _draw() -> void:
 		if map == null:
 			return
+		# All overlay geometry lives in plate coordinates — ride the same
+		# view transform as the terrain so rings, standard, and the march
+		# stay glued to their sites at any zoom.
+		draw_set_transform(map._view_pan, 0.0,
+			Vector2(map._view_zoom, map._view_zoom))
 		var amber: Color = map.PLAYER_AMBER
 		var crimson: Color = map.CRIMSON
 		# 1 — breathing rings on the frontier (quiet during the march).
