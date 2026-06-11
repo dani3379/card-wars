@@ -3746,14 +3746,17 @@ func _play_creature(card: Control, cost: int) -> void:
 	player_mana -= cost
 	_pulse_mana_label(cost)
 	_cards_played_this_turn += 1
+	# Flag BEFORE remove_child: pulling a hovered card out of the hand can
+	# fire its mouse_exited, and the exit handler's return-to-hand-pose
+	# branch must already see "this is a battlefield card" or it writes
+	# hand-fan coordinates onto a card being seated into a slot.
+	card.is_on_battlefield = true
+	card.current_lane = lane_idx
+	card.current_row = row
 	_hand.erase(card)
 	_hand_container.remove_child(card)
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play")
-
-	card.is_on_battlefield = true
-	card.current_lane = lane_idx
-	card.current_row = row
 	# Hand → battlefield: shrink to the compact variant so the 4x4 grid fits.
 	card.set_compact_mode(true)
 
@@ -9524,7 +9527,12 @@ func _on_field_move_started(card: Control) -> void:
 	card.global_position = home_global
 
 
-func _on_field_move_dropped(card: Control, global_pos: Vector2) -> void:
+func _on_field_move_dropped(global_pos: Vector2, card: Control) -> void:
+	# Param order matters: the signal emits global_pos and .bind(card)
+	# APPENDS the card — (signal args..., bound args). The reversed
+	# signature hard-errored on arg conversion, the handler never ran, and
+	# every field move stranded its creature on the hand layer at the raw
+	# drop position (the "played cards end up in Timbuktu" bug).
 	if not is_instance_valid(card):
 		return
 	_clear_slot_highlights()
