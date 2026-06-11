@@ -9035,20 +9035,16 @@ func _play_landing_pop(card: Control, from_global: Vector2 = Vector2.ZERO,
 				rest_parent.move_child(card, rest_index)
 		card.z_index = 0
 
-		var settle := card.create_tween()
-		settle.tween_property(card, "scale", rest_scale, 0.13).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-		settle.tween_callback(func():
-			if is_instance_valid(card) and card.has_method("enable_idle_bob"):
-				card.enable_idle_bob()
-		)
+		# Landing = the wax press (squash + impression ring + release). It
+		# re-arms the idle bob itself when the press settles.
+		if card.has_method("play_wax_press"):
+			card.play_wax_press(rest_scale)
 	else:
-		card.scale = rest_scale * 1.35
-		var tw := card.create_tween()
-		tw.tween_property(card, "scale", rest_scale, 0.22).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-		tw.tween_callback(func():
-			if is_instance_valid(card) and card.has_method("enable_idle_bob"):
-				card.enable_idle_bob()
-		)
+		# Drop-in entrance (enemy placements / repositions): arrive slightly
+		# large, then the shared wax press stamps it onto the board.
+		card.scale = rest_scale * 1.22
+		if card.has_method("play_wax_press"):
+			card.play_wax_press(rest_scale)
 
 
 func _on_card_will_die(card: Control) -> void:

@@ -1027,6 +1027,12 @@ var _hp_base_color: Color = Color.WHITE
 
 var _is_hovered := false
 var _is_being_dragged := false
+# Hover-lift motion state: the quick rise tween and the elevation shadow that
+# deepens as the card leaves the table. The shadow lives in a wrapper Control
+# because Card2D is a PanelContainer — container layout stomps a direct
+# child's inset offsets on every layout pass.
+var _hover_tween: Tween = null
+var _lift_shadow: Control = null
 # Static flag: true while ANY Card2D is being dragged anywhere. Hand siblings
 # read this in _on_mouse_entered to suppress their hover-pop animation —
 # without it, dragging a card over the rest of the hand made each neighbour
@@ -5519,6 +5525,86 @@ func set_hand_target(pos: Vector2, rot: float, scl: Vector2 = Vector2.ONE) -> vo
 		_hand_tween.tween_property(self, "scale", _hand_target_scale, 0.17)
 
 
+## Lazily builds the elevation shadow used by the hand hover-lift: a soft
+## wide drop shadow that fades in as the card rises off the table. Sits at
+## child index 0 so every layout (chart, baked overlay) renders above it.
+func _ensure_lift_shadow() -> void:
+	if _lift_shadow != null and is_instance_valid(_lift_shadow):
+		return
+	_lift_shadow = Control.new()
+	_lift_shadow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var body := Panel.new()
+	body.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var st := StyleBoxFlat.new()
+	# Invisible body, shadow-only — the same trick as the chart layout's
+	# seat/glow panels.
+	st.bg_color = Color(0, 0, 0, 0.0)
+	st.set_corner_radius_all(14)
+	st.shadow_color = Color(0, 0, 0, 0.55)
+	st.shadow_size = 26
+	st.shadow_offset = Vector2(0, 14)
+	body.add_theme_stylebox_override("panel", st)
+	body.set_anchors_preset(Control.PRESET_FULL_RECT)
+	body.offset_left = 14
+	body.offset_right = -14
+	body.offset_top = 12
+	body.offset_bottom = -4
+	_lift_shadow.add_child(body)
+	_lift_shadow.modulate.a = 0.0
+	add_child(_lift_shadow)
+	move_child(_lift_shadow, 0)
+
+
+## The wax-press landing: the card comes down onto the board and PRESSES —
+## quick squash, a radiating impression ring, then a small back-out release.
+## Replaces a plain outward scale pop: in the writ fiction, playing a card
+## is pressing a seal, not inflating a balloon. Combat calls this at the end
+## of _play_landing_pop for both player flights and enemy drop-ins.
+func play_wax_press(rest_scale: Vector2 = Vector2.ONE) -> void:
+	if static_display or get_tree() == null:
+		return
+	pivot_offset = size * 0.5
+	var tw := create_tween()
+	# Press: wider + shorter, from whatever entrance scale the landing left.
+	tw.tween_property(self, "scale",
+		Vector2(rest_scale.x * 1.06, rest_scale.y * 0.90), 0.07) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_callback(_spawn_press_ring)
+	# Release with a small overshoot, then hand off to the idle bob.
+	tw.tween_property(self, "scale", rest_scale, 0.17) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_callback(func():
+		if has_method("enable_idle_bob"):
+			enable_idle_bob()
+	)
+
+
+## One-shot impression ring for the wax press: a warm gilt outline that
+## radiates out from the card edge and fades, like the halo a seal leaves
+## in soft wax. Self-freeing.
+func _spawn_press_ring() -> void:
+	if get_tree() == null:
+		return
+	var ring := Panel.new()
+	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var st := StyleBoxFlat.new()
+	st.draw_center = false
+	st.border_color = Color(0.95, 0.84, 0.58, 0.85)
+	st.set_border_width_all(2)
+	st.set_corner_radius_all(10)
+	ring.add_theme_stylebox_override("panel", st)
+	ring.position = Vector2.ZERO
+	ring.size = size
+	ring.pivot_offset = size * 0.5
+	ring.z_index = 30
+	add_child(ring)
+	var tw := ring.create_tween().set_parallel(true)
+	tw.tween_property(ring, "scale", Vector2(1.22, 1.30), 0.30) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(ring, "modulate:a", 0.0, 0.30).set_ease(Tween.EASE_OUT)
+	tw.chain().tween_callback(ring.queue_free)
+
+
 func play_attack_lunge() -> void:
 	# Quick wind-up → thrust toward the opponent's side → recoil back. Player
 	# creatures lunge up, enemy creatures lunge down. The brief anticipation
@@ -5820,9 +5906,20 @@ func _on_mouse_entered() -> void:
 	_set_border_color(GameTheme.GILT_BRIGHT)
 	if not is_on_battlefield:
 		z_index = 10
-		scale = Vector2(1.15, 1.15)
-		rotation = 0.0
-		position = _hand_target_position + Vector2(0, -80)
+		# Hover-lift: a fast tween instead of a snap — still feels instant at
+		# 0.11s, but the card visibly RISES off the table, and the elevation
+		# shadow deepening underneath sells the lift. Cubic-out so it leads
+		# with speed and lands soft.
+		_ensure_lift_shadow()
+		if _hover_tween != null and _hover_tween.is_valid():
+			_hover_tween.kill()
+		_hover_tween = create_tween().set_parallel(true)
+		_hover_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		_hover_tween.tween_property(self, "scale", Vector2(1.15, 1.15), 0.11)
+		_hover_tween.tween_property(self, "rotation", 0.0, 0.11)
+		_hover_tween.tween_property(self, "position",
+			_hand_target_position + Vector2(0, -80), 0.11)
+		_hover_tween.tween_property(_lift_shadow, "modulate:a", 1.0, 0.13)
 	# Honour the tooltip delay setting — 0 = show instantly. The lift/scale
 	# still happens immediately; only the detail panel is deferred so brief
 	# cursor sweeps don't spam popup creation+free.
@@ -5851,11 +5948,19 @@ func _on_mouse_exited() -> void:
 		_set_border_color(_get_default_frame_tint())
 	if not is_on_battlefield:
 		z_index = 0
-		# Restore the resting hand pose set by set_hand_target — scale,
-		# rotation, and the lifted Y. pivot_offset stays at bottom-centre.
-		scale = _hand_target_scale
-		rotation = _hand_target_rotation
-		position = _hand_target_position
+		# Settle back to the resting hand pose set by set_hand_target. A
+		# touch slower than the rise — picking up is eager, putting down is
+		# gentle. If the hand re-lays-out mid-settle, set_hand_target's own
+		# tween is created later and wins per-property, so they can't fight.
+		if _hover_tween != null and _hover_tween.is_valid():
+			_hover_tween.kill()
+		_hover_tween = create_tween().set_parallel(true)
+		_hover_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		_hover_tween.tween_property(self, "scale", _hand_target_scale, 0.14)
+		_hover_tween.tween_property(self, "rotation", _hand_target_rotation, 0.14)
+		_hover_tween.tween_property(self, "position", _hand_target_position, 0.14)
+		if _lift_shadow != null and is_instance_valid(_lift_shadow):
+			_hover_tween.tween_property(_lift_shadow, "modulate:a", 0.0, 0.12)
 	_hide_detail_panel()
 
 
@@ -5909,6 +6014,12 @@ func _start_drag(mouse_pos: Vector2) -> void:
 	_is_hovered = false
 	if _hand_tween != null and _hand_tween.is_valid():
 		_hand_tween.kill()
+	# The grab sets scale/rotation directly below — a live hover-lift tween
+	# would keep writing them every frame and fight the drag.
+	if _hover_tween != null and _hover_tween.is_valid():
+		_hover_tween.kill()
+	if _lift_shadow != null and is_instance_valid(_lift_shadow):
+		_lift_shadow.modulate.a = 0.0
 	# Scale the card DOWN to ~0.85 while dragging so it doesn't obscure the
 	# board the player is trying to drop it on. Hover scale is 1.15 (a "pop"
 	# while the card sits in hand) — keeping that during drag made the card
