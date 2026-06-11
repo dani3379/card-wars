@@ -236,7 +236,7 @@ const BOSS_PHASES: Dictionary = {
 		{"threshold": 14, "passive_id": "crypt_ghost",
 			"passive_desc": "When an enemy creature dies: summon a 1/1 Swift Ghost in a random empty enemy lane.",
 			"transition_msg": "EVERY KINGDOM'S DEAD RIDE WITH HIM!",
-			"transition_effect": {"type": "summon_multiple", "name": "Risen",
+			"transition_effect": {"type": "summon_multiple", "name": "Repossessed",
 				"atk": 2, "hp": 2, "count": 2, "kw": ["last_stand"]}},
 		{"threshold": 0, "passive_id": "doom_bell",
 			"passive_desc": "Every other round the throne tolls: a ticking Cinder drops into an empty lane, and other enemies swing +1 ATK while one ticks.",
@@ -275,7 +275,7 @@ const BOSS_PHASES: Dictionary = {
 		{"threshold": 14, "passive_id": "crypt_ghost",
 			"passive_desc": "When an enemy creature dies: summon a 1/1 Swift Ghost in a random empty enemy lane.",
 			"transition_msg": "EVERY FUNERAL YOU SOLD COMES HOME!",
-			"transition_effect": {"type": "summon", "name": "Gravewarden",
+			"transition_effect": {"type": "summon", "name": "Vault Warden",
 				"atk": 2, "hp": 6, "kw": ["armored", "last_stand"]}},
 		{"threshold": 0, "passive_id": "formation_lockstep",
 			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1, and enemy front-row creatures gain Armored.",
@@ -303,11 +303,11 @@ const BOSS_PHASES: Dictionary = {
 	],
 	"rival_acolyte": [
 		{"threshold": 10, "passive_id": "altar_sacrifice",
-			"passive_desc": "Start of each round: the weakest enemy creature is offered to the Altar (+1 Charge). At 3 Charges: summon a 5/6 Champion and deal 3 face damage."},
+			"passive_desc": "Start of each round: the weakest enemy creature is offered to the Furnace Altar (+1 Charge). At 3 Charges it cashes out: summon Paid in Full (5/6) and deal 3 face damage."},
 		{"threshold": 0, "passive_id": "crypt_ghost",
 			"passive_desc": "When an enemy creature dies: summon a 1/1 Swift Ghost in a random empty enemy lane.",
 			"transition_msg": "THE DEBT COMES DUE!",
-			"transition_effect": {"type": "summon_multiple", "name": "Risen",
+			"transition_effect": {"type": "summon_multiple", "name": "Repossessed",
 				"atk": 2, "hp": 2, "count": 2, "kw": ["last_stand"]}},
 	],
 	"rival_pyromancer": [
@@ -545,28 +545,29 @@ const ENCOUNTERS: Dictionary = {
 	# faction stand-in path remains only as a safety net.
 
 	"rival_stalwart": {
-		# THE STALWART — Lord of the Last Wall (Formation). The wall grows
-		# while it stands: each body holding a line beside another gains
-		# +1/+1 at the top of every round (from round 2 — the player gets
-		# one clean read of the board first). Phase 2 closes ranks: the
-		# drill continues AND the front row goes Armored. Counterplay is
-		# reading the line — kill the middle, isolate the ends, never let
-		# two of his walls stand touching for free.
+		# THE STALWART — Lord of the Last Wall (Formation). His age of the
+		# island is the legion: drill, line-relief, the eagle that must not
+		# fall. The wall grows while it stands: each body holding a line
+		# beside another gains +1/+1 at the top of every round (from round 2
+		# — the player gets one clean read of the board first). Phase 2
+		# closes ranks: the drill continues AND the front row goes Armored.
+		# Counterplay is reading the line — kill the middle, isolate the
+		# ends, never let two of his walls stand touching for free.
 		"name": "THE STALWART", "act": 1, "type": "boss", "faction": "last_wall", "hp": 23,
 		"passive_id": "formation_drill",
 		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
-		"preamble": "He was holding this line before you had a name, and he intends to hold it after. Stone does not argue. It waits. Every round you leave his wall standing, it stands harder.",
+		"preamble": "He has lost battles in every age there is and not one war. Stone does not argue. It drills. Every round you leave his wall standing, it stands harder.",
 		"deck": [
 			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns"]},
 			{"name": "Shieldbearer", "atk": 1, "hp": 5, "kw": ["armored"]},
-			{"name": "Standard Bearer", "atk": 1, "hp": 3,
+			{"name": "Eagle-Bearer", "atk": 1, "hp": 3,
 				"adj_buff": {"atk": 1, "hp": 0},
 				"on_death": {"type": "debuff_all_player_atk", "value": 1}},
 			{"name": "Veteran", "atk": 3, "hp": 4, "kw": ["armored"]},
-			{"name": "Captain", "atk": 2, "hp": 5, "kw": ["armored"],
+			{"name": "Centurion", "atk": 2, "hp": 5, "kw": ["armored"],
 				"adj_buff": {"atk": 1, "hp": 0}},
 			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns"]},
-			{"name": "Iron Vanguard", "atk": 4, "hp": 4, "kw": ["armored", "last_stand"]},
+			{"name": "First Spear", "atk": 4, "hp": 4, "kw": ["armored", "last_stand"]},
 		],
 		"reinforcement": {"name": "Recruit", "atk": 2, "hp": 3, "kw": ["armored"]},
 		"reinforcement_pool": [
@@ -575,28 +576,30 @@ const ENCOUNTERS: Dictionary = {
 	},
 
 	"rival_raider": {
-		# THE RAIDER — Lord of the Grasswake (Overrun). The empty lane is his
-		# highway: the whole warband is Swift and chips face on entry, and the
-		# harpy_swift_face passive pays his riders +1 face damage for every
-		# attack that sails through an open lane. Phase 2 stops caring whether
-		# you walled up — the wake keeps summoning Swift bodies into his empty
-		# lanes. Counterplay is holding all four gates: every lane you leave
-		# open is a toll you pay twice.
+		# THE RAIDER — Lord of the Grasswake (Overrun). His age of the island
+		# is the horse-conquest: landless brothers over the water, forty
+		# lances to a kingdom. The empty lane is his highway: the whole
+		# warband is Swift and chips face on entry, and the harpy_swift_face
+		# passive pays his riders +1 face damage for every attack that sails
+		# through an open lane. Phase 2 stops caring whether you walled up —
+		# the wake keeps summoning Swift bodies into his empty lanes.
+		# Counterplay is holding all four gates: every lane you leave open is
+		# a toll you pay twice.
 		"name": "THE RAIDER", "act": 1, "type": "boss", "faction": "grasswake", "hp": 22,
 		"passive_id": "harpy_swift_face",
 		"passive_desc": "Enemy Swift creatures deal +1 face damage when attacking through empty lanes.",
-		"preamble": "He was crowned at a dead gallop and has not slowed down since. Every lane you leave open is a road home for him, and his riders know all of them. Wall the field, or bleed for the gaps.",
+		"preamble": "He crossed the water with forty lances and nothing to inherit, and was crowned at a dead gallop. Every lane you leave open is a road home for him, and his riders know all of them. Wall the field, or bleed for the gaps.",
 		"deck": [
 			{"name": "Outrider", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
-			{"name": "Wind Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Salt Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
 			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
 			{"name": "Banner-Bearer", "atk": 1, "hp": 3,
 				"adj_buff": {"atk": 1, "hp": 0}},
-			{"name": "Grass Runner", "atk": 2, "hp": 2, "kw": ["swift"],
+			{"name": "Wake Hound", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_death": {"type": "summon", "atk": 1, "hp": 1}},
-			{"name": "Sky Stalker", "atk": 3, "hp": 3, "kw": ["swift", "piercing"]},
-			{"name": "Storm Chief", "atk": 4, "hp": 4, "kw": ["swift"],
+			{"name": "Pennon Griffin", "atk": 3, "hp": 3, "kw": ["swift", "piercing"]},
+			{"name": "First Ashore", "atk": 4, "hp": 4, "kw": ["swift"],
 				"adj_buff": {"atk": 1, "hp": 0},
 				"on_enter": {"type": "damage_face", "value": 2}},
 		],
@@ -609,99 +612,105 @@ const ENCOUNTERS: Dictionary = {
 	},
 
 	"rival_acolyte": {
-		# THE ACOLYTE — Lord of the Owed (the Tithe). Deaths are deposits: a
-		# back-row Altar takes the weakest of his own creatures every round
+		# THE ACOLYTE — Lord of the Owed (the Tithe). His age of the island
+		# is the merchant-god city: hired spears, the furnace altar, the
+		# ledger that always balances. Deaths are deposits: a back-row
+		# Furnace Altar takes the weakest of his own creatures every round
 		# (+1 Charge — their on-deaths still fire), and at 3 Charges it cashes
-		# the lot out as a 5/6 Champion plus face damage. Half his bodies pay
-		# out on death, so killing them and sparing them both feed the ledger.
-		# Phase 2 stops banking — every death raises a Ghost on the spot. The
-		# ON_PLAYER_SACRIFICE reactive taxes your own rituals 2 face. The
-		# Altar's Charge badge is the fight's visible corpse-counter.
+		# the lot out as Paid in Full (a 5/6) plus face damage. Half his
+		# bodies pay out on death, so killing them and sparing them both feed
+		# the ledger. Phase 2 stops banking — every death raises a Ghost on
+		# the spot. The ON_PLAYER_SACRIFICE reactive taxes your own rituals
+		# 2 face. The altar's Charge badge is the fight's visible
+		# corpse-counter.
 		"name": "THE ACOLYTE", "act": 1, "type": "boss", "faction": "owed", "hp": 22,
 		"passive_id": "altar_sacrifice",
-		"passive_desc": "Start of each round: the weakest enemy creature is offered to the Altar (+1 Charge). At 3 Charges: summon a 5/6 Champion and deal 3 face damage.",
-		"preamble": "He keeps his kingdom's books, and the books are graves. Everything that dies near him is banked and spent again — his own soldiers walk to the altar smiling. You are already in the ledger.",
+		"passive_desc": "Start of each round: the weakest enemy creature is offered to the Furnace Altar (+1 Charge). At 3 Charges it cashes out: summon Paid in Full (5/6) and deal 3 face damage.",
+		"preamble": "He keeps his kingdom's books, and the books are graves. His god is a furnace that pays interest: everything that dies near him is banked and spent again, and his own soldiers walk to it smiling. You are already in the ledger.",
 		"structures": [
-			{"name": "Altar", "atk": 0, "hp": 99,
+			{"name": "Furnace Altar", "atk": 0, "hp": 99,
 				"kw": ["structure"], "charge_max": 3, "lane": 1},
 		],
 		"deck": [
 			{"name": "Initiate", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_death": {"type": "damage_face", "value": 1}},
-			{"name": "Skeleton", "atk": 2, "hp": 1, "kw": ["last_stand"]},
-			{"name": "Bone Walker", "atk": 2, "hp": 2, "kw": ["last_stand"],
+			{"name": "Debtor", "atk": 2, "hp": 1, "kw": ["last_stand"]},
+			{"name": "Collateral", "atk": 2, "hp": 2, "kw": ["last_stand"],
 				"on_death": {"type": "summon", "atk": 1, "hp": 1}},
 			{"name": "Bleeding Heart", "atk": 2, "hp": 3,
 				"on_death": {"type": "damage_all_enemies", "value": 2}},
-			{"name": "Dark Priest", "atk": 2, "hp": 4, "kw": ["regenerate"],
+			{"name": "Furnace Priest", "atk": 2, "hp": 4, "kw": ["regenerate"],
 				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
-			{"name": "Gravewarden", "atk": 2, "hp": 6, "kw": ["armored", "last_stand"]},
+			{"name": "Vault Warden", "atk": 2, "hp": 6, "kw": ["armored", "last_stand"]},
 			{"name": "Tithe Collector", "atk": 3, "hp": 5, "kw": ["piercing"],
 				"on_death": {"type": "damage_face", "value": 2}},
 		],
-		"reinforcement": {"name": "Risen", "atk": 2, "hp": 2, "kw": ["last_stand"]},
+		"reinforcement": {"name": "Repossessed", "atk": 2, "hp": 2, "kw": ["last_stand"]},
 		"reinforcement_pool": [
 			{"name": "Initiate", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_death": {"type": "damage_face", "value": 1}},
-			{"name": "Skeleton", "atk": 2, "hp": 1, "kw": ["last_stand"]},
+			{"name": "Debtor", "atk": 2, "hp": 1, "kw": ["last_stand"]},
 		],
 	},
 
 	"rival_pyromancer": {
-		# THE PYROMANCER — Lord of the Lanternhall (Foresight). The fire lord
-		# who learned the colder arithmetic: void_exile reads (and removes)
-		# the top of your draw pile every turn, his frost adepts chill your
-		# ATK on entry, and the back row snipes past your wall. Phase 2 he
+		# THE PYROMANCER — Lord of the Lanternhall (Foresight). His age of
+		# the island is the geometer's city: burning mirrors, the harbor
+		# claw, circles in the sand. The fire lord who learned the colder
+		# arithmetic: void_exile reads (and removes) the top of your draw
+		# pile every turn, his Claw Adepts shake the ATK out of whatever they
+		# face on entry, and the back row snipes past your wall. Phase 2 he
 		# stops reading and starts rewriting — your best creature's keywords
 		# get copied onto his pieces every round. Kill the fight fast; every
 		# stalled turn costs a card you might have needed.
 		"name": "THE PYROMANCER", "act": 1, "type": "boss", "faction": "lanternhall", "hp": 21,
 		"passive_id": "void_exile",
 		"passive_desc": "Start of your turn: the top card of your draw pile is exiled (removed from this fight).",
-		"preamble": "He came up burning things, like everyone from the old war. Then the library found him and taught him the colder arithmetic: why burn a thing tomorrow when you can read its ending today? He has already read yours.",
+		"preamble": "He came up burning things, like everyone from the old war. Then the library found him and taught him the colder arithmetic: mirrors, circles, why burn a thing tomorrow when you can read its ending today. He has already read yours.",
 		"deck": [
 			{"name": "Star-Reader", "atk": 2, "hp": 2, "kw": ["ranged"]},
-			{"name": "Frost Adept", "atk": 1, "hp": 3, "kw": ["ranged"],
+			{"name": "Claw Adept", "atk": 1, "hp": 3, "kw": ["ranged"],
 				"on_enter": {"type": "debuff_opposing_atk", "value": 2}},
-			{"name": "Glass Sniper", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Burning Glass", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
 			{"name": "Reflection", "atk": 2, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "copy_opposing_keywords"}},
-			{"name": "Null Beast", "atk": 3, "hp": 4,
+			{"name": "Ink Beast", "atk": 3, "hp": 4,
 				"on_enter": {"type": "discard_random"}},
 			{"name": "Hall-Watcher", "atk": 1, "hp": 6, "kw": ["thorns", "armored"]},
-			{"name": "Frost Lector", "atk": 3, "hp": 4, "kw": ["ranged"],
+			{"name": "Cold Lector", "atk": 3, "hp": 4, "kw": ["ranged"],
 				"intents": ["ATK", "ABILITY", "ATK", "ABILITY"],
 				"ability": {"type": "steal_atk", "value": 1}},
 		],
 		"reinforcement": {"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
 		"reinforcement_pool": [
 			{"name": "Star-Reader", "atk": 2, "hp": 2, "kw": ["ranged"]},
-			{"name": "Glass Sniper", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Burning Glass", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
 		],
 	},
 
 	"rival_kindler": {
-		# THE KINDLER — Lord of the Everflame (the Fuse). Nothing pays now,
-		# everything pays later: forge_burn_all cooks both boards 1 a round
-		# (his armored and regenerating bodies shrug it; your chaff doesn't),
-		# ticking Cinders ride the deck AND the reinforcement drip, and his
-		# martyrs detonate on death. Phase 2 the slow burn becomes the
-		# detonation — the doom_bell toll drops fresh bombs every other round
-		# while the host swings harder. Race him or defuse him; turtling pays
-		# his interest.
+		# THE KINDLER — Lord of the Everflame (the Fuse). His age of the
+		# island is the liquid fire: the sealed recipe, the siphons, fire
+		# that burns on water. Nothing pays now, everything pays later:
+		# forge_burn_all cooks both boards 1 a round (his armored and
+		# regenerating bodies shrug it; your chaff doesn't), ticking Cinders
+		# ride the deck AND the reinforcement drip, and his martyrs detonate
+		# on death. Phase 2 the slow burn becomes the detonation — the
+		# doom_bell toll drops fresh bombs every other round while the host
+		# swings harder. Race him or defuse him; turtling pays his interest.
 		"name": "THE KINDLER", "act": 1, "type": "boss", "faction": "everflame", "hp": 23,
 		"passive_id": "forge_burn_all",
 		"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
-		"preamble": "He feeds the fire because he remembers what it does when it goes hungry. Nothing in his camp pays its cost up front — every bomb and every martyr is a debt rolled forward to a louder day. You have arrived on the due date.",
+		"preamble": "The recipe is his alone, sealed behind his teeth, and what it makes burns on water. Nothing in his camp pays its cost up front — every bomb and every martyr is a debt rolled forward to a louder day. You have arrived on the due date.",
 		"deck": [
 			{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
 			{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
-			{"name": "Hellfire Imp", "atk": 2, "hp": 3, "kw": ["swift"],
+			{"name": "Siphon Imp", "atk": 2, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
 			{"name": "Burning Martyr", "atk": 3, "hp": 3,
 				"on_death": {"type": "damage_all_enemies", "value": 2}},
 			{"name": "Ash Hound", "atk": 4, "hp": 2, "kw": ["swift", "piercing"], "wither": 1},
-			{"name": "Coal Hulk", "atk": 2, "hp": 5, "kw": ["thorns", "armored"]},
+			{"name": "Pitch Hulk", "atk": 2, "hp": 5, "kw": ["thorns", "armored"]},
 			{"name": "Pyre Tender", "atk": 3, "hp": 5, "kw": ["regenerate"],
 				"adj_buff": {"atk": 1, "hp": 0}},
 		],
@@ -726,7 +735,7 @@ const ENCOUNTERS: Dictionary = {
 	"amalgam_acolyte": {
 		# THE ACOLYTE ASCENDANT — the Owed on the throne. You handed him
 		# three kingdoms' worth of funerals, and the dead still hold office:
-		# phase 1 raises the fallen as a Swift trickle (the storm-dead),
+		# phase 1 raises the fallen as a Swift trickle (the riderless dead),
 		# phase 2 the burned Wall closes ranks (formation_drill, the same
 		# engine THE STALWART drills), phase 3 the Everflame answers with
 		# ticking Cinders (the doom_bell toll). Each phase is a kingdom the
@@ -737,16 +746,16 @@ const ENCOUNTERS: Dictionary = {
 		"preamble": "You burned three kingdoms to reach this chair, and he thanks you for every funeral — they all marched here ahead of you. Win, and the throne is yours. Everything it owes comes with it.",
 		"deck": [
 			{"name": "Wraith", "atk": 3, "hp": 3, "kw": ["swift"]},
-			{"name": "Skeleton", "atk": 2, "hp": 1, "kw": ["last_stand"]},
-			{"name": "Bone Walker", "atk": 2, "hp": 2, "kw": ["last_stand"],
+			{"name": "Debtor", "atk": 2, "hp": 1, "kw": ["last_stand"]},
+			{"name": "Collateral", "atk": 2, "hp": 2, "kw": ["last_stand"],
 				"on_death": {"type": "summon", "atk": 1, "hp": 1}},
 			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
 			{"name": "Shieldbearer", "atk": 1, "hp": 5, "kw": ["armored"]},
-			{"name": "Gravewarden", "atk": 2, "hp": 6, "kw": ["armored", "last_stand"]},
+			{"name": "Vault Warden", "atk": 2, "hp": 6, "kw": ["armored", "last_stand"]},
 			{"name": "Risen Lich", "atk": 4, "hp": 4, "kw": ["piercing"],
 				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
 		],
-		"reinforcement": {"name": "Risen", "atk": 2, "hp": 2, "kw": ["last_stand"]},
+		"reinforcement": {"name": "Repossessed", "atk": 2, "hp": 2, "kw": ["last_stand"]},
 	},
 
 	"amalgam_raider": {
@@ -761,7 +770,7 @@ const ENCOUNTERS: Dictionary = {
 		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
 		"preamble": "You broke three kingdoms getting here, and he watched from horseback, delighted — fewer fences every time you won. Everything you tore down rides under his banner now. Win, and the throne is yours, if you can make it stand still.",
 		"deck": [
-			{"name": "Wind Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Salt Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
 			{"name": "Outrider", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
 			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
@@ -769,7 +778,7 @@ const ENCOUNTERS: Dictionary = {
 				"adj_buff": {"atk": 1, "hp": 0}},
 			{"name": "Shieldbearer", "atk": 1, "hp": 5, "kw": ["armored"]},
 			{"name": "Wraith", "atk": 3, "hp": 3, "kw": ["swift"]},
-			{"name": "Storm Chief", "atk": 4, "hp": 4, "kw": ["swift"],
+			{"name": "First Ashore", "atk": 4, "hp": 4, "kw": ["swift"],
 				"adj_buff": {"atk": 1, "hp": 0},
 				"on_enter": {"type": "damage_face", "value": 2}},
 		],
@@ -778,7 +787,7 @@ const ENCOUNTERS: Dictionary = {
 
 	"amalgam_stalwart": {
 		# THE STALWART ASCENDANT — the Last Wall on the throne. The wall
-		# learned from every kingdom it outlasted: phase 1 the storm-dead
+		# learned from every kingdom it outlasted: phase 1 the riderless dead
 		# trickle in Swift, phase 2 the Lanternhall reads your dwindling deck
 		# (top card exiled each turn), phase 3 the Everflame burns the whole
 		# hall — and his Armored line shrugs the 1-a-round burn while your
@@ -791,11 +800,11 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
 			{"name": "Shieldbearer", "atk": 1, "hp": 5, "kw": ["armored"]},
 			{"name": "Veteran", "atk": 3, "hp": 4, "kw": ["armored"]},
-			{"name": "Captain", "atk": 2, "hp": 5, "kw": ["armored"],
+			{"name": "Centurion", "atk": 2, "hp": 5, "kw": ["armored"],
 				"adj_buff": {"atk": 1, "hp": 0}},
 			{"name": "Wraith", "atk": 3, "hp": 3, "kw": ["swift"]},
-			{"name": "Gravewarden", "atk": 2, "hp": 6, "kw": ["armored", "last_stand"]},
-			{"name": "Iron Vanguard", "atk": 4, "hp": 4, "kw": ["armored", "last_stand"]},
+			{"name": "Vault Warden", "atk": 2, "hp": 6, "kw": ["armored", "last_stand"]},
+			{"name": "First Spear", "atk": 4, "hp": 4, "kw": ["armored", "last_stand"]},
 		],
 		"reinforcement": {"name": "Recruit", "atk": 2, "hp": 3, "kw": ["armored"]},
 	},
@@ -803,7 +812,7 @@ const ENCOUNTERS: Dictionary = {
 	"amalgam_pyromancer": {
 		# THE PYROMANCER ASCENDANT — the Lanternhall on the throne. The
 		# coldest ending he ever read is his own coronation: phase 1 the
-		# storm-dead trickle in Swift, phase 2 the burned Wall rebuilds
+		# riderless dead trickle in Swift, phase 2 the burned Wall rebuilds
 		# itself around his readers (+1/+1 drill), phase 3 the Owed collect —
 		# the void executes your strongest creature every round. His own
 		# bench is glass and starlight: Ranged, chilling, copying your tricks.
@@ -813,15 +822,15 @@ const ENCOUNTERS: Dictionary = {
 		"preamble": "You burned three kingdoms to reach this chair, and he read each ending a season before you wrote it. What is left of them sits beside him now, cold and catalogued and pointed at you. Win, and the throne is yours. He has already seen whether you do.",
 		"deck": [
 			{"name": "Star-Reader", "atk": 2, "hp": 3, "kw": ["ranged"]},
-			{"name": "Glass Sniper", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Burning Glass", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
 			{"name": "Reflection", "atk": 2, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "copy_opposing_keywords"}},
-			{"name": "Frost Adept", "atk": 1, "hp": 3, "kw": ["ranged"],
+			{"name": "Claw Adept", "atk": 1, "hp": 3, "kw": ["ranged"],
 				"on_enter": {"type": "debuff_opposing_atk", "value": 2}},
 			{"name": "Hall-Watcher", "atk": 1, "hp": 6, "kw": ["thorns", "armored"]},
-			{"name": "Null Beast", "atk": 3, "hp": 5,
+			{"name": "Ink Beast", "atk": 3, "hp": 5,
 				"on_enter": {"type": "discard_random"}},
-			{"name": "Frost Lector", "atk": 4, "hp": 5, "kw": ["ranged"]},
+			{"name": "Cold Lector", "atk": 4, "hp": 5, "kw": ["ranged"]},
 		],
 		"reinforcement": {"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
 	},
@@ -844,8 +853,8 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Burning Martyr", "atk": 3, "hp": 3,
 				"on_death": {"type": "damage_all_enemies", "value": 2}},
 			{"name": "Ash Hound", "atk": 4, "hp": 2, "kw": ["swift", "piercing"], "wither": 1},
-			{"name": "Coal Hulk", "atk": 2, "hp": 5, "kw": ["thorns", "armored"]},
-			{"name": "Hellfire Imp", "atk": 2, "hp": 3, "kw": ["swift"],
+			{"name": "Pitch Hulk", "atk": 2, "hp": 5, "kw": ["thorns", "armored"]},
+			{"name": "Siphon Imp", "atk": 2, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
 			{"name": "Conflagrant", "atk": 5, "hp": 5, "kw": ["piercing"],
 				"on_death": {"type": "damage_face", "value": 3}},

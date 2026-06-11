@@ -811,6 +811,16 @@ const CARD_TRIBES := {
 	"stone_wall": "construct", "iron_bastion": "construct", "warding_stone": "construct",
 	"siege_golem": "construct", "riteforge": "construct",
 	"golem": "construct", "stone_sentinel": "construct",
+
+	# SUCCESSOR WARS — rival-kit bodies (renamed per kingdom's island age)
+	"centurion": "soldier", "eagle-bearer": "soldier", "first_spear": "soldier",
+	"first_ashore": "wretch",
+	"salt_harpy": "beast", "pennon_griffin": "beast", "wake_hound": "beast",
+	"debtor": "undead", "collateral": "undead", "vault_warden": "undead",
+	"repossessed": "undead", "paid_in_full": "undead", "siphon_imp": "undead",
+	"furnace_priest": "fae", "claw_adept": "fae", "burning_glass": "fae",
+	"cold_lector": "fae", "ink_beast": "fae",
+	"pitch_hulk": "construct", "furnace_altar": "construct",
 }
 
 # DARK tribe colors — Card2D v3 (the active render path) paints the name on a

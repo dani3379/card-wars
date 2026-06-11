@@ -98,12 +98,22 @@ static func _is_word_char(c: String) -> bool:
 
 static func dispatch_on_enter(card, lane_idx: int, is_enemy: bool, ctx) -> void:
 	var data = card.card_data if card is Control else CardDB.get_card_data(card)
-	if data.is_empty() or not data.has("on_enter"):
+	if data.is_empty():
 		return
-	var effect = data.on_enter
-	_run_on_enter(effect, card, lane_idx, is_enemy, ctx)
-	if data.has("keywords") and data.keywords.has("summon"):
+	# Read the Summon keyword BEFORE the effect runs: transform on-enters
+	# (copy_friendly / copy_last_dead) graft the source's keywords onto this
+	# card mid-dispatch, and a grafted Summon must not fire as a play trigger
+	# — copies skip enter-triggers by design (see _copy_creature_onto).
+	# Keyword-only carriers (Squire Captain, Summoner) have no on_enter dict,
+	# so Summon dispatches independently of it. Combat.gd has no separate
+	# summon pass — this is the single dispatch point for both sides.
+	var summon_on_play: bool = data.has("keywords") and data.keywords.has("summon")
+	if data.has("on_enter"):
+		_run_on_enter(data.on_enter, card, lane_idx, is_enemy, ctx)
+	if summon_on_play:
 		_do_summon(lane_idx, is_enemy, ctx)
+		if not is_enemy:
+			ctx._dispatch_reactive("ON_PLAYER_SUMMON", card, lane_idx)
 
 
 static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx) -> void:

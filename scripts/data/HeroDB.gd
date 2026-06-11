@@ -108,13 +108,21 @@ const DEFAULT_HERO: String = "stalwart"
 #   hero — the lord's hero id (inverse of HEROES[x].faction).
 #   color — banner/political-wash tint for map skinning (tuned later in pixels).
 const FACTIONS: Dictionary = {
+	# History-inspired: each kingdom channels one age of the island's real
+	# past (the map IS Sicily). Grasswake = the horse-conquest (landless
+	# brothers over the water, forty lances took an island). Last Wall = the
+	# legion (drill, rank rotation, lost battles / won wars). Owed = the
+	# merchant-god city (hired spears, the furnace altar, the ledger).
+	# Lanternhall = the geometer's city (burning mirrors, the harbor claw,
+	# circles). Everflame = the liquid fire (the sealed recipe, it burns on
+	# water). Ids/mechanics untouched — texture only.
 	"grasswake": {
 		"id": "grasswake",
 		"name": "The Grasswake",
-		"element": "Storm",
+		"element": "Horse & Salt",
 		"engine": "Overrun",
 		"engine_line": "The empty lane is their highway.",
-		"lord_title": "Lord of the Grasswake",
+		"lord_title": "The Landless Brother",
 		"hero": "raider",
 		"color": Color(0.33, 0.50, 0.55),
 	},
@@ -124,27 +132,27 @@ const FACTIONS: Dictionary = {
 		"element": "Stone",
 		"engine": "Formation",
 		"engine_line": "The longer they stand, the stronger they stand.",
-		"lord_title": "Lord of the Last Wall",
+		"lord_title": "The Last Centurion",
 		"hero": "stalwart",
 		"color": Color(0.58, 0.55, 0.47),
 	},
 	"owed": {
 		"id": "owed",
 		"name": "The Owed",
-		"element": "Rot",
+		"element": "Ash & Coin",
 		"engine": "The Tithe",
 		"engine_line": "Every death here is a deposit. They collect.",
-		"lord_title": "Lord of the Owed",
+		"lord_title": "The Keeper of Ledgers",
 		"hero": "acolyte",
 		"color": Color(0.47, 0.52, 0.30),
 	},
 	"lanternhall": {
 		"id": "lanternhall",
 		"name": "The Lanternhall",
-		"element": "Frost & Star",
+		"element": "Mirror & Star",
 		"engine": "Foresight",
 		"engine_line": "They have already seen this turn.",
-		"lord_title": "Lord of the Lanternhall",
+		"lord_title": "The Measurer of Circles",
 		"hero": "pyromancer",
 		"color": Color(0.52, 0.60, 0.78),
 	},
@@ -154,7 +162,7 @@ const FACTIONS: Dictionary = {
 		"element": "Fire",
 		"engine": "The Fuse",
 		"engine_line": "Nothing pays now. Everything pays later, bigger.",
-		"lord_title": "Lord of the Everflame",
+		"lord_title": "The Keeper of the Recipe",
 		"hero": "kindler",
 		"color": Color(0.78, 0.36, 0.20),
 	},

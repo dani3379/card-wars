@@ -1162,7 +1162,7 @@ func _start_round() -> void:
 	var wave_warn: int = _next_wave_count()
 	if wave_warn >= 2:
 		if _wave_surge_pending():
-			_show_info("The fuse catches — the Everflame surges")
+			_show_info("Fire on the water — the Everflame surges")
 		else:
 			_show_info("A wave musters — %d reinforcements next round" % wave_warn)
 
@@ -2948,11 +2948,11 @@ const FACTION_WAVE_SCHEDULES: Dictionary = {
 # schedule rests this round, "surge" = the Everflame's fuse moment.
 const FACTION_WAVE_CAPTIONS: Dictionary = {
 	"grasswake": {"wave": "THE WAKE CRESTS", "none": "THE WAKE HAS PASSED"},
-	"last_wall": {"wave": "FRESH STONE — TOUGHER", "none": "THE WALL HOLDS"},
+	"last_wall": {"wave": "FRESH RANKS — TOUGHER", "none": "THE WALL HOLDS"},
 	"owed": {"wave": "THE OWED COLLECT", "none": "NO DEBTS TO COLLECT"},
-	"lanternhall": {"wave": "A LANTERN SIGNALS", "none": "THE HALL ONLY WATCHES"},
+	"lanternhall": {"wave": "A MIRROR FLASHES", "none": "THE HALL ONLY WATCHES"},
 	"everflame": {"wave": "THE FUSE BURNS DOWN", "none": "THE EVERFLAME HOLDS",
-		"surge": "THE FUSE CATCHES"},
+		"surge": "FIRE ON THE WATER"},
 }
 
 
@@ -3860,7 +3860,8 @@ func _play_creature(card: Control, cost: int) -> void:
 	# brand-new adjacency that pushed an ally from 1→2 picks up the +1 HP.
 	_apply_linked_banner_hp()
 
-	# On-enter effects
+	# On-enter effects + the Summon keyword (single dispatch point; the
+	# ON_PLAYER_SUMMON reactive fires from inside it as well).
 	KeywordEffects.dispatch_on_enter(card, lane_idx, false, self)
 	# On-play ability (formerly floop): fires immediately when the creature
 	# lands. Fire-and-forget so any modal pickers match the on-enter convention.
@@ -3926,12 +3927,6 @@ func _play_creature(card: Control, cost: int) -> void:
 		if not picked.is_empty():
 			summon_token(1, 1, picked.lane, false, picked.row)
 			_standard_bearer_fired_this_turn = true
-
-	# Summon keyword
-	if card.has_keyword("summon"):
-		KeywordEffects._do_summon(lane_idx, false, self)
-		# Reactive passive: ON_PLAYER_SUMMON
-		_dispatch_reactive("ON_PLAYER_SUMMON", card, lane_idx)
 
 	# Raider's Oath (class-restricted): playing a Swift creature refunds 1 mana
 	# this turn. Stacks with itself — multiple Swift plays each refund.
@@ -7662,13 +7657,15 @@ func _rise_from_mausoleum(mausoleum: Control) -> void:
 
 
 func _cultist_altar_tick() -> void:
-	# Cultist Enclave start-of-round: the lowest-HP cultist offers itself to
-	# the Altar, adding +1 charge. At charge 3 the Altar climaxes: summon a
-	# Cultist Champion AND deal 3 face damage. The sacrificed creature dies
-	# and triggers its on-death normally (e.g. Bleeding Heart still bombs).
+	# Altar start-of-round (Cultist Enclave's "Altar", the Owed's "Furnace
+	# Altar"): the lowest-HP creature offers itself, adding +1 charge. At
+	# charge 3 the altar climaxes: summon a champion AND deal 3 face damage.
+	# Against the Owed the champion is "Paid in Full" — ledger language. The
+	# sacrificed creature dies and triggers its on-death normally (e.g.
+	# Bleeding Heart still bombs).
 	var altar: Control = null
 	for s in _all_structures():
-		if String(s.card_data.get("name", "")) == "Altar":
+		if String(s.card_data.get("name", "")) in ["Altar", "Furnace Altar"]:
 			altar = s
 			break
 	if altar == null:
@@ -7696,15 +7693,21 @@ func _cultist_altar_tick() -> void:
 		_add_structure_charge(altar, 1)
 	# If the Altar crossed threshold, fire the climax.
 	if altar.get_meta("ready_to_ignite", false):
-		_show_combat_banner("★ CHAMPION SUMMONED ★",
-			"The Altar drinks deep.", Color(0.85, 0.30, 0.95))
+		var is_owed: bool = _encounter_faction == "owed"
+		if is_owed:
+			_show_combat_banner("★ PAID IN FULL ★",
+				"The ledger balances.", Color(0.85, 0.30, 0.95))
+		else:
+			_show_combat_banner("★ CHAMPION SUMMONED ★",
+				"The Altar drinks deep.", Color(0.85, 0.30, 0.95))
 		var burst_pos: Vector2 = altar.global_position + altar.size * altar.scale * 0.5
 		spawn_spell_burst(burst_pos, Color(0.85, 0.30, 0.95, 0.95))
 		screen_shake(12.0)
 		screen_flash(Color(0.55, 0.18, 0.75, 0.30), 0.3)
-		# Summon the Champion in an empty front lane.
+		# Summon the champion in an empty front lane.
 		var champion: Dictionary = EncounterDB.make_card_data({
-			"name": "Cultist Champion", "atk": 5, "hp": 6,
+			"name": "Paid in Full" if is_owed else "Cultist Champion",
+			"atk": 5, "hp": 6,
 			"kw": ["piercing"],
 			"on_enter": {"type": "damage_face", "value": 2},
 		})
@@ -8227,6 +8230,41 @@ const PRESENCE_BARKS := {
 		"phase": "Rise. RISE.",
 		"slay": "Welcome to the choir.",
 	},
+
+	# Successor Wars rival lords — each voiced by the island age his kingdom
+	# channels (the horse-conquest, the legion, the merchant-god city, the
+	# geometer's city, the liquid fire). Throne amalgams reuse these via the
+	# amalgam_ → rival_ fallback in _pick_bark.
+	"rival_raider": {
+		"enter": "I came over the water with nothing. Look at everything you have brought me.",
+		"hurt": ["A toll. Every road has one.", "I have been unhorsed before. I land riding."],
+		"phase": "EVERY OPEN GATE IS MINE.",
+		"slay": "Your land now. It was always going to be somebody's.",
+	},
+	"rival_stalwart": {
+		"enter": "You are not the first to reach this wall. You are not even this morning's first.",
+		"hurt": ["The line holds.", "Close the rank. Step over him."],
+		"phase": "CLOSE RANKS.",
+		"slay": "Stand down. The wall stands.",
+	},
+	"rival_acolyte": {
+		"enter": "Sit. The ledger has a line for you — it has had one for years.",
+		"hurt": ["Noted.", "An expense. It will be recouped."],
+		"phase": "ALL ACCOUNTS COME DUE.",
+		"slay": "Paid in full.",
+	},
+	"rival_pyromancer": {
+		"enter": "I measured this fight last winter. Proceed.",
+		"hurt": ["Within tolerance.", "An error of one degree. Corrected."],
+		"phase": "NOW THE MIRRORS TURN.",
+		"slay": "Do not disturb my circles.",
+	},
+	"rival_kindler": {
+		"enter": "You came for the recipe. It is not written down. It is poured.",
+		"hurt": ["Feed it to the fire.", "It burns on water. What were you hoping?"],
+		"phase": "NOW IT POURS.",
+		"slay": "Burn gently. You were kindling all along.",
+	},
 }
 
 
@@ -8478,6 +8516,9 @@ func _update_presence_hp() -> void:
 
 func _pick_bark(kind: String) -> String:
 	var bset: Dictionary = PRESENCE_BARKS.get(_encounter_id, {})
+	if bset.is_empty():
+		# Throne amalgams speak with their lord's rival-kit voice.
+		bset = PRESENCE_BARKS.get(_encounter_id.replace("amalgam_", "rival_"), {})
 	var lines = bset.get(kind, null)
 	if lines == null:
 		lines = PRESENCE_BARKS["_generic"].get(kind, null)
