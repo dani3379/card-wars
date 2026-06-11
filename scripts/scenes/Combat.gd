@@ -9661,7 +9661,10 @@ func _build_incoming_damage_chip() -> void:
 	chip.anchor_right = 1.0
 	chip.anchor_top = 0.0
 	chip.anchor_bottom = 0.0
-	chip.offset_left = -160
+	# Full column width (-250..-14), matching the enemy plate and the wave
+	# chip above/below it — the ragged right rail (three different widths)
+	# was a big part of the "unfinished building" read.
+	chip.offset_left = -250
 	chip.offset_right = -14
 	chip.offset_top = 324
 	chip.offset_bottom = 382
@@ -9867,10 +9870,20 @@ func _build_enemy_banner_diegetic() -> void:
 	_enemy_presence = banner
 	banner.pivot_offset = Vector2(W * 0.5, H * 0.5)
 
-	# Dark backdrop so the portrait never blends into the meadow background.
-	var bg := ColorRect.new()
+	# Ink-board backing with a dark edge — the same plate material the cards
+	# mount their art on, so the antagonist reads as a framed instrument of
+	# the war room rather than a photo on a void.
+	var bg := Panel.new()
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
-	bg.color = Color(0.08, 0.03, 0.03, 0.92)
+	var bg_st := StyleBoxFlat.new()
+	bg_st.bg_color = Color(0.075, 0.052, 0.042, 0.95)
+	bg_st.border_color = Color(0.02, 0.012, 0.01, 0.9)
+	bg_st.set_border_width_all(1)
+	bg_st.set_corner_radius_all(4)
+	bg_st.shadow_color = Color(0, 0, 0, 0.5)
+	bg_st.shadow_size = 10
+	bg_st.shadow_offset = Vector2(0, 4)
+	bg.add_theme_stylebox_override("panel", bg_st)
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	banner.add_child(bg)
 
@@ -9937,20 +9950,23 @@ func _build_enemy_banner_diegetic() -> void:
 	banner.add_child(pflash)
 	_presence_flash = pflash
 
-	# Painted border wraps the WHOLE plate (portrait + HP bar) so the bar reads
-	# as the base of one framed panel — not a pill hanging outside the frame.
-	if _slot_frame_tex != null:
-		var frame := NinePatchRect.new()
-		frame.texture = _slot_frame_tex
-		frame.set_anchors_preset(Control.PRESET_FULL_RECT)
-		frame.patch_margin_left = 52
-		frame.patch_margin_right = 52
-		frame.patch_margin_top = 52
-		frame.patch_margin_bottom = 52
-		frame.draw_center = false
-		frame.modulate = Color(0.85, 0.30, 0.20, 0.90)
-		frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		banner.add_child(frame)
+	# Metal fillet wraps the WHOLE plate (portrait + HP plaque) — the card
+	# art-plate language, in the foe's oxblood metal. (The old tinted
+	# nine-patch read as a thin smudge and was the "unfinished" tell here.)
+	var fillet := Panel.new()
+	fillet.set_anchors_preset(Control.PRESET_FULL_RECT)
+	fillet.offset_left = 4
+	fillet.offset_top = 4
+	fillet.offset_right = -4
+	fillet.offset_bottom = -4
+	var fil_st := StyleBoxFlat.new()
+	fil_st.draw_center = false
+	fil_st.border_color = Color(0.60, 0.24, 0.18, 0.85)
+	fil_st.set_border_width_all(1)
+	fil_st.set_corner_radius_all(2)
+	fillet.add_theme_stylebox_override("panel", fil_st)
+	fillet.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner.add_child(fillet)
 
 	# Foe identity lives in the big encounter-name title in the center HUD
 	# (_floor_label). The portrait stays a clean icon + HP medallion instead of
@@ -10032,10 +10048,19 @@ func _build_player_banner_diegetic() -> void:
 	banner.mouse_filter = Control.MOUSE_FILTER_PASS
 	_hud_layer.add_child(banner)
 
-	# Dark backdrop behind the portrait so it doesn't blend into the meadow.
-	var bg := ColorRect.new()
+	# Ink-board backing with a dark edge — mirrors the enemy plate's material
+	# so the two columns read as a matched pair of instruments.
+	var bg := Panel.new()
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
-	bg.color = Color(0.06, 0.04, 0.03, 0.92)
+	var bg_st := StyleBoxFlat.new()
+	bg_st.bg_color = Color(0.062, 0.048, 0.038, 0.95)
+	bg_st.border_color = Color(0.02, 0.012, 0.01, 0.9)
+	bg_st.set_border_width_all(1)
+	bg_st.set_corner_radius_all(4)
+	bg_st.shadow_color = Color(0, 0, 0, 0.5)
+	bg_st.shadow_size = 10
+	bg_st.shadow_offset = Vector2(0, 4)
+	bg.add_theme_stylebox_override("panel", bg_st)
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	banner.add_child(bg)
 
@@ -10055,20 +10080,22 @@ func _build_player_banner_diegetic() -> void:
 		img.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		banner.add_child(img)
 
-	# Painted border wraps the WHOLE plate (portrait + HP bar) so the bar reads
-	# as the base of one framed panel — not a pill hanging outside the frame.
-	if _slot_frame_tex != null:
-		var frame := NinePatchRect.new()
-		frame.texture = _slot_frame_tex
-		frame.set_anchors_preset(Control.PRESET_FULL_RECT)
-		frame.patch_margin_left = 52
-		frame.patch_margin_right = 52
-		frame.patch_margin_top = 52
-		frame.patch_margin_bottom = 52
-		frame.draw_center = false
-		frame.modulate = Color(0.95, 0.78, 0.32, 0.90)
-		frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		banner.add_child(frame)
+	# Metal fillet wraps the WHOLE plate — the player's bronze to the foe's
+	# oxblood (same card art-plate language on both columns).
+	var fillet := Panel.new()
+	fillet.set_anchors_preset(Control.PRESET_FULL_RECT)
+	fillet.offset_left = 4
+	fillet.offset_top = 4
+	fillet.offset_right = -4
+	fillet.offset_bottom = -4
+	var fil_st := StyleBoxFlat.new()
+	fil_st.draw_center = false
+	fil_st.border_color = Color(0.62, 0.48, 0.26, 0.85)
+	fil_st.set_border_width_all(1)
+	fil_st.set_corner_radius_all(2)
+	fillet.add_theme_stylebox_override("panel", fil_st)
+	fillet.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner.add_child(fillet)
 
 	# Bar inset inside the frame's painted border so it nests within the plate.
 	var hp := _make_hp_medallion_diegetic(false, player_hp, player_max_hp)
@@ -10092,20 +10119,21 @@ func _make_hp_medallion_diegetic(is_enemy: bool, hp: int, max_hp: int) -> Contro
 	var disc := Panel.new()
 	disc.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-	var rim: Color = Color(0.95, 0.40, 0.25, 1.0) if is_enemy \
-		else Color(0.95, 0.78, 0.32, 1.0)
-	var bg: Color = Color(0.16, 0.04, 0.04, 0.94) if is_enemy \
-		else Color(0.14, 0.08, 0.03, 0.94)
-
+	# Ink plaque, not a UI pill: warm ink board, a restrained metal rim
+	# (bronze for the player, oxblood for the foe), square-ish document
+	# corners. The old 14px-radius lozenge with a saturated 3px rim was the
+	# single loudest "unfinished mobile UI" read on the screen.
+	var rim: Color = Color(0.66, 0.20, 0.15, 0.95) if is_enemy \
+		else Color(0.62, 0.48, 0.26, 0.95)
 	var s := StyleBoxFlat.new()
-	s.bg_color = bg
+	s.bg_color = Color(0.092, 0.070, 0.052, 0.96)
 	s.border_color = rim
 	for k in ["border_width_top", "border_width_bottom",
 			"border_width_left", "border_width_right"]:
-		s.set(k, 3)
+		s.set(k, 2)
 	for k in ["corner_radius_top_left", "corner_radius_top_right",
 			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
-		s.set(k, 14)
+		s.set(k, 5)
 	s.shadow_color = Color(0, 0, 0, 0.55)
 	s.shadow_size = 6
 	s.shadow_offset = Vector2(0, 3)
@@ -10123,8 +10151,11 @@ func _make_hp_medallion_diegetic(is_enemy: bool, hp: int, max_hp: int) -> Contro
 	# the fill spans the 170px interior (182 − 2·PAD). Stored as meta so
 	# _update_hud scales the drain tween to this exact width.
 	var full_w: float = 170.0
-	var fill_color: Color = Color(0.86, 0.20, 0.16) if is_enemy \
-		else Color(0.80, 0.18, 0.15)
+	# Sealing-wax bar, matte: oxblood with a faint cooled-sheen top line —
+	# the bar IS the wax poured into the plaque's channel. (The old fill was
+	# saturated crimson with a glossy gel highlight.)
+	var fill_color: Color = Color(0.55, 0.135, 0.10) if is_enemy \
+		else Color(0.50, 0.125, 0.10)
 	var fill := Panel.new()
 	fill.name = "Fill"
 	fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -10139,15 +10170,13 @@ func _make_hp_medallion_diegetic(is_enemy: bool, hp: int, max_hp: int) -> Contro
 	fill.set_meta("full_w", full_w)
 	var fill_style := StyleBoxFlat.new()
 	fill_style.bg_color = fill_color
-	fill_style.corner_radius_top_left = 10
-	fill_style.corner_radius_bottom_left = 10
-	fill_style.corner_radius_top_right = 3
-	fill_style.corner_radius_bottom_right = 3
-	# Brighter top edge = a glossy highlight line so the bar reads as a filled
-	# liquid/gel, not a flat block.
-	fill_style.border_width_top = 2
-	fill_style.border_color = Color(fill_color.r + 0.18, fill_color.g + 0.14,
-		fill_color.b + 0.12, 0.85)
+	fill_style.corner_radius_top_left = 4
+	fill_style.corner_radius_bottom_left = 4
+	fill_style.corner_radius_top_right = 2
+	fill_style.corner_radius_bottom_right = 2
+	fill_style.border_width_top = 1
+	fill_style.border_color = Color(minf(fill_color.r * 1.35, 1.0),
+		minf(fill_color.g * 1.35, 1.0), minf(fill_color.b * 1.35, 1.0), 0.50)
 	fill.add_theme_stylebox_override("panel", fill_style)
 	disc.add_child(fill)
 
@@ -10438,8 +10467,13 @@ func _build_mana_post_diegetic() -> void:
 	_mana_label.add_theme_constant_override("outline_size", 6)
 	post.add_child(_mana_label)
 
-	# Caption below ("MANA") so newcomers can identify the resource.
-	var caption := _make_text_label("MANA", 12, Color(0.58, 0.82, 1.0))
+	# Caption below — letterspaced Cinzel in dim gilt, the chart-caption
+	# voice (the old light-blue Nunito "MANA" read as a debug label and was
+	# the loudest cheap note on the bottom rail).
+	var caption := _make_text_label("M A N A", 11,
+		Color(GILT.r, GILT.g, GILT.b, 0.85))
+	if GameTheme.font_title != null:
+		caption.add_theme_font_override("font", GameTheme.font_title)
 	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	caption.anchor_left = 0.0
 	caption.anchor_right = 1.0
