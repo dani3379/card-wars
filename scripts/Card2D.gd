@@ -683,6 +683,11 @@ var deck_uid: int = -1
 # When true, _build_layout dispatches to _build_redesign_proto so the live game
 # (which never sets this) is completely unaffected.
 @export var redesign_proto: bool = false
+# v7 "campaign document" frame A/B (takes precedence over redesign_proto).
+# Cards join the antique-chart material world of the map plate / tooltips /
+# rest banners: ink board, per-rarity metal rules, wax-seal stats, gilt
+# Cinzel nameplate. Harness-only until promoted.
+@export var chart_proto: bool = false
 # Keyword-treatment A/B for the redesign prototype only. 0 = pill shelf,
 # 1 = drop (no icon row), 2 = engraved recessed plaque, 3 = stamps on the
 # art's lower-left, 4 = 40px orb rail, 5 = 56px orbs (stat-orb parity).
@@ -1332,6 +1337,9 @@ func _find_card_art() -> Texture2D:
 func _build_layout() -> void:
 	if card_data.is_empty():
 		return
+	if chart_proto:
+		_build_chart_proto()
+		return
 	if redesign_proto:
 		_build_redesign_proto()
 		return
@@ -1357,13 +1365,15 @@ func _build_layout() -> void:
 		else:
 			_build_full_layout_v4()
 	elif GameTheme.USE_NEW_FRAME:
-		# v6 redesign promoted to live. The in-hand card and every static card
-		# display flow through this branch; so does the CardTextureCache bake
-		# (it sets static_display + bake_strip_stats but no layout flag), so the
-		# baked texture is the redesign with blank numerals and the baked-overlay
-		# live labels land on the orbs (positions match v3). Battlefield tokens
-		# use compact_mode above; the render harness still sets redesign_proto.
-		_build_redesign_proto()
+		# v7 "campaign document" frame promoted to live (was the v6 proto —
+		# kept selectable via redesign_proto for reference). The in-hand card
+		# and every static card display flow through this branch; so does the
+		# CardTextureCache bake (it sets static_display + bake_strip_stats but
+		# no layout flag), so the baked texture is the chart frame with blank
+		# numerals and the baked-overlay live labels land on the wax seals
+		# (same 56px corner boxes as v3/v6). Battlefield tokens use
+		# compact_mode above.
+		_build_chart_proto()
 	else:
 		_build_full_layout()
 
@@ -1436,10 +1446,11 @@ func _build_compact_layout() -> void:
 	# the light-on-red HP read fine). White-with-dark-outline reads on any
 	# fill, which is why every AAA card game stamps stats that way.
 	if is_creature():
-		var c_atk := GemOrb.new()
-		c_atk.shape = "circle"
-		c_atk.style = "smooth"
-		c_atk.fill_color = GameTheme.ATK_GOLD_SHIELD
+		# v7 chart material: matte wax seals (same 38px boxes + 18px light
+		# numerals — the verified battlefield-legibility setup — only the
+		# glossy sphere paint changed).
+		var token_metal := Color(0.62, 0.50, 0.26)
+		var c_atk := _chart_seal(GameTheme.ATK_GOLD_SHIELD, token_metal)
 		c_atk.anchor_left = 0.0; c_atk.anchor_right = 0.0
 		c_atk.anchor_top = 1.0;  c_atk.anchor_bottom = 1.0
 		c_atk.offset_left = 3;   c_atk.offset_right = 41
@@ -1450,10 +1461,7 @@ func _build_compact_layout() -> void:
 		c_atk.add_child(_atk_label)
 		_atk_badge = null
 
-		var c_hp := GemOrb.new()
-		c_hp.shape = "circle"
-		c_hp.style = "smooth"
-		c_hp.fill_color = GameTheme.HEALTH_RED_DROP
+		var c_hp := _chart_seal(GameTheme.HEALTH_RED_DROP, token_metal)
 		c_hp.anchor_left = 1.0; c_hp.anchor_right = 1.0
 		c_hp.anchor_top = 1.0;  c_hp.anchor_bottom = 1.0
 		c_hp.offset_left = -41; c_hp.offset_right = -3
@@ -1500,19 +1508,24 @@ func _build_compact_layout() -> void:
 			kw_icons.append(icon_tex)
 			if kw_icons.size() >= 3:
 				break
-		# Glossy arcane-violet orbs at stat-orb parity (30px vs the token's 32px
-		# ATK/HP gems) so keywords read at a glance; the flat 20px gold glyphs
-		# washed into the art. Same GemOrb sphere as the stat orbs.
+		# v7 chart material: ink roundels with a metal rim + gilt glyph (same
+		# 30px seats as the old violet gems — keywords still read at a glance,
+		# now in the same material family as the hand card's rail).
 		if kw_icons.size() > 0:
 			var kw_orb := 30.0
 			var kw_gap := 4.0
 			var kw_total := float(kw_icons.size()) * kw_orb + float(kw_icons.size() - 1) * kw_gap
 			for i in range(kw_icons.size()):
-				var korb := GemOrb.new()
-				korb.shape = "circle"
-				korb.style = "smooth"
-				korb.fill_color = Color(0.247, 0.153, 0.376)  # deep arcane violet
-				korb.gloss = 0.42  # calmer than stat orbs so the gilt glyph reads
+				var korb := Panel.new()
+				var kost := StyleBoxFlat.new()
+				kost.bg_color = Color(0.105, 0.088, 0.066, 0.97)
+				kost.border_color = Color(0.62, 0.50, 0.26, 0.85)
+				kost.set_border_width_all(1)
+				kost.set_corner_radius_all(999)
+				kost.shadow_color = Color(0, 0, 0, 0.45)
+				kost.shadow_size = 3
+				kost.shadow_offset = Vector2(0, 1)
+				korb.add_theme_stylebox_override("panel", kost)
 				korb.anchor_left = 1.0; korb.anchor_right = 1.0
 				korb.anchor_top = 0.0; korb.anchor_bottom = 0.0
 				korb.offset_left = -4.0 - kw_total + float(i) * (kw_orb + kw_gap)
@@ -1691,7 +1704,9 @@ func _build_baked_overlay_layout() -> void:
 		atk_slot.offset_top = -47; atk_slot.offset_bottom = 9
 		atk_slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		root.add_child(atk_slot)
-		_atk_base_color = Color(0.10, 0.07, 0.02)  # dark-on-gold, matches v4
+		# Light cream on the v7 burnished-bronze wax seal (the old dark-on-gold
+		# was tuned for the bright v3/v6 sphere and vanishes on the seal).
+		_atk_base_color = Color(1.000, 0.957, 0.839)
 		_atk_label = _make_stat_number(str(current_atk), _atk_base_color, 0,
 			Color(1.00, 0.78, 0.20, 0.90))
 		atk_slot.add_child(_atk_label)
@@ -2897,6 +2912,739 @@ func _kw_orbs_rail(root: Control, meds: Array, box: float = 40.0) -> void:
 		glyph.modulate = GameTheme.GILT_BRIGHT
 		glyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		orb.add_child(glyph)
+
+
+# ═══════════════════════════════════════════
+#  V8 "CAMPAIGN WRIT" — gated by `chart_proto` (evolved in place from the
+#  v7 dark-board draft; git history holds v7).
+#  The card IS the campaign paper now: the same aged parchment the Sicily
+#  plate and the tooltips are printed on, with the document furniture set
+#  ON the material — per-rarity METAL double rules over an ink keyline,
+#  the painted art mounted big as an ink-matted, gilt-filleted plate, a
+#  dark-ink name cartouche with a gilt Cinzel name, the rules text written
+#  straight onto the ruled page (no floating well), keyword devices
+#  ink-stamped in the bottom margin (never pinned over the painting), and
+#  the stats as real pressed WAX SEALS with seeded irregular silhouettes.
+#  Cost/ATK/HP seal boxes keep the exact v3/v6 56px corner seats, so the
+#  bake-overlay contract is untouched.
+# ═══════════════════════════════════════════
+
+## A pressed wax seal, fully procedural. The silhouette is a seeded blob —
+## every seal cools a little differently — with a cooled-rim edge, a
+## stamped impression ring whose lit wall faces away from the top-left
+## light, and a matte sheen. No specular ball highlights anywhere: this is
+## wax on paper, not polished glass.
+class WaxSeal extends Control:
+	var wax := Color(0.5, 0.15, 0.1)
+	var seed_text := "seal"
+
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _blob(center: Vector2, base_r: float, n: int = 28) -> PackedVector2Array:
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash(seed_text)
+		var ph1 := rng.randf() * TAU
+		var ph2 := rng.randf() * TAU
+		var amp1 := 0.030 + rng.randf() * 0.022
+		var amp2 := 0.020 + rng.randf() * 0.016
+		var pts := PackedVector2Array()
+		for i in range(n):
+			var a := TAU * float(i) / float(n)
+			var w := 1.0 + amp1 * sin(a * 3.0 + ph1) + amp2 * sin(a * 7.0 + ph2)
+			pts.append(center + Vector2(cos(a), sin(a)) * base_r * w)
+		return pts
+
+	func _draw() -> void:
+		var min_dim := minf(size.x, size.y)
+		if min_dim <= 6.0:
+			return
+		var center := size * 0.5
+		var base_r := min_dim * 0.5 - 1.5
+		# 1 — cast shadow: two stacked soft blobs anchor the seal to the page.
+		draw_colored_polygon(_blob(center + Vector2(0.6, 2.4), base_r * 1.03),
+			Color(0, 0, 0, 0.26))
+		draw_colored_polygon(_blob(center + Vector2(0.3, 1.2), base_r * 1.01),
+			Color(0, 0, 0, 0.20))
+		# 2 — the wax body.
+		var body := _blob(center, base_r)
+		draw_colored_polygon(body, wax)
+		# 3 — cooled rim: the darker edge line doubles as silhouette AA
+		# (draw_colored_polygon has no antialiased flag; the AA polyline
+		# straddling the boundary smooths it).
+		var closed := body.duplicate()
+		closed.append(body[0])
+		draw_polyline(closed,
+			Color(wax.r * 0.50, wax.g * 0.50, wax.b * 0.54, 0.85), 2.2, true)
+		# 4 — stamp impression: dark groove ring, lit wall on the side away
+		# from the top-left light (+y is down: 0.04..0.36 TAU = lower-right).
+		var ring_r := base_r * 0.72
+		draw_arc(center, ring_r, 0, TAU, 40,
+			Color(wax.r * 0.42, wax.g * 0.42, wax.b * 0.46, 0.65), 1.8, true)
+		draw_arc(center, ring_r + 1.5, TAU * 0.04, TAU * 0.36, 26,
+			Color(minf(wax.r * 1.45 + 0.06, 1.0), minf(wax.g * 1.45 + 0.06, 1.0),
+			minf(wax.b * 1.45 + 0.06, 1.0), 0.40), 1.2, true)
+		# 5 — pressed face, a touch darker so the cream numeral pops.
+		draw_circle(center, ring_r - 2.5, Color(0, 0, 0, 0.10), true, -1.0, true)
+		# 6 — matte sheen: one soft crescent toward the light (PI..1.5PI =
+		# left → up-left → up), wide and dim — wax, not glass.
+		draw_arc(center, base_r * 0.55, PI * 1.02, PI * 1.55, 18,
+			Color(1.0, 0.96, 0.88, 0.13), 2.2, true)
+		# 7 — seeded micro-nicks: cooled-wax imperfections.
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash(seed_text) + 7
+		for i in range(3):
+			var a := rng.randf() * TAU
+			var rr := base_r * (0.30 + rng.randf() * 0.45)
+			draw_circle(center + Vector2(cos(a), sin(a)) * rr,
+				0.8 + rng.randf() * 1.0,
+				Color(1, 1, 1, 0.05 + rng.randf() * 0.05), true, -1.0, true)
+
+
+## Aged-paper tooth for the card leaf: seeded mottling washes, lighter
+## sizing patches, foxing specks, fiber hairlines, and an edge toast that
+## follows the rounded corner. It's a painter (not a stack of full-rect
+## texture tiles) precisely so nothing leaks past the corner radius onto
+## the background. Deterministic per seed — bakes are stable.
+class ParchmentPlate extends Control:
+	var seed_text := "leaf"
+	var corner_radius := 8.0
+	var stain := Color(0.455, 0.341, 0.196)
+	var lift := Color(0.973, 0.945, 0.851)
+	var fox := Color(0.408, 0.263, 0.118)
+	var toast := Color(0.298, 0.208, 0.110)
+	var strength := 1.0
+
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	## Rounded-rect outline path at `inset`, subdivided so per-segment alpha
+	## jitter reads as hand-inked wobble instead of one tone per edge.
+	func _rr_path(inset: float) -> PackedVector2Array:
+		var r := maxf(corner_radius - inset, 0.5)
+		var w := size.x - inset * 2.0
+		var h := size.y - inset * 2.0
+		var raw := PackedVector2Array()
+		var corners := [
+			[Vector2(inset + r, inset + r), PI, PI * 1.5],
+			[Vector2(inset + w - r, inset + r), PI * 1.5, TAU],
+			[Vector2(inset + w - r, inset + h - r), 0.0, PI * 0.5],
+			[Vector2(inset + r, inset + h - r), PI * 0.5, PI],
+		]
+		for c in corners:
+			var ctr: Vector2 = c[0]
+			var a0: float = c[1]
+			var a1: float = c[2]
+			for s in range(6):
+				var a := lerpf(a0, a1, float(s) / 5.0)
+				raw.append(ctr + Vector2(cos(a), sin(a)) * r)
+		raw.append(raw[0])
+		var pts := PackedVector2Array()
+		for j in range(raw.size() - 1):
+			pts.append(raw[j])
+			var seg_len := raw[j].distance_to(raw[j + 1])
+			if seg_len > 14.0:
+				var chunks := int(ceil(seg_len / 14.0))
+				for k in range(1, chunks):
+					pts.append(raw[j].lerp(raw[j + 1], float(k) / float(chunks)))
+		pts.append(raw[raw.size() - 1])
+		return pts
+
+	func _draw() -> void:
+		if size.x <= 4.0 or size.y <= 4.0:
+			return
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash(seed_text)
+		# 1 — mottled sepia washes: the sizing ages unevenly.
+		for i in range(11):
+			var p := Vector2(rng.randf() * size.x, rng.randf() * size.y)
+			var r := lerpf(size.x * 0.14, size.x * 0.40, rng.randf())
+			var a := (0.028 + rng.randf() * 0.036) * strength
+			draw_circle(p, r, Color(stain.r, stain.g, stain.b, a),
+				true, -1.0, true)
+		# 2 — lighter patches where the sizing held.
+		for i in range(5):
+			var p := Vector2(rng.randf() * size.x, rng.randf() * size.y)
+			var r := lerpf(size.x * 0.10, size.x * 0.28, rng.randf())
+			draw_circle(p, r,
+				Color(lift.r, lift.g, lift.b, 0.025 + rng.randf() * 0.030),
+				true, -1.0, true)
+		# 3 — foxing specks.
+		for i in range(28):
+			var p := Vector2(rng.randf() * size.x, rng.randf() * size.y)
+			draw_circle(p, 0.6 + rng.randf() * 1.2,
+				Color(fox.r, fox.g, fox.b,
+				minf((0.055 + rng.randf() * 0.085) * strength, 0.30)),
+				true, -1.0, true)
+		# 4 — fiber hairlines.
+		for i in range(30):
+			var p := Vector2(rng.randf() * size.x, rng.randf() * size.y)
+			var dir := Vector2.from_angle(rng.randf() * TAU)
+			draw_line(p, p + dir * (3.0 + rng.randf() * 7.0),
+				Color(stain.r, stain.g, stain.b, 0.035 + rng.randf() * 0.045),
+				1.0, true)
+		# 5 — edge toast: nested rounded outlines, alpha-jittered per segment,
+		# strongest at the rim and fading inward.
+		for k in range(5):
+			var path := _rr_path(1.0 + float(k) * 1.6)
+			var base_a := (0.105 - float(k) * 0.019) * strength
+			for j in range(path.size() - 1):
+				draw_line(path[j], path[j + 1],
+					Color(toast.r, toast.g, toast.b,
+					base_a * (0.7 + rng.randf() * 0.6)),
+					2.6 - float(k) * 0.3, true)
+
+# ═══════════════════════════════════════════
+
+## Border/rule metal per rarity — the quiet rarity language (plus the glow).
+func _chart_metal(rarity: String) -> Color:
+	if CardDB.is_curse(String(card_data.get("id", ""))):
+		return Color(0.55, 0.52, 0.45)            # weathered bone
+	match rarity:
+		"rare":     return Color(0.87, 0.69, 0.30)  # gold
+		"uncommon": return Color(0.71, 0.75, 0.79)  # silver
+		"starter":  return Color(0.52, 0.50, 0.46)  # pewter
+	return Color(0.64, 0.48, 0.27)                 # common — aged bronze
+
+
+## A rectangular rule (border only) inset uniformly from the card edge.
+func _chart_rule(parent: Control, inset: float, width: int, col: Color,
+		radius: int) -> void:
+	var r := Panel.new()
+	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	r.set_anchors_preset(Control.PRESET_FULL_RECT)
+	r.offset_left = inset
+	r.offset_top = inset
+	r.offset_right = -inset
+	r.offset_bottom = -inset
+	var st := StyleBoxFlat.new()
+	st.draw_center = false
+	st.border_color = col
+	st.set_border_width_all(width)
+	st.set_corner_radius_all(radius)
+	r.add_theme_stylebox_override("panel", st)
+	parent.add_child(r)
+
+
+## A small rotated-square finial — the cartouche diamond, sized for cards.
+func _chart_diamond(parent: Control, center: Vector2, size_px: float,
+		col: Color) -> void:
+	var d := Panel.new()
+	d.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var st := StyleBoxFlat.new()
+	st.bg_color = col
+	st.border_color = Color(0.05, 0.04, 0.03, 0.9)
+	st.set_border_width_all(1)
+	d.add_theme_stylebox_override("panel", st)
+	d.size = Vector2(size_px, size_px)
+	d.pivot_offset = d.size * 0.5
+	d.rotation_degrees = 45.0
+	d.position = center - d.pivot_offset
+	parent.add_child(d)
+
+
+## A pressed wax seal (see WaxSeal). The caller seats it (56px box on the
+## hand card, 38px on the field token) and parents the numeral label onto
+## it. The metal param is kept for call-site compatibility — real wax sits
+## directly on the paper, no metal bezel.
+func _chart_seal(wax: Color, _metal: Color) -> Control:
+	var seal := WaxSeal.new()
+	seal.wax = wax
+	# Seed per card AND per stat color so the three seals on one card cool
+	# into three different blobs, but every bake of the same card matches.
+	seal.seed_text = String(card_data.get("id", "?")) + wax.to_html(false)
+	return seal
+
+
+## Keyword devices, writ edition: a centered row of ink-stamped roundels
+## in the document's bottom margin — printed ON the paper, never pinned
+## over the painting (the art plate stays clean; that was v7's mistake).
+func _kw_stamp_row(root: Control, meds: Array, metal: Color) -> void:
+	var n: int = min(meds.size(), 3)
+	if n == 0:
+		return
+	var box := 25.0
+	var gap := 6.0
+	var inset: float = box * 0.20
+	var total := box * float(n) + gap * float(n - 1)
+	var x0 := 112.5 - total * 0.5
+	for i in range(n):
+		var stamp := Panel.new()
+		stamp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var sst := StyleBoxFlat.new()
+		sst.bg_color = Color(0.165, 0.133, 0.098, 0.96)
+		sst.border_color = Color(metal.r, metal.g, metal.b, 0.80)
+		sst.set_border_width_all(1)
+		sst.set_corner_radius_all(999)
+		sst.shadow_color = Color(0.10, 0.06, 0.02, 0.30)
+		sst.shadow_size = 2
+		sst.shadow_offset = Vector2(0, 1)
+		stamp.add_theme_stylebox_override("panel", sst)
+		stamp.position = Vector2(x0 + float(i) * (box + gap), 260.5)
+		stamp.size = Vector2(box, box)
+		root.add_child(stamp)
+		var glyph := TextureRect.new()
+		glyph.texture = meds[i]
+		glyph.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		glyph.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		glyph.set_anchors_preset(Control.PRESET_FULL_RECT)
+		glyph.offset_left = inset
+		glyph.offset_right = -inset
+		glyph.offset_top = inset
+		glyph.offset_bottom = -inset
+		glyph.modulate = GameTheme.GILT_BRIGHT
+		glyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		stamp.add_child(glyph)
+
+
+func _build_chart_proto() -> void:
+	var root := Control.new()
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+
+	var rarity := String(card_data.get("rarity", "common"))
+	var is_sp := is_spell()
+	var is_curse_card := CardDB.is_curse(String(card_data.get("id", "")))
+	var metal := _chart_metal(rarity)
+	var metal_dim := Color(metal.r, metal.g, metal.b, 0.78)
+
+	# ── seat shadow (neutral, same as v6) ────────────────────────────────
+	var seat := Panel.new()
+	seat.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	seat.anchor_left = 0.06
+	seat.anchor_right = 0.94
+	seat.anchor_top = 0.04
+	seat.anchor_bottom = 0.965
+	var seat_st := StyleBoxFlat.new()
+	seat_st.bg_color = Color(0, 0, 0, 0.0)
+	seat_st.set_corner_radius_all(22)
+	seat_st.shadow_color = Color(0, 0, 0, 0.55)
+	seat_st.shadow_size = 18
+	seat_st.shadow_offset = Vector2(0, 4)
+	seat.add_theme_stylebox_override("panel", seat_st)
+	root.add_child(seat)
+
+	# ── rarity glow halo (quieter than v6 — the metal carries rarity too) ─
+	var glow_size := 3
+	var glow_col: Color = GameTheme.rarity_color(rarity)
+	if rarity == "rare":
+		glow_col = Color(0.95, 0.72, 0.25)
+	match rarity:
+		"rare":     glow_size = 13
+		"uncommon": glow_size = 8
+		"common":   glow_size = 3
+		"starter":  glow_size = 2
+	if not is_curse_card:
+		var glow := Panel.new()
+		glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		glow.anchor_left = 0.035
+		glow.anchor_right = 0.965
+		glow.anchor_top = 0.02
+		glow.anchor_bottom = 0.985
+		var gs := StyleBoxFlat.new()
+		gs.bg_color = Color(0, 0, 0, 0.0)
+		gs.set_corner_radius_all(20)
+		gs.shadow_color = Color(glow_col.r, glow_col.g, glow_col.b, 0.55)
+		gs.shadow_size = glow_size
+		glow.add_theme_stylebox_override("panel", gs)
+		root.add_child(glow)
+
+	# ── the leaf: aged parchment — the SAME paper the campaign chart and
+	# the tooltips are printed on. v7's dark board read as a void wearing
+	# gold jewelry; the writ puts the furniture ON the material instead.
+	var leaf := Panel.new()
+	leaf.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	leaf.set_anchors_preset(Control.PRESET_FULL_RECT)
+	var bst := StyleBoxFlat.new()
+	bst.bg_color = Color(0.871, 0.812, 0.694) if not is_curse_card \
+		else Color(0.769, 0.749, 0.655)
+	bst.border_color = Color(0.165, 0.125, 0.082)
+	bst.set_border_width_all(1)
+	bst.set_corner_radius_all(8)
+	leaf.add_theme_stylebox_override("panel", bst)
+	root.add_child(leaf)
+	# Paper tooth: a seeded painter, corner-radius aware (full-rect texture
+	# tiles leak square corners past the rounded leaf onto the background).
+	var tooth := ParchmentPlate.new()
+	tooth.set_anchors_preset(Control.PRESET_FULL_RECT)
+	tooth.offset_left = 1
+	tooth.offset_top = 1
+	tooth.offset_right = -1
+	tooth.offset_bottom = -1
+	tooth.seed_text = String(card_data.get("id", "?"))
+	tooth.corner_radius = 7.0
+	if is_curse_card:
+		# The document itself is corrupted: murk-green staining, heavier.
+		tooth.stain = Color(0.282, 0.318, 0.196)
+		tooth.fox = Color(0.255, 0.282, 0.137)
+		tooth.toast = Color(0.196, 0.216, 0.118)
+		tooth.strength = 1.7
+	root.add_child(tooth)
+	# A whisper of fiber noise on top of the painter's washes.
+	if GameTheme.tex_card_grain:
+		var bgn := TextureRect.new()
+		bgn.texture = GameTheme.tex_card_grain
+		bgn.stretch_mode = TextureRect.STRETCH_TILE
+		bgn.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		bgn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		bgn.offset_left = 3
+		bgn.offset_top = 3
+		bgn.offset_right = -3
+		bgn.offset_bottom = -3
+		bgn.modulate = Color(0.42, 0.30, 0.16, 0.10)
+		bgn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(bgn)
+
+	# ── metal rules: ink keyline + heavy outer + hairline inner — the
+	# cartouche language; the dark keyline sets the metal INTO the paper ──
+	_chart_rule(root, 4.0, 1, Color(0.165, 0.125, 0.082, 0.50), 8)
+	_chart_rule(root, 5.0, 2, metal, 7)
+	_chart_rule(root, 9.0, 1, Color(metal.r * 0.80, metal.g * 0.80,
+		metal.b * 0.80, 0.80), 5)
+
+	# ── art mounted as a plate: ink mat + gilt fillet + inner shadow. The
+	# painting is the best thing on the card — it gets the most area (the
+	# plate runs to half the leaf) and nothing is ever pinned over it. ─────
+	var card_art: Texture2D = _find_card_art()
+	# NOTE: the card control is natively 225x300 — these offsets are REAL
+	# pixels (the 300x400 numbers some layouts use only exist inside
+	# _center_at_point's design-space mapping).
+	var mat := Panel.new()
+	mat.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	mat.anchor_left = 0.0
+	mat.anchor_right = 1.0
+	mat.anchor_top = 0.0
+	mat.anchor_bottom = 0.0
+	mat.offset_left = 9
+	mat.offset_right = -9
+	mat.offset_top = 9
+	mat.offset_bottom = 152
+	var mat_st := StyleBoxFlat.new()
+	mat_st.bg_color = Color(0.118, 0.096, 0.072)
+	mat.add_theme_stylebox_override("panel", mat_st)
+	root.add_child(mat)
+	var art_clip := Control.new()
+	art_clip.clip_contents = true
+	art_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	art_clip.anchor_left = 0.0
+	art_clip.anchor_right = 1.0
+	art_clip.anchor_top = 0.0
+	art_clip.anchor_bottom = 0.0
+	art_clip.offset_left = 11
+	art_clip.offset_right = -11
+	art_clip.offset_top = 11
+	art_clip.offset_bottom = 150
+	root.add_child(art_clip)
+	_art_rect = art_clip
+	if card_art:
+		var art_tex := TextureRect.new()
+		art_tex.texture = card_art
+		art_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		art_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		art_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+		art_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		art_clip.add_child(art_tex)
+	else:
+		# Sealed empty plate: ink fill + ghosted gilt monogram.
+		var ph := Panel.new()
+		ph.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ph.set_anchors_preset(Control.PRESET_FULL_RECT)
+		var phst := StyleBoxFlat.new()
+		phst.bg_color = Color(0.118, 0.102, 0.080)
+		ph.add_theme_stylebox_override("panel", phst)
+		art_clip.add_child(ph)
+		var ph_name := String(card_data.get("name", "")).strip_edges()
+		var mono_ch := ph_name.substr(0, 1).to_upper() \
+			if ph_name.length() > 0 else "?"
+		var mono := _make_styled_label(mono_ch, GameTheme.font_display, 40,
+			Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.26))
+		mono.add_theme_constant_override("outline_size", 0)
+		_center_at_point(mono, Vector2(150, 100), Vector2(80, 80))
+		ph.add_child(mono)
+	if GameTheme.tex_card_vignette:
+		# Inner shadow so the painting reads mounted INTO the board.
+		var avg := TextureRect.new()
+		avg.texture = GameTheme.tex_card_vignette
+		avg.stretch_mode = TextureRect.STRETCH_SCALE
+		avg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		avg.set_anchors_preset(Control.PRESET_FULL_RECT)
+		avg.modulate = Color(0, 0, 0, 0.34)
+		avg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		art_clip.add_child(avg)
+	# Gilt fillet rule around the mat — the plate's outer frame line.
+	var fillet := Panel.new()
+	fillet.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	fillet.anchor_left = 0.0
+	fillet.anchor_right = 1.0
+	fillet.anchor_top = 0.0
+	fillet.anchor_bottom = 0.0
+	fillet.offset_left = 8
+	fillet.offset_right = -8
+	fillet.offset_top = 8
+	fillet.offset_bottom = 153
+	var fst := StyleBoxFlat.new()
+	fst.draw_center = false
+	fst.border_color = metal_dim
+	fst.set_border_width_all(1)
+	fillet.add_theme_stylebox_override("panel", fst)
+	root.add_child(fillet)
+
+	# ── rarity diamond at top-center, set on the rule like a gem mount ───
+	if rarity == "uncommon" or rarity == "rare":
+		var gem_col := Color(0.949, 0.616, 0.137) if rarity == "rare" \
+			else Color(0.62, 0.72, 0.86)
+		_chart_diamond(root, Vector2(112.5, 7.0), 10.0, gem_col)
+
+	# ── nameplate: raised ink band, metal hairlines, gilt Cinzel name ────
+	var plate := Panel.new()
+	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	plate.anchor_left = 0.0
+	plate.anchor_right = 1.0
+	plate.anchor_top = 0.0
+	plate.anchor_bottom = 0.0
+	plate.offset_left = 10
+	plate.offset_right = -10
+	plate.offset_top = 154
+	plate.offset_bottom = 178
+	var plst := StyleBoxFlat.new()
+	plst.bg_color = Color(0.128, 0.106, 0.078, 0.98)
+	plst.border_color = metal_dim
+	plst.border_width_top = 1
+	plst.border_width_bottom = 1
+	plst.set_corner_radius_all(2)
+	plate.add_theme_stylebox_override("panel", plst)
+	root.add_child(plate)
+	_chart_diamond(root, Vector2(10, 166), 5.5, metal)
+	_chart_diamond(root, Vector2(215, 166), 5.5, metal)
+	var name_font: Font = GameTheme.font_title_black \
+		if GameTheme.font_title_black != null else GameTheme.font_display
+	var name_col := Color(0.93, 0.82, 0.55)
+	if is_curse_card:
+		name_col = Color(0.74, 0.72, 0.66)
+	# Cinzel caps run wide — long names step down instead of ellipsizing.
+	var nm := String(card_data.get("name", ""))
+	var nm_size := 14
+	if nm.length() > 17:
+		nm_size = 11
+	elif nm.length() > 13:
+		nm_size = 12
+	_name_label = _make_styled_label(nm, name_font, nm_size, name_col)
+	_name_label.add_theme_constant_override("outline_size", 0)
+	_name_label.add_theme_color_override("font_shadow_color",
+		Color(0, 0, 0, 0.55))
+	_name_label.add_theme_constant_override("shadow_offset_x", 0)
+	_name_label.add_theme_constant_override("shadow_offset_y", 1)
+	_name_label.clip_text = true
+	_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	# Band center y=166 real → 221.33 in _center_at_point's 300x400 space.
+	_center_at_point(_name_label, Vector2(150, 221.33), SIZE_NAME)
+	root.add_child(_name_label)
+
+	# ── keyword rail (chart roundels) ────────────────────────────────────
+	var combat_meds: Array = []
+	for k in card_data.get("keywords", []):
+		var k_str := String(k)
+		var icon_tex: Texture2D = GameTheme.get_keyword_icon(k_str)
+		if icon_tex == null or k_str == "floop":
+			continue
+		combat_meds.append(icon_tex)
+		if combat_meds.size() >= 3:
+			break
+	if not is_sp:
+		_kw_stamp_row(root, combat_meds, metal)
+
+	# ── ruled text region: the page itself carries the rules text. A fine
+	# ink hairline box with metal corner ticks — chart-legend language —
+	# instead of v7's floating tooltip-like well. ─────────────────────────
+	var rulebox := Panel.new()
+	rulebox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rulebox.anchor_left = 0.0
+	rulebox.anchor_right = 1.0
+	rulebox.anchor_top = 0.0
+	rulebox.anchor_bottom = 0.0
+	rulebox.offset_left = 15
+	rulebox.offset_right = -15
+	rulebox.offset_top = 184
+	rulebox.offset_bottom = 257
+	var pst := StyleBoxFlat.new()
+	pst.draw_center = false
+	pst.border_color = Color(0.255, 0.188, 0.118, 0.80) if not is_curse_card \
+		else Color(0.255, 0.275, 0.180, 0.85)
+	pst.set_border_width_all(1)
+	rulebox.add_theme_stylebox_override("panel", pst)
+	root.add_child(rulebox)
+	_chart_diamond(root, Vector2(15, 184), 3.6, metal_dim)
+	_chart_diamond(root, Vector2(210, 184), 3.6, metal_dim)
+	_chart_diamond(root, Vector2(15, 257), 3.6, metal_dim)
+	_chart_diamond(root, Vector2(210, 257), 3.6, metal_dim)
+
+	# ── description (dark ink written on the page) ───────────────────────
+	var desc_clip := Control.new()
+	desc_clip.clip_contents = true
+	desc_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	desc_clip.anchor_left = 0.0
+	desc_clip.anchor_right = 1.0
+	desc_clip.anchor_top = 0.0
+	desc_clip.anchor_bottom = 0.0
+	desc_clip.offset_left = 17
+	desc_clip.offset_right = -17
+	desc_clip.offset_top = 186
+	desc_clip.offset_bottom = 255
+	root.add_child(desc_clip)
+	var center_box := CenterContainer.new()
+	center_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	center_box.set_anchors_preset(Control.PRESET_FULL_RECT)
+	desc_clip.add_child(center_box)
+	var desc_rt := RichTextLabel.new()
+	desc_rt.bbcode_enabled = true
+	desc_rt.fit_content = true
+	desc_rt.scroll_active = false
+	desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	desc_rt.custom_minimum_size = Vector2(170, 0)
+	var desc_font: Font = GameTheme.font_body
+	var desc_bold_font: Font = GameTheme.font_body_bold
+	if desc_font:
+		desc_rt.add_theme_font_override("normal_font", desc_font)
+		desc_rt.add_theme_font_override("bold_font",
+			desc_bold_font if desc_bold_font else desc_font)
+	var raw_desc: String = card_data.get("desc", "")
+	var dsz := 11
+	if raw_desc.length() > 105:
+		dsz = 9
+	elif raw_desc.length() > 72:
+		dsz = 10
+	desc_rt.add_theme_font_size_override("normal_font_size", dsz)
+	desc_rt.add_theme_font_size_override("bold_font_size", dsz)
+	desc_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
+	# The keyword gold (#e8b547) is tuned for dark wells and disappears on
+	# paper. Re-ink the same markup in dark bronze — keyword identity kept,
+	# document contrast won (~5.5:1 on the leaf).
+	desc_rt.text = "[center]%s[/center]" % KeywordEffects.colorize_keywords(
+		raw_desc).replace(KeywordEffects.KEYWORD_GOLD, "#7a4f10")
+	center_box.add_child(desc_rt)
+
+	# ── stats as wax seals OR the spell footer line ──────────────────────
+	var stat_font: Font = GameTheme.font_stat
+	var seal_metal := Color(0.62, 0.50, 0.26)
+	if is_creature():
+		var cost_seal := _chart_seal(GameTheme.COST_BLUE_GEM, seal_metal)
+		cost_seal.anchor_left = 0.0
+		cost_seal.anchor_right = 0.0
+		cost_seal.anchor_top = 0.0
+		cost_seal.anchor_bottom = 0.0
+		cost_seal.offset_left = -9
+		cost_seal.offset_right = 47
+		cost_seal.offset_top = -9
+		cost_seal.offset_bottom = 47
+		root.add_child(cost_seal)
+		_cost_label = _make_styled_label(
+			"" if bake_strip_stats else str(card_data.get("cost", 0)),
+			stat_font, 15, Color(0.996, 0.941, 0.800))
+		_cost_label.add_theme_constant_override("outline_size", 4)
+		_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
+		_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
+		_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cost_seal.add_child(_cost_label)
+
+		var atk_seal := _chart_seal(GameTheme.ATK_GOLD_SHIELD, seal_metal)
+		atk_seal.anchor_left = 0.0
+		atk_seal.anchor_right = 0.0
+		atk_seal.anchor_top = 1.0
+		atk_seal.anchor_bottom = 1.0
+		atk_seal.offset_left = -9
+		atk_seal.offset_right = 47
+		atk_seal.offset_top = -47
+		atk_seal.offset_bottom = 9
+		root.add_child(atk_seal)
+		_atk_label = _make_styled_label(
+			"" if bake_strip_stats else str(current_atk), stat_font, 15,
+			Color(1.000, 0.957, 0.839))
+		_atk_label.add_theme_constant_override("outline_size", 4)
+		_atk_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_atk_label.offset_top = ORB_NUMERAL_Y_OFFSET
+		_atk_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
+		_atk_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		atk_seal.add_child(_atk_label)
+
+		var hp_seal := _chart_seal(GameTheme.HEALTH_RED_DROP, seal_metal)
+		hp_seal.anchor_left = 1.0
+		hp_seal.anchor_right = 1.0
+		hp_seal.anchor_top = 1.0
+		hp_seal.anchor_bottom = 1.0
+		hp_seal.offset_left = -47
+		hp_seal.offset_right = 9
+		hp_seal.offset_top = -47
+		hp_seal.offset_bottom = 9
+		root.add_child(hp_seal)
+		_hp_label = _make_styled_label(
+			"" if bake_strip_stats else str(current_hp), stat_font, 15,
+			Color(1.000, 0.941, 0.898))
+		_hp_label.add_theme_constant_override("outline_size", 4)
+		_hp_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_hp_label.offset_top = ORB_NUMERAL_Y_OFFSET
+		_hp_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
+		_hp_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		hp_seal.add_child(_hp_label)
+	else:
+		# Spells still pay a cost — the seal stays; the bottom carries the
+		# letterspaced footer line instead of ATK/HP.
+		var sp_cost := _chart_seal(GameTheme.COST_BLUE_GEM, seal_metal)
+		sp_cost.anchor_left = 0.0
+		sp_cost.anchor_right = 0.0
+		sp_cost.anchor_top = 0.0
+		sp_cost.anchor_bottom = 0.0
+		sp_cost.offset_left = -9
+		sp_cost.offset_right = 47
+		sp_cost.offset_top = -9
+		sp_cost.offset_bottom = 47
+		root.add_child(sp_cost)
+		_cost_label = _make_styled_label(
+			"" if bake_strip_stats else str(card_data.get("cost", 0)),
+			stat_font, 15, Color(0.996, 0.941, 0.800))
+		_cost_label.add_theme_constant_override("outline_size", 4)
+		_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
+		_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
+		_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		sp_cost.add_child(_cost_label)
+
+		var footer_text := "INSTANT"
+		var kws: Array = card_data.get("keywords", [])
+		if is_curse_card:
+			footer_text = "CURSE"
+		else:
+			match String(card_data.get("targeting", "none")):
+				"enemy_creature":    footer_text = "TARGET ENEMY"
+				"friendly_creature": footer_text = "TARGET ALLY"
+				"any_creature":      footer_text = "ANY CREATURE"
+				"any":               footer_text = "ANY TARGET"
+				_:
+					if "exhaust" in kws:
+						footer_text = "EXHAUST"
+					elif "retain" in kws:
+						footer_text = "RETAIN"
+		var spaced := ""
+		for ci in range(footer_text.length()):
+			spaced += footer_text[ci]
+			if ci < footer_text.length() - 1:
+				spaced += " "
+		# Letterpress ink on the paper (the gilt-on-dark v7 color washes out
+		# against parchment).
+		var foot_col := Color(0.302, 0.224, 0.133, 0.95)
+		if is_curse_card:
+			foot_col = Color(0.318, 0.310, 0.255, 0.95)
+		var ftl := _make_styled_label(spaced, GameTheme.font_title \
+			if GameTheme.font_title != null else GameTheme.font_display,
+			10, foot_col)
+		ftl.add_theme_constant_override("outline_size", 0)
+		ftl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.5))
+		ftl.add_theme_constant_override("shadow_offset_y", 1)
+		_center_at_point(ftl, Vector2(150, 374), Vector2(220, 24))
+		root.add_child(ftl)
+		_chart_diamond(root, Vector2(24, 280.5), 5.0, metal_dim)
+		_chart_diamond(root, Vector2(201, 280.5), 5.0, metal_dim)
 
 
 # ═══════════════════════════════════════════
