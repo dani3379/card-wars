@@ -3050,14 +3050,16 @@ func _build_wave_chip() -> void:
 	chip.name = "NextWaveChip"
 	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.07, 0.05, 0.09, 0.92)
+	# Same warm ink-plaque family as the incoming chip; the border color is
+	# overwritten per wave count, so only the base material changes here.
+	style.bg_color = Color(0.10, 0.062, 0.046, 0.94)
 	style.border_color = Color(0.55, 0.40, 0.75, 1.0)
 	for k in ["border_width_top", "border_width_bottom",
 			"border_width_left", "border_width_right"]:
 		style.set(k, 2)
 	for k in ["corner_radius_top_left", "corner_radius_top_right",
 			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
-		style.set(k, 7)
+		style.set(k, 4)
 	style.shadow_color = Color(0, 0, 0, 0.6)
 	style.shadow_size = 6
 	style.shadow_offset = Vector2(0, 3)
@@ -7911,6 +7913,108 @@ func _summon_enemy_token_with_keyword(atk: int, hp: int, keyword: String) -> voi
 #  BOARD LAYOUT
 # =====================================================================
 
+## The war-table surface: a faded campaign chart inked straight onto the
+## scorched table the battle is fought across — a double-ruled coast with
+## sea hatching, dashed march routes, site rings, a compass, cup stains,
+## and the burn creeping in along the clash band and the edges (heavier in
+## later acts: the war eats the map). Seeded per encounter+act, so every
+## fight's table is its own document but stable across rebuilds. Drawn
+## once; static — sits between the dark substrate and the lane tracks.
+class TablePlate extends Control:
+	var seed_text := "table"
+	var act := 1
+
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _coast_y(t: float, y0: float, amp: float, ph1: float, ph2: float) -> float:
+		return y0 + sin(t * 4.2 + ph1) * amp * 0.55 + sin(t * 9.7 + ph2) * amp * 0.30
+
+	func _draw() -> void:
+		if size.x < 80.0 or size.y < 80.0:
+			return
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash(seed_text)
+		var ink := Color(0.74, 0.58, 0.34)
+		# 1 — the coast: a double-ruled wandering line (the chart idiom).
+		var ph1 := rng.randf() * TAU
+		var ph2 := rng.randf() * TAU
+		var y0 := size.y * (0.30 + rng.randf() * 0.40)
+		var amp := size.y * 0.14
+		var coast := PackedVector2Array()
+		var n := 26
+		for i in range(n + 1):
+			var t := float(i) / float(n)
+			coast.append(Vector2(t * size.x, _coast_y(t, y0, amp, ph1, ph2)))
+		draw_polyline(coast, Color(ink.r, ink.g, ink.b, 0.15), 2.2, true)
+		var coast2 := PackedVector2Array()
+		for p in coast:
+			coast2.append(p + Vector2(0, 6))
+		draw_polyline(coast2, Color(ink.r, ink.g, ink.b, 0.09), 1.1, true)
+		# Sea hatching seaward of the coast.
+		for i in range(26):
+			var t := rng.randf()
+			var hy := _coast_y(t, y0, amp, ph1, ph2) + 12.0 + rng.randf() * 46.0
+			if hy > size.y - 8.0:
+				continue
+			draw_line(Vector2(t * size.x, hy),
+				Vector2(t * size.x + 10.0 + rng.randf() * 8.0, hy),
+				Color(ink.r, ink.g, ink.b, 0.055 + rng.randf() * 0.04), 1.0, true)
+		# 2 — march routes: two dashed tracks wandering across the land.
+		for r in range(2):
+			var ry := size.y * (0.12 + rng.randf() * 0.66)
+			var rph := rng.randf() * TAU
+			var seg_on := true
+			var x := rng.randf() * 40.0
+			while x < size.x - 12.0:
+				var x2 := minf(x + 14.0, size.x - 8.0)
+				if seg_on:
+					var ya := ry + sin(x / size.x * 5.0 + rph) * size.y * 0.05
+					var yb := ry + sin(x2 / size.x * 5.0 + rph) * size.y * 0.05
+					draw_line(Vector2(x, ya), Vector2(x2, yb),
+						Color(ink.r, ink.g, ink.b, 0.115), 1.4, true)
+				seg_on = not seg_on
+				x = x2
+		# 3 — site rings: held positions marked on the chart.
+		for i in range(5):
+			var p := Vector2(rng.randf() * size.x, rng.randf() * size.y)
+			draw_arc(p, 4.0 + rng.randf() * 5.0, 0, TAU, 18,
+				Color(ink.r, ink.g, ink.b, 0.13), 1.2, true)
+			draw_circle(p, 1.2, Color(ink.r, ink.g, ink.b, 0.16), true, -1.0, true)
+		# 4 — compass cross, upper-right quadrant.
+		var cp := Vector2(size.x * (0.74 + rng.randf() * 0.16),
+			size.y * (0.12 + rng.randf() * 0.14))
+		var cr := 16.0 + rng.randf() * 8.0
+		draw_arc(cp, cr, 0, TAU, 26, Color(ink.r, ink.g, ink.b, 0.125), 1.0, true)
+		draw_line(cp + Vector2(0, -cr * 1.45), cp + Vector2(0, cr * 1.45),
+			Color(ink.r, ink.g, ink.b, 0.125), 1.0, true)
+		draw_line(cp + Vector2(-cr * 1.45, 0), cp + Vector2(cr * 1.45, 0),
+			Color(ink.r, ink.g, ink.b, 0.125), 1.0, true)
+		# 5 — cup ring stains: someone set their drink on the orders.
+		for i in range(2):
+			var sp := Vector2(rng.randf() * size.x, rng.randf() * size.y)
+			var a0 := rng.randf() * TAU
+			draw_arc(sp, 13.0 + rng.randf() * 9.0, a0, a0 + TAU * 0.8, 30,
+				Color(0.30, 0.20, 0.10, 0.10), 2.6, true)
+		# 6 — the burn: scorch along the clash band + creeping from the
+		# top/bottom edges; later acts burn hotter.
+		var burn := Color(0.04, 0.02, 0.012)
+		for i in range(7 + act * 3):
+			var bp: Vector2
+			if rng.randf() < 0.55:
+				bp = Vector2(rng.randf() * size.x,
+					size.y * 0.5 + (rng.randf() - 0.5) * size.y * 0.16)
+			else:
+				bp = Vector2(rng.randf() * size.x,
+					size.y * (0.04 + 0.92 * float(rng.randi() % 2)) \
+					+ (rng.randf() - 0.5) * size.y * 0.07)
+			var br := 14.0 + rng.randf() * 34.0
+			draw_circle(bp, br, Color(burn.r, burn.g, burn.b,
+				0.09 + rng.randf() * 0.11), true, -1.0, true)
+			draw_circle(bp, br * 0.55, Color(burn.r, burn.g, burn.b,
+				0.08 + rng.randf() * 0.10), true, -1.0, true)
+
+
 func _build_board() -> void:
 	# Layout strategy (anchor-based, no competing VBox shares):
 	#
@@ -8025,6 +8129,51 @@ func _build_board() -> void:
 	substrate.add_theme_stylebox_override("panel", sub_style)
 	board_zone.add_child(substrate)
 
+	# ── The war table itself ────────────────────────────────────────────────
+	# The bare substrate read as a void between the HUD edges. Dress it as the
+	# campaign table the war is being run from: wood grain, a faded chart of
+	# the theater inked straight on it, and a quiet bronze fillet — the same
+	# furniture language as the cards and the map plate. All static, all
+	# under the lanes, so it costs nothing per frame.
+	if GameTheme.tex_card_wood_grain:
+		var wood := TextureRect.new()
+		wood.texture = GameTheme.tex_card_wood_grain
+		wood.stretch_mode = TextureRect.STRETCH_TILE
+		wood.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		wood.set_anchors_preset(Control.PRESET_FULL_RECT)
+		wood.offset_left = 6
+		wood.offset_top = 6
+		wood.offset_right = -6
+		wood.offset_bottom = -6
+		wood.modulate = Color(0.78, 0.56, 0.34, 0.14)
+		wood.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		board_zone.add_child(wood)
+	var chart := TablePlate.new()
+	chart.clip_contents = true
+	chart.set_anchors_preset(Control.PRESET_FULL_RECT)
+	chart.offset_left = 6
+	chart.offset_top = 6
+	chart.offset_right = -6
+	chart.offset_bottom = -6
+	chart.seed_text = "%s_act%d" % [String(RunState.current_encounter_id),
+		RunState.get_act()]
+	chart.act = RunState.get_act()
+	board_zone.add_child(chart)
+	var table_fillet := Panel.new()
+	table_fillet.set_anchors_preset(Control.PRESET_FULL_RECT)
+	table_fillet.offset_left = 4
+	table_fillet.offset_top = 4
+	table_fillet.offset_right = -4
+	table_fillet.offset_bottom = -4
+	table_fillet.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var fillet_st := StyleBoxFlat.new()
+	fillet_st.draw_center = false
+	fillet_st.border_color = Color(GILT.r, GILT.g, GILT.b, 0.16)
+	fillet_st.set_border_width_all(1)
+	fillet_st.set_corner_radius_all(12)
+	table_fillet.add_theme_stylebox_override("panel", fillet_st)
+	board_zone.add_child(table_fillet)
+
 	# Warm stage glow ON the substrate (additive, above the dark plate but below
 	# the lanes/cards) so the centre of the table is lit and the eye lands on the
 	# board first. Self-contained here rather than relying on the global ambient
@@ -8076,7 +8225,7 @@ func _build_board() -> void:
 		track.size_flags_vertical = Control.SIZE_FILL
 		track.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var track_style := StyleBoxFlat.new()
-		track_style.bg_color = Color(0.015, 0.012, 0.01, 0.34)
+		track_style.bg_color = Color(0.015, 0.012, 0.01, 0.22)
 		track_style.border_color = Color(GILT.r, GILT.g, GILT.b, 0.08)
 		for k in ["border_width_left", "border_width_right",
 				"border_width_top", "border_width_bottom"]:
@@ -8116,9 +8265,24 @@ func _build_board() -> void:
 
 	# ── Clash line ───────────────────────────────────────────────────────────
 	# The front line where combat resolves, drawn full-width across the centre
-	# (lands in each column's CLASH_GAP). A crisp lit gilt seam, not the old 44px
-	# walnut beam that ate vertical space. It only crosses the empty gap between
-	# the front rows, so it never overlaps a card.
+	# (lands in each column's CLASH_GAP). A charred furrow under a crisp lit
+	# gilt seam — the front has burned itself into the table. It only crosses
+	# the empty gap between the front rows, so it never overlaps a card.
+	var furrow := Panel.new()
+	furrow.anchor_left = 0.0
+	furrow.anchor_right = 1.0
+	furrow.anchor_top = 0.5
+	furrow.anchor_bottom = 0.5
+	furrow.offset_top = -7
+	furrow.offset_bottom = 7
+	furrow.offset_left = 10
+	furrow.offset_right = -10
+	furrow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var fur_st := StyleBoxFlat.new()
+	fur_st.bg_color = Color(0.015, 0.008, 0.004, 0.55)
+	fur_st.set_corner_radius_all(5)
+	furrow.add_theme_stylebox_override("panel", fur_st)
+	board_zone.add_child(furrow)
 	_midline = Panel.new()
 	_midline.anchor_left = 0.0
 	_midline.anchor_right = 1.0
@@ -9431,14 +9595,17 @@ func _build_incoming_damage_chip() -> void:
 	chip.name = "IncomingDamageChip"
 	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.13, 0.05, 0.04, 0.92)
+	# Warm ink-board family (the cards' mat / the map tooltips), squarer
+	# corners — a plaque, not an app pill. The crimson border stays: it's the
+	# chip's functional voice.
+	style.bg_color = Color(0.10, 0.062, 0.046, 0.94)
 	style.border_color = Color(0.85, 0.27, 0.18, 1.0)
 	for k in ["border_width_top", "border_width_bottom",
 			"border_width_left", "border_width_right"]:
 		style.set(k, 2)
 	for k in ["corner_radius_top_left", "corner_radius_top_right",
 			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
-		style.set(k, 7)
+		style.set(k, 4)
 	style.shadow_color = Color(0, 0, 0, 0.6)
 	style.shadow_size = 6
 	style.shadow_offset = Vector2(0, 3)
@@ -10040,7 +10207,11 @@ func _build_encounter_scroll_diegetic() -> void:
 	rule_line.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	rule.add_child(rule_line)
 
-	_phase_label = _make_text_label("YOUR TURN", 17, IVORY)
+	_phase_label = _make_text_label("YOUR TURN", 17, GameTheme.GILT_BRIGHT)
+	# Cinzel, like the encounter title above it — the phase line is part of
+	# the chart furniture, not a plain UI status string.
+	if GameTheme.font_title != null:
+		_phase_label.add_theme_font_override("font", GameTheme.font_title)
 	_phase_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_phase_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
 	_phase_label.add_theme_constant_override("outline_size", 4)
@@ -10052,15 +10223,20 @@ func _build_encounter_scroll_diegetic() -> void:
 
 	if _encounter_passive != "":
 		var enc = EncounterDB.get_encounter(RunState.current_encounter_id)
-		# The boss's passive IS its threat — promote it from faint text to a
-		# persistent ominous plaque (dark scrim + crimson underline) so it reads as
-		# a standing danger every turn, not a caption you scroll past.
+		# The boss's passive IS its threat — a posted EDICT: the encounter's
+		# standing rule written in dark ink on the same parchment the cards
+		# are cut from, framed in oxblood. A paper notice on the dark HUD
+		# pulls the eye harder than another black box, and it puts the rule
+		# in the writ fiction instead of a toast notification's.
 		var threat_frame := PanelContainer.new()
 		var threat_bg := StyleBoxFlat.new()
-		threat_bg.bg_color = Color(0.12, 0.03, 0.03, 0.62)
-		threat_bg.set_corner_radius_all(6)
-		threat_bg.border_width_bottom = 2
-		threat_bg.border_color = Color(0.82, 0.22, 0.16, 0.9)
+		threat_bg.bg_color = Color(0.851, 0.792, 0.671, 0.97)
+		threat_bg.set_corner_radius_all(3)
+		threat_bg.border_color = Color(0.48, 0.12, 0.09, 0.95)
+		threat_bg.set_border_width_all(2)
+		threat_bg.shadow_color = Color(0, 0, 0, 0.55)
+		threat_bg.shadow_size = 7
+		threat_bg.shadow_offset = Vector2(0, 3)
 		threat_bg.content_margin_left = 18
 		threat_bg.content_margin_right = 18
 		threat_bg.content_margin_top = 6
@@ -10068,9 +10244,10 @@ func _build_encounter_scroll_diegetic() -> void:
 		threat_frame.add_theme_stylebox_override("panel", threat_bg)
 		threat_frame.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		var passive := _make_text_label(enc.get("passive_desc", ""), 18,
-			Color(1.0, 0.80, 0.50))
-		passive.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
-		passive.add_theme_constant_override("outline_size", 5)
+			Color(0.20, 0.11, 0.07))
+		if GameTheme.font_card_body_bold != null:
+			passive.add_theme_font_override("font", GameTheme.font_card_body_bold)
+		passive.add_theme_constant_override("outline_size", 0)
 		passive.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		passive.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		passive.custom_minimum_size = Vector2(440, 0)

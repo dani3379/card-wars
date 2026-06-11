@@ -5767,6 +5767,24 @@ func set_threat_flagged(on: bool) -> void:
 			ov.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			ov.z_index = 6  # below DangerMark (7) so a boss badge still reads on top
 			add_child(ov)
+			# Dark keyline UNDER the crimson ring. Warm fights (infernal grade,
+			# red-lit paintings) swallow a bare red border into the art — the
+			# dark separation is what keeps the flag legible on any painting,
+			# instead of stacking even more red on red.
+			var keyline := Panel.new()
+			keyline.set_anchors_preset(Control.PRESET_FULL_RECT)
+			keyline.offset_left = -1
+			keyline.offset_top = -1
+			keyline.offset_right = 1
+			keyline.offset_bottom = 1
+			keyline.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			var ksb := StyleBoxFlat.new()
+			ksb.draw_center = false
+			ksb.set_border_width_all(5)
+			ksb.border_color = Color(0.06, 0.02, 0.02, 0.85)
+			ksb.set_corner_radius_all(12)
+			keyline.add_theme_stylebox_override("panel", ksb)
+			ov.add_child(keyline)
 			var ring := Panel.new()
 			ring.set_anchors_preset(Control.PRESET_FULL_RECT)
 			ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -5775,16 +5793,51 @@ func set_threat_flagged(on: bool) -> void:
 			sb.set_border_width_all(3)
 			sb.border_color = Color(1.0, 0.30, 0.22)
 			sb.set_corner_radius_all(10)
-			sb.shadow_color = Color(1.0, 0.22, 0.14, 0.5)
-			sb.shadow_size = 8
+			sb.shadow_color = Color(1.0, 0.22, 0.14, 0.38)
+			sb.shadow_size = 5
 			ring.add_theme_stylebox_override("panel", sb)
 			ov.add_child(ring)
+			# Shape read, not just hue: a small sword badge at the top edge so
+			# the threat still lands when the whole scene is graded red.
+			var badge := Panel.new()
+			badge.anchor_left = 0.5
+			badge.anchor_right = 0.5
+			badge.anchor_top = 0.0
+			badge.anchor_bottom = 0.0
+			badge.offset_left = -11
+			badge.offset_right = 11
+			badge.offset_top = -10
+			badge.offset_bottom = 12
+			badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			var bsb := StyleBoxFlat.new()
+			bsb.bg_color = Color(0.10, 0.035, 0.03, 0.96)
+			bsb.border_color = Color(1.0, 0.30, 0.22, 0.95)
+			bsb.set_border_width_all(1)
+			bsb.set_corner_radius_all(999)
+			bsb.shadow_color = Color(0, 0, 0, 0.5)
+			bsb.shadow_size = 3
+			badge.add_theme_stylebox_override("panel", bsb)
+			ov.add_child(badge)
+			if GameTheme.tex_icon_sword != null:
+				var sw := TextureRect.new()
+				sw.texture = GameTheme.tex_icon_sword
+				sw.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				sw.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				sw.set_anchors_preset(Control.PRESET_FULL_RECT)
+				sw.offset_left = 4
+				sw.offset_top = 4
+				sw.offset_right = -4
+				sw.offset_bottom = -4
+				sw.modulate = Color(1.0, 0.45, 0.32)
+				sw.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				badge.add_child(sw)
 			_threat_overlay = ov
 		_threat_overlay.visible = true
 		if _threat_tween != null and _threat_tween.is_valid():
 			_threat_tween.kill()
+		# Gentler pulse floor — the old 0.35 trough strobed against warm art.
 		_threat_tween = create_tween().set_loops()
-		_threat_tween.tween_property(_threat_overlay, "modulate:a", 0.35, 0.50).set_trans(Tween.TRANS_SINE)
+		_threat_tween.tween_property(_threat_overlay, "modulate:a", 0.55, 0.50).set_trans(Tween.TRANS_SINE)
 		_threat_tween.tween_property(_threat_overlay, "modulate:a", 1.0, 0.50).set_trans(Tween.TRANS_SINE)
 	else:
 		if _threat_tween != null:
