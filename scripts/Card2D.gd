@@ -2929,6 +2929,134 @@ func _kw_orbs_rail(root: Control, meds: Array, box: float = 40.0) -> void:
 #  bake-overlay contract is untouched.
 # ═══════════════════════════════════════════
 
+## The cut sheet itself: a deckled (seeded, slightly irregular) leaf
+## silhouette with its ink contour and edge toast drawn along the SAME
+## wobbled path, so the organic edge never separates from its shading.
+## Replaces a StyleBox rounded rect — a mathematically perfect corner is
+## the one thing real cut paper never has. The wobble only pushes INWARD,
+## so children inset by >=3px always stay on the paper.
+class WritLeaf extends Control:
+	var seed_text := "leaf"
+	var paper := Color(0.871, 0.812, 0.694)
+	var edge_ink := Color(0.165, 0.125, 0.082)
+	var toast := Color(0.298, 0.208, 0.110)
+	var toast_strength := 1.0
+	var corner_radius := 8.0
+
+	var _ph1 := 0.0
+	var _ph2 := 0.0
+
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash(seed_text)
+		_ph1 = rng.randf() * TAU
+		_ph2 = rng.randf() * TAU
+
+	## Rounded-rect ring at `inset`, deckled: a fixed-count path (so nested
+	## toast rings stay parallel) where each vertex is pushed inward along
+	## the local path normal by a smooth two-frequency seeded wave.
+	func _ring(inset: float, amp: float) -> PackedVector2Array:
+		var r := maxf(corner_radius - inset, 0.5)
+		var x0 := inset
+		var y0 := inset
+		var x1 := size.x - inset
+		var y1 := size.y - inset
+		var cs := [
+			[Vector2(x0 + r, y0 + r), PI, PI * 1.5],
+			[Vector2(x1 - r, y0 + r), PI * 1.5, TAU],
+			[Vector2(x1 - r, y1 - r), 0.0, PI * 0.5],
+			[Vector2(x0 + r, y1 - r), PI * 0.5, PI],
+		]
+		var arc_n := 7
+		var edge_n := 21
+		var ideal := PackedVector2Array()
+		for ci in range(4):
+			var ctr: Vector2 = cs[ci][0]
+			var a0: float = cs[ci][1]
+			var a1: float = cs[ci][2]
+			for s in range(arc_n):
+				var a := lerpf(a0, a1, float(s) / float(arc_n - 1))
+				ideal.append(ctr + Vector2(cos(a), sin(a)) * r)
+			var nci := (ci + 1) % 4
+			var nctr: Vector2 = cs[nci][0]
+			var na0: float = cs[nci][1]
+			var p_from := ctr + Vector2(cos(a1), sin(a1)) * r
+			var p_to := nctr + Vector2(cos(na0), sin(na0)) * r
+			for s in range(1, edge_n + 1):
+				ideal.append(p_from.lerp(p_to, float(s) / float(edge_n + 1)))
+		var n := ideal.size()
+		var pts := PackedVector2Array()
+		for i in range(n):
+			var prev := ideal[(i - 1 + n) % n]
+			var next := ideal[(i + 1) % n]
+			var tang := (next - prev).normalized()
+			var inward := Vector2(-tang.y, tang.x)
+			var u := float(i) / float(n) * TAU
+			var wob := clampf(0.34 + 0.33 * sin(u * 5.0 + _ph1)
+				+ 0.33 * sin(u * 13.0 + _ph2), 0.0, 1.0) * amp
+			pts.append(ideal[i] + inward * wob)
+		return pts
+
+	func _draw() -> void:
+		if size.x <= 8.0 or size.y <= 8.0:
+			return
+		# 1 — the sheet.
+		var sheet := _ring(1.0, 1.7)
+		draw_colored_polygon(sheet, paper)
+		# 2 — ink contour: hand-cut edge line, doubles as silhouette AA.
+		var closed := sheet.duplicate()
+		closed.append(sheet[0])
+		draw_polyline(closed, edge_ink, 1.3, true)
+		# 3 — edge toast along the SAME deckle, fading inward, per-segment
+		# alpha jitter so it reads hand-inked rather than printed.
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash(seed_text) + 3
+		for k in range(4):
+			var ring := _ring(2.2 + float(k) * 1.7, 1.7)
+			var base_a := (0.105 - float(k) * 0.019) * toast_strength
+			for j in range(ring.size() - 1):
+				draw_line(ring[j], ring[j + 1],
+					Color(toast.r, toast.g, toast.b,
+					base_a * (0.7 + rng.randf() * 0.6)),
+					2.4 - float(k) * 0.3, true)
+
+
+## The name cartouche: a swallowtail banner — ink field, metal edge,
+## notched ribbon-tail ends — replacing the flat full-width bar (the last
+## pure UI-rectangle on the card). The name sits on the ink between tails.
+class InkCartouche extends Control:
+	var metal := Color(0.64, 0.48, 0.27)
+	var ink := Color(0.137, 0.110, 0.082, 0.985)
+	var notch := 9.0
+
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		var w := size.x
+		var h := size.y
+		var pts := PackedVector2Array([
+			Vector2(0, 0), Vector2(w, 0), Vector2(w - notch, h * 0.5),
+			Vector2(w, h), Vector2(0, h), Vector2(notch, h * 0.5),
+		])
+		# Settle shadow, then the banner, then its metal edge (AA polyline).
+		var sh := PackedVector2Array()
+		for p in pts:
+			sh.append(p + Vector2(0, 1.6))
+		draw_colored_polygon(sh, Color(0, 0, 0, 0.28))
+		draw_colored_polygon(pts, ink)
+		var closed := pts.duplicate()
+		closed.append(pts[0])
+		draw_polyline(closed, Color(metal.r, metal.g, metal.b, 0.92), 1.2, true)
+		# Inner hairlines between the tails — the double-rule read.
+		var hl := Color(metal.r, metal.g, metal.b, 0.45)
+		draw_line(Vector2(notch + 4.0, 2.5), Vector2(w - notch - 4.0, 2.5),
+			hl, 1.0, true)
+		draw_line(Vector2(notch + 4.0, h - 2.5), Vector2(w - notch - 4.0, h - 2.5),
+			hl, 1.0, true)
+
+
 ## A pressed wax seal, fully procedural. The silhouette is a seeded blob —
 ## every seal cools a little differently — with a cooled-rim edge, a
 ## stamped impression ring whose lit wall faces away from the top-left
@@ -3001,54 +3129,20 @@ class WaxSeal extends Control:
 				Color(1, 1, 1, 0.05 + rng.randf() * 0.05), true, -1.0, true)
 
 
-## Aged-paper tooth for the card leaf: seeded mottling washes, lighter
-## sizing patches, foxing specks, fiber hairlines, and an edge toast that
-## follows the rounded corner. It's a painter (not a stack of full-rect
-## texture tiles) precisely so nothing leaks past the corner radius onto
-## the background. Deterministic per seed — bakes are stable.
+## Aged-paper tooth for the card leaf interior: seeded mottling washes,
+## lighter sizing patches, foxing specks, fiber hairlines. The leaf's
+## organic edge + toast live in WritLeaf (path-locked to the deckle);
+## this painter only ages the field inside it. Deterministic per seed —
+## bakes are stable.
 class ParchmentPlate extends Control:
 	var seed_text := "leaf"
-	var corner_radius := 8.0
 	var stain := Color(0.455, 0.341, 0.196)
 	var lift := Color(0.973, 0.945, 0.851)
 	var fox := Color(0.408, 0.263, 0.118)
-	var toast := Color(0.298, 0.208, 0.110)
 	var strength := 1.0
 
 	func _ready() -> void:
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
-
-	## Rounded-rect outline path at `inset`, subdivided so per-segment alpha
-	## jitter reads as hand-inked wobble instead of one tone per edge.
-	func _rr_path(inset: float) -> PackedVector2Array:
-		var r := maxf(corner_radius - inset, 0.5)
-		var w := size.x - inset * 2.0
-		var h := size.y - inset * 2.0
-		var raw := PackedVector2Array()
-		var corners := [
-			[Vector2(inset + r, inset + r), PI, PI * 1.5],
-			[Vector2(inset + w - r, inset + r), PI * 1.5, TAU],
-			[Vector2(inset + w - r, inset + h - r), 0.0, PI * 0.5],
-			[Vector2(inset + r, inset + h - r), PI * 0.5, PI],
-		]
-		for c in corners:
-			var ctr: Vector2 = c[0]
-			var a0: float = c[1]
-			var a1: float = c[2]
-			for s in range(6):
-				var a := lerpf(a0, a1, float(s) / 5.0)
-				raw.append(ctr + Vector2(cos(a), sin(a)) * r)
-		raw.append(raw[0])
-		var pts := PackedVector2Array()
-		for j in range(raw.size() - 1):
-			pts.append(raw[j])
-			var seg_len := raw[j].distance_to(raw[j + 1])
-			if seg_len > 14.0:
-				var chunks := int(ceil(seg_len / 14.0))
-				for k in range(1, chunks):
-					pts.append(raw[j].lerp(raw[j + 1], float(k) / float(chunks)))
-		pts.append(raw[raw.size() - 1])
-		return pts
 
 	func _draw() -> void:
 		if size.x <= 4.0 or size.y <= 4.0:
@@ -3083,16 +3177,6 @@ class ParchmentPlate extends Control:
 			draw_line(p, p + dir * (3.0 + rng.randf() * 7.0),
 				Color(stain.r, stain.g, stain.b, 0.035 + rng.randf() * 0.045),
 				1.0, true)
-		# 5 — edge toast: nested rounded outlines, alpha-jittered per segment,
-		# strongest at the rim and fading inward.
-		for k in range(5):
-			var path := _rr_path(1.0 + float(k) * 1.6)
-			var base_a := (0.105 - float(k) * 0.019) * strength
-			for j in range(path.size() - 1):
-				draw_line(path[j], path[j + 1],
-					Color(toast.r, toast.g, toast.b,
-					base_a * (0.7 + rng.randf() * 0.6)),
-					2.6 - float(k) * 0.3, true)
 
 # ═══════════════════════════════════════════
 
@@ -3250,34 +3334,32 @@ func _build_chart_proto() -> void:
 		root.add_child(glow)
 
 	# ── the leaf: aged parchment — the SAME paper the campaign chart and
-	# the tooltips are printed on. v7's dark board read as a void wearing
-	# gold jewelry; the writ puts the furniture ON the material instead.
-	var leaf := Panel.new()
-	leaf.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# the tooltips are printed on, cut with a deckled organic edge. WritLeaf
+	# draws silhouette + contour + toast along one wobbled path: a StyleBox
+	# rounded rect reads as UI precisely because its corners are perfect.
+	var leaf := WritLeaf.new()
 	leaf.set_anchors_preset(Control.PRESET_FULL_RECT)
-	var bst := StyleBoxFlat.new()
-	bst.bg_color = Color(0.871, 0.812, 0.694) if not is_curse_card \
-		else Color(0.769, 0.749, 0.655)
-	bst.border_color = Color(0.165, 0.125, 0.082)
-	bst.set_border_width_all(1)
-	bst.set_corner_radius_all(8)
-	leaf.add_theme_stylebox_override("panel", bst)
+	leaf.seed_text = String(card_data.get("id", "?"))
+	if is_curse_card:
+		leaf.paper = Color(0.769, 0.749, 0.655)
+		leaf.edge_ink = Color(0.138, 0.148, 0.100)
+		leaf.toast = Color(0.196, 0.216, 0.118)
+		leaf.toast_strength = 1.7
 	root.add_child(leaf)
-	# Paper tooth: a seeded painter, corner-radius aware (full-rect texture
-	# tiles leak square corners past the rounded leaf onto the background).
+	# Paper tooth: the interior ageing painter (washes/foxing/fibers),
+	# clipped at 3px inset so the big wash circles stay on the sheet.
 	var tooth := ParchmentPlate.new()
+	tooth.clip_contents = true
 	tooth.set_anchors_preset(Control.PRESET_FULL_RECT)
-	tooth.offset_left = 1
-	tooth.offset_top = 1
-	tooth.offset_right = -1
-	tooth.offset_bottom = -1
+	tooth.offset_left = 3
+	tooth.offset_top = 3
+	tooth.offset_right = -3
+	tooth.offset_bottom = -3
 	tooth.seed_text = String(card_data.get("id", "?"))
-	tooth.corner_radius = 7.0
 	if is_curse_card:
 		# The document itself is corrupted: murk-green staining, heavier.
 		tooth.stain = Color(0.282, 0.318, 0.196)
 		tooth.fox = Color(0.255, 0.282, 0.137)
-		tooth.toast = Color(0.196, 0.216, 0.118)
 		tooth.strength = 1.7
 	root.add_child(tooth)
 	# A whisper of fiber noise on top of the painter's washes.
@@ -3388,34 +3470,44 @@ func _build_chart_proto() -> void:
 	fst.set_border_width_all(1)
 	fillet.add_theme_stylebox_override("panel", fst)
 	root.add_child(fillet)
+	# Plate marks: small metal squares on the fillet corners — the mounting
+	# hardware that makes the painting read as a fixed museum plate.
+	for pm in [Vector2(8, 8), Vector2(217, 8), Vector2(8, 153), Vector2(217, 153)]:
+		var mark := Panel.new()
+		mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var mst := StyleBoxFlat.new()
+		mst.bg_color = metal
+		mst.border_color = Color(0.10, 0.08, 0.05, 0.9)
+		mst.set_border_width_all(1)
+		mark.add_theme_stylebox_override("panel", mst)
+		mark.position = (pm as Vector2) - Vector2(2.5, 2.5)
+		mark.size = Vector2(5, 5)
+		root.add_child(mark)
 
-	# ── rarity diamond at top-center, set on the rule like a gem mount ───
+	# ── rarity gem at top-center: a faceted diamond SET into an ink mount
+	# on the rules — bigger and jeweled, so rarity reads at hand scale ────
 	if rarity == "uncommon" or rarity == "rare":
 		var gem_col := Color(0.949, 0.616, 0.137) if rarity == "rare" \
 			else Color(0.62, 0.72, 0.86)
-		_chart_diamond(root, Vector2(112.5, 7.0), 10.0, gem_col)
+		_chart_diamond(root, Vector2(112.5, 7.0), 15.0, Color(0.10, 0.082, 0.060))
+		_chart_diamond(root, Vector2(112.5, 7.0), 9.0, gem_col)
+		_chart_diamond(root, Vector2(112.5, 5.4), 3.4,
+			Color(minf(gem_col.r * 1.5, 1.0), minf(gem_col.g * 1.5, 1.0),
+			minf(gem_col.b * 1.5, 1.0)))
 
-	# ── nameplate: raised ink band, metal hairlines, gilt Cinzel name ────
-	var plate := Panel.new()
-	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# ── name cartouche: swallowtail ink banner, metal-edged — the name
+	# moment is crafted furniture now, not a flat full-width bar ──────────
+	var plate := InkCartouche.new()
 	plate.anchor_left = 0.0
 	plate.anchor_right = 1.0
 	plate.anchor_top = 0.0
 	plate.anchor_bottom = 0.0
-	plate.offset_left = 10
-	plate.offset_right = -10
-	plate.offset_top = 154
-	plate.offset_bottom = 178
-	var plst := StyleBoxFlat.new()
-	plst.bg_color = Color(0.128, 0.106, 0.078, 0.98)
-	plst.border_color = metal_dim
-	plst.border_width_top = 1
-	plst.border_width_bottom = 1
-	plst.set_corner_radius_all(2)
-	plate.add_theme_stylebox_override("panel", plst)
+	plate.offset_left = 12
+	plate.offset_right = -12
+	plate.offset_top = 156
+	plate.offset_bottom = 184
+	plate.metal = metal
 	root.add_child(plate)
-	_chart_diamond(root, Vector2(10, 166), 5.5, metal)
-	_chart_diamond(root, Vector2(215, 166), 5.5, metal)
 	var name_font: Font = GameTheme.font_title_black \
 		if GameTheme.font_title_black != null else GameTheme.font_display
 	var name_col := Color(0.93, 0.82, 0.55)
@@ -3436,8 +3528,8 @@ func _build_chart_proto() -> void:
 	_name_label.add_theme_constant_override("shadow_offset_y", 1)
 	_name_label.clip_text = true
 	_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	# Band center y=166 real → 221.33 in _center_at_point's 300x400 space.
-	_center_at_point(_name_label, Vector2(150, 221.33), SIZE_NAME)
+	# Cartouche center y=170 real → 226.67 in _center_at_point's 300x400 space.
+	_center_at_point(_name_label, Vector2(150, 226.67), SIZE_NAME)
 	root.add_child(_name_label)
 
 	# ── keyword rail (chart roundels) ────────────────────────────────────
@@ -3464,7 +3556,7 @@ func _build_chart_proto() -> void:
 	rulebox.anchor_bottom = 0.0
 	rulebox.offset_left = 15
 	rulebox.offset_right = -15
-	rulebox.offset_top = 184
+	rulebox.offset_top = 188
 	rulebox.offset_bottom = 257
 	var pst := StyleBoxFlat.new()
 	pst.draw_center = false
@@ -3473,8 +3565,8 @@ func _build_chart_proto() -> void:
 	pst.set_border_width_all(1)
 	rulebox.add_theme_stylebox_override("panel", pst)
 	root.add_child(rulebox)
-	_chart_diamond(root, Vector2(15, 184), 3.6, metal_dim)
-	_chart_diamond(root, Vector2(210, 184), 3.6, metal_dim)
+	_chart_diamond(root, Vector2(15, 188), 3.6, metal_dim)
+	_chart_diamond(root, Vector2(210, 188), 3.6, metal_dim)
 	_chart_diamond(root, Vector2(15, 257), 3.6, metal_dim)
 	_chart_diamond(root, Vector2(210, 257), 3.6, metal_dim)
 
@@ -3488,7 +3580,7 @@ func _build_chart_proto() -> void:
 	desc_clip.anchor_bottom = 0.0
 	desc_clip.offset_left = 17
 	desc_clip.offset_right = -17
-	desc_clip.offset_top = 186
+	desc_clip.offset_top = 190
 	desc_clip.offset_bottom = 255
 	root.add_child(desc_clip)
 	var center_box := CenterContainer.new()
@@ -3502,18 +3594,23 @@ func _build_chart_proto() -> void:
 	desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	desc_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	desc_rt.custom_minimum_size = Vector2(170, 0)
-	var desc_font: Font = GameTheme.font_body
-	var desc_bold_font: Font = GameTheme.font_body_bold
+	# The writ writes its rules in a book hand (Alegreya) — a modern rounded
+	# sans on period paper breaks the document fiction. Serif sizes run +1
+	# on the sans scale: hairline serifs need it at these px sizes.
+	var desc_font: Font = GameTheme.font_card_body \
+		if GameTheme.font_card_body != null else GameTheme.font_body
+	var desc_bold_font: Font = GameTheme.font_card_body_bold \
+		if GameTheme.font_card_body_bold != null else GameTheme.font_body_bold
 	if desc_font:
 		desc_rt.add_theme_font_override("normal_font", desc_font)
 		desc_rt.add_theme_font_override("bold_font",
 			desc_bold_font if desc_bold_font else desc_font)
 	var raw_desc: String = card_data.get("desc", "")
-	var dsz := 11
+	var dsz := 12
 	if raw_desc.length() > 105:
-		dsz = 9
-	elif raw_desc.length() > 72:
 		dsz = 10
+	elif raw_desc.length() > 72:
+		dsz = 11
 	desc_rt.add_theme_font_size_override("normal_font_size", dsz)
 	desc_rt.add_theme_font_size_override("bold_font_size", dsz)
 	desc_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)

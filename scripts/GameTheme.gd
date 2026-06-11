@@ -7,6 +7,8 @@ var font_body: Font = null      # Nunito Regular + embolden 0.55 — description
 var font_body_bold: Font = null # Nunito Regular + embolden 0.85 — keyword [b] tags (ExtraBold)
 var font_title: Font = null       # Cinzel SemiBold — combat HUD headers/captions (NOT cards)
 var font_title_black: Font = null # Cinzel Black — combat HUD numerals (HP/mana/counts)
+var font_card_body: Font = null      # Alegreya 500 — card rules text (the writ's book hand)
+var font_card_body_bold: Font = null # Alegreya ~760 — keyword [b] tags on the card page
 
 # ── Textures ──
 var tex_card_frame_ornate: Texture2D = null
@@ -214,6 +216,29 @@ func _load_assets() -> void:
 		push_warning("[GameTheme] Cinzel unavailable — HUD falls back to display/stat font")
 		font_title = font_display
 		font_title_black = font_stat
+
+	# Card rules text: Alegreya — an OFL book serif designed for literature,
+	# sturdy at small sizes. The card page is diegetic paper, so it gets a
+	# diegetic book hand; HUD/menus keep Nunito (clean UI voice). SCOPED TO
+	# CARDS on purpose. wght 500 (not 400): hairline serifs at 10-12px need
+	# the half-step of weight to survive AA against the parchment fill.
+	var alegreya := load("res://assets/fonts/Alegreya-Variable.ttf") as FontFile
+	if alegreya != null:
+		if nunito != null:
+			alegreya.fallbacks = [nunito]
+		var writ_body := FontVariation.new()
+		writ_body.base_font = alegreya
+		writ_body.variation_opentype = {"wght": 500}
+		font_card_body = writ_body
+		var writ_bold := FontVariation.new()
+		writ_bold.base_font = alegreya
+		writ_bold.variation_opentype = {"wght": 760}
+		font_card_body_bold = writ_bold
+		print("[GameTheme] font_card_body set to Alegreya")
+	else:
+		push_warning("[GameTheme] Alegreya unavailable — card body falls back to Nunito")
+		font_card_body = font_body
+		font_card_body_bold = font_body_bold
 	# Flip USE_NEW_FRAME below to false to revert to the old card_frame_ornate.png.
 	var ornate_path = "res://assets/ui/card_frame_ornate.png"
 	if USE_NEW_FRAME:
