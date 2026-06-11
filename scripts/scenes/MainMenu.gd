@@ -199,7 +199,7 @@ func _rebuild_menu() -> void:
 		asc_row.add_child(plus)
 		col.add_child(asc_row)
 
-	var btn_gallery := _make_menu_button("CARD GALLERY",
+	var btn_gallery := _make_menu_button("COLLECTION",
 		Color(0.16, 0.20, 0.32), MENU_FONT, MENU_H)
 	btn_gallery.pressed.connect(func():
 		GameTheme.fade_out_then_change_scene(self, COLLECTION_SCENE))
