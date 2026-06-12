@@ -144,10 +144,18 @@ var overlay_handles_standard := false
 # keeps the full-island view until scrolled.
 const VIEW_ZOOM_MIN := 1.0
 const VIEW_ZOOM_MAX := 2.4
+# The zoom band where the plate changes DRESS (the Paradox map-mode move —
+# never show the strategic theater and the decision ladder at full strength
+# together). Zoomed in past HI = march dress: roads, chips, your claimed
+# amber, quiet ground. Zoomed out past LO = campaign dress: rival dyes,
+# province borders, kingdom names, chart furniture. Crossfaded between.
+const DRESS_ZOOM_LO := 1.10
+const DRESS_ZOOM_HI := 1.30
 var _view_zoom := 1.0
 var _view_pan := Vector2.ZERO
 var _view_drag := false
 var _view_drag_last := Vector2.ZERO
+var _last_dress_mix := -1.0
 
 # ── Plate item + bakes + per-act cache ───────────────────────────────────
 # Three layers of structure keep the map fast (the plate used to lag both
@@ -173,7 +181,8 @@ var _view_drag_last := Vector2.ZERO
 const PLATE_BAKE_SCALE := 2.0
 var _plate_item = null   # untyped: typed Control fails on script-only members
 var _geo_tex: ImageTexture = null     # per act, cached in RunState
-var _plate_tex: ImageTexture = null   # per open (geo + ink), never cached
+var _march_tex: ImageTexture = null   # per open — the clean march dress
+var _plate_tex: ImageTexture = null   # campaign dress; stale copy cache-seeded
 var _plate_bake_pending := false
 var _bake_gen := 0
 # "" = the live map · "geo" = clone baking geography only · "plate" = clone
@@ -260,11 +269,34 @@ func _set_view(z: float, pan: Vector2) -> void:
 	# zooming can never expose void past an edge.
 	var lim := size * (1.0 - _view_zoom)
 	_view_pan = Vector2(clampf(pan.x, lim.x, 0.0), clampf(pan.y, lim.y, 0.0))
-	# View changes only move the plate item's transform — nothing re-records.
+	# View changes only move the plate item's transform — nothing re-records
+	# EXCEPT a dress-mix change, which re-records the (2-3 quad) plate item
+	# so the campaign layer's crossfade alpha tracks the zoom.
 	if _plate_item != null:
 		_plate_item.position = _view_pan
 		_plate_item.scale = Vector2(_view_zoom, _view_zoom)
+		var mix := _campaign_mix()
+		if not is_equal_approx(mix, _last_dress_mix):
+			_last_dress_mix = mix
+			_plate_item.queue_redraw()
 	_on_view_changed()
+
+
+## 0 = pure march dress (zoomed in, the default), 1 = full campaign dress
+## (zoomed out to the war table). Crossfaded across the DRESS_ZOOM band.
+func _campaign_mix() -> float:
+	return clampf((DRESS_ZOOM_HI - _view_zoom) / (DRESS_ZOOM_HI - DRESS_ZOOM_LO),
+		0.0, 1.0)
+
+
+## Which dress the VECTOR ink path paints (bake clones pin theirs; the live
+## fallback — cold opens, failed readbacks — picks the nearer dress).
+func _ink_campaign() -> bool:
+	if bake_mode == "plate":
+		return true
+	if bake_mode == "march":
+		return false
+	return _campaign_mix() > 0.5
 
 
 func _on_view_changed() -> void:
@@ -306,6 +338,10 @@ func build_map() -> void:
 		_resolve_kingdoms()
 		_derive_terrain_tags()
 		_geo_tex = cache.get("geo", null)
+		# Last open's campaign plate: at most one visit stale, which only
+		# shows for the ~150ms until this open's bakes land — a silent hold,
+		# never a pop.
+		_plate_tex = cache.get("plate_prev", null)
 		_redraw_plate()
 		if bake_mode == "":
 			_ensure_plate_bake()
@@ -376,11 +412,14 @@ func _mesh_restore(m: Dictionary) -> void:
 
 
 ## The per-open bake chain (live map only). Ensures the act's geography
-## texture exists (baking + caching it on the act's first open), then bakes
-## the COMPLETE plate — geo quad + campaign ink — for this open, collapsing
-## the live plate item to a single quad. Fire-and-forget coroutine; any
-## failed readback leaves the (correct, just slower) vector path in place,
-## and plate_baked fires in every outcome so MapView's gate can't hang.
+## texture exists (baking + caching it on the act's first open), bakes the
+## MARCH plate (geo + decision ink — the dress the map opens in; this is
+## what gates MapView's opening ease), then bakes the CAMPAIGN plate in the
+## background for the zoomed-out dress. The campaign texture is also cached
+## per act so the next open can hold a one-visit-stale dressed island during
+## its own bake instead of popping. Fire-and-forget coroutine; any failed
+## readback leaves the (correct, just slower) vector path in place, and
+## plate_baked fires in every outcome so MapView's gate can't hang.
 func _ensure_plate_bake() -> void:
 	_bake_gen += 1
 	var gen := _bake_gen
@@ -393,13 +432,20 @@ func _ensure_plate_bake() -> void:
 				RunState.map_plate_cache[_act]["geo"] = g
 			_redraw_plate()
 	if gen == _bake_gen:
-		var p: ImageTexture = await _bake_via_clone("plate")
-		if gen == _bake_gen and p != null:
-			_plate_tex = p
+		var m: ImageTexture = await _bake_via_clone("march")
+		if gen == _bake_gen and m != null:
+			_march_tex = m
 			_redraw_plate()
 	if gen == _bake_gen:
 		_plate_bake_pending = false
 	plate_baked.emit()
+	if gen == _bake_gen:
+		var p: ImageTexture = await _bake_via_clone("plate")
+		if gen == _bake_gen and p != null:
+			_plate_tex = p
+			if RunState.map_plate_cache.has(_act):
+				RunState.map_plate_cache[_act]["plate_prev"] = p
+			_redraw_plate()
 
 
 ## Render this map once through an offscreen clone in a 2× SubViewport and
@@ -1481,10 +1527,11 @@ func _draw() -> void:
 	_draw_ui()
 
 
-## The plate's canvas item. Steady state is ONE quad (the per-open complete
-## bake); until that lands it paints geography (cached quad or vectors) +
-## the campaign ink. Re-records only when _redraw_plate fires — zoom/pan
-## just move this item's transform.
+## The plate's canvas item. Steady state is the march quad with the campaign
+## quad crossfaded over it by zoom (the dress system); until the bakes land
+## it paints geography (cached quad or vectors) + the nearer dress's ink.
+## Re-records only when _redraw_plate fires or the dress mix changes —
+## zoom/pan otherwise just move this item's transform.
 class PlateItem extends Control:
 	# Untyped on purpose: hard-typed vars fail compile on script-only members.
 	var map = null
@@ -1492,11 +1539,22 @@ class PlateItem extends Control:
 	func _draw() -> void:
 		if map == null or map._nodes.is_empty() or map._polys.is_empty():
 			return
-		if map._plate_tex != null:
-			# The complete plate (geography + ink) in a single command.
-			draw_texture_rect(map._plate_tex,
-				Rect2(Vector2.ZERO, map.size), false)
-			return
+		if map.bake_mode == "":
+			var mix: float = map._campaign_mix()
+			if map._march_tex != null:
+				draw_texture_rect(map._march_tex,
+					Rect2(Vector2.ZERO, map.size), false)
+				if mix > 0.0 and map._plate_tex != null:
+					draw_texture_rect(map._plate_tex,
+						Rect2(Vector2.ZERO, map.size), false,
+						Color(1, 1, 1, mix))
+				return
+			if map._plate_tex != null:
+				# March bake still in flight — hold the (possibly one-visit
+				# stale) campaign plate rather than flash the vector path.
+				draw_texture_rect(map._plate_tex,
+					Rect2(Vector2.ZERO, map.size), false)
+				return
 		var count: int = map._seed_pts.size()
 		if map._geo_tex != null:
 			# Baked geography: ocean/terrain/coast/rivers/decorations in one
@@ -1508,17 +1566,19 @@ class PlateItem extends Control:
 			map._paint_geo(self, count)
 		if map.bake_mode == "geo":
 			return   # geography-bake clone: no ink in the cached texture
-		# Campaign ink — political wash, roads, chips, keep/camp, labels.
-		# Painted by the live map only while its plate bake is in flight,
-		# and by the "plate" clone to produce that bake.
-		map._draw_political(self, count)
+		# Campaign ink, dress-gated: the march dress is the decision screen
+		# (roads, chips, keep/camp, your amber); the campaign dress adds the
+		# political theater (rival dyes, borders, kingdom + chart names).
+		var campaign: bool = map._ink_campaign()
+		map._draw_political(self, count, campaign)
 		map._draw_etna(self)
 		map._draw_routes(self)
 		map._draw_sites(self)
 		map._draw_keep(self)
 		map._draw_camp(self)
-		map._draw_kingdom_names(self)
-		map._draw_labels(self)
+		if campaign:
+			map._draw_kingdom_names(self)
+			map._draw_labels(self)
 		map._draw_furniture(self)
 
 
@@ -1742,11 +1802,14 @@ func _draw_furniture(tgt: CanvasItem) -> void:
 	tgt.draw_circle(head + Vector2(-1, -3), 1.4, Color(0.9, 0.85, 0.6, 0.9))
 
 
-func _draw_political(tgt: CanvasItem, count: int) -> void:
+func _draw_political(tgt: CanvasItem, count: int, campaign: bool = true) -> void:
 	# Claimed wash — and, on conquest runs, the rival's wash on every province
 	# you haven't taken yet: the kingdom starts in his colors and your amber
 	# eats them site by site. The dye is thinned (_faction_wash) so the
 	# antique plate holds; wilds beyond the corridor stay unwashed.
+	# The march dress keeps only the PLAYER's side of this — claimed amber
+	# and the frontier rim. Rival dye + province borders are campaign-only:
+	# they were the densest noise sitting directly behind the site chips.
 	var rival_wash := _faction_wash()
 	for i in range(count):
 		var p := _prov[i]
@@ -1755,7 +1818,7 @@ func _draw_political(tgt: CanvasItem, count: int) -> void:
 		if bool(_nodes[p].vis):
 			tgt.draw_colored_polygon(_polys[i], Color(PLAYER_AMBER.r,
 				PLAYER_AMBER.g, PLAYER_AMBER.b, 0.30))
-		elif _faction_id != "":
+		elif campaign and _faction_id != "":
 			tgt.draw_colored_polygon(_polys[i], rival_wash)
 	# Province borders along true cell edges; frontier rim bright.
 	for i2 in range(count):
@@ -1776,6 +1839,8 @@ func _draw_political(tgt: CanvasItem, count: int) -> void:
 			elif a_vis:
 				tgt.draw_line(seg[0], seg[1], Color(PLAYER_AMBER.r,
 					PLAYER_AMBER.g, PLAYER_AMBER.b, 0.55), 1.8, true)
+			elif not campaign:
+				continue
 			elif _faction_id != "":
 				# Interior borders of the unconquered kingdom carry his dye —
 				# the land reads as provinces of HIS realm, not neutral ink.
