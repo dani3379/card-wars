@@ -94,6 +94,28 @@ func _affinity(d: Dictionary, faction: String) -> int:
 		var st: String = String(d.get("spell", {}).get("type", ""))
 		if st.contains("damage") or st.contains("burn"):
 			s += 2
+	# Phase 2.5 — the muster leans to the country it camps in. A +1 bump
+	# only: faction affinity stays the lead voice, terrain is the accent.
+	match RunState.current_terrain:
+		"woods":
+			for kw in ["swift", "ranged", "piercing"]:
+				if kws.has(kw):
+					s += 1
+					break
+		"pass":
+			for kw in ["armored", "thorns", "shield"]:
+				if kws.has(kw):
+					s += 1
+					break
+		"ash":
+			if kws.has("doom") or kws.has("rampage"):
+				s += 1
+			elif String(d.get("type", "")) == "spell" \
+					and String(d.get("spell", {}).get("type", "")).contains("damage"):
+				s += 1
+		"meadow":
+			if int(d.get("cost", 9)) <= 1:
+				s += 1
 	return s
 
 

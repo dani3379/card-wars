@@ -54,6 +54,11 @@ var map_plate_cache: Dictionary = {}
 var current_encounter_id: String = ""
 var current_node_type: String = ""
 var current_mutator_id: String = ""
+# Phase 2.5 — the visited node's route terrain ("meadow"/"woods"/"pass"/
+# "ash"; "" before the plate has tagged the act) and whether the road in
+# crosses a river bridge. Event/Recruit read these to lean their offers.
+var current_terrain: String = ""
+var current_bridge: bool = false
 # Run statistics — surfaced on the GameOver recap screen. Reset by
 # start_new_run, updated by Combat on each victory / death, persisted in
 # the save file so a quit-mid-run resume keeps the running counts.
@@ -220,6 +225,8 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	current_encounter_id = ""
 	current_node_type = ""
 	current_mutator_id = ""
+	current_terrain = ""
+	current_bridge = false
 	fights_won = 0
 	mutators_survived = []
 	cause_of_death = ""
@@ -739,6 +746,8 @@ func visit_node(row: int, col: int) -> void:
 			current_node_type = n.type
 			current_encounter_id = n.get("encounter_id", "")
 			current_mutator_id = n.get("mutator_id", "")
+			current_terrain = String(n.get("terrain", ""))
+			current_bridge = bool(n.get("bridge", false))
 			current_floor += 1
 			save_run()  # checkpoint: player is committing to enter a room
 			return
@@ -751,6 +760,64 @@ func _find_node_by_col(row_nodes: Array, col: int) -> Dictionary:
 	return {}
 
 
+## Phase 2.5 — once the plate has tagged this act's holds with terrain
+## (MapTerrain._derive_terrain_tags, first open of the act), re-DEAL the
+## already-dealt encounters onto terrain-matching nodes. The multiset of
+## fights never changes — the player meets the same kits either way — they
+## just land on coherent ground: ambush kits in the woods, armor on the
+## pass, doom in the ash, the lightest deal on the meadow road. Pure
+## function of (dealt multiset, tags): greedy over a total order, no RNG,
+## so re-running it is idempotent. Gated to untouched acts so a mid-act
+## save from before tagging never shuffles fights the player has already
+## scouted via tooltips.
+func apply_terrain_redeal() -> void:
+	var act_map := get_current_act_map()
+	if act_map.is_empty():
+		return
+	for row in act_map:
+		for n in row:
+			if bool(n.get("visited", false)):
+				return
+	var order := {"ash": 0, "woods": 1, "pass": 2, "meadow": 3}
+	for node_type in ["combat", "elite"]:
+		var nodes: Array = []
+		for row in act_map:
+			for n in row:
+				if String(n.get("type", "")) == node_type \
+						and String(n.get("terrain", "")) != "" \
+						and String(n.get("encounter_id", "")) != "":
+					nodes.append(n)
+		if nodes.size() < 2:
+			continue
+		var pool: Array = []
+		for n in nodes:
+			pool.append(String(n.encounter_id))
+		# Ash holds pick first (rarest ground, loudest theme), then woods,
+		# pass, meadow; (row, col) breaks ties so the order is total.
+		nodes.sort_custom(func(a, b):
+			var ta: int = order.get(String(a.terrain), 3)
+			var tb: int = order.get(String(b.terrain), 3)
+			if ta != tb:
+				return ta < tb
+			if int(a.row) != int(b.row):
+				return int(a.row) < int(b.row)
+			return int(a.col) < int(b.col))
+		for n in nodes:
+			var best_i := 0
+			var best_s: int = -(1 << 30)
+			for i in range(pool.size()):
+				var s: int = EncounterDB.terrain_affinity(pool[i], String(n.terrain))
+				# Tie-break on the id itself, NOT pool position — the pool is
+				# rebuilt in row-major node order on every call, so a position
+				# tie-break made equal-scoring kits swap on a second pass
+				# (idempotence is the whole determinism guarantee here).
+				if s > best_s or (s == best_s and pool[i] < pool[best_i]):
+					best_s = s
+					best_i = i
+			n["encounter_id"] = pool[best_i]
+			pool.remove_at(best_i)
+
+
 func advance_act() -> void:
 	current_act_idx += 1
 	map_position = {"row": -1, "col": -1}
@@ -759,6 +826,8 @@ func advance_act() -> void:
 	current_encounter_id = ""
 	current_node_type = ""
 	current_mutator_id = ""
+	current_terrain = ""
+	current_bridge = false
 	# Per-act rest counters reset so the time-of-day shader tint (dusk → night)
 	# restarts each act, and Whetstone's "first rest of act" payoff re-arms.
 	rests_visited_in_act = 0
@@ -1266,6 +1335,8 @@ func save_run() -> void:
 		"current_encounter_id": current_encounter_id,
 		"current_node_type": current_node_type,
 		"current_mutator_id": current_mutator_id,
+		"current_terrain": current_terrain,
+		"current_bridge": current_bridge,
 		"fights_won": fights_won,
 		"mutators_survived": mutators_survived,
 		"cause_of_death": cause_of_death,
@@ -1407,6 +1478,8 @@ func load_run(slot: int = -1) -> bool:
 	current_encounter_id = String(data.get("current_encounter_id", ""))
 	current_node_type = String(data.get("current_node_type", ""))
 	current_mutator_id = String(data.get("current_mutator_id", ""))
+	current_terrain = String(data.get("current_terrain", ""))
+	current_bridge = bool(data.get("current_bridge", false))
 	fights_won = int(data.get("fights_won", 0))
 	mutators_survived = []
 	for m in data.get("mutators_survived", []):

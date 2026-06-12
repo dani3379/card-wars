@@ -35,6 +35,17 @@ func _ready() -> void:
 
 
 func _pick_event() -> void:
+	# Phase 2.5 — at a bridge node the crossing IS the event, the first
+	# time. The plate painted the bridge on the road in; the room honors it.
+	# Repeat bridges fall through to the normal roll (the gate below keeps
+	# the crossing eligible there, competing like any seen event).
+	if RunState.current_bridge and EVENTS.has("the_crossing") \
+			and not RunState.events_seen.has("the_crossing"):
+		_event_id = "the_crossing"
+		_event_data = EVENTS[_event_id]
+		_current_node = _event_data
+		RunState.events_seen.append(_event_id)
+		return
 	# Two filters in order: (1) gate predicates must pass for the current run
 	# state (low-HP, has-curse, deck-size, act, prior-events-seen), (2) prefer
 	# unseen events so the player explores the roster before repeating.
@@ -82,6 +93,9 @@ func _event_gate_passes(event_id: String) -> bool:
 			return pct < float(gate.get("value", 0.5))
 		"gold_at_least":
 			return RunState.gold >= int(gate.get("value", 0))
+		"at_bridge":
+			# Phase 2.5 — only rolls where the road in crossed a river.
+			return RunState.current_bridge
 		"deck_at_least":
 			return RunState.deck.size() >= int(gate.get("value", 0))
 		"has_nonstarting_relic":
@@ -123,6 +137,9 @@ func _event_gate_passes_dict(gate: Dictionary) -> bool:
 			return pct < float(gate.get("value", 0.5))
 		"gold_at_least":
 			return RunState.gold >= int(gate.get("value", 0))
+		"at_bridge":
+			# Phase 2.5 — only rolls where the road in crossed a river.
+			return RunState.current_bridge
 		"deck_at_least":
 			return RunState.deck.size() >= int(gate.get("value", 0))
 		"has_nonstarting_relic":
@@ -1646,6 +1663,41 @@ const EVENTS: Dictionary = {
 				"effects": [
 					{"type": "damage", "value": 8},
 					{"type": "gold", "value": 70},
+				],
+			},
+		],
+	},
+
+	"the_crossing": {
+		# Phase 2.5 — fires at bridge-flagged nodes (the plate painted the
+		# bridge on the road in; this room honors it). First bridge of the
+		# run always rolls it (_pick_event override); later bridges compete
+		# normally via the at_bridge gate.
+		"name": "The Crossing",
+		"desc": "The river runs brown and fast under a bridge of black timber. A chain hangs across the far end, and three men who do not introduce themselves lean on it. The toll is whatever you look like you can pay.",
+		"gate": {"type": "at_bridge"},
+		"choices": [
+			{
+				"label": "Pay the toll\n\nThey count it twice.\nThe chain comes down.",
+				"desc": "-45 gold",
+				"effects": [
+					{"type": "gold", "value": -45},
+				],
+			},
+			{
+				"label": "Force the bridge\n\nThe chain holds longer than the men do.\nNot quite long enough.",
+				"desc": "-6 HP, +50 gold from the toll box",
+				"effects": [
+					{"type": "damage", "value": 6},
+					{"type": "gold", "value": 50},
+				],
+			},
+			{
+				"label": "Ford the river downstream\n\nThe water is patient.\nIt takes something from everyone.",
+				"desc": "-3 HP, +1 Curse",
+				"effects": [
+					{"type": "damage", "value": 3},
+					{"type": "add_curse"},
 				],
 			},
 		],

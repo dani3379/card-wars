@@ -289,6 +289,7 @@ func build_map() -> void:
 		_mesh_restore(cache.mesh)
 		_read_run_map()
 		_resolve_kingdoms()
+		_derive_terrain_tags()
 		_geo_tex = cache.get("geo", null)
 		_redraw_plate()
 		if bake_mode == "":
@@ -306,6 +307,7 @@ func build_map() -> void:
 	_build_roads()
 	_place_labels()
 	_resolve_kingdoms()
+	_derive_terrain_tags()
 	_redraw_plate()
 	if bake_mode != "":
 		return
@@ -630,7 +632,9 @@ func _read_run_map() -> void:
 			"avail": avail.has(Vector2i(nd.row, nd.col)),
 			"encounter_id": String(nd.get("encounter_id", "")),
 			"row": int(nd.row), "col": int(nd.col),
-			"mutator_id": String(nd.get("mutator_id", ""))})
+			"mutator_id": String(nd.get("mutator_id", "")),
+			"terrain": String(nd.get("terrain", "")),
+			"bridge": bool(nd.get("bridge", false))})
 		if nd.row == 0:
 			row0.append({"pos": p, "vis": bool(nd.visited),
 				"avail": avail.has(Vector2i(nd.row, nd.col))})
@@ -1165,6 +1169,115 @@ func road_path_between(from_p: Vector2, to_p: Vector2) -> PackedVector2Array:
 				and (e.b as Vector2).distance_to(to_p) < 1.0:
 			return _edge_curves[ei]
 	return PackedVector2Array([from_p, to_p])
+
+
+## Phase 2.5 — geography becomes the difficulty dial. On the act's first
+## open (tags absent from the run map), classify every hold by the ground
+## it sits on and the road that reaches it, write the tags into the run-map
+## node dicts (live references — they persist with the save), flag bridge
+## crossings, and let RunState re-deal the dealt fights onto matching
+## ground. Idempotent: tagged acts — including bake clones, which build
+## after the live plate has tagged — skip straight out, and _read_run_map
+## already copied their tags into _nodes.
+func _derive_terrain_tags() -> void:
+	var act_map: Array = RunState.get_current_act_map()
+	if act_map.is_empty() or _nodes.is_empty():
+		return
+	var untagged: Array = []
+	for row in act_map:
+		for nd in row:
+			if String(nd.get("terrain", "")) == "":
+				untagged.append(nd)
+	if untagged.is_empty():
+		return
+	var pos_by_rc: Dictionary = {}
+	for m in _nodes:
+		pos_by_rc[Vector2i(int(m.row), int(m.col))] = m.pos
+	for nd in untagged:
+		var key := Vector2i(int(nd.row), int(nd.col))
+		if not pos_by_rc.has(key):
+			continue
+		nd["terrain"] = _classify_site(pos_by_rc[key])
+		nd["bridge"] = false
+	# Bridge flags: a river bridge on the road INTO a hold marks the hold —
+	# its event rolls the crossing, its tooltip warns about the water.
+	for br in _bridges:
+		for ei in range(_edge_curves.size()):
+			# Tight radius: at 12 a single river crossing flagged every edge
+			# threading the same valley (act 3 hit 5 bridge holds of ~13).
+			if not _curve_hits(_edge_curves[ei], br.pos, 9.0):
+				continue
+			var dest: Vector2 = _edges[ei].b
+			for nd2 in untagged:
+				var key2 := Vector2i(int(nd2.row), int(nd2.col))
+				if pos_by_rc.has(key2) \
+						and (pos_by_rc[key2] as Vector2).distance_to(dest) < 2.0:
+					nd2["bridge"] = true
+			break
+	RunState.apply_terrain_redeal()
+	if RunState.run_active:
+		RunState.save_run()
+	# _read_run_map built _nodes before tagging ran — refresh its snapshot
+	# (terrain/bridge for tooltips + ink, encounter_id after the re-deal).
+	var by_rc: Dictionary = {}
+	for row in act_map:
+		for nd3 in row:
+			by_rc[Vector2i(int(nd3.row), int(nd3.col))] = nd3
+	for m in _nodes:
+		var k := Vector2i(int(m.row), int(m.col))
+		if not by_rc.has(k):
+			continue
+		var src: Dictionary = by_rc[k]
+		m["terrain"] = String(src.get("terrain", ""))
+		m["bridge"] = bool(src.get("bridge", false))
+		m["encounter_id"] = String(src.get("encounter_id", ""))
+
+
+## Dominant ground around a site plus the last stretch of its approach
+## road — a clearing chip at the end of a forest road still reads (and
+## now fights) as woods. Sampled off the biome mesh; priority runs
+## scarcest-first so ash and the pass never drown in surrounding grass.
+func _classify_site(p: Vector2) -> String:
+	var tally: Dictionary = {B_FOREST: 0, B_SCORCH: 0, B_ROCK: 0, B_SNOW: 0,
+		B_HILLS: 0, B_GRASS: 0, B_BEACH: 0}
+	var samples: Array = [p]
+	for k in range(8):
+		var a := TAU * float(k) / 8.0
+		samples.append(p + Vector2(cos(a), sin(a)) * 30.0)
+		if k % 2 == 0:
+			samples.append(p + Vector2(cos(a), sin(a)) * 16.0)
+	for ei in range(_edge_curves.size()):
+		if (_edges[ei].b as Vector2).distance_to(p) >= 2.0:
+			continue
+		var pts := _edge_curves[ei]
+		for t in [0.45, 0.6, 0.75, 0.9]:
+			samples.append(pts[int(float(pts.size() - 1) * t)])
+		break
+	for s in samples:
+		var ci := _cell_at(s)
+		if ci < 0 or not _land[ci]:
+			continue
+		var b: int = _biome[ci]
+		if tally.has(b):
+			tally[b] += 1
+	if tally[B_SCORCH] >= 2:
+		return "ash"
+	if tally[B_ROCK] + tally[B_SNOW] >= 2 or tally[B_HILLS] >= 6:
+		return "pass"
+	# Forest must be ~40% of the read (7 of ~17 samples) to call the hold
+	# wooded — at the looser 4 the forest-heavy west leg tagged 11 of 15
+	# sites "woods" and the label stopped meaning anything. Terrain reads
+	# are features of a route, not the act's wallpaper.
+	if tally[B_FOREST] >= 7:
+		return "woods"
+	return "meadow"
+
+
+func _curve_hits(pts: PackedVector2Array, p: Vector2, r: float) -> bool:
+	for q in pts:
+		if q.distance_to(p) <= r:
+			return true
+	return false
 
 
 func _place_labels() -> void:
@@ -1742,6 +1855,7 @@ func _draw_routes(tgt: CanvasItem) -> void:
 				9.0, true)
 			_stamp_route_dashes(tgt, _edge_curves[ei], ei,
 				PLAYER_AMBER, 4.2, 11.0, 7.5, true)
+			_stamp_terrain_glyph(tgt, _edge_curves[ei], _edges[ei].b)
 		elif bool(e.from_vis) and bool(e.get("to_vis", false)):
 			# Brighter than the political CRIMSON wash — the marched line
 			# sits over a dark casing and must not silt into it.
@@ -1804,6 +1918,52 @@ func _stamp_route_dashes(tgt: CanvasItem, pts: PackedVector2Array, seed_i: int,
 			var wing: Vector2 = tip - tv * 11.0 + nv * 8.0 * s
 			tgt.draw_line(tip, wing, casing, w + 3.2, true)
 			tgt.draw_line(tip, wing, ink, w, true)
+
+
+## Phase 2.5 — terrain badge on an open leg: a small inked roundel at
+## mid-road telling you what country the march crosses (pine = woods,
+## peaks = the pass, flame = ash). Meadow is the default and stays
+## unbadged — absence reads as the easy road. The destination node's tag
+## is looked up by position; legs too short for a clean dash run skip
+## the badge rather than crowd the chevron.
+func _stamp_terrain_glyph(tgt: CanvasItem, pts: PackedVector2Array,
+		dest: Vector2) -> void:
+	var terrain := ""
+	for m in _nodes:
+		if (m.pos as Vector2).distance_to(dest) < 2.0:
+			terrain = String(m.get("terrain", ""))
+			break
+	if terrain == "" or terrain == "meadow":
+		return
+	var cum := PackedFloat32Array()
+	cum.append(0.0)
+	var total := 0.0
+	for i in range(1, pts.size()):
+		total += pts[i - 1].distance_to(pts[i])
+		cum.append(total)
+	if total < 80.0:
+		return
+	var c := _route_arc_point(pts, cum, total * 0.5)
+	var ink := PLAYER_AMBER
+	tgt.draw_circle(c, 10.5, Color(0.06, 0.045, 0.025, 0.92))
+	tgt.draw_arc(c, 10.5, 0, TAU, 26,
+		Color(ink.r, ink.g, ink.b, 0.9), 1.5, true)
+	match terrain:
+		"woods":
+			tgt.draw_line(c + Vector2(0, -5.6), c + Vector2(-4.5, 3.2), ink, 1.8, true)
+			tgt.draw_line(c + Vector2(0, -5.6), c + Vector2(4.5, 3.2), ink, 1.8, true)
+			tgt.draw_line(c + Vector2(-4.5, 3.2), c + Vector2(4.5, 3.2), ink, 1.8, true)
+			tgt.draw_line(c + Vector2(0, 3.2), c + Vector2(0, 5.8), ink, 1.8, true)
+		"pass":
+			tgt.draw_line(c + Vector2(-5.8, 4.2), c + Vector2(-1.0, -4.8), ink, 1.8, true)
+			tgt.draw_line(c + Vector2(-1.0, -4.8), c + Vector2(2.0, 1.0), ink, 1.8, true)
+			tgt.draw_line(c + Vector2(2.0, 1.0), c + Vector2(4.0, -2.0), ink, 1.8, true)
+			tgt.draw_line(c + Vector2(4.0, -2.0), c + Vector2(6.1, 4.2), ink, 1.8, true)
+		"ash":
+			tgt.draw_line(c + Vector2(-3.0, 4.2), c + Vector2(-0.5, -5.2), ink, 1.8, true)
+			tgt.draw_line(c + Vector2(3.0, 4.2), c + Vector2(-0.5, -5.2), ink, 1.8, true)
+			tgt.draw_line(c + Vector2(-3.0, 4.2), c + Vector2(3.0, 4.2), ink, 1.8, true)
+			tgt.draw_line(c + Vector2(2.2, -1.2), c + Vector2(3.7, -3.7), ink, 1.6, true)
 
 
 ## Point at arc-distance `d` along a polyline whose cumulative segment

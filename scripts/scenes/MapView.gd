@@ -21,6 +21,16 @@ const CARD_SCENE := preload("res://scenes/card_2d.tscn")
 const HIT_R := 26.0           # click radius, normal site chip
 const BOSS_HIT := 46.0        # click radius, the keep
 
+# Phase 2.5 — the tooltip's route-planning line per ground type. Keywords
+# stay Capitalized (COPY_STYLE §4); the phrasing names what the country
+# BREEDS, matching the terrain re-deal in RunState.apply_terrain_redeal.
+const TERRAIN_TIPS := {
+	"woods": "Wooded road — ambush country. Swift and Ranged favor it.",
+	"pass": "High pass — hard going. Armored kits hold passes.",
+	"ash": "Ash country — the burn. Doom and fire walk here.",
+	"meadow": "Meadow road — open country, lighter resistance.",
+}
+
 var _hud_root: Control = null
 var _overlay: MapPulseOverlay = null
 var _marching := false        # commit march in flight — ignore further clicks
@@ -204,6 +214,16 @@ func _tip(nd: Dictionary) -> String:
 	if mut_id != "" and MutatorDB.exists(mut_id):
 		var mut: Dictionary = MutatorDB.get_mutator(mut_id)
 		label += "\n★ %s: %s" % [mut.get("name", mut_id), mut.get("desc", "")]
+	# Phase 2.5 — the ground the hold sits on. The terrain line is the
+	# route-planning read: it tells you what KIND of fight the country
+	# breeds before you commit to the road.
+	var terrain: String = String(nd.get("terrain", ""))
+	if t in ["combat", "elite"] and TERRAIN_TIPS.has(terrain):
+		label += "\n%s" % TERRAIN_TIPS[terrain]
+	elif t == "boss" and terrain == "ash":
+		label += "\nThe approach is ash the whole way."
+	if bool(nd.get("bridge", false)):
+		label += "\nA bridge crossing — something always waits at the water."
 	return label
 
 

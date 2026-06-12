@@ -67,6 +67,49 @@ func get_kingdom_pool(act: int, type: String, faction: String) -> Array:
 	return pool
 
 
+## Phase 2.5 — terrain affinity (flavour-only weighting, §15.1 #9). How well
+## an authored kit fits the ground its hold sits on: woods favors ambush
+## kits, the pass favors armor, ash favors doom/burn, meadow favors the
+## lightest deck in the deal. Scores are only ever compared WITHIN one
+## terrain (RunState.apply_terrain_redeal assigns one terrain at a time),
+## so the scales don't need to agree across terrains.
+const TERRAIN_KW := {
+	"woods": ["swift", "ranged", "piercing"],
+	"pass": ["armored", "thorns", "shield", "last_stand", "formation"],
+	"ash": ["doom", "rampage", "overrun"],
+}
+var _terrain_aff_cache: Dictionary = {}
+
+
+func terrain_affinity(enc_id: String, terrain: String) -> int:
+	var key := enc_id + "/" + terrain
+	if _terrain_aff_cache.has(key):
+		return _terrain_aff_cache[key]
+	var enc: Dictionary = ENCOUNTERS.get(enc_id, {})
+	var deck: Array = enc.get("deck", [])
+	var score := 0
+	if terrain == "meadow":
+		# Lighter deal = better fit: open country carries the act's easy road.
+		var stats := 0
+		for c in deck:
+			stats += int(c.get("atk", 0)) + int(c.get("hp", 0))
+		score = 200 - stats - deck.size() * 4
+	else:
+		var kws: Array = TERRAIN_KW.get(terrain, [])
+		for c in deck:
+			for kw in c.get("kw", []):
+				if kw in kws:
+					score += 3   # one bump per body, not per keyword
+					break
+		# A reinforcement that fits keeps the theme alive late — half weight.
+		for kw in enc.get("reinforcement", {}).get("kw", []):
+			if kw in kws:
+				score += 1
+				break
+	_terrain_aff_cache[key] = score
+	return score
+
+
 # Face-HP norms per act band, read off the live ENCOUNTERS data (A1 combats
 # run 9–13, elites 18, bosses 21–23; A2 15–18 / 23–25 / 29–31; A3 19–22 /
 # 24–29 / 32–36). Used to rescale fights placed outside their authored act —
