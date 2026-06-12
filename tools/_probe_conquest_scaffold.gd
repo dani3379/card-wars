@@ -318,12 +318,16 @@ func _test_recruit_nodes() -> void:
 				for node in row:
 					if String(node.type) == "recruit":
 						recruits += 1
-			if recruits < 1 or recruits > 2:
+			# 1-3 camps per act: the early/mid/late muster bands (the third
+			# camp was a deliberate deck-growth lever — see the row-skeleton
+			# comments in RunState._assign_node_types; the old 1-2 expectation
+			# predated it and failed even before the 2026-06-12 skeleton).
+			if recruits < 1 or recruits > 3:
 				counts_ok = false
 			if RS._min_fights_to_rest(RS.map_data[a]) < RS.HOLDS_TO_OPEN_LORD:
 				gate_ok = false
 			total += recruits
-	_check(counts_ok, "every act carries 1-2 recruit camps (%d across 18 acts)" % total)
+	_check(counts_ok, "every act carries 1-3 recruit camps (%d across 18 acts)" % total)
 	_check(gate_ok, "fight-count guarantee survives recruit conversion")
 	# The muster draft itself (script-level, no UI).
 	var rec = load("res://scripts/scenes/Recruit.gd").new()

@@ -81,6 +81,18 @@ const TERRAIN_KW := {
 var _terrain_aff_cache: Dictionary = {}
 
 
+## Total statline + body count of an authored kit — the "how heavy is this
+## deal" read used by the meadow affinity AND the road's escalation sort
+## (light kits land at the landing, heavy kits near the keep).
+func kit_weight(enc_id: String) -> int:
+	var enc: Dictionary = ENCOUNTERS.get(enc_id, {})
+	var deck: Array = enc.get("deck", [])
+	var stats := 0
+	for c in deck:
+		stats += int(c.get("atk", 0)) + int(c.get("hp", 0))
+	return stats + deck.size() * 4
+
+
 func terrain_affinity(enc_id: String, terrain: String) -> int:
 	var key := enc_id + "/" + terrain
 	if _terrain_aff_cache.has(key):
@@ -90,10 +102,7 @@ func terrain_affinity(enc_id: String, terrain: String) -> int:
 	var score := 0
 	if terrain == "meadow":
 		# Lighter deal = better fit: open country carries the act's easy road.
-		var stats := 0
-		for c in deck:
-			stats += int(c.get("atk", 0)) + int(c.get("hp", 0))
-		score = 200 - stats - deck.size() * 4
+		score = 200 - kit_weight(enc_id)
 	else:
 		var kws: Array = TERRAIN_KW.get(terrain, [])
 		for c in deck:

@@ -224,6 +224,12 @@ func _tip(nd: Dictionary) -> String:
 		label += "\nThe approach is ash the whole way."
 	if bool(nd.get("bridge", false)):
 		label += "\nA bridge crossing — something always waits at the water."
+	# Pursuit intel — once 2 holds fall the rival's outriders reach every
+	# hold still standing. Mirrors the crimson pennant on the chip.
+	if t == "combat" and not bool(nd.get("vis", false)) \
+			and RunState.holds_broken_in_act >= 2:
+		label += "\nOutriders hold it — an extra reinforcement on round 2%s." \
+			% (" and round 4" if RunState.holds_broken_in_act >= 3 else "")
 	return label
 
 

@@ -2042,6 +2042,17 @@ func _draw_sites(tgt: CanvasItem) -> void:
 			# Mutator star — same signal as the old chart, on the chip's rim.
 			_draw_star(tgt, p + Vector2(r * 0.78, -r * 0.78), 6.0,
 				Color(1.0, 0.84, 0.30, 0.95))
+		# Pursuit mark — once the rival's response is riding (2+ holds
+		# broken), every unbroken hold wears a crimson outrider pennant
+		# over its left shoulder: the road has hardened since you landed.
+		if typ == "combat" and RunState.holds_broken_in_act >= 2:
+			var fp := p + Vector2(-r * 0.95, -r * 0.62)
+			tgt.draw_line(fp, fp + Vector2(0, -11.0),
+				Color(0.10, 0.05, 0.03, 0.95), 1.8, true)
+			tgt.draw_colored_polygon(PackedVector2Array([
+				fp + Vector2(0, -11.0), fp + Vector2(-8.5, -8.2),
+				fp + Vector2(0, -5.6)]),
+				Color(0.85, 0.25, 0.18, 0.95))
 
 
 func _draw_etna(tgt: CanvasItem) -> void:

@@ -425,7 +425,8 @@ func _ready() -> void:
 	# node_type was already captured above for the music branch — reuse it.
 	if node_type == "boss" or node_type == "elite":
 		await _show_encounter_intro(node_type == "boss")
-	elif _encounter_passive_desc != "" or has_mutator() or _wave_schedule_active:
+	elif _encounter_passive_desc != "" or has_mutator() or _wave_schedule_active \
+			or _pursuit_tier() >= 1:
 		await _show_encounter_intro(false, true)
 	_start_round()
 
@@ -3152,6 +3153,25 @@ func _build_wave_chip() -> void:
 	_wave_chip = chip
 
 
+## Pursuit ("the road answers the march", 2026-06-12): once the lord's gate
+## threshold falls, the rival's response rides out to every hold still
+## standing. Tier 0 below 2 broken holds; tier 1 at 2 (one outrider body on
+## round 2); tier 2 at 3+ (again on round 4). Normal holds only — lords and
+## their stronghold elites keep their authored kit pacing (§15.2). This is
+## the act's tempo decision: rush the open gate, or farm the remaining
+## holds knowing they harden.
+func _pursuit_tier() -> int:
+	if RunState.current_node_type != "combat":
+		return 0
+	if RunState.holds_broken_in_act >= 3:
+		return 2
+	if RunState.holds_broken_in_act >= 2:
+		return 1
+	return 0
+
+var _pursuit_banner_shown: bool = false
+
+
 func _enemy_place_creatures() -> void:
 	var enc = EncounterDB.get_encounter(_encounter_id) if _encounter_id != "" else {}
 	var enc_type = enc.get("type", "combat")
@@ -3176,6 +3196,18 @@ func _enemy_place_creatures() -> void:
 		max_place = 2
 	else:
 		max_place = 1 if randi() % ENEMY_FLOOP_CHANCE_DENOM != 0 else 2
+	# Pursuit — one extra body on the outrider rounds. Stacks on faction
+	# waves by design: the wave is the kingdom's engine, the outriders are
+	# the rival's answer. The banner fires on the first outrider beat so
+	# the spike never reads as random (same rule as the Everflame surge).
+	var pt: int = _pursuit_tier()
+	if pt >= 1 and (round_number == 2 or (round_number == 4 and pt >= 2)):
+		max_place += 1
+		if not _pursuit_banner_shown:
+			_pursuit_banner_shown = true
+			_show_combat_banner("OUTRIDERS",
+				"The rival reinforces the hold — the road has eyes",
+				Color(0.85, 0.25, 0.18))
 
 	var tough_hp: int = int(_wave_schedule().get("tough_hp", 0)) if wave_n >= 0 else 0
 	var placed := 0
@@ -12483,6 +12515,22 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 		desc_label.custom_minimum_size = Vector2(vp.x * 0.62, 0)
 		desc_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		holder.add_child(desc_label)
+
+	# Pursuit tag — the road has hardened since the march began. Read before
+	# the fight starts, mirrored by the OUTRIDERS banner when the body lands.
+	if quick and _pursuit_tier() >= 1:
+		var pur_label := Label.new()
+		pur_label.text = "OUTRIDERS — his riders reached this hold first: an extra reinforcement on round 2%s." \
+			% (" and round 4" if _pursuit_tier() >= 2 else "")
+		pur_label.add_theme_font_size_override("font_size", 18)
+		pur_label.add_theme_color_override("font_color", Color(1.0, 0.52, 0.42))
+		pur_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.92))
+		pur_label.add_theme_constant_override("outline_size", 5)
+		pur_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		pur_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		pur_label.custom_minimum_size = Vector2(vp.x * 0.6, 0)
+		pur_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		holder.add_child(pur_label)
 
 	# Mutator badge: tag below the passive (or below the name when no passive),
 	# with name + description so the player reads what changed this fight.

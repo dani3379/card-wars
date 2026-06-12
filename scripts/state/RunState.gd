@@ -125,28 +125,29 @@ const ASCENSION_HP_MULT: Array[float] = [1.0, 1.20, 1.40, 1.60, 1.80, 2.0]
 const ACTS: int = 3
 
 # ── Campaign-map constants ──
-# 7 columns wide, 8 rows tall (rows 0..6 are explorable, row 7 = boss).
-# Shrunk from 15 rows on 2026-06-10: at ~38 sites the map reads as an
-# abstract lattice; at 11–15 sites it reads as a campaign over real terrain
-# (the Sicily plate in MapTerrain/MapView). _generate_act_map enforces the
-# 11–15 window with an acceptance loop.
+# 7 columns wide, 10 rows tall (rows 0..8 are explorable, row 9 = keep).
+# History: 15 rows → 8 on 2026-06-10 (at ~38 sites the map read as an
+# abstract lattice, not a campaign over the plate) → 10 on 2026-06-12
+# (the road-to-the-keep pass: fight count stays constant, the two new
+# rows are wayside tissue — the Kaycee's-Mod length lesson: a road grows
+# in verbs, not violence). _generate_act_map enforces a 14–19-site
+# window with an acceptance loop.
 const MAP_WIDTH: int = 7
-const MAP_HEIGHT: int = 8
-const BOSS_ROW: int = 7
-const REST_ROW: int = 6
+const MAP_HEIGHT: int = 10
+const BOSS_ROW: int = 9
+const REST_ROW: int = 8
 const NUM_PATHS: int = 3
-const MIN_ELITE_ROW: int = 3     # Elites/rest cannot appear before this row.
 
-# Room-type probabilities (cumulative). combat 41%, event 22%, elite 10%,
-# rest 12%, shop 10%, treasure 5%.
-const PROB_SHOP: float = 0.10
-const PROB_REST: float = 0.22    # 0.10 + 0.12
-const PROB_ELITE: float = 0.32   # 0.22 + 0.10
-const PROB_EVENT: float = 0.58   # 0.32 + 0.26 — events up a notch...
-const PROB_TREASURE: float = 0.63  # 0.58 + 0.05 — ...so raw fights drop
-# (combat = the 0.37 remainder; was 0.41. Paired with a third muster camp —
-# deck growth over grind. The acceptance loop still guarantees every route
-# carries HOLDS_TO_OPEN_LORD fights, so the boss gate can't starve.)
+# Row skeleton (Kaycee's-Mod model, 2026-06-12): every row carries a fixed
+# BEAT — fight rows alternate with wayside rows — so the road's rhythm is
+# guaranteed by construction and the within-row choice becomes "which
+# flavor of this beat" (fights differ by terrain/kit, waysides by verb).
+# This replaced the per-node probability table + sibling/consecutive rules:
+# the skeleton can't deal a corridor of five straight fights, fight count
+# per act is CONSTANT (4 + 1 elite + keep), and the road's extra length is
+# all between-fights tissue. See _assign_node_types for the band content.
+const FIGHT_ROWS: Array[int] = [0, 2, 6]   # plain holds (R4 = elite band)
+const ELITE_ROW: int = 4                   # the act's mid-road spike
 
 
 func get_act() -> int:
@@ -792,9 +793,34 @@ func apply_terrain_redeal() -> void:
 		var pool: Array = []
 		for n in nodes:
 			pool.append(String(n.encounter_id))
-		# Ash holds pick first (rarest ground, loudest theme), then woods,
-		# pass, meadow; (row, col) breaks ties so the order is total.
-		nodes.sort_custom(func(a, b):
+		# Stage 0 (combat only) — the landing is always light: row-0 holds
+		# take the lightest kits in the deal outright, terrain be damned.
+		# The act opens like an invasion (skirmishes at the beachhead) and
+		# the heavy deals are pushed up-road by construction.
+		var rest_nodes: Array = []
+		if node_type == "combat":
+			var landing: Array = []
+			for n in nodes:
+				if int(n.row) == 0:
+					landing.append(n)
+				else:
+					rest_nodes.append(n)
+			landing.sort_custom(func(a, b): return int(a.col) < int(b.col))
+			for n in landing:
+				var li := 0
+				for i in range(pool.size()):
+					var wi: int = EncounterDB.kit_weight(pool[i])
+					var wl: int = EncounterDB.kit_weight(pool[li])
+					if wi < wl or (wi == wl and pool[i] < pool[li]):
+						li = i
+				n["encounter_id"] = pool[li]
+				pool.remove_at(li)
+		else:
+			rest_nodes = nodes
+		# Stage 1 — terrain claims the rest: ash holds pick first (rarest
+		# ground, loudest theme), then woods, pass, meadow; (row, col)
+		# breaks ties so the order is total.
+		rest_nodes.sort_custom(func(a, b):
 			var ta: int = order.get(String(a.terrain), 3)
 			var tb: int = order.get(String(b.terrain), 3)
 			if ta != tb:
@@ -802,7 +828,7 @@ func apply_terrain_redeal() -> void:
 			if int(a.row) != int(b.row):
 				return int(a.row) < int(b.row)
 			return int(a.col) < int(b.col))
-		for n in nodes:
+		for n in rest_nodes:
 			var best_i := 0
 			var best_s: int = -(1 << 30)
 			for i in range(pool.size()):
@@ -816,6 +842,34 @@ func apply_terrain_redeal() -> void:
 					best_i = i
 			n["encounter_id"] = pool[best_i]
 			pool.remove_at(best_i)
+		# Stage 2 — escalation within terrain: every node in a terrain group
+		# scores identically wherever its kit lands (affinity is a function
+		# of kit x terrain alone), so permuting INSIDE a group is free.
+		# Sort each group's kits light→heavy and lay them down the road in
+		# row order: the deal sharpens as the keep nears.
+		var groups: Dictionary = {}
+		for n in rest_nodes:
+			var t: String = String(n.terrain)
+			if not groups.has(t):
+				groups[t] = []
+			groups[t].append(n)
+		for t in groups:
+			var grp: Array = groups[t]
+			if grp.size() < 2:
+				continue
+			var kits: Array = []
+			for n in grp:
+				kits.append(String(n.encounter_id))
+			kits.sort_custom(func(a, b):
+				var wa: int = EncounterDB.kit_weight(a)
+				var wb: int = EncounterDB.kit_weight(b)
+				return wa < wb if wa != wb else a < b)
+			grp.sort_custom(func(a, b):
+				if int(a.row) != int(b.row):
+					return int(a.row) < int(b.row)
+				return int(a.col) < int(b.col))
+			for i in range(grp.size()):
+				grp[i]["encounter_id"] = kits[i]
 
 
 func advance_act() -> void:
@@ -891,20 +945,20 @@ func _generate_map() -> void:
 		map_data.append(_generate_act_map(act, rng))
 
 
-## Generates a single act map. Implements the Slay-the-Spire algorithm:
+## Generates a single act map:
 ##   1. Walk NUM_PATHS paths from row 0 up to REST_ROW, ±1 column per step,
-##      with a no-crossing constraint.
-##   2. Assign room types per the STS probability table, respecting the
-##      "no consecutive elite/shop/rest", "no rest before MIN_ELITE_ROW",
-##      "no rest on row REST_ROW-1", and "siblings must differ" rules.
+##      with a no-crossing constraint and a 3x merge bias (trunk + branches).
+##   2. Stamp the Kaycee's-Mod row skeleton over the lattice — fight rows
+##      alternating with wayside bands; guarantees placed, not rolled
+##      (see _assign_node_types).
 ##   3. Add a single boss node at the BOSS_ROW center, with every populated
 ##      REST_ROW node connecting up to it.
 ##   4. Walk through and assign encounter IDs to combat/elite/boss nodes.
 func _generate_act_map(act: int, rng: RandomNumberGenerator) -> Array:
-	# Acceptance loop: only acts with 11–15 sites (incl. boss) read as a
-	# campaign map — fewer is degenerate, more re-grows the lattice. One
-	# value is drawn from the shared rng per act so later acts stay
-	# deterministic regardless of how many attempts this act needed.
+	# Acceptance loop: only acts with 14–19 sites (incl. boss) read as a
+	# campaign over the plate — fewer is degenerate, more re-grows the
+	# lattice. One value is drawn from the shared rng per act so later acts
+	# stay deterministic regardless of how many attempts this act needed.
 	var base_seed: int = rng.randi()
 	var flat: Array = []
 	for attempt in range(60):
@@ -918,7 +972,6 @@ func _generate_act_map(act: int, rng: RandomNumberGenerator) -> Array:
 			grid.append(row)
 		_generate_paths(grid, arng)
 		_assign_node_types(grid, arng)
-		_place_recruit_nodes(grid, arng)
 		_add_boss_node(grid)
 		_assign_encounters(grid, act, arng)
 		flat = _flatten_grid(grid)
@@ -927,8 +980,9 @@ func _generate_act_map(act: int, rng: RandomNumberGenerator) -> Array:
 			n += (row_nodes as Array).size()
 		# Site-count window AND boss-gate guarantee: the worst route a player
 		# can walk must still pass HOLDS_TO_OPEN_LORD fight nodes, or the
-		# locked keep could softlock the act.
-		if n >= 11 and n <= 15 and _min_fights_to_rest(flat) >= HOLDS_TO_OPEN_LORD:
+		# locked keep could softlock the act. (The skeleton makes the fight
+		# minimum 4 by construction — the DFS check stays as a tripwire.)
+		if n >= 14 and n <= 19 and _min_fights_to_rest(flat) >= HOLDS_TO_OPEN_LORD:
 			return flat
 	return flat
 
@@ -1048,122 +1102,98 @@ func _would_cross(grid: Array, r: int, from_col: int, to_col: int) -> bool:
 
 
 func _assign_node_types(grid: Array, rng: RandomNumberGenerator) -> void:
-	# Row 0 → all combat (always a real fight to start). Row REST_ROW → all
-	# rest sites (the breather before the boss).
+	# The row skeleton. Fight rows and the rest row are uniform; the elite
+	# band gets exactly one elite (the act's stronghold spike — forced onto
+	# every route when the band is a single merge point, avoidable when the
+	# row is wider); wayside rows deal their band's flavors round-robin so
+	# siblings differ wherever the row has width.
+	#   R0 fight (the landing — lightest deal, see apply_terrain_redeal)
+	#   R1 wayside: events
+	#   R2 fight
+	#   R3 wayside: the muster band — recruit guaranteed, shop beside it
+	#   R4 fight: the elite band
+	#   R5 wayside: events, sometimes a second muster
+	#   R6 fight
+	#   R7 wayside: the spoils band — treasure guaranteed
+	#   R8 rest (the war-council breather)   R9 keep
 	for c in range(MAP_WIDTH):
-		if grid[0][c] != null:
-			grid[0][c]["type"] = "combat"
 		if grid[REST_ROW][c] != null:
 			grid[REST_ROW][c]["type"] = "rest"
-	for r in range(1, REST_ROW):
+	for r in FIGHT_ROWS:
+		for node in _row_nodes(grid, r):
+			node["type"] = "combat"
+	var band: Array = _row_nodes(grid, ELITE_ROW)
+	for node in band:
+		node["type"] = "combat"
+	if not band.is_empty():
+		band[rng.randi() % band.size()]["type"] = "elite"
+	_fill_wayside_row(grid, 1, ["event", "recruit"], rng)
+	_fill_wayside_row(grid, 3, ["shop", "event"], rng)
+	_fill_wayside_row(grid, 5, ["event", "event", "recruit"], rng)
+	_fill_wayside_row(grid, 7, ["shop", "event"], rng)
+	# A row offers at most one muster — R1's two-flavor pool can round-robin
+	# recruit twice across a 3-wide row. Demoting duplicates to events keeps
+	# camps at one per band (early/mid/late => never more than 3 per act).
+	for r in [1, 3, 5, 7]:
+		var seen_recruit := false
+		for node in _row_nodes(grid, r):
+			if String(node["type"]) == "recruit":
+				if seen_recruit:
+					node["type"] = "event"
+				seen_recruit = true
+	# Placed guarantees (not prayed-for rolls): the muster camp, the
+	# treasure, and at least one shop somewhere on the road. R1/R5 pools
+	# can add a second or third muster — deck growth lives at camps in the
+	# conquest economy (fights pay gold, not cards), so expected musters
+	# stay ~2 per act (range 1-3), matching the old early/mid/late bands.
+	_force_one(grid, 3, "recruit", rng)
+	_force_one(grid, 7, "treasure", rng)
+	if _count_type(grid, "shop") == 0:
+		for r in [7, 3, 5]:
+			if _force_one(grid, r, "shop", rng):
+				break
+
+
+func _row_nodes(grid: Array, r: int) -> Array:
+	var out: Array = []
+	for c in range(MAP_WIDTH):
+		if grid[r][c] != null:
+			out.append(grid[r][c])
+	return out
+
+
+## Deal a wayside band's flavors across the row, round-robin from a random
+## offset — siblings differ whenever the row is wider than one site.
+func _fill_wayside_row(grid: Array, r: int, pool: Array,
+		rng: RandomNumberGenerator) -> void:
+	var i: int = rng.randi() % pool.size()
+	for node in _row_nodes(grid, r):
+		node["type"] = pool[i % pool.size()]
+		i += 1
+
+
+## Stamp `t` onto one PLAIN node (event/shop) of row `r` — never onto an
+## already-placed guarantee (a single-site muster row must not lose its
+## recruit to the shop fallback). Returns false if the row has no plain slot.
+func _force_one(grid: Array, r: int, t: String,
+		rng: RandomNumberGenerator) -> bool:
+	var plain: Array = []
+	for node in _row_nodes(grid, r):
+		if String(node["type"]) in ["event", "shop"]:
+			plain.append(node)
+	if plain.is_empty():
+		return false
+	plain[rng.randi() % plain.size()]["type"] = t
+	return true
+
+
+func _count_type(grid: Array, t: String) -> int:
+	var n: int = 0
+	for r in range(MAP_HEIGHT):
 		for c in range(MAP_WIDTH):
-			if grid[r][c] == null:
-				continue
-			grid[r][c]["type"] = _pick_room_type(grid, r, c, rng)
-
-
-func _pick_room_type(grid: Array, r: int, c: int,
-		rng: RandomNumberGenerator) -> String:
-	# Retry until placement satisfies every rule, then fall back to combat
-	# if 200 attempts can't find a valid alternative.
-	for _attempt in range(200):
-		var roll: float = rng.randf()
-		var t: String
-		if roll < PROB_SHOP:
-			t = "shop"
-		elif roll < PROB_REST:
-			t = "rest"
-		elif roll < PROB_ELITE:
-			t = "elite"
-		elif roll < PROB_EVENT:
-			t = "event"
-		elif roll < PROB_TREASURE:
-			t = "treasure"
-		else:
-			t = "combat"
-		if (t == "elite" or t == "rest") and r < MIN_ELITE_ROW:
-			continue
-		if t == "treasure" and r < MIN_ELITE_ROW:
-			continue
-		if t == "rest" and r == REST_ROW - 1:
-			continue
-		if _is_consecutive_violation(grid, t, r, c):
-			continue
-		if _has_sibling_with_type(grid, t, r, c):
-			continue
-		return t
-	return "combat"
-
-
-func _is_consecutive_violation(grid: Array, t: String, r: int,
-		c: int) -> bool:
-	# STS: elite/shop/rest/treasure can't follow the same type on any incoming path.
-	if t != "elite" and t != "shop" and t != "rest" and t != "treasure":
-		return false
-	if r == 0:
-		return false
-	for pc in range(MAP_WIDTH):
-		var parent = grid[r - 1][pc]
-		if parent == null:
-			continue
-		if not parent["connections"].has(c):
-			continue
-		if parent.get("type", "") == t:
-			return true
-	return false
-
-
-func _has_sibling_with_type(grid: Array, t: String, r: int,
-		c: int) -> bool:
-	# STS: a parent with multiple outgoing edges must point to distinct types,
-	# so the player's choice between siblings is always meaningful.
-	if r == 0:
-		return false
-	for pc in range(MAP_WIDTH):
-		var parent = grid[r - 1][pc]
-		if parent == null:
-			continue
-		if not parent["connections"].has(c):
-			continue
-		for sc in parent["connections"]:
-			if sc == c:
-				continue
-			var sibling = grid[r][sc]
-			if sibling == null:
-				continue
-			if sibling.get("type", "") == t:
-				return true
-	return false
-
-
-## Successor Wars: deck growth lives at muster camps (a free 1-of-3 draft),
-## not post-fight rewards — so every kingdom guarantees up to three recruit
-## sites, one per leg of the march (early / mid / late). They convert from
-## existing sites so the generator's path and type rules stay intact, and
-## they eat COMBAT sites first (the explicit fewer-fights-more-musters
-## lever), falling back to events only when a band has no eligible fight.
-## The acceptance loop re-validates the boss-gate fight minimum AFTER
-## conversion, so a recruit can never eat the gate.
-func _place_recruit_nodes(grid: Array, rng: RandomNumberGenerator) -> void:
-	var bands: Array = [[1, 2], [3, 4], [5, REST_ROW - 1]]
-	for band in bands:
-		var fights: Array = []
-		var fallback: Array = []
-		for r in range(band[0], band[1] + 1):
-			for c in range(MAP_WIDTH):
-				var node = grid[r][c]
-				if node == null:
-					continue
-				if _has_sibling_with_type(grid, "recruit", r, c):
-					continue
-				if node["type"] == "combat":
-					fights.append(node)
-				elif node["type"] == "event":
-					fallback.append(node)
-		var candidates: Array = fights if not fights.is_empty() else fallback
-		if not candidates.is_empty():
-			var pick = candidates[rng.randi() % candidates.size()]
-			pick["type"] = "recruit"
+			if grid[r][c] != null and String(grid[r][c]["type"]) == t:
+				n += 1
+	return n
 
 
 func _add_boss_node(grid: Array) -> void:
