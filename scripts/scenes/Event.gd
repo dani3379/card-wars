@@ -1,11 +1,21 @@
 extends Control
-## Event.gd — Random choice encounters. ~39 events, each with 2-3 choices that
-## trade between HP, gold, deck size, curses, relics and card upgrades. Some are
-## state-gated (low HP, has-curse, deck size, act, prior visits) and a few branch
-## into a second screen or open a card/relic picker. Two looping formats live
-## here too: the transform picker (The Chrysalis Fence) and the push-your-luck
-## dice run (The Bone Pit). Quick ONE-DECISION roadside stops are NOT events —
-## they're the Wayside scene's verbs (scripts/scenes/Wayside.gd).
+## Event.gd — Random choice encounters (~39). The pool is FORMAT-diverse on
+## purpose (2026-06-12 remake — "the structure of the old ones was all the
+## same"): besides the classic 2-3-trade screens, events run on reusable
+## interaction engines:
+##   risk_loop   — push-your-luck "do it again?" (spring sips, choir verses,
+##                 orchard harvest, woodcutter swings)
+##   dice_run    — pot-based wager runs (Bone Pit add-mode, Coin That Won't
+##                 Land double-or-nothing)
+##   roll_table  — committed-action mystery outcomes (fork roads, drowned
+##                 bell, forcing the bridge)
+##   pawn_appraisal / stranger_hand / sacrifice / transform / copy / remove
+##                 — card-tactile pickers
+##   hidden+tell — Three Warm Handles, Rotting Carnival (the tell is the game)
+##   follow_up   — multi-stage branches (lantern, calf, answering well)
+## Some are state-gated (low HP, has-curse, deck size, act, prior visits).
+## Quick ONE-DECISION roadside stops are NOT events — they're the Wayside
+## scene's verbs (scripts/scenes/Wayside.gd).
 
 const MAP_SCENE = "res://scenes/map.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
@@ -549,7 +559,7 @@ const MODAL_EFFECTS := [
 	"butcher_buff", "mirror_twin_buff",
 	"upgrade_choice", "upgrade_choice_multi",
 	"stranger_hand_pick", "relic_sacrifice_pick", "sacrifice_pick",
-	"transform_choice", "dice_run",
+	"transform_choice", "dice_run", "risk_loop", "pawn_appraisal",
 ]
 
 
@@ -881,9 +891,54 @@ func _apply_effect(effect: Dictionary) -> String:
 			_start_transform_mode(int(effect.get("value", 1)))
 			return ""
 		"dice_run":
-			_start_dice_run(int(effect.get("start", 25)))
+			_start_dice_run(effect)
+			return ""
+		"risk_loop":
+			_start_risk_loop(effect)
+			return ""
+		"pawn_appraisal":
+			_start_appraisal_mode()
+			return ""
+		"roll_table":
+			# Weighted mystery outcome — the choice says WHAT you're risking,
+			# the table decides what the road actually does. Entries:
+			# {"weight": int, "text": String, "effects": [non-modal effects]}.
+			# Keeps one-shot choices from being a printed menu: the player
+			# commits to an action, not a price list.
+			var outcomes: Array = effect.get("outcomes", [])
+			var total := 0
+			for o in outcomes:
+				total += maxi(1, int(o.get("weight", 1)))
+			if total <= 0:
+				return ""
+			var pick := randi() % total
+			for o in outcomes:
+				pick -= maxi(1, int(o.get("weight", 1)))
+				if pick < 0:
+					var receipt := _apply_effect_list(o.get("effects", []))
+					return _combine_lines([String(o.get("text", "")), receipt])
 			return ""
 	return ""
+
+
+## Apply a list of NON-MODAL effects and join their receipt lines. Used by
+## roll_table outcomes and risk_loop steps — never put a picker-type effect
+## (MODAL_EFFECTS) in those lists; it would clobber the calling screen.
+func _apply_effect_list(effects: Array) -> String:
+	var parts: Array = []
+	for e in effects:
+		var t := _apply_effect(e)
+		if t != "":
+			parts.append(t)
+	return "\n".join(parts)
+
+
+func _combine_lines(parts: Array) -> String:
+	var out: Array = []
+	for p in parts:
+		if String(p).strip_edges() != "":
+			out.append(String(p))
+	return "\n".join(out)
 
 
 func _deck_count(kind: String) -> int:
@@ -1606,18 +1661,33 @@ func _on_transform_pick(deck_index: int) -> void:
 		_start_transform_mode(_transform_remaining)
 
 
-# ── Knucklebones run (The Bone Pit) ──────────────────────────────────────
-# A real push-your-luck mini-game, not a one-shot coin flip: the pot opens
-# at `start` gold and every cast either grows it (2 in 3) or loses the lot
-# (1 in 3). Banking ends the run and pays the pot. The two buttons reuse
-# the cinematic frameless-choice strip so the pit reads like any other
-# beat of the event — just one that loops.
+# ── Pot run (dice_run) — parameterized push-your-luck wager ──────────────
+# A real looping mini-game, not a one-shot coin flip: the pot opens at
+# `start` gold and every press either grows it or loses the lot; banking
+# ends the run and pays the pot. Fully data-driven so different events
+# wear it as different games — The Bone Pit (add mode, 1-in-3 bust) and
+# The Coin That Won't Land (double-or-nothing, even odds, entry stake).
+# Text fields take {pot} / {gain} tokens. Defaults reproduce the Bone Pit.
 
+var _dice_cfg: Dictionary = {}
 var _dice_pot: int = 0
 
-func _start_dice_run(start_pot: int) -> void:
-	_dice_pot = start_pot
-	_build_dice_screen("The space in the circle is yours. The pot sits at %d gold." % _dice_pot)
+func _dice_text(key: String, fallback: String, gain: int = 0) -> String:
+	return String(_dice_cfg.get(key, fallback)) \
+		.replace("{pot}", str(_dice_pot)).replace("{gain}", str(gain))
+
+
+func _start_dice_run(effect: Dictionary) -> void:
+	_dice_cfg = effect
+	_dice_pot = int(effect.get("start", 25))
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0:
+		if RunState.gold < stake:
+			_show_result(_dice_text("broke_text", "You haven't the coin to sit down."))
+			return
+		RunState.gold -= stake
+	_build_dice_screen(_dice_text("open_text",
+		"The space in the circle is yours. The pot sits at {pot} gold."))
 
 
 func _build_dice_screen(beat: String) -> void:
@@ -1644,28 +1714,301 @@ func _build_dice_screen(beat: String) -> void:
 	choices_vbox.add_theme_constant_override("separation", 12)
 	add_child(choices_vbox)
 
-	choices_vbox.add_child(_make_frameless_choice("Cast the bones",
-		"2 in 3 the pot grows. Skulls lose it all.",
-		"The knuckles rattle like teeth in a cup.", 118, _on_dice_roll))
-	choices_vbox.add_child(_make_frameless_choice("Bank the pot",
-		"Take %d gold and leave the circle." % _dice_pot,
-		"The dead nod. Walking away is also a move.", 118, _on_dice_bank))
+	choices_vbox.add_child(_make_frameless_choice(
+		_dice_text("roll_label", "Cast the bones"),
+		_dice_text("roll_sub", "2 in 3 the pot grows. Skulls lose it all."),
+		_dice_text("roll_body", "The knuckles rattle like teeth in a cup."),
+		118, _on_dice_roll))
+	choices_vbox.add_child(_make_frameless_choice(
+		_dice_text("bank_label", "Bank the pot"),
+		_dice_text("bank_sub", "Take {pot} gold and leave the circle."),
+		_dice_text("bank_body", "The dead nod. Walking away is also a move."),
+		118, _on_dice_bank))
 
 
 func _on_dice_roll() -> void:
-	if randi() % 3 == 0:
+	if randf() < float(_dice_cfg.get("bust_pct", 1.0 / 3.0)):
 		_dice_pot = 0
-		_show_result("Skulls. The pot drains back into the pit, coin by coin, and the circle closes over it. The dead do not gloat. Much.")
+		_show_result(_dice_text("bust_text",
+			"Skulls. The pot drains back into the pit, coin by coin, and the circle closes over it. The dead do not gloat. Much."))
 		return
-	var gain: int = randi_range(18, 34)
-	_dice_pot += gain
+	var gain: int = 0
+	if String(_dice_cfg.get("mode", "add")) == "double":
+		gain = _dice_pot
+		_dice_pot *= 2
+	else:
+		gain = randi_range(int(_dice_cfg.get("gain_min", 18)),
+			int(_dice_cfg.get("gain_max", 34)))
+		_dice_pot += gain
 	AudioBank.play_sfx("button_click")
-	_build_dice_screen("The bones land clean — %d more into the pot. The oldest legionary clicks his jaw, which you have learned is applause." % gain)
+	_build_dice_screen(_dice_text("grow_text",
+		"The bones land clean — {gain} more into the pot. The oldest legionary clicks his jaw, which you have learned is applause.", gain))
 
 
 func _on_dice_bank() -> void:
 	RunState.gain_gold(_dice_pot)
-	_show_result("You bank %d gold and stand. A space stays open in the circle behind you. It is always open. That is the other rule." % _dice_pot)
+	_show_result(_dice_text("bank_text",
+		"You bank {pot} gold and stand. A space stays open in the circle behind you. It is always open. That is the other rule."))
+
+
+# ── Risk loop (risk_loop) — the generic "do it again?" engine ────────────
+# The reusable spine for push-your-luck events that aren't about a gold
+# pot: drink another sip, sing another verse, pick another fruit, swing
+# the axe again. Two modes:
+#   "bust" (default): each press rolls the step's `chance` to SUCCEED —
+#     success applies the step's effects immediately (you keep what you
+#     got) and advances; failure applies `bust.effects` and ends.
+#   "jackpot": each press applies the step's effects as a COST, then
+#     rolls `chance` to hit the `jackpot` — which applies effects and/or
+#     launches a picker modal (e.g. upgrade_choice) and ends; a miss
+#     advances to the next step (author the last step at chance 1.0).
+# Steps carry their own odds line (`sub`, shown gold on the button) and a
+# success beat (`text`). The action hides when the player can't pay the
+# step's HP cost — no lethal loops (mirrors the Wet Cards' non-lethal rule).
+# AUTHORING LAW: step/bust/jackpot effects must be NON-MODAL (except the
+# jackpot's `modal` field, which names the picker to launch).
+
+var _risk_cfg: Dictionary = {}
+var _risk_step: int = 0
+
+func _start_risk_loop(effect: Dictionary) -> void:
+	_risk_cfg = effect
+	_risk_step = 0
+	_build_risk_screen(String(effect.get("open_text", _current_node.get("desc", ""))))
+
+
+func _effects_hp_cost(effects: Array) -> int:
+	var dmg := 0
+	for e in effects:
+		if String(e.get("type", "")) == "damage":
+			dmg += int(e.get("value", 0))
+	return dmg
+
+
+func _build_risk_screen(beat: String) -> void:
+	_clear_ui()
+	_set_event_art_visible(true)
+
+	var title := _make_event_title(_event_data.name)
+	title.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	title.offset_left = 80
+	title.offset_top = 72
+	title.offset_right = 700
+	title.offset_bottom = 132
+	add_child(title)
+
+	var steps: Array = _risk_cfg.get("steps", [])
+	var can_act: bool = _risk_step < steps.size()
+	if can_act:
+		# Non-lethal guard: never offer a press the player can't survive.
+		var cost := _effects_hp_cost(steps[_risk_step].get("effects", []))
+		if cost > 0 and RunState.hero_hp <= cost:
+			can_act = false
+			beat += "\n\nYou haven't the blood for another."
+
+	var desc = _make_event_desc(beat)
+	add_child(desc)
+
+	var n_choices: int = 2 if can_act else 1
+	var choices_vbox := VBoxContainer.new()
+	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	choices_vbox.offset_left = 80
+	choices_vbox.offset_right = 700
+	choices_vbox.offset_top = -(n_choices * 118 + (n_choices - 1) * 12 + 110)
+	choices_vbox.offset_bottom = -110
+	choices_vbox.add_theme_constant_override("separation", 12)
+	add_child(choices_vbox)
+
+	if can_act:
+		var step: Dictionary = steps[_risk_step]
+		choices_vbox.add_child(_make_frameless_choice(
+			String(_risk_cfg.get("action", "Press on")),
+			String(step.get("sub", "")),
+			String(_risk_cfg.get("action_body", "")), 118, _on_risk_action))
+	choices_vbox.add_child(_make_frameless_choice(
+		String(_risk_cfg.get("leave", "Step away")), "",
+		String(_risk_cfg.get("leave_sub", "Keep what you have.")), 118,
+		_on_risk_leave))
+
+
+func _on_risk_action() -> void:
+	var steps: Array = _risk_cfg.get("steps", [])
+	if _risk_step >= steps.size():
+		_on_risk_leave()
+		return
+	var step: Dictionary = steps[_risk_step]
+	var chance := float(step.get("chance", 1.0))
+	AudioBank.play_sfx("button_click")
+	if String(_risk_cfg.get("mode", "bust")) == "jackpot":
+		# The press always costs; the roll decides whether it pays.
+		var cost_receipt := _apply_effect_list(step.get("effects", []))
+		if randf() < chance:
+			var jp: Dictionary = _risk_cfg.get("jackpot", {})
+			var jp_receipt := _apply_effect_list(jp.get("effects", []))
+			var line := _combine_lines([String(jp.get("text", "")),
+				cost_receipt, jp_receipt])
+			var modal := String(jp.get("modal", ""))
+			if modal == "upgrade_choice":
+				_pending_pre_text = line
+				_start_upgrade_mode(1)
+			elif modal == "remove_choice":
+				_pending_pre_text = line
+				_start_remove_mode()
+			else:
+				_show_result(line)
+			return
+		_risk_step += 1
+		if _risk_step >= steps.size():
+			_show_result(_combine_lines([
+				String(_risk_cfg.get("done_text", "There is nothing more here.")),
+				cost_receipt]))
+		else:
+			_build_risk_screen(_combine_lines([String(step.get("text", "")),
+				cost_receipt]))
+		return
+	# Bust mode: success pays and advances, failure ends the loop.
+	if randf() < chance:
+		var receipt := _apply_effect_list(step.get("effects", []))
+		_risk_step += 1
+		if _risk_step >= steps.size():
+			_show_result(_combine_lines([receipt,
+				String(_risk_cfg.get("done_text", "There is nothing more here."))]))
+		else:
+			_build_risk_screen(_combine_lines([String(step.get("text", "")), receipt]))
+	else:
+		var bust: Dictionary = _risk_cfg.get("bust", {})
+		var bust_receipt := _apply_effect_list(bust.get("effects", []))
+		_show_result(_combine_lines([String(bust.get("text", "The luck turns.")),
+			bust_receipt]))
+
+
+func _on_risk_leave() -> void:
+	if _risk_step == 0:
+		_show_result(String(_risk_cfg.get("leave_text_early",
+			_risk_cfg.get("leave_text", "You let it be."))))
+	else:
+		_show_result(String(_risk_cfg.get("leave_text", "You step away with what you were given.")))
+
+
+# ── Appraisal (pawn_appraisal) — the haggling counter ────────────────────
+# She pulls a random card from YOUR deck and names a price. Take it, or
+# ask her to pull another — her interest (and the multiplier) cools 15%
+# each time, three cards shown at most. The pressure is the format: the
+# first offer is the best one, and it's never for the card you'd have
+# chosen to sell. Curses are never appraised ("she has standards").
+
+var _appr_index: int = -1
+var _appr_mult: float = 1.0
+var _appr_shown: int = 0
+
+func _start_appraisal_mode() -> void:
+	_appr_mult = 1.0
+	_appr_shown = 1
+	_appr_index = _appraisal_roll(-1)
+	if _appr_index < 0:
+		_show_result("She glances through your pack once and slides it back under the glass. Nothing in it interests her.")
+		return
+	_build_appraisal_screen()
+
+
+func _appraisal_roll(exclude: int) -> int:
+	var pool: Array = []
+	for i in range(RunState.deck.size()):
+		if i == exclude:
+			continue
+		if CardDB.is_curse(RunState.deck[i]):
+			continue
+		pool.append(i)
+	if pool.is_empty():
+		return exclude
+	return pool[randi() % pool.size()]
+
+
+func _appraisal_price(deck_index: int) -> int:
+	var data = RunState.get_upgraded_card_data(deck_index)
+	var base: int = 30
+	match String(data.get("rarity", "common")):
+		"starter": base = 15
+		"common": base = 30
+		"uncommon": base = 50
+		"rare": base = 85
+	return int(round((base + int(data.get("cost", 0)) * 5) * _appr_mult))
+
+
+func _build_appraisal_screen() -> void:
+	_clear_ui()
+	_set_event_art_visible(true)
+
+	var data = RunState.get_upgraded_card_data(_appr_index)
+	var price := _appraisal_price(_appr_index)
+
+	var title := _make_event_title(
+		"She holds up [color=#e8b547]%s[/color]" % String(data.get("name", "a card")))
+	title.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	title.offset_left = 80
+	title.offset_top = 72
+	title.offset_right = 700
+	title.offset_bottom = 132
+	add_child(title)
+
+	var desc = _make_event_desc(
+		"She turns it over twice behind the smoked glass, taps it once, and names a figure. She does not repeat herself.")
+	add_child(desc)
+
+	# The card itself, stood on the scrim left of the choices.
+	var wrapper := Control.new()
+	wrapper.custom_minimum_size = Vector2(225, 300)
+	wrapper.set_anchors_preset(Control.PRESET_CENTER_LEFT)
+	wrapper.offset_left = 96
+	wrapper.offset_right = 321
+	wrapper.offset_top = -40
+	wrapper.offset_bottom = 260
+	var card_node = CARD_SCENE.instantiate()
+	card_node.static_display = true
+	card_node.card_data = data
+	wrapper.add_child(card_node)
+	add_child(wrapper)
+
+	var can_another: bool = _appr_shown < 3 and RunState.deck.size() > 1
+	var n_choices: int = 3 if can_another else 2
+	var choices_vbox := VBoxContainer.new()
+	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	choices_vbox.offset_left = 360
+	choices_vbox.offset_right = 980
+	choices_vbox.offset_top = -(n_choices * 118 + (n_choices - 1) * 12 + 110)
+	choices_vbox.offset_bottom = -110
+	choices_vbox.add_theme_constant_override("separation", 12)
+	add_child(choices_vbox)
+
+	choices_vbox.add_child(_make_frameless_choice("Sell it",
+		"Trade %s for %d gold." % [String(data.get("name", "the card")), price],
+		"Her hand is already open under the slot.", 118, _on_appraisal_sell))
+	if can_another:
+		choices_vbox.add_child(_make_frameless_choice("Show her another",
+			"She pulls a different card — but her interest cools.",
+			"\"As you like. The figure was for THAT one.\"", 118,
+			_on_appraisal_another))
+	choices_vbox.add_child(_make_frameless_choice("Keep your things", "",
+		"She slides the card back without a word.", 118,
+		_on_stranger_hand_leave))
+
+
+func _on_appraisal_sell() -> void:
+	var data = RunState.get_upgraded_card_data(_appr_index)
+	var price := _appraisal_price(_appr_index)
+	RunState.remove_card_at(_appr_index)
+	RunState.gain_gold(price)
+	AudioBank.play_sfx("button_click")
+	_show_result("%s goes behind the smoked glass with everything else that mattered to someone once. You count %d gold. She has already stopped looking at you." \
+		% [String(data.get("name", "The card")), price])
+
+
+func _on_appraisal_another() -> void:
+	_appr_shown += 1
+	_appr_mult *= 0.85
+	_appr_index = _appraisal_roll(_appr_index)
+	AudioBank.play_sfx("button_click")
+	_build_appraisal_screen()
 
 
 # ── Event definitions ──
@@ -1719,31 +2062,49 @@ const EVENTS: Dictionary = {
 
 	"thrice_blessed_spring": {
 		"name": "The Thrice-Blessed Spring",
-		"desc": "A spring boils with old miracles. Each sip heals deeper — and rots something deeper still.",
+		"desc": "A spring boils with old miracles. The first sip is always free. After that, the spring starts counting.",
 		"gate": {"type": "hp_below_pct", "value": 0.75},
 		"choices": [
 			{
-				"label": "One Sip\n\nHeal 6 HP. Your starting creatures weaken.",
-				"desc": "+6 HP; starting creatures -1 HP each",
+				"label": "Kneel and drink\n\nSip by sip the miracle runs deeper.\nSomewhere past the third sip, so do the dregs.",
+				"desc": "Heal sip by sip — push your luck against the dregs",
 				"effects": [
-					{"type": "heal", "value": 6},
-					{"type": "debuff_starters"},
+					{"type": "risk_loop", "mode": "bust",
+						"open_text": "The water is blood-warm and tastes of copper and church bells. The first sip is always free.",
+						"action": "Drink again",
+						"action_body": "The surface leans toward your mouth.",
+						"leave": "Step back from the water",
+						"leave_sub": "Keep what the water gave.",
+						"leave_text": "You wipe your mouth and stand. Behind you the spring keeps boiling, gently, for the next thirsty thing.",
+						"leave_text_early": "You kneel, and look, and do not drink. The spring files that away.",
+						"steps": [
+							{"chance": 1.0, "sub": "Heal 5 HP — the first sip is safe.",
+								"effects": [{"type": "heal", "value": 5}],
+								"text": "Warmth spreads through old aches. The spring hums, pleased with itself."},
+							{"chance": 0.75, "sub": "Heal 7 HP — but 1 in 4 the dregs rise.",
+								"effects": [{"type": "heal", "value": 7}],
+								"text": "Deeper. The miracle reaches bones you had given up on. Something at the bottom shifts its weight."},
+							{"chance": 0.55, "sub": "Heal 9 HP — the odds are barely yours now.",
+								"effects": [{"type": "heal", "value": 9}],
+								"text": "The water level does not drop. You understand, mid-swallow, that the spring is drinking too."},
+						],
+						"bust": {"effects": [{"type": "add_curse"}],
+							"text": "The dregs rise to meet your mouth — old, patient, and glad of the company. Something settles into your deck. The spring goes still, satisfied."},
+						"done_text": "The boiling quiets. The spring has no more miracles for you today; the surface films over like a closing eye."},
 				],
 			},
 			{
-				"label": "Two Sips\n\nHeal 14 HP. Lose 30 gold to the dregs.",
-				"desc": "+14 HP, -30 gold",
+				"label": "Bottle the overflow\n\nWhat spills past the rim is still a miracle.\nJust a portable, deniable one.",
+				"desc": "Gain a Healing Potion",
 				"effects": [
-					{"type": "heal", "value": 14},
-					{"type": "gold", "value": -30},
+					{"type": "gain_potion"},
 				],
 			},
 			{
-				"label": "Drink Deep\n\nHeal to full. Gain a Curse.",
-				"desc": "Heal to full, +1 Curse",
+				"label": "Wash your wounds and move on\n\nNo sip, no debt. The water still helps,\nthe way water does.",
+				"desc": "Heal 4 HP",
 				"effects": [
-					{"type": "heal_full"},
-					{"type": "add_curse"},
+					{"type": "heal", "value": 4},
 				],
 			},
 		],
@@ -1751,14 +2112,13 @@ const EVENTS: Dictionary = {
 
 	"pawnbrokers_window": {
 		"name": "The Pawnbroker's Window",
-		"desc": "Behind smoked glass, the pawnbroker fans her wares. She does not sell. She only trades.",
+		"desc": "Behind smoked glass, the pawnbroker fans her wares. She does not sell. She buys — but only what interests her, and the first figure she names is always the best one.",
 		"choices": [
 			{
-				"label": "Trade Steel\n\nLose 6 HP.\nPick a card to remove.",
-				"desc": "-6 HP, remove a chosen card",
+				"label": "Slide your pack through the slot\n\nShe pulls out what interests HER.\nIt is never what you would have chosen to sell.",
+				"desc": "She appraises cards from your deck — sell, or ask for another (her offers cool)",
 				"effects": [
-					{"type": "damage", "value": 6},
-					{"type": "remove_choice"},
+					{"type": "pawn_appraisal"},
 				],
 			},
 			{
@@ -1782,22 +2142,40 @@ const EVENTS: Dictionary = {
 
 	"fork_in_the_long_road": {
 		"name": "The Fork in the Long Road",
-		"desc": "Two paths split the moor. One smells of woodsmoke. The other, of iron.",
+		"desc": "Two paths split the moor. One smells of woodsmoke. The other, of iron. The smell is all the road will tell you in advance.",
 		"choices": [
 			{
-				"label": "The Smoke Road\n\nA hearth, a roof, a long sleep.\nYou pay the tollman and wake up tougher.",
-				"desc": "-40 gold, +4 max HP",
+				"label": "The Smoke Road\n\nWoodsmoke means people.\nUsually. You walk it and find out.",
+				"desc": "Comfort of some kind waits — the road decides which",
 				"effects": [
-					{"type": "gold", "value": -40},
-					{"type": "gain_max_hp", "value": 4},
+					{"type": "roll_table", "outcomes": [
+						{"weight": 3,
+							"text": "The smoke is an inn, and the inn is real: a hearth, a stew, a bed with one previous owner. You leave coin on the counter and stiffness on the mattress.",
+							"effects": [{"type": "gold", "value": -30}, {"type": "heal", "value": 9}]},
+						{"weight": 2,
+							"text": "The smoke is a tollman's brazier. He names a price for the warm road, and the warm road is worth it — you sleep deep and wake tougher than you've been in years.",
+							"effects": [{"type": "gold", "value": -40}, {"type": "gain_max_hp", "value": 4}]},
+						{"weight": 1,
+							"text": "The smoke is a cold campfire, hours dead, with a purse forgotten beside it. Whoever slept here left in a hurry, in the direction you are not going.",
+							"effects": [{"type": "gold", "value": 25}]},
+					]},
 				],
 			},
 			{
-				"label": "The Iron Road\n\nTake 8 damage.\nGain 70 gold from the dead.",
-				"desc": "-8 HP, +70 gold",
+				"label": "The Iron Road\n\nIron means a fight happened.\nOr is still happening. You walk it and find out.",
+				"desc": "Spoils of some kind wait — the road decides whose",
 				"effects": [
-					{"type": "damage", "value": 8},
-					{"type": "gold", "value": 70},
+					{"type": "roll_table", "outcomes": [
+						{"weight": 3,
+							"text": "A skirmish, finished this morning by the look of the crows. The dead are nobody's now. Their purses come to you heavier than your conscience.",
+							"effects": [{"type": "damage", "value": 6}, {"type": "gold", "value": 75}]},
+						{"weight": 2,
+							"text": "Among the fallen, an officer — and on the officer, something fine that survived him. Pulling it free costs you a bad moment with something that wasn't quite done dying.",
+							"effects": [{"type": "damage", "value": 3}, {"type": "random_relic"}]},
+						{"weight": 1,
+							"text": "The field is quiet. Too quiet, too tidy — the dead are arranged. You take the coin laid on their eyes and feel the road remember you doing it.",
+							"effects": [{"type": "gold", "value": 50}, {"type": "add_curse"}]},
+					]},
 				],
 			},
 		],
@@ -1821,11 +2199,17 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Force the bridge\n\nThe chain holds longer than the men do.\nNot quite long enough.",
-				"desc": "-6 HP, +50 gold from the toll box",
+				"label": "Force the bridge\n\nThree men, one chain, and you.\nSomebody is wrong about how this goes.",
+				"desc": "Take the bridge by force — the scrap decides the price",
 				"effects": [
-					{"type": "damage", "value": 6},
-					{"type": "gold", "value": 50},
+					{"type": "roll_table", "outcomes": [
+						{"weight": 2,
+							"text": "The chain holds longer than the men do. Not quite long enough. You cross with their toll box under your arm and one of their boot prints on your ribs.",
+							"effects": [{"type": "damage", "value": 4}, {"type": "gold", "value": 60}]},
+						{"weight": 1,
+							"text": "They are better at this than they look — leaning on that chain is what they do all day. You cross, in the end, but the toll box is light and your nose will set crooked.",
+							"effects": [{"type": "damage", "value": 9}, {"type": "gold", "value": 15}]},
+					]},
 				],
 			},
 			{
@@ -1900,14 +2284,33 @@ const EVENTS: Dictionary = {
 
 	"woodcutter": {
 		"name": "The Woodcutter",
-		"desc": "He has been chopping the same tree for thirty years. The tree has not gotten smaller. He has. 'Swing for me,' he says, 'and I'll teach you the trick of it.'",
+		"desc": "He has been chopping the same tree for thirty years. The tree has not gotten smaller. He has. 'Swing for me,' he says, 'and I'll teach you the trick of it. Most don't get it the first swing.'",
 		"choices": [
 			{
-				"label": "Take the axe and swing\n\nIt is heavier than it looks.\nMost things are. You learn the trick of it.",
-				"desc": "-2 HP, upgrade a chosen card",
+				"label": "Take the axe and swing\n\nEvery swing costs you something.\nSomewhere in there, the trick clicks.",
+				"desc": "-2 HP a swing until the trick clicks — then upgrade a chosen card",
 				"effects": [
-					{"type": "damage", "value": 2},
-					{"type": "upgrade_choice"},
+					{"type": "risk_loop", "mode": "jackpot",
+						"open_text": "The axe is heavier than it looks. Most things are. He steps back into the shade to watch, arms folded, patient as the tree.",
+						"action": "Swing again",
+						"action_body": "Your shoulders already know this will hurt.",
+						"leave": "Hand back the axe",
+						"leave_sub": "Some tricks aren't worth the blisters.",
+						"leave_text": "He takes the axe without judgment. \"The tree will wait,\" he says. \"It's good at that.\"",
+						"leave_text_early": "You leave the axe where it leans. He nods, like that was also a kind of answer.",
+						"steps": [
+							{"chance": 0.34, "sub": "-2 HP — 1 in 3 the trick clicks.",
+								"effects": [{"type": "damage", "value": 2}],
+								"text": "The blade skips off the grain. \"Lower,\" he says. \"It's always lower than you think.\""},
+							{"chance": 0.5, "sub": "-2 HP — even odds now.",
+								"effects": [{"type": "damage", "value": 2}],
+								"text": "Closer. The tree rings like a bell, and the sound stays in your wrists. He leans forward, almost interested."},
+							{"chance": 1.0, "sub": "-2 HP — this one lands.",
+								"effects": [{"type": "damage", "value": 2}],
+								"text": ""},
+						],
+						"jackpot": {"modal": "upgrade_choice",
+							"text": "The trick clicks through your arms like a key turning. You see, suddenly, where everything you carry has been heavy in the wrong place."}},
 				],
 			},
 			{
@@ -1960,8 +2363,36 @@ const EVENTS: Dictionary = {
 
 	"gravesong_choir": {
 		"name": "The Gravesong Choir",
-		"desc": "Four hooded singers stand around an open grave, humming a tune you almost recognize. One pauses, lifts a finger to her lips, and beckons toward the empty pit.",
+		"desc": "Four hooded singers stand around an open grave, humming a tune you almost recognize. One pauses, lifts a finger to her lips, and beckons toward the empty fifth place in the circle.",
 		"choices": [
+			{
+				"label": "Take the fifth place and sing\n\nVerse by verse, the soil gives up its grave-gifts.\nVerse by verse, the song learns your voice.",
+				"desc": "Sing verse by verse — grave-gifts surface until the song turns",
+				"effects": [
+					{"type": "risk_loop", "mode": "bust",
+						"open_text": "You step into the circle. The hum threads itself through your teeth without asking. The grave at the center is empty, and listening.",
+						"action": "Sing the next verse",
+						"action_body": "The harmony opens a place for you in it.",
+						"leave": "Bow out of the circle",
+						"leave_sub": "Keep what the soil gave up.",
+						"leave_text": "You step back. The choir closes the gap without looking, and the song goes on without your name in it. That is the best ending this song has.",
+						"leave_text_early": "You do not sing. The fifth place stays open behind you for a long way down the road.",
+						"steps": [
+							{"chance": 1.0, "sub": "Gain 25 gold — the first verse is welcome.",
+								"effects": [{"type": "gold", "value": 25}],
+								"text": "The soil stirs. A coin purse surfaces beside your boot like something coming up for air."},
+							{"chance": 0.7, "sub": "Gain 35 gold — 3 in 10 the song turns.",
+								"effects": [{"type": "gold", "value": 35}],
+								"text": "A ring. A chain. A saint's little finger in silver. The choir sings louder, and the grave is not so empty now."},
+							{"chance": 0.5, "sub": "A grave-gift surfaces — even odds the song turns.",
+								"effects": [{"type": "random_relic"}],
+								"text": "Something old and well-made works its way up out of the dark, wrapped in a winding-sheet the size of a kerchief."},
+						],
+						"bust": {"effects": [{"type": "add_curse"}],
+							"text": "The song turns on the high note. It walks down your throat, takes a verse of you with it, and lays it in the grave. The choir bows. To you, or to it."},
+						"done_text": "The hum fades. The grave is full now, though you never saw anything go in. The singers file out past you, and one squeezes your arm — kindly, you decide."},
+				],
+			},
 			{
 				"label": "Lay 2 cards in the grave\n\nThe choir sings them down.\nThe song takes a little of you with them.",
 				"desc": "-6 HP, remove 2 chosen cards, +1 rare card",
@@ -1972,18 +2403,10 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Sing along\n\nThe melody finds a card in your deck\nand sharpens it on the harmony.",
+				"label": "Sing along from the road\n\nThe melody finds a card in your deck\nand sharpens it on the harmony.",
 				"desc": "Upgrade a chosen card",
 				"effects": [
 					{"type": "upgrade_choice"},
-				],
-			},
-			{
-				"label": "Pocket the offering plate and leave\n\nThe coins are heavy. The humming\nfollows you down the road, sour now.",
-				"desc": "+50 gold, +1 Curse",
-				"effects": [
-					{"type": "gold", "value": 50},
-					{"type": "add_curse"},
 				],
 			},
 		],
@@ -2383,11 +2806,20 @@ const EVENTS: Dictionary = {
 		"desc": "A bronze bell sits in the path, half-sunk in mud. Its tongue is missing. Water beads on the metal though there has been no rain in weeks.",
 		"choices": [
 			{
-				"label": "Strike it with your fist\n\nThe sound carries.\nSomething hears it.",
-				"desc": "-7 HP, +random relic",
+				"label": "Strike it with your fist\n\nThe sound will carry.\nYou will not get to choose what hears it.",
+				"desc": "Something answers the bell — the river decides what",
 				"effects": [
-					{"type": "damage", "value": 7},
-					{"type": "random_relic"},
+					{"type": "roll_table", "outcomes": [
+						{"weight": 2,
+							"text": "The tone rolls out flat across the mud, wrong without its tongue, and something answers it: between one blink and the next there is a gift at your feet, and a bruise blooming on the arm that struck.",
+							"effects": [{"type": "damage", "value": 5}, {"type": "random_relic"}]},
+						{"weight": 2,
+							"text": "The bell coughs up river water that was never inside it — and coins with it, old ones, green with the deep, payment from whoever sank it.",
+							"effects": [{"type": "gold", "value": 55}]},
+						{"weight": 1,
+							"text": "Nothing answers. Nothing at all. The silence is the answer, and it follows you up the road and settles into your deck to wait with the patience of drowned things.",
+							"effects": [{"type": "add_curse"}, {"type": "gold", "value": 25}]},
+					]},
 				],
 			},
 			{
@@ -2439,27 +2871,30 @@ const EVENTS: Dictionary = {
 
 	"rotting_carnival": {
 		"name": "The Rotting Carnival",
-		"desc": "Three tents stand in a field. The barker is asleep at his post, or dead at his post; you can't tell, and he won't say. A handwritten sign reads: PICK ONE. WE ARE NOT RESPONSIBLE FOR WHAT THE TENTS REMEMBER.",
+		"desc": "Three tents stand in a field. The barker is asleep at his post, or dead at his post; you can't tell, and he won't say. A handwritten sign reads: PICK ONE. WE ARE NOT RESPONSIBLE FOR WHAT THE TENTS REMEMBER. You may listen at the flaps, but the tents only show what they do once you're inside.",
 		"choices": [
 			{
-				"label": "The red tent\n\nThe knife-thrower nicks you\non the way out.",
-				"desc": "-4 HP, upgrade a random card",
+				"hidden": true,
+				"tell": "From the red tent: a thock — thock — thock of blades into wood, and polite applause from no hands at all.",
+				"desc": "Hidden",
 				"effects": [
 					{"type": "upgrade_random"},
 					{"type": "damage", "value": 4},
 				],
 			},
 			{
-				"label": "The yellow tent\n\nThe fortune-teller takes\na piece of your name.",
-				"desc": "+80 gold, +1 Curse",
+				"hidden": true,
+				"tell": "From the yellow tent: incense, shuffled cards, and the slow count of coins that are not being spent.",
+				"desc": "Hidden",
 				"effects": [
 					{"type": "gold", "value": 80},
 					{"type": "add_curse"},
 				],
 			},
 			{
-				"label": "The black tent\n\nThe magician keeps a card.\nYou don't know which one.",
-				"desc": "+random relic, -1 random card",
+				"hidden": true,
+				"tell": "The black tent makes no sound and smells of nothing at all. The flap hangs open exactly your width.",
+				"desc": "Hidden",
 				"effects": [
 					{"type": "random_relic"},
 					{"type": "remove_cards", "value": 1},
@@ -2979,11 +3414,34 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Fill your pack and sell the harvest\n\nThey keep weeping in the sack, all the way down the road,\nuntil — somewhere past the third hill — they stop. Something noticed.",
-				"desc": "+70 gold, +1 Curse",
+				"label": "Harvest for market\n\nFruit by fruit, the sack grows heavier.\nFruit by fruit, the orchard pays closer attention.",
+				"desc": "Pick fruit by fruit — until something notices",
 				"effects": [
-					{"type": "gold", "value": 70},
-					{"type": "add_curse"},
+					{"type": "risk_loop", "mode": "bust",
+						"open_text": "You spread your sack beneath the heaviest tree. The fruit watches you reach. The nearest one has stopped crying, which is somehow worse.",
+						"action": "Pick another",
+						"action_body": "The branch lowers itself, helpfully.",
+						"leave": "Tie the sack and go",
+						"leave_sub": "Keep what you've picked.",
+						"leave_text": "You shoulder the sack. Behind you the orchard weeps on, softer now, like it's already forgotten which ones you took.",
+						"leave_text_early": "You leave the sack empty. A few of the faces smile in their sleep.",
+						"steps": [
+							{"chance": 1.0, "sub": "Gain 20 gold — the low fruit comes easy.",
+								"effects": [{"type": "gold", "value": 20}],
+								"text": "It comes off the stem with a sigh. In the sack, it settles like something getting comfortable."},
+							{"chance": 0.8, "sub": "Gain 25 gold — 1 in 5 something notices.",
+								"effects": [{"type": "gold", "value": 25}],
+								"text": "The next one is warmer. Around you, very quietly, the weeping has begun to synchronize."},
+							{"chance": 0.6, "sub": "Gain 30 gold — the trees are counting now.",
+								"effects": [{"type": "gold", "value": 30}],
+								"text": "Heavier still. Somewhere behind you a branch creaks, in the way that floorboards creak under feet."},
+							{"chance": 0.4, "sub": "Gain 40 gold — you are pushing it.",
+								"effects": [{"type": "gold", "value": 40}],
+								"text": "The best fruit hangs highest, of course it does. The whole row is silent now, watching you climb."},
+						],
+						"bust": {"effects": [{"type": "damage", "value": 5}],
+							"text": "A branch closes on your wrist like a hand. The orchard stops weeping all at once, and in the silence you hear how many trees there are. You leave some skin getting loose."},
+						"done_text": "The sack will hold no more. The orchard lets you go — generous, the way things are generous when they know where you live."},
 				],
 			},
 			{
@@ -3005,10 +3463,22 @@ const EVENTS: Dictionary = {
 		"desc": "A silver coin spins on its edge in the middle of the path. It has been spinning, by the look of the worn groove beneath it, for a very long time. It does not wobble. It does not slow. A small sign, propped against a stone, reads in a neat hand: CALL IT.",
 		"choices": [
 			{
-				"label": "Bet a fistful of coin on heads\n\nYou throw your gold down beside the spinning silver.\nThe coin keeps turning, deciding, taking its time about you.",
-				"desc": "Bet 50 gold — even odds to win 120",
+				"label": "Put your stake down and call it\n\nDouble or nothing, as many times as your nerve holds.\nThe coin has all day. The coin has all century.",
+				"desc": "Stake 25 gold — the pot doubles on every call, even odds it all goes",
 				"effects": [
-					{"type": "wager_gold", "stake": 50, "payout": 120},
+					{"type": "dice_run", "stake": 25, "start": 40,
+						"mode": "double", "bust_pct": 0.5,
+						"broke_text": "You haven't 25 gold to stake. The coin spins on, unbothered. It has been refused by poorer.",
+						"open_text": "You lay your stake in the groove beside the spinning silver. The pot stands at {pot} gold. The coin picks up speed, which should not be possible, and is.",
+						"roll_label": "Call it again",
+						"roll_sub": "Even odds: the pot doubles — or the coin lands and takes it all.",
+						"roll_body": "The coin is enjoying this. You can tell.",
+						"bank_label": "Take the pot",
+						"bank_sub": "Take {pot} gold and walk.",
+						"bank_body": "Some bets are best left spinning.",
+						"grow_text": "It blurs, leans, nearly topples — and rights itself, still spinning. The pot stands at {pot} gold. Somewhere behind the sign, something exhales.",
+						"bust_text": "The coin falls flat at last. Tails. Your stake and the pot slide into the groove it has worn in the road, and are gone. The coin stands back up on its edge and resumes spinning.",
+						"bank_text": "You bank {pot} gold and step back. The coin spins on, patient. The sign, you notice now, has your handwriting on it."},
 				],
 			},
 			{
