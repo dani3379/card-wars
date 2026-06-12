@@ -1,8 +1,11 @@
 extends Control
-## Event.gd — Random choice encounters. ~30 events, each with 2-3 choices that
+## Event.gd — Random choice encounters. ~39 events, each with 2-3 choices that
 ## trade between HP, gold, deck size, curses, relics and card upgrades. Some are
 ## state-gated (low HP, has-curse, deck size, act, prior visits) and a few branch
-## into a second screen or open a card/relic picker.
+## into a second screen or open a card/relic picker. Two looping formats live
+## here too: the transform picker (The Chrysalis Fence) and the push-your-luck
+## dice run (The Bone Pit). Quick ONE-DECISION roadside stops are NOT events —
+## they're the Wayside scene's verbs (scripts/scenes/Wayside.gd).
 
 const MAP_SCENE = "res://scenes/map.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
@@ -517,10 +520,17 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 
 
 func _load_event_image() -> Texture2D:
-	for ext in ["png", "jpg"]:
-		var p := "res://assets/events/%s.%s" % [_event_id, ext]
-		if ResourceLoader.exists(p):
-			return load(p)
+	# Bespoke art (keyed by event id) always wins; an optional "art" field
+	# names another event's image as a stand-in, so a new event ships with a
+	# fitting plate immediately and upgrades itself the moment a bespoke
+	# assets/events/<event_id>.png lands.
+	for key in [_event_id, String(_event_data.get("art", ""))]:
+		if String(key) == "":
+			continue
+		for ext in ["png", "jpg"]:
+			var p := "res://assets/events/%s.%s" % [key, ext]
+			if ResourceLoader.exists(p):
+				return load(p)
 	return null
 
 
@@ -539,6 +549,7 @@ const MODAL_EFFECTS := [
 	"butcher_buff", "mirror_twin_buff",
 	"upgrade_choice", "upgrade_choice_multi",
 	"stranger_hand_pick", "relic_sacrifice_pick", "sacrifice_pick",
+	"transform_choice", "dice_run",
 ]
 
 
@@ -865,6 +876,12 @@ func _apply_effect(effect: Dictionary) -> String:
 			return effect.get("text", "Power gathers for the fight ahead.")
 		"sacrifice_pick":
 			_start_sacrifice_mode(effect)
+			return ""
+		"transform_choice":
+			_start_transform_mode(int(effect.get("value", 1)))
+			return ""
+		"dice_run":
+			_start_dice_run(int(effect.get("start", 25)))
 			return ""
 	return ""
 
@@ -1533,6 +1550,124 @@ func _on_sacrifice_pick(deck_index: int) -> void:
 			_show_result("You lay down %s." % nm)
 
 
+# ── Transform picker (The Chrysalis Fence) ───────────────────────────────
+# Choose a card; it leaves the deck and a random card of the same rarity
+# takes its slot — the classic StS transform. Curses are excluded (a free
+# curse-to-card swap would out-pay every dedicated curse-eater event);
+# starters roll into the common pool so the result is always playable.
+# Multi-count re-enters itself like the remove/upgrade pickers.
+
+var _transform_remaining: int = 0
+var _transform_results: Array = []
+
+func _start_transform_mode(count: int) -> void:
+	if _transform_remaining <= 0:
+		_transform_remaining = count
+		_transform_results = []
+	var eligible: Array = []
+	for i in range(RunState.deck.size()):
+		if not CardDB.is_curse(RunState.deck[i]):
+			eligible.append(i)
+	if eligible.is_empty():
+		_transform_remaining = 0
+		_show_result("Nothing you carry is alive enough to change.")
+		return
+	var suffix := ""
+	if _transform_remaining > 1:
+		suffix = " (%d remaining)" % _transform_remaining
+	var grid = _make_card_picker_grid(
+		"Choose a card to feed the silk" + suffix, GameTheme.SPELL_PURPLE)
+	for i in eligible:
+		var data = RunState.get_upgraded_card_data(i)
+		_add_card_to_grid(grid, data, _on_transform_pick.bind(i))
+
+
+func _on_transform_pick(deck_index: int) -> void:
+	var old_id: String = RunState.deck[deck_index]
+	var old_data = CardDB.get_card_data(old_id)
+	var rarity: String = String(old_data.get("rarity", "common"))
+	# Starters hatch into commons; everything else keeps its weight class.
+	if rarity == "starter" or rarity == "enemy":
+		rarity = "common"
+	var pool: Array = CardDB.cards_of_rarity(rarity)
+	pool.erase(old_id)
+	if pool.is_empty():
+		pool = CardDB.cards_of_rarity("common")
+		pool.erase(old_id)
+	RunState.remove_card_at(deck_index)
+	var new_id: String = pool[randi() % pool.size()]
+	RunState.add_card(new_id)
+	_transform_results.append("%s became %s" \
+		% [old_data.get("name", "it"), CardDB.get_card_data(new_id).name])
+	_transform_remaining -= 1
+	if _transform_remaining <= 0:
+		_show_result("The silk parts. " + ". ".join(_transform_results) + ".")
+	else:
+		_start_transform_mode(_transform_remaining)
+
+
+# ── Knucklebones run (The Bone Pit) ──────────────────────────────────────
+# A real push-your-luck mini-game, not a one-shot coin flip: the pot opens
+# at `start` gold and every cast either grows it (2 in 3) or loses the lot
+# (1 in 3). Banking ends the run and pays the pot. The two buttons reuse
+# the cinematic frameless-choice strip so the pit reads like any other
+# beat of the event — just one that loops.
+
+var _dice_pot: int = 0
+
+func _start_dice_run(start_pot: int) -> void:
+	_dice_pot = start_pot
+	_build_dice_screen("The space in the circle is yours. The pot sits at %d gold." % _dice_pot)
+
+
+func _build_dice_screen(beat: String) -> void:
+	_clear_ui()
+	_set_event_art_visible(true)
+
+	var title := _make_event_title("The pot: [color=#e8b547]%d gold[/color]" % _dice_pot)
+	title.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	title.offset_left = 80
+	title.offset_top = 72
+	title.offset_right = 700
+	title.offset_bottom = 132
+	add_child(title)
+
+	var desc = _make_event_desc(beat)
+	add_child(desc)
+
+	var choices_vbox := VBoxContainer.new()
+	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	choices_vbox.offset_left = 80
+	choices_vbox.offset_right = 700
+	choices_vbox.offset_top = -(2 * 118 + 12 + 110)
+	choices_vbox.offset_bottom = -110
+	choices_vbox.add_theme_constant_override("separation", 12)
+	add_child(choices_vbox)
+
+	choices_vbox.add_child(_make_frameless_choice("Cast the bones",
+		"2 in 3 the pot grows. Skulls lose it all.",
+		"The knuckles rattle like teeth in a cup.", 118, _on_dice_roll))
+	choices_vbox.add_child(_make_frameless_choice("Bank the pot",
+		"Take %d gold and leave the circle." % _dice_pot,
+		"The dead nod. Walking away is also a move.", 118, _on_dice_bank))
+
+
+func _on_dice_roll() -> void:
+	if randi() % 3 == 0:
+		_dice_pot = 0
+		_show_result("Skulls. The pot drains back into the pit, coin by coin, and the circle closes over it. The dead do not gloat. Much.")
+		return
+	var gain: int = randi_range(18, 34)
+	_dice_pot += gain
+	AudioBank.play_sfx("button_click")
+	_build_dice_screen("The bones land clean — %d more into the pot. The oldest legionary clicks his jaw, which you have learned is applause." % gain)
+
+
+func _on_dice_bank() -> void:
+	RunState.gain_gold(_dice_pot)
+	_show_result("You bank %d gold and stand. A space stays open in the circle behind you. It is always open. That is the other rule." % _dice_pot)
+
+
 # ── Event definitions ──
 #
 # Event "name" and "desc" support inline BBCode — _make_event_title and
@@ -1676,6 +1811,7 @@ const EVENTS: Dictionary = {
 		"name": "The Crossing",
 		"desc": "The river runs brown and fast under a bridge of black timber. A chain hangs across the far end, and three men who do not introduce themselves lean on it. The toll is whatever you look like you can pay.",
 		"gate": {"type": "at_bridge"},
+		"art": "tollkeeper_bridge",
 		"choices": [
 			{
 				"label": "Pay the toll\n\nThey count it twice.\nThe chain comes down.",
@@ -2988,6 +3124,109 @@ const EVENTS: Dictionary = {
 				"label": "Say nothing and walk away\n\nThe voice keeps talking behind you,\nanswering questions, for a long time.",
 				"desc": "No effect",
 				"effects": [],
+			},
+		],
+	},
+
+	# ── Transform shrine (new format: card metamorphosis) ──
+	# The deck-sculpting verb the pool lacked: not removal, not upgrade —
+	# CHANGE. Art borrows the lantern-moth plate until a bespoke cocoon
+	# image lands at assets/events/the_chrysalis.png.
+	"the_chrysalis": {
+		"name": "The Chrysalis Fence",
+		"desc": "Someone has strung cocoons along a fence line, each the size of a saddlebag, each gently steaming in the cold. A farmer's sign, repainted many times, reads: ONE IN, ONE OUT. NO PROMISES. The silk nearest you unseams itself a finger's width, politely.",
+		"choices": [
+			{
+				"label": "Feed it a card\n\nThe silk closes over it like a mouth\nthat has been waiting to be a mouth.",
+				"desc": "Transform a chosen card into a random card of the same rarity",
+				"effects": [
+					{"type": "transform_choice", "value": 1},
+				],
+			},
+			{
+				"label": "Feed it two, and your hand with them\n\nThe silk tastes you first.\nIt is a fair price for double the change.",
+				"desc": "-4 HP, transform 2 chosen cards",
+				"effects": [
+					{"type": "damage", "value": 4},
+					{"type": "transform_choice", "value": 2},
+				],
+			},
+			{
+				"label": "Cut one down and carry it off\n\nIt hatches in your pack before the next hill.\nBoth halves of it.",
+				"desc": "+1 rare card, +1 Curse",
+				"effects": [
+					{"type": "add_rare"},
+					{"type": "add_curse"},
+				],
+			},
+		],
+		"art": "hollow_lantern",
+	},
+
+	# ── Bridge variant (so repeat crossings aren't always The Crossing) ──
+	"the_ferryman": {
+		"name": "The Ferryman",
+		"desc": "Below the bridge, tied to a post older than the bridge, a flat-bottomed barge waits on a rope line. The ferryman watches the timbers above with open contempt. He remembers when there wasn't a bridge. He is patient. Rivers are on his side.",
+		"gate": {"type": "at_bridge"},
+		"art": "tollkeeper_bridge",
+		"choices": [
+			{
+				"label": "Pay for the slow water\n\nHe poles you the long way, past the reed beds,\nand you watch the banks like a general. You arrive rested.",
+				"desc": "-30 gold; +1 max Command next fight",
+				"effects": [
+					{"type": "gold", "value": -30},
+					{"type": "combat_mana", "value": 1,
+						"text": "You step off the barge already giving orders — +1 Command next fight."},
+				],
+			},
+			{
+				"label": "Work the rope for him\n\nThe current fights you the whole width.\nHe splits the day's tolls without being asked.",
+				"desc": "-4 HP, +45 gold",
+				"effects": [
+					{"type": "damage", "value": 4},
+					{"type": "gold", "value": 45},
+				],
+			},
+			{
+				"label": "Trade him a name for passage\n\nHe writes nothing down. The river\nremembers it for him. It is gone from you by the far bank.",
+				"desc": "Remove a chosen card",
+				"effects": [
+					{"type": "remove_choice"},
+				],
+			},
+		],
+	},
+
+	# ── Push-your-luck game (new format: a mini-game that loops) ──
+	# dice_run is a real multi-round run, not a one-shot wager — the pot
+	# grows 2-in-3 per cast and busts 1-in-3, bank any time. Art borrows the
+	# gambler's table until assets/events/the_bone_pit.png exists.
+	"the_bone_pit": {
+		"name": "The Bone Pit",
+		"desc": "Four legionaries, dead these three hundred years, crouch around a shallow pit casting knucklebones cut from their own hands. They have been playing since the empire that owed them wages stopped existing. A space opens in the circle. The rules are short: roll, or bank. The pot is the pot.",
+		"art": "gambler",
+		"choices": [
+			{
+				"label": "Take the open seat\n\nThe bones are warm.\nThey should not be warm.",
+				"desc": "The pot opens at 25 gold — grow it cast by cast, bank any time, skulls lose it all",
+				"effects": [
+					{"type": "dice_run", "start": 25},
+				],
+			},
+			{
+				"label": "Rob the pot\n\nThey do not stand. They do not speak.\nThey only watch you go, all four, without turning their heads.",
+				"desc": "+35 gold, +1 Curse",
+				"effects": [
+					{"type": "gold", "value": 35},
+					{"type": "add_curse"},
+				],
+			},
+			{
+				"label": "Salute the game and pass\n\nThe oldest flicks a coin after you.\n\"For respecting the rules,\" his jaw clicks. \"Few do.\"",
+				"desc": "+5 gold",
+				"effects": [
+					{"type": "gold", "value": 5},
+				],
 			},
 		],
 	},

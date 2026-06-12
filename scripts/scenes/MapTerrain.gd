@@ -634,7 +634,8 @@ func _read_run_map() -> void:
 			"row": int(nd.row), "col": int(nd.col),
 			"mutator_id": String(nd.get("mutator_id", "")),
 			"terrain": String(nd.get("terrain", "")),
-			"bridge": bool(nd.get("bridge", false))})
+			"bridge": bool(nd.get("bridge", false)),
+			"wayside_id": String(nd.get("wayside_id", ""))})
 		if nd.row == 0:
 			row0.append({"pos": p, "vis": bool(nd.visited),
 				"avail": avail.has(Vector2i(nd.row, nd.col))})
@@ -2240,7 +2241,7 @@ func _draw_ui() -> void:
 	var items: Array = []
 	for it0 in [["combat", "FIGHT"], ["elite", "ELITE"], ["rest", "REST"],
 			["shop", "SHOP"], ["event", "EVENT"], ["treasure", "TREASURE"],
-			["recruit", "RECRUIT"]]:
+			["recruit", "RECRUIT"], ["wayside", "WAYSIDE"]]:
 		if present.has(it0[0]):
 			items.append(it0)
 	var lwid := float(items.size()) * 118.0
@@ -2295,4 +2296,5 @@ func _node_icon(typ: String) -> Texture2D:
 		"boss": return GameTheme.tex_node_boss
 		"treasure": return GameTheme.tex_node_treasure
 		"recruit": return GameTheme.tex_node_recruit
+		"wayside": return GameTheme.tex_node_wayside
 	return null

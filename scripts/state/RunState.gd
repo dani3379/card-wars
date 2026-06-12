@@ -59,6 +59,11 @@ var current_mutator_id: String = ""
 # crosses a river bridge. Event/Recruit read these to lean their offers.
 var current_terrain: String = ""
 var current_bridge: bool = false
+# Which roadside verb a visited wayside halt runs ("drill_yard" /
+# "muster_scale" / "standard_bearer" / "supply_cache"). Assigned at map gen
+# (node.wayside_id) so the chart can advertise the stop; copied here by
+# visit_node so the Wayside scene knows which screen to build.
+var current_wayside_id: String = ""
 # Run statistics — surfaced on the GameOver recap screen. Reset by
 # start_new_run, updated by Combat on each victory / death, persisted in
 # the save file so a quit-mid-run resume keeps the running counts.
@@ -130,24 +135,26 @@ const ACTS: int = 3
 # abstract lattice, not a campaign over the plate) → 10 on 2026-06-12
 # (the road-to-the-keep pass: fight count stays constant, the two new
 # rows are wayside tissue — the Kaycee's-Mod length lesson: a road grows
-# in verbs, not violence). _generate_act_map enforces a 14–19-site
-# window with an acceptance loop.
+# in verbs, not violence) → 12 on 2026-06-12 (slice 2: TWO between-fight
+# stops per gap, the Inscryption cadence — every gap between holds is a
+# pair of waysides drawn from event/verb/recruit/shop/treasure).
+# _generate_act_map enforces a 16–23-site window with an acceptance loop.
 const MAP_WIDTH: int = 7
-const MAP_HEIGHT: int = 10
-const BOSS_ROW: int = 9
-const REST_ROW: int = 8
+const MAP_HEIGHT: int = 12
+const BOSS_ROW: int = 11
+const REST_ROW: int = 10
 const NUM_PATHS: int = 3
 
 # Row skeleton (Kaycee's-Mod model, 2026-06-12): every row carries a fixed
-# BEAT — fight rows alternate with wayside rows — so the road's rhythm is
+# BEAT — fight rows alternate with wayside PAIRS — so the road's rhythm is
 # guaranteed by construction and the within-row choice becomes "which
 # flavor of this beat" (fights differ by terrain/kit, waysides by verb).
 # This replaced the per-node probability table + sibling/consecutive rules:
 # the skeleton can't deal a corridor of five straight fights, fight count
 # per act is CONSTANT (4 + 1 elite + keep), and the road's extra length is
 # all between-fights tissue. See _assign_node_types for the band content.
-const FIGHT_ROWS: Array[int] = [0, 2, 6]   # plain holds (R4 = elite band)
-const ELITE_ROW: int = 4                   # the act's mid-road spike
+const FIGHT_ROWS: Array[int] = [0, 3, 9]   # plain holds (R6 = elite band)
+const ELITE_ROW: int = 6                   # the act's mid-road spike
 
 
 func get_act() -> int:
@@ -228,6 +235,7 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	current_mutator_id = ""
 	current_terrain = ""
 	current_bridge = false
+	current_wayside_id = ""
 	fights_won = 0
 	mutators_survived = []
 	cause_of_death = ""
@@ -400,6 +408,16 @@ func get_card_upgrade(deck_index: int) -> Dictionary:
 	return card_upgrades.get(uid, {})
 
 
+## Wayside verbs write richer upgrade entries than upgrade_card's
+## path+keyword pair (the drill stacks a counter in the same slot). One
+## entry per card is still the law — callers gate eligibility on
+## is_card_upgraded (the Forge's "+" and a wayside mod can't share a card).
+func apply_wayside_upgrade(deck_index: int, entry: Dictionary) -> void:
+	if deck_index < 0 or deck_index >= deck_uids.size():
+		return
+	card_upgrades[deck_uids[deck_index]] = entry
+
+
 func is_card_upgraded(deck_index: int) -> bool:
 	return not get_card_upgrade(deck_index).is_empty()
 
@@ -445,6 +463,22 @@ func _apply_upgrade(data: Dictionary, upgrade: Dictionary) -> Dictionary:
 			# combat (a 0-hp card would die instantly on placement).
 			if d.type == "creature":
 				d.hp = maxi(1, d.hp - 1)
+		"drill":
+			# Drill Yard wayside: +1/+1 per completed drill pass (stacks live
+			# in the upgrade entry — push-your-luck writes the same slot).
+			if d.type == "creature":
+				var st: int = int(upgrade.get("stacks", 1))
+				d.atk += st
+				d.hp += st
+		"grant_kw":
+			# Standard-Bearer wayside, receiving end: the banner passes on.
+			if d.type == "creature" and String(upgrade.get("keyword", "")) != "" \
+					and not d.keywords.has(upgrade.keyword):
+				d.keywords.append(upgrade.keyword)
+		"strip_kw":
+			# Standard-Bearer wayside, giving end: the bearer marches plainer.
+			if d.type == "creature":
+				d.keywords.erase(upgrade.get("keyword", ""))
 		"butcher":
 			# Butcher event payoff: +2 ATK and Wither 1 on a creature. The Event
 			# screen advertises both halves — previously we only applied the ATK
@@ -749,6 +783,7 @@ func visit_node(row: int, col: int) -> void:
 			current_mutator_id = n.get("mutator_id", "")
 			current_terrain = String(n.get("terrain", ""))
 			current_bridge = bool(n.get("bridge", false))
+			current_wayside_id = String(n.get("wayside_id", ""))
 			current_floor += 1
 			save_run()  # checkpoint: player is committing to enter a room
 			return
@@ -882,6 +917,7 @@ func advance_act() -> void:
 	current_mutator_id = ""
 	current_terrain = ""
 	current_bridge = false
+	current_wayside_id = ""
 	# Per-act rest counters reset so the time-of-day shader tint (dusk → night)
 	# restarts each act, and Whetstone's "first rest of act" payoff re-arms.
 	rests_visited_in_act = 0
@@ -955,7 +991,7 @@ func _generate_map() -> void:
 ##      REST_ROW node connecting up to it.
 ##   4. Walk through and assign encounter IDs to combat/elite/boss nodes.
 func _generate_act_map(act: int, rng: RandomNumberGenerator) -> Array:
-	# Acceptance loop: only acts with 14–19 sites (incl. boss) read as a
+	# Acceptance loop: only acts with 16–23 sites (incl. boss) read as a
 	# campaign over the plate — fewer is degenerate, more re-grows the
 	# lattice. One value is drawn from the shared rng per act so later acts
 	# stay deterministic regardless of how many attempts this act needed.
@@ -982,7 +1018,7 @@ func _generate_act_map(act: int, rng: RandomNumberGenerator) -> Array:
 		# can walk must still pass HOLDS_TO_OPEN_LORD fight nodes, or the
 		# locked keep could softlock the act. (The skeleton makes the fight
 		# minimum 4 by construction — the DFS check stays as a tripwire.)
-		if n >= 14 and n <= 19 and _min_fights_to_rest(flat) >= HOLDS_TO_OPEN_LORD:
+		if n >= 16 and n <= 23 and _min_fights_to_rest(flat) >= HOLDS_TO_OPEN_LORD:
 			return flat
 	return flat
 
@@ -1106,16 +1142,20 @@ func _assign_node_types(grid: Array, rng: RandomNumberGenerator) -> void:
 	# band gets exactly one elite (the act's stronghold spike — forced onto
 	# every route when the band is a single merge point, avoidable when the
 	# row is wider); wayside rows deal their band's flavors round-robin so
-	# siblings differ wherever the row has width.
+	# siblings differ wherever the row has width. Every between-fight gap is
+	# a PAIR of wayside rows — the Inscryption cadence: two stops of
+	# different kinds between every hold.
 	#   R0 fight (the landing — lightest deal, see apply_terrain_redeal)
-	#   R1 wayside: events
-	#   R2 fight
-	#   R3 wayside: the muster band — recruit guaranteed, shop beside it
-	#   R4 fight: the elite band
+	#   R1 wayside: the landing tissue — events, a verb, maybe a muster
+	#   R2 wayside: roadside verbs and omens
+	#   R3 fight
+	#   R4 wayside: the muster band — recruit guaranteed, shop beside it
 	#   R5 wayside: events, sometimes a second muster
-	#   R6 fight
-	#   R7 wayside: the spoils band — treasure guaranteed
-	#   R8 rest (the war-council breather)   R9 keep
+	#   R6 fight: the elite band
+	#   R7 wayside: the spoils band — treasure guaranteed after the spike
+	#   R8 wayside: last outfitting — shop leads the pool
+	#   R9 fight (the approach hold)
+	#   R10 rest (the war-council breather)   R11 keep
 	for c in range(MAP_WIDTH):
 		if grid[REST_ROW][c] != null:
 			grid[REST_ROW][c]["type"] = "rest"
@@ -1127,29 +1167,45 @@ func _assign_node_types(grid: Array, rng: RandomNumberGenerator) -> void:
 		node["type"] = "combat"
 	if not band.is_empty():
 		band[rng.randi() % band.size()]["type"] = "elite"
-	_fill_wayside_row(grid, 1, ["event", "recruit"], rng)
-	_fill_wayside_row(grid, 3, ["shop", "event"], rng)
-	_fill_wayside_row(grid, 5, ["event", "event", "recruit"], rng)
-	_fill_wayside_row(grid, 7, ["shop", "event"], rng)
-	# A row offers at most one muster — R1's two-flavor pool can round-robin
+	var wayside_rows: Array[int] = [1, 2, 4, 5, 7, 8]
+	_fill_wayside_row(grid, 1, ["event", "wayside", "recruit"], rng)
+	_fill_wayside_row(grid, 2, ["wayside", "event"], rng)
+	_fill_wayside_row(grid, 4, ["shop", "event"], rng)
+	_fill_wayside_row(grid, 5, ["event", "wayside", "recruit"], rng)
+	_fill_wayside_row(grid, 7, ["event", "wayside"], rng)
+	_fill_wayside_row(grid, 8, ["shop", "event", "wayside"], rng)
+	# A row offers at most one muster — a narrow pool can round-robin
 	# recruit twice across a 3-wide row. Demoting duplicates to events keeps
-	# camps at one per band (early/mid/late => never more than 3 per act).
-	for r in [1, 3, 5, 7]:
+	# camps at one per band (early/mid => never more than 3 per act).
+	for r in wayside_rows:
 		var seen_recruit := false
 		for node in _row_nodes(grid, r):
 			if String(node["type"]) == "recruit":
 				if seen_recruit:
 					node["type"] = "event"
 				seen_recruit = true
+	# Wayside halts get their verb at gen so the chart can tell you what
+	# the stop IS before you commit (tooltip intel, same as mutators). The
+	# act's halts deal from a shuffled verb pool so two never repeat
+	# within an act unless the act has more halts than verbs.
+	var verbs: Array = ["drill_yard", "muster_scale", "standard_bearer",
+		"supply_cache"]
+	_shuffle_array(verbs, rng)
+	var vi: int = 0
+	for r in wayside_rows:
+		for node in _row_nodes(grid, r):
+			if String(node["type"]) == "wayside":
+				node["wayside_id"] = verbs[vi % verbs.size()]
+				vi += 1
 	# Placed guarantees (not prayed-for rolls): the muster camp, the
 	# treasure, and at least one shop somewhere on the road. R1/R5 pools
 	# can add a second or third muster — deck growth lives at camps in the
 	# conquest economy (fights pay gold, not cards), so expected musters
 	# stay ~2 per act (range 1-3), matching the old early/mid/late bands.
-	_force_one(grid, 3, "recruit", rng)
+	_force_one(grid, 4, "recruit", rng)
 	_force_one(grid, 7, "treasure", rng)
 	if _count_type(grid, "shop") == 0:
-		for r in [7, 3, 5]:
+		for r in [8, 4, 5]:
 			if _force_one(grid, r, "shop", rng):
 				break
 
@@ -1174,17 +1230,22 @@ func _fill_wayside_row(grid: Array, r: int, pool: Array,
 
 ## Stamp `t` onto one PLAIN node (event/shop) of row `r` — never onto an
 ## already-placed guarantee (a single-site muster row must not lose its
-## recruit to the shop fallback). Returns false if the row has no plain slot.
+## recruit to the shop fallback). Falls back to eating a wayside halt when
+## the row dealt no plain slot (a 1-wide spoils row that rolled "wayside"
+## must still yield its treasure). Returns false if the row has neither.
 func _force_one(grid: Array, r: int, t: String,
 		rng: RandomNumberGenerator) -> bool:
-	var plain: Array = []
-	for node in _row_nodes(grid, r):
-		if String(node["type"]) in ["event", "shop"]:
-			plain.append(node)
-	if plain.is_empty():
-		return false
-	plain[rng.randi() % plain.size()]["type"] = t
-	return true
+	for pool in [["event", "shop"], ["wayside"]]:
+		var plain: Array = []
+		for node in _row_nodes(grid, r):
+			if String(node["type"]) in pool:
+				plain.append(node)
+		if not plain.is_empty():
+			var picked: Dictionary = plain[rng.randi() % plain.size()]
+			picked["type"] = t
+			picked.erase("wayside_id")
+			return true
+	return false
 
 
 func _count_type(grid: Array, t: String) -> int:
@@ -1367,6 +1428,7 @@ func save_run() -> void:
 		"current_mutator_id": current_mutator_id,
 		"current_terrain": current_terrain,
 		"current_bridge": current_bridge,
+		"current_wayside_id": current_wayside_id,
 		"fights_won": fights_won,
 		"mutators_survived": mutators_survived,
 		"cause_of_death": cause_of_death,
@@ -1510,6 +1572,7 @@ func load_run(slot: int = -1) -> bool:
 	current_mutator_id = String(data.get("current_mutator_id", ""))
 	current_terrain = String(data.get("current_terrain", ""))
 	current_bridge = bool(data.get("current_bridge", false))
+	current_wayside_id = String(data.get("current_wayside_id", ""))
 	fights_won = int(data.get("fights_won", 0))
 	mutators_survived = []
 	for m in data.get("mutators_survived", []):

@@ -15,6 +15,7 @@ const REST_SCENE := "res://scenes/rest.tscn"
 const EVENT_SCENE := "res://scenes/event.tscn"
 const TREASURE_SCENE := "res://scenes/treasure.tscn"
 const RECRUIT_SCENE := "res://scenes/recruit.tscn"
+const WAYSIDE_SCENE := "res://scenes/wayside.tscn"
 const MAIN_MENU := "res://scenes/main_menu.tscn"
 const CARD_SCENE := preload("res://scenes/card_2d.tscn")
 
@@ -29,6 +30,20 @@ const TERRAIN_TIPS := {
 	"pass": "High pass — hard going. Armored kits hold passes.",
 	"ash": "Ash country — the burn. Doom and fire walk here.",
 	"meadow": "Meadow road — open country, lighter resistance.",
+}
+
+# Wayside halts advertise their verb on the chart (same contract as
+# mutators/terrain: the stop's KIND is route-planning intel, the inside is
+# the surprise). Names + one-line tells, keyed by node.wayside_id.
+const WAYSIDE_TIPS := {
+	"drill_yard": ["The Drill Yard",
+		"Drill a creature: +1/+1, then push your luck for more."],
+	"muster_scale": ["The Quartermaster's Scales",
+		"One trade by weight — sell a card for gold, or buy provisions."],
+	"standard_bearer": ["The Standard-Bearer",
+		"Move one keyword from one of your creatures to another."],
+	"supply_cache": ["The Supply Cache",
+		"Crack it open — carry away 1 of 3 spoils."],
 }
 
 var _hud_root: Control = null
@@ -196,6 +211,10 @@ func _tip(nd: Dictionary) -> String:
 			label = enc.name
 	if t == "recruit":
 		label += "\nChoose 1 of 3 cards to join your deck. Free."
+	if t == "wayside":
+		var wid: String = String(nd.get("wayside_id", ""))
+		if WAYSIDE_TIPS.has(wid):
+			label = "%s\n%s" % [WAYSIDE_TIPS[wid][0], WAYSIDE_TIPS[wid][1]]
 	if t == "boss":
 		# Rival-lord intel: whose keep this is, and whether the road is open.
 		var rival: String = RunState.get_act_rival()
@@ -262,6 +281,7 @@ func _on_node_pressed(row: int, col: int) -> void:
 		"event": target = EVENT_SCENE
 		"treasure": target = TREASURE_SCENE
 		"recruit": target = RECRUIT_SCENE
+		"wayside": target = WAYSIDE_SCENE
 	# The army marches down the carved road to the chosen site, then the
 	# scene fades — the commit reads as a move on the campaign map, not a
 	# menu click.

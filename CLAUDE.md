@@ -25,7 +25,7 @@ For headless parse-checks during development: `Godot_v4.6.x-stable_win64_console
 
 ### Scene flow
 
-`MainMenu → (StartingRelicPick) → MapView → Combat/Shop/Rest/Event → Reward → MapView → ... → Combat (boss) → GameOver`
+`MainMenu → (StartingRelicPick) → MapView → Combat/Shop/Rest/Event/Recruit/Treasure/Wayside → Reward → MapView → ... → Combat (boss) → GameOver`
 
 Scene transitions use `get_tree().change_scene_to_file()`. Each scene is a `.tscn` in `scenes/` with a matching script in `scripts/scenes/`. Starting relic selection runs from MainMenu before the first map appears, building UI programmatically over the menu background.
 
@@ -59,7 +59,7 @@ Largest file (~11,800 lines). Core systems:
 
 ### Map system
 
-RunState generates a branching map per act: 8 rows tall × up to 7 columns wide, 3 paths with a 3× merge bias (trunk road + branches). `BOSS_ROW = 7` (last row), `REST_ROW = 6`; elites/rest unlock at `MIN_ELITE_ROW = 3`; combat-only floor for early rows. An acceptance loop in `_generate_act_map` reseeds until the act has 11–15 sites — the count where the map reads as a campaign over terrain rather than a lattice.
+RunState generates a branching map per act: 12 rows tall × up to 7 columns wide, 3 paths with a 3× merge bias (trunk road + branches). The act is a fixed **row skeleton** (Kaycee's-Mod model): fight rows (`FIGHT_ROWS [0, 3, 9]`, elite band at `ELITE_ROW 6`) alternate with PAIRS of wayside rows, so every between-fight gap is exactly two non-fight stops (Inscryption cadence) dealt from event / wayside verb / recruit / shop / treasure; `REST_ROW = 10`, `BOSS_ROW = 11`. Fight count per act is constant by construction (4 + keep). An acceptance loop in `_generate_act_map` reseeds until the act has 16–23 sites and every route carries enough fights to open the lord gate. **Wayside halts** (`scenes/wayside.tscn`, `scripts/scenes/Wayside.gd`) are one-decision roadside verbs assigned at gen (`node.wayside_id` → `RunState.current_wayside_id`): drill_yard (push-your-luck +1/+1), muster_scale (sell a card by weight / buy provisions), standard_bearer (move a keyword between creatures), supply_cache (pick 1 of 3 spoils). Their permanent card changes ride the card-upgrade slot (`apply_wayside_upgrade`, paths `drill`/`grant_kw`/`strip_kw`) — one entry per card, so a drilled creature can't also be forged.
 
 The map screen is two layers: **MapTerrain** (`scripts/scenes/MapTerrain.gd`) draws the static campaign plate — hand-traced Sicily coastline, carved-groove roads, political province layer (capped ~240px from sites; farther land wears the run's rival-realm dyes — nearest-keep zones from `KEEP_LLS`, gold once their act is won), antique-chart furniture, per-act dressing. The campaign sweeps the island one leg per act — west landing → a keep in the northern passes → the southern grain country → Etna's foot — with each act's camp pitched where the last keep fell (`keep_lls` in `_read_run_map`; march spine is a camp→keep vector with lanes fanning perpendicular). Scorch is centered on `_etna_peak` (not the act's keep) and grows per act. **MapView** (`scripts/scenes/MapView.gd`) extends it with the game layer: invisible hover/click buttons over the painted site chips (tooltips carry encounter + mutator intel), node → scene flow, top HUD, deck viewer, per-act meta-relic pickers, and the return-to-map save checkpoint. `scenes/map_proto.tscn` renders MapTerrain alone (sandbox). HUD positions must derive from `size.x` — the stretch canvas is the 1600×900 project viewport, and hardcoded window-pixel x coordinates land off-canvas. The chart zooms/pans (wheel + drag; opens auto-focused on the army standard). Perf structure: the plate paints on `PlateItem` (child canvas item — every `_draw_*` plate function takes a target CanvasItem `tgt`; zoom/pan only move the item's transform), offscreen `bake_mode` clones collapse it to one 2× texture (geography per act, full plate per open), and `RunState.map_plate_cache` carries mesh + geo texture across opens within an act. The plate is frozen while on screen: per-frame animation belongs in `MapPulseOverlay`; new plate layers go in `PlateItem._draw`'s ink block (they bake in automatically). Gotcha: a zero-size Control is culled when its transform isn't identity — `_plate_item.size` must stay the real plate rect.
 
@@ -94,14 +94,14 @@ Spells: `id, name, type:"spell", cost, rarity, keywords[], desc, spell{type,valu
 - **New keyword**: add to `KeywordEffects.KEYWORDS`, implement in dispatchers, add to Card2D display.
 - **New spell type**: add `spell.type` handler in Combat.gd `_resolve_spell()` or `_resolve_custom_spell()`. If you add a custom damage spell, declare `dmg_bonus` in its UPGRADES entry and add `+ plus_dmg` to the damage line in the resolver.
 - **New encounter**: add to `EncounterDB.ENCOUNTERS` with name, act, type, hp, passive_id, passive_desc, deck, reinforcement. Add passive handler to Combat.gd if passive_id is non-empty. Optional reactive passive: add to `REACTIVE_PASSIVES` and handler case in `_dispatch_reactive`.
-- **New event**: add to `Event.gd` EVENTS dictionary with name, desc, choices with effects.
+- **New event**: add to `Event.gd` EVENTS dictionary with name, desc, choices with effects. Until bespoke Midjourney art lands at `assets/events/<event_id>.png`, set an `"art": "<other_event_id>"` stand-in — the bespoke file auto-wins once it exists.
 
 ## Key constants
 
 - Player HP: 25
 - Command (player-facing name for the turn resource; ALL code identifiers still say mana — `base_max_mana`, `player_mana`, `gain_mana`): starts at 3/turn; can grow via relics. Up to 2 banked carryover by default (`MAX_BANKED_MANA`; Ice Cream relic uncaps banking). See COPY_STYLE §6 before writing any resource text.
 - Hand draw: 4/turn (HAND_DRAW_PER_TURN), max hand: 10
-- 3 acts. Map: 8 rows × ≤7 columns, 11–15 sites per act. Boss at row 7, elites/rest start row 3.
+- 3 acts. Map: 12 rows × ≤7 columns, 16–23 sites per act. Fights at rows 0/3/9 + elite band at 6; wayside pairs between; rest at row 10, boss at row 11.
 - Lanes: 4 per row × 2 rows per side (front/back) = 8 slots per side.
 - Card rarities: "starter", "common", "uncommon", "rare", "enemy"
 - Shop prices: common 50g, uncommon 75g, rare 120g, relic 100g, potion 40g, removal 50g
