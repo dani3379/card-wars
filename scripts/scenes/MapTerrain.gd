@@ -198,8 +198,23 @@ var _faction_color: Color = CRIMSON
 # The three act keeps (lon/lat) — each rival lord's seat, and the anchor the
 # island's realm partition is carved around. Shared by _read_run_map (camp →
 # keep march legs) and _assign_zones (nearest-seat kingdom zones).
-const KEEP_LLS := [Vector2(13.58, 37.88), Vector2(14.22, 37.20),
+# The grain-country keep sits a step inland: on the coast the lane clamp
+# compressed act 3's opening chips onto their own camp.
+const KEEP_LLS := [Vector2(13.58, 37.88), Vector2(14.26, 37.32),
 	Vector2(14.90, 37.66)]
+# Authored waypoints (lon/lat) winding each act's march between camp and keep.
+# The legs sweep through the island's country instead of cutting the crow
+# line — that lengthens the road under the 12-row ladder by ~50%, which is
+# what gives the sites room to read as separate stops.
+const LEG_WAYPOINTS := [
+	[Vector2(12.90, 37.62), Vector2(13.30, 37.55), Vector2(13.66, 37.66)],
+	[Vector2(13.98, 37.72), Vector2(14.52, 37.55), Vector2(14.48, 37.40)],
+	[Vector2(14.62, 37.12), Vector2(14.95, 37.27), Vector2(15.05, 37.50)],
+]
+# Perpendicular spacing between adjacent map columns on the lane grid.
+const LANE_W := 52.0
+var _spine_pts: PackedVector2Array = PackedVector2Array()
+var _spine_cum: PackedFloat32Array = PackedFloat32Array()
 # The run's three rival realms over those seats, resolved per build by
 # _resolve_kingdoms(): {name, color, centroid, state} where state is
 # "taken" (acts already won — wears your gold), "front" (this act), or
@@ -549,6 +564,47 @@ func _perp_extent(base: Vector2, dirv: Vector2) -> float:
 	return d
 
 
+## Catmull-Rom spine through camp → authored waypoints → keep, sampled dense
+## and arc-length tabulated. Deterministic (no rng) — node stations re-derive
+## identically on every open, which the per-act plate cache relies on.
+func _build_spine(camp: Vector2, keep: Vector2) -> void:
+	var ctrl: Array[Vector2] = [camp]
+	for wp in LEG_WAYPOINTS[clampi(_act - 1, 0, 2)]:
+		var wv: Vector2 = wp
+		ctrl.append(_clamp_into_island(_geo(wv.x, wv.y), 30.0))
+	ctrl.append(keep)
+	_spine_pts = PackedVector2Array()
+	for si in range(ctrl.size() - 1):
+		var p0: Vector2 = ctrl[maxi(si - 1, 0)]
+		var p1: Vector2 = ctrl[si]
+		var p2: Vector2 = ctrl[si + 1]
+		var p3: Vector2 = ctrl[mini(si + 2, ctrl.size() - 1)]
+		for k in range(14):
+			var t: float = float(k) / 14.0
+			var pt: Vector2 = ((p1 * 2.0) + (p2 - p0) * t \
+				+ (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * (t * t) \
+				+ (p1 * 3.0 - p0 - p2 * 3.0 + p3) * (t * t * t)) * 0.5
+			# Safety clamp: the curve can belly off-island between two
+			# clamped controls hugging a coast.
+			_spine_pts.append(_clamp_into_island(pt, 20.0))
+	_spine_pts.append(keep)
+	_spine_cum = PackedFloat32Array()
+	_spine_cum.append(0.0)
+	var run := 0.0
+	for i in range(1, _spine_pts.size()):
+		run += _spine_pts[i - 1].distance_to(_spine_pts[i])
+		_spine_cum.append(run)
+
+
+## March direction at arc-distance d — central difference over the spine.
+func _spine_tangent(d: float) -> Vector2:
+	var top: float = _spine_cum[_spine_cum.size() - 1]
+	var a: Vector2 = _route_arc_point(_spine_pts, _spine_cum, maxf(d - 8.0, 0.0))
+	var b: Vector2 = _route_arc_point(_spine_pts, _spine_cum, minf(d + 8.0, top))
+	var v: Vector2 = b - a
+	return v.normalized() if v.length() > 0.001 else Vector2.RIGHT
+
+
 # ═══════════════════ RUN DATA ═══════════════════
 
 func _read_run_map() -> void:
@@ -569,37 +625,39 @@ func _read_run_map() -> void:
 		_clamp_into_island(_geo(KEEP_LLS[act_i - 1].x, KEEP_LLS[act_i - 1].y), 34.0)
 	var keep: Vector2 = _clamp_into_island(
 		_geo(KEEP_LLS[act_i].x, KEEP_LLS[act_i].y), 34.0)
-	# March spine as a vector — legs are no longer pure west→east, so sites
-	# advance along camp→keep and lanes fan perpendicular to the march.
-	var leg: Vector2 = keep - camp
-	var leg_len: float = maxf(leg.length(), 1.0)
-	var dirv: Vector2 = leg / leg_len
-	var perp: Vector2 = dirv.orthogonal()
-	var pad_a: float = clampf(leg_len * 0.18, 55.0, 110.0)
-	var pad_b: float = clampf(leg_len * 0.22, 75.0, 130.0)
-	var row_step: float = (leg_len - pad_a - pad_b) / float(maxi(total_rows - 1, 1))
-	# Along-spine jitter scales with the row step so rows can't visually
-	# reorder on short legs; cross-spine jitter stays generous.
-	var j_along_amp: float = minf(row_step * 0.42, 28.0)
+	# The march SPINE is a winding road, not the crow line. Rows sit at equal
+	# arc-length stations along it; lanes are a fixed perpendicular grid
+	# (col 3 = the spine itself), so the act reads as a ladder of choices
+	# marching toward the keep. This was THE legibility fix: straight legs
+	# ran ~430px for 12 rows, the relaxation pass shoved the overflowing
+	# chips around, and the run rendered as a shapeless woven cluster.
+	_build_spine(camp, keep)
+	var total_len: float = _spine_cum[_spine_cum.size() - 1]
+	var pad_a: float = minf(78.0, total_len * 0.11)
+	var pad_b: float = 112.0   # the keep's forecourt — walls + plaque need air
+	var span: float = total_len - pad_a - pad_b
 	var pos_lut: Dictionary = {}
 	var row0: Array = []   # {pos, avail, vis} — for camp trails
-	# Pass 1 — place every site on the leg's march spine. The cross-spine
-	# band measures the island's real extent perpendicular to the march, so
-	# lanes compress in narrow country instead of falling off the coast.
+	# Pass 1 — every site at its row's arc station, offset to its lane. The
+	# lane grid compresses where the island narrows (perp extent capped).
 	var entries: Array = []
 	for ri in range(total_rows):
 		for nd in act_map[ri]:
 			var t: float = float(nd.row) / float(total_rows - 1)
-			var base: Vector2 = camp + dirv * (pad_a + (leg_len - pad_a - pad_b) * t)
-			var lanes: float = float(RunState.MAP_WIDTH - 1)
+			var d: float = pad_a + span * t
+			var base: Vector2 = _route_arc_point(_spine_pts, _spine_cum, d)
+			var tang: Vector2 = _spine_tangent(d)
+			var perp: Vector2 = tang.orthogonal()
 			var en: float = _perp_extent(base, -perp)
 			var ep: float = _perp_extent(base, perp)
-			var foff: float = lerpf(-en * 0.82, ep * 0.82, float(nd.col) / lanes)
+			var foff: float = clampf((float(nd.col) - 3.0) * LANE_W,
+				-en * 0.88, ep * 0.88)
+			# Hash jitter, small: enough to unstiffen the grid, never enough
+			# to reorder rows or weave lanes.
 			var hsh: int = nd.row * 31 + nd.col * 47
-			var j_a: float = (fmod(float(hsh * 13 + 5), 56.0) - 28.0) \
-				* (j_along_amp / 28.0)
-			var j_p: float = fmod(float(hsh * 7 + 3), 44.0) - 22.0
-			var p: Vector2 = base + dirv * j_a + perp * (foff + j_p)
+			var j_a: float = fmod(float(hsh * 13 + 5), 20.0) - 10.0
+			var j_p: float = fmod(float(hsh * 7 + 3), 16.0) - 8.0
+			var p: Vector2 = base + tang * j_a + perp * (foff + j_p)
 			if String(nd.type) == "boss":
 				p = keep
 			else:
@@ -614,8 +672,8 @@ func _read_run_map() -> void:
 				var eb: Dictionary = entries[bi]
 				var dv := (eb.pos as Vector2) - (ea.pos as Vector2)
 				var dl := dv.length()
-				if dl < 46.0 and dl > 0.01:
-					var push := dv.normalized() * (46.0 - dl) * 0.5
+				if dl < 50.0 and dl > 0.01:
+					var push := dv.normalized() * (50.0 - dl) * 0.5
 					if String((ea.nd as Dictionary).type) != "boss":
 						ea.pos = _clamp_into_island((ea.pos as Vector2) - push)
 					if String((eb.nd as Dictionary).type) != "boss":
@@ -1281,6 +1339,25 @@ func _curve_hits(pts: PackedVector2Array, p: Vector2, r: float) -> bool:
 	return false
 
 
+## Push a label anchor out of the march corridor — a terrain name laid under
+## the site chips turns both into mush. Walks away from the nearest site
+## until clear. _nodes is already built when labels place (build order) and
+## when kingdom names draw (live ink).
+func _dodge_corridor(p: Vector2, clearance: float = 96.0) -> Vector2:
+	for _i in range(10):
+		var best_d := INF
+		var best_n := Vector2.ZERO
+		for nd in _nodes:
+			var dd: float = (nd.pos as Vector2).distance_to(p)
+			if dd < best_d:
+				best_d = dd
+				best_n = nd.pos
+		if best_d >= clearance or best_d < 0.01:
+			return p
+		p += (p - best_n).normalized() * (clearance - best_d + 6.0)
+	return p
+
+
 func _place_labels() -> void:
 	# Landmark names on the biggest terrain features — map furniture is half
 	# of what makes a game map read as a place. Descriptive common-noun names
@@ -1292,7 +1369,7 @@ func _place_labels() -> void:
 		"crimson": false})
 	var wood_c := _largest_cluster([B_FOREST])
 	if wood_c.z >= 12.0:
-		_labels.append({"pos": Vector2(wood_c.x, wood_c.y),
+		_labels.append({"pos": _dodge_corridor(Vector2(wood_c.x, wood_c.y)),
 			"text": "T H E   B L A C K   P I N E S", "size": 14,
 			"crimson": false})
 	var ash_c := _largest_cluster([B_SCORCH])
@@ -1452,7 +1529,11 @@ class PlateItem extends Control:
 func _paint_geo(tgt: CanvasItem, count: int) -> void:
 	# 1 — ocean base (rect, then shallow/deep cells refine it).
 	tgt.draw_rect(Rect2(Vector2.ZERO, size), OCEAN_DEEP)
-	# 2 — every cell, hillshaded.
+	# 2 — every cell, hillshaded. Cells near the march corridor are lifted
+	# toward pale road-country: the campaign layer needs quiet ground under
+	# it, and the lightened band doubles as "settled land along the road".
+	# Scorch keeps its char (act 3 marches THROUGH the lava country) and
+	# snow stays snow.
 	for i in range(count):
 		if _polys[i].size() < 3:
 			continue
@@ -1461,6 +1542,10 @@ func _paint_geo(tgt: CanvasItem, count: int) -> void:
 			var s := _shade[i]
 			col = Color(clampf(col.r * s, 0.0, 1.0),
 				clampf(col.g * s, 0.0, 1.0), clampf(col.b * s, 0.0, 1.0))
+			if i < _road_d.size() and _road_d[i] < 120.0 \
+					and _biome[i] != B_SCORCH and _biome[i] != B_SNOW:
+				col = col.lerp(Color(0.76, 0.70, 0.53),
+					(1.0 - _road_d[i] / 120.0) * 0.34)
 		tgt.draw_colored_polygon(_polys[i], col)
 	# 2.5 — graticule ruled over open water only (charts rule the sea, not
 	# the land); land cells were drawn already, so we sample and skip them.
@@ -1577,7 +1662,7 @@ func _draw_kingdom_names(tgt: CanvasItem) -> void:
 			col = Color(minf(c.r * 1.35, 1.0), minf(c.g * 1.35, 1.0),
 				minf(c.b * 1.35, 1.0), 0.72)
 		tgt.draw_string(GameTheme.font_display,
-			(k.centroid as Vector2) + Vector2(-150.0, 4.0),
+			_dodge_corridor(k.centroid as Vector2, 116.0) + Vector2(-150.0, 4.0),
 			_letterspace(String(k.name)), HORIZONTAL_ALIGNMENT_CENTER,
 			300, 13, col)
 
@@ -1694,9 +1779,10 @@ func _draw_political(tgt: CanvasItem, count: int) -> void:
 			elif _faction_id != "":
 				# Interior borders of the unconquered kingdom carry his dye —
 				# the land reads as provinces of HIS realm, not neutral ink.
+				# Kept faint: these run right through the site corridor.
 				tgt.draw_line(seg[0], seg[1], Color(_faction_color.r * 0.6,
-					_faction_color.g * 0.6, _faction_color.b * 0.6, 0.55),
-					1.4, true)
+					_faction_color.g * 0.6, _faction_color.b * 0.6, 0.38),
+					1.2, true)
 			else:
 				tgt.draw_line(seg[0], seg[1],
 					Color(0.05, 0.05, 0.04, 0.38), 1.4, true)
@@ -1714,7 +1800,10 @@ func _draw_decorations(tgt: CanvasItem, count: int) -> void:
 		# the engraved-map relief texture under the symbol layer.
 		var g := _grad[i]
 		var slope := g.length() * 9.0
-		if slope > 0.30 and _biome[i] in [B_GRASS, B_HILLS, B_ROCK, B_BEACH]:
+		# Hachures stop short of the corridor — relief strokes under the
+		# campaign ink read as clutter, not relief.
+		if slope > 0.30 and _road_d[i] > 70.0 \
+				and _biome[i] in [B_GRASS, B_HILLS, B_ROCK, B_BEACH]:
 			var down := -g.normalized()
 			var n_h := 2 if slope > 0.75 else 1
 			for hk in range(n_h):
@@ -1728,8 +1817,9 @@ func _draw_decorations(tgt: CanvasItem, count: int) -> void:
 		match _biome[i]:
 			B_FOREST:
 				# Dense stands of small trees with canopy shadows — woods
-				# should read as a texture mass at full-map zoom.
-				if drng.randf() < 0.72:
+				# should read as a texture mass at full-map zoom. The road
+				# keeps a cleared verge through them (and the chips with it).
+				if _road_d[i] > 48.0 and drng.randf() < 0.72:
 					for _t in range(drng.randi_range(1, 3)):
 						var tp := p + Vector2(drng.randf_range(-9.0, 9.0),
 							drng.randf_range(-8.0, 8.0))
@@ -1748,8 +1838,9 @@ func _draw_decorations(tgt: CanvasItem, count: int) -> void:
 							Color(0.07, 0.06, 0.04, 0.8), 1.0, true)
 			B_ROCK, B_SNOW:
 				# Ridge chains: offset peaks so ranges read as continuous
-				# chains, the way painted maps draw them.
-				if drng.randf() < 0.55:
+				# chains, the way painted maps draw them. Never ON the road —
+				# a peak glyph over a chip kills both.
+				if _road_d[i] > 40.0 and drng.randf() < 0.55:
 					for _pk in range(drng.randi_range(1, 2)):
 						var pc := p + Vector2(drng.randf_range(-8.0, 8.0),
 							drng.randf_range(-6.0, 6.0))
@@ -1799,7 +1890,7 @@ func _draw_decorations(tgt: CanvasItem, count: int) -> void:
 					tgt.draw_arc(p, drng.randf_range(4.0, 6.5), PI, TAU, 10,
 						Color(0.18, 0.15, 0.09, 0.5), 1.5, true)
 			B_GRASS:
-				if _road_d[i] < 150.0 and slope < 0.45 \
+				if _road_d[i] > 55.0 and _road_d[i] < 170.0 and slope < 0.45 \
 						and drng.randf() < 0.38:
 					# Tilled fields along the roads — settled country reads
 					# as furrow strokes on a quantised axis.
@@ -1992,11 +2083,29 @@ func _draw_sea_segments(tgt: CanvasItem, a: Vector2, b: Vector2, col: Color) -> 
 			tgt.draw_line(p0, p1, col, 1.0, true)
 
 
+## Per-type chip dress: radius (fights are the road's milestones — bigger
+## than waysides, so the skeleton's fight…stop…stop…fight rhythm is visible
+## at a glance) + the dye the parchment disc is washed with.
+const SITE_STYLE := {
+	"combat": {"r": 16.0, "tint": Color(0.62, 0.15, 0.10), "wash": 0.12},
+	"elite": {"r": 19.0, "tint": Color(0.62, 0.13, 0.09), "wash": 0.26},
+	"rest": {"r": 15.0, "tint": Color(0.95, 0.55, 0.20), "wash": 0.18},
+	"shop": {"r": 14.0, "tint": Color(0.74, 0.56, 0.16), "wash": 0.18},
+	"event": {"r": 14.0, "tint": Color(0.44, 0.28, 0.56), "wash": 0.17},
+	"treasure": {"r": 14.0, "tint": Color(0.88, 0.68, 0.18), "wash": 0.24},
+	"recruit": {"r": 14.0, "tint": Color(0.22, 0.38, 0.55), "wash": 0.18},
+	"wayside": {"r": 13.0, "tint": Color(0.42, 0.35, 0.24), "wash": 0.10},
+}
+
+
 func _draw_sites(tgt: CanvasItem) -> void:
 	# Marker hierarchy — the cool of a campaign map is reading the campaign:
 	#   conquered  → planted amber pennant (the land is yours)
-	#   reachable  → big glowing chip (your next moves)
-	#   far future → small, dim chip (known but distant)
+	#   reachable  → light disc at full strength, amber ring + halo
+	#   far future → same light disc, dimmed and ink-ringed
+	# Discs are pale parchment with DARK ink glyphs — the value flip off the
+	# olive terrain is what makes site types readable at chart zoom (the old
+	# dark-coin chips with dark-gold glyphs all read as identical dots).
 	for nd in _nodes:
 		var p: Vector2 = nd.pos
 		var typ: String = nd.type
@@ -2011,34 +2120,44 @@ func _draw_sites(tgt: CanvasItem) -> void:
 			tgt.draw_colored_polygon(PackedVector2Array([p + Vector2(0, -19),
 				p + Vector2(15, -14.5), p + Vector2(0, -10)]), PLAYER_AMBER)
 			continue
-		# Future sites stay clearly readable — at 13 sites every location is
-		# a landmark, not UI noise; hierarchy comes from size + rim, not fade.
-		var r := 17.0 if open_now else 13.0
-		var chip_c := Color(0.085, 0.075, 0.06, 0.94 if open_now else 0.88)
-		var rim := Color(0.32, 0.28, 0.20, 0.9)
-		var icon_tint := Color(0.80, 0.72, 0.54,
-			1.0 if open_now else 0.78)
-		if open_now:
-			rim = PLAYER_AMBER
-		elif typ == "elite":
-			rim = Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.85)
+		var st: Dictionary = SITE_STYLE.get(typ, SITE_STYLE["wayside"])
+		var r: float = float(st.r) + (2.0 if open_now else 0.0)
+		var disc := Color(0.90, 0.84, 0.68).lerp(st.tint as Color,
+			float(st.wash))
+		var ink := Color(0.13, 0.10, 0.07)
+		if not open_now:
+			# Future stops: same paper, lower light — hierarchy by value,
+			# not by hiding the type.
+			disc = disc.darkened(0.18)
+			disc.a = 0.92
+			ink = Color(0.16, 0.13, 0.09, 0.88)
 		if typ == "rest":
 			# Hearth glow — a safe light on the road.
 			tgt.draw_circle(p, r + 7.0, Color(1.0, 0.62, 0.25,
-				0.16 if open_now else 0.09))
+				0.18 if open_now else 0.10))
 		tgt.draw_circle(p + Vector2(2, 3), r + 1.0, Color(0, 0, 0, 0.45))
-		tgt.draw_circle(p, r, chip_c)
-		tgt.draw_arc(p, r, 0, TAU, 30, rim, 2.2 if open_now else 1.4, true)
+		tgt.draw_circle(p, r, disc)
+		if typ == "elite":
+			# Generals wear the rival's crimson on the rim, open or not.
+			tgt.draw_arc(p, r, 0, TAU, 30,
+				Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.95),
+				2.6 if open_now else 2.0, true)
+			tgt.draw_arc(p, r - 2.6, 0, TAU, 30,
+				Color(0.13, 0.10, 0.07, 0.85), 1.2, true)
+		else:
+			tgt.draw_arc(p, r, 0, TAU, 30,
+				PLAYER_AMBER if open_now else Color(0.20, 0.16, 0.10, 0.9),
+				2.4 if open_now else 1.5, true)
 		if open_now:
 			tgt.draw_arc(p, r + 5.0, 0, TAU, 30, Color(PLAYER_AMBER.r,
-				PLAYER_AMBER.g, PLAYER_AMBER.b, 0.38), 1.6, true)
+				PLAYER_AMBER.g, PLAYER_AMBER.b, 0.42), 1.7, true)
 			tgt.draw_circle(p, r + 14.0,
-				Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b, 0.06))
+				Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b, 0.07))
 		var tex: Texture2D = _node_icon(typ)
-		var ipx := r * 1.25
+		var ipx := r * 1.30
 		if tex != null:
 			tgt.draw_texture_rect(tex, Rect2(p - Vector2(ipx, ipx) * 0.5,
-				Vector2(ipx, ipx)), false, icon_tint)
+				Vector2(ipx, ipx)), false, ink)
 		if String(nd.get("mutator_id", "")) != "":
 			# Mutator star — same signal as the old chart, on the chip's rim.
 			_draw_star(tgt, p + Vector2(r * 0.78, -r * 0.78), 6.0,
@@ -2251,10 +2370,21 @@ func _draw_ui() -> void:
 	draw_line(Vector2(lx - 32, h - 64), Vector2(lx + lwid + 2, h - 64),
 		Color(0.55, 0.48, 0.36, 0.25), 1.0, true)
 	for it in items:
+		# Miniature of the real site chip — the legend previews exactly what
+		# the player will see on the road (parchment disc, type dye, ink glyph).
+		var st: Dictionary = SITE_STYLE.get(it[0], SITE_STYLE["wayside"])
+		var lc := Vector2(lx + 9.0, h - 47.0)
+		var disc := Color(0.90, 0.84, 0.68).lerp(st.tint as Color,
+			float(st.wash))
+		draw_circle(lc, 10.0, disc)
+		draw_arc(lc, 10.0, 0, TAU, 24,
+			Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.95) if it[0] == "elite"
+			else Color(0.20, 0.16, 0.10, 0.9),
+			1.6 if it[0] == "elite" else 1.2, true)
 		var tex: Texture2D = _node_icon(it[0])
 		if tex != null:
-			draw_texture_rect(tex, Rect2(Vector2(lx, h - 56),
-				Vector2(18, 18)), false, Color(0.75, 0.68, 0.52, 0.9))
+			draw_texture_rect(tex, Rect2(lc - Vector2(6.5, 6.5),
+				Vector2(13, 13)), false, Color(0.13, 0.10, 0.07))
 		draw_string(GameTheme.font_display, Vector2(lx + 24, h - 41),
 			it[1], HORIZONTAL_ALIGNMENT_LEFT, 90, 12,
 			Color(0.70, 0.64, 0.50, 0.85))
