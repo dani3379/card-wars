@@ -86,14 +86,20 @@ func _pick_event() -> void:
 
 
 # Returns true if the event's gate (if any) is satisfied by current RunState.
-# Events without a "gate" field are always eligible. Gates are encoded as
-# simple type+param dicts so adding a new gate is one match arm here, not a
-# new function per event.
+# Events without a "gate" field are always eligible.
 func _event_gate_passes(event_id: String) -> bool:
 	var event = EVENTS.get(event_id, {})
 	var gate: Dictionary = event.get("gate", {})
 	if gate.is_empty():
 		return true
+	return _event_gate_passes_dict(gate)
+
+
+# The one gate dispatcher. Gates are simple type+param dicts so adding a new
+# gate is one match arm here. Used by event-level gates, "all" sub-gates, and
+# per-choice "blue" gates (the verdigris options that only appear when the
+# event recognizes something about the player — hero, relics, deck, history).
+func _event_gate_passes_dict(gate: Dictionary) -> bool:
 	match gate.get("type", ""):
 		"has_curse":
 			for cid in RunState.deck:
@@ -125,47 +131,24 @@ func _event_gate_passes(event_id: String) -> bool:
 				if not RunState.events_seen.has(needed):
 					return false
 			return true
+		"hero_is":
+			return RunState.current_hero_id == String(gate.get("value", ""))
+		"upgraded_at_least":
+			# Cards carrying ANY mod (forge/drill/banner) — "edge-work".
+			return RunState.card_upgrades.size() >= int(gate.get("value", 1))
+		"starters_at_least":
+			var n := 0
+			for cid in RunState.deck:
+				if CardDB.get_card_data(cid).get("rarity", "") == "starter":
+					n += 1
+			return n >= int(gate.get("value", 1))
+		"potions_full":
+			return not RunState.can_add_potion()
 		"all":
 			# Compound — every sub-gate must pass. Used by Beekeeper Again /
 			# Beekeeper Returns to combine act + seen_all checks.
 			for sub in gate.get("gates", []):
 				if not _event_gate_passes_dict(sub):
-					return false
-			return true
-	return true
-
-
-# Helper for "all" gate type — re-runs the same dispatch on a sub-gate dict
-# without needing a wrapping event entry. Extracted so we don't recurse
-# through EVENTS.get() and risk a missing-key warning.
-func _event_gate_passes_dict(gate: Dictionary) -> bool:
-	match gate.get("type", ""):
-		"has_curse":
-			for cid in RunState.deck:
-				if CardDB.is_curse(cid):
-					return true
-			return false
-		"hp_below_pct":
-			var pct: float = float(RunState.hero_hp) / float(maxi(1, RunState.hero_max_hp))
-			return pct < float(gate.get("value", 0.5))
-		"gold_at_least":
-			return RunState.gold >= int(gate.get("value", 0))
-		"at_bridge":
-			# Phase 2.5 — only rolls where the road in crossed a river.
-			return RunState.current_bridge
-		"deck_at_least":
-			return RunState.deck.size() >= int(gate.get("value", 0))
-		"has_nonstarting_relic":
-			for rid in RunState.relics:
-				var r = RelicDB.get_relic(rid)
-				if r.get("tier", "starting") != "starting":
-					return true
-			return false
-		"act_at_least":
-			return RunState.get_act() >= int(gate.get("value", 1))
-		"seen_all":
-			for needed in gate.get("events", []):
-				if not RunState.events_seen.has(needed):
 					return false
 			return true
 	return true
@@ -208,10 +191,18 @@ func _build_ui() -> void:
 	var desc = _make_event_desc(_current_node.desc)
 	add_child(desc)
 
+	# Blue options (per-choice "blue" gate) only exist while the event
+	# recognizes something about the player — filter before sizing the stack.
+	var visible_choices: Array = []
+	for choice in _current_node.choices:
+		if choice.has("blue") and not _event_gate_passes_dict(choice.blue):
+			continue
+		visible_choices.append(choice)
+
 	# Choice column anchored bottom-left. Frameless gem-prefixed entries
 	# (Hades / StS dialogue beat-by-beat) — only the column anchor changed
 	# from center to left, the cinematic style is preserved.
-	var num_choices: int = _current_node.choices.size()
+	var num_choices: int = visible_choices.size()
 	# Tall enough for three stacked lines: headline + gold outcome + dim flavor.
 	# 118 keeps a 3-choice stack (stack_h 378, top y≈412) clear of the desc box
 	# (bottom 400) on the 900px viewport, while still absorbing a rare two-line
@@ -229,7 +220,7 @@ func _build_ui() -> void:
 	choices_vbox.alignment = BoxContainer.ALIGNMENT_BEGIN
 	add_child(choices_vbox)
 
-	for choice in _current_node.choices:
+	for choice in visible_choices:
 		choices_vbox.add_child(_make_event_choice(choice, choice_h))
 
 	var skip_btn = GameTheme.make_back_button("LEAVE", Vector2(140, 40))
@@ -405,11 +396,18 @@ func _make_event_choice(choice: Dictionary, height: int) -> Button:
 		# empty and show only the flavor beat — the payoff is the next screen.
 		effect_text = String(choice.get("desc", ""))
 	return _make_frameless_choice(headline_text, effect_text, body_text, height,
-			_resolve_choice.bind(choice))
+			_resolve_choice.bind(choice), choice.has("blue"))
+
+
+# Verdigris ink for blue options — the color is the tell that the event SEES
+# you (your hero, your relics, your history). Matches RelicDB's "event" tier.
+const BLUE_INK := Color(0.47, 0.83, 0.75, 1.0)
+const BLUE_INK_BRIGHT := Color(0.66, 0.97, 0.88, 1.0)
 
 
 func _make_frameless_choice(headline_text: String, effect_text: String,
-		body_text: String, height: int, on_press: Callable) -> Button:
+		body_text: String, height: int, on_press: Callable,
+		is_blue: bool = false) -> Button:
 	# Returns a transparent Button containing layered visuals — gem ornament
 	# on the left, then a stacked column: headline, the mechanical OUTCOME line
 	# (gold — what the player actually gets), then a dim flavor beat. The whole
@@ -449,7 +447,11 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 	gem.custom_minimum_size = Vector2(18, 18)
 	gem.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	gem.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	gem.modulate = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.85)
+	var gem_rest := Color(BLUE_INK.r, BLUE_INK.g, BLUE_INK.b, 0.95) if is_blue \
+		else Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.85)
+	var gem_hot := Color(BLUE_INK_BRIGHT.r, BLUE_INK_BRIGHT.g, BLUE_INK_BRIGHT.b, 1.0) if is_blue \
+		else Color(GameTheme.GILT_BRIGHT.r, GameTheme.GILT_BRIGHT.g, GameTheme.GILT_BRIGHT.b, 1.0)
+	gem.modulate = gem_rest
 	gem.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	gem.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(gem)
@@ -464,7 +466,9 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 	var headline := Label.new()
 	headline.text = headline_text
 	headline.add_theme_font_size_override("font_size", 26)
-	headline.add_theme_color_override("font_color", GameTheme.IVORY)
+	var head_rest: Color = BLUE_INK if is_blue else GameTheme.IVORY
+	var head_hot: Color = BLUE_INK_BRIGHT if is_blue else GameTheme.KEYWORD_GOLD
+	headline.add_theme_color_override("font_color", head_rest)
 	headline.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.80))
 	headline.add_theme_constant_override("outline_size", 3)
 	headline.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.75))
@@ -518,12 +522,12 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 		vbox.add_child(body)
 
 	btn.mouse_entered.connect(func() -> void:
-		gem.modulate = Color(GameTheme.GILT_BRIGHT.r, GameTheme.GILT_BRIGHT.g, GameTheme.GILT_BRIGHT.b, 1.0)
-		headline.add_theme_color_override("font_color", GameTheme.KEYWORD_GOLD)
+		gem.modulate = gem_hot
+		headline.add_theme_color_override("font_color", head_hot)
 	)
 	btn.mouse_exited.connect(func() -> void:
-		gem.modulate = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.85)
-		headline.add_theme_color_override("font_color", GameTheme.IVORY)
+		gem.modulate = gem_rest
+		headline.add_theme_color_override("font_color", head_rest)
 	)
 
 	return btn
@@ -556,6 +560,7 @@ func _load_event_image() -> Texture2D:
 ## pickers in the same `effects` array.
 const MODAL_EFFECTS := [
 	"copy_card", "remove_choice", "remove_choice_multi", "remove_choice_filtered",
+	"remove_choice_all_copies",
 	"butcher_buff", "mirror_twin_buff",
 	"upgrade_choice", "upgrade_choice_multi",
 	"stranger_hand_pick", "relic_sacrifice_pick", "sacrifice_pick",
@@ -669,10 +674,19 @@ func _apply_effect(effect: Dictionary) -> String:
 				var relic = RelicDB.get_relic(choices[0])
 				return "Gained relic: %s" % relic.name
 			return "No relics available."
+		"specific_relic":
+			# Named event relic (tier "event") — the payoff carries the event's
+			# story. Falls back to coin if somehow already carried.
+			var rid := String(effect.get("id", ""))
+			if rid != "" and not RunState.relics.has(rid):
+				RunState.add_relic(rid)
+				return "Gained relic: %s" % RelicDB.get_relic(rid).name
+			RunState.gain_gold(30)
+			return "Gained 30 gold."
 		"upgrade_random":
 			var upgradeable: Array = []
 			for i in range(RunState.deck.size()):
-				if RunState.is_card_upgraded(i):
+				if RunState.has_upgrade_path(i, "plus"):
 					continue
 				if not CardDB.is_upgradeable(RunState.deck[i]):
 					continue
@@ -698,6 +712,10 @@ func _apply_effect(effect: Dictionary) -> String:
 			# honor its fiction ("feed him a curse") instead of opening the whole
 			# deck and letting the player remove their best card.
 			_start_remove_filtered_mode(String(effect.get("filter", "")))
+			return ""
+		"remove_choice_all_copies":
+			# Blue option (the Last Tinker): pick one card, he keeps the lot.
+			_start_remove_all_copies_mode(String(effect.get("filter", "")))
 			return ""
 		"wager_gold":
 			# One-shot coin bet. Pay `stake` up front (the gate keeps the
@@ -739,7 +757,7 @@ func _apply_effect(effect: Dictionary) -> String:
 					continue
 				if data.get("rarity", "") != "starter":
 					continue
-				if RunState.is_card_upgraded(i):
+				if RunState.has_upgrade_path(i, "fortify_neg"):
 					continue
 				RunState.upgrade_card(i, "fortify_neg")
 				weakened += 1
@@ -750,6 +768,14 @@ func _apply_effect(effect: Dictionary) -> String:
 			if RunState.add_potion("healing"):
 				return "Gained a Healing Potion."
 			return "Your potion belt is already full."
+		"sell_potion":
+			# Blue option (Pawnbroker): she pays over shop odds for a bottle.
+			if RunState.potions.is_empty():
+				return "Your belt is empty. She slides the glass shut."
+			RunState.potions.pop_back()
+			var price: int = int(effect.get("value", 65))
+			RunState.gain_gold(price)
+			return "She buys a potion off your belt for %d gold." % price
 		"add_card":
 			# Add one random card of the given rarity (default common). Lets an
 			# event hand out a non-rare pull without the "always a rare" inflation.
@@ -1160,6 +1186,37 @@ func _filter_empty_message(filter: String) -> String:
 	return "Nothing here he'll take."
 
 
+# ── Remove ALL copies (the Last Tinker's blue option) ────────────────────
+# Picker over unique qualifying card ids; choosing one removes every copy
+# at once. "He takes the lot or none."
+
+func _start_remove_all_copies_mode(filter: String) -> void:
+	var unique_ids: Array = []
+	for i in range(RunState.deck.size()):
+		var cid: String = RunState.deck[i]
+		if _card_matches_filter(cid, filter) and not unique_ids.has(cid):
+			unique_ids.append(cid)
+	if unique_ids.is_empty():
+		_show_result(_filter_empty_message(filter))
+		return
+	var grid = _make_card_picker_grid("Choose a card — he keeps every copy of it", GameTheme.KEYWORD_GOLD)
+	for cid in unique_ids:
+		_add_card_to_grid(grid, CardDB.get_card_data(cid),
+			_on_remove_all_copies_pick.bind(String(cid)))
+
+
+func _on_remove_all_copies_pick(card_id: String) -> void:
+	var nm: String = CardDB.get_card_data(card_id).name
+	var removed := 0
+	for i in range(RunState.deck.size() - 1, -1, -1):
+		if RunState.deck.size() <= 1:
+			break
+		if RunState.deck[i] == card_id:
+			RunState.remove_card_at(i)
+			removed += 1
+	_show_result("He weighs the matched set once and keeps it. Removed %d × %s." % [removed, nm])
+
+
 func _filter_removed_message(filter: String, card_name: String) -> String:
 	match filter:
 		"curse":
@@ -1237,7 +1294,7 @@ func _start_mirror_twin_mode() -> void:
 		var data = CardDB.get_card_data(RunState.deck[i])
 		if data.get("type", "creature") != "creature":
 			continue
-		if RunState.is_card_upgraded(i):
+		if RunState.has_upgrade_path(i, "mirror_twin"):
 			continue
 		_add_card_to_grid(grid, data, _on_mirror_twin_pick.bind(i))
 
@@ -1262,7 +1319,7 @@ func _start_upgrade_mode(count: int) -> void:
 
 	var any_upgradeable := false
 	for i in range(RunState.deck.size()):
-		if not RunState.is_card_upgraded(i):
+		if not RunState.has_upgrade_path(i, "plus"):
 			any_upgradeable = true
 			break
 	if not any_upgradeable:
@@ -1280,7 +1337,7 @@ func _start_upgrade_mode(count: int) -> void:
 		suffix = " (%d remaining)" % _upgrade_choice_remaining
 	var grid = _make_card_picker_grid("Choose a card to upgrade" + suffix, GameTheme.KEYWORD_GOLD)
 	for i in range(RunState.deck.size()):
-		if RunState.is_card_upgraded(i):
+		if RunState.has_upgrade_path(i, "plus"):
 			continue
 		var data = RunState.get_upgraded_card_data(i)
 		_add_card_to_grid(grid, data, _on_upgrade_choice_pick.bind(i))
@@ -1747,8 +1804,17 @@ func _on_dice_roll() -> void:
 
 func _on_dice_bank() -> void:
 	RunState.gain_gold(_dice_pot)
-	_show_result(_dice_text("bank_text",
-		"You bank {pot} gold and stand. A space stays open in the circle behind you. It is always open. That is the other rule."))
+	var line := _dice_text("bank_text",
+		"You bank {pot} gold and stand. A space stays open in the circle behind you. It is always open. That is the other rule.")
+	# Big-pot payoff: banking past the threshold carries the table's own
+	# relic away with the gold (event relics — granted by name, never rolled).
+	var rid := String(_dice_cfg.get("bank_relic", ""))
+	if rid != "" and _dice_pot >= int(_dice_cfg.get("bank_relic_at", 0)) \
+			and not RunState.relics.has(rid):
+		RunState.add_relic(rid)
+		line += "\n\n" + _dice_text("bank_relic_text",
+			"Gained relic: %s." % RelicDB.get_relic(rid).name)
+	_show_result(line)
 
 
 # ── Risk loop (risk_loop) — the generic "do it again?" engine ────────────
@@ -2122,6 +2188,14 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
+				"blue": {"type": "potions_full"},
+				"label": "Set your full belt on the sill\n\nShe holds a bottle to the smoked light and almost smiles.\n\"Liquids,\" she says, \"keep their word.\" She pays over the odds.",
+				"desc": "Sell a potion for 65 gold",
+				"effects": [
+					{"type": "sell_potion", "value": 65},
+				],
+			},
+			{
 				"label": "Trade Coin\n\nLeave 60 gold on the sill.\nUpgrade a card you choose.",
 				"desc": "-60 gold, upgrade a chosen card",
 				"effects": [
@@ -2196,6 +2270,21 @@ const EVENTS: Dictionary = {
 				"desc": "-45 gold",
 				"effects": [
 					{"type": "gold", "value": -45},
+				],
+			},
+			{
+				"blue": {"type": "hero_is", "value": "stalwart"},
+				"label": "Read the water like a soldier\n\nYou served on rivers like this one. There is always a ford,\nand it is always where the cattle cross. You find it in an hour.",
+				"desc": "Ford upstream, free — the river owes soldiers",
+				"effects": [
+					{"type": "roll_table", "outcomes": [
+						{"weight": 2,
+							"text": "The ford is exactly where doctrine says it should be. You cross dry to the boot-tops, and on the far bank you pocket a toll coin some less careful traveller dropped running.",
+							"effects": [{"type": "gold", "value": 20}]},
+						{"weight": 1,
+							"text": "The cattle path crosses at a drowned shrine stone. You touch it mid-river for luck, the way the drovers do, and the cold water takes the road-ache out of your legs.",
+							"effects": [{"type": "heal", "value": 4}]},
+					]},
 				],
 			},
 			{
@@ -2325,9 +2414,9 @@ const EVENTS: Dictionary = {
 							{"chance": 0.7, "sub": "Gain 35 gold — 3 in 10 the song turns.",
 								"effects": [{"type": "gold", "value": 35}],
 								"text": "A ring. A chain. A saint's little finger in silver. The choir sings louder, and the grave is not so empty now."},
-							{"chance": 0.5, "sub": "A grave-gift surfaces — even odds the song turns.",
-								"effects": [{"type": "random_relic"}],
-								"text": "Something old and well-made works its way up out of the dark, wrapped in a winding-sheet the size of a kerchief."},
+							{"chance": 0.5, "sub": "The choir's own relic surfaces — even odds the song turns.",
+								"effects": [{"type": "specific_relic", "id": "verse_of_you"}],
+								"text": "Something works its way up out of the dark, wrapped in a winding-sheet the size of a kerchief: a verse, written in a hand you know, because it is yours."},
 						],
 						"bust": {"effects": [{"type": "add_curse"}],
 							"text": "The song turns on the high note. It walks down your throat, takes a verse of you with it, and lays it in the grave. The choir bows. To you, or to it."},
@@ -2629,10 +2718,10 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Trade him another Curse\n\nHe takes it gently and lays it\non the side of his plate.",
-				"desc": "+random relic, eat a chosen Curse",
+				"label": "Trade him another Curse\n\nHe takes it gently, lays it on the side of his plate,\nand tears you the heel of the loaf in payment.",
+				"desc": "Gain the Sin-Eater's Crust (relic), eat a chosen Curse",
 				"effects": [
-					{"type": "random_relic"},
+					{"type": "specific_relic", "id": "sin_eaters_crust"},
 					{"type": "remove_choice_filtered", "filter": "curse"},
 				],
 			},
@@ -2668,6 +2757,14 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
+				"blue": {"type": "hero_is", "value": "acolyte"},
+				"label": "Recite the pain-psalm with her\n\nShe stops mid-reach. \"Clergy,\" she says, and the chair\nremembers being a pew. The rite asks nothing of the faithful.",
+				"desc": "Heal to full",
+				"effects": [
+					{"type": "heal_full"},
+				],
+			},
+			{
 				"label": "Limp on\n\nThe chair creaks. She watches you go.",
 				"desc": "No effect",
 				"effects": [],
@@ -2697,6 +2794,14 @@ const EVENTS: Dictionary = {
 					{"type": "remove_choice"},
 					{"type": "remove_cards", "value": 1},
 					{"type": "random_relic"},
+				],
+			},
+			{
+				"blue": {"type": "starters_at_least", "value": 4},
+				"label": "He points at the matched set\n\n\"Four the same. You walk like a man carrying\nfour of the same.\" He takes the lot or none.",
+				"desc": "Remove EVERY copy of one chosen starting card",
+				"effects": [
+					{"type": "remove_choice_all_copies", "filter": "starter"},
 				],
 			},
 			{
@@ -2874,6 +2979,14 @@ const EVENTS: Dictionary = {
 				"desc": "-3 HP, upgrade a chosen card",
 				"effects": [
 					{"type": "damage", "value": 3},
+					{"type": "upgrade_choice"},
+				],
+			},
+			{
+				"blue": {"type": "upgraded_at_least", "value": 3},
+				"label": "Let him study your edge-work\n\nHe turns your reworked steel over twice and almost smiles.\n\"Somebody taught you. Sit — this one is for the craft.\"",
+				"desc": "Upgrade a chosen card, free",
+				"effects": [
 					{"type": "upgrade_choice"},
 				],
 			},
@@ -3116,6 +3229,8 @@ const EVENTS: Dictionary = {
 				"effects": [
 					{"type": "dice_run", "stake": 25, "start": 40,
 						"mode": "double", "bust_pct": 0.5,
+						"bank_relic": "coin_landed", "bank_relic_at": 160,
+						"bank_relic_text": "As you turn to go, the spinning stops. The coin lies flat in your open palm — heads, warm as a struck match — and the groove in the road is empty. Gained relic: The Coin, Landed.",
 						"broke_text": "You haven't 25 gold to stake. The coin spins on, unbothered. It has been refused by poorer.",
 						"open_text": "You lay your stake in the groove beside the spinning silver. The pot stands at {pot} gold. The coin picks up speed, which should not be possible, and is.",
 						"roll_label": "Call it again",
@@ -3257,7 +3372,19 @@ const EVENTS: Dictionary = {
 				"label": "Take the open seat\n\nThe bones are warm.\nThey should not be warm.",
 				"desc": "The pot opens at 25 gold — grow it cast by cast, bank any time, skulls lose it all",
 				"effects": [
-					{"type": "dice_run", "start": 25},
+					{"type": "dice_run", "start": 25,
+						"bank_relic": "warm_knucklebone", "bank_relic_at": 75,
+						"bank_relic_text": "The eldest legionary stops you at the edge of the circle and presses one of his own knucklebones into your palm. It is warm. It stays warm. Gained relic: Warm Knucklebone."},
+				],
+			},
+			{
+				"blue": {"type": "seen_all", "events": ["coin_on_edge"]},
+				"label": "Tell them about the coin\n\nFour dead faces turn at once. \"The spinner,\" one clicks.\n\"It owes this table a pot. Sit — your stake is already in.\"",
+				"desc": "The pot opens at 50 gold — the dead respect a fellow gambler",
+				"effects": [
+					{"type": "dice_run", "start": 50,
+						"bank_relic": "warm_knucklebone", "bank_relic_at": 75,
+						"bank_relic_text": "The eldest legionary stops you at the edge of the circle and presses one of his own knucklebones into your palm. It is warm. It stays warm. Gained relic: Warm Knucklebone."},
 				],
 			},
 			{

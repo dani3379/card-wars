@@ -205,10 +205,14 @@ func _animate_focus(world: Vector2, target_zoom: float, duration := 0.55) -> voi
 func _tip(nd: Dictionary) -> String:
 	var t: String = String(nd.type)
 	var label: String = t.capitalize()
+	if t == "elite":
+		label = "General"  # player-facing name for the elite band
 	if t in ["combat", "elite", "boss"] and String(nd.get("encounter_id", "")) != "":
 		var enc: Dictionary = EncounterDB.get_encounter(String(nd.encounter_id))
 		if not enc.is_empty():
 			label = enc.name
+	if t == "elite":
+		label += "\nA General holds this ground — break them for a relic."
 	if t == "recruit":
 		label += "\nChoose 1 of 3 cards to join your deck. Free."
 	if t == "wayside":

@@ -246,6 +246,7 @@ var _last_dead_creature_id: String = ""
 var _last_dead_creature_uid: int = -1
 var _grave_pact_active: bool = false
 var _soul_lantern_used_this_round: bool = false
+var _verse_of_you_used_this_round: bool = false
 var _battle_scars_triggered_this_fight: bool = false
 var _resonance_crystal_used_this_fight: bool = false
 var _gravewardens_rebirths: int = 0  # Gravewarden's Pact — Imp rebirths used this fight
@@ -1094,6 +1095,7 @@ func _start_round() -> void:
 	_last_spell_target_lane = -1
 	_friendly_deaths_this_round = 0
 	_soul_lantern_used_this_round = false
+	_verse_of_you_used_this_round = false
 	_extra_draws_this_turn = 0
 	phase = Phase.PLAYER_TURN
 
@@ -1225,6 +1227,10 @@ func _start_round() -> void:
 	# for +2 max). Round 2+ flows normally so the +2 ceiling actually matters.
 	if _has_relic("marathoners_sash") and round_number == 1:
 		player_mana = 1
+	# Warm Knucklebone (event relic): 1 in 6 turns the bones come up warm.
+	# After the Sash override so the bonus survives a round-1 ramp.
+	if _has_relic("warm_knucklebone") and randi() % 6 == 0:
+		player_mana += int(RelicDB.get_relic("warm_knucklebone").get("value", 1))
 	# Tutorial: first round where mana actually carries over.
 	if banked > 0:
 		_maybe_show_banking_tutorial()
@@ -2767,6 +2773,11 @@ func _on_friendly_death(card: Control, _lane_idx: int) -> void:
 	if _has_relic("soul_lantern") and not _soul_lantern_used_this_round:
 		_soul_lantern_used_this_round = true
 		_bonus_mana_next_turn += 1
+	# A Verse of You (event relic): the first friendly death each round sings
+	# a card up out of the deck. Same once-per-round cadence as Soul Lantern.
+	if _has_relic("verse_of_you") and not _verse_of_you_used_this_round:
+		_verse_of_you_used_this_round = true
+		draw_one()
 	# Sigil of Hunger: arm a "next creature -1 mana" charge, once per round.
 	if _has_relic("sigil_of_hunger") and not _sigil_of_hunger_fired_this_round:
 		_sigil_of_hunger_fired_this_round = true
@@ -9347,6 +9358,11 @@ func _on_card_destroyed(card: Control) -> void:
 	# multi-creature wipe or a chunky bruiser dying lands with weight.
 	_note_death(card, was_enemy)
 
+	# The Coin, Landed (event relic): every fall pays, either side of the
+	# field. Structures are furniture, not dead — they don't flip the coin.
+	if _has_relic("coin_landed") and not card.has_keyword("structure"):
+		RunState.gain_gold(int(RelicDB.get_relic("coin_landed").get("value", 2)))
+
 	# Snapshot enemy data so on_death effects that look up "last dead enemy"
 	# see the freshly-dead card (Doppelganger, Phoenix Feather).
 	if was_enemy:
@@ -12444,7 +12460,7 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 
 	if not quick:
 		var prefix_label := Label.new()
-		prefix_label.text = "— BOSS —" if is_boss else "— ELITE —"
+		prefix_label.text = "— BOSS —" if is_boss else "— GENERAL —"
 		prefix_label.add_theme_font_size_override("font_size", 26)
 		prefix_label.add_theme_color_override("font_color",
 			Color(1.0, 0.45, 0.20) if is_boss else Color(1.0, 0.78, 0.30))

@@ -29,14 +29,14 @@ func _ready() -> void:
 	elif _is_elite_reward:
 		_relic_choices = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
 
-	# Olympian's Mark: after every elite victory, upgrade one random un-upgraded
+	# Olympian's Mark: after every General falls, upgrade one random unforged
 	# creature/spell in the deck for free. Applies the same "+" upgrade the
 	# rest-site offers, so the relic stays in lockstep with the player-driven
 	# forge path instead of carving out a parallel buff.
 	if node_type == "elite" and RunState.has_relic("olympians_mark"):
 		var candidates: Array[int] = []
 		for i in RunState.deck.size():
-			if not RunState.is_card_upgraded(i):
+			if not RunState.has_upgrade_path(i, "plus"):
 				var d: Dictionary = CardDB.get_card_data(RunState.deck[i])
 				if d.get("type", "") in ["creature", "spell"] \
 						and CardDB.is_upgradeable(RunState.deck[i]):

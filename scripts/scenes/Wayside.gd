@@ -8,8 +8,10 @@ extends Control
 ##   supply_cache    — crack the cache open: pick 1 of 3 rolled spoils
 ## All four are ONE-DECISION stops (the Inscryption cadence: walk in, one
 ## verb, walk out) — the long-form prose rooms stay in Event.gd. Permanent
-## card changes ride the card_upgrades slot via RunState.apply_wayside_upgrade;
-## one entry per card is the law, so a drilled creature can't also be forged.
+## card changes ride the card_upgrades mod STACK via
+## RunState.apply_wayside_upgrade — mods compose (a drilled creature can
+## also carry a banner and be forged), Inscryption-style. The only caps are
+## DRILL_MAX_STACKS and the forge's one "+" per card.
 
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 const MAP_SCENE = "res://scenes/map.tscn"
@@ -250,16 +252,18 @@ func _add_card_to_grid(grid: GridContainer, data: Dictionary,
 
 
 # ═══════════════════ DRILL YARD ═══════════════════
-# Pick a creature; every completed pass banks +1/+1 (an upgrade-slot entry
-# with a stacks counter). After the first free pass, each further pass is a
-# coin flip: heads +1/+1 more, tails the yard takes DRILL_FAIL_HP from YOU
-# and closes. Stacks already banked always survive — the wager is your
-# blood, never the creature's progress.
+# Pick a creature; every completed pass banks +1/+1 (a drill entry in the
+# card's mod stack, carrying a TOTAL stacks counter). After the first free
+# pass, each further pass is a coin flip: heads +1/+1 more, tails the yard
+# takes DRILL_FAIL_HP from YOU and closes. Stacks already banked always
+# survive — the wager is your blood, never the creature's progress.
+# Inscryption model: a forged or banner-carrying creature can still drill;
+# only a creature already drilled to DRILL_MAX_STACKS is done here.
 
 func _drill_eligible() -> Array:
 	var out: Array = []
 	for i in range(RunState.deck.size()):
-		if RunState.is_card_upgraded(i):
+		if int(RunState.get_upgrade_entry(i, "drill").get("stacks", 0)) >= DRILL_MAX_STACKS:
 			continue
 		var data = CardDB.get_card_data(RunState.deck[i])
 		if data.get("type", "") != "creature":
@@ -299,7 +303,9 @@ func _show_drill_consolation() -> void:
 
 func _on_drill_pick(deck_index: int) -> void:
 	_drill_index = deck_index
-	_drill_stacks = 1
+	# A creature drilled at an earlier yard picks up where it left off —
+	# the new pass adds to its banked total instead of resetting it.
+	_drill_stacks = int(RunState.get_upgrade_entry(deck_index, "drill").get("stacks", 0)) + 1
 	RunState.apply_wayside_upgrade(deck_index,
 		{"path": "drill", "stacks": _drill_stacks})
 	AudioBank.play_sfx("card_play")
@@ -465,15 +471,15 @@ func _on_scales_meal() -> void:
 # ═══════════════════ THE STANDARD-BEARER ═══════════════════
 # An old soldier who carries every banner his dead carried. Pick a creature
 # to give up one keyword, then pick the creature who takes it. Both ends
-# write the card's one upgrade slot, so the trade is applied atomically at
-# the final pick — backing out costs nothing.
+# append to the cards' mod stacks; the trade is applied atomically at the
+# final pick — backing out costs nothing. Keywords are read from the
+# UPGRADED data, so a banner granted at one halt can be passed on at the
+# next, and a stripped banner is really gone.
 
 func _banner_donors() -> Array:
 	var out: Array = []
 	for i in range(RunState.deck.size()):
-		if RunState.is_card_upgraded(i):
-			continue
-		var data = CardDB.get_card_data(RunState.deck[i])
+		var data = RunState.get_upgraded_card_data(i)
 		if data.get("type", "") != "creature":
 			continue
 		if not _transferable_of(data).is_empty():
@@ -492,9 +498,9 @@ func _transferable_of(data: Dictionary) -> Array:
 func _banner_receivers(donor_index: int, kw: String) -> Array:
 	var out: Array = []
 	for i in range(RunState.deck.size()):
-		if i == donor_index or RunState.is_card_upgraded(i):
+		if i == donor_index:
 			continue
-		var data = CardDB.get_card_data(RunState.deck[i])
+		var data = RunState.get_upgraded_card_data(i)
 		if data.get("type", "") != "creature":
 			continue
 		if data.get("keywords", []).has(kw):
@@ -508,7 +514,7 @@ func _build_banner_donor() -> void:
 	# A donor only counts if SOMEONE can take its banner.
 	var valid: Array = []
 	for i in donors:
-		var data = CardDB.get_card_data(RunState.deck[i])
+		var data = RunState.get_upgraded_card_data(i)
 		for kw in _transferable_of(data):
 			if not _banner_receivers(i, kw).is_empty():
 				valid.append(i)
@@ -537,7 +543,7 @@ func _build_banner_donor() -> void:
 
 func _on_banner_donor_pick(deck_index: int) -> void:
 	_banner_from = deck_index
-	var data = CardDB.get_card_data(RunState.deck[deck_index])
+	var data = RunState.get_upgraded_card_data(deck_index)
 	# Only offer keywords that have at least one valid receiver.
 	var options: Array = []
 	for kw in _transferable_of(data):

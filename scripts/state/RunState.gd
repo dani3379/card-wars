@@ -389,51 +389,104 @@ func remove_card_at(index: int) -> bool:
 	deck.remove_at(index)
 	deck_uids.remove_at(index)
 	card_upgrades.erase(uid)
+	# The Sin-Eater's Crust (event relic): every card that leaves the deck
+	# feeds you. All removal paths — events, shop service, wayside scales,
+	# curse-eating — funnel through here, so this is the one hook site.
+	if has_relic("sin_eaters_crust"):
+		heal_hero(int(RelicDB.get_relic("sin_eaters_crust").get("value", 3)))
 	return true
 
 
-# ── Card upgrades ──
+# ── Card upgrades (Inscryption model: mods STACK) ──
+# card_upgrades[uid] is an ordered Array of mod entries ({path, keyword, ...}).
+# A card can be drilled, carry a transferred keyword, AND be forged — every
+# entry folds into the card data in the order it was earned. The only
+# per-path cap is "plus" (a card has exactly one hand-crafted + version) and
+# the drill's own DRILL_MAX_STACKS; callers gate those via has_upgrade_path /
+# get_upgrade_entry, not via "is the card touched at all".
 
 func upgrade_card(deck_index: int, path: String, keyword: String = "") -> void:
 	if deck_index < 0 or deck_index >= deck_uids.size():
 		return
-	var uid = deck_uids[deck_index]
-	card_upgrades[uid] = {"path": path, "keyword": keyword}
+	_append_upgrade(deck_uids[deck_index], {"path": path, "keyword": keyword})
 
 
-func get_card_upgrade(deck_index: int) -> Dictionary:
+func get_card_upgrades(deck_index: int) -> Array:
 	if deck_index < 0 or deck_index >= deck_uids.size():
-		return {}
-	var uid = deck_uids[deck_index]
-	return card_upgrades.get(uid, {})
+		return []
+	return card_upgrades.get(deck_uids[deck_index], [])
+
+
+## True if any entry in the card's mod stack uses `path`.
+func has_upgrade_path(deck_index: int, path: String) -> bool:
+	for entry in get_card_upgrades(deck_index):
+		if String(entry.get("path", "")) == path:
+			return true
+	return false
+
+
+## First entry with the given path ({} if none) — the drill reads its banked
+## stacks back through this.
+func get_upgrade_entry(deck_index: int, path: String) -> Dictionary:
+	for entry in get_card_upgrades(deck_index):
+		if String(entry.get("path", "")) == path:
+			return entry
+	return {}
 
 
 ## Wayside verbs write richer upgrade entries than upgrade_card's
-## path+keyword pair (the drill stacks a counter in the same slot). One
-## entry per card is still the law — callers gate eligibility on
-## is_card_upgraded (the Forge's "+" and a wayside mod can't share a card).
+## path+keyword pair. Entries append to the card's mod stack; the drill is
+## the one exception — it carries a TOTAL stacks counter, so a new drill
+## entry replaces the previous drill entry instead of stacking beside it.
 func apply_wayside_upgrade(deck_index: int, entry: Dictionary) -> void:
 	if deck_index < 0 or deck_index >= deck_uids.size():
 		return
-	card_upgrades[deck_uids[deck_index]] = entry
+	var uid = deck_uids[deck_index]
+	if String(entry.get("path", "")) == "drill":
+		var stack: Array = card_upgrades.get(uid, [])
+		for i in range(stack.size()):
+			if String(stack[i].get("path", "")) == "drill":
+				stack[i] = entry
+				return
+	_append_upgrade(uid, entry)
 
 
+func _append_upgrade(uid: int, entry: Dictionary) -> void:
+	if not card_upgrades.has(uid):
+		card_upgrades[uid] = []
+	card_upgrades[uid].append(entry)
+
+
+## True if the card carries ANY mod. Callers that used this to mean
+## "already forged" now ask has_upgrade_path(i, "plus") instead.
 func is_card_upgraded(deck_index: int) -> bool:
-	return not get_card_upgrade(deck_index).is_empty()
+	return not get_card_upgrades(deck_index).is_empty()
 
 
 func get_upgraded_card_data(deck_index: int) -> Dictionary:
 	if deck_index < 0 or deck_index >= deck.size():
 		return {}
 	var base = CardDB.get_card_data(deck[deck_index])
-	var upgrade = get_card_upgrade(deck_index)
-	if upgrade.is_empty():
+	var stack := get_card_upgrades(deck_index)
+	if stack.is_empty():
 		return base
-	return _apply_upgrade(base, upgrade)
+	var d = base.duplicate(true)
+	var forged := false
+	for entry in stack:
+		d = _apply_upgrade(d, entry)
+		if String(entry.get("path", "")) == "plus":
+			forged = true
+	# The " +" suffix marks the FORGED state specifically — wayside drills and
+	# transferred banners show in the stats/keywords, not the name.
+	if forged:
+		d.name = d.name + " +"
+	return d
 
 
-func _apply_upgrade(data: Dictionary, upgrade: Dictionary) -> Dictionary:
-	var d = data.duplicate(true)
+# Folds ONE mod entry into card data. Called per stack entry by
+# get_upgraded_card_data, which owns the duplicate() and the " +" suffix —
+# this function mutates and returns the dict it's given.
+func _apply_upgrade(d: Dictionary, upgrade: Dictionary) -> Dictionary:
 	var bonus = 3 if has_relic("blacksmiths_hammer") else 2
 	match upgrade.path:
 		"plus":
@@ -518,7 +571,6 @@ func _apply_upgrade(data: Dictionary, upgrade: Dictionary) -> Dictionary:
 						doubled = true
 					if doubled and not d.keywords.has("exhaust"):
 						d.keywords.append("exhaust")
-	d.name = d.name + " +"
 	return d
 
 
@@ -1557,8 +1609,11 @@ func load_run(slot: int = -1) -> bool:
 	# JSON int-keyed dicts come back as String keys — convert.
 	card_upgrades = {}
 	var raw_upgrades: Dictionary = data.get("card_upgrades", {})
+	# Shape migration: saves from the single-slot era store one Dictionary per
+	# uid; the stacking model stores an Array of entries. Wrap legacy values.
 	for k in raw_upgrades:
-		card_upgrades[int(k)] = raw_upgrades[k]
+		var v = raw_upgrades[k]
+		card_upgrades[int(k)] = v if v is Array else [v]
 	_next_uid = int(data.get("next_uid", deck.size()))
 	relics = []
 	for id in data.get("relics", []):

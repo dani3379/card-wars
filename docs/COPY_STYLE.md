@@ -135,6 +135,11 @@ canonical display names:
   Preserve the qualifier exactly as written.
 - Carryover is **banking**: `bank`, `unspent Command carries over`. The glossary
   entry is named "Banking" — keep that vocabulary, don't invent "reserve"/"save".
+- **The elite-band fights are `Generals` in player text** — capitalized, always
+  (renamed 2026-06-12; code identifiers still say `elite` — node types,
+  `ELITE_ROW`, hook names — and those NEVER change). Map legend, tooltips, the
+  combat intro banner, and relic descs all say General: `After you defeat a
+  General: …`.
 
 ---
 

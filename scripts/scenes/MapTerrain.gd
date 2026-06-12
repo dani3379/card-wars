@@ -2239,7 +2239,7 @@ func _draw_ui() -> void:
 	for nd2 in _nodes:
 		present[String(nd2.type)] = true
 	var items: Array = []
-	for it0 in [["combat", "FIGHT"], ["elite", "ELITE"], ["rest", "REST"],
+	for it0 in [["combat", "FIGHT"], ["elite", "GENERAL"], ["rest", "REST"],
 			["shop", "SHOP"], ["event", "EVENT"], ["treasure", "TREASURE"],
 			["recruit", "RECRUIT"], ["wayside", "WAYSIDE"]]:
 		if present.has(it0[0]):

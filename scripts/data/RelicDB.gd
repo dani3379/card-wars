@@ -429,7 +429,7 @@ const RELICS: Dictionary = {
 	#  UTILITY RELICS — Round 3 additions (3) — hook into map / reward flow.
 	# ═══════════════════════════════════════════════════════════════════════
 	"olympians_mark": {"id": "olympians_mark", "name": "Olympian's Mark", "tier": "utility",
-		"desc": "After each elite fight: upgrade a random card in your deck for free.",
+		"desc": "After you defeat a General: upgrade a random card in your deck for free.",
 		"hooks": ["elite_won"], "effect": "post_elite_upgrade", "value": 1},
 	"centaur_heart": {"id": "centaur_heart", "name": "Centaur Heart", "tier": "utility",
 		"desc": "When you reach Act 2: gain +5 max HP and heal to full.",
@@ -437,6 +437,23 @@ const RELICS: Dictionary = {
 	"stardust_vial": {"id": "stardust_vial", "name": "Stardust Vial", "tier": "utility",
 		"desc": "Recruit camps also offer 1 rare card.",
 		"hooks": [], "effect": "stardust_vial", "value": 1},
+
+	# ═══════════════════════════════════════════════════════════════════════
+	#  EVENT RELICS — never rolled (tier "event" is in no reward pool); each
+	#  is granted by name from its event and carries that event's story.
+	# ═══════════════════════════════════════════════════════════════════════
+	"coin_landed": {"id": "coin_landed", "name": "The Coin, Landed", "tier": "event",
+		"desc": "Whenever a creature dies: gain 2 gold.",
+		"hooks": ["creature_death"], "effect": "gold_on_death", "value": 2},
+	"verse_of_you": {"id": "verse_of_you", "name": "A Verse of You", "tier": "event",
+		"desc": "When a friendly creature dies: draw 1 card. Once per round.",
+		"hooks": ["creature_death"], "effect": "draw_on_friendly_death", "value": 1},
+	"warm_knucklebone": {"id": "warm_knucklebone", "name": "Warm Knucklebone", "tier": "event",
+		"desc": "At the start of each turn: 1 in 6 odds to gain 1 Command.",
+		"hooks": ["turn_start"], "effect": "chance_bonus_mana", "value": 1},
+	"sin_eaters_crust": {"id": "sin_eaters_crust", "name": "The Sin-Eater's Crust", "tier": "event",
+		"desc": "Whenever a card leaves your deck: heal 3 HP.",
+		"hooks": [], "effect": "heal_on_card_removed", "value": 3},
 
 	# ═══════════════════════════════════════════════════════════════════════
 	#  BOSS RELICS — Round 3 additions (9) — run-warping, no +1-mana template.
@@ -552,6 +569,7 @@ const TIER_COLORS := {
 	"combat":   Color(0.95, 0.55, 0.30, 1.0),
 	"utility":  Color(0.55, 0.90, 0.50, 1.0),
 	"boss":     Color(0.85, 0.45, 1.00, 1.0),
+	"event":    Color(0.47, 0.83, 0.75, 1.0),  # verdigris — the "blue option" ink
 }
 
 static func get_tier_color(id: String) -> Color:

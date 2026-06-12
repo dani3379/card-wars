@@ -250,14 +250,14 @@ func _add_choice_upgrade(row: HBoxContainer) -> void:
 	else:
 		var any_upgradeable := false
 		for i in range(RunState.deck.size()):
-			if RunState.is_card_upgraded(i):
+			if RunState.has_upgrade_path(i, "plus"):
 				continue
 			if not CardDB.is_upgradeable(RunState.deck[i]):
 				continue
 			any_upgradeable = true
 			break
 		if not any_upgradeable:
-			disabled_reason = "Every card already upgraded."
+			disabled_reason = "Every card already forged."
 	var desc := "%s\n⚒ Forge a + version" % _flavor_for("upgrade", "")
 	var banner = GameTheme.make_choice_banner("UPGRADE", desc, _accent_upgrade,
 		ICON_UPGRADE, Vector2(340, 160), disabled_reason)
@@ -278,13 +278,13 @@ func _add_choice_reforge_if_available(row: HBoxContainer) -> void:
 	else:
 		var upgradeable_count := 0
 		for i in range(RunState.deck.size()):
-			if RunState.is_card_upgraded(i):
+			if RunState.has_upgrade_path(i, "plus"):
 				continue
 			if not CardDB.is_upgradeable(RunState.deck[i]):
 				continue
 			upgradeable_count += 1
 		if upgradeable_count < 2:
-			disabled_reason = "Need 2+ un-upgraded cards."
+			disabled_reason = "Need 2+ unforged cards."
 	var desc := "%s\n◈ Forge two + versions (Whetstone)" % _flavor_for("reforge", "")
 	var banner = GameTheme.make_choice_banner("REFORGE", desc, _accent_reforge,
 		ICON_REFORGE, Vector2(340, 160), disabled_reason)
@@ -412,13 +412,15 @@ func _begin_pick_card_for_upgrade() -> void:
 	scroll.add_child(grid)
 
 	for i in range(RunState.deck.size()):
-		if RunState.is_card_upgraded(i):
+		# Forge "+" stays once per card; other mods (drill, banners) don't
+		# block the forge — Inscryption stacking.
+		if RunState.has_upgrade_path(i, "plus"):
 			continue
 		# Skip cards with no meaningful upgrade (curses). Players never see them
 		# offered as upgrade targets, even though they're in the deck.
 		if not CardDB.is_upgradeable(RunState.deck[i]):
 			continue
-		var data = CardDB.get_card_data(RunState.deck[i])
+		var data = RunState.get_upgraded_card_data(i)
 		var wrapper := Control.new()
 		wrapper.custom_minimum_size = Vector2(225, 300)
 		var card_node = CARD_SCENE.instantiate()
@@ -463,10 +465,12 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(dim)
 
-	# Compute base + upgraded data. The upgraded preview uses the exact same
-	# code path that the live deck does — RunState._apply_plus_upgrade — so
-	# what the player sees here is what they get in combat.
-	var base_data: Dictionary = CardDB.get_card_data(RunState.deck[deck_index])
+	# Compute current + forged data. The "before" side starts from the card's
+	# LIVE modded data (drill stacks, banners included) and the preview lays
+	# the plus delta on top via the same code path the live deck uses —
+	# RunState._apply_plus_upgrade — so what the player sees here is what
+	# they get in combat.
+	var base_data: Dictionary = RunState.get_upgraded_card_data(deck_index)
 	var upgraded_data: Dictionary = RunState.preview_plus_upgrade(base_data)
 
 	# Header title (gold, large)

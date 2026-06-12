@@ -1521,7 +1521,7 @@ func _apply_blessing(id: String) -> void:
 			# Mark's auto-upgrade so we don't open a picker on the menu screen.
 			var candidates: Array[int] = []
 			for i in RunState.deck.size():
-				if RunState.is_card_upgraded(i):
+				if RunState.has_upgrade_path(i, "plus"):
 					continue
 				var d: Dictionary = CardDB.get_card_data(RunState.deck[i])
 				if d.get("type", "") in ["creature", "spell"] \
