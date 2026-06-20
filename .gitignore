@@ -48,6 +48,8 @@ tools/card_redesign_v6/
 tools/screenshot/
 tools/screenshot_boot.*
 tools/_crop_*
+# Headless parse-check / probe run logs (regenerated on every run)
+tools/*.log
 
 # Godot editor temp / backup files
 *.TMP
