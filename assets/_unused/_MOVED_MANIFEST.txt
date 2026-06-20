@@ -1,0 +1,24 @@
+Unused images shelved 2026-06-17. Restore by moving back + removing .gdignore.
+
+[content-art orphans]
+  assets/creatures/war_hound.png -> assets/_unused/creatures/
+  assets/creatures/war_titan.png -> assets/_unused/creatures/
+  assets/events/char_widow.png -> assets/_unused/events/
+  assets/events/collector_event.png -> assets/_unused/events/
+  assets/events/empty_wedding.png -> assets/_unused/events/
+  assets/events/hanged_mapmaker.png -> assets/_unused/events/
+  assets/events/spellwrights_pact.png -> assets/_unused/events/
+  assets/portraits/enemy_demon.jpg -> assets/_unused/portraits/
+  assets/portraits/vanitas_source.jpg -> assets/_unused/portraits/
+  assets/backgrounds/combat_arena.jpg -> assets/_unused/backgrounds/
+  assets/backgrounds/triumph_of_death.jpg -> assets/_unused/backgrounds/
+
+[source / backup folders]
+  assets/frames/_backup_v3/ (folder)
+  assets/sources/ (folder)
+
+[painterly source icon packs]
+  assets/spells/painterly-1/ (folder)
+  assets/spells/painterly-2/ (folder)
+  assets/spells/painterly-3/ (folder)
+  assets/spells/painterly-4/ (folder)

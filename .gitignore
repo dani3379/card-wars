@@ -2,6 +2,15 @@
 *.translation
 export.cfg
 export_presets.cfg
+
+# Build artifacts / export output (machine-local, never committed)
+build/
+.export_templates/
+
+# Shelved art — moved out of the active project (see assets/_unused/_MOVED_MANIFEST.txt).
+# Kept on disk as a local backup; the originals stay recoverable from git history.
+assets/_unused/
+
 .vscode/
 .idea/
 .DS_Store
