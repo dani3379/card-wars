@@ -19,16 +19,23 @@ const RED := Color(0.90, 0.45, 0.35, 1.0)
 # ── UI refs ──
 var _status_label: Label
 var _hint_label: Label
+var _code_label: Label              # big shareable room code (host, online)
 var _ip_field: LineEdit
 var _port_field: LineEdit
-var _host_btn: Button
-var _join_btn: Button
+var _code_field: LineEdit           # room-code entry (join, online)
+var _host_online_btn: Button       # relay host (primary path)
+var _join_online_btn: Button       # relay join by code
+var _lan_toggle: Button            # expands the direct/LAN fallback section
+var _lan_panel: VBoxContainer      # direct host/join controls (collapsed by default)
+var _host_btn: Button              # LAN/direct host
+var _join_btn: Button              # LAN/direct join
 var _ready_btn: Button
 var _start_btn: Button
 var _connect_panel: VBoxContainer   # host/join controls (hidden once connected)
 var _ready_panel: VBoxContainer     # ready/start controls (shown once connected)
 var _you_ready_label: Label
 var _opp_ready_label: Label
+var _relay_host: String = ""        # resolved relay address (empty = online disabled)
 
 # ── Mode / format picker (host picks; client sees the choice) ──
 var _mode_panel: VBoxContainer       # built on connect (host buttons / client label)
@@ -41,6 +48,7 @@ var _selected_best_of: int = 1       # host's current pick (1 or 3)
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "main_menu")
+	_relay_host = NetMatch.get_relay_host()
 	# Fresh lobby: drop any stale connection from a previous visit.
 	NetMatch.leave()
 	_build_ui()
@@ -70,8 +78,8 @@ func _build_ui() -> void:
 	col.add_child(GameTheme.make_screen_title("SKIRMISH — ONLINE", GILT_BRIGHT))
 
 	var blurb := GameTheme.make_label(
-		"Pick a mode, then fight a friend.\n"
-		+ "Connect over a Tailscale / LAN address — no port forwarding needed.",
+		"Pick a mode, then fight a friend anywhere.\n"
+		+ "Host gets a room code — share it, your friend types it in. No IP, no setup.",
 		15, ASH)
 	blurb.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	blurb.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -86,23 +94,60 @@ func _build_ui() -> void:
 	_connect_panel.add_theme_constant_override("separation", 12)
 	col.add_child(_connect_panel)
 
-	_host_btn = GameTheme.make_themed_button("HOST A MATCH",
+	# ── Online (relay / room code) — the primary, NAT-free path ──
+	_host_online_btn = GameTheme.make_themed_button("HOST ONLINE",
 		Color(0.18, 0.36, 0.18), Vector2(360, 48), 20,
-		"Start a server and wait for a friend to join.")
-	_host_btn.pressed.connect(_on_host_pressed)
-	_connect_panel.add_child(_host_btn)
+		"Open a room on the relay and get a code to share. Plays across the internet — no port forwarding, no VPN.")
+	_host_online_btn.pressed.connect(_on_host_online_pressed)
+	_connect_panel.add_child(_host_online_btn)
 
-	var or_lbl := GameTheme.make_label("— or join —", 14, ASH)
+	var or_lbl := GameTheme.make_label("— or join with a code —", 14, ASH)
 	or_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_connect_panel.add_child(or_lbl)
+
+	var code_row := HBoxContainer.new()
+	code_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	code_row.add_theme_constant_override("separation", 8)
+	_connect_panel.add_child(code_row)
+
+	_code_field = _make_field("", 200, "ROOM CODE")
+	_code_field.max_length = NetMatch.ROOM_CODE_LEN
+	_code_field.text_changed.connect(_on_code_typed)
+	_code_field.text_submitted.connect(func(_t): _on_join_online_pressed())
+	code_row.add_child(_code_field)
+
+	_join_online_btn = GameTheme.make_themed_button("JOIN ONLINE",
+		Color(0.20, 0.28, 0.42), Vector2(150, 44), 18,
+		"Enter your friend's room code to connect.")
+	_join_online_btn.pressed.connect(_on_join_online_pressed)
+	code_row.add_child(_join_online_btn)
+
+	# ── Same-network / direct fallback (LAN or a Tailscale IP) — collapsed ──
+	_lan_toggle = GameTheme.make_themed_button("Same network / direct IP  ▾",
+		Color(0.16, 0.16, 0.20), Vector2(360, 32), 13,
+		"Play over a LAN or a Tailscale address with no relay — best when you're on the same WiFi.")
+	_lan_toggle.pressed.connect(_on_lan_toggle_pressed)
+	_connect_panel.add_child(_lan_toggle)
+
+	_lan_panel = VBoxContainer.new()
+	_lan_panel.alignment = BoxContainer.ALIGNMENT_CENTER
+	_lan_panel.add_theme_constant_override("separation", 10)
+	_lan_panel.visible = false
+	_connect_panel.add_child(_lan_panel)
+
+	_host_btn = GameTheme.make_themed_button("HOST (LAN)",
+		Color(0.18, 0.32, 0.22), Vector2(360, 42), 17,
+		"Start a server on this machine; share your LAN / Tailscale IP.")
+	_host_btn.pressed.connect(_on_host_pressed)
+	_lan_panel.add_child(_host_btn)
 
 	# Address row: IP + port fields.
 	var addr_row := HBoxContainer.new()
 	addr_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	addr_row.add_theme_constant_override("separation", 8)
-	_connect_panel.add_child(addr_row)
+	_lan_panel.add_child(addr_row)
 
-	_ip_field = _make_field("127.0.0.1", 240, "Host's Tailscale / LAN IP")
+	_ip_field = _make_field("127.0.0.1", 240, "Host's LAN / Tailscale IP")
 	addr_row.add_child(_ip_field)
 	_port_field = _make_field(str(NetMatch.DEFAULT_PORT), 90, "Port")
 	addr_row.add_child(_port_field)
@@ -155,6 +200,12 @@ func _build_ui() -> void:
 	_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(_status_label)
 
+	# Big shareable room code (host, online). Hidden until the relay assigns one.
+	_code_label = GameTheme.make_label("", 40, GILT_BRIGHT)
+	_code_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_code_label.visible = false
+	col.add_child(_code_label)
+
 	_hint_label = GameTheme.make_label("", 13, ASH)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_hint_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -193,9 +244,55 @@ func _wire_net_signals() -> void:
 	NetMatch.ready_state_changed.connect(_refresh_ready_labels)
 	NetMatch.match_starting.connect(_on_match_starting)
 	NetMatch.match_config_changed.connect(_on_match_config_changed)
+	NetMatch.room_created.connect(_on_room_created)
+	NetMatch.room_error.connect(_on_room_error)
 
 
 # ── Button handlers ──
+
+## Online HOST: open a room on the relay; the code arrives via `room_created`.
+func _on_host_online_pressed() -> void:
+	if _relay_host == "":
+		_set_status("Online play isn't set up in this build yet — use Same network / direct IP below.", RED)
+		return
+	var err := NetMatch.host_via_relay(_relay_host, NetMatch.RELAY_PORT_DEFAULT)
+	if err != OK:
+		_set_status("Couldn't reach the relay (error %d). Try again, or use direct IP." % err, RED)
+		return
+	_set_status("Opening a room on the relay…", GILT_BRIGHT)
+	_set_connect_buttons_enabled(false)
+
+
+## Online JOIN: connect to the relay and claim the friend's room by its code.
+func _on_join_online_pressed() -> void:
+	if _relay_host == "":
+		_set_status("Online play isn't set up in this build yet — use Same network / direct IP below.", RED)
+		return
+	var code := _code_field.text.strip_edges().to_upper()
+	if code.length() != NetMatch.ROOM_CODE_LEN:
+		_set_status("Enter the %d-character room code your friend shared." % NetMatch.ROOM_CODE_LEN, RED)
+		return
+	var err := NetMatch.join_via_relay(_relay_host, NetMatch.RELAY_PORT_DEFAULT, code)
+	if err != OK:
+		_set_status("Couldn't reach the relay (error %d). Try again, or use direct IP." % err, RED)
+		return
+	_set_status("Joining room %s…" % code, GILT_BRIGHT)
+	_set_connect_buttons_enabled(false)
+
+
+## Keep the room-code field uppercase as the player types (caret-safe).
+func _on_code_typed(new_text: String) -> void:
+	var up := new_text.to_upper()
+	if up != new_text:
+		var caret := _code_field.caret_column
+		_code_field.text = up
+		_code_field.caret_column = caret
+
+
+func _on_lan_toggle_pressed() -> void:
+	_lan_panel.visible = not _lan_panel.visible
+	_lan_toggle.text = "Same network / direct IP  " + ("▴" if _lan_panel.visible else "▾")
+
 
 func _on_host_pressed() -> void:
 	var port := _read_port()
@@ -278,6 +375,27 @@ func _on_back_pressed() -> void:
 
 
 # ── Net event handlers ──
+
+## Relay assigned our shareable room code (host, online). Show it large and move on
+## to the ready panel — the host reads the code to their friend while waiting.
+func _on_room_created(code: String) -> void:
+	var spaced := ""
+	for ch in code:
+		spaced += String(ch) + "  "
+	_code_label.text = spaced.strip_edges()
+	_code_label.visible = true
+	_set_status("Room open — share this code with your friend:", GREEN)
+	_hint_label.text = "Your friend picks JOIN ONLINE and types this code. Then both ready up and you press START MATCH."
+	_connect_panel.visible = false
+	_show_ready_panel()
+
+
+## Relay rejected our code (bad / full / closed). `_rpc_room_error` already called
+## leave(), so we're cleanly disconnected — let the player try another code.
+func _on_room_error(reason: String) -> void:
+	_set_status(reason if reason != "" else "That room code didn't work.", RED)
+	_set_connect_buttons_enabled(true)
+
 
 func _on_peer_joined(_id: int) -> void:
 	_set_status("A friend connected!", GREEN)
@@ -437,14 +555,27 @@ func _on_match_config_changed() -> void:
 func _reset_to_connect_panel() -> void:
 	_connect_panel.visible = true
 	_ready_panel.visible = false
-	_host_btn.disabled = false
-	_join_btn.disabled = false
+	_code_label.visible = false
+	_set_connect_buttons_enabled(true)
 	_start_btn.disabled = true
 
 
+## Enable/disable all four connect buttons together. Online buttons stay disabled
+## when no relay address is configured in this build.
+func _set_connect_buttons_enabled(on: bool) -> void:
+	var online_ok := on and _relay_host != ""
+	_host_online_btn.disabled = not online_ok
+	_join_online_btn.disabled = not online_ok
+	_host_btn.disabled = not on
+	_join_btn.disabled = not on
+
+
 func _refresh_state() -> void:
-	_set_status("Host a match, or join a friend's address.", IVORY)
+	_set_status("Host a match, or join a friend's room code.", IVORY)
 	_hint_label.text = ""
+	_set_connect_buttons_enabled(true)
+	if _relay_host == "":
+		_hint_label.text = "Online play isn't set up in this build yet — open “Same network / direct IP” to play over LAN or Tailscale."
 
 
 func _refresh_ready_labels() -> void:

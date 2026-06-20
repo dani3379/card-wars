@@ -341,16 +341,27 @@ Use Godot 4's built-in high-level multiplayer:
 
 ### 5.2 "Online with a friend" — the NAT problem
 Raw ENet needs the host reachable. Options, in recommended order for this project:
-1. **ENet + a VPN overlay (Tailscale / ZeroTier / Hamachi)** — the friend joins a
-   virtual LAN and connects to the host's overlay IP. **Zero port-forwarding, zero
-   relay code.** Write pure LAN code; it "just works" over the internet. *Use this
-   for v1.* The lobby just takes an IP + port.
-2. **Manual port-forward** — host forwards one UDP port. Brittle; don't rely on it.
-3. **Steam networking (GodotSteam)** — handles NAT via Steam relay, lobby invites.
-   The right answer for a public release; out of scope for the playtest tool.
-4. **WebRTC + a signaling server** — most work; only if browser builds matter.
+1. **★ BUILT — Self-hosted relay + room codes.** Both players connect *outward* to a
+   relay you run; it pairs them by a 4-char room code and forwards each envelope to
+   the room partner only. Outbound traversal works through any NAT/CGNAT, so no
+   player installs anything or forwards a port — they just share a code. This is the
+   **shipping default** (`Transport.RELAY` in `NetMatch`; relay =
+   `tools/relay_server.gd` run headless on a VPS). Verified headless at 3 layers
+   (`tools/_probe_relay.gd`). **Deploy + ops: [`RELAY_DEPLOY.md`](RELAY_DEPLOY.md).**
+2. **ENet + a VPN overlay (Tailscale / ZeroTier / Hamachi)** — the friend joins a
+   virtual LAN and connects to the host's overlay IP. Zero port-forwarding, zero
+   relay code. Still LIVE as the lobby's "Same network / direct IP" fallback (and
+   the original verified path); good when both players are on the same WiFi or
+   already share an overlay.
+3. **Manual port-forward** — host forwards one UDP port. Brittle; don't rely on it.
+4. **Steam networking (GodotSteam)** — handles NAT via Steam relay, lobby invites.
+   The other half of "do both" — zero servers/cost on a Steam release. The room /
+   envelope layer is transport-agnostic, so it slots in as a third `Transport`
+   without touching Draft/Combat. Tracked in Phase 5.
+5. **WebRTC + a signaling server** — most work; only if browser builds matter.
 
-Document the Tailscale path in the lobby UI ("enter your friend's Tailscale IP").
+The lobby leads with **HOST/JOIN ONLINE** (room codes, option 1) and folds the
+direct-IP/Tailscale path (option 2) under "Same network / direct IP".
 
 ### 5.3 Default port
 Pick a fixed default UDP port (e.g. `7717`) shown in the lobby, overridable.
