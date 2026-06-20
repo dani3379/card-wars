@@ -50,6 +50,7 @@ func _process(_delta: float) -> bool:
 	_test_supported_spells_real()
 	_test_mode_flags_and_perspective()
 	_test_ctx_routing()
+	_test_series_format()
 
 	if _fails == 0:
 		print("[skirmish-probe] ALL PASS")
@@ -220,3 +221,29 @@ func _test_ctx_routing() -> void:
 		"an unsupported spell type is refused by the gate")
 	combat.free()
 	SS.reset()
+
+
+## Best-of-N series math (SkirmishState) — the spine of the Best-of-3 mode. Pure
+## state, no scene nodes, so we exercise it directly.
+func _test_series_format() -> void:
+	print("— best-of-N series format")
+	SS.best_of = 3
+	SS.reset_series()
+	_check(SS.games_to_win() == 2, "Bo3 needs 2 game wins (got %d)" % SS.games_to_win())
+	_check(SS.series_leader() == -1, "fresh series has no leader")
+	SS.record_game_winner(0)
+	_check(SS.series_wins[0] == 1 and SS.series_game == 2,
+		"game 1 to slot 0 -> 1-0, game counter at 2")
+	_check(SS.series_leader() == -1, "1-0 is not yet a clinch")
+	SS.record_game_winner(-1)   # a draw credits neither side but advances the game
+	_check(SS.series_wins == [1, 0] and SS.series_game == 3, "a draw advances the counter only")
+	SS.record_game_winner(0)
+	_check(SS.series_leader() == 0, "slot 0 clinches the series at 2 wins")
+	# Bo1 degenerates to first-to-1.
+	SS.best_of = 1
+	SS.reset_series()
+	_check(SS.games_to_win() == 1, "Bo1 needs 1 game win")
+	SS.record_game_winner(1)
+	_check(SS.series_leader() == 1, "Bo1 clinches on the first win")
+	SS.best_of = 1
+	SS.reset_series()

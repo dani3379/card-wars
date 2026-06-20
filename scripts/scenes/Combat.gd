@@ -13480,12 +13480,35 @@ func _net_host_check_match_over() -> void:
 
 
 func _net_show_result(winner_index: int) -> void:
+	if _net_match_over:
+		return   # one result per game — guards the Best-of-N tally against double-count
 	_net_match_over = true
 	phase = Phase.GAME_OVER
 	Card2D.board_interactive = false
 	if _end_turn_btn != null:
 		_end_turn_btn.disabled = true
 	var me: int = NetMatch.local_player_index
+
+	# ── Best-of-N series ────────────────────────────────────────────────────
+	# Both peers run this symmetrically (host via _net_host_check_match_over, client
+	# via the EV_MATCH_OVER event), so record the game on each side; the SkirmishState
+	# tally stays in sync. Then either roll into the next game or crown the series.
+	if SkirmishState.best_of > 1:
+		SkirmishState.record_game_winner(winner_index)
+		if SkirmishState.series_leader() == -1:
+			_net_show_series_interstitial(winner_index)   # series live → next game
+			return
+		var series_won := SkirmishState.series_leader() == me
+		var sverdict := "SERIES WON" if series_won else "SERIES LOST"
+		if _phase_label != null:
+			_phase_label.text = sverdict
+		_show_info("%s  (%s)  —  rematch, or leave?" % [sverdict, _net_series_score_str()])
+		if AudioBank != null:
+			AudioBank.play_sfx("victory" if series_won else "defeat")
+		_net_build_result_panel(sverdict)
+		return
+
+	# ── Single game (Bo1): the original behaviour. ──
 	var verdict := "DRAW"
 	if winner_index == me:
 		verdict = "VICTORY!"
@@ -13499,6 +13522,44 @@ func _net_show_result(winner_index: int) -> void:
 	# Stay connected: offer a rematch (same drafted decks, fresh HP/board) instead
 	# of auto-dropping to the menu. The connection is held open until someone leaves.
 	_net_build_result_panel(verdict)
+
+
+## "You N – M Opponent" from the local player's POV (Best-of-N standing).
+func _net_series_score_str() -> String:
+	var me: int = NetMatch.local_player_index
+	var opp: int = 1 - me
+	return "You %d – %d Opponent" % [
+		SkirmishState.series_wins[me], SkirmishState.series_wins[opp]]
+
+
+## A live series game just ended: show this game's verdict + the running score, then
+## auto-roll into the next game by driving the SAME rematch handshake both sides use
+## (each side flags itself + signals the peer → the host relaunches; HP/board reset
+## via NetMatch._enter_combat_local; the kept decks and series tally carry over).
+func _net_show_series_interstitial(winner_index: int) -> void:
+	var me: int = NetMatch.local_player_index
+	var game_verdict := "DRAW"
+	if winner_index == me:
+		game_verdict = "GAME WON"
+	elif winner_index >= 0:
+		game_verdict = "GAME LOST"
+	if _phase_label != null:
+		_phase_label.text = game_verdict
+	_show_info("%s  ·  %s  ·  first to %d  —  next game…" % [
+		game_verdict, _net_series_score_str(), SkirmishState.games_to_win()])
+	if AudioBank != null:
+		AudioBank.play_sfx("victory" if winner_index == me else "defeat")
+	# Hold the standing on screen, then advance. The host only relaunches once BOTH
+	# sides have signalled, so a small clock skew between the two timers is harmless.
+	await get_tree().create_timer(2.2).timeout
+	if not _net_match_over:
+		return   # peer left during the pause; _net_on_peer_lost already handled it
+	_net_rematch_local = true
+	if _is_host():
+		NetMatch.send_to_client({"t": NetMatch.EV_REMATCH})
+	else:
+		NetMatch.send_intent({"t": NetMatch.IN_REMATCH})
+	_net_try_start_rematch()
 
 
 # ── Rematch (keep both peers connected; replay with the same decks) ──────────
@@ -13543,6 +13604,10 @@ func _net_build_result_panel(verdict: String) -> void:
 func _net_request_rematch() -> void:
 	if _net_rematch_local:
 		return
+	# After a decided series, REMATCH starts a FRESH best-of-N (both sides reset
+	# symmetrically as each presses; the tally otherwise persists between games).
+	if SkirmishState.best_of > 1 and SkirmishState.series_leader() != -1:
+		SkirmishState.reset_series()
 	_net_rematch_local = true
 	if _net_result_panel != null and is_instance_valid(_net_result_panel):
 		# Disable the REMATCH button + relabel so the player knows we're waiting.
