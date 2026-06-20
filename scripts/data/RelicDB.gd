@@ -6,7 +6,7 @@ extends Node
 ## hooks: game events this relic responds to. Combat.gd checks these.
 ##
 ## Optional schema fields:
-##   restricted_to: "<hero_id>"  — only offered to that hero (raider/stalwart/acolyte/pyromancer).
+##   restricted_to: "<hero_id>"  — only offered to that hero (raider/stalwart/acolyte/pyromancer/kindler).
 ##   mana_cap_cost: int          — counts toward non-boss mana ceiling (+2 max). Boss-tier mana relics bypass.
 ##   downside: "<id>"            — pairs with boss "+1 max mana" trade.
 
@@ -144,7 +144,7 @@ const RELICS: Dictionary = {
 		"desc": "Enlist 2 cards at recruit camps instead of 1.",
 		"hooks": [], "effect": "double_reward_pick", "value": 0},
 	"blacksmiths_hammer": {"id": "blacksmiths_hammer", "name": "Blacksmith's Hammer", "tier": "utility",
-		"desc": "Sharpen/Fortify give +3 instead of +2. Imbue offers 3 choices.",
+		"desc": "Forge upgrades give +3 instead of +2.",
 		"hooks": [], "effect": "upgrade_bonus", "value": 0},
 	"scavengers_pouch": {"id": "scavengers_pouch", "name": "Scavenger's Pouch", "tier": "utility",
 		"desc": "Gain 20 gold when you remove a card.",
@@ -160,23 +160,23 @@ const RELICS: Dictionary = {
 		"desc": "+1 max Command. Gain a Curse after every fight.",
 		"hooks": ["combat_end"], "effect": "boss_mana", "value": 1,
 		"downside": "curse_on_reward"},
-	"coffee_dripper": {"id": "coffee_dripper", "name": "Coffee Dripper", "tier": "boss",
+	"coffee_dripper": {"id": "coffee_dripper", "name": "Hairshirt", "tier": "boss",
 		"desc": "+1 max Command. Can't heal at rest sites.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
 		"downside": "no_rest_heal"},
-	"fusion_hammer": {"id": "fusion_hammer", "name": "Fusion Hammer", "tier": "boss",
+	"fusion_hammer": {"id": "fusion_hammer", "name": "Cracked Anvil", "tier": "boss",
 		"desc": "+1 max Command. Can't upgrade cards at rest sites.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
 		"downside": "no_upgrade"},
-	"ectoplasm": {"id": "ectoplasm", "name": "Ectoplasm", "tier": "boss",
+	"ectoplasm": {"id": "ectoplasm", "name": "Vow of Poverty", "tier": "boss",
 		"desc": "+1 max Command. Can't gain gold.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
 		"downside": "no_gold"},
-	"busted_crown": {"id": "busted_crown", "name": "Busted Crown", "tier": "boss",
+	"busted_crown": {"id": "busted_crown", "name": "Tarnished Crown", "tier": "boss",
 		"desc": "+1 max Command. Recruit camps show 1 choice instead of 3.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
 		"downside": "fewer_rewards"},
-	"sozu": {"id": "sozu", "name": "Sozu", "tier": "boss",
+	"sozu": {"id": "sozu", "name": "Temperance Vow", "tier": "boss",
 		"desc": "+1 max Command. Can't gain potions.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
 		"downside": "no_potions"},
@@ -184,7 +184,7 @@ const RELICS: Dictionary = {
 		"desc": "+1 max Command. All enemies get +1 ATK.",
 		"hooks": ["combat_start"], "effect": "boss_mana", "value": 1,
 		"downside": "enemy_atk_buff"},
-	"velvet_choker": {"id": "velvet_choker", "name": "Velvet Choker", "tier": "boss",
+	"velvet_choker": {"id": "velvet_choker", "name": "Penitent's Collar", "tier": "boss",
 		"desc": "+1 max Command. Can only play 5 cards per turn.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
 		"downside": "play_limit"},
@@ -200,10 +200,10 @@ const RELICS: Dictionary = {
 		"desc": "On turn 1 of each fight, gain 1 bonus Command.",
 		"hooks": ["turn_start"], "effect": "bonus_mana_turn1", "value": 1,
 		"mana_cap_cost": 1},
-	"happy_flower": {"id": "happy_flower", "name": "Happy Flower", "tier": "combat",
+	"happy_flower": {"id": "happy_flower", "name": "Saint's Posy", "tier": "combat",
 		"desc": "Every 3 turns, gain 1 bonus Command.",
 		"hooks": ["turn_start"], "effect": "happy_flower", "value": 1},
-	"ice_cream": {"id": "ice_cream", "name": "Ice Cream", "tier": "combat",
+	"ice_cream": {"id": "ice_cream", "name": "Miser's Coffer", "tier": "combat",
 		"desc": "Unspent Command carries over fully between turns (no cap).",
 		"hooks": [], "effect": "full_mana_bank", "value": 0},
 	"art_of_war": {"id": "art_of_war", "name": "Art of War", "tier": "combat",
@@ -220,7 +220,7 @@ const RELICS: Dictionary = {
 	# ═══════════════════════════════════════════════════════════════════════
 
 	# ─── Cost manipulation ───
-	"mummified_hand": {"id": "mummified_hand", "name": "Mummified Hand", "tier": "combat",
+	"mummified_hand": {"id": "mummified_hand", "name": "Withered Saint's Hand", "tier": "combat",
 		"desc": "When you cast a spell: a random creature in your hand costs 0 this turn.",
 		"hooks": ["spell_played"], "effect": "mummified_hand", "value": 0},
 	"sigil_of_hunger": {"id": "sigil_of_hunger", "name": "Sigil of Hunger", "tier": "combat",
@@ -243,7 +243,7 @@ const RELICS: Dictionary = {
 	"frozen_eye": {"id": "frozen_eye", "name": "Frozen Eye", "tier": "combat",
 		"desc": "See the top card of your draw pile.",
 		"hooks": [], "effect": "frozen_eye", "value": 0},
-	"toolbox": {"id": "toolbox", "name": "Toolbox", "tier": "combat",
+	"toolbox": {"id": "toolbox", "name": "Quartermaster's Chest", "tier": "combat",
 		"desc": "Start of each fight: choose 1 of 3 extra cards to add to your hand.",
 		"hooks": ["combat_start"], "effect": "toolbox", "value": 3},
 	"bottled_talisman": {"id": "bottled_talisman", "name": "Bottled Talisman", "tier": "combat",
@@ -274,7 +274,7 @@ const RELICS: Dictionary = {
 		"desc": "When you place a creature in an empty column: +1 ATK to friendlies in that column.",
 		"hooks": ["creature_played"], "effect": "empty_column_atk", "value": 1},
 	"flanking_banner": {"id": "flanking_banner", "name": "Flanking Banner", "tier": "combat",
-		"desc": "When 3 of 4 front lanes are full: enemies in the empty column take 2 at end of round.",
+		"desc": "When 3 of 4 front lanes are full: enemies in the empty column take 2 damage at end of round.",
 		"hooks": ["round_end"], "effect": "flank_damage", "value": 2},
 
 	# ─── Combat-start setups ───
@@ -312,7 +312,7 @@ const RELICS: Dictionary = {
 	"reapers_scythe": {"id": "reapers_scythe", "name": "Reaper's Scythe", "tier": "combat",
 		"desc": "When you sacrifice a creature with an On-Enter effect: the next creature you play also triggers it.",
 		"hooks": ["sacrifice"], "effect": "reapers_scythe", "value": 0},
-	"du_vu_doll": {"id": "du_vu_doll", "name": "Du-Vu Doll", "tier": "combat",
+	"du_vu_doll": {"id": "du_vu_doll", "name": "Maledetto Poppet", "tier": "combat",
 		"desc": "+1 ATK to all friendlies for each Curse in your deck.",
 		"hooks": ["creature_played"], "effect": "du_vu_doll", "value": 1},
 	"soul_ledger": {"id": "soul_ledger", "name": "Soul Ledger", "tier": "combat",
@@ -358,13 +358,13 @@ const RELICS: Dictionary = {
 		"hooks": ["round_end"], "effect": "imp_generator", "value": 0},
 
 	# ─── Balatro imports (conditional copy/scaling) ───
-	"blueprint": {"id": "blueprint", "name": "Blueprint", "tier": "combat",
+	"blueprint": {"id": "blueprint", "name": "Mason's Tracing", "tier": "combat",
 		"desc": "The next creature you play copies the On-Enter effect of the previous creature you played this fight.",
 		"hooks": ["creature_played"], "effect": "blueprint", "value": 0},
-	"brainstorm": {"id": "brainstorm", "name": "Brainstorm", "tier": "combat",
+	"brainstorm": {"id": "brainstorm", "name": "Drillmaster's Whistle", "tier": "combat",
 		"desc": "Each round, the first creature you play copies the keywords of the first creature you played this fight.",
 		"hooks": ["creature_played"], "effect": "brainstorm", "value": 0},
-	"mime": {"id": "mime", "name": "Mime", "tier": "combat",
+	"mime": {"id": "mime", "name": "Mummer's Mask", "tier": "combat",
 		"desc": "At end of turn, one chosen card in hand is played for free, triggering its On-Enter effect.",
 		"hooks": ["turn_end"], "effect": "mime", "value": 0},
 	"the_family": {"id": "the_family", "name": "The Family", "tier": "combat",
@@ -375,7 +375,7 @@ const RELICS: Dictionary = {
 	"frost_spike": {"id": "frost_spike", "name": "Frost Spike", "tier": "combat",
 		"desc": "The first creature you play each fight applies Wither 1 when it attacks.",
 		"hooks": ["creature_played"], "effect": "frost_spike", "value": 1},
-	"junk_slot": {"id": "junk_slot", "name": "Junk Slot", "tier": "combat",
+	"junk_slot": {"id": "junk_slot", "name": "Open Ground", "tier": "combat",
 		"desc": "If you have 4+ empty board slots: +1 max Command.",
 		"hooks": [], "effect": "junk_slot_mana", "value": 1,
 		"mana_cap_cost": 1},
@@ -459,10 +459,10 @@ const RELICS: Dictionary = {
 	#  BOSS RELICS — Round 3 additions (9) — run-warping, no +1-mana template.
 	#  These replace the "all boss relics are +1 mana with downside" monotony.
 	# ═══════════════════════════════════════════════════════════════════════
-	"pandoras_box": {"id": "pandoras_box", "name": "Pandora's Box", "tier": "boss",
+	"pandoras_box": {"id": "pandoras_box", "name": "The Conjurer's Coffer", "tier": "boss",
 		"desc": "Transform all your starting creatures into random rare creatures.",
 		"hooks": [], "effect": "pandoras_box", "value": 0},
-	"snecko_eye": {"id": "snecko_eye", "name": "Snecko Eye", "tier": "boss",
+	"snecko_eye": {"id": "snecko_eye", "name": "Basilisk Eye", "tier": "boss",
 		"desc": "Draw 6 cards instead of 4. Every card in hand has its cost randomized 0-3 each turn.",
 		"hooks": ["turn_start"], "effect": "snecko_eye", "value": 6},
 	"calling_bell": {"id": "calling_bell", "name": "Calling Bell", "tier": "boss",
@@ -474,7 +474,7 @@ const RELICS: Dictionary = {
 	"lichs_bargain": {"id": "lichs_bargain", "name": "Lich's Bargain", "tier": "boss",
 		"desc": "Friendlies trigger On-Death effects twice. After each fight: lose 1 HP per friendly death (max 3).",
 		"hooks": ["creature_death", "combat_end"], "effect": "lichs_bargain", "value": 2},
-	"lean_mean": {"id": "lean_mean", "name": "Lean Mean", "tier": "boss",
+	"lean_mean": {"id": "lean_mean", "name": "Lean Company", "tier": "boss",
 		"desc": "+1 max Command while your deck has 14 or fewer cards.",
 		"hooks": [], "effect": "lean_mean", "value": 1},
 	"glowing_hand": {"id": "glowing_hand", "name": "Glowing Hand", "tier": "boss",
@@ -596,7 +596,21 @@ static func roll_relic_reward(tier: String = "combat", relics_held: Array[String
 static func roll_boss_relics(relics_held: Array[String] = [], hero_id: String = "") -> Array[String]:
 	var pool: Array[String] = filter_pool_for_run(get_relics_by_tier("boss"), hero_id, relics_held)
 	pool.shuffle()
-	return pool.slice(0, mini(3, pool.size()))
+	var picks: Array[String] = pool.slice(0, mini(3, pool.size()))
+	# Guarantee at least one run-warping boss relic in a full offer, so the player
+	# is never shown three interchangeable "+1 Command / downside" boss_mana taxes.
+	if picks.size() == 3:
+		var has_warper := false
+		for id in picks:
+			if RELICS[id].get("effect", "") != "boss_mana":
+				has_warper = true
+				break
+		if not has_warper:
+			for id in pool:  # pool is already shuffled; first non-pick warper wins
+				if id not in picks and RELICS[id].get("effect", "") != "boss_mana":
+					picks[2] = id
+					break
+	return picks
 
 
 static func get_boss_mana_bonus(relics_held: Array[String]) -> int:

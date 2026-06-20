@@ -24,7 +24,17 @@ func _ready() -> void:
 	if not RunState.run_active:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
-	GameTheme.add_atmosphere(self, "shop")
+	# Lift the painted tavern: the shop mood's outer-alpha (0.60) + vignette
+	# (0.45) was crushing the background toward black. Raise the node modulate and
+	# soften the atmosphere so the painting reads behind the shelves.
+	var bg := get_node_or_null("Background")
+	if bg != null:
+		bg.self_modulate = Color(0.66, 0.66, 0.64, 1.0)
+	GameTheme.add_atmosphere(self, "shop", true, {
+		"vignette": 0.36,
+		"grad_inner": Color(0.12, 0.09, 0.05, 0.18),
+		"grad_outer": Color(0.03, 0.02, 0.01, 0.46),
+	})
 	AudioBank.play_music("shop")
 	_discount = 0.75 if RunState.has_relic("merchants_license") else 1.0
 	_roll_stock()
@@ -72,7 +82,7 @@ func _build_ui() -> void:
 	title.offset_bottom = 68
 	add_child(title)
 
-	var gold_label = GameTheme.make_label("%d gold" % RunState.gold, 20, GameTheme.KEYWORD_GOLD)
+	var gold_label = GameTheme.make_label("%d gold" % RunState.gold, 20, GameTheme.KEYWORD_GOLD, true)
 	gold_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	gold_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	gold_label.offset_top = 72
@@ -80,11 +90,12 @@ func _build_ui() -> void:
 	add_child(gold_label)
 
 	# Card stock — real Card2D renders with a Buy button below (matches Reward).
-	var cards_label = GameTheme.make_label("Cards for Sale", GameTheme.FONT_SUBHEADER, GameTheme.DESC_DIM)
-	cards_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	# Shelf label gets the chart's ruled-heading furniture so it reads as a
+	# section of the page, not floating text.
+	var cards_label = GameTheme.make_section_divider("Cards for Sale", GameTheme.GILT)
 	cards_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	cards_label.offset_top = 104
-	cards_label.offset_bottom = 132
+	cards_label.offset_bottom = 134
 	add_child(cards_label)
 
 	var card_row = HBoxContainer.new()
@@ -119,11 +130,10 @@ func _build_ui() -> void:
 		slot.add_child(buy_btn)
 
 	# Relic + Services — one centered row below the cards.
-	var svc_label = GameTheme.make_label("Relics & Services", GameTheme.FONT_SUBHEADER, GameTheme.DESC_DIM)
-	svc_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var svc_label = GameTheme.make_section_divider("Relics & Services", GameTheme.GILT)
 	svc_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	svc_label.offset_top = 486
-	svc_label.offset_bottom = 514
+	svc_label.offset_bottom = 516
 	add_child(svc_label)
 
 	var svc_row = HBoxContainer.new()
@@ -160,7 +170,7 @@ func _build_ui() -> void:
 		pcolor)
 	if RunState.has_downside("no_potions"):
 		potion.button.disabled = true
-		potion.label.text = "%s\nBlocked by Sozu" % pname
+		potion.label.text = "%s\nBlocked by Temperance Vow" % pname
 	elif RunState.gold < potion_price:
 		potion.button.disabled = true
 	elif not RunState.can_add_potion():
@@ -197,23 +207,26 @@ func _make_service_slot(icon_path: String, text: String, color: Color) -> Dictio
 	# pills in clashing hues. Returns {slot, button, label}: `slot` is added to
 	# the row, `button` carries disabled/pressed wiring, `label` lets callers
 	# swap the body text for disabled-state messaging.
-	var panel_bg := Color(0.20, 0.13, 0.09)
+	# Inked document tile (dark ink body + tan rule + ~4px corners + deep shadow),
+	# the praised chart look enforced via the shared parchment panel helper. The
+	# `color` accent only tints the rest-state border so potion/removal read as a
+	# matched set with the relic card beside them — not pills in clashing hues.
+	var panel_bg := Color(0.055, 0.048, 0.040, 0.96)
 	var btn := Button.new()
 	btn.custom_minimum_size = Vector2(220, 150)
 	btn.focus_mode = Control.FOCUS_NONE
 	btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	var normal := GameTheme.make_btn_style(panel_bg, color.lerp(GameTheme.GILT, 0.45), 10)
+	var normal := GameTheme.make_panel_style(panel_bg,
+		color.lerp(GameTheme.GILT, 0.55), 1, 4, true, true)
 	btn.add_theme_stylebox_override("normal", normal)
-	var hover := normal.duplicate() as StyleBoxFlat
-	hover.bg_color = panel_bg.lightened(0.10)
-	hover.border_color = GameTheme.GILT_BRIGHT
+	var hover := GameTheme.make_panel_style(Color(0.085, 0.070, 0.052, 0.97),
+		GameTheme.GILT_BRIGHT, 1, 4, true, true)
 	btn.add_theme_stylebox_override("hover", hover)
-	var pressed := normal.duplicate() as StyleBoxFlat
-	pressed.bg_color = panel_bg.darkened(0.15)
+	var pressed := GameTheme.make_panel_style(Color(0.045, 0.038, 0.032, 0.96),
+		color.lerp(GameTheme.GILT, 0.55), 1, 4, true, true)
 	btn.add_theme_stylebox_override("pressed", pressed)
-	var disabled := normal.duplicate() as StyleBoxFlat
-	disabled.bg_color = panel_bg.darkened(0.30)
-	disabled.border_color = Color(0.40, 0.30, 0.15, 0.55)
+	var disabled := GameTheme.make_panel_style(Color(0.05, 0.045, 0.04, 0.85),
+		Color(0.40, 0.30, 0.15, 0.55), 1, 4, true, true)
 	btn.add_theme_stylebox_override("disabled", disabled)
 
 	var col := VBoxContainer.new()
@@ -347,7 +360,8 @@ func _confirm_remove(deck_index: int, price: int) -> void:
 	RunState.gold -= price
 	_spawn_gold_spend(price)
 	if RunState.has_relic("scavengers_pouch"):
-		RunState.gain_gold(20)
+		# Gold is paid centrally in RunState.remove_card_at (fires on ALL removal
+		# paths now); here we only show the cue so we don't double-pay.
 		var vp := get_viewport_rect().size
 		GameTheme.spawn_floating_text(self,
 			Vector2(vp.x * 0.5, 140.0),

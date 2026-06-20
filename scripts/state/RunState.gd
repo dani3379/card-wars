@@ -299,8 +299,11 @@ func get_act_rival() -> String:
 
 ## Successor Wars: the player picks which remaining rival to march on next
 ## (boss Reward, between acts — the player-chosen rival order). Swaps that
-## lord into the next act's slot and keeps act_faction mirrored. No map regen
-## needed — boss kits and kingdom pools read the deal late, at visit time.
+## lord into the next act's slot and keeps act_faction mirrored. The act maps
+## are all baked up-front at start_new_run, and visit_node reads each boss
+## node's BAKED encounter_id — so the swapped acts' boss nodes must be
+## re-stamped here, or the map dresses in the new rival's colours while the
+## fight stays the originally-dealt lord (the choice would be a no-op).
 func choose_next_rival(hero_id: String) -> void:
 	var next_idx := current_act_idx + 1
 	for i in range(next_idx, rival_lords.size()):
@@ -310,8 +313,31 @@ func choose_next_rival(hero_id: String) -> void:
 				rival_lords[next_idx] = hero_id
 				act_faction[i] = HeroDB.get_faction(rival_lords[i])
 				act_faction[next_idx] = HeroDB.get_faction(hero_id)
+				# Both swapped slots changed rulers — re-derive their boss kits.
+				_rebake_boss_node(next_idx)
+				_rebake_boss_node(i)
 			return
 	push_warning("RunState: choose_next_rival('%s') not in remaining deal" % hero_id)
+
+
+## Re-stamp one act's boss-node encounter_id from the CURRENT rival deal.
+## Needed after choose_next_rival swaps who rules an act post-generation:
+## visit_node reads the baked node id, not the live deal, so without this the
+## boss fight wouldn't match the chosen rival or the faction-skinned map.
+## act_idx is 0-based (map_data index); _boss_encounter_for_act takes 1-based.
+func _rebake_boss_node(act_idx: int) -> void:
+	if act_idx < 0 or act_idx >= map_data.size():
+		return
+	# Deterministic local stream — only consulted by the stand-in fallback,
+	# which never fires while all five rival kits are authored, but keep it
+	# seeded so a thin-faction stand-in stays stable across re-bakes.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = run_seed ^ (0x424F5353 + act_idx)
+	for row in map_data[act_idx]:
+		for n in row:
+			if String(n.get("type", "")) == "boss":
+				n["encounter_id"] = _boss_encounter_for_act(act_idx + 1, rng)
+				return
 
 
 func end_run(victorious: bool) -> void:
@@ -394,6 +420,11 @@ func remove_card_at(index: int) -> bool:
 	# curse-eating — funnel through here, so this is the one hook site.
 	if has_relic("sin_eaters_crust"):
 		heal_hero(int(RelicDB.get_relic("sin_eaters_crust").get("value", 3)))
+	# Scavenger's Pouch: gold on every removal — same one-sink contract as the
+	# Sin-Eater's Crust above (was previously paid only on the shop path, so
+	# event/wayside removals silently skipped it).
+	if has_relic("scavengers_pouch"):
+		gain_gold(int(RelicDB.get_relic("scavengers_pouch").get("value", 20)))
 	return true
 
 
@@ -1457,8 +1488,11 @@ func save_run() -> void:
 	if not run_active:
 		return
 	if active_slot < 0 or active_slot >= SAVE_SLOTS:
-		push_warning("RunState.save_run: invalid active_slot %d, defaulting to 0" % active_slot)
-		active_slot = 0
+		# No real slot has been claimed (e.g. a headless probe that called
+		# start_new_run without going through the menu's slot picker). Skip the
+		# write rather than silently clobbering slot 0's save.
+		push_warning("RunState.save_run: no active_slot claimed (%d), skipping save" % active_slot)
+		return
 	# JSON converts integer dict keys to strings, so card_upgrades keys come
 	# back as Strings on load — we convert back in load_run().
 	var payload: Dictionary = {

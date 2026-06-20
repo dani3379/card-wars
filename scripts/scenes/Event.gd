@@ -1103,6 +1103,12 @@ func _start_remove_mode() -> void:
 
 
 func _on_remove_pick(deck_index: int) -> void:
+	# Never empty the deck — every other removal path keeps a floor of 1 card
+	# (multi-remove / all-copies stop at deck.size() <= 1; the shop disables the
+	# service). A 1-card deck still builds a 1-tile picker, so guard the commit.
+	if RunState.deck.size() <= 1:
+		_show_result("That is the last thing you carry. You keep it.")
+		return
 	RunState.remove_card_at(deck_index)
 	_show_result("Card removed.")
 
@@ -1152,6 +1158,10 @@ func _start_remove_filtered_mode(filter: String) -> void:
 
 
 func _on_remove_filtered_pick(deck_index: int, filter: String) -> void:
+	# Deck floor of 1, same as the other removal paths.
+	if RunState.deck.size() <= 1:
+		_show_result("That is the last thing you carry. You keep it.")
+		return
 	var data = CardDB.get_card_data(RunState.deck[deck_index])
 	RunState.remove_card_at(deck_index)
 	_show_result(_filter_removed_message(filter, data.name))
@@ -1271,14 +1281,22 @@ func _on_copy_pick(deck_index: int) -> void:
 
 
 func _start_butcher_mode() -> void:
-	var grid = _make_card_picker_grid("Choose a creature for the Butcher (+2 ATK, +Wither 1)", GameTheme.KEYWORD_GOLD)
+	# A creature-less deck would build an empty picker with no way out (the grid
+	# helper has no leave button) — so report it gracefully, like the sacrifice
+	# / transform / upgrade pickers do when nothing qualifies.
+	var eligible: Array = []
+	for i in range(RunState.deck.size()):
+		if CardDB.get_card_data(RunState.deck[i]).get("type", "creature") == "creature":
+			eligible.append(i)
+	if eligible.is_empty():
+		_show_result("The Butcher turns his cleaver over and finds nothing in your pack worth the block.")
+		return
+	var grid = _make_card_picker_grid("Choose a creature for the Butcher (+2 ATK, Wither 1)", GameTheme.KEYWORD_GOLD)
 
 	# Same closure-capture fix as _start_remove_mode: bind the deck index by
 	# value so each tile knows which card it represents at click-time.
-	for i in range(RunState.deck.size()):
+	for i in eligible:
 		var data = CardDB.get_card_data(RunState.deck[i])
-		if data.get("type", "creature") != "creature":
-			continue
 		_add_card_to_grid(grid, data, _on_butcher_pick.bind(i))
 
 
@@ -1289,13 +1307,21 @@ func _on_butcher_pick(deck_index: int) -> void:
 
 
 func _start_mirror_twin_mode() -> void:
-	var grid = _make_card_picker_grid("Push a creature through (HP → 1, ATK +4)", GameTheme.SPELL_PURPLE)
+	# No eligible creature → empty picker with no way out. Report it instead
+	# (mirrors the sacrifice / transform / upgrade empty-state handling).
+	var eligible: Array = []
 	for i in range(RunState.deck.size()):
-		var data = CardDB.get_card_data(RunState.deck[i])
-		if data.get("type", "creature") != "creature":
+		if CardDB.get_card_data(RunState.deck[i]).get("type", "creature") != "creature":
 			continue
 		if RunState.has_upgrade_path(i, "mirror_twin"):
 			continue
+		eligible.append(i)
+	if eligible.is_empty():
+		_show_result("The pool shows you nothing it wants. The reflection folds its arms and waits.")
+		return
+	var grid = _make_card_picker_grid("Push a creature through (HP → 1, +4 ATK)", GameTheme.SPELL_PURPLE)
+	for i in eligible:
+		var data = CardDB.get_card_data(RunState.deck[i])
 		_add_card_to_grid(grid, data, _on_mirror_twin_pick.bind(i))
 
 
@@ -1634,6 +1660,10 @@ func _start_sacrifice_mode(effect: Dictionary) -> void:
 
 
 func _on_sacrifice_pick(deck_index: int) -> void:
+	# Deck floor of 1 — sacrificing your only card would leave an empty deck.
+	if RunState.deck.size() <= 1:
+		_show_result("It is all you have left to lay down. The altar lets you keep it.")
+		return
 	var data = RunState.get_upgraded_card_data(deck_index)
 	var atk: int = int(data.get("atk", 0))
 	var nm: String = data.get("name", "the creature")
@@ -2060,6 +2090,10 @@ func _build_appraisal_screen() -> void:
 
 
 func _on_appraisal_sell() -> void:
+	# Deck floor of 1 — she won't leave you with nothing to your name.
+	if RunState.deck.size() <= 1:
+		_show_result("She turns it over once more and slides it back. \"Your last? No. Even I have a line.\"")
+		return
 	var data = RunState.get_upgraded_card_data(_appr_index)
 	var price := _appraisal_price(_appr_index)
 	RunState.remove_card_at(_appr_index)
@@ -2374,6 +2408,14 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
+				"blue": {"type": "hero_is", "value": "raider"},
+				"label": "Take it on the first swing\n\nYou don't outlive trees; you outrun them. One swing,\nall your weight, the way you take everything. The trick was never patience.",
+				"desc": "Upgrade a chosen card, free — speed is its own trick",
+				"effects": [
+					{"type": "upgrade_choice"},
+				],
+			},
+			{
 				"label": "Work the tree in his place\n\nHe sits in the shade and counts coins\nhe'd forgotten he owned. Your arms ache for days.",
 				"desc": "+40 gold, -3 HP",
 				"effects": [
@@ -2469,6 +2511,65 @@ const EVENTS: Dictionary = {
 				"effects": [
 					{"type": "copy_card"},
 					{"type": "add_curse"},
+				],
+			},
+			{
+				"blue": {"type": "has_curse"},
+				"label": "Let it study your cracks\n\nThe glass cat circles you twice. \"You're already fractured,\" it says, almost\ntender. \"Hold one up to me. I'll take the flaw, not give you a new one.\"",
+				"desc": "Remove a chosen Curse, free",
+				"effects": [
+					{"type": "remove_choice_filtered", "filter": "curse"},
+				],
+			},
+		],
+	},
+
+	# ── Lighter beat (genuinely warm, no dread twist) ──
+	# The pool skews grim; this one is meant to be a clean exhale — a real
+	# village feast, no rot, no watching thing, no debt. The comedy is human
+	# (a tiny widow drinks you under the table). Mechanically simple: plain
+	# immediate effects only, so it can't go wrong.
+	"saints_day_feast": {
+		"name": "The Saint's Day Feast",
+		"desc": "You round a hill and walk straight into a festival. Bunting, a bonfire, three fiddlers who have clearly been at the wine. The whole village turns, sees a tired stranger with a sword, and decides — with the absolute certainty of people who have already eaten — that you are a guest. \"You'll sit,\" says an old woman who comes up to your elbow. It is not a question.",
+		"choices": [
+			{
+				"label": "Sit and eat your fill\n\nThere is more food than the village can possibly\nmean, and they keep putting it in front of you anyway.",
+				"desc": "+12 HP",
+				"effects": [
+					{"type": "heal", "value": 12},
+				],
+			},
+			{
+				"label": "Take the old widow's drinking dare\n\nShe is eighty if she's a day and reaches your elbow.\nShe has also, you slowly realize, done this before.",
+				"desc": "Match her cup for cup — the wine decides how the morning goes",
+				"effects": [
+					{"type": "roll_table", "outcomes": [
+						{"weight": 2,
+							"text": "You hold your own longer than anyone expected, the widow least of all. She concedes at the eleventh cup, slaps a purse on the table, and declares you family. You wake under a cart with a headache and a friend for life.",
+							"effects": [{"type": "gold", "value": 45}, {"type": "heal", "value": 4}]},
+						{"weight": 2,
+							"text": "She drinks you flat into the straw by the ninth cup. The village finds this the funniest thing to happen all year. You wake at noon, gently mocked, thoroughly fed, and somehow better rested than you've been in weeks.",
+							"effects": [{"type": "heal", "value": 8}]},
+						{"weight": 1,
+							"text": "Neither of you remembers who won. You wake holding a bottle of the good stuff someone pressed on you \"for the road,\" and a pounding head you have entirely earned.",
+							"effects": [{"type": "gain_potion"}, {"type": "damage", "value": 2}]},
+					]},
+				],
+			},
+			{
+				"label": "Dance until the fiddlers give out\n\nYou do not know the steps. Nobody minds.\nThe whole square is improvising and so, now, are you.",
+				"desc": "+25 gold (tossed at the stranger who danced), +4 HP",
+				"effects": [
+					{"type": "gold", "value": 25},
+					{"type": "heal", "value": 4},
+				],
+			},
+			{
+				"label": "Thank them and walk on\n\nThey send you off with bread for the road and\nwave until the hill takes you out of sight.",
+				"desc": "+6 HP",
+				"effects": [
+					{"type": "heal", "value": 6},
 				],
 			},
 		],
@@ -2846,6 +2947,14 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
+				"blue": {"type": "hero_is", "value": "pyromancer"},
+				"label": "Heat the bronze until it sings\n\nA bell needs no tongue if you give it fire. You started this with flame\nand see no reason to stop. It rings true, and the rung note shakes coin from the mud.",
+				"desc": "Gain gold for each spell in your deck",
+				"effects": [
+					{"type": "scaled", "count": "spells", "per": 8, "outcome": "gold", "cap": 120},
+				],
+			},
+			{
 				"label": "Kneel beside it\n\nWhatever you are listening for,\nyou hear something else. It teaches you.",
 				"desc": "Upgrade a chosen card",
 				"effects": [
@@ -2897,7 +3006,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Push a creature through\n\nThe pool keeps it.\nWhat returns is hungrier.",
-				"desc": "Pick a creature: HP → 1, ATK +4",
+				"desc": "Pick a creature: HP → 1, +4 ATK",
 				"effects": [
 					{"type": "mirror_twin_buff"},
 				],
@@ -3146,6 +3255,14 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
+				"blue": {"type": "hero_is", "value": "kindler"},
+				"label": "Speak to it in its own tongue\n\nThe grooves know your hands. You feed fires for a living; you know what\nthe stone wants and why. It teaches you a word freely, the way it teaches its own.",
+				"desc": "+1 rare card, no blood owed",
+				"effects": [
+					{"type": "add_rare"},
+				],
+			},
+			{
 				"label": "Open your own wrist\n\nNo creature, no problem. The groove takes\nblood just as well, and teaches a dark word for it.",
 				"desc": "-8 HP, +1 rare card, +1 Curse",
 				"effects": [
@@ -3242,6 +3359,14 @@ const EVENTS: Dictionary = {
 						"grow_text": "It blurs, leans, nearly topples — and rights itself, still spinning. The pot stands at {pot} gold. Somewhere behind the sign, something exhales.",
 						"bust_text": "The coin falls flat at last. Tails. Your stake and the pot slide into the groove it has worn in the road, and are gone. The coin stands back up on its edge and resumes spinning.",
 						"bank_text": "You bank {pot} gold and step back. The coin spins on, patient. The sign, you notice now, has your handwriting on it."},
+				],
+			},
+			{
+				"blue": {"type": "has_nonstarting_relic"},
+				"label": "Show the coin what you've already won\n\nYou spread your relics in the dust. The coin slows — actually slows —\nto look. \"A winner,\" the sign rewrites itself. \"The house calls one for you. No stake.\"",
+				"desc": "Free flip: 90 gold on heads, nothing on tails",
+				"effects": [
+					{"type": "wager_gold", "stake": 0, "payout": 90},
 				],
 			},
 			{
@@ -3361,12 +3486,10 @@ const EVENTS: Dictionary = {
 
 	# ── Push-your-luck game (new format: a mini-game that loops) ──
 	# dice_run is a real multi-round run, not a one-shot wager — the pot
-	# grows 2-in-3 per cast and busts 1-in-3, bank any time. Art borrows the
-	# gambler's table until assets/events/the_bone_pit.png exists.
+	# grows 2-in-3 per cast and busts 1-in-3, bank any time.
 	"the_bone_pit": {
 		"name": "The Bone Pit",
 		"desc": "Four legionaries, dead these three hundred years, crouch around a shallow pit casting knucklebones cut from their own hands. They have been playing since the empire that owed them wages stopped existing. A space opens in the circle. The rules are short: roll, or bank. The pot is the pot.",
-		"art": "gambler",
 		"choices": [
 			{
 				"label": "Take the open seat\n\nThe bones are warm.\nThey should not be warm.",

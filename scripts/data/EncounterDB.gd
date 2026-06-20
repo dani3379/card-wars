@@ -296,8 +296,8 @@ const BOSS_PHASES: Dictionary = {
 			"transition_effect": {"type": "buff_all_enemies_atk", "value": 1}},
 	],
 	"amalgam_stalwart": [
-		{"threshold": 27, "passive_id": "throne_husks",
-			"passive_desc": "Start of each round: summon a 2/2 Swift creature in an empty enemy lane."},
+		{"threshold": 27, "passive_id": "formation_drill",
+			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1."},
 		{"threshold": 14, "passive_id": "void_exile",
 			"passive_desc": "Start of your turn: the top card of your draw pile is exiled (removed from this fight).",
 			"transition_msg": "THE LANTERNHALL READS YOUR LAST PAGES!",
@@ -336,8 +336,12 @@ const BOSS_PHASES: Dictionary = {
 				"atk": 2, "hp": 4, "count": 2, "kw": ["armored"]}},
 	],
 	"rival_stalwart": [
-		{"threshold": 11, "passive_id": "formation_drill",
-			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1."},
+		# Phase 0 documents the STARTING passive only (it's never a transition
+		# target — transitions go to index >=1). Kept in sync with the encounter's
+		# passive_id (formation_muster, the gentler act-1 cadence); the threshold
+		# 11 here is what triggers the endgame jump to lockstep below.
+		{"threshold": 11, "passive_id": "formation_muster",
+			"passive_desc": "From round 3: each FRONT-rank enemy standing beside another gains +1/+1."},
 		{"threshold": 0, "passive_id": "formation_lockstep",
 			"passive_desc": "The drill continues, and enemy front-row creatures gain Armored.",
 			"transition_msg": "THE WALL CLOSES RANKS!",
@@ -381,7 +385,7 @@ const BOSS_PHASES: Dictionary = {
 	],
 	"iron_warden": [
 		{"threshold": 13, "passive_id": "", "passive_desc": ""},
-		{"threshold": 0, "passive_id": "iron_warden_siege", "passive_desc": "All enemies gain Armored.",
+		{"threshold": 0, "passive_id": "iron_warden_siege", "passive_desc": "All enemies gain Armored. End of each round: take 3 damage.",
 			"transition_msg": "The Warden enters Siege Mode!",
 			"transition_effect": {"type": "summon", "name": "Iron Guard", "atk": 2, "hp": 5, "kw": ["armored"]}},
 	],
@@ -606,8 +610,8 @@ const ENCOUNTERS: Dictionary = {
 		# Counterplay is reading the line — kill the middle, isolate the
 		# ends, never let two of his walls stand touching for free.
 		"name": "THE STALWART", "act": 1, "type": "boss", "faction": "last_wall", "hp": 23,
-		"passive_id": "formation_drill",
-		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
+		"passive_id": "formation_muster",
+		"passive_desc": "From round 3: each FRONT-rank enemy standing beside another gains +1/+1.",
 		"preamble": "He has lost battles in every age there is and not one war. Stone does not argue. It drills. Every round you leave his wall standing, it stands harder.",
 		"deck": [
 			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns"]},
@@ -644,7 +648,7 @@ const ENCOUNTERS: Dictionary = {
 		"deck": [
 			{"name": "Outrider", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
-			{"name": "Salt Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Salt Harpy", "atk": 2, "hp": 2, "kw": ["swift"]},
 			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
 			{"name": "Banner-Bearer", "atk": 1, "hp": 3,
 				"adj_buff": {"atk": 1, "hp": 0}},
@@ -653,7 +657,7 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Pennon Griffin", "atk": 3, "hp": 3, "kw": ["swift", "piercing"]},
 			{"name": "First Ashore", "atk": 4, "hp": 4, "kw": ["swift"],
 				"adj_buff": {"atk": 1, "hp": 0},
-				"on_enter": {"type": "damage_face", "value": 2}},
+				"on_enter": {"type": "damage_face", "value": 1}},
 		],
 		"reinforcement": {"name": "Rider", "atk": 2, "hp": 2, "kw": ["swift"]},
 		"reinforcement_pool": [
@@ -715,7 +719,7 @@ const ENCOUNTERS: Dictionary = {
 		# stops reading and starts rewriting — your best creature's keywords
 		# get copied onto his pieces every round. Kill the fight fast; every
 		# stalled turn costs a card you might have needed.
-		"name": "THE PYROMANCER", "act": 1, "type": "boss", "faction": "lanternhall", "hp": 21,
+		"name": "THE PYROMANCER", "act": 1, "type": "boss", "faction": "lanternhall", "hp": 28,
 		"passive_id": "void_exile",
 		"passive_desc": "Start of your turn: the top card of your draw pile is exiled (removed from this fight).",
 		"preamble": "He came up burning things, like everyone from the old war. Then the library found him and taught him the colder arithmetic: mirrors, circles, why burn a thing tomorrow when you can read its ending today. He has already read yours.",
@@ -723,13 +727,13 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Star-Reader", "atk": 2, "hp": 2, "kw": ["ranged"]},
 			{"name": "Claw Adept", "atk": 1, "hp": 3, "kw": ["ranged"],
 				"on_enter": {"type": "debuff_opposing_atk", "value": 2}},
-			{"name": "Burning Glass", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Burning Glass", "atk": 4, "hp": 2, "kw": ["ranged", "piercing"]},
 			{"name": "Reflection", "atk": 2, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "copy_opposing_keywords"}},
 			{"name": "Ink Beast", "atk": 3, "hp": 4,
 				"on_enter": {"type": "discard_random"}},
 			{"name": "Hall-Watcher", "atk": 1, "hp": 6, "kw": ["thorns", "armored"]},
-			{"name": "Cold Lector", "atk": 3, "hp": 4, "kw": ["ranged"],
+			{"name": "Cold Lector", "atk": 4, "hp": 4, "kw": ["ranged"],
 				"intents": ["ATK", "ABILITY", "ATK", "ABILITY"],
 				"ability": {"type": "steal_atk", "value": 1}},
 		],
@@ -845,8 +849,8 @@ const ENCOUNTERS: Dictionary = {
 		# hall — and his Armored line shrugs the 1-a-round burn while your
 		# chaff cooks. Break the wall before the fire does his work for him.
 		"name": "THE STALWART ASCENDANT", "act": 3, "type": "boss", "faction": "last_wall", "hp": 40,
-		"passive_id": "throne_husks",
-		"passive_desc": "Start of each round: summon a 2/2 Swift creature in an empty enemy lane.",
+		"passive_id": "formation_drill",
+		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
 		"preamble": "You burned three kingdoms to rubble, and rubble is just stone waiting for a mason. He built the war you fought into the wall around this chair. Win, and the throne is yours — everything it was holding back comes with it.",
 		"deck": [
 			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
@@ -923,6 +927,7 @@ const ENCOUNTERS: Dictionary = {
 		# small chip-damage on_enter or random-player ping. Low HP, easy to
 		# clear — but the first round HURTS if you didn't expect a wave.
 		"name": "The First Cut", "act": 1, "type": "combat", "faction": "grasswake", "hp": 11,
+		"preamble": "The smallest blade the war owns, sent ahead to see if you bleed like the last lot. First cuts take your measure.",
 		"passive_id": "", "passive_desc": "",
 		"deck": [
 			{"name": "Runt", "atk": 1, "hp": 2, "kw": ["swift"],
@@ -978,6 +983,7 @@ const ENCOUNTERS: Dictionary = {
 		# adjacents when one falls; killing the buffer in the middle is the
 		# puzzle, not killing the front-row chaff.
 		"name": "The Den Mother's Brood", "act": 1, "type": "combat", "faction": "grasswake", "hp": 13,
+		"preamble": "The grass was a hunting ground before it was a road, and her brood has not forgotten which of you is meat.",
 		"passive_id": "wolf_pack_revenge",
 		"passive_desc": "When an enemy creature dies: adjacent enemies gain +1 ATK this round.",
 		"deck": [
@@ -1038,6 +1044,7 @@ const ENCOUNTERS: Dictionary = {
 
 	"bandit_camp": {
 		"name": "The Toll-Takers", "act": 1, "type": "combat", "faction": "grasswake", "hp": 13,
+		"preamble": "Every road has a price, and these men appointed themselves to collect it — in coin, in teeth, in whatever comes loose.",
 		"passive_id": "bandit_mana_steal",
 		"passive_desc": "When the enemy places its first reinforcement each round: you lose 1 Command next turn.",
 		# Bandit Camp — mixed combat archetypes. Cutpurse (eco), Archer (range),
@@ -1100,6 +1107,7 @@ const ENCOUNTERS: Dictionary = {
 
 	"mushroom_grove": {
 		"name": "The Spore-Cathedral", "act": 1, "type": "combat", "faction": "owed", "hp": 9,
+		"preamble": "Something soft and patient has been preaching down here, and the dead make a devout congregation. Breathe shallow.",
 		"passive_id": "mushroom_heal",
 		"passive_desc": "End of each round: heal every enemy creature 1 HP.",
 		# Mushroom Grove — IT JUST GROWS BACK. Almost every fungus regenerates
@@ -1159,6 +1167,7 @@ const ENCOUNTERS: Dictionary = {
 
 	"stone_sentinels": {
 		"name": "The Tooth-Stones", "act": 1, "type": "combat", "faction": "last_wall", "hp": 11,
+		"preamble": "They were set in the ground to mark a border no living man remembers drawing. They still mean to hold it.",
 		"passive_id": "",
 		"passive_desc": "",
 		# Stone Sentinels — heavy fortress: walls, hurlers, breakers, an animator.
@@ -1191,6 +1200,7 @@ const ENCOUNTERS: Dictionary = {
 		# stop the next dive. The matron buffs adjacents — kill her early or
 		# the whole flock hits harder.
 		"name": "The Stooping Wings", "act": 1, "type": "combat", "faction": "grasswake", "hp": 12,
+		"preamble": "They nest where the road runs thin and the drop runs long. The screaming starts once they are already on you.",
 		"passive_id": "harpy_swift_face",
 		"passive_desc": "Enemy Swift creatures deal +1 face damage when attacking through empty lanes.",
 		"deck": [
@@ -1215,6 +1225,7 @@ const ENCOUNTERS: Dictionary = {
 		# the point: ignoring them costs face damage, killing them costs
 		# board.
 		"name": "The Trampling Hour", "act": 1, "type": "combat", "faction": "grasswake", "hp": 12,
+		"preamble": "There is an hour near dusk when the herd comes through and the ground belongs to it. You arrived at that hour.",
 		"passive_id": "", "passive_desc": "",
 		"deck": [
 			{"name": "Piglet", "atk": 1, "hp": 2, "kw": ["swift"],
@@ -1243,6 +1254,7 @@ const ENCOUNTERS: Dictionary = {
 		# her and the field stops growing back. The heal is a creature you can
 		# answer, not an invisible passive (no more phantom mushroom_heal).
 		"name": "The Field That Watches Back", "act": 1, "type": "combat", "faction": "owed", "hp": 10,
+		"preamble": "Someone planted these to frighten the crows. The crows left years ago. The field kept watching anyway.",
 		"passive_id": "", "passive_desc": "",
 		"deck": [
 			{"name": "Scarecrow", "atk": 1, "hp": 5, "kw": ["thorns"]},
@@ -1275,6 +1287,7 @@ const ENCOUNTERS: Dictionary = {
 		# and the player's first lesson in the clock that the Bellringer will
 		# later weaponise. No passive — the bombs telegraph themselves.
 		"name": "The Powderkeg Run", "act": 1, "type": "combat", "faction": "everflame", "hp": 12,
+		"preamble": "Everything here is packed, fused, and stacked too close together. This fight only asks who lights it first.",
 		"passive_id": "", "passive_desc": "",
 		"deck": [
 			{"name": "Runt", "atk": 1, "hp": 2, "kw": ["swift"]},
@@ -1315,6 +1328,7 @@ const ENCOUNTERS: Dictionary = {
 		# gets. Every orc carries Swift or Piercing — there's nowhere safe to
 		# stall. Kill the Chieftain fast or the buffs land on the wrong guys.
 		"name": "The Long Drumming", "act": 1, "type": "elite", "faction": "grasswake", "hp": 18,
+		"preamble": "You hear them before the road bends — the drum that keeps a warband in step. It does not stop for parley.",
 		"passive_id": "orc_random_buff",
 		"passive_desc": "Start of each round: a random enemy creature gains +1 ATK for the rest of the fight.",
 		"deck": [
@@ -1340,7 +1354,8 @@ const ENCOUNTERS: Dictionary = {
 		# passive spawns a Skeleton every time anything dies. Most creatures
 		# have Last Stand or summon on death. The reactive double_on_death
 		# already amplifies enemy deaths. Spell AoE > spot-killing.
-		"name": "Where the Dead Come Back", "act": 1, "type": "elite", "faction": "owed", "hp": 18,
+		"name": "Where the Dead Come Back", "act": 1, "type": "elite", "faction": "owed", "hp": 15,
+		"preamble": "Up in the tower a clerk keeps tallying, and down here the tally keeps standing back up. Outpace the count.",
 		"passive_id": "necro_death_summon",
 		"passive_desc": "When a non-Skeleton enemy dies: summon a 1/1 Skeleton in a random empty enemy lane.",
 		"deck": [
@@ -1424,6 +1439,7 @@ const ENCOUNTERS: Dictionary = {
 		# damage on death, debuffs on death, summons on death. Killing one
 		# triggers another beat. The easy kills hurt you the most.
 		"name": "The Bleeding-Heart Cell", "act": 2, "type": "combat", "faction": "owed", "hp": 16,
+		"preamble": "They love you, the way a knife loves the whetstone. Every wound they take is one they meant to give away.",
 		"passive_id": "cultist_buff",
 		"passive_desc": "Start of each round: a random Cultist gains +1/+1.",
 		"deck": [
@@ -1490,6 +1506,7 @@ const ENCOUNTERS: Dictionary = {
 		# damage doesn't stick. The fight rewards big single hits over slow
 		# grinds. Drowned is the only true wall (armored).
 		"name": "The Drowned Garden", "act": 2, "type": "combat", "faction": "owed", "hp": 16,
+		"preamble": "Someone kept a garden here before the water came up to stay. It is still growing. It has only changed what it grows.",
 		"passive_id": "swamp_thorns",
 		"passive_desc": "All enemy creatures have Thorns.",
 		"deck": [
@@ -1543,6 +1560,7 @@ const ENCOUNTERS: Dictionary = {
 		# threat. Kill the buffers first or trade horribly with the puffed-up
 		# line.
 		"name": "The Coin-Sworn", "act": 2, "type": "combat", "faction": "last_wall", "hp": 15,
+		"preamble": "They have no quarrel with you, only a contract — and a paid man, unlike an angry one, has nothing left to talk down.",
 		"passive_id": "merc_piercing",
 		"passive_desc": "Enemy creatures with 4 or more ATK have Piercing.",
 		"deck": [
@@ -1572,6 +1590,7 @@ const ENCOUNTERS: Dictionary = {
 		# summon from another dying enemy. Killing makes the board WORSE.
 		# Players have to learn to leave certain creatures alive.
 		"name": "The Crypt That Will Not Stay Shut", "act": 2, "type": "combat", "faction": "owed", "hp": 17,
+		"preamble": "The door was sealed for a reason, and the reason is still inside, working the latch. It does not care to be read to.",
 		"passive_id": "crypt_ghost",
 		"passive_desc": "When an enemy creature dies: summon a 1/1 Swift Ghost in a random empty enemy lane.",
 		"deck": [
@@ -1599,6 +1618,7 @@ const ENCOUNTERS: Dictionary = {
 		# rains down from forge_burn_all + Slag Heap detonations. Even
 		# ignoring the board drains HP fast.
 		"name": "The Forge That Eats", "act": 2, "type": "combat", "faction": "everflame", "hp": 18,
+		"preamble": "The fire here is never allowed to die, and it is always a little hungry. The smiths feed it what the road sends.",
 		"passive_id": "forge_burn_all",
 		"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
 		"deck": [
@@ -1628,6 +1648,7 @@ const ENCOUNTERS: Dictionary = {
 		# buffing adjacents, a Fallen Paladin healing, and a Forsworn Champion
 		# that refuses to die clean (Last Stand). Slow but punishing trades.
 		"name": "The Faithless Lances", "act": 2, "type": "combat", "faction": "last_wall", "hp": 17,
+		"preamble": "They swore the oaths you would want at your back, broke them somewhere on this road, and found the breaking suited them.",
 		"passive_id": "", "passive_desc": "",
 		"deck": [
 			{"name": "Squire", "atk": 2, "hp": 2, "kw": ["armored"]},
@@ -1653,6 +1674,7 @@ const ENCOUNTERS: Dictionary = {
 		# Forge_burn_all chip damage burns them too, but they're disposable
 		# — the pack is built to rush you down before round 4.
 		"name": "The Cinder-Hounds", "act": 2, "type": "combat", "faction": "everflame", "hp": 16,
+		"preamble": "They were dogs once, before the burning got into them. Now they run where the smoke runs, always downwind of dying.",
 		"passive_id": "forge_burn_all",
 		"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
 		"deck": [
@@ -1685,6 +1707,7 @@ const ENCOUNTERS: Dictionary = {
 		# pure back-row volume you have to reach and silence. Push damage onto the
 		# singers fast or get pecked to death.
 		"name": "The Carrion Choir", "act": 2, "type": "combat", "faction": "owed", "hp": 16,
+		"preamble": "They have followed the column for days, singing the only hymn they know. They are very good at it, and it is nearly done.",
 		"passive_id": "cultist_buff",
 		"passive_desc": "Start of each round: a random bird gains +1/+1. The murder always grows.",
 		"deck": [
@@ -1738,6 +1761,7 @@ const ENCOUNTERS: Dictionary = {
 		# spell buff can land on. Soldiers wall, Hellhounds chase, Pit Fiend
 		# grows, Infernal nukes. The fight says "every spell is a tradeoff."
 		"name": "The Threshold Choir", "act": 2, "type": "elite", "faction": "everflame", "hp": 25,
+		"preamble": "This is the door the deeper war keeps, held by things never born on your side of it. Past here, no prayer answers.",
 		"passive_id": "demon_spell_buff",
 		"passive_desc": "When you cast a spell: a random enemy creature gains +1 ATK for the rest of the fight.",
 		"deck": [
@@ -1767,6 +1791,7 @@ const ENCOUNTERS: Dictionary = {
 		# best keywords each round and slaps them onto an enemy. Built tall
 		# (lots of bodies), buffed wide (passive). Sweep wide, not deep.
 		"name": "The Puppeteer", "act": 2, "type": "elite", "faction": "lanternhall", "hp": 23,
+		"preamble": "Every soldier you raise, it counts as a gift. The strings are already knotted — you simply cannot see them yet.",
 		"passive_id": "puppet_keyword_copy",
 		"passive_desc": "Start of each round: copy the keywords from your highest-ATK creature onto a random enemy.",
 		"deck": [
@@ -1829,14 +1854,14 @@ const ENCOUNTERS: Dictionary = {
 		# (hollow_king_phase2) snipes the TOP TWO and adds a Curse to your
 		# discard. Deck: chaff bodies that don't matter if they die — the
 		# pressure is the passive, not the creatures.
-		"name": "The Hollow King", "act": 2, "type": "boss", "faction": "owed", "hp": 29,
+		"name": "The Hollow King", "act": 2, "type": "boss", "faction": "owed", "hp": 31,
 		"passive_id": "hollow_king_snipe",
 		"passive_desc": "Start of each round: deal 3 damage to your highest-ATK creature.",
 		"preamble": "There is an eye here that decides what gets to continue. It has looked at you before and found you wanting. It is willing to look again.",
 		"deck": [
-			{"name": "Hollow Knight", "atk": 2, "hp": 4, "kw": ["armored"]},
-			{"name": "Hollow Knight", "atk": 2, "hp": 4, "kw": ["armored"]},
-			{"name": "Hollow Knight", "atk": 2, "hp": 4, "kw": ["armored"]},
+			{"name": "Hollow Knight", "atk": 3, "hp": 4, "kw": ["armored"]},
+			{"name": "Hollow Knight", "atk": 3, "hp": 4, "kw": ["armored"]},
+			{"name": "Hollow Knight", "atk": 3, "hp": 4, "kw": ["armored"]},
 			{"name": "Void Guard", "atk": 1, "hp": 5, "kw": ["armored", "regenerate"]},
 			{"name": "Shadow Blade", "atk": 3, "hp": 2, "kw": ["swift", "piercing"]},
 			{"name": "Shadow Blade", "atk": 3, "hp": 2, "kw": ["swift", "piercing"]},
@@ -1887,6 +1912,7 @@ const ENCOUNTERS: Dictionary = {
 		# refills lanes the instant your creatures die. Defensive trades
 		# barely work — every kill triggers a fresh enemy beat.
 		"name": "The Hall of Wrong Reflections", "act": 3, "type": "combat", "faction": "lanternhall", "hp": 20,
+		"preamble": "Every surface shows you back a little wrong, a little ahead. By the time you tell which reflection lies, it has moved.",
 		"passive_id": "mirror_instant_place",
 		"passive_desc": "When a friendly creature dies: the enemy draws and places a creature immediately.",
 		"deck": [
@@ -1934,6 +1960,7 @@ const ENCOUNTERS: Dictionary = {
 		# passive amps the whole board on a 3-round cycle. The puzzle is "no
 		# single counter covers all of them."
 		"name": "The Storm Made Flesh", "act": 3, "type": "combat", "faction": "grasswake", "hp": 21,
+		"preamble": "The weather over the high passes grew tired of being weather. It has taken a shape, and the shape is walking down.",
 		"passive_id": "nexus_rotation",
 		"passive_desc": "Three-round cycle (repeats). Round 1: all enemies gain +1 ATK. Round 2: all enemies heal 2 HP. Round 3: all enemies gain Thorns this round.",
 		"deck": [
@@ -1981,6 +2008,7 @@ const ENCOUNTERS: Dictionary = {
 		# adds face damage from the highest ATK each round, so trades that
 		# leave their heavy hitter alive bleed you out fast.
 		"name": "The Executioner's Block", "act": 3, "type": "combat", "faction": "last_wall", "hp": 19,
+		"preamble": "The wood is dark and certain, and the man beside it never asks what you did. He only asks whether you will kneel.",
 		"passive_id": "executioner_face",
 		"passive_desc": "Each round: the highest-ATK enemy also deals its ATK as face damage.",
 		"deck": [
@@ -2024,6 +2052,7 @@ const ENCOUNTERS: Dictionary = {
 		# whelps and kobolds are the only chaff; the rest are statline
 		# threats. The periodic AoE passive punishes stalling.
 		"name": "Where the Old Drake Sleeps", "act": 3, "type": "combat", "faction": "everflame", "hp": 22,
+		"preamble": "The young one guarded a road. This one remembers when the whole island was its road. It sleeps lightly, and it sleeps here.",
 		"passive_id": "dragon_lair_periodic",
 		"passive_desc": "Every 3 rounds: deal 3 damage to all your creatures.",
 		"deck": [
@@ -2065,6 +2094,7 @@ const ENCOUNTERS: Dictionary = {
 		# (chain damage). The forge_burn_all passive keeps ambient chip damage
 		# flowing every round. No structures — the deck IS the theme.
 		"name": "The Pyre Cult", "act": 3, "type": "combat", "faction": "everflame", "hp": 20,
+		"preamble": "They believe the world ends in fire, and they have volunteered to help. Faith like that does not flinch or stop.",
 		"passive_id": "forge_burn_all",
 		"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
 		"deck": [
@@ -2095,6 +2125,7 @@ const ENCOUNTERS: Dictionary = {
 		# strangles your board into uselessness. Spell-heavy decks shred
 		# this fight; creature-heavy decks struggle.
 		"name": "The Withered Court", "act": 3, "type": "combat", "faction": "owed", "hp": 22,
+		"preamble": "The court never adjourned; it only dried out where it sat. It will receive you warmly, and keep a little of your warmth.",
 		"passive_id": "cultist_buff",
 		"passive_desc": "Start of each round: a random Courtier gains +1/+1.",
 		"deck": [
@@ -2128,6 +2159,7 @@ const ENCOUNTERS: Dictionary = {
 		# silences your strongest creature each round. Push damage onto the
 		# back-row singers fast or get sung to death.
 		"name": "The Killing Choir", "act": 3, "type": "combat", "faction": "owed", "hp": 21,
+		"preamble": "They sing in numbers, not notes — a count that runs one way. Stand in the aisle too long and you join the song.",
 		"passive_id": "hollow_king_snipe",
 		"passive_desc": "Start of each round: deal 3 damage to your highest-ATK creature.",
 		"deck": [
@@ -2160,6 +2192,7 @@ const ENCOUNTERS: Dictionary = {
 		# a Phylactery wall, Skeleton Knights that just keep coming. The
 		# puzzle is "which one do I spend my limited spells on first."
 		"name": "The Bone-Crowned", "act": 3, "type": "elite", "faction": "owed", "hp": 29,
+		"preamble": "He spends death the way he spent life: collecting. The crown is bone now, the court as well, and he is not yet finished.",
 		"passive_id": "archlich_immortal",
 		"passive_desc": "Creature attacks can't reduce enemies below 1 HP. Only spells and other effects can finish them off.",
 		"deck": [
@@ -2186,24 +2219,25 @@ const ENCOUNTERS: Dictionary = {
 		# they can stabilize. The Void Maw shreds your hand on top. The
 		# fight pressures you to kill fast — every stalled turn costs you a
 		# card you might've needed.
-		"name": "The One Who Walks Sideways", "act": 3, "type": "elite", "faction": "lanternhall", "hp": 27,
+		"name": "The One Who Walks Sideways", "act": 3, "type": "elite", "faction": "lanternhall", "hp": 38,
+		"preamble": "It comes not at you but around you, through a corner the road did not have a breath ago. Geometry is on its side.",
 		"passive_id": "void_exile",
 		"passive_desc": "Start of your turn: the top card of your draw pile is exiled (removed from this fight).",
 		"deck": [
 			{"name": "Void Spawn", "atk": 3, "hp": 4, "kw": ["swift"]},
 			{"name": "Void Spawn", "atk": 3, "hp": 4, "kw": ["swift"]},
-			{"name": "Rift Stalker", "atk": 4, "hp": 3, "kw": ["swift", "piercing"]},
-			{"name": "Rift Stalker", "atk": 4, "hp": 3, "kw": ["swift", "piercing"]},
+			{"name": "Rift Stalker", "atk": 4, "hp": 4, "kw": ["swift", "piercing"]},
+			{"name": "Rift Stalker", "atk": 4, "hp": 4, "kw": ["swift", "piercing"]},
 			{"name": "Null Beast", "atk": 3, "hp": 5,
 				"on_enter": {"type": "discard_random"}},
 			{"name": "Null Beast", "atk": 3, "hp": 5,
 				"on_enter": {"type": "discard_random"}},
-			{"name": "Void Maw", "atk": 5, "hp": 5, "kw": ["piercing"],
+			{"name": "Void Maw", "atk": 6, "hp": 6, "kw": ["piercing"],
 				"on_enter": {"type": "discard_random"}},
 		],
-		"reinforcement": {"name": "Fragment", "atk": 2, "hp": 2, "kw": ["swift"]},
+		"reinforcement": {"name": "Fragment", "atk": 5, "hp": 4, "kw": ["swift", "piercing"]},
 		"reinforcement_pool": [
-			{"name": "Rift Stalker", "atk": 4, "hp": 3, "kw": ["swift", "piercing"]},
+			{"name": "Rift Stalker", "atk": 4, "hp": 4, "kw": ["swift", "piercing"]},
 			{"name": "Void Spawn", "atk": 3, "hp": 4, "kw": ["swift"]},
 		],
 	},
@@ -2216,25 +2250,26 @@ const ENCOUNTERS: Dictionary = {
 		# (wolf_pack_revenge). Kill the front-row flock first and the
 		# remaining beasts rage; kill the buffers first and the front
 		# collapses. Real target-order puzzle.
-		"name": "The Shepherd Who Lost His Sheep", "act": 3, "type": "elite", "faction": "owed", "hp": 27,
+		"name": "The Shepherd Who Lost His Sheep", "act": 3, "type": "elite", "faction": "owed", "hp": 31,
+		"preamble": "He kept the flock long after it stopped breathing. He cannot tell the living from the led now, and he is reaching for you.",
 		"passive_id": "wolf_pack_revenge",
 		"passive_desc": "When an enemy creature dies: adjacent enemies gain +1 ATK this round.",
 		"deck": [
 			{"name": "Maggot-Lamb", "atk": 3, "hp": 2, "kw": ["swift"]},
 			{"name": "Maggot-Lamb", "atk": 3, "hp": 2, "kw": ["swift"]},
 			{"name": "Stray Lamb", "atk": 2, "hp": 2, "kw": ["swift"]},
-			{"name": "Bone-Ram", "atk": 4, "hp": 3, "kw": ["piercing"]},
-			{"name": "Bone-Ram", "atk": 4, "hp": 3, "kw": ["piercing"]},
+			{"name": "Bone-Ram", "atk": 5, "hp": 4, "kw": ["piercing"]},
+			{"name": "Bone-Ram", "atk": 5, "hp": 4, "kw": ["piercing"]},
 			{"name": "Flock Whisperer", "atk": 2, "hp": 5, "kw": ["regenerate"],
 				"adj_buff": {"atk": 0, "hp": 1},
 				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
 			{"name": "Mad Shepherd", "atk": 4, "hp": 6, "kw": ["last_stand"],
 				"adj_buff": {"atk": 1, "hp": 0}},
 		],
-		"reinforcement": {"name": "Stray Lamb", "atk": 2, "hp": 2, "kw": ["swift"]},
+		"reinforcement": {"name": "Stray Lamb", "atk": 4, "hp": 3, "kw": ["swift"]},
 		"reinforcement_pool": [
 			{"name": "Maggot-Lamb", "atk": 3, "hp": 2, "kw": ["swift"]},
-			{"name": "Bone-Ram", "atk": 4, "hp": 3, "kw": ["piercing"]},
+			{"name": "Bone-Ram", "atk": 5, "hp": 4, "kw": ["piercing"]},
 		],
 	},
 
@@ -2251,6 +2286,7 @@ const ENCOUNTERS: Dictionary = {
 		# elites (the immortal Bone-Crowned, the attrition Void Walker). Trade
 		# fast, sweep wide, end it before the menagerie reflects your whole deck.
 		"name": "The Glass Menagerie", "act": 3, "type": "elite", "faction": "lanternhall", "hp": 24,
+		"preamble": "Each was blown to one perfect purpose and cooled around it. They do not bleed — they break, into a handful of new edges.",
 		"passive_id": "executioner_face",
 		"passive_desc": "Each round: the highest-ATK enemy also deals its ATK as face damage. The biggest shard cuts deepest.",
 		"deck": [

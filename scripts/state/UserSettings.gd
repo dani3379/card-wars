@@ -51,6 +51,10 @@ var colorblind_mode: String = "off"
 var reduce_motion: bool = false
 # Show a "you still have mana / cards" modal before ending turn.
 var end_turn_warning: bool = true
+# Combat telegraph: when hovering a battlefield creature, draw an arrow to the
+# creature it will strike plus a DIES/-N/SURVIVES outcome chip. Per-frame work
+# while a creature is hovered, so it's a toggle for players who want it off.
+var combat_telegraph: bool = true
 # Mute audio when the window loses focus.
 var mute_on_focus_loss: bool = true
 var resolution: Vector2i = DEFAULT_RES
@@ -60,6 +64,10 @@ var sacrifice_tutorial_seen: bool = false
 var banking_tutorial_seen: bool = false
 var intents_tutorial_seen: bool = false
 var pile_tutorial_seen: bool = false
+# Taught once on the first End Turn: the simultaneous-combat model — the single
+# most counter-intuitive rule (both sides strike at once; front rank fights and
+# is struck first; the back rank waits in reserve).
+var combat_model_tutorial_seen: bool = false
 
 
 func mark_floop_tutorial_seen() -> void:
@@ -94,6 +102,13 @@ func mark_pile_tutorial_seen() -> void:
 	if pile_tutorial_seen:
 		return
 	pile_tutorial_seen = true
+	save()
+
+
+func mark_combat_model_tutorial_seen() -> void:
+	if combat_model_tutorial_seen:
+		return
+	combat_model_tutorial_seen = true
 	save()
 
 var _bus_music: int = -1
@@ -348,6 +363,11 @@ func set_end_turn_warning(val: bool) -> void:
 	save()
 
 
+func set_combat_telegraph(val: bool) -> void:
+	combat_telegraph = val
+	save()
+
+
 func set_mute_on_focus_loss(val: bool) -> void:
 	mute_on_focus_loss = val
 	save()
@@ -400,6 +420,7 @@ func save() -> void:
 		"colorblind_mode": colorblind_mode,
 		"reduce_motion": reduce_motion,
 		"end_turn_warning": end_turn_warning,
+		"combat_telegraph": combat_telegraph,
 		"mute_on_focus_loss": mute_on_focus_loss,
 		"resolution_x": resolution.x,
 		"resolution_y": resolution.y,
@@ -408,6 +429,7 @@ func save() -> void:
 		"banking_tutorial_seen": banking_tutorial_seen,
 		"intents_tutorial_seen": intents_tutorial_seen,
 		"pile_tutorial_seen": pile_tutorial_seen,
+		"combat_model_tutorial_seen": combat_model_tutorial_seen,
 	}
 	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
 	if f:
@@ -438,6 +460,7 @@ func load_settings() -> void:
 		colorblind_mode = parsed.get("colorblind_mode", "off")
 		reduce_motion = parsed.get("reduce_motion", false)
 		end_turn_warning = parsed.get("end_turn_warning", true)
+		combat_telegraph = parsed.get("combat_telegraph", true)
 		mute_on_focus_loss = parsed.get("mute_on_focus_loss", true)
 		var rx: int = int(parsed.get("resolution_x", 1600))
 		var ry: int = int(parsed.get("resolution_y", 900))
@@ -447,3 +470,4 @@ func load_settings() -> void:
 		banking_tutorial_seen = parsed.get("banking_tutorial_seen", false)
 		intents_tutorial_seen = parsed.get("intents_tutorial_seen", false)
 		pile_tutorial_seen = parsed.get("pile_tutorial_seen", false)
+		combat_model_tutorial_seen = parsed.get("combat_model_tutorial_seen", false)

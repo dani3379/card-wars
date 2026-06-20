@@ -127,7 +127,8 @@ func _load_assets() -> void:
 	lilita = ResourceLoader.load(lilita_path, "FontFile",
 		ResourceLoader.CACHE_MODE_IGNORE) as FontFile
 	if lilita != null:
-		print("[GameTheme] Lilita One loaded via ResourceLoader (cache ignored)")
+		if OS.is_debug_build():
+			print("[GameTheme] Lilita One loaded via ResourceLoader (cache ignored)")
 	else:
 		# Fallback: load_dynamic_font (the runtime API for un-imported files).
 		var ff := FontFile.new()
@@ -135,7 +136,8 @@ func _load_assets() -> void:
 		if err == OK:
 			ff.resource_path = lilita_path  # theme cache key
 			lilita = ff
-			print("[GameTheme] Lilita One loaded via load_dynamic_font()")
+			if OS.is_debug_build():
+				print("[GameTheme] Lilita One loaded via load_dynamic_font()")
 		else:
 			push_warning("[GameTheme] Lilita One failed both load paths, err=", err)
 
@@ -162,7 +164,8 @@ func _load_assets() -> void:
 		# explicit Y offset on the label rect — pixel-deterministic, per
 		# call site. See ORB_NUMERAL_Y_OFFSET in Card2D.gd.
 		font_stat = lilita
-		print("[GameTheme] font_display and font_stat set to Lilita One")
+		if OS.is_debug_build():
+			print("[GameTheme] font_display and font_stat set to Lilita One")
 	else:
 		# Final fallback to Cinzel.
 		push_warning("[GameTheme] Lilita One unavailable — using Cinzel fallback")
@@ -212,7 +215,8 @@ func _load_assets() -> void:
 		title_black.base_font = cinzel
 		title_black.variation_opentype = {"wght": 860}
 		font_title_black = title_black
-		print("[GameTheme] font_title/font_title_black set to Cinzel")
+		if OS.is_debug_build():
+			print("[GameTheme] font_title/font_title_black set to Cinzel")
 	else:
 		push_warning("[GameTheme] Cinzel unavailable — HUD falls back to display/stat font")
 		font_title = font_display
@@ -235,7 +239,8 @@ func _load_assets() -> void:
 		writ_bold.base_font = alegreya
 		writ_bold.variation_opentype = {"wght": 760}
 		font_card_body_bold = writ_bold
-		print("[GameTheme] font_card_body set to Alegreya")
+		if OS.is_debug_build():
+			print("[GameTheme] font_card_body set to Alegreya")
 	else:
 		push_warning("[GameTheme] Alegreya unavailable — card body falls back to Nunito")
 		font_card_body = font_body
@@ -249,8 +254,9 @@ func _load_assets() -> void:
 			ornate_path = new_path
 	if ResourceLoader.exists(ornate_path):
 		tex_card_frame_ornate = load(ornate_path)
-	print("[GameTheme] tex_card_frame_ornate (default) loaded from: ", ornate_path,
-		"  USE_NEW_FRAME=", USE_NEW_FRAME)
+	if OS.is_debug_build():
+		print("[GameTheme] tex_card_frame_ornate (default) loaded from: ", ornate_path,
+			"  USE_NEW_FRAME=", USE_NEW_FRAME)
 	tex_icon_sword = load("res://assets/icons/sword.png")
 	tex_icon_heart = load("res://assets/icons/heart.png")
 
@@ -530,8 +536,16 @@ func make_panel_textured(tint: Color = Color(0.18, 0.14, 0.10),
 	return s
 
 
-static func make_panel_style(bg: Color = PARCHMENT, border: Color = PARCHMENT_BORDER,
-		border_w: int = 2, corner: int = 16, shadow: bool = true) -> StyleBoxFlat:
+# The praised chart look (see make_choice_banner): dark ink body + a thin
+# tan/gilt rule + small ~4px corners + a deep drop shadow. Every "UI-kit" panel
+# in the game routes through here, so this is THE place the document aesthetic
+# is enforced. `parchment = true` adds the extra paper character — a faint warm
+# grain wash baked into bg_color and a second-tone inner keyline via a brighter
+# top/left bias — for tiles that should read as a torn document, not a button.
+static func make_panel_style(bg: Color = Color(0.06, 0.05, 0.042, 0.96),
+		border: Color = Color(0.60, 0.51, 0.34, 0.90),
+		border_w: int = 1, corner: int = 4, shadow: bool = true,
+		parchment: bool = false) -> StyleBoxFlat:
 	var s := StyleBoxFlat.new()
 	s.bg_color = bg
 	s.border_color = border
@@ -544,13 +558,24 @@ static func make_panel_style(bg: Color = PARCHMENT, border: Color = PARCHMENT_BO
 	s.corner_radius_bottom_left = corner
 	s.corner_radius_bottom_right = corner
 	if shadow:
-		s.shadow_color = Color(0, 0, 0, 0.55)
-		s.shadow_size = 6
-		s.shadow_offset = Vector2(0, 3)
+		s.shadow_color = Color(0, 0, 0, 0.65)
+		s.shadow_size = 8
+		s.shadow_offset = Vector2(0, 4)
+	if parchment:
+		# Warm the ink body a hair so it reads as aged paper rather than flat
+		# black, and lift the top edge — a subtle "lit from above" cue that
+		# makes the tile look like a physical leaf catching light, matching the
+		# card-surface convention in _build_card_surface_textures.
+		s.bg_color = bg.lerp(Color(0.16, 0.12, 0.08), 0.35)
+		s.border_color = border.lightened(0.05)
+		s.border_width_top = max(border_w, 1)
+		# A faint gilt sheen along the very top edge sells the document feel.
+		s.shadow_color = Color(0, 0, 0, 0.72)
+		s.shadow_size = 10
 	return s
 
 
-static func make_btn_style(bg: Color, border: Color = GILT, corner: int = 20) -> StyleBoxFlat:
+static func make_btn_style(bg: Color, border: Color = GILT, corner: int = 4) -> StyleBoxFlat:
 	var s := StyleBoxFlat.new()
 	s.bg_color = bg
 	s.border_color = border
@@ -587,7 +612,7 @@ func make_themed_button(text: String, bg: Color, min_size: Vector2 = Vector2(160
 	btn.add_theme_color_override("font_disabled_color", Color(0.7, 0.65, 0.55, 0.6))
 	btn.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.45))
 	btn.add_theme_constant_override("outline_size", 2)
-	var normal = make_btn_style(bg, GILT, int(min_size.y / 2.0))
+	var normal = make_btn_style(bg, GILT, 4)
 	btn.add_theme_stylebox_override("normal", normal)
 	var hover = normal.duplicate() as StyleBoxFlat
 	hover.bg_color = bg.lightened(0.15)
@@ -1686,6 +1711,74 @@ static func make_separator(color: Color = GILT, width: float = 200.0) -> CenterC
 	return center
 
 
+## Section heading in the chart's vocabulary: a centered caption flanked by two
+## tan rules with a small diamond accent — the same furniture as make_screen_title
+## but lighter, for sub-sections within a screen (e.g. the Shop's "Cards for Sale"
+## / "Relics & Services" shelf labels). Reads as a ruled heading on the page
+## instead of a stray floating Label. Returns an HBoxContainer; anchor/position it
+## like any Control.
+func make_section_divider(text: String, color: Color = GILT,
+		font_size: int = FONT_SUBHEADER, rule_width: float = 90.0) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 12)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var line_col := Color(color.r, color.g, color.b, 0.42)
+
+	var left := ColorRect.new()
+	left.custom_minimum_size = Vector2(rule_width, 1)
+	left.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	left.color = line_col
+	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(left)
+
+	var diamond_tex := load("res://assets/icons/diamond.png") as Texture2D
+	if diamond_tex != null:
+		var dl := TextureRect.new()
+		dl.texture = diamond_tex
+		dl.custom_minimum_size = Vector2(8, 8)
+		dl.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		dl.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		dl.modulate = Color(color.r, color.g, color.b, 0.55)
+		dl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		dl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		row.add_child(dl)
+
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.add_theme_font_size_override("font_size", font_size)
+	lbl.add_theme_color_override("font_color", color)
+	lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.55))
+	lbl.add_theme_constant_override("outline_size", 3)
+	if font_display:
+		lbl.add_theme_font_override("font", font_display)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(lbl)
+
+	if diamond_tex != null:
+		var dr := TextureRect.new()
+		dr.texture = diamond_tex
+		dr.custom_minimum_size = Vector2(8, 8)
+		dr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		dr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		dr.modulate = Color(color.r, color.g, color.b, 0.55)
+		dr.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		dr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		row.add_child(dr)
+
+	var right := ColorRect.new()
+	right.custom_minimum_size = Vector2(rule_width, 1)
+	right.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	right.color = line_col
+	right.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(right)
+
+	return row
+
+
 # ═══════════════════════════════════════════
 #  ICON + LABEL STAT BADGE
 # ═══════════════════════════════════════════
@@ -2114,7 +2207,7 @@ func show_deck_picker(host: Node, title: String, type_filter: String = "",
 			slot.add_child(btn)
 		if not is_instance_valid(layer):
 			return -1
-		await host.get_tree().process_frame
+		await get_tree().process_frame
 
 	if allow_cancel:
 		var cancel := make_back_button("CANCEL", Vector2(170, 44))
@@ -2125,7 +2218,7 @@ func show_deck_picker(host: Node, title: String, type_filter: String = "",
 		root.add_child(cancel)
 
 	while result["index"] == -2 and is_instance_valid(layer):
-		await host.get_tree().process_frame
+		await get_tree().process_frame
 	# Layer freed by a scene change rather than a pick → treat as dismissed.
 	if result["index"] == -2:
 		return -1
@@ -2220,7 +2313,7 @@ func show_option_picker(host: Node, title: String, options: Array) -> int:
 			vbox.add_child(dl)
 
 	while result["index"] == -2 and is_instance_valid(layer):
-		await host.get_tree().process_frame
+		await get_tree().process_frame
 	if result["index"] == -2:
 		return -1
 	return result["index"]

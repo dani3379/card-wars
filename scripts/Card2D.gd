@@ -656,6 +656,10 @@ class SphereOrb extends Control:
 # with no deck origin (tokens, curses, copies). Lets the combat draw pile carry
 # per-copy upgrades through the play→death→discard→reshuffle lifecycle.
 var deck_uid: int = -1
+# Online Skirmish: stable cross-wire handle for a board creature, issued by the
+# host (NetMatch.issue_entity_id) at placement. -1 in single-player / in hand —
+# see docs/MULTIPLAYER_SKIRMISH_PLAN.md §8.
+var entity_id: int = -1
 @export var is_opponent: bool = false
 @export var is_on_battlefield: bool = false
 # When true, the card is being rendered in a non-interactive context
@@ -1048,6 +1052,11 @@ const FIELD_MOVE_THRESHOLD := 10.0  # px the cursor must travel to start a move
 # Gate for board interaction (move-drag + floop click). Combat sets this false
 # while combat resolves / the enemy acts, so the player can't grab mid-swing.
 static var board_interactive := true
+# Sub-gate for the floop CLICK specifically. Online skirmish re-enables board
+# interaction (so the active player can reposition) but keeps floop toggles off,
+# since floop abilities aren't resolved over the wire yet — so reposition rides
+# board_interactive while floop_clicked stays suppressed here.
+static var floop_interactive := true
 var _hand_target_position := Vector2.ZERO
 var _hand_target_rotation := 0.0
 # Resting scale for hand cards. Set via set_hand_target by Combat._layout_hand
@@ -3118,8 +3127,11 @@ class WaxSeal extends Control:
 		draw_arc(center, ring_r + 1.5, TAU * 0.04, TAU * 0.36, 26,
 			Color(minf(wax.r * 1.45 + 0.06, 1.0), minf(wax.g * 1.45 + 0.06, 1.0),
 			minf(wax.b * 1.45 + 0.06, 1.0), 0.40), 1.2, true)
-		# 5 — pressed face, a touch darker so the cream numeral pops.
-		draw_circle(center, ring_r - 2.5, Color(0, 0, 0, 0.10), true, -1.0, true)
+		# 5 — pressed face, sunk darker so the light numeral pops off it. This
+		# face sits directly under the stat label on both the 56px hand seal and
+		# the 38px battlefield token; a deeper well is what lets the brightened
+		# field numeral read over dark art (see _build_orb_number_label).
+		draw_circle(center, ring_r - 2.5, Color(0, 0, 0, 0.20), true, -1.0, true)
 		# 6 — matte sheen: one soft crescent toward the light (PI..1.5PI =
 		# left → up-left → up), wide and dim — wax, not glass.
 		draw_arc(center, base_r * 0.55, PI * 1.02, PI * 1.55, 18,
@@ -3183,6 +3195,54 @@ class ParchmentPlate extends Control:
 			draw_line(p, p + dir * (3.0 + rng.randf() * 7.0),
 				Color(stain.r, stain.g, stain.b, 0.035 + rng.randf() * 0.045),
 				1.0, true)
+
+
+## Engraved device for the no-art plate: a small manuscript sigil drawn in
+## dim gilt ink on the parchment — a compass-rosette for spells, a crossed-
+## blade roundel for creatures. Replaces the old giant near-black initial
+## letter (which read as a broken placeholder); a quiet centered device reads
+## as intentional chart furniture instead. Deterministic, no letters.
+class EmptyPlateSigil extends Control:
+	var is_spell_sigil := false
+	var ink := Color(0.82, 0.66, 0.30, 0.42)   # dim gilt
+
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		var min_dim := minf(size.x, size.y)
+		if min_dim <= 12.0:
+			return
+		var c := size * 0.5
+		var r := min_dim * 0.34
+		var shadow := Color(0.10, 0.07, 0.03, 0.30)
+		# Twin engraved rings (shadow first, then the gilt line atop) — the
+		# "set into the page" look the rest of the card's metal furniture uses.
+		for ring_r in [r, r * 0.62]:
+			draw_arc(c + Vector2(0, 1), ring_r, 0, TAU, 48, shadow, 1.6, true)
+			draw_arc(c, ring_r, 0, TAU, 48, ink, 1.4, true)
+		if is_spell_sigil:
+			# Compass rosette: eight rays, the cardinals longer.
+			for i in range(8):
+				var a := TAU * float(i) / 8.0 - PI * 0.5
+				var inner := r * 0.18
+				var outer := r * (0.92 if i % 2 == 0 else 0.66)
+				var d := Vector2(cos(a), sin(a))
+				draw_line(c + d * inner + Vector2(0, 1),
+					c + d * outer + Vector2(0, 1), shadow, 1.6, true)
+				draw_line(c + d * inner, c + d * outer, ink, 1.4, true)
+			draw_circle(c, r * 0.12, ink, true, -1.0, true)
+		else:
+			# Crossed blades: two slim quills/swords through the roundel.
+			for ang in [PI * 0.25, -PI * 0.25]:
+				var d := Vector2(cos(ang), sin(ang))
+				var p0 := c - d * (r * 0.88)
+				var p1 := c + d * (r * 0.88)
+				draw_line(p0 + Vector2(0, 1), p1 + Vector2(0, 1),
+					shadow, 2.0, true)
+				draw_line(p0, p1, ink, 1.8, true)
+			draw_circle(c + Vector2(0, 1), r * 0.16, shadow, true, -1.0, true)
+			draw_circle(c, r * 0.14, ink, true, -1.0, true)
 
 # ═══════════════════════════════════════════
 
@@ -3285,6 +3345,53 @@ func _kw_stamp_row(root: Control, meds: Array, metal: Color) -> void:
 		glyph.modulate = GameTheme.GILT_BRIGHT
 		glyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		stamp.add_child(glyph)
+
+
+## Short printed keyword reminders for the hand card. New players read+drag —
+## they don't hover the bottom-margin glyphs to learn what Swift/Armored/etc.
+## do. So we print a compact one-liner per combat keyword right under the rules
+## text, ON the paper. Kept short (card-sized, not the full hover tooltip) and
+## re-inked dark-bronze (the tooltip gold washes out on parchment). We SKIP any
+## keyword already named in the desc text (royal_guard/vampire_lord weave them
+## in) so the reminder never duplicates the rules line above it. Returns "" when
+## there is nothing left to remind. BBCode, for the desc RichTextLabel.
+const _KW_REMINDER: Dictionary = {
+	"armored":    "Takes 1 less from each hit.",
+	"swift":      "Strikes first, before the foe can.",
+	"ranged":     "Hits the back row first.",
+	"thorns":     "Hurts attackers for 1.",
+	"regenerate": "Heals 1 each round.",
+	"piercing":   "Overkill carries to the back, then face.",
+	"last_stand": "Survives a killing blow once.",
+	"poison":     "Anything it wounds dies.",
+	"shield":     "Soaks the first hit whole.",
+	"guardian":   "Nearby foes must strike it.",
+	"lifelink":   "Heals you when it deals damage.",
+	"rampage":    "Grows +1 ATK per kill.",
+	"overrun":    "+1 ATK while its lane is open.",
+	"formation":  "+1/+1 when standing beside an ally.",
+	"summon":     "Brings a 1/1 token alongside.",
+}
+
+func _chart_kw_reminder_bbcode(desc_lower: String, body_hex: String) -> String:
+	var lines: Array[String] = []
+	for k in card_data.get("keywords", []):
+		var ks := String(k)
+		if not _KW_REMINDER.has(ks):
+			continue
+		# Don't restate a keyword the rules text already names (it's colorized
+		# up there); the reminder is for the silent icon-only keywords.
+		var disp: String = KeywordEffects.KEYWORDS.get(ks, {}).get("display", ks)
+		var dl := String(disp).to_lower()
+		if dl in desc_lower or ks.replace("_", " ") in desc_lower:
+			continue
+		lines.append("[b][color=#7a4f10]%s[/color][/b]  [color=%s]%s[/color]" \
+			% [disp, body_hex, _KW_REMINDER[ks]])
+		if lines.size() >= 3:
+			break
+	if lines.is_empty():
+		return ""
+	return "\n".join(lines)
 
 
 func _build_chart_proto() -> void:
@@ -3433,22 +3540,50 @@ func _build_chart_proto() -> void:
 		art_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		art_clip.add_child(art_tex)
 	else:
-		# Sealed empty plate: ink fill + ghosted gilt monogram.
+		# Sealed empty plate: an aged-parchment field (the same paper the leaf
+		# is cut from), tooth texture, and a small engraved gilt sigil — NOT a
+		# giant near-black initial letter (that read as a broken placeholder).
+		# A quiet centered device on warm paper reads as intentional chart
+		# furniture: "no portrait drawn for this entry," not "art failed to load."
 		var ph := Panel.new()
 		ph.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		ph.set_anchors_preset(Control.PRESET_FULL_RECT)
 		var phst := StyleBoxFlat.new()
-		phst.bg_color = Color(0.118, 0.102, 0.080)
+		phst.bg_color = Color(0.808, 0.749, 0.620) if not is_curse_card \
+			else Color(0.612, 0.604, 0.522)
 		ph.add_theme_stylebox_override("panel", phst)
 		art_clip.add_child(ph)
-		var ph_name := String(card_data.get("name", "")).strip_edges()
-		var mono_ch := ph_name.substr(0, 1).to_upper() \
-			if ph_name.length() > 0 else "?"
-		var mono := _make_styled_label(mono_ch, GameTheme.font_display, 40,
-			Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.26))
-		mono.add_theme_constant_override("outline_size", 0)
-		_center_at_point(mono, Vector2(150, 100), Vector2(80, 80))
-		ph.add_child(mono)
+		# Inner ink mat line so the empty plate still reads as a mounted frame.
+		var ph_rule := Panel.new()
+		ph_rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ph_rule.set_anchors_preset(Control.PRESET_FULL_RECT)
+		ph_rule.offset_left = 4; ph_rule.offset_top = 4
+		ph_rule.offset_right = -4; ph_rule.offset_bottom = -4
+		var ph_rst := StyleBoxFlat.new()
+		ph_rst.draw_center = false
+		ph_rst.border_color = Color(0.255, 0.188, 0.118, 0.45)
+		ph_rst.set_border_width_all(1)
+		ph_rule.add_theme_stylebox_override("panel", ph_rst)
+		ph.add_child(ph_rule)
+		# Aged tooth on the empty paper (washes/foxing) so it matches the leaf.
+		var ph_tooth := ParchmentPlate.new()
+		ph_tooth.clip_contents = true
+		ph_tooth.set_anchors_preset(Control.PRESET_FULL_RECT)
+		ph_tooth.seed_text = String(card_data.get("id", "?")) + "_plate"
+		if is_curse_card:
+			ph_tooth.stain = Color(0.282, 0.318, 0.196)
+			ph_tooth.fox = Color(0.255, 0.282, 0.137)
+			ph_tooth.strength = 1.4
+		ph.add_child(ph_tooth)
+		# The engraved device, centered on the plate.
+		var sigil := EmptyPlateSigil.new()
+		sigil.is_spell_sigil = is_sp
+		if is_curse_card:
+			sigil.ink = Color(0.45, 0.46, 0.34, 0.55)
+		sigil.set_anchors_preset(Control.PRESET_FULL_RECT)
+		sigil.offset_left = 20; sigil.offset_top = 16
+		sigil.offset_right = -20; sigil.offset_bottom = -16
+		ph.add_child(sigil)
 	if GameTheme.tex_card_vignette:
 		# Inner shadow so the painting reads mounted INTO the board.
 		var avg := TextureRect.new()
@@ -5068,12 +5203,19 @@ func _build_orb_number_label(text: String, font_sz: int,
 		lbl.add_theme_font_override("font", GameTheme.font_body)
 	lbl.add_theme_font_size_override("font_size", font_sz)
 	if light_face:
-		lbl.add_theme_color_override("font_color", Color(1, 0.98, 0.90))
+		# Battlefield stat numerals must read over dark art on a dark table —
+		# the whole "can't evaluate the trade" problem. Stamp them the way the
+		# floating combat numbers are stamped (pure-white face + a heavy fully
+		# opaque black outline, ~6px on the 26-38px float labels): the outline
+		# carries the legibility, so the fill never has to fight the wax. Scaled
+		# to the 18px seal numeral, a 5px outline + a thicker drop shadow gives
+		# the same readable-on-anything punch without going garish.
+		lbl.add_theme_color_override("font_color", Color(1, 1, 1, 1))
 		lbl.add_theme_color_override("font_outline_color",
-			Color(0, 0, 0, 0.98))
-		lbl.add_theme_constant_override("outline_size", 3)
+			Color(0, 0, 0, 1.0))
+		lbl.add_theme_constant_override("outline_size", 5)
 		lbl.add_theme_color_override("font_shadow_color",
-			Color(0, 0, 0, 0.55))
+			Color(0, 0, 0, 0.70))
 		lbl.add_theme_constant_override("shadow_offset_x", 1)
 		lbl.add_theme_constant_override("shadow_offset_y", 2)
 	else:
@@ -5293,6 +5435,10 @@ func take_damage_bypass_armor(amount: int) -> void:
 		update_stat_display()
 		_flash_hit()
 		return
+	# Mirror take_damage: Berserker's extra_damage ("+1 from all sources") must
+	# apply here too, or it's silently lost on Thorns/piercing/poison hits.
+	if int(card_data.get("extra_damage", 0)) > 0:
+		amount += int(card_data.extra_damage)
 	current_hp -= amount
 	if current_hp <= 0 and has_keyword("last_stand") and not last_stand_used:
 		current_hp = 1
@@ -5340,6 +5486,8 @@ func _spawn_keyword_chip(text: String, color: Color) -> void:
 func _combat_vfx_target() -> Node:
 	# The Combat scene exposes spawn_floating_number(); other scenes (gallery,
 	# bake viewport) don't, so we no-op there.
+	if not is_inside_tree():
+		return null
 	var tree := get_tree()
 	if tree == null:
 		return null
@@ -5461,7 +5609,7 @@ func _die() -> void:
 	# Stop idle bob from writing position.y each frame — it would fight the death
 	# tween (and the sacrifice rise in particular).
 	_idle_bob_enabled = false
-	if static_display or get_tree() == null:
+	if static_display or not is_inside_tree():
 		if AudioBank != null:
 			AudioBank.play_sfx("death")
 		queue_free()
@@ -5561,7 +5709,7 @@ func _ensure_lift_shadow() -> void:
 ## is pressing a seal, not inflating a balloon. Combat calls this at the end
 ## of _play_landing_pop for both player flights and enemy drop-ins.
 func play_wax_press(rest_scale: Vector2 = Vector2.ONE) -> void:
-	if static_display or get_tree() == null:
+	if static_display or not is_inside_tree():
 		return
 	pivot_offset = size * 0.5
 	var tw := create_tween()
@@ -5583,7 +5731,7 @@ func play_wax_press(rest_scale: Vector2 = Vector2.ONE) -> void:
 ## radiates out from the card edge and fades, like the halo a seal leaves
 ## in soft wax. Self-freeing.
 func _spawn_press_ring() -> void:
-	if get_tree() == null:
+	if not is_inside_tree():
 		return
 	var ring := Panel.new()
 	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -5613,7 +5761,7 @@ func play_attack_lunge() -> void:
 	# rather than numbers silently changing. Kept fast so the forward apex still
 	# lands near the combat code's LUNGE_APEX (0.09s) impact beat, and position is
 	# restored exactly so the slot's CenterContainer layout is unaffected.
-	if static_display or get_tree() == null:
+	if static_display or not is_inside_tree():
 		return
 	var dir := 1.0 if is_opponent else -1.0
 	var rest := position
@@ -5637,7 +5785,7 @@ func play_hit_recoil(push_down: bool) -> void:
 	# and pops slightly, then settles — the second half of the "collision" the
 	# attacker's lunge starts. Mirrors the lunge's position-tween approach so it
 	# coexists with idle bob the same proven way; restores to the captured rest.
-	if static_display or get_tree() == null:
+	if static_display or not is_inside_tree():
 		return
 	var dir := 1.0 if push_down else -1.0
 	var rest := position
@@ -5662,7 +5810,7 @@ func play_hit_recoil(push_down: bool) -> void:
 func _play_last_stand_flare() -> void:
 	# A bright heroic flare the instant Last Stand saves the creature at 1 HP.
 	# White overbright flash + a slow scale pulse so the clutch survival reads.
-	if static_display or get_tree() == null:
+	if static_display or not is_inside_tree():
 		return
 	var base := modulate
 	var rest_scale := scale
@@ -5739,8 +5887,9 @@ func set_danger_marked(on: bool, amount: int = 0) -> void:
 var _threat_flagged: bool = false
 var _threat_tween: Tween = null
 var _threat_overlay: Control = null
+var _threat_dmg_label: Label = null
 
-func set_threat_flagged(on: bool) -> void:
+func set_threat_flagged(on: bool, damage: int = 0) -> void:
 	# JUICE — a pulsing crimson outline on enemy attackers that pose an immediate
 	# threat (will smash the player's face this round, or swing a heavy blow).
 	# Lets the player SEE danger instead of reading it out of the numbers. This
@@ -5797,24 +5946,26 @@ func set_threat_flagged(on: bool) -> void:
 			sb.shadow_size = 5
 			ring.add_theme_stylebox_override("panel", sb)
 			ov.add_child(ring)
-			# Shape read, not just hue: a small sword badge at the top edge so
-			# the threat still lands when the whole scene is graded red.
+			# Shape AND number, not just hue: a danger chip at the top edge with a
+			# sword glyph + the predicted hit. Dark fill with a warning-amber edge
+			# so it reads on ANY mood grade (infernal red, noir, frost) — a red-on-
+			# red board can't swallow a near-black chip with a bright numeral.
 			var badge := Panel.new()
 			badge.anchor_left = 0.5
 			badge.anchor_right = 0.5
 			badge.anchor_top = 0.0
 			badge.anchor_bottom = 0.0
-			badge.offset_left = -11
-			badge.offset_right = 11
-			badge.offset_top = -10
-			badge.offset_bottom = 12
+			badge.offset_left = -23
+			badge.offset_right = 23
+			badge.offset_top = -12
+			badge.offset_bottom = 14
 			badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			var bsb := StyleBoxFlat.new()
-			bsb.bg_color = Color(0.10, 0.035, 0.03, 0.96)
-			bsb.border_color = Color(1.0, 0.30, 0.22, 0.95)
-			bsb.set_border_width_all(1)
-			bsb.set_corner_radius_all(999)
-			bsb.shadow_color = Color(0, 0, 0, 0.5)
+			bsb.bg_color = Color(0.08, 0.03, 0.025, 0.97)
+			bsb.border_color = Color(1.0, 0.55, 0.25, 0.96)
+			bsb.set_border_width_all(2)
+			bsb.set_corner_radius_all(8)
+			bsb.shadow_color = Color(0, 0, 0, 0.55)
 			bsb.shadow_size = 3
 			badge.add_theme_stylebox_override("panel", bsb)
 			ov.add_child(badge)
@@ -5823,16 +5974,46 @@ func set_threat_flagged(on: bool) -> void:
 				sw.texture = GameTheme.tex_icon_sword
 				sw.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 				sw.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-				sw.set_anchors_preset(Control.PRESET_FULL_RECT)
+				sw.anchor_left = 0.0
+				sw.anchor_right = 0.0
+				sw.anchor_top = 0.0
+				sw.anchor_bottom = 1.0
 				sw.offset_left = 4
-				sw.offset_top = 4
-				sw.offset_right = -4
-				sw.offset_bottom = -4
-				sw.modulate = Color(1.0, 0.45, 0.32)
+				sw.offset_right = 22
+				sw.offset_top = 3
+				sw.offset_bottom = -3
+				sw.modulate = Color(1.0, 0.62, 0.42)
 				sw.mouse_filter = Control.MOUSE_FILTER_IGNORE
 				badge.add_child(sw)
+			# The predicted hit — bold and bright, updated on every refresh below.
+			var dmg_lbl := Label.new()
+			dmg_lbl.anchor_left = 0.0
+			dmg_lbl.anchor_right = 1.0
+			dmg_lbl.anchor_top = 0.0
+			dmg_lbl.anchor_bottom = 1.0
+			dmg_lbl.offset_left = 20
+			dmg_lbl.offset_right = -3
+			dmg_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			dmg_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			dmg_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			if GameTheme.font_stat != null:
+				dmg_lbl.add_theme_font_override("font", GameTheme.font_stat)
+			dmg_lbl.add_theme_font_size_override("font_size", 17)
+			dmg_lbl.add_theme_color_override("font_color", Color(1.0, 0.93, 0.72))
+			dmg_lbl.add_theme_color_override("font_outline_color", Color(0.0, 0.0, 0.0, 0.95))
+			dmg_lbl.add_theme_constant_override("outline_size", 4)
+			badge.add_child(dmg_lbl)
+			_threat_dmg_label = dmg_lbl
 			_threat_overlay = ov
 		_threat_overlay.visible = true
+		# Refresh the predicted-hit numeral each time the flag is (re)applied — the
+		# cached overlay otherwise keeps a stale number when the attacker's ATK changes.
+		if is_instance_valid(_threat_dmg_label):
+			if damage > 0:
+				_threat_dmg_label.text = str(damage)
+				_threat_dmg_label.visible = true
+			else:
+				_threat_dmg_label.visible = false
 		if _threat_tween != null and _threat_tween.is_valid():
 			_threat_tween.kill()
 		# Gentler pulse floor — the old 0.35 trough strobed against warm art.
@@ -5931,7 +6112,7 @@ func set_display_cost(effective_cost: int) -> void:
 func play_floop_pulse() -> void:
 	# Golden flash + small scale punch when a floop ability resolves on this card.
 	# Lets the player track which creature just acted in a busy board state.
-	if static_display or get_tree() == null:
+	if static_display or not is_inside_tree():
 		return
 	if AudioBank != null:
 		AudioBank.play_sfx("floop")
@@ -6043,7 +6224,7 @@ func _gui_input(event: InputEvent) -> void:
 				# Combat didn't wire (e.g. tokens) fall through instead of lifting
 				# off into a handler-less drag.
 				_begin_field_grab(event.global_position)
-			elif is_on_battlefield and not is_opponent and has_floop():
+			elif floop_interactive and is_on_battlefield and not is_opponent and has_floop():
 				floop_clicked.emit()
 			elif not is_on_battlefield:
 				_start_drag(event.global_position)
@@ -6170,7 +6351,7 @@ func _end_field_grab(_mouse_pos: Vector2) -> void:
 		_field_lifted = false
 		drag_ended.emit()
 		field_move_dropped.emit(global_position + size * 0.5)
-	elif has_floop() and not is_opponent:
+	elif floop_interactive and has_floop() and not is_opponent:
 		# A press that never travelled is a floop toggle, not a move.
 		floop_clicked.emit()
 
@@ -6376,11 +6557,15 @@ func _build_detail() -> PanelContainer:
 	# ── On-enter / on-death / floop descriptions ──
 	var extra_lines: Array[String] = []
 	if card_data.has("on_enter"):
-		extra_lines.append("On Enter: " + card_data.get("desc", ""))
+		var oe_desc := str(card_data.get("desc", ""))
+		if oe_desc.begins_with("On-Enter") or oe_desc.begins_with("On Enter"):
+			extra_lines.append(oe_desc)
+		else:
+			extra_lines.append("On-Enter: " + oe_desc)
 	if card_data.has("on_death"):
 		var od = card_data.on_death
 		if od.has("type"):
-			extra_lines.append("On Death: %s" % _describe_trigger(od))
+			extra_lines.append("On-Death: %s" % _describe_trigger(od))
 	if card_data.has("floop"):
 		var fl = card_data.floop
 		extra_lines.append("Floop: %s" % _describe_trigger(fl))
@@ -6427,23 +6612,23 @@ func _describe_trigger(data: Dictionary) -> String:
 	var t = data.get("type", "")
 	var v = data.get("value", 0)
 	match t:
-		"damage_opposing": return "Deal %d to opposing creature" % v
-		"damage_random_player": return "Deal %d to random friendly creature" % v
-		"damage_all_enemies": return "Deal %d to all enemy creatures" % v
-		"damage_face": return "Deal %d to enemy hero" % v
+		"damage_opposing": return "Deal %d damage to the opposing creature" % v
+		"damage_random_player": return "Deal %d damage to a random friendly creature" % v
+		"damage_all_enemies": return "Deal %d damage to all enemy creatures" % v
+		"damage_face": return "Deal %d damage to enemy face" % v
 		"draw": return "Draw %d card(s)" % v
 		"gain_gold": return "Gain %d gold" % v
-		"debuff_opposing_atk": return "Reduce opposing ATK by %d" % v
+		"debuff_opposing_atk": return "The opposing creature gets -%d ATK" % v
 		"discard_random": return "Discard %d random card(s)" % v
-		"damage_opposing_lane": return "Deal %d to opposing lane" % v
+		"damage_opposing_lane": return "Deal %d damage to the opposing lane" % v
 		"summon": return "Summon a %d/%d token" % [data.get("atk", 1), data.get("hp", 1)]
 		"bonus_mana": return "Gain %d bonus Command" % v
-		"debuff_all_player_atk": return "Reduce all friendly ATK by %d" % v
-		"damage_adjacent": return "Deal %d to adjacent creatures" % v
-		"damage_any": return "Deal %d to any target" % v
+		"debuff_all_player_atk": return "All friendlies get -%d ATK" % v
+		"damage_adjacent": return "Deal %d damage to adjacent creatures" % v
+		"damage_any": return "Deal %d damage to any target" % v
 		"summon_random": return "Summon a random creature"
 		"kill_adjacent_summon": return "Kill adjacent, summon in its place"
-		"steal_atk": return "Steal %d ATK from opposing" % v
-		"heal_all_friendly": return "Heal all friendly creatures %d" % v
+		"steal_atk": return "Steal %d ATK from the opposing creature" % v
+		"heal_all_friendly": return "Heal all friendlies %d HP" % v
 		"summon_token": return "Summon a token creature"
 	return t.replace("_", " ").capitalize()

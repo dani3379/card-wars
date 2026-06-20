@@ -15,7 +15,17 @@ const DEATH_REFRAINS := [
 
 
 func _ready() -> void:
-	GameTheme.add_atmosphere(self, "game_over")
+	# Lift the crushed background. Two crushers were stacking: the .tscn's
+	# Background.self_modulate (≈0.2 brightness) and the "game_over" mood's
+	# heavy vignette. Raise the modulate and soften the vignette/gradient so the
+	# painted end-of-run art actually reads behind the summary panel.
+	var bg := get_node_or_null("Background")
+	if bg != null:
+		bg.self_modulate = Color(0.46, 0.42, 0.46, 1.0)
+	GameTheme.add_atmosphere(self, "game_over", true, {
+		"vignette": 0.40,
+		"grad_outer": Color(0.02, 0.01, 0.03, 0.50),
+	})
 	AudioBank.play_music("victory" if RunState.hero_hp > 0 else "defeat")
 
 	# Apply display font to title
@@ -64,6 +74,12 @@ func _ready() -> void:
 	$Stats.text = "Total Runs %d  •  Victories %d" % [
 		MetaState.total_runs, MetaState.total_victories,
 	]
+	# The .tscn ships this at 14px / dim grey — too faint to read over the lifted
+	# background. Bump to a legible gilt caption.
+	$Stats.add_theme_font_size_override("font_size", 17)
+	$Stats.add_theme_color_override("font_color", Color(0.90, 0.80, 0.52, 1.0))
+	$Stats.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.6))
+	$Stats.add_theme_constant_override("outline_size", 3)
 
 	_build_run_summary()
 
@@ -115,23 +131,16 @@ func _build_run_summary() -> void:
 	var panel := PanelContainer.new()
 	panel.name = "RunSummaryPanel"
 	panel.custom_minimum_size = Vector2(1280, 0)
-	var s := StyleBoxFlat.new()
-	s.bg_color = Color(0.12, 0.09, 0.07, 0.92)
-	s.border_color = Color(0.83, 0.74, 0.54, 0.85)  # GILT
-	s.border_width_left = 2
-	s.border_width_right = 2
-	s.border_width_top = 2
-	s.border_width_bottom = 2
-	s.corner_radius_top_left = 14
-	s.corner_radius_top_right = 14
-	s.corner_radius_bottom_left = 14
-	s.corner_radius_bottom_right = 14
+	# Chart-look document plate (dark ink body + tan rule + small corners +
+	# shadow) via the shared helper, instead of the old flat rounded rect.
+	# make_panel_style returns a StyleBoxFlat, so we add the content margins it
+	# doesn't expose afterward.
+	var s := GameTheme.make_panel_style(
+		Color(0.055, 0.048, 0.040, 0.94), GameTheme.GILT, 1, 4, true)
 	s.content_margin_left = 28
 	s.content_margin_right = 28
 	s.content_margin_top = 16
 	s.content_margin_bottom = 18
-	s.shadow_size = 14
-	s.shadow_color = Color(0, 0, 0, 0.5)
 	panel.add_theme_stylebox_override("panel", s)
 	# Top-anchored at y=315 so it sits under the repositioned Stats label
 	# (y≈275-305) with headroom for the BackBtn at y≈800.
@@ -170,7 +179,7 @@ func _build_run_summary() -> void:
 		_add_separator(col)
 		var mhead := _make_summary_label(
 			"MUTATORS SURVIVED  (%d)" % RunState.mutators_survived.size(),
-			14, Color(0.83, 0.74, 0.54, 0.85))
+			16, Color(0.90, 0.80, 0.56, 1.0))
 		mhead.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		col.add_child(mhead)
 
@@ -194,7 +203,7 @@ func _build_run_summary() -> void:
 	if RunState.relics.size() > 0:
 		_add_separator(col)
 		var rel_head := _make_summary_label("RELICS  (%d)" % RunState.relics.size(),
-			14, Color(0.83, 0.74, 0.54, 0.85))
+			16, Color(0.90, 0.80, 0.56, 1.0))
 		rel_head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		col.add_child(rel_head)
 
@@ -216,7 +225,7 @@ func _build_run_summary() -> void:
 		_add_separator(col)
 		var deck_head := _make_summary_label(
 			"DECK  (%d cards)" % RunState.deck.size(),
-			14, Color(0.83, 0.74, 0.54, 0.85))
+			16, Color(0.90, 0.80, 0.56, 1.0))
 		deck_head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		col.add_child(deck_head)
 
@@ -342,10 +351,10 @@ func _stat_chip(label: String, value: String) -> VBoxContainer:
 	var box := VBoxContainer.new()
 	box.alignment = BoxContainer.ALIGNMENT_CENTER
 	box.add_theme_constant_override("separation", 2)
-	var lbl := _make_summary_label(label, 12, Color(0.62, 0.58, 0.52, 0.92))
+	var lbl := _make_summary_label(label, 14, Color(0.82, 0.76, 0.62, 1.0))
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(lbl)
-	var val := _make_summary_label(value, 22, Color(1.0, 0.85, 0.45))
+	var val := _make_summary_label(value, 26, Color(1.0, 0.86, 0.46))
 	val.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(val)
 	return box

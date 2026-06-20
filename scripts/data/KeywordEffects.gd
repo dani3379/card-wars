@@ -3,7 +3,7 @@ extends Node
 ## Combat.gd calls dispatch_* hooks. Display helpers used by Card2D.
 
 const KEYWORDS: Dictionary = {
-	"armored":    {"display": "Armored",     "desc": "Takes 1 less damage from each creature attack (minimum 1)."},
+	"armored":    {"display": "Armored",     "desc": "Takes 1 less damage from each hit (minimum 1)."},
 	"swift":      {"display": "Swift",       "desc": "Attacks in the Swift pre-phase, before normal combat, while opposing creatures can't strike back."},
 	"ranged":     {"display": "Ranged",      "desc": "Attacks a random back-row enemy first, or the front row if the back is empty. Ignores blocking."},
 	"thorns":     {"display": "Thorns",      "desc": "Deals 1 damage back to each creature that attacks this."},

@@ -1,5 +1,5 @@
 extends Node
-## HeroDB.gd — autoload. 4 starter heroes (StS-style: each is a deck + 1 mild
+## HeroDB.gd — autoload. 5 starter heroes (StS-style: each is a deck + 1 mild
 ## signature relic). Picked at the start of a run, before the map opens.
 ##
 ## Each hero entry:
@@ -14,9 +14,10 @@ const HEROES: Dictionary = {
 		"name": "Raider",
 		"tagline": "Burn them out fast.",
 		"lore": "You don't outlive the road; you outrun it.",
-		"desc": "Aggressive 1-cost rush. Goblins and Ratlings hit before the wall goes up.",
+		"desc": "Aggressive Swift rush. Lookouts and Ratlings strike in the pre-phase, before the wall goes up.",
 		"deck": [
-			"goblin", "goblin", "goblin", "goblin",
+			"goblin", "goblin",
+			"lookout", "lookout",
 			"ratling", "ratling",
 			"brute", "brute",
 			"fireball", "fireball",
@@ -59,11 +60,11 @@ const HEROES: Dictionary = {
 		"name": "Pyromancer",
 		"tagline": "The spells do the work.",
 		"lore": "You started this with fire. You see no reason to stop now.",
-		"desc": "Half the deck is burn. Hexblades grow with every spell you cast while Fireball and Strike close it out.",
+		"desc": "Half the deck is burn. Ranged Hexblades and Ravens snipe from the back row — Hexblade grows with every spell — while Fireball and Strike close it out.",
 		"deck": [
 			"fireball", "fireball", "fireball",
 			"strike", "strike", "strike",
-			"goblin", "goblin",
+			"raven", "raven",
 			"hexblade", "hexblade",
 		],
 		"relic": "worn_spellbook",

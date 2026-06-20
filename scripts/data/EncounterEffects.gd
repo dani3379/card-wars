@@ -69,6 +69,10 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 		"formation_lockstep":
 			# THE STALWART phase 2 — the drill continues, the front armors up.
 			formation_drill_tick(ctx, true)
+		"formation_muster":
+			# THE STALWART (act 1 gate) — a gentler muster: front rank only, from
+			# round 3. Same growing-wall identity at act-1 intensity (see front_only).
+			formation_drill_tick(ctx, false, true)
 		"throne_husks":
 			# Amalgam finale phase 1 — the burned kingdoms' dead trickle back
 			# as Swift chaff. Skips the setup round like every engine.
@@ -353,11 +357,17 @@ static func has_encounter_passive_keyword(ctx, card, keyword: String) -> bool:
 ## round 2 (engines must fire by round 2 — CONQUEST_REDESIGN.md §15.2).
 ## Lockstep (phase 2) additionally hard-grants Armored to the front row via
 ## the keywords array so the armor shows on the card chips.
-static func formation_drill_tick(ctx, lockstep: bool) -> void:
-	if ctx.round_number < 2:
+static func formation_drill_tick(ctx, lockstep: bool, front_only := false) -> void:
+	# front_only = the gentler act-1 "muster" cadence: only the front rank drills
+	# (the back row is queue space, not part of the growing wall) and it starts a
+	# round later, so the act-1 gate isn't carrying the act-3 finale's full
+	# compounding snowball. The act-3 amalgams/ascendants keep the both-row,
+	# round-2 version below.
+	if ctx.round_number < (3 if front_only else 2):
 		return
 	var grew := false
-	for row in [ctx.ROW_FRONT, ctx.ROW_BACK]:
+	var rows: Array = [ctx.ROW_FRONT] if front_only else [ctx.ROW_FRONT, ctx.ROW_BACK]
+	for row in rows:
 		var arr: Array = ctx._row_array(true, row)
 		for i in arr.size():
 			var c = arr[i]

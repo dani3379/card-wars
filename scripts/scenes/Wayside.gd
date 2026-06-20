@@ -43,7 +43,19 @@ func _ready() -> void:
 	if not RunState.run_active:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
-	GameTheme.add_atmosphere(self, "event")
+	# Lift the painted background: the scene's Background was crushed to ~0.30
+	# self_modulate AND then the atmosphere overlay (event mood, vignette 0.50 +
+	# outer-alpha 0.65) stacked on top, leaving the forest art near-black. Raise
+	# the node back toward the Shop's 0.5 and soften the atmosphere so the
+	# painting actually reads behind the document tiles.
+	var bg := get_node_or_null("Background")
+	if bg != null:
+		bg.self_modulate = Color(0.62, 0.62, 0.60, 1.0)
+	GameTheme.add_atmosphere(self, "event", true, {
+		"vignette": 0.38,
+		"grad_inner": Color(0.08, 0.05, 0.12, 0.16),
+		"grad_outer": Color(0.02, 0.01, 0.05, 0.46),
+	})
 	AudioBank.play_music("event")
 	_verb = RunState.current_wayside_id
 	if _verb == "":
@@ -95,44 +107,108 @@ func _add_header(title_text: String, flavor: String) -> void:
 	add_child(sub)
 
 
-## A parchment tile choice — headline in gold, payload line in ivory. The
-## whole panel is the click target; `enabled = false` renders it dimmed with
-## the reason it's closed (no dead rewards, but no hidden options either).
+## A parchment tile choice in the map screen's chart vocabulary — an inked
+## document tile (dark ink body + tan rule + small corners + deep shadow), with
+## an engraved sigil column, the headline in gilt over a short accent rule, and
+## the payload line below. Composition mirrors make_choice_banner so the road's
+## stops read like the rest screen's choices, not flat rounded buttons. The whole
+## tile is one click target; `enabled = false` renders it dimmed (no dead
+## rewards, but no hidden options either). `icon_path` may be "" — falls back to
+## an engraved glyph from the headline's first character.
 func _make_tile(headline: String, payload: String, on_press: Callable,
-		enabled: bool = true) -> Button:
+		enabled: bool = true, icon_path: String = "") -> Button:
 	var btn := Button.new()
 	btn.flat = false
 	btn.focus_mode = Control.FOCUS_NONE
 	btn.custom_minimum_size = Vector2(560, 96)
-	btn.add_theme_stylebox_override("normal", GameTheme.make_panel_style())
-	btn.add_theme_stylebox_override("hover",
-		GameTheme.make_panel_style(GameTheme.PARCHMENT, GameTheme.GILT_BRIGHT))
-	btn.add_theme_stylebox_override("pressed", GameTheme.make_panel_style())
-	btn.add_theme_stylebox_override("disabled", GameTheme.make_panel_style())
+	# Parchment-variant chart panel: dark ink body, tan rule, ~4px corners, deep
+	# shadow — the praised make_choice_banner look, enforced via the shared helper.
+	btn.add_theme_stylebox_override("normal",
+		GameTheme.make_panel_style(Color(0.055, 0.048, 0.040, 0.96),
+			Color(0.60, 0.51, 0.34, 0.90), 1, 4, true, true))
+	var hover_style := GameTheme.make_panel_style(Color(0.085, 0.070, 0.052, 0.97),
+		GameTheme.GILT_BRIGHT, 1, 4, true, true)
+	btn.add_theme_stylebox_override("hover", hover_style)
+	btn.add_theme_stylebox_override("pressed",
+		GameTheme.make_panel_style(Color(0.045, 0.038, 0.032, 0.96),
+			Color(0.60, 0.51, 0.34, 0.90), 1, 4, true, true))
+	btn.add_theme_stylebox_override("disabled",
+		GameTheme.make_panel_style(Color(0.05, 0.045, 0.04, 0.85),
+			Color(0.40, 0.34, 0.22, 0.55), 1, 4, true, true))
 	if enabled:
 		btn.pressed.connect(on_press)
 	else:
 		btn.disabled = true
 		btn.modulate = Color(1, 1, 1, 0.45)
 
+	# Body: HBox = [engraved sigil column | text column], matching make_choice_banner.
+	var hbox := HBoxContainer.new()
+	hbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hbox.offset_left = 18
+	hbox.offset_right = -18
+	hbox.offset_top = 10
+	hbox.offset_bottom = -10
+	hbox.add_theme_constant_override("separation", 14)
+	hbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(hbox)
+
+	var icon_box := Control.new()
+	icon_box.custom_minimum_size = Vector2(52, 52)
+	icon_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	icon_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(icon_box)
+	if icon_path != "" and ResourceLoader.exists(icon_path):
+		# Engraved-sigil treatment: drop shadow + parchment tint, like the map legend.
+		var icon_tex: Texture2D = load(icon_path)
+		for layer in range(2):
+			var tex := TextureRect.new()
+			tex.texture = icon_tex
+			tex.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+			tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+			if layer == 0:
+				for prop in ["offset_left", "offset_top", "offset_right", "offset_bottom"]:
+					tex.set(prop, 2.0)
+				tex.modulate = Color(0, 0, 0, 0.55)
+			else:
+				tex.modulate = Color(0.82, 0.74, 0.56)
+			tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			icon_box.add_child(tex)
+	else:
+		var glyph := GameTheme.make_label(headline.left(1), 38, Color(0.82, 0.74, 0.56), true)
+		glyph.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		glyph.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		glyph.set_anchors_preset(Control.PRESET_FULL_RECT)
+		if GameTheme.font_display:
+			glyph.add_theme_font_override("font", GameTheme.font_display)
+		glyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		icon_box.add_child(glyph)
+
 	var vbox := VBoxContainer.new()
-	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
-	vbox.offset_left = 20
-	vbox.offset_right = -20
-	vbox.offset_top = 12
-	vbox.offset_bottom = -12
-	vbox.add_theme_constant_override("separation", 6)
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	vbox.add_theme_constant_override("separation", 4)
 	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
 	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	btn.add_child(vbox)
+	hbox.add_child(vbox)
 
-	var head := GameTheme.make_label(headline, 21, GameTheme.KEYWORD_GOLD)
+	var head := GameTheme.make_label(headline, 21, GameTheme.KEYWORD_GOLD, true)
 	head.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vbox.add_child(head)
+
+	# Short gilt rule under the headline — the chart's ruled furniture.
+	var rule := ColorRect.new()
+	rule.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.70)
+	rule.custom_minimum_size = Vector2(40, 2)
+	rule.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(rule)
+
 	if payload != "":
 		var body := GameTheme.make_label(payload, 15, GameTheme.IVORY)
 		body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		body.custom_minimum_size = Vector2(520, 0)
+		body.custom_minimum_size = Vector2(440, 0)
 		body.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		vbox.add_child(body)
 	return btn
@@ -445,6 +521,10 @@ func _build_scales_sell() -> void:
 
 
 func _on_scales_sell_pick(deck_index: int) -> void:
+	# Deck floor of 1 — the quartermaster won't buy your last card off you.
+	if RunState.deck.size() <= 1:
+		_show_result("He weighs it, then sets it back in your hands. \"Sell me your last? No. March on.\"")
+		return
 	var card_id: String = RunState.deck[deck_index]
 	var data = CardDB.get_card_data(card_id)
 	var price := _sell_price(card_id)
@@ -456,12 +536,20 @@ func _on_scales_sell_pick(deck_index: int) -> void:
 
 
 func _on_scales_potion() -> void:
+	# Belt-and-suspenders: the tile is built disabled when unaffordable or the
+	# belt is full, but guard the handler too so a stale tile can't push gold
+	# negative or charge for a potion the full belt rejects.
+	if RunState.gold < SCALE_POTION_COST:
+		return
+	if not RunState.add_potion("healing"):
+		return
 	RunState.gold -= SCALE_POTION_COST
-	RunState.add_potion("healing")
 	_show_result("Paid %d gold. The draught is the colour of a bruise and smells worse. It will work." % SCALE_POTION_COST)
 
 
 func _on_scales_meal() -> void:
+	if RunState.gold < SCALE_MEAL_COST:
+		return
 	RunState.gold -= SCALE_MEAL_COST
 	RunState.heal_hero(SCALE_MEAL_HEAL)
 	_show_result("Paid %d gold. Healed %d HP. The stew has been simmering since the last war and is better for it." \

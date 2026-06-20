@@ -147,7 +147,7 @@ func _build_ui() -> void:
 	if faction != "":
 		var fname: String = String(HeroDB.faction_info(faction).get("name", ""))
 		if fname != "":
-			flavor = "Word of your claim spreads through %s. Three banners offer their service — take one, no charge." % fname
+			flavor = "Word of your claim spreads through %s. Banners offer their service — take one, no charge." % fname
 	var sub = GameTheme.make_label(flavor, GameTheme.FONT_SUBHEADER, GameTheme.IVORY)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	outer.add_child(sub)

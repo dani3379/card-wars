@@ -230,7 +230,7 @@ func _add_hero_silhouette() -> void:
 func _add_choice_rest(row: HBoxContainer) -> void:
 	var disabled_reason := ""
 	if RunState.has_downside("no_rest_heal"):
-		disabled_reason = "Blocked by Coffee Dripper."
+		disabled_reason = "Blocked by Hairshirt."
 	elif RunState.hero_hp >= RunState.hero_max_hp:
 		disabled_reason = "Already at full health."
 	# Two-line banner body: hero-flavored line + mechanical readout. Players
@@ -246,7 +246,7 @@ func _add_choice_rest(row: HBoxContainer) -> void:
 func _add_choice_upgrade(row: HBoxContainer) -> void:
 	var disabled_reason := ""
 	if RunState.has_downside("no_upgrade"):
-		disabled_reason = "Blocked by Fusion Hammer."
+		disabled_reason = "Blocked by Cracked Anvil."
 	else:
 		var any_upgradeable := false
 		for i in range(RunState.deck.size()):
@@ -274,7 +274,7 @@ func _add_choice_reforge_if_available(row: HBoxContainer) -> void:
 	if RunState.whetstone_used_this_act:
 		disabled_reason = "Already used this act."
 	elif RunState.has_downside("no_upgrade"):
-		disabled_reason = "Blocked by Fusion Hammer."
+		disabled_reason = "Blocked by Cracked Anvil."
 	else:
 		var upgradeable_count := 0
 		for i in range(RunState.deck.size()):

@@ -17,7 +17,12 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
 
-	GameTheme.add_atmosphere(self, "reward")
+	# Lift the crushed vignette/gradient so the painted spoils art reads behind
+	# the document tiles (the base "reward" mood crushes it near black).
+	GameTheme.add_atmosphere(self, "reward", true, {
+		"vignette": 0.30,
+		"grad_outer": Color(0.03, 0.02, 0.02, 0.42),
+	})
 	# Reward continues whatever combat music faded out; if no track is loaded,
 	# the map track keeps quiet — no separate "reward" music asset needed.
 	var node_type = RunState.current_node_type
@@ -73,10 +78,8 @@ func _build_ui() -> void:
 
 	# Relic choices
 	if _is_elite_reward and _relic_choices.size() > 0:
-		var relic_title = GameTheme.make_label("Choose a Relic",
-			GameTheme.FONT_SUBHEADER, GameTheme.KEYWORD_GOLD)
-		relic_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		outer.add_child(relic_title)
+		# Ruled cartouche subheader (matches Treasure / Event / Recruit).
+		outer.add_child(_make_section_header("Choose a Relic"))
 
 		var relic_row = HBoxContainer.new()
 		relic_row.add_theme_constant_override("separation", 24)
@@ -85,7 +88,9 @@ func _build_ui() -> void:
 		outer.add_child(relic_row)
 
 		for id in _relic_choices:
-			var btn = GameTheme.make_relic_card(id, Color(0.55, 0.30, 0.20),
+			# Chart-look tile: dark-ink PARCHMENT body → document tile (gilt rule,
+			# small corners) with the painted relic icon on top, not a flat slab.
+			var btn = GameTheme.make_relic_card(id, GameTheme.PARCHMENT,
 				Vector2(220, 150))
 			# Shrink-center: the row owns the freed vertical space now that
 			# the card rack is gone, and HBox children stretch by default —
@@ -147,10 +152,7 @@ func _show_march_choice(next_idx: int) -> void:
 		GameTheme.GILT_BRIGHT, GameTheme.FONT_HEADER)
 	outer.add_child(title)
 
-	var sub = GameTheme.make_label("Choose whose kingdom burns next.",
-		GameTheme.FONT_SUBHEADER, GameTheme.KEYWORD_GOLD)
-	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	outer.add_child(sub)
+	outer.add_child(_make_section_header("Choose whose kingdom burns next."))
 
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 32)
@@ -169,6 +171,34 @@ func _show_march_choice(next_idx: int) -> void:
 		if click != null:
 			click.pressed.connect(_pick_march.bind(lord))
 		row.add_child(banner)
+
+
+func _make_section_header(text: String) -> HBoxContainer:
+	# A ruled subheader plaque: tan rule — gold caption — tan rule. Echoes the
+	# chart furniture (make_screen_title's divider) so the cue reads as a
+	# document heading, not a stray label. Mirrors Treasure._make_section_header.
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 12)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var rule_col := Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.28)
+	var left := ColorRect.new()
+	left.custom_minimum_size = Vector2(70, 1)
+	left.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	left.color = rule_col
+	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(left)
+	var lbl := GameTheme.make_label(text, GameTheme.FONT_SUBHEADER, GameTheme.KEYWORD_GOLD)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(lbl)
+	var right := ColorRect.new()
+	right.custom_minimum_size = Vector2(70, 1)
+	right.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	right.color = rule_col
+	right.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(right)
+	return row
 
 
 func _pick_march(lord: String) -> void:

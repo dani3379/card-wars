@@ -13,6 +13,7 @@ const EVENT_SCENE = "res://scenes/event.tscn"
 const TREASURE_SCENE = "res://scenes/treasure.tscn"
 const COLLECTION_SCENE = "res://scenes/collection.tscn"
 const CREDITS_SCENE = "res://scenes/credits.tscn"
+const SKIRMISH_SCENE = "res://scenes/net_lobby.tscn"
 
 const GILT := Color(0.83, 0.74, 0.54, 1.0)
 const GILT_BRIGHT := Color(1.0, 0.85, 0.45, 1.0)
@@ -199,11 +200,28 @@ func _rebuild_menu() -> void:
 		asc_row.add_child(plus)
 		col.add_child(asc_row)
 
+	# Online skirmish — draft-and-fight 1-v-1 with a friend. Separate from the
+	# campaign (its own lobby → draft → combat flow). See
+	# docs/MULTIPLAYER_SKIRMISH_PLAN.md.
+	var btn_skirmish := _make_menu_button("SKIRMISH (ONLINE)",
+		Color(0.20, 0.28, 0.42), MENU_FONT, MENU_H)
+	btn_skirmish.pressed.connect(func():
+		GameTheme.fade_out_then_change_scene(self, SKIRMISH_SCENE))
+	col.add_child(btn_skirmish)
+
 	var btn_gallery := _make_menu_button("COLLECTION",
 		Color(0.16, 0.20, 0.32), MENU_FONT, MENU_H)
 	btn_gallery.pressed.connect(func():
 		GameTheme.fade_out_then_change_scene(self, COLLECTION_SCENE))
 	col.add_child(btn_gallery)
+
+	# How to play — the campaign primer + full keyword glossary, reachable
+	# without starting a run (all other teaching lives inside combat). Opens an
+	# in-place overlay so the menu atmosphere keeps running behind it.
+	var btn_help := _make_menu_button("HOW TO PLAY",
+		Color(0.20, 0.24, 0.20), MENU_FONT, MENU_H)
+	btn_help.pressed.connect(_show_how_to_play)
+	col.add_child(btn_help)
 
 	var btn_settings := _make_menu_button("SETTINGS",
 		Color(0.22, 0.20, 0.18), MENU_FONT, MENU_H)
@@ -794,14 +812,35 @@ func _make_hero_card(hid: String) -> Button:
 		col.add_child(portrait)
 		_hero_portraits[hid] = portrait
 	else:
-		var wash := ColorRect.new()
-		wash.custom_minimum_size = port_size
-		wash.color = Color(0.16, 0.14, 0.20)
-		wash.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		wash.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		wash.modulate = Color(0.70, 0.68, 0.66)
-		col.add_child(wash)
-		_hero_portraits[hid] = wash
+		# No painted portrait yet (e.g. the Kindler) — render an intentional
+		# crest plate instead of a bare color block so the card never reads as
+		# "broken / missing asset". A framed parchment panel with the hero's
+		# monogram + a small "portrait to come" note degrades gracefully and
+		# still occupies the exact portrait footprint so the row stays aligned.
+		var plate := PanelContainer.new()
+		plate.custom_minimum_size = port_size
+		plate.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var pstyle := GameTheme.make_panel_style(
+			Color(0.10, 0.085, 0.11, 0.92),
+			Color(GILT.r, GILT.g, GILT.b, 0.55), 1, 4, false)
+		plate.add_theme_stylebox_override("panel", pstyle)
+		var pcol := VBoxContainer.new()
+		pcol.alignment = BoxContainer.ALIGNMENT_CENTER
+		pcol.add_theme_constant_override("separation", 6)
+		pcol.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		plate.add_child(pcol)
+		var mono := _make_display_label(
+			String(hero.get("name", hid)).strip_edges().left(1).to_upper(),
+			84, Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.85))
+		mono.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		pcol.add_child(mono)
+		var coming := _make_display_label("portrait to come", 11, ASH)
+		coming.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		pcol.add_child(coming)
+		col.add_child(plate)
+		plate.modulate = Color(0.70, 0.68, 0.66)
+		_hero_portraits[hid] = plate
 
 	var name_lbl := _make_display_label(String(hero.get("name", hid)), 22, GILT_BRIGHT)
 	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -1046,6 +1085,197 @@ func _on_open_settings() -> void:
 
 func _on_quit() -> void:
 	get_tree().quit()
+
+
+# ---------------------------------------------------------------------------
+# HOW TO PLAY / GLOSSARY OVERLAY
+# ---------------------------------------------------------------------------
+# A self-contained reference reachable from the main menu (and mirrored on the
+# map HUD). Two columns on one parchment sheet: a hand-written "How the
+# campaign works" primer on the left, and the full keyword glossary on the
+# right — sourced live from KeywordEffects.KEYWORDS so it never drifts from the
+# real rules. Built programmatically in the chart aesthetic (dark ink panels,
+# gilt headers) and torn down on close; the menu/atmosphere persist behind it.
+
+func _show_how_to_play() -> void:
+	# One overlay at a time — re-pressing the button shouldn't stack scrims.
+	var existing := get_node_or_null("HowToPlayOverlay")
+	if existing != null:
+		existing.queue_free()
+	add_child(HowToPlayOverlay.build(self))
+
+
+# Shared builder so the map screen can show the exact same reference. Static so
+# MapView can call MainMenu's nothing — instead MapView carries its own copy
+# (disjoint file set), but the layout logic is identical and kept in sync by
+# eye. `host` only needs to be a Control we can parent to.
+class HowToPlayOverlay:
+	static func build(_host: Control) -> Control:
+		var GILT_B := Color(1.0, 0.88, 0.35, 1.0)
+		var IVORY_C := Color(0.96, 0.92, 0.78, 1.0)
+		var ASH_C := Color(0.62, 0.58, 0.52, 1.0)
+
+		var scrim := ColorRect.new()
+		scrim.name = "HowToPlayOverlay"
+		scrim.color = Color(0.02, 0.015, 0.03, 0.88)
+		scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
+		scrim.mouse_filter = Control.MOUSE_FILTER_STOP
+		# Click the dark margin to dismiss.
+		scrim.gui_input.connect(func(ev: InputEvent):
+			if ev is InputEventMouseButton and ev.pressed \
+					and ev.button_index == MOUSE_BUTTON_LEFT:
+				scrim.queue_free())
+
+		var panel := PanelContainer.new()
+		panel.set_anchors_preset(Control.PRESET_CENTER)
+		panel.custom_minimum_size = Vector2(1180, 740)
+		panel.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
+			Color(0.06, 0.05, 0.045, 0.99),
+			Color(0.60, 0.51, 0.34, 0.95), 2, 6, true))
+		# Eat clicks inside the panel so they don't reach the dismiss scrim.
+		panel.mouse_filter = Control.MOUSE_FILTER_STOP
+		scrim.add_child(panel)
+
+		var pad := MarginContainer.new()
+		for m in ["margin_left", "margin_right", "margin_top", "margin_bottom"]:
+			pad.add_theme_constant_override(m, 28)
+		panel.add_child(pad)
+
+		var outer := VBoxContainer.new()
+		outer.add_theme_constant_override("separation", 14)
+		pad.add_child(outer)
+
+		# ── Header row: title + close ──
+		var head := HBoxContainer.new()
+		head.add_theme_constant_override("separation", 12)
+		outer.add_child(head)
+		var title := GameTheme.make_label("HOW TO PLAY", GameTheme.FONT_HEADER, GILT_B)
+		title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		head.add_child(title)
+		var close := GameTheme.make_back_button("CLOSE", Vector2(120, 36), 16)
+		close.pressed.connect(func(): scrim.queue_free())
+		head.add_child(close)
+
+		var rule := ColorRect.new()
+		rule.color = Color(0.60, 0.51, 0.34, 0.55)
+		rule.custom_minimum_size = Vector2(0, 2)
+		outer.add_child(rule)
+
+		# ── Two columns ──
+		var cols := HBoxContainer.new()
+		cols.add_theme_constant_override("separation", 26)
+		cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		outer.add_child(cols)
+
+		# LEFT — the campaign primer.
+		var left_scroll := ScrollContainer.new()
+		left_scroll.custom_minimum_size = Vector2(500, 0)
+		left_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		left_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+		cols.add_child(left_scroll)
+		var left := VBoxContainer.new()
+		left.add_theme_constant_override("separation", 10)
+		left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		left_scroll.add_child(left)
+
+		var sect := GameTheme.make_label("HOW THE CAMPAIGN WORKS",
+			GameTheme.FONT_SUBHEADER, GILT_B)
+		left.add_child(sect)
+
+		var primer := [
+			["Command", "Your turn resource (one bar of it each turn — you start with 3). Creatures and spells cost Command to play. Up to 2 unspent Command banks into next turn, so you can save up for a heavy play."],
+			["The board", "Four lanes, two ranks deep on each side. The front rank fights; the back rank is reserve. You place creatures into either rank from your hand."],
+			["Combat", "Both sides strike at the same time. In each lane the front rank trades first and is struck first — back-rank creatures wait their turn behind the front. Some creatures have Swift and strike in a pre-phase before any of this."],
+			["The Forge", "At a rest you can Forge a card: a permanent \"+\" upgrade with a hand-crafted before/after. No rolls, no path picking — you choose the card, you see exactly what it becomes."],
+			["Recruit camps", "A free draft. Pick 1 of 3 cards to join your deck at no cost — the main way your deck grows between fights."],
+			["The boss gate", "Each rival lord's keep starts barred. Break enough holds (the map shows how many remain) to open the road, then march on the keep itself."],
+		]
+		for entry in primer:
+			left.add_child(HowToPlayOverlay._make_primer_block(
+				entry[0], entry[1], GILT_B, IVORY_C))
+
+		# Vertical divider between columns.
+		var vrule := ColorRect.new()
+		vrule.color = Color(0.50, 0.42, 0.28, 0.40)
+		vrule.custom_minimum_size = Vector2(2, 0)
+		vrule.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		cols.add_child(vrule)
+
+		# RIGHT — the full keyword glossary, sourced live from KeywordEffects.
+		var right_col := VBoxContainer.new()
+		right_col.add_theme_constant_override("separation", 8)
+		right_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		right_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		cols.add_child(right_col)
+		var gloss_head := GameTheme.make_label("KEYWORD GLOSSARY",
+			GameTheme.FONT_SUBHEADER, GILT_B)
+		right_col.add_child(gloss_head)
+		var gloss_note := GameTheme.make_label(
+			"Every keyword that can appear on a card.", 13, ASH_C)
+		right_col.add_child(gloss_note)
+
+		var gloss_scroll := ScrollContainer.new()
+		gloss_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		gloss_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		gloss_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+		right_col.add_child(gloss_scroll)
+		var gloss := VBoxContainer.new()
+		gloss.add_theme_constant_override("separation", 9)
+		gloss.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		gloss_scroll.add_child(gloss)
+
+		for key in KeywordEffects.KEYWORDS.keys():
+			var kw: Dictionary = KeywordEffects.KEYWORDS[key]
+			gloss.add_child(HowToPlayOverlay._make_keyword_row(
+				String(kw.get("display", key)), String(kw.get("desc", "")),
+				GILT_B, IVORY_C))
+
+		return scrim
+
+
+	static func _make_primer_block(heading: String, body: String,
+			gilt: Color, ivory: Color) -> Control:
+		var box := VBoxContainer.new()
+		box.add_theme_constant_override("separation", 2)
+		box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var h := GameTheme.make_label(heading, 16,
+			Color(0.92, 0.80, 0.50, 1.0))
+		box.add_child(h)
+		var b := GameTheme.make_label(body, 13, ivory)
+		b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.custom_minimum_size = Vector2(460, 0)
+		box.add_child(b)
+		return box
+
+
+	static func _make_keyword_row(name: String, desc: String,
+			gilt: Color, ivory: Color) -> Control:
+		# Gilt keyword name + dim body on a hairline ink chip — the chart kit.
+		var row := PanelContainer.new()
+		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.085, 0.072, 0.060, 0.65)
+		sb.border_color = Color(0.45, 0.38, 0.26, 0.45)
+		sb.set_border_width_all(1)
+		sb.set_corner_radius_all(3)
+		sb.content_margin_left = 12
+		sb.content_margin_right = 12
+		sb.content_margin_top = 7
+		sb.content_margin_bottom = 7
+		row.add_theme_stylebox_override("panel", sb)
+		var v := VBoxContainer.new()
+		v.add_theme_constant_override("separation", 1)
+		row.add_child(v)
+		var n := GameTheme.make_label(name, 15,
+			Color(0.95, 0.82, 0.48, 1.0))
+		v.add_child(n)
+		var d := GameTheme.make_label(desc, 13, ivory)
+		d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		d.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		d.custom_minimum_size = Vector2(560, 0)
+		v.add_child(d)
+		return row
 
 
 # ---------------------------------------------------------------------------

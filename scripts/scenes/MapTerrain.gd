@@ -426,6 +426,10 @@ func _ensure_plate_bake() -> void:
 	_plate_bake_pending = true
 	if _geo_tex == null:
 		var g: ImageTexture = await _bake_via_clone("geo")
+		# A node commit during the bake frees MapView (and us) — bail before
+		# touching our own members/signals on a freed instance.
+		if not is_inside_tree():
+			return
 		if gen == _bake_gen and g != null:
 			_geo_tex = g
 			if RunState.map_plate_cache.has(_act):
@@ -433,6 +437,8 @@ func _ensure_plate_bake() -> void:
 			_redraw_plate()
 	if gen == _bake_gen:
 		var m: ImageTexture = await _bake_via_clone("march")
+		if not is_inside_tree():
+			return
 		if gen == _bake_gen and m != null:
 			_march_tex = m
 			_redraw_plate()
@@ -441,6 +447,8 @@ func _ensure_plate_bake() -> void:
 	plate_baked.emit()
 	if gen == _bake_gen:
 		var p: ImageTexture = await _bake_via_clone("plate")
+		if not is_inside_tree():
+			return
 		if gen == _bake_gen and p != null:
 			_plate_tex = p
 			if RunState.map_plate_cache.has(_act):
@@ -472,7 +480,13 @@ func _bake_via_clone(mode: String) -> ImageTexture:
 	# out (plus margin), then read the render target back.
 	for _i in 4:
 		await get_tree().process_frame
+		# If the scene changed mid-bake we (and our child SubViewport) are
+		# freed — stop before the next get_tree() errors on a freed node.
+		if not is_inside_tree():
+			return null
 	await RenderingServer.frame_post_draw
+	if not is_inside_tree() or not is_instance_valid(sub):
+		return null
 	var img: Image = sub.get_texture().get_image()
 	sub.queue_free()
 	if img == null or img.is_empty():
