@@ -461,12 +461,16 @@ func _ensure_plate_bake() -> void:
 ## hits the mesh/geo cache, so its build is cheap; "geo" mode paints the
 ## geography layers only, "plate" mode paints geo (quad if cached) + ink.
 func _bake_via_clone(mode: String) -> ImageTexture:
+	# A zero/tiny plate (the first frames of an embedded F5 window, before the
+	# stretch canvas has sized us) would make a 0×0 SubViewport whose render-
+	# target readback is undefined — skip the bake and let the vector path
+	# paint until we have a real rect.
+	if size.x < 4.0 or size.y < 4.0:
+		return null
 	var sub := SubViewport.new()
 	sub.size = Vector2i(size * PLATE_BAKE_SCALE)
 	sub.disable_3d = true
 	sub.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	sub.canvas_transform = Transform2D().scaled(
-		Vector2(PLATE_BAKE_SCALE, PLATE_BAKE_SCALE))
 	var clone: Control = (load("res://scripts/scenes/MapTerrain.gd")
 		as GDScript).new()
 	clone.bake_mode = mode
@@ -476,6 +480,13 @@ func _bake_via_clone(mode: String) -> ImageTexture:
 	clone.size = size
 	sub.add_child(clone)
 	add_child(sub)
+	# canvas_transform MUST be set AFTER the SubViewport enters the tree: only
+	# on enter does its canvas attach to its viewport. Setting it earlier makes
+	# the RenderingServer reject the call ("!viewport->canvas_map.has(p_canvas)")
+	# — Godot re-applies the stored value on enter so the bake still scaled, but
+	# the rejected call spammed an error on every single map open.
+	sub.canvas_transform = Transform2D().scaled(
+		Vector2(PLATE_BAKE_SCALE, PLATE_BAKE_SCALE))
 	# Clone _ready waits a frame, builds, paints the frame after — wait those
 	# out (plus margin), then read the render target back.
 	for _i in 4:
@@ -487,7 +498,14 @@ func _bake_via_clone(mode: String) -> ImageTexture:
 	await RenderingServer.frame_post_draw
 	if not is_inside_tree() or not is_instance_valid(sub):
 		return null
-	var img: Image = sub.get_texture().get_image()
+	# Guard the readback: a SubViewport whose render target never came up (a
+	# possibility in the embedded editor's shared GL context) returns a null
+	# texture — calling get_image() on that would hard-crash the whole game.
+	var vp_tex: Texture2D = sub.get_texture()
+	if vp_tex == null:
+		sub.queue_free()
+		return null
+	var img: Image = vp_tex.get_image()
 	sub.queue_free()
 	if img == null or img.is_empty():
 		return null
