@@ -14,9 +14,30 @@ extends Node
 
 enum CombatMode { SOLO, NET_HOST, NET_CLIENT }
 
+## Deck-acquisition flows the lobby can launch. The networked COMBAT layer is
+## mode-agnostic — every mode just fills the two player slots with decks and drops
+## into the same combat.tscn — so a new mode is a new deck-acquisition scene plus
+## an entry here. DRAFT is the original 1-of-3 ×20.
+enum MatchMode { DRAFT, CONSTRUCTED, QUICK, SEALED }
+
 const START_HP: int = 25
 const BASE_MAX_MANA: int = 3
 const DECK_TARGET: int = 20   # cards drafted per player
+
+## Mode registry: id → display name, deck-acquisition scene, and a one-line blurb.
+## The lobby builds its picker from this and routes to `scene` on START. A mode is
+## only OFFERED if its scene file exists in the build (see available_modes), so
+## modes light up as their scenes land — the framework ships safe with only DRAFT.
+const MODE_DEFS: Array = [
+	{"id": MatchMode.DRAFT, "name": "Draft", "scene": "res://scenes/net_draft.tscn",
+		"blurb": "Pick 1 of 3, twenty times."},
+	{"id": MatchMode.CONSTRUCTED, "name": "Constructed", "scene": "res://scenes/net_constructed.tscn",
+		"blurb": "Build any 20-card deck from the full pool."},
+	{"id": MatchMode.QUICK, "name": "Quick Battle", "scene": "res://scenes/net_quick.tscn",
+		"blurb": "Random decks — straight to the fight."},
+	{"id": MatchMode.SEALED, "name": "Sealed", "scene": "res://scenes/net_sealed.tscn",
+		"blurb": "Open a fixed pool and build a deck from it."},
+]
 
 ## Card ids barred from the skirmish draft even though their rarity is draftable —
 ## cards that assume single-player context (gold economy, draw/discard/exhaust
@@ -96,6 +117,16 @@ var slots: Array[PlayerSlot] = []
 ## Index into `slots` for the local player (== NetMatch.local_player_index).
 var local_index: int = -1
 
+## ── Match format (Best-of-N series) ─────────────────────────────────────────
+## best_of is 1 (single game) or 3 (first to 2). Set from NetMatch.best_of in
+## begin_session so the choice survives the deck-acquisition scene → combat. The
+## series tallies persist across the per-game combat-scene relaunches because this
+## autoload is NOT reset between games — only the heroes/board reset, via
+## NetMatch._enter_combat_local. The Best-of-3 combat code reads these.
+var best_of: int = 1
+var series_wins: Array[int] = [0, 0]
+var series_game: int = 1
+
 ## uid = slot_index * UID_SLOT_STRIDE + draft_position. Deterministic so the host
 ## and the client compute the SAME uid for the same physical card without any
 ## negotiation — both draft each slot in the same pick order. The host keys all
@@ -123,6 +154,77 @@ func refresh_heroes() -> void:
 	for s in slots:
 		s.hero_hp = START_HP
 		s.hero_max_hp = START_HP
+
+
+## Configure a fresh session from the live NetMatch connection. EVERY
+## deck-acquisition scene (draft / constructed / quick / sealed) calls this first
+## in _ready: it clears the slots, sets the net combat mode + local index + shared
+## seed, copies the chosen match format, and zeroes the series. After this the
+## scene fills the LOCAL deck (and exchanges with the opponent), then the host
+## calls NetMatch.launch_combat.
+func begin_session() -> void:
+	reset()
+	combat_mode = CombatMode.NET_HOST if NetMatch.is_host else CombatMode.NET_CLIENT
+	local_index = NetMatch.local_player_index
+	rng_seed = NetMatch.match_seed
+	best_of = NetMatch.best_of
+	reset_series()
+
+
+# ── Match-format helpers (Best-of-N) ────────────────────────────────────────
+
+func reset_series() -> void:
+	series_wins = [0, 0]
+	series_game = 1
+
+## Games one side must win to take the match (Bo1 → 1, Bo3 → 2).
+func games_to_win() -> int:
+	return best_of / 2 + 1
+
+## Record a finished game's winner by slot index (0/1); -1 (draw) advances the
+## game counter without crediting either side.
+func record_game_winner(winner_index: int) -> void:
+	if winner_index == 0 or winner_index == 1:
+		series_wins[winner_index] += 1
+	series_game += 1
+
+## Slot index that has clinched the series (>= games_to_win), or -1 if still live.
+func series_leader() -> int:
+	var need := games_to_win()
+	for i in 2:
+		if series_wins[i] >= need:
+			return i
+	return -1
+
+
+# ── Mode-registry helpers ───────────────────────────────────────────────────
+
+static func mode_def(mode: int) -> Dictionary:
+	for d in MODE_DEFS:
+		if int(d.get("id", -1)) == mode:
+			return d
+	return MODE_DEFS[0]
+
+static func mode_scene(mode: int) -> String:
+	return String(mode_def(mode).get("scene", MODE_DEFS[0]["scene"]))
+
+static func mode_name(mode: int) -> String:
+	return String(mode_def(mode).get("name", "Draft"))
+
+static func mode_blurb(mode: int) -> String:
+	return String(mode_def(mode).get("blurb", ""))
+
+## Mode ids whose scene file exists in this build. The lobby only offers these, so
+## a mode whose scene hasn't been built yet simply doesn't appear (each lights up
+## as its scene lands). DRAFT is guaranteed as a fallback.
+static func available_modes() -> Array:
+	var out: Array = []
+	for d in MODE_DEFS:
+		if ResourceLoader.exists(String(d.get("scene", ""))):
+			out.append(int(d.get("id", 0)))
+	if out.is_empty():
+		out.append(MatchMode.DRAFT)
+	return out
 
 
 ## Append a drafted card id to a player's deck with a deterministic uid (see

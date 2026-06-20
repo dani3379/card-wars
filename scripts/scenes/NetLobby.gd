@@ -30,6 +30,14 @@ var _ready_panel: VBoxContainer     # ready/start controls (shown once connected
 var _you_ready_label: Label
 var _opp_ready_label: Label
 
+# ── Mode / format picker (host picks; client sees the choice) ──
+var _mode_panel: VBoxContainer       # built on connect (host buttons / client label)
+var _mode_buttons: Dictionary = {}   # MatchMode id -> Button (host only)
+var _bo_buttons: Dictionary = {}     # best_of value (1/3) -> Button (host only)
+var _mode_info_label: Label          # client: shows the host's chosen mode/format
+var _selected_mode: int = 0          # host's current pick (SkirmishState.MatchMode)
+var _selected_best_of: int = 1       # host's current pick (1 or 3)
+
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "main_menu")
@@ -62,7 +70,7 @@ func _build_ui() -> void:
 	col.add_child(GameTheme.make_screen_title("SKIRMISH — ONLINE", GILT_BRIGHT))
 
 	var blurb := GameTheme.make_label(
-		"Draft a 20-card deck, then fight a friend.\n"
+		"Pick a mode, then fight a friend.\n"
 		+ "Connect over a Tailscale / LAN address — no port forwarding needed.",
 		15, ASH)
 	blurb.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -110,6 +118,14 @@ func _build_ui() -> void:
 	_ready_panel.add_theme_constant_override("separation", 10)
 	_ready_panel.visible = false
 	col.add_child(_ready_panel)
+
+	# Mode / format picker — populated on connect (host gets buttons, client a
+	# read-only label) since is_host isn't known until host/join completes.
+	_mode_panel = VBoxContainer.new()
+	_mode_panel.alignment = BoxContainer.ALIGNMENT_CENTER
+	_mode_panel.add_theme_constant_override("separation", 6)
+	_ready_panel.add_child(_mode_panel)
+	_ready_panel.add_child(GameTheme.make_separator(GILT_BRIGHT, 300.0))
 
 	var ready_row := HBoxContainer.new()
 	ready_row.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -176,6 +192,7 @@ func _wire_net_signals() -> void:
 	NetMatch.peer_left.connect(_on_peer_left)
 	NetMatch.ready_state_changed.connect(_refresh_ready_labels)
 	NetMatch.match_starting.connect(_on_match_starting)
+	NetMatch.match_config_changed.connect(_on_match_config_changed)
 
 
 # ── Button handlers ──
@@ -291,11 +308,16 @@ func _on_peer_left(_id: int) -> void:
 
 
 func _on_match_starting(_seed: int) -> void:
-	if ResourceLoader.exists(DRAFT_SCENE):
+	# Route to the chosen mode's deck-acquisition scene (host's pick, synced via
+	# NetMatch.match_mode). Falls back to the draft if that scene isn't in the build.
+	var scene := SkirmishState.mode_scene(NetMatch.match_mode)
+	if ResourceLoader.exists(scene):
+		get_tree().change_scene_to_file(scene)
+	elif ResourceLoader.exists(DRAFT_SCENE):
+		_set_status("That mode isn't in this build — starting a draft.", GREEN)
 		get_tree().change_scene_to_file(DRAFT_SCENE)
 	else:
-		# Phase 0 standalone: the draft scene arrives in Phase 1.
-		_set_status("Connected & ready — draft screen lands in Phase 1.", GREEN)
+		_set_status("Connected & ready — deck screens land with the mode build.", GREEN)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -306,7 +328,110 @@ func _show_ready_panel() -> void:
 	_ready_panel.visible = true
 	# START is host-only; the client never sees an enabled start button.
 	_start_btn.visible = NetMatch.is_host
+	_populate_mode_panel()
 	_refresh_ready_labels()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  MODE / FORMAT PICKER  (host picks; client sees the choice)
+# ─────────────────────────────────────────────────────────────────────────
+
+func _populate_mode_panel() -> void:
+	if _mode_panel == null:
+		return
+	for c in _mode_panel.get_children():
+		c.queue_free()
+	_mode_buttons.clear()
+	_bo_buttons.clear()
+	_mode_info_label = null
+	if NetMatch.is_host:
+		_build_host_mode_picker()
+		# Broadcast the current selection so a connected client shows it at once.
+		NetMatch.set_match_config(_selected_mode, _selected_best_of)
+	else:
+		_build_client_mode_display()
+
+
+func _build_host_mode_picker() -> void:
+	var ml := GameTheme.make_label("MODE", 14, GILT_BRIGHT)
+	ml.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_mode_panel.add_child(ml)
+
+	var mode_row := HBoxContainer.new()
+	mode_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	mode_row.add_theme_constant_override("separation", 8)
+	_mode_panel.add_child(mode_row)
+	# Only offer modes whose scene exists in this build. If the host's last pick is
+	# no longer available, fall back to the first offered mode.
+	var modes := SkirmishState.available_modes()
+	if not modes.has(_selected_mode):
+		_selected_mode = int(modes[0])
+	for mode in modes:
+		var b := GameTheme.make_themed_button(SkirmishState.mode_name(mode).to_upper(),
+			Color(0.20, 0.24, 0.34), Vector2(150, 40), 14, SkirmishState.mode_blurb(mode))
+		b.pressed.connect(_on_mode_chosen.bind(mode))
+		mode_row.add_child(b)
+		_mode_buttons[mode] = b
+
+	var fl := GameTheme.make_label("FORMAT", 14, GILT_BRIGHT)
+	fl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_mode_panel.add_child(fl)
+
+	var bo_row := HBoxContainer.new()
+	bo_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	bo_row.add_theme_constant_override("separation", 8)
+	_mode_panel.add_child(bo_row)
+	for bo in [1, 3]:
+		var b2 := GameTheme.make_themed_button(
+			"SINGLE GAME" if bo == 1 else "BEST OF 3",
+			Color(0.20, 0.24, 0.34), Vector2(150, 36), 13)
+		b2.pressed.connect(_on_best_of_chosen.bind(bo))
+		bo_row.add_child(b2)
+		_bo_buttons[bo] = b2
+
+	_refresh_host_picker_highlight()
+
+
+func _on_mode_chosen(mode: int) -> void:
+	_selected_mode = mode
+	NetMatch.set_match_config(_selected_mode, _selected_best_of)
+	_refresh_host_picker_highlight()
+
+
+func _on_best_of_chosen(bo: int) -> void:
+	_selected_best_of = bo
+	NetMatch.set_match_config(_selected_mode, _selected_best_of)
+	_refresh_host_picker_highlight()
+
+
+func _refresh_host_picker_highlight() -> void:
+	for mode in _mode_buttons:
+		(_mode_buttons[mode] as Button).modulate = \
+			Color.WHITE if mode == _selected_mode else Color(0.5, 0.5, 0.5)
+	for bo in _bo_buttons:
+		(_bo_buttons[bo] as Button).modulate = \
+			Color.WHITE if bo == _selected_best_of else Color(0.5, 0.5, 0.5)
+
+
+func _build_client_mode_display() -> void:
+	_mode_info_label = GameTheme.make_label("", 16, IVORY)
+	_mode_info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_mode_panel.add_child(_mode_info_label)
+	_refresh_client_mode_display()
+
+
+func _refresh_client_mode_display() -> void:
+	if _mode_info_label == null:
+		return
+	_mode_info_label.text = "Host chose:  %s  ·  %s" % [
+		SkirmishState.mode_name(NetMatch.match_mode),
+		"Best of 3" if NetMatch.best_of == 3 else "Single game"]
+
+
+func _on_match_config_changed() -> void:
+	# Client side only: the host changed the mode/format — refresh the display.
+	if not NetMatch.is_host:
+		_refresh_client_mode_display()
 
 
 func _reset_to_connect_panel() -> void:

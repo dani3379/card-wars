@@ -46,12 +46,9 @@ func _ready() -> void:
 		get_tree().change_scene_to_file(MENU_SCENE)
 		return
 
-	# Configure the skirmish session from the live connection.
-	SkirmishState.reset()
-	SkirmishState.combat_mode = SkirmishState.CombatMode.NET_HOST \
-		if NetMatch.is_host else SkirmishState.CombatMode.NET_CLIENT
-	SkirmishState.local_index = NetMatch.local_player_index
-	SkirmishState.rng_seed = NetMatch.match_seed
+	# Configure the skirmish session from the live connection (combat mode, local
+	# index, shared seed, match format, series reset). Shared by every mode.
+	SkirmishState.begin_session()
 	_target = SkirmishState.DECK_TARGET
 
 	# Per-player triplet stream: same seed, different salt per side.

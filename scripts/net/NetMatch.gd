@@ -25,6 +25,7 @@ signal lobby_reset                      # connection fully torn down
 # ── Lobby / handshake signals ──
 signal ready_state_changed              # local_ready or remote_ready changed
 signal match_starting(seed: int)        # host pressed start; both sides should advance
+signal match_config_changed             # host changed the mode / best-of selection
 
 # ── Gameplay signals (consumed by NetDraft / Combat in later phases) ──
 signal draft_event_received(event: Dictionary)    # both directions, draft messages
@@ -72,6 +73,12 @@ var local_player_index: int = -1
 ## Shared match seed (host-chosen, sent to client) — drives the draft RNG so
 ## both machines can generate reproducible card triplets. Set by start_match.
 var match_seed: int = 0
+## Match config (host-chosen in the lobby, synced to the client). match_mode is a
+## SkirmishState.MatchMode value selecting the deck-acquisition flow; best_of is 1
+## (single game) or 3. The lobby routes to the mode's scene on START; the Best-of-3
+## combat code reads best_of. Both ride the start RPC so the client always has them.
+var match_mode: int = 0
+var best_of: int = 1
 var _peer: ENetMultiplayerPeer = null
 var _connected: bool = false
 ## Host-side: the connected client's ENet peer id (0 = no client). Set when the
@@ -147,6 +154,8 @@ func leave() -> void:
 	local_ready = false
 	remote_ready = false
 	remote_present = false
+	match_mode = 0
+	best_of = 1
 	entities.clear()
 	_next_entity_id = 1
 	lobby_reset.emit()
@@ -234,14 +243,38 @@ func start_match() -> void:
 	if not is_host or not both_ready():
 		return
 	match_seed = randi()
-	_rpc_match_start.rpc(match_seed)   # tell the client
+	# Carry the match config in the start RPC too, so the client definitely has the
+	# chosen mode / best-of even if it missed an earlier set_match_config broadcast.
+	_rpc_match_start.rpc(match_seed, match_mode, best_of)   # tell the client
 	match_starting.emit(match_seed)    # tell ourselves (rpc is call_remote only)
 
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_match_start(seed: int) -> void:
+func _rpc_match_start(seed: int, mode: int, bo: int) -> void:
 	match_seed = seed
+	match_mode = mode
+	best_of = bo
 	match_starting.emit(seed)
+
+
+## Host-only: choose the deck-acquisition mode + best-of and push the choice to the
+## client so its lobby can display it. Safe to call before a client is present (the
+## broadcast is skipped until one connects; start_match re-sends it regardless).
+func set_match_config(mode: int, bo: int) -> void:
+	if not is_host:
+		return
+	match_mode = mode
+	best_of = bo
+	if remote_present:
+		_rpc_match_config.rpc(mode, bo)
+	match_config_changed.emit()
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_match_config(mode: int, bo: int) -> void:
+	match_mode = mode
+	best_of = bo
+	match_config_changed.emit()
 
 
 # ─────────────────────────────────────────────────────────────────────────
