@@ -60,6 +60,7 @@ func _process(_delta: float) -> bool:
 	_test_kingdom_pools()
 	_test_act_scaling()
 	_test_map_wiring()
+	_test_rival_reorder_boss()
 	_test_boss_gate()
 	_test_recruit_nodes()
 	_test_finale()
@@ -262,6 +263,40 @@ func _test_map_wiring() -> void:
 		if found == "" or not EDB.ENCOUNTERS.has(found):
 			all_bosses_ok = false
 	_check(all_bosses_ok, "every act's keep has a real boss (kit or stand-in)")
+
+
+func _boss_of(act_idx: int) -> String:
+	for row in RS.map_data[act_idx]:
+		for node in row:
+			if String(node.type) == "boss":
+				return String(node.get("encounter_id", ""))
+	return ""
+
+
+# The NEXT MARCH choice (choose_next_rival) swaps who rules an upcoming act
+# AFTER the maps are baked. visit_node reads each boss node's baked id, so the
+# swapped acts' boss nodes must be re-derived — or the map dresses in the new
+# lord's colours while the fight stays the originally-dealt one. Regression
+# guard for that re-bake (was silently broken: dressing changed, fight didn't).
+func _test_rival_reorder_boss() -> void:
+	print("— rival reorder re-bakes the boss node (NEXT MARCH choice)")
+	RS.start_new_run("raider", 0, 31337)
+	# Fresh run → current_act_idx 0, so choose_next_rival targets act-2 (idx 1).
+	var orig_act2_rival: String = String(RS.rival_lords[1])
+	var swap_in: String = String(RS.rival_lords[2])  # act-3's lord, always != act-2's
+	var orig_act2_boss: String = _boss_of(1)
+	_check(orig_act2_boss == "rival_%s" % orig_act2_rival,
+		"act-2 boss starts as the dealt lord (got '%s')" % orig_act2_boss)
+	# Player chooses to march on act-3's lord next → swaps deal slots 1 and 2.
+	RS.choose_next_rival(swap_in)
+	_check(RS.rival_lords[1] == swap_in, "deal array: chosen lord now rules act 2")
+	_check(RS.act_faction[1] == HDB.get_faction(swap_in), "act_faction[1] mirrors the swap")
+	_check(_boss_of(1) == "rival_%s" % swap_in,
+		"act-2 boss NODE re-baked to the chosen lord (got '%s')" % _boss_of(1))
+	_check(_boss_of(1) != orig_act2_boss, "act-2 boss actually changed (no-op guard)")
+	# The displaced lord fell into the act-3 slot — its boss node re-bakes too.
+	_check(_boss_of(2) == "rival_%s" % orig_act2_rival,
+		"act-3 boss NODE re-baked to the displaced lord (got '%s')" % _boss_of(2))
 
 
 func _test_boss_gate() -> void:
