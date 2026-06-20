@@ -34,6 +34,8 @@ GameTheme="*res://scripts/GameTheme.gd"
 UserSettings="*res://scripts/state/UserSettings.gd"
 CardTextureCache="*res://scripts/state/CardTextureCache.gd"
 AudioBank="*res://scripts/AudioBank.gd"
+NetMatch="*res://scripts/net/NetMatch.gd"
+SkirmishState="*res://scripts/net/SkirmishState.gd"
 
 [display]
 
