@@ -230,7 +230,7 @@ func _add_hero_silhouette() -> void:
 func _add_choice_rest(row: HBoxContainer) -> void:
 	var disabled_reason := ""
 	if RunState.has_downside("no_rest_heal"):
-		disabled_reason = "Blocked by Hairshirt."
+		disabled_reason = "Can't heal at camp (Hairshirt)."
 	elif RunState.hero_hp >= RunState.hero_max_hp:
 		disabled_reason = "Already at full health."
 	# Two-line banner body: hero-flavored line + mechanical readout. Players
@@ -246,7 +246,7 @@ func _add_choice_rest(row: HBoxContainer) -> void:
 func _add_choice_upgrade(row: HBoxContainer) -> void:
 	var disabled_reason := ""
 	if RunState.has_downside("no_upgrade"):
-		disabled_reason = "Blocked by Cracked Anvil."
+		disabled_reason = "Can't forge here (Cracked Anvil)."
 	else:
 		var any_upgradeable := false
 		for i in range(RunState.deck.size()):
@@ -259,7 +259,7 @@ func _add_choice_upgrade(row: HBoxContainer) -> void:
 		if not any_upgradeable:
 			disabled_reason = "Every card already forged."
 	var desc := "%s\n⚒ Forge a + version" % _flavor_for("upgrade", "")
-	var banner = GameTheme.make_choice_banner("UPGRADE", desc, _accent_upgrade,
+	var banner = GameTheme.make_choice_banner("FORGE", desc, _accent_upgrade,
 		ICON_UPGRADE, Vector2(340, 160), disabled_reason)
 	_wire_banner(banner, row, _accent_upgrade, _start_upgrade_mode)
 
@@ -274,7 +274,7 @@ func _add_choice_reforge_if_available(row: HBoxContainer) -> void:
 	if RunState.whetstone_used_this_act:
 		disabled_reason = "Already used this act."
 	elif RunState.has_downside("no_upgrade"):
-		disabled_reason = "Blocked by Cracked Anvil."
+		disabled_reason = "Can't forge here (Cracked Anvil)."
 	else:
 		var upgradeable_count := 0
 		for i in range(RunState.deck.size()):
@@ -286,7 +286,7 @@ func _add_choice_reforge_if_available(row: HBoxContainer) -> void:
 		if upgradeable_count < 2:
 			disabled_reason = "Need 2+ unforged cards."
 	var desc := "%s\n◈ Forge two + versions (Whetstone)" % _flavor_for("reforge", "")
-	var banner = GameTheme.make_choice_banner("REFORGE", desc, _accent_reforge,
+	var banner = GameTheme.make_choice_banner("FORGE TWO", desc, _accent_reforge,
 		ICON_REFORGE, Vector2(340, 160), disabled_reason)
 	_wire_banner(banner, row, _accent_reforge, _start_reforge_mode)
 
@@ -385,7 +385,7 @@ func _begin_pick_card_for_upgrade() -> void:
 
 	var header_text: String = "Choose a card to forge"
 	if _reforge_remaining > 0:
-		header_text = "REFORGE — pick %d more card%s" % [
+		header_text = "FORGE TWO — pick %d more card%s" % [
 			_reforge_remaining, "" if _reforge_remaining == 1 else "s"]
 	var title = GameTheme.make_label(header_text, GameTheme.FONT_HEADER, GameTheme.KEYWORD_GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -476,7 +476,7 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	# Header title (gold, large)
 	var header_text := "FORGE"
 	if _reforge_remaining > 0:
-		header_text = "REFORGE  ·  %d remaining" % _reforge_remaining
+		header_text = "FORGE TWO  ·  %d remaining" % _reforge_remaining
 	var title = GameTheme.make_label(header_text, GameTheme.FONT_HEADER + 6, GameTheme.GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.set_anchors_preset(Control.PRESET_TOP_WIDE)

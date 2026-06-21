@@ -31,6 +31,21 @@ var _net_skip_draw_this_round: bool = false   # set when an opening hand was pre
 var _net_rematch_local: bool = false          # this side pressed REMATCH on the result screen
 var _net_rematch_remote: bool = false         # the other side wants a rematch
 var _net_result_panel: Control = null         # the post-match REMATCH / LEAVE overlay
+# Opponent hand presence: a small fan of FACE-DOWN card backs, the way other card
+# games show it — placed in the gap just LEFT of the enemy plate (top-right), so it
+# reads as the foe's held hand, next to the foe, clear of the centred title and the
+# board. You see THAT they hold cards and how many, never what they are. Driven by
+# _net_opp_hand_count, broadcast each time the active side's hand changes.
+var _net_opp_hand_box: Control = null          # fan container in the gap by the enemy plate
+var _net_opp_hand_row: Control = null          # holds the card-back fan
+var _net_card_back_tex: Texture2D = null       # the shared face-down card art
+# Opponent's Command (skirmish only): the foe's current/max resource, synced over
+# the wire alongside the hand count and shown as a wax Command seal mirroring the
+# player's own. Reads 0/<base> until the foe's first turn-begin broadcast lands.
+var _net_opp_mana: int = 0
+var _net_opp_max_mana: int = 0
+var _net_opp_mana_label: Label = null          # numeral pressed into the foe's seal
+var _net_opp_mana_post: Control = null         # the whole foe Command instrument
 
 const MAX_BANKED_MANA: int = 2
 const HAND_DRAW_PER_TURN: int = 4
@@ -312,6 +327,11 @@ var _midline: Panel
 # HUD additions for 4x4 polish.
 var _deck_count_label: Label
 var _discard_count_label: Label
+var _exhaust_count_label: Label
+var _exhaust_box: Control                    # exhaust pile panel (hidden while empty)
+var _phase_caption: String = ""              # active combat-phase caption (SWIFT / CLASH / …)
+var _info_token: int = 0                     # generation guard so a stale _show_info timer can't wipe a newer message
+var _mana_bank_pips: Array = []              # banking carry-over pips under the Command seal
 var _floop_tutorial_shown: bool = false
 var _banking_tutorial_shown: bool = false
 var _intents_tutorial_shown: bool = false
@@ -344,7 +364,10 @@ var _incoming_dmg_chip: PanelContainer  # framed "incoming face damage" indicato
 var _incoming_dmg_icon: TextureRect  # crossed-swords / skull glyph in the chip
 var _enemy_hp_label: Label
 var _mana_label: Label
+var _mana_seal_post: Control = null   # player Command instrument (hover → tooltip)
+var _bank_pips: HBoxContainer = null  # carryover dots on the seal's plinth shelf
 var _turn_label: Label
+
 var _info_label: Label
 var _floor_label: Label
 var _end_turn_btn: Button
@@ -2081,7 +2104,9 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 # =====================================================================
 
 func _do_combat() -> void:
+	_phase_caption = ""   # fresh phase narration each combat (no stale-caption leak)
 	_update_hud()
+	_refresh_adjacency_buffs()
 
 	# Snapshot which lanes had a front-row blocker at start of combat. Used for
 	# face-damage decisions when the blocker dies mid-combat.
@@ -2096,6 +2121,14 @@ func _do_combat() -> void:
 		if c.state.stunned or c.state.is_frozen:
 			c.has_attacked_this_turn = true
 
+	# PHASE NARRATION: caption a sub-phase only when it will actually do
+	# something, so the phase line never names an empty beat. Swift is named
+	# only if a Swift creature is poised to strike.
+	for c in _all_creatures_both_sides():
+		if c.has_keyword("swift") and c.can_attack() and not c.has_attacked_this_turn:
+			_set_phase_caption("SWIFT STRIKES")
+			break
+
 	# SWIFT PHASE — front row first, then back row. Both rows attack regardless
 	# of whether their own column's front is occupied (back is queue space, not
 	# a separate combat tier). Each strike is awaited so the swing reads as a
@@ -2108,6 +2141,14 @@ func _do_combat() -> void:
 		await _resolve_swift_attack(lane_idx, ROW_BACK, true, player_front_empty_at_start)
 
 	_cleanup_dead()
+
+	# CLASH caption (guarded) — show only if someone is still poised to strike.
+	# Snapshot the headcount so we can tell afterward whether anyone fell.
+	var _alive_before_clash := _all_creatures_both_sides().size()
+	for c in _all_creatures_both_sides():
+		if c.can_attack() and not c.has_attacked_this_turn:
+			_set_phase_caption("CLASH — BOTH SIDES STRIKE")
+			break
 
 	# SIMULTANEOUS COMBAT — both sides attack per lane so dying creatures still
 	# deal damage. Front row first, then back row.
@@ -2128,6 +2169,11 @@ func _do_combat() -> void:
 			c.update_stat_display()
 
 	_cleanup_dead()
+
+	# THE FALLEN — name the death beat, but only if the clash actually killed
+	# something, so the caption never lies about a bloodless trade.
+	if _all_creatures_both_sides().size() < _alive_before_clash:
+		_set_phase_caption("THE FALLEN")
 
 	await _short_pause(COMBAT_PAUSE_SHORT)
 	_update_hud()
@@ -2676,9 +2722,11 @@ func _apply_thorns(defender: Control, attacker: Control, attacker_is_enemy: bool
 
 
 func _effective_attack(card: Control, lane_idx: int, is_enemy: bool) -> int:
+	# Adjacency buffs are baked into effective_atk() via the stored adj_atk_buff
+	# (kept fresh by _refresh_adjacency_buffs), so they apply to BOTH sides and
+	# show on the numeral — do NOT re-add them here or it double-counts.
 	var atk = card.effective_atk()
 	if not is_enemy:
-		atk += _get_adj_buff_atk(lane_idx, false)
 		if card.has_keyword("swift") and _has_relic("swift_boots"):
 			atk += 1
 		if _has_relic("glass_cannon"):
@@ -2708,8 +2756,8 @@ func _effective_attack(card: Control, lane_idx: int, is_enemy: bool) -> int:
 		# half is granted at placement via _apply_linked_banner_hp's broader
 		# rescan; ATK part falls through the linked_banner branch since both
 		# relics share the "needs 2 adj" condition when held together).
-		# When ONLY diagonal_crest is held, the adj_buff bonus is delivered
-		# via _get_adj_buff_atk through the diagonal-aware lookup below.
+		# (Neither uses the card adj_buff path — that is Battle Drummer's keyword,
+		# now baked into effective_atk via adj_atk_buff; see the top of this func.)
 		# Steady Banner: turn-1 ATK debuff. The +2 persistent buff is granted
 		# in _end_round to surviving creatures.
 		if round_number == 1 and _has_relic("steady_banner"):
@@ -2960,10 +3008,9 @@ func _apply_linked_banner_hp() -> void:
 
 
 func _get_adj_buff_atk(lane_idx: int, is_enemy: bool) -> int:
-	# 4x4: adjacent-buff sources contribute from the same row as the attacker.
-	# For now we sum both rows of the same column-1/column+1 because front and
-	# back share the lane semantically — this keeps Bannerman-style cards
-	# strong without needing a row-aware Card2D ref here.
+	# 4x4: adjacent-buff sources contribute from the same column-1/column+1 in
+	# EITHER row, because front and back share the lane semantically — this keeps
+	# Bannerman-style cards strong without needing a row-aware Card2D ref here.
 	#
 	# NOTE: adj_buff.hp is currently NOT applied anywhere. Every card in CardDB
 	# sets hp:0 so the omission is harmless today, but if you author a card
@@ -2977,11 +3024,41 @@ func _get_adj_buff_atk(lane_idx: int, is_enemy: bool) -> int:
 			if adj < 0 or adj >= LANES_PER_ROW:
 				continue
 			var neighbor = field[adj]
-			if neighbor != null and neighbor.card_data.has("adj_buff"):
-				total += neighbor.card_data.adj_buff.get("atk", 0)
+			if neighbor != null and is_instance_valid(neighbor) and neighbor.card_data.has("adj_buff"):
+				total += int(neighbor.card_data.adj_buff.get("atk", 0))
+				# Banner of Unity sweetens the player's adjacency only (relics are
+				# the player's). Skirmish v1 is relic-free, so _has_relic is false
+				# there and both sides compute identically.
 				if not is_enemy and _has_relic("banner_of_unity"):
 					total += 1
 	return total
+
+
+## Re-tally every creature's adjacency ATK buff from scratch and push it onto the
+## card so it (a) shows on the ATK numeral with a "+N ATK" pop, (b) rides the net
+## board snapshot (which serialises effective_atk), and (c) applies to BOTH sides
+## — an enemy/opponent Battle Drummer buffs ITS neighbours too. Called at every
+## board-mutation choke point; cheap (16 slots) and only repaints cards whose
+## value actually changed, so redundant calls are harmless.
+##
+## The net CLIENT never runs this: its creatures' current_atk already carries the
+## host's buffed effective_atk straight off the snapshot, so recomputing locally
+## would double-count.
+func _refresh_adjacency_buffs() -> void:
+	if _is_client():
+		return
+	for is_enemy in [false, true]:
+		for row in [ROW_FRONT, ROW_BACK]:
+			var arr = _row_array(is_enemy, row)
+			for lane in range(LANES_PER_ROW):
+				var c = arr[lane]
+				if c == null or not is_instance_valid(c):
+					continue
+				var bonus := _get_adj_buff_atk(lane, is_enemy)
+				if c.adj_atk_buff != bonus:
+					c.adj_atk_buff = bonus
+					if c.has_method("update_stat_display"):
+						c.update_stat_display()
 
 
 func _has_passive_on_field(passive_name: String) -> bool:
@@ -3019,6 +3096,9 @@ func _cleanup_dead() -> void:
 				var c = arr[lane_idx]
 				if c != null and is_instance_valid(c) and c.current_hp <= 0:
 					c.try_die()
+	# A death removes a buff source / changes neighbours — re-tally adjacency so the
+	# survivors' ATK drops in step (and pops a "-N ATK" so it reads on-screen).
+	_refresh_adjacency_buffs()
 
 
 func _on_friendly_death(card: Control, _lane_idx: int) -> void:
@@ -3080,6 +3160,10 @@ func _post_combat_sequence() -> void:
 	_post_combat_cleanup()
 	_discard_hand()
 
+	# Name the reinforcement beat so a fresh enemy creature appearing reads as
+	# "they brought up reserves," not a silent board change.
+	if not _enemy_deck.is_empty() or not _reinforcement.is_empty():
+		_set_phase_caption("ENEMY REINFORCES")
 	await _short_pause(COMBAT_PAUSE_MEDIUM)
 	_enemy_place_creatures()
 
@@ -3599,6 +3683,9 @@ func _place_enemy_card(data: Dictionary, lane_idx: int, row: int = ROW_FRONT) ->
 	# Show the freshly-placed creature's intent immediately so it's never
 	# blank between placement and the next intent-assignment pass.
 	_update_intent_display(card, "ATK")
+	# Enemy/opponent adjacency works too — a foe's Battle Drummer buffs its own
+	# line. Re-tally so the buffed numerals show and the strike math is correct.
+	_refresh_adjacency_buffs()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -4361,7 +4448,13 @@ func _play_spell(card: Control, cost: int) -> void:
 		_spawn_spell_cast_ghost(card.card_data, spell_start_global, null)
 		_targeting_spell = card
 		_targeting_data = card.card_data
-		_show_info("Click a target...")
+		# Persistent, named prompt — set DIRECTLY (not via _show_info, whose 2s
+		# timer would wipe it while targeting is still armed). Names the spell, the
+		# legal target, and the cancel gesture. Cleared on resolve/cancel.
+		_info_token += 1   # invalidate any pending _show_info clear-timer
+		_info_label.text = "%s — choose %s    ·    right-click to cancel" % [
+			String(card.card_data.get("name", "Spell")), _targeting_human(targeting)]
+		_info_label.modulate = Color(1, 1, 1, 1)
 		_show_targeting_arrow()
 		_update_hud()
 		return
@@ -5450,6 +5543,16 @@ func _cancel_targeting() -> void:
 	_update_hud()
 
 
+func _targeting_human(targeting: String) -> String:
+	# Plain-language name of a spell's legal target set, for the targeting prompt.
+	match targeting:
+		"enemy_creature": return "an enemy creature"
+		"friendly_creature": return "a friendly creature"
+		"any_creature": return "any creature"
+		"any": return "any creature — or click the enemy banner to hit their face"
+		_: return "a target"
+
+
 func _is_click_on_card(pos: Vector2, card: Control) -> bool:
 	var rect = Rect2(card.global_position, card.size)
 	return rect.has_point(pos)
@@ -6025,6 +6128,9 @@ func summon_token(atk: int, hp: int, lane_idx: int, is_enemy: bool, row: int = R
 	# counts. Re-scan so any ally that just hit 2+ adjacents gets +1 HP.
 	if not is_enemy:
 		_apply_linked_banner_hp()
+	# A summoned body sits next to existing creatures — re-tally so it picks up any
+	# adjacent Battle Drummer / Bannerman buff (and the numeral shows it).
+	_refresh_adjacency_buffs()
 
 
 func _return_dead_to_hand(lane_idx: int) -> void:
@@ -7094,9 +7200,12 @@ func _assign_intents() -> void:
 
 
 func _update_intent_display(card: Control, intent: String) -> void:
-	## Renders an intent badge above enemies for non-default intents only.
-	## ATK damage is already shown by the on-card ATK orb, so we skip it here
-	## to avoid the duplicate "⚔ N" chip that overlapped the artwork.
+	## Renders an intent badge above enemies for non-default intents (CHARGE,
+	## GUARD, RALLY, …). The default ATK case gets its own compact red down-chevron
+	## via _update_attack_marker — so a plain attacker (by far the most common
+	## case, and the one that used to telegraph NOTHING) now reads as "this will
+	## swing," without re-printing the ATK-orb numeral that overlapped the art.
+	_update_attack_marker(card, intent)
 	var lbl: Label = null
 	if card.has_meta("intent_label") and is_instance_valid(card.get_meta("intent_label")):
 		lbl = card.get_meta("intent_label")
@@ -7157,6 +7266,64 @@ func _update_intent_display(card: Control, intent: String) -> void:
 	lbl.text = label_text
 	lbl.visible = true
 	_pacing_any_intent_shown = true
+
+
+func _update_attack_marker(card: Control, intent: String) -> void:
+	## The default-attack telegraph: a small red down-chevron on every enemy that
+	## will simply swing this turn — the case named-intent pills skip. Kept in its
+	## own marker node so it never duplicates the ATK orb or the intent pill.
+	var show_fang := (intent == "ATK" or intent == "")
+	# Only flag a creature that can actually strike (skip stunned / 0-ATK / etc.).
+	if show_fang and card.has_method("can_attack") and not card.can_attack():
+		show_fang = false
+	# The louder "⚔ N" threat badge already telegraphs this swing (with its number),
+	# so a face-threat enemy carries ONE signal, not two stacked at its top edge.
+	# The chevron is the quiet fallback for attackers the threat flag skips (a
+	# blocked lane / a light hitter). _refresh_threat_flags re-syncs us on toggle.
+	if show_fang and bool(card.get("_threat_flagged")):
+		show_fang = false
+	var m: Control = null
+	if card.has_meta("atk_marker") and is_instance_valid(card.get_meta("atk_marker")):
+		m = card.get_meta("atk_marker")
+	if not show_fang:
+		if m != null:
+			m.visible = false
+		return
+	if m == null:
+		m = _make_attack_fang()
+		card.add_child(m)
+		card.set_meta("atk_marker", m)
+	m.visible = true
+
+
+func _make_attack_fang() -> Control:
+	## A down-pointing red chevron pinned to the enemy card's top edge. Drawn with
+	## Polygon2D so it is font-independent (the UI font carries no ⚔/▼ glyph), and
+	## small so eight of them never crowd the board.
+	var holder := Control.new()
+	holder.anchor_left = 0.5
+	holder.anchor_right = 0.5
+	holder.anchor_top = 0.0
+	holder.anchor_bottom = 0.0
+	holder.offset_left = -12
+	holder.offset_right = 12
+	holder.offset_top = -15
+	holder.offset_bottom = 7
+	holder.z_index = 6
+	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Dark backing chevron (slightly larger, drawn first → reads as an outline).
+	var back := Polygon2D.new()
+	back.polygon = PackedVector2Array([Vector2(-11, 0), Vector2(11, 0), Vector2(0, 15)])
+	back.color = Color(0, 0, 0, 0.85)
+	back.position = Vector2(12, 1)
+	holder.add_child(back)
+	# Crimson fill chevron.
+	var tri := Polygon2D.new()
+	tri.polygon = PackedVector2Array([Vector2(-8.5, 0), Vector2(8.5, 0), Vector2(0, 11.5)])
+	tri.color = Color(0.93, 0.30, 0.26, 0.97)
+	tri.position = Vector2(12, 1)
+	holder.add_child(tri)
+	return holder
 
 
 func _resolve_intents() -> void:
@@ -7247,7 +7414,7 @@ func _resolve_enemy_ability(card: Control, lane_idx: int) -> void:
 				var target_lane = adj[randi() % adj.size()]
 				var victim = arr[target_lane]
 				if victim != null:
-					card.current_atk += victim.current_atk
+					card.current_atk += victim.effective_atk()
 					card.current_hp += victim.current_hp
 					card.card_data.hp += victim.current_hp
 					victim.take_damage(999)
@@ -9591,6 +9758,9 @@ func _place_card_in_slot(card: Control, lane_idx: int, row: int = ROW_FRONT,
 			card.damaged.connect(_on_friendly_damaged.bind(card))
 	card.update_floop_display()
 	_play_landing_pop(card, from_global, with_arc)
+	# A new creature changes adjacency — re-tally so it gets/grants the buff and
+	# the numerals (its own + its neighbours') update with a "+N ATK" pop.
+	_refresh_adjacency_buffs()
 
 
 func _play_landing_pop(card: Control, from_global: Vector2 = Vector2.ZERO,
@@ -9733,6 +9903,10 @@ func _on_card_destroyed(card: Control) -> void:
 	# JUICE — register this death for the coalesced "notable kill" hit-stop so a
 	# multi-creature wipe or a chunky bruiser dying lands with weight.
 	_note_death(card, was_enemy)
+
+	# The slot arrays were nulled above — re-tally adjacency so neighbours of the
+	# fallen card lose its buff immediately (any on_death summon below re-tallies).
+	_refresh_adjacency_buffs()
 
 	# The Coin, Landed (event relic): every fall pays, either side of the
 	# field. Structures are furniture, not dead — they don't flip the coin.
@@ -9983,6 +10157,9 @@ func _on_field_move_dropped(global_pos: Vector2, card: Control) -> void:
 			if AudioBank != null:
 				AudioBank.play_sfx("card_play")
 			moved = true
+			# Moving a creature re-shapes both the vacated and the new neighbourhood —
+			# re-tally adjacency for everyone affected.
+			_refresh_adjacency_buffs()
 		elif not same_slot:
 			_show_info("That slot is occupied.")
 	elif _moves_used_this_turn >= MOVES_PER_TURN:
@@ -9999,6 +10176,10 @@ func _return_card_to_slot(card: Control) -> void:
 	_reset_card_after_drag(card)
 	_slot_set_card(_slot_array(false, card.current_row)[card.current_lane], card)
 	_row_array(false, card.current_row)[card.current_lane] = card
+	# The lift turned the idle bob off (it owns position.y). This path has no landing
+	# pop to re-arm it, so re-anchor it to the re-centered slot next frame.
+	if card.has_method("rearm_idle_bob_next_frame"):
+		card.rearm_idle_bob_next_frame()
 
 
 func _reset_card_after_drag(card: Control) -> void:
@@ -10346,34 +10527,14 @@ func _build_enemy_banner_diegetic() -> void:
 		banner.add_child(img)
 	_presence_art = null
 
-	# ── Living Antagonist treatment: emerge-from-shadow + reaction overlays ──
-	# Inner vignette so the foe's edges melt into the dark pocket (Inscryption).
-	var pvig := TextureRect.new()
-	pvig.set_anchors_preset(Control.PRESET_FULL_RECT)
-	pvig.offset_bottom = HP_TOP
-	pvig.texture = _make_presence_vignette_tex()
-	pvig.stretch_mode = TextureRect.STRETCH_SCALE
-	pvig.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	banner.add_child(pvig)
-	# Warm rim-light down the board-facing (left) edge — additive, "lit by the stage".
-	var prim := TextureRect.new()
-	prim.anchor_left = 0.0; prim.anchor_right = 0.0
-	prim.anchor_top = 0.0; prim.anchor_bottom = 1.0
-	prim.offset_right = 42; prim.offset_bottom = HP_TOP
-	var prim_grad := Gradient.new()
-	prim_grad.offsets = PackedFloat32Array([0.0, 1.0])
-	prim_grad.colors = PackedColorArray([Color(1.0, 0.64, 0.32, 0.5), Color(1.0, 0.64, 0.32, 0.0)])
-	var prim_tex := GradientTexture2D.new()
-	prim_tex.gradient = prim_grad
-	prim_tex.fill_from = Vector2(0, 0.5); prim_tex.fill_to = Vector2(1, 0.5)
-	prim_tex.width = 64; prim_tex.height = 8
-	prim.texture = prim_tex
-	prim.stretch_mode = TextureRect.STRETCH_SCALE
-	var prim_mat := CanvasItemMaterial.new()
-	prim_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
-	prim.material = prim_mat
-	prim.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	banner.add_child(prim)
+	# ── Living Antagonist reaction overlay ──
+	# The foe portrait is presented CLEAN — exactly like the player's plate in
+	# _build_player_banner_diegetic (just image + fillet + HP). The old vignette
+	# wash + warm rim-light made this corner read as a differently-treated photo
+	# instead of the same instrument; both portraits already sit on black-bg art,
+	# so they blend into their plates without help. Only the hidden hit-flash
+	# stays — it's invisible at rest and just adds juice when the foe is struck
+	# (driven by _presence_flinch).
 	# Red hit-flash overlay (hidden; driven by presence_flinch).
 	var pflash := ColorRect.new()
 	pflash.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -10718,7 +10879,7 @@ func _build_encounter_scroll_diegetic() -> void:
 	_phase_label.add_theme_constant_override("outline_size", 4)
 	stack.add_child(_phase_label)
 
-	_turn_label = _make_text_label("Round 1 · Deploy your line", 12, Color(0.80, 0.72, 0.52))
+	_turn_label = _make_text_label("Round 1 · Set your line", 12, Color(0.80, 0.72, 0.52))
 	_turn_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	stack.add_child(_turn_label)
 
@@ -10757,31 +10918,62 @@ func _build_encounter_scroll_diegetic() -> void:
 
 
 func _build_mana_post_diegetic() -> void:
-	# Bottom-LEFT, directly RIGHT of the player banner: the COMMAND SEAL — a
-	# big pressed disc of sealing-wax navy (the same wax every card's cost
-	# seal is pressed in, so "blue wax = Command" reads as one system). The
-	# old faceted sapphire said "arcane mana"; the campaign fiction is a
-	# commander stamping writs at a war table, so the per-turn resource is
-	# the signet itself. Card2D.WaxSeal paints the blob (seeded deckle, stamp
-	# ring, sheen); a dim lamp-glow behind it flickers like the table light.
-	# The count rides front-and-center as a single bold numeral so it's still
-	# readable from across the screen.
+	# The player's own Command instrument.
+	_build_command_seal_post(false)
+
+
+## Paint a wax COMMAND SEAL — the per-turn resource readout — for one side. A big
+## pressed disc of sealing-wax navy (the same wax every card's cost seal is pressed
+## in, so "blue wax = Command" reads as one system). The campaign fiction is a
+## commander stamping writs at a war table, so the per-turn resource is the signet
+## itself. Card2D.WaxSeal paints the blob (seeded deckle, stamp ring, sheen); a dim
+## lamp-glow behind it flickers like the table light. The count rides front-and-
+## center as a single bold numeral so it's still readable from across the screen.
+##
+## is_opp=false → the PLAYER's seal (bottom-left, beside the player banner; its
+## numeral is _mana_label, pulsed on spend). is_opp=true → the OPPONENT's mirror
+## (skirmish only; up in the foe's corner under the enemy banner), fed by the
+## synced _net_opp_mana so the player can read what the foe can afford. Same wax
+## material, same furniture — built "the same way" for both sides.
+func _build_command_seal_post(is_opp: bool) -> void:
 	const GEM_W := 124
 	const GEM_H := 152
 	const HH := 56.0   # instrument half-height (plinth band + numeral box anchor)
 	const CY := 62.0   # seal center Y within the post
 	var post := Control.new()
-	post.anchor_left = 0.0
-	post.anchor_right = 0.0
-	post.anchor_top = 1.0
-	post.anchor_bottom = 1.0
-	# Sits just right of the player banner (banner W=210, x=14..224) with a
-	# small gap; pinned to the bottom edge above the hand row.
-	post.offset_left = 234
-	post.offset_top = -(GEM_H + 10)
-	post.offset_right = 234 + GEM_W
-	post.offset_bottom = -10
-	post.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if is_opp:
+		# Enemy column, top-RIGHT: tucked under the foe's portrait/HP banner so the
+		# foe's resource groups with its other vitals. Pinned below the incoming-
+		# damage chip slot (y324..382); the muster/wave chip never builds in skirmish,
+		# so the column below the chip is free.
+		post.anchor_left = 1.0
+		post.anchor_right = 1.0
+		post.anchor_top = 0.0
+		post.anchor_bottom = 0.0
+		post.offset_left = -194      # centered under the W=236 enemy banner
+		post.offset_top = 392
+		post.offset_right = -70
+		post.offset_bottom = 392 + GEM_H
+	else:
+		post.anchor_left = 0.0
+		post.anchor_right = 0.0
+		post.anchor_top = 1.0
+		post.anchor_bottom = 1.0
+		# Sits just right of the player banner (banner W=210, x=14..224) with a
+		# small gap; pinned to the bottom edge above the hand row.
+		post.offset_left = 234
+		post.offset_top = -(GEM_H + 10)
+		post.offset_right = 234 + GEM_W
+		post.offset_bottom = -10
+	# The instrument is a hover target so a new commander can learn what the
+	# blue wax MEANS (the numeral alone teaches nothing). The opponent's mirror
+	# is hoverable too — same lesson, framed as "what the foe can spend".
+	post.mouse_filter = Control.MOUSE_FILTER_STOP
+	if is_opp:
+		post.tooltip_text = "FOE'S COMMAND\nWhat your enemy can spend this turn. The bigger it grows, the heavier the line they can field."
+	else:
+		post.tooltip_text = _command_tooltip_text()
+		_mana_seal_post = post
 	_hud_layer.add_child(post)
 
 	# Soft lamp-glow behind the seal — warm table light, not arcane radiance.
@@ -10847,31 +11039,37 @@ func _build_mana_post_diegetic() -> void:
 	# the wax's bottom edge.
 	var seal := Card2D.WaxSeal.new()
 	seal.wax = GameTheme.COST_BLUE_GEM
-	seal.seed_text = "command_post"
+	seal.seed_text = "command_post_opp" if is_opp else "command_post"
 	seal.position = Vector2(GEM_W / 2.0 - seal_r, CY - seal_r)
 	seal.size = Vector2(seal_r * 2.0, seal_r * 2.0)
 	post.add_child(seal)
 
 	# Big numeric — current / max Command, dominant readout, pressed INTO the
 	# wax face: cream numeral + deep-navy outline, same ink as card cost seals.
-	_mana_label = _make_text_label("%d / %d" % [player_mana, player_max_mana],
+	var cur_val: int = _net_opp_mana if is_opp else player_mana
+	var max_val: int = _net_opp_max_mana if is_opp else player_max_mana
+	var lbl := _make_text_label("%d / %d" % [cur_val, max_val],
 		37, Color(0.996, 0.941, 0.800))
 	if GameTheme.font_title_black:
-		_mana_label.add_theme_font_override("font", GameTheme.font_title_black)
-	_mana_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_mana_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_mana_label.anchor_left = 0.0
-	_mana_label.anchor_right = 0.0
-	_mana_label.anchor_top = 0.0
-	_mana_label.anchor_bottom = 0.0
-	_mana_label.offset_left = 0
-	_mana_label.offset_right = GEM_W
-	_mana_label.offset_top = CY - HH
-	_mana_label.offset_bottom = CY + HH
-	_mana_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_mana_label.add_theme_color_override("font_outline_color", Color(0.04, 0.08, 0.16, 0.95))
-	_mana_label.add_theme_constant_override("outline_size", 6)
-	post.add_child(_mana_label)
+		lbl.add_theme_font_override("font", GameTheme.font_title_black)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.anchor_left = 0.0
+	lbl.anchor_right = 0.0
+	lbl.anchor_top = 0.0
+	lbl.anchor_bottom = 0.0
+	lbl.offset_left = 0
+	lbl.offset_right = GEM_W
+	lbl.offset_top = CY - HH
+	lbl.offset_bottom = CY + HH
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lbl.add_theme_color_override("font_outline_color", Color(0.04, 0.08, 0.16, 0.95))
+	lbl.add_theme_constant_override("outline_size", 6)
+	post.add_child(lbl)
+	if is_opp:
+		_net_opp_mana_label = lbl
+	else:
+		_mana_label = lbl
 
 	# Caption below — letterspaced Cinzel in dim gilt, the chart-caption
 	# voice (the old light-blue Nunito "MANA" read as a debug label and was
@@ -10891,6 +11089,22 @@ func _build_mana_post_diegetic() -> void:
 	caption.add_theme_constant_override("outline_size", 3)
 	post.add_child(caption)
 
+	# Carryover pips — small dots on the plinth shelf showing how much unspent
+	# Command will BANK into next turn (up to MAX_BANKED_MANA). Teaches the bank
+	# rule by sight: spend down and the lit dots wink out. Player seal only.
+	if not is_opp:
+		var pips := HBoxContainer.new()
+		pips.alignment = BoxContainer.ALIGNMENT_CENTER
+		pips.add_theme_constant_override("separation", 5)
+		pips.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		pips.offset_left = 0
+		pips.offset_right = GEM_W
+		pips.offset_top = CY + seal_r - 2     # on the plinth band, just below the wax
+		pips.offset_bottom = CY + seal_r + 14
+		post.add_child(pips)
+		_bank_pips = pips
+		_update_bank_pips()
+
 	# Lamp flicker: the wax is inert (no arcane breathing) — only the table
 	# light moves. Uneven up/down times keep the loop from reading metronomic.
 	var aura_tw := aura.create_tween().set_loops()
@@ -10898,6 +11112,54 @@ func _build_mana_post_diegetic() -> void:
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	aura_tw.tween_property(aura, "modulate:a", 0.55, 0.9) \
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+	if is_opp:
+		_net_opp_mana_post = post
+
+
+## Hover text for the player's Command seal — teaches the resource from scratch:
+## what it is, that it refills each turn, and that unspent Command banks. Rebuilt
+## live (max / cap can grow mid-run) so the lesson never goes stale.
+func _command_tooltip_text() -> String:
+	var bank_line: String
+	if _has_relic("ice_cream"):
+		bank_line = "Unspent Command ALL carries over (Ice Cream)."
+	else:
+		bank_line = "Up to %d unspent Command carries over — the lit dots on the shelf." % MAX_BANKED_MANA
+	return "COMMAND — your turn resource.\nSpend it to play creatures and spells. Refills to %d at the start of each turn.\n%s" % [player_max_mana, bank_line]
+
+
+## Repaint the carryover dots: `lit` of `cap` filled, where lit = what you'd bank
+## right now (current Command, capped). Called on build and on every HUD refresh.
+func _update_bank_pips() -> void:
+	if _bank_pips == null or not is_instance_valid(_bank_pips):
+		return
+	for c in _bank_pips.get_children():
+		c.queue_free()
+	var cap: int = player_mana if _has_relic("ice_cream") else MAX_BANKED_MANA
+	cap = clampi(cap, 0, 6)   # bound the row so a fat Ice Cream bank can't overflow
+	var lit: int = clampi(player_mana, 0, cap)
+	for i in range(cap):
+		var dot := Panel.new()
+		dot.custom_minimum_size = Vector2(9, 9)
+		dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var st := StyleBoxFlat.new()
+		st.set_corner_radius_all(5)
+		st.set_border_width_all(1)
+		if i < lit:
+			# Lit = will carry over: warm gilt, like banked coin on the shelf.
+			st.bg_color = Color(0.93, 0.74, 0.36, 0.96)
+			st.border_color = Color(0.25, 0.16, 0.05, 0.9)
+		else:
+			# Empty bank slot: hollow and dim.
+			st.bg_color = Color(0.10, 0.08, 0.06, 0.55)
+			st.border_color = Color(0.55, 0.44, 0.26, 0.6)
+		dot.add_theme_stylebox_override("panel", st)
+		_bank_pips.add_child(dot)
+	# Keep the hover lesson current with the live max / cap.
+	if _mana_seal_post != null and is_instance_valid(_mana_seal_post):
+		_mana_seal_post.tooltip_text = _command_tooltip_text()
 
 
 func _build_piles_diegetic() -> void:
@@ -10936,6 +11198,22 @@ func _build_piles_diegetic() -> void:
 	disc_box.offset_top = COL_TOP
 	disc_box.offset_bottom = COL_TOP + PILE_H
 	_hud_layer.add_child(disc_box)
+
+	# EXHAUST — third stack, charred paper. Hidden until a card is actually
+	# exhausted (Exhaust keyword / exhaust-a-card effects), so it teaches itself
+	# by appearing the moment a card leaves play "for good" instead of vanishing.
+	var exhaust_box := _make_pile_panel_diegetic("EXHAUST", 2)
+	exhaust_box.anchor_left = 0.0
+	exhaust_box.anchor_right = 0.0
+	exhaust_box.anchor_top = 0.0
+	exhaust_box.anchor_bottom = 0.0
+	exhaust_box.offset_left = COL_LEFT + (PILE_W + 18) * 2
+	exhaust_box.offset_right = COL_LEFT + (PILE_W + 18) * 2 + PILE_W
+	exhaust_box.offset_top = COL_TOP
+	exhaust_box.offset_bottom = COL_TOP + PILE_H
+	exhaust_box.visible = false
+	_exhaust_box = exhaust_box
+	_hud_layer.add_child(exhaust_box)
 
 
 func _build_potion_bar_diegetic() -> void:
@@ -11062,6 +11340,7 @@ func _make_pile_panel_diegetic(caption_text: String, kind: int) -> Control:
 	# Replaces the dark ornate card-back texture, which read as a separate
 	# product from the v9 parchment writs fanned right next to it.
 	var is_discard := kind == 1
+	var is_exhaust := kind == 2
 	# Two back leaves nudged up-left — the stack's physical thickness.
 	for layer_i in [2, 1]:
 		var off := float(layer_i) * 3.0
@@ -11074,9 +11353,12 @@ func _make_pile_panel_diegetic(caption_text: String, kind: int) -> Control:
 		leaf.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var lst := StyleBoxFlat.new()
 		var shade := 0.78 - float(layer_i) * 0.09
-		lst.bg_color = Color(0.851 * shade, 0.792 * shade, 0.671 * shade) \
-			if not is_discard else \
-			Color(0.760 * shade, 0.730 * shade, 0.660 * shade)
+		if is_exhaust:
+			lst.bg_color = Color(0.34 * shade, 0.30 * shade, 0.295 * shade)
+		elif is_discard:
+			lst.bg_color = Color(0.760 * shade, 0.730 * shade, 0.660 * shade)
+		else:
+			lst.bg_color = Color(0.851 * shade, 0.792 * shade, 0.671 * shade)
 		lst.border_color = Color(0.165, 0.125, 0.082, 0.9)
 		lst.set_border_width_all(1)
 		lst.set_corner_radius_all(2)
@@ -11103,8 +11385,12 @@ func _make_pile_panel_diegetic(caption_text: String, kind: int) -> Control:
 	front.set_anchors_preset(Control.PRESET_FULL_RECT)
 	front.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var fst := StyleBoxFlat.new()
-	fst.bg_color = Color(0.851, 0.792, 0.671) if not is_discard \
-		else Color(0.745, 0.718, 0.648)
+	if is_exhaust:
+		fst.bg_color = Color(0.33, 0.29, 0.285)   # spent ash — reads as "gone for good"
+	elif is_discard:
+		fst.bg_color = Color(0.745, 0.718, 0.648)
+	else:
+		fst.bg_color = Color(0.851, 0.792, 0.671)
 	fst.border_color = Color(0.165, 0.125, 0.082)
 	fst.set_border_width_all(1)
 	fst.set_corner_radius_all(2)
@@ -11123,7 +11409,7 @@ func _make_pile_panel_diegetic(caption_text: String, kind: int) -> Control:
 	frst.set_border_width_all(1)
 	front_rule.add_theme_stylebox_override("panel", frst)
 	front.add_child(front_rule)
-	if not is_discard:
+	if kind == 0:
 		var seal := Panel.new()
 		seal.anchor_left = 0.5
 		seal.anchor_right = 0.5
@@ -11197,6 +11483,8 @@ func _make_pile_panel_diegetic(caption_text: String, kind: int) -> Control:
 
 	if kind == 0:
 		_deck_count_label = count_label
+	elif kind == 2:
+		_exhaust_count_label = count_label
 	else:
 		_discard_count_label = count_label
 
@@ -11229,6 +11517,9 @@ func _show_pile_viewer(kind: int) -> void:
 	if kind == 0:
 		entries = _player_draw_pile.duplicate()
 		title_text = "DRAW PILE (%d)" % entries.size()
+	elif kind == 2:
+		entries = _exhaust_pile.duplicate()
+		title_text = "EXHAUSTED (%d) — removed for the rest of this fight" % entries.size()
 	else:
 		entries = _player_discard_pile.duplicate()
 		title_text = "DISCARD PILE (%d)" % entries.size()
@@ -11745,17 +12036,20 @@ func _update_hud() -> void:
 		_mana_label.text = "%d / %d (+%d)" % [player_mana, player_max_mana, player_mana - player_max_mana]
 	else:
 		_mana_label.text = "%d / %d" % [player_mana, player_max_mana]
+	_update_bank_pips()
 	_refresh_hand_affordability()
 	_refresh_relic_counters()
 	# JUICE: re-evaluate low-HP dread and enemy threat outlines on every HUD
 	# refresh (i.e. after every damage / heal / board change).
 	_update_low_hp_dread()
 	_refresh_threat_flags()
-	# Round 1 reads as the muster beat — you set your line before the lines
-	# clash. The build does fight every round, so this frames the opening as a
-	# deliberate deploy phase, not "nothing happens".
+	# Round 1 is the muster beat — set your line before the lines clash.
+	# IMPORTANT: combat runs EVERY round (there is no setup-only turn), so the
+	# copy must NOT imply turn 1 is consequence-free — ending it triggers the
+	# first clash. The one-time combat-model tip (fired on first End Turn) and
+	# the SWIFT/CLASH phase captions drive that home.
 	if round_number == 1:
-		_turn_label.text = "Round 1 · Deploy your line"
+		_turn_label.text = "Round 1 · Set your line"
 	else:
 		_turn_label.text = "Round %d" % round_number
 	_update_presence_hp()
@@ -11772,12 +12066,21 @@ func _update_hud() -> void:
 		_deck_count_label.text = deck_text
 	if _discard_count_label:
 		_discard_count_label.text = str(_player_discard_pile.size())
+	if _exhaust_count_label:
+		_exhaust_count_label.text = str(_exhaust_pile.size())
+	if _exhaust_box:
+		# The exhaust stack only exists on-screen once something has been removed
+		# for the fight — so an empty pile never sits there as a mystery.
+		_exhaust_box.visible = not _exhaust_pile.is_empty()
 	match phase:
 		Phase.PLAYER_TURN:
 			_phase_label.text = "YOUR TURN"
 			_phase_label.add_theme_color_override("font_color", IVORY)
 		Phase.RESOLVING:
-			_phase_label.text = "FIGHT"
+			# Narrate the sub-phase the loop is in (SWIFT STRIKES / CLASH / THE
+			# FALLEN / ENEMY REINFORCES) instead of one flat "FIGHT". _do_combat
+			# fills _phase_caption as it advances; fall back to "FIGHT".
+			_phase_label.text = _phase_caption if _phase_caption != "" else "FIGHT"
 			_phase_label.add_theme_color_override("font_color", Color(1.00, 0.60, 0.25))
 		Phase.GAME_OVER:
 			pass
@@ -12087,6 +12390,9 @@ func _refresh_threat_flags() -> void:
 				c.set_threat_flagged(true, c.effective_atk())
 			else:
 				c.set_threat_flagged(false)
+			# Keep the default-attack chevron in sync with the badge: it hides
+			# beneath a threat flag and reappears the moment the flag clears.
+			_update_attack_marker(c, String(c.get_meta("current_intent", "ATK")))
 
 func _enemy_is_threatening(c: Control, lane: int, row: int) -> bool:
 	# A creature is "threatening" if it can attack and either (a) its column is
@@ -12439,7 +12745,9 @@ func _predicted_damage_against(card: Control, spell_type: String, custom_id: Str
 		var reduction := 1
 		if not card.is_opponent and _has_relic("fortress_stone"):
 			reduction = 2
-		dmg = maxi(0, dmg - reduction)
+		# Match Card2D.take_damage: Armored floors damage at 1, never fully negates,
+		# so the lethal/non-lethal read can't disagree with the actual hit.
+		dmg = maxi(1, dmg - reduction)
 	return dmg
 
 
@@ -12503,14 +12811,26 @@ func _hide_combat_telegraph() -> void:
 
 
 func _update_combat_telegraph() -> void:
-	# Only during the player's own turn, when the feature is on and the board is
-	# interactive. Skip while dragging a card (the drop preview owns the cursor).
+	# Shows during the player's own turn (solo or net) AND — in a net match — during
+	# the OPPONENT's turn, so the player can read the incoming strike before it lands
+	# the same way they preview their own. Respects the setting; skip while dragging a
+	# card (the drop preview owns the cursor).
 	if _telegraph_arrow == null:
 		return
-	if phase != Phase.PLAYER_TURN \
-			or (UserSettings != null and not UserSettings.combat_telegraph) \
-			or not Card2D.board_interactive \
+	if (UserSettings != null and not UserSettings.combat_telegraph) \
 			or Card2D._any_card_dragging:
+		_hide_combat_telegraph()
+		return
+	# My own active turn — the historical gate (solo play and my own net turn both
+	# satisfy board_interactive + PLAYER_TURN).
+	var my_turn: bool = phase == Phase.PLAYER_TURN and Card2D.board_interactive
+	# The opponent's net turn: my board is locked, but the forward read stays useful
+	# while they develop. Drop it once the clash actually resolves (the host flips to
+	# RESOLVING; the client never does, so its coarse v1 animation keeps a live read).
+	var opp_turn: bool = _is_net() and not _net_match_over \
+			and _net_active_index != NetMatch.local_player_index \
+			and phase != Phase.RESOLVING
+	if not (my_turn or opp_turn):
 		_hide_combat_telegraph()
 		return
 	var mouse_pos := get_viewport().get_mouse_position()
@@ -13248,7 +13568,24 @@ func _show_turn_banner() -> void:
 func _show_info(msg: String) -> void:
 	_info_label.text = msg
 	_info_label.modulate = Color(1, 1, 1, 1)
-	get_tree().create_timer(2.0).timeout.connect(func(): _info_label.text = "")
+	# Generation guard: only THIS message's timer may clear the label. A newer
+	# _show_info (or a persistent targeting prompt, which bumps the token) keeps
+	# a stale 2s timer from wiping a message the player is still meant to read.
+	_info_token += 1
+	var my_token := _info_token
+	get_tree().create_timer(2.0).timeout.connect(func():
+		if _info_token == my_token and _info_label != null:
+			_info_label.text = "")
+
+
+func _set_phase_caption(t: String) -> void:
+	# Drive the phase line through the combat sub-phases (SWIFT / CLASH / THE
+	# FALLEN / ENEMY REINFORCES). _update_hud's RESOLVING case also reads
+	# _phase_caption, so the caption survives a HUD refresh mid-combat.
+	_phase_caption = t
+	if _phase_label != null:
+		_phase_label.text = t
+		_phase_label.add_theme_color_override("font_color", Color(1.00, 0.60, 0.25))
 
 
 # Balance-telemetry switch — MUST stay false in release. When true, _dbgp() prints
@@ -13315,6 +13652,16 @@ func _net_begin_combat() -> void:
 	# Mid-match disconnect: bail to the menu rather than hang (plan §15).
 	NetMatch.peer_left.connect(func(_id): _net_on_peer_lost())
 	NetMatch.host_closed.connect(_net_on_peer_lost)
+	# Open-hand spectating: build the face-up "opponent's hand" strip up top now so
+	# it's ready when the first EV_HAND_COUNT (which now carries the cards) lands.
+	_net_build_opp_hand_ui()
+	# Foe's Command seal (mirror of the player's): seed its max from the opponent's
+	# slot so it reads "0 / <base>" until their first turn-begin sync, then build it.
+	var opp_slot: SkirmishState.PlayerSlot = SkirmishState.get_slot(SkirmishState.opponent_index())
+	if opp_slot != null:
+		_net_opp_max_mana = opp_slot.base_max_mana
+	if _net_opp_mana_post == null:
+		_build_command_seal_post(true)
 	phase = Phase.PLAYER_TURN
 	if _is_host():
 		_show_info("Skirmish — you have the first move.")
@@ -13331,6 +13678,9 @@ func _net_begin_combat() -> void:
 			draw_one()
 		_net_skip_draw_this_round = true
 		_layout_hand()
+		# Share the pre-dealt opening hand so the host can see it during turn 1 too
+		# (the host broadcasts its own hand from _net_local_turn_begin).
+		_net_broadcast_hand_count()
 		_show_info("Skirmish — waiting for the host. Plan your opening hand…")
 
 
@@ -13428,6 +13778,10 @@ func _net_run_attack(active_index: int) -> void:
 	# the first real (contested) attack on turn 2. Skip the whole strike pass on the
 	# opening turn and fall straight through to the turn-pass below.
 	if _net_turn_round > 1:
+		# Make sure adjacency is current before the strike math reads effective_atk
+		# (the campaign resolvers below). Placement already refreshes, but this is
+		# the authoritative damage pass — keep it honest for both warbands.
+		_refresh_adjacency_buffs()
 		# Host POV: host = player side (is_enemy=false, index 0); client = enemy side.
 		var active_is_enemy: bool = active_index == 1
 		var defender_front_empty: Array[bool] = []
@@ -13487,6 +13841,10 @@ func _net_show_result(winner_index: int) -> void:
 	Card2D.board_interactive = false
 	if _end_turn_btn != null:
 		_end_turn_btn.disabled = true
+	# The face-up opponent-hand strip is meaningless once the game is over; hide it
+	# so it doesn't sit over the result / rematch panel.
+	if _net_opp_hand_box != null and is_instance_valid(_net_opp_hand_box):
+		_net_opp_hand_box.visible = false
 	var me: int = NetMatch.local_player_index
 
 	# ── Best-of-N series ────────────────────────────────────────────────────
@@ -13652,6 +14010,10 @@ func _net_leave_to_menu() -> void:
 func _net_sync_board() -> void:
 	if not _is_host():
 		return
+	# This fires after every authoritative mutation, so it's the one place that
+	# guarantees the snapshot's per-creature atk (serialised from effective_atk
+	# below) reflects current adjacency — for BOTH sides, on the client's screen.
+	_refresh_adjacency_buffs()
 	var creatures: Array = []
 	for is_enemy in [false, true]:
 		for row in [ROW_FRONT, ROW_BACK]:
@@ -13876,6 +14238,9 @@ func _on_net_intent(sender_id: int, intent: Dictionary) -> void:
 				_net_run_attack(1)
 		NetMatch.EV_HAND_COUNT:
 			_net_opp_hand_count = int(intent.get("n", 0))
+			_net_refresh_opp_hand()
+			_net_set_opp_mana(int(intent.get("mana", _net_opp_mana)),
+				int(intent.get("maxmana", _net_opp_max_mana)))
 		_:
 			pass
 
@@ -13996,6 +14361,13 @@ func _on_net_event(event: Dictionary) -> void:
 			_net_apply_board_sync(event)
 		NetMatch.EV_HAND_COUNT:
 			_net_opp_hand_count = int(event.get("n", 0))
+			_net_refresh_opp_hand()
+			_net_set_opp_mana(int(event.get("mana", _net_opp_mana)),
+				int(event.get("maxmana", _net_opp_max_mana)))
+		NetMatch.EV_SPELL:
+			# The host cast a spell — show its arrow + thrown card + target burst so we
+			# see exactly what they pointed at (client casts are shown host-side).
+			_net_on_opp_spell_event(event)
 		NetMatch.EV_DRAW:
 			# A spell we cast told us to draw from our own pile (host resolved it).
 			for _i in int(event.get("n", 0)):
@@ -14007,6 +14379,7 @@ func _on_net_event(event: Dictionary) -> void:
 			# A spell we cast granted us Command on our own side.
 			player_mana += int(event.get("n", 0))
 			_update_hud()
+			_net_broadcast_hand_count()   # push the bumped Command to the foe's seal
 		NetMatch.EV_MATCH_OVER:
 			_net_show_result(int(event.get("winner", -1)))
 		NetMatch.EV_REMATCH:
@@ -14015,13 +14388,34 @@ func _on_net_event(event: Dictionary) -> void:
 			pass
 
 
-## Tell the opponent our hand SIZE (a number; never the cards). Host → event,
-## client → intent; the receiver stores it in _net_opp_hand_count.
+## Tell the opponent our hand SIZE (a number; never the cards — they only see how
+## many we hold, as face-down backs). Host → event, client → intent; the receiver
+## stores it in _net_opp_hand_count and refreshes the face-down fan up top.
 func _net_broadcast_hand_count() -> void:
+	# The hand count rides with our live Command (current + max) so the opponent's
+	# foe-Command seal tracks what we can afford. This fires on every hand/mana
+	# change (turn-begin refill, each play, spell draw/Command rewards), so the
+	# foe's readout stays current without a separate channel.
+	var msg := {"t": NetMatch.EV_HAND_COUNT, "n": _hand.size(),
+		"mana": player_mana, "maxmana": player_max_mana}
 	if _is_host():
-		NetMatch.send_to_client({"t": NetMatch.EV_HAND_COUNT, "n": _hand.size()})
+		NetMatch.send_to_client(msg)
 	else:
-		NetMatch.send_intent({"t": NetMatch.EV_HAND_COUNT, "n": _hand.size()})
+		NetMatch.send_intent(msg)
+
+
+## Store the opponent's synced Command and refresh the foe's wax seal numeral.
+## Mirrors _update_hud's player-mana formatting (banked carryover shown as "(+N)").
+func _net_set_opp_mana(cur: int, mx: int) -> void:
+	_net_opp_mana = cur
+	_net_opp_max_mana = mx
+	if _net_opp_mana_label == null or not is_instance_valid(_net_opp_mana_label):
+		return
+	if _net_opp_mana > _net_opp_max_mana:
+		_net_opp_mana_label.text = "%d / %d (+%d)" % [
+			_net_opp_mana, _net_opp_max_mana, _net_opp_mana - _net_opp_max_mana]
+	else:
+		_net_opp_mana_label.text = "%d / %d" % [_net_opp_mana, _net_opp_max_mana]
 
 
 ## The "Opponent's turn" line, annotated with their hand size when we know it.
@@ -14029,6 +14423,274 @@ func _net_opp_turn_msg() -> String:
 	if _net_opp_hand_count > 0:
 		return "Opponent's turn — %d in hand" % _net_opp_hand_count
 	return "Opponent's turn…"
+
+
+# ── Opponent's hand (face-down fan by the enemy plate) ───────────────────────
+#
+#  A small fan of face-down card backs, the way other card games show the foe's
+#  hand. Placed in the gap just LEFT of the enemy plate (top-right): next to the
+#  foe, clear of the centred title, above the board. You see THAT they hold cards
+#  and how many — never what they are. Driven by _net_opp_hand_count.
+
+func _net_build_opp_hand_ui() -> void:
+	if _hud_layer == null or _net_opp_hand_box != null:
+		return
+	if _net_card_back_tex == null:
+		_net_card_back_tex = load("res://assets/ui/card_back.png") as Texture2D
+
+	# Box sits in the gap between the centred title (right edge ~x1100) and the
+	# enemy plate (left edge x1350). Right-anchored so it tracks the plate.
+	_net_opp_hand_box = Control.new()
+	_net_opp_hand_box.name = "NetOppHand"
+	_net_opp_hand_box.anchor_left = 1.0
+	_net_opp_hand_box.anchor_right = 1.0
+	_net_opp_hand_box.anchor_top = 0.0
+	_net_opp_hand_box.anchor_bottom = 0.0
+	_net_opp_hand_box.offset_left = -494   # ~x1106
+	_net_opp_hand_box.offset_right = -250  # x1350 (the plate's left edge)
+	_net_opp_hand_box.offset_top = 0.0
+	_net_opp_hand_box.offset_bottom = 96.0
+	_net_opp_hand_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_net_opp_hand_box.z_index = 6
+	_net_opp_hand_box.visible = false
+	_hud_layer.add_child(_net_opp_hand_box)
+
+	var label := Label.new()
+	label.text = "OPPONENT"
+	label.add_theme_font_size_override("font_size", 10)
+	label.add_theme_color_override("font_color", Color(0.90, 0.80, 0.60, 0.7))
+	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	label.add_theme_constant_override("outline_size", 3)
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.anchor_left = 0.0
+	label.anchor_right = 1.0
+	label.offset_top = 74.0
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if GameTheme.font_display:
+		label.add_theme_font_override("font", GameTheme.font_display)
+	_net_opp_hand_box.add_child(label)
+
+	_net_opp_hand_row = Control.new()
+	_net_opp_hand_row.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_net_opp_hand_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_net_opp_hand_box.add_child(_net_opp_hand_row)
+
+
+## Rebuild the face-down fan from _net_opp_hand_count. Cheap (a few TextureRects
+## sharing one texture), so we rebuild on every hand-count change.
+func _net_refresh_opp_hand() -> void:
+	if _net_opp_hand_row == null or not is_instance_valid(_net_opp_hand_row):
+		return
+	if _net_opp_hand_box != null:
+		_net_opp_hand_box.visible = _net_opp_hand_count > 0
+	for child in _net_opp_hand_row.get_children():
+		child.queue_free()
+	var n: int = _net_opp_hand_count
+	if n <= 0:
+		return
+	const BACK_W := 46.0
+	const BACK_H := 64.0
+	const BASE_Y := 6.0
+	var area_w: float = _net_opp_hand_box.size.x if _net_opp_hand_box != null else 244.0
+	# Overlapping fan, centred in the gap. Tighten the spacing as the hand grows so
+	# a big hand still fits the narrow gap.
+	var spacing: float = BACK_W * 0.62
+	var usable: float = area_w - BACK_W - 6.0
+	if n > 1 and spacing * float(n - 1) > usable:
+		spacing = usable / float(n - 1)
+	var total: float = spacing * float(n - 1)
+	var start_x: float = (area_w - total) * 0.5
+	var mid: float = float(n - 1) * 0.5
+	for i in range(n):
+		var back := _net_make_card_back(Vector2(BACK_W, BACK_H))
+		_net_opp_hand_row.add_child(back)
+		var off: float = float(i) - mid                 # signed distance from centre
+		var norm: float = 0.0 if mid <= 0.0 else off / mid
+		# A hand held at the top hangs DOWN: edges ride a little lower, middle highest,
+		# with the cards splayed outward (rotated about their bottom-centre).
+		var x: float = start_x + float(i) * spacing - BACK_W * 0.5
+		var y: float = BASE_Y + norm * norm * 7.0
+		back.position = Vector2(x, y)
+		back.rotation = off * 0.085
+
+
+## One face-down card: the shared card-back art, rotated about its bottom-centre
+## (the held point of a fanned hand). A soft shadow lifts it off the board.
+func _net_make_card_back(sz: Vector2) -> Control:
+	var holder := Control.new()
+	holder.custom_minimum_size = sz
+	holder.size = sz
+	holder.pivot_offset = Vector2(sz.x * 0.5, sz.y)   # rotate around the bottom-centre
+	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var shadow := Panel.new()
+	shadow.set_anchors_preset(Control.PRESET_FULL_RECT)
+	shadow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sst := StyleBoxFlat.new()
+	sst.bg_color = Color(0.02, 0.015, 0.01, 0.0)
+	sst.set_corner_radius_all(4)
+	sst.shadow_color = Color(0, 0, 0, 0.5)
+	sst.shadow_size = 4
+	shadow.add_theme_stylebox_override("panel", sst)
+	holder.add_child(shadow)
+
+	if _net_card_back_tex != null:
+		var pic := TextureRect.new()
+		pic.texture = _net_card_back_tex
+		pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE   # shrink the big art into sz
+		pic.set_anchors_preset(Control.PRESET_FULL_RECT)
+		pic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		holder.add_child(pic)
+	else:
+		# No card-back art — a gilt-edged dark plate still reads as "a card".
+		var plate := Panel.new()
+		plate.set_anchors_preset(Control.PRESET_FULL_RECT)
+		plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var pst := StyleBoxFlat.new()
+		pst.bg_color = Color(0.16, 0.07, 0.06, 0.96)
+		pst.border_color = Color(GILT.r, GILT.g, GILT.b, 0.55)
+		pst.set_border_width_all(2)
+		pst.set_corner_radius_all(4)
+		plate.add_theme_stylebox_override("panel", pst)
+		holder.add_child(plate)
+	return holder
+
+
+# ── Opponent spell telegraph (arrow + thrown card to the target) ─────────────
+#
+#  When the opponent casts, we show what they pointed at: a gold arrow from their
+#  hand (top) to the struck target, a thrown ghost of the spell card, and the
+#  spell's family burst on the target. The casting side already saw its own arrow
+#  during target selection, so this only fires for the WATCHER.
+
+## CLIENT: the host announced a spell (EV_SPELL). Resolve the target locally (the
+## entity registry is shared by eid) and play the telegraph. Fires before the board
+## snapshot, so the target node is still alive even for a lethal spell.
+func _net_on_opp_spell_event(event: Dictionary) -> void:
+	var data := CardDB.get_card_data(String(event.get("id", "")))
+	if data.is_empty():
+		return
+	var teid: int = int(event.get("target", -1))
+	var tnode: Control = null
+	var tcenter := Vector2.ZERO
+	var has_t := false
+	if teid >= 0:
+		var n = NetMatch.get_entity(teid)
+		if n != null and is_instance_valid(n):
+			tnode = n
+			tcenter = n.get_global_rect().get_center()
+			has_t = true
+	_net_spell_telegraph(data, tcenter, has_t, tnode)
+
+
+func _net_spell_telegraph(card_data: Dictionary, target_center: Vector2,
+		has_target: bool, target_node: Control) -> void:
+	if _hud_layer == null:
+		return
+	var vp := get_viewport_rect().size
+	# The opponent casts from their corner — origin at the enemy plate (top-right),
+	# so the arrow + thrown card visibly come from the foe.
+	var origin := Vector2(vp.x - 130.0, 150.0)
+	if _enemy_banner_for_info != null and is_instance_valid(_enemy_banner_for_info):
+		origin = _enemy_banner_for_info.get_global_rect().get_center()
+	var dest := target_center if has_target else Vector2(vp.x * 0.5, vp.y * 0.4)
+	if has_target:
+		_net_flash_arrow(origin, dest)
+	_net_spawn_thrown_ghost(card_data, origin, dest)
+	# Burst at the struck point — reuse the family VFX while we still have the node.
+	if target_node != null and is_instance_valid(target_node):
+		_play_spell_cast_vfx(card_data, target_node)
+	elif has_target:
+		spawn_spell_burst(dest,
+			_legacy_spell_color(String(card_data.get("spell", {}).get("type", ""))))
+	else:
+		_play_spell_cast_vfx(card_data, null)
+
+
+## A one-shot version of the targeting arrow (the live one tracks the cursor): a
+## gold bezier from the opponent's hand to the target that fades in, holds, fades.
+func _net_flash_arrow(from: Vector2, to: Vector2) -> void:
+	if _hud_layer == null:
+		return
+	var line := Line2D.new()
+	line.width = 7.0
+	line.antialiased = true
+	line.joint_mode = Line2D.LINE_JOINT_ROUND
+	line.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	line.end_cap_mode = Line2D.LINE_CAP_ROUND
+	line.z_index = 239
+	var curve := Curve.new()
+	curve.add_point(Vector2(0.0, 0.4))
+	curve.add_point(Vector2(1.0, 1.0))
+	line.width_curve = curve
+	var grad := Gradient.new()
+	grad.set_color(0, Color(1.0, 0.85, 0.35, 0.55))
+	grad.set_color(1, Color(1.0, 0.45, 0.15, 1.0))
+	line.gradient = grad
+	# Bow the curve downward — the opponent throws the spell down at our board.
+	var dir := to - from
+	var ctrl1 := from + Vector2(dir.x * 0.15, 150.0)
+	var ctrl2 := to + Vector2(0.0, -70.0)
+	var points := PackedVector2Array()
+	var steps := 26
+	for i in range(steps + 1):
+		points.append(_bezier_cubic(from, ctrl1, ctrl2, to, float(i) / float(steps)))
+	line.points = points
+	line.modulate.a = 0.0
+	_hud_layer.add_child(line)
+
+	var head := Polygon2D.new()
+	head.polygon = PackedVector2Array([Vector2(0, 0), Vector2(-22, -10), Vector2(-22, 10)])
+	head.color = Color(1.0, 0.40, 0.12, 1.0)
+	head.z_index = 240
+	head.position = to
+	head.modulate.a = 0.0
+	if points.size() >= 2:
+		var tangent: Vector2 = points[points.size() - 1] - points[points.size() - 2]
+		if tangent.length_squared() > 0.01:
+			head.rotation = tangent.angle()
+	_hud_layer.add_child(head)
+
+	var tw := create_tween()
+	# Fade in (line + head together), hold, fade out (together), then free.
+	tw.tween_property(line, "modulate:a", 1.0, 0.12)
+	tw.parallel().tween_property(head, "modulate:a", 1.0, 0.12)
+	tw.tween_interval(0.45)
+	tw.tween_property(line, "modulate:a", 0.0, 0.30)
+	tw.parallel().tween_property(head, "modulate:a", 0.0, 0.30)
+	tw.tween_callback(func():
+		if is_instance_valid(line): line.queue_free()
+		if is_instance_valid(head): head.queue_free())
+
+
+## A thrown spell card flying from the opponent's hand toward the target, fading.
+func _net_spawn_thrown_ghost(card_data: Dictionary, from: Vector2, to: Vector2) -> void:
+	if _hud_layer == null or CardTextureCache == null:
+		return
+	var tex: Texture2D = CardTextureCache.get_texture(card_data)
+	if tex == null:
+		return   # not baked — the arrow + burst still carry the read
+	var ghost := TextureRect.new()
+	ghost.texture = tex
+	ghost.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	ghost.expand_mode = TextureRect.EXPAND_IGNORE_SIZE   # honour sz, not the texture's
+	var sz := Vector2(150.0, 206.0)
+	ghost.custom_minimum_size = sz
+	ghost.size = sz
+	ghost.pivot_offset = sz * 0.5
+	ghost.position = from - sz * 0.5
+	ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ghost.modulate = Color(1, 1, 1, 0.95)
+	ghost.z_index = 200
+	_hud_layer.add_child(ghost)
+	var landing := to - sz * 0.5
+	var tw := ghost.create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(ghost, "position", landing, 0.40).set_ease(Tween.EASE_IN)
+	tw.tween_property(ghost, "scale", Vector2(0.62, 0.62), 0.40).set_ease(Tween.EASE_IN)
+	tw.tween_property(ghost, "modulate:a", 0.0, 0.42).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(ghost.queue_free)
 
 
 ## The other peer dropped — end cleanly and return to the menu. Handles both the
@@ -14094,6 +14756,9 @@ func _net_play_spell(card: Control, cost: int) -> void:
 	if targeting == "none":
 		if _is_host():
 			_net_resolve_spell(data, -1, 0)
+			# Tell the client what we cast (no target) — sent before the board snapshot
+			# so its telegraph plays, then the result reconciles.
+			NetMatch.send_to_client({"t": NetMatch.EV_SPELL, "id": id, "target": -1})
 			_net_sync_board()
 		else:
 			NetMatch.send_intent({"t": NetMatch.IN_PLAY_SPELL, "uid": uid, "id": id, "target": -1})
@@ -14116,6 +14781,9 @@ func _net_cast_targeted(spell_card: Control, target: Control) -> void:
 		eid = int(target.entity_id)
 	if _is_host():
 		_net_resolve_spell(spell_card.card_data, eid, 0)
+		# Tell the client which target we pointed at — sent before the board snapshot
+		# so the arrow + thrown card play, then the result reconciles.
+		NetMatch.send_to_client({"t": NetMatch.EV_SPELL, "id": spell_card.card_id, "target": eid})
 		_net_sync_board()
 	else:
 		NetMatch.send_intent({
@@ -14135,7 +14803,22 @@ func _net_apply_remote_spell(intent: Dictionary) -> void:
 	var data := CardDB.get_card_data(String(intent.get("id", "")))
 	if data.is_empty() or not _net_spell_supported(data):
 		return
-	_net_resolve_spell(data, int(intent.get("target", -1)), 1)
+	var target_eid: int = int(intent.get("target", -1))
+	# Capture the target's screen position BEFORE resolving — _net_resolve_spell
+	# runs _cleanup_dead, which can free the node a lethal spell just killed.
+	var tnode: Control = null
+	var tcenter := Vector2.ZERO
+	var has_t := false
+	if target_eid >= 0:
+		var n = NetMatch.get_entity(target_eid)
+		if n != null and is_instance_valid(n):
+			tnode = n
+			tcenter = n.get_global_rect().get_center()
+			has_t = true
+	_net_resolve_spell(data, target_eid, 1)
+	# The host is the watcher of the client's spell — show its arrow + thrown card.
+	_net_spell_telegraph(data, tcenter, has_t,
+		tnode if (tnode != null and is_instance_valid(tnode)) else null)
 	_net_sync_board()
 
 
@@ -14472,3 +15155,4 @@ func _net_caster_gain_mana(caster_is_enemy: bool, n: int) -> void:
 	else:
 		player_mana += n
 		_update_hud()
+		_net_broadcast_hand_count()   # push the bumped Command to the foe's seal

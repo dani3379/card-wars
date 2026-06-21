@@ -48,6 +48,13 @@ tools/card_redesign_v6/
 tools/screenshot/
 tools/screenshot_boot.*
 tools/_crop_*
+# Clarity-verification scratch (2026-06-21): combat/map/card render harnesses,
+# their PNG outputs, and the zoomed crops used to eyeball the UI changes.
+/_shot_*.png
+tools/_shot_*
+tools/_render_*
+tools/_v_*
+tools/_probe_parsecheck.*
 # Headless parse-check / probe run logs (regenerated on every run)
 tools/*.log
 

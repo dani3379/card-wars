@@ -274,7 +274,11 @@ func _load_assets() -> void:
 	tex_node_treasure = load(gi_dir + "coins-pile.svg")
 	tex_node_recruit = load(gi_dir + "flying-flag.svg")
 	# Wayside halts (drill yard / muster scale / standard-bearer / cache) —
-	# the roadside verbs added 2026-06-12; a soldier's helm on a post.
+	# the roadside verbs added 2026-06-12. Each verb now draws its OWN ink
+	# glyph on the chart (anvil / scales / banner / chest) via
+	# MapTerrain._draw_wayside_glyph, so the four stops aren't pixel-identical.
+	# This helm-on-a-post texture stays as the fallback for an unknown/blank
+	# wayside_id (and the legend reuses the same per-verb glyphs).
 	tex_node_wayside = load(gi_dir + "horned-helm.svg")
 	# Painted icons (downloaded CC0 from OpenGameArt) prefer over silhouettes
 	# where available — they match Slay-the-Spire's painted HUD aesthetic.
@@ -1285,11 +1289,15 @@ func _load_new_frames() -> void:
 
 
 func _load_keyword_icons() -> void:
-	# Game-icons.net SVGs, CC-BY 3.0 (credited in CREDITS.md).
+	# Game-icons.net SVGs, CC-BY 3.0 (credited in CREDITS.md), plus the
+	# hand-authored redesign-keyword devices in the same white-silhouette kit.
 	var keywords = [
 		"armored", "swift", "ranged", "thorns", "regenerate", "summon",
 		"last_stand", "piercing", "sacrifice", "exhaust", "retain",
 		"wither", "on_enter", "on_death", "floop", "adj_buff",
+		# Redesign keywords — were silently icon-less (no bottom-margin device).
+		"shield", "poison", "guardian", "doom", "rampage", "lifelink",
+		"overrun", "formation",
 	]
 	for k in keywords:
 		var p = "res://assets/icons/keywords/%s.svg" % k

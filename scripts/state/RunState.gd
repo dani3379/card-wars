@@ -156,6 +156,17 @@ const NUM_PATHS: int = 3
 const FIGHT_ROWS: Array[int] = [0, 3, 9]   # plain holds (R6 = elite band)
 const ELITE_ROW: int = 6                   # the act's mid-road spike
 
+# First-run on-ramp (CLARITY_AUDIT P1#5): on a player's very first campaign
+# (MetaState.total_runs == 0 — no run has ever been finished), the Act-1
+# row-0 hold is pinned to one hand-picked gentle fight with its mutator
+# suppressed, so the first thing a newcomer fights is calm and predictable.
+# "goblin_scouts" (The First Cut) is the gentlest authored Act-1 combat:
+# the lowest total statline, an EMPTY passive, no thorns/armored walls to
+# muddy first trades, no resource/heal/regen trap, and a trivial 1/1 Swift
+# reinforcement. The matching "drag a creature onto a lane" coach tip is
+# wired separately in Combat (P1#5, other lane).
+const FIRST_RUN_OPENER_ENCOUNTER: String = "goblin_scouts"
+
 
 func get_act() -> int:
 	return current_act_idx + 1
@@ -1361,6 +1372,12 @@ func _assign_encounters(grid: Array, act: int,
 	_shuffle_array(combat_ids, rng)
 	var elite_ids: Array = EncounterDB.get_kingdom_pool(act, "elite", faction)
 	_shuffle_array(elite_ids, rng)
+	# First-run on-ramp (P1#5): only the very first campaign's opening hold —
+	# Act 1, row 0 (FIGHT_ROWS[0]) — gets the hand-picked gentle fight with no
+	# mutator. Every later act, later row, and every subsequent run keeps the
+	# shuffled pool + 35% mutator roll untouched. Identity-only: this never
+	# touches the skeleton/site counts the acceptance loop guards.
+	var first_run_opener: bool = act == 1 and MetaState.total_runs == 0
 	var combat_idx: int = 0
 	var elite_idx: int = 0
 	for r in range(MAP_HEIGHT):
@@ -1370,6 +1387,10 @@ func _assign_encounters(grid: Array, act: int,
 				continue
 			match node["type"]:
 				"combat":
+					if first_run_opener and r == FIGHT_ROWS[0]:
+						node["encounter_id"] = FIRST_RUN_OPENER_ENCOUNTER
+						node["mutator_id"] = ""
+						continue
 					if combat_ids.size() > 0:
 						node["encounter_id"] = combat_ids[combat_idx % combat_ids.size()]
 						combat_idx += 1

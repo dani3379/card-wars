@@ -83,7 +83,12 @@ func _ready() -> void:
 	# the ease glides over a single-quad plate instead of heavy frames.
 	if _plate_tex == null and _plate_bake_pending:
 		await plate_baked
-	_animate_focus(_player_pos if _has_player else _camp_pos, 1.45)
+	# Open INSIDE the dress crossfade band (DRESS_ZOOM_LO 1.10 .. HI 1.30) so
+	# the keep/region/place-name plaques are legible on arrival. The old 1.45
+	# sat above the band, fading every campaign label to zero until the player
+	# happened to wheel out. 1.20 ≈ a 50% campaign-dress blend — names read,
+	# the march chips still lead.
+	_animate_focus(_player_pos if _has_player else _camp_pos, 1.20)
 	# Checkpoint: every return to the map captures post-room state (HP, gold,
 	# deck changes, relics earned). Clear the room-in-progress fields first so a
 	# later resume lands on the map rather than re-entering the room the player

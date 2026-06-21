@@ -2167,7 +2167,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Kneel and drink\n\nSip by sip the miracle runs deeper.\nSomewhere past the third sip, so do the dregs.",
-				"desc": "Heal sip by sip — push your luck against the dregs",
+				"desc": "Each sip heals more; press your luck and a miss adds a Curse",
 				"effects": [
 					{"type": "risk_loop", "mode": "bust",
 						"open_text": "The water is blood-warm and tastes of copper and church bells. The first sip is always free.",
@@ -2382,7 +2382,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Take the axe and swing\n\nEvery swing costs you something.\nSomewhere in there, the trick clicks.",
-				"desc": "-2 HP a swing until the trick clicks — then upgrade a chosen card",
+				"desc": "Pay 2 HP per swing; within 3 swings it lands, then upgrade a chosen card",
 				"effects": [
 					{"type": "risk_loop", "mode": "jackpot",
 						"open_text": "The axe is heavier than it looks. Most things are. He steps back into the shade to watch, arms folded, patient as the tree.",
@@ -2439,7 +2439,7 @@ const EVENTS: Dictionary = {
 		"choices": [
 			{
 				"label": "Take the fifth place and sing\n\nVerse by verse, the soil gives up its grave-gifts.\nVerse by verse, the song learns your voice.",
-				"desc": "Sing verse by verse — grave-gifts surface until the song turns",
+				"desc": "Each verse earns more gold, then a relic; a miss adds a Curse",
 				"effects": [
 					{"type": "risk_loop", "mode": "bust",
 						"open_text": "You step into the circle. The hum threads itself through your teeth without asking. The grave at the center is empty, and listening.",
@@ -3293,7 +3293,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Harvest for market\n\nFruit by fruit, the sack grows heavier.\nFruit by fruit, the orchard pays closer attention.",
-				"desc": "Pick fruit by fruit — until something notices",
+				"desc": "Each fruit earns more gold; press your luck or take 5 damage",
 				"effects": [
 					{"type": "risk_loop", "mode": "bust",
 						"open_text": "You spread your sack beneath the heaviest tree. The fruit watches you reach. The nearest one has stopped crying, which is somehow worse.",

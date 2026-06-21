@@ -990,6 +990,13 @@ var temp_atk_buff: int = 0
 # start of each round (in Combat); when it reaches 0 the bonus is removed.
 var persistent_atk_buff: int = 0
 var persistent_atk_buff_rounds: int = 0
+# Adjacency ATK buff (Battle Drummer / Bannerman / Wolf Pack, etc.) — the live
+# sum of neighbouring `adj_buff` sources, recomputed by Combat whenever the board
+# changes (Combat._refresh_adjacency_buffs). Stored here so it shows on the ATK
+# numeral, rides the net board snapshot (which serialises effective_atk), and
+# applies to BOTH sides. Combat owns the value; the client leaves it 0 and reads
+# the host's already-buffed atk straight off the snapshot.
+var adj_atk_buff: int = 0
 # Doom keyword — per-creature countdown to detonation. Lazily seeded from
 # card_data.doom the first time it's needed (card_data is often assigned AFTER
 # _ready, e.g. enemy placement), via _ensure_doom_init(). -999 = "not yet seeded".
@@ -1300,7 +1307,7 @@ func can_attack() -> bool:
 	return true
 
 func effective_atk() -> int:
-	return current_atk + temp_atk_buff + persistent_atk_buff
+	return current_atk + temp_atk_buff + persistent_atk_buff + adj_atk_buff
 
 
 # ═══════════════════════════════════════════
@@ -3309,15 +3316,22 @@ func _chart_seal(wax: Color, _metal: Color) -> Control:
 ## Keyword devices, writ edition: a centered row of ink-stamped roundels
 ## in the document's bottom margin — printed ON the paper, never pinned
 ## over the painting (the art plate stays clean; that was v7's mistake).
-func _kw_stamp_row(root: Control, meds: Array, metal: Color) -> void:
+func _kw_stamp_row(root: Control, meds: Array, metal: Color,
+		total_meds: int = -1) -> void:
 	var n: int = min(meds.size(), 3)
 	if n == 0:
 		return
+	# How many icon-bearing keywords the card actually has (the caller may pass
+	# only the first 3 textures). When it exceeds the 3 shown, we append a "+N"
+	# overflow roundel so the player knows there are more devices.
+	var total: int = total_meds if total_meds >= 0 else meds.size()
+	var overflow: int = maxi(total - n, 0)
+	var slots: int = n + (1 if overflow > 0 else 0)
 	var box := 25.0
 	var gap := 6.0
 	var inset: float = box * 0.20
-	var total := box * float(n) + gap * float(n - 1)
-	var x0 := 112.5 - total * 0.5
+	var row_w := box * float(slots) + gap * float(slots - 1)
+	var x0 := 112.5 - row_w * 0.5
 	for i in range(n):
 		var stamp := Panel.new()
 		stamp.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -3345,6 +3359,30 @@ func _kw_stamp_row(root: Control, meds: Array, metal: Color) -> void:
 		glyph.modulate = GameTheme.GILT_BRIGHT
 		glyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		stamp.add_child(glyph)
+	if overflow > 0:
+		# "+N" overflow roundel — same ink mount, a gilt count instead of a
+		# device, so the player sees the card carries more keywords than fit.
+		var more := Panel.new()
+		more.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var mst := StyleBoxFlat.new()
+		mst.bg_color = Color(0.165, 0.133, 0.098, 0.96)
+		mst.border_color = Color(metal.r, metal.g, metal.b, 0.80)
+		mst.set_border_width_all(1)
+		mst.set_corner_radius_all(999)
+		mst.shadow_color = Color(0.10, 0.06, 0.02, 0.30)
+		mst.shadow_size = 2
+		mst.shadow_offset = Vector2(0, 1)
+		more.add_theme_stylebox_override("panel", mst)
+		more.position = Vector2(x0 + float(n) * (box + gap), 260.5)
+		more.size = Vector2(box, box)
+		root.add_child(more)
+		var more_lbl := _make_styled_label("+%d" % overflow,
+			GameTheme.font_stat if GameTheme.font_stat != null \
+			else GameTheme.font_display, 11, GameTheme.GILT_BRIGHT)
+		more_lbl.add_theme_constant_override("outline_size", 3)
+		more_lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
+		more_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		more.add_child(more_lbl)
 
 
 ## Short printed keyword reminders for the hand card. New players read+drag —
@@ -3373,21 +3411,29 @@ const _KW_REMINDER: Dictionary = {
 	"summon":     "Brings a 1/1 token alongside.",
 }
 
-func _chart_kw_reminder_bbcode(desc_lower: String, body_hex: String) -> String:
+func _chart_kw_reminder_bbcode(desc_lower: String, body_hex: String,
+		max_lines: int = 3) -> String:
+	if max_lines <= 0:
+		return ""
 	var lines: Array[String] = []
 	for k in card_data.get("keywords", []):
 		var ks := String(k)
 		if not _KW_REMINDER.has(ks):
 			continue
-		# Don't restate a keyword the rules text already names (it's colorized
-		# up there); the reminder is for the silent icon-only keywords.
+		# Skip a keyword ONLY when the rules text actually EXPLAINS it (house
+		# style: "Keyword — explanation"). A desc that merely NAMES it
+		# ("Shield. Swift.") still needs the teaching line — otherwise a bare-
+		# keyword card stays silent, the worst case for a new player. The em-dash
+		# (or hyphen) right after the keyword is the "this is the gloss" tell.
 		var disp: String = KeywordEffects.KEYWORDS.get(ks, {}).get("display", ks)
 		var dl := String(disp).to_lower()
-		if dl in desc_lower or ks.replace("_", " ") in desc_lower:
+		var alt := ks.replace("_", " ")
+		if (dl + " —") in desc_lower or (dl + " -") in desc_lower \
+				or (alt + " —") in desc_lower or (alt + " -") in desc_lower:
 			continue
 		lines.append("[b][color=#7a4f10]%s[/color][/b]  [color=%s]%s[/color]" \
 			% [disp, body_hex, _KW_REMINDER[ks]])
-		if lines.size() >= 3:
+		if lines.size() >= max_lines:
 			break
 	if lines.is_empty():
 		return ""
@@ -3402,6 +3448,10 @@ func _build_chart_proto() -> void:
 	var rarity := String(card_data.get("rarity", "common"))
 	var is_sp := is_spell()
 	var is_curse_card := CardDB.is_curse(String(card_data.get("id", "")))
+	# Forged-card glance cue (P3): RunState stamps is_upgraded:true when a card
+	# is "+"-forged. The lone " +" name suffix can be ellipsized away, so we add
+	# non-text cues below (gilded name + forge pips flanking the cartouche).
+	var is_upg := bool(card_data.get("is_upgraded", false)) and not is_curse_card
 	var metal := _chart_metal(rarity)
 	var metal_dim := Color(metal.r, metal.g, metal.b, 0.78)
 
@@ -3654,6 +3704,10 @@ func _build_chart_proto() -> void:
 	var name_col := Color(0.93, 0.82, 0.55)
 	if is_curse_card:
 		name_col = Color(0.74, 0.72, 0.66)
+	elif is_upg:
+		# Forged: lift the name to a brighter struck-gilt so an upgraded card
+		# reads as upgraded at a glance, independent of the " +" suffix.
+		name_col = Color(1.0, 0.886, 0.541)
 	# Cinzel caps run wide — long names step down instead of ellipsizing.
 	var nm := String(card_data.get("name", ""))
 	var nm_size := 14
@@ -3672,19 +3726,29 @@ func _build_chart_proto() -> void:
 	# Cartouche center y=170 real → 226.67 in _center_at_point's 300x400 space.
 	_center_at_point(_name_label, Vector2(150, 226.67), SIZE_NAME)
 	root.add_child(_name_label)
+	if is_upg:
+		# Gilt forge finials flank the name cartouche (real-px coords, like the
+		# rulebox ticks). Always visible regardless of rarity or name length —
+		# the redundant non-text half of the forged glance cue.
+		var forge_gilt := Color(1.0, 0.835, 0.4)
+		_chart_diamond(root, Vector2(21, 170), 5.0, forge_gilt)
+		_chart_diamond(root, Vector2(204, 170), 5.0, forge_gilt)
 
 	# ── keyword rail (chart roundels) ────────────────────────────────────
+	# Count ALL icon-bearing keywords (don't cap the count here) so the rail can
+	# render a "+N" overflow marker when a card carries more devices than fit.
 	var combat_meds: Array = []
+	var kw_icon_total := 0
 	for k in card_data.get("keywords", []):
 		var k_str := String(k)
 		var icon_tex: Texture2D = GameTheme.get_keyword_icon(k_str)
 		if icon_tex == null or k_str == "floop":
 			continue
-		combat_meds.append(icon_tex)
-		if combat_meds.size() >= 3:
-			break
+		kw_icon_total += 1
+		if combat_meds.size() < 3:
+			combat_meds.append(icon_tex)
 	if not is_sp:
-		_kw_stamp_row(root, combat_meds, metal)
+		_kw_stamp_row(root, combat_meds, metal, kw_icon_total)
 
 	# ── ruled text region: the page itself carries the rules text. A fine
 	# ink hairline box with metal corner ticks — chart-legend language —
@@ -3758,8 +3822,41 @@ func _build_chart_proto() -> void:
 	# The keyword gold (#e8b547) is tuned for dark wells and disappears on
 	# paper. Re-ink the same markup in dark bronze — keyword identity kept,
 	# document contrast won (~5.5:1 on the leaf).
-	desc_rt.text = "[center]%s[/center]" % KeywordEffects.colorize_keywords(
+	var desc_bbcode := KeywordEffects.colorize_keywords(
 		raw_desc).replace(KeywordEffects.KEYWORD_GOLD, "#7a4f10")
+	# ── on-card keyword reminders (P1#1) ─────────────────────────────────
+	# New players read+drag; they never hover the bottom-margin glyphs to
+	# learn what Swift/Poison/etc. do. Print a compact one-liner per silent
+	# keyword right under the rules text, ON the paper. Guarded for vertical
+	# room: the desc clip is ~65px tall, so a wordy desc leaves space for
+	# fewer reminders. We budget by estimating how many wrapped lines the desc
+	# already eats (≈170px wide well at `dsz`px), reserve a separator line,
+	# and give the rest to reminders (each runs ~1.6 wrapped lines here).
+	# `_chart_kw_reminder_bbcode` already skips any keyword the desc names, so
+	# this never duplicates the rules line and naturally prefers the keywords
+	# the desc doesn't explain.
+	if not is_curse_card:
+		var line_px: float = float(dsz) + 4.0
+		var avail_lines: float = 65.0 / line_px
+		# chars-per-line is ~ well_width / (dsz * 0.52) for this serif at these
+		# sizes; estimate the desc's own line count, then a generous ceil.
+		var cpl: float = maxf(170.0 / (float(dsz) * 0.52), 12.0)
+		var desc_lines: float = ceil(maxf(float(raw_desc.length()) / cpl, 1.0))
+		# Reserve one line for the hairline separator; reminders eat ~1.7
+		# wrapped lines each at this width.
+		var room: float = avail_lines - desc_lines - 1.0
+		var max_rem: int = int(floor(room / 1.7))
+		max_rem = clampi(max_rem, 0, 3)
+		if max_rem > 0:
+			var rem_hex := "#6b5530"  # muted bronze ink — secondary teaching tone
+			var rem := _chart_kw_reminder_bbcode(
+				raw_desc.to_lower(), rem_hex, max_rem)
+			if rem != "":
+				# A faint rule separates the printed reminders from the card's
+				# own rules so they read as a glossary footnote, not more rules.
+				desc_bbcode += "\n[color=#9a7a3a]· · ·[/color]\n" \
+					+ "[font_size=%d]%s[/font_size]" % [maxi(dsz - 1, 9), rem]
+	desc_rt.text = "[center]%s[/center]" % desc_bbcode
 	center_box.add_child(desc_rt)
 
 	# ── stats as wax seals OR the spell footer line ──────────────────────
@@ -3776,10 +3873,16 @@ func _build_chart_proto() -> void:
 		cost_seal.offset_top = -9
 		cost_seal.offset_bottom = 47
 		root.add_child(cost_seal)
+		# Stat numerals (P3): bumped 15→18px with a pure-white fill and a deep
+		# 5px dark outline so they read crisply against the textured pressed-wax
+		# face. The 56px seal box offsets are untouched — they are the
+		# bake-overlay contract (see CLAUDE.md).
 		_cost_label = _make_styled_label(
 			"" if bake_strip_stats else str(card_data.get("cost", 0)),
-			stat_font, 15, Color(0.996, 0.941, 0.800))
-		_cost_label.add_theme_constant_override("outline_size", 4)
+			stat_font, 18, Color(1, 1, 1))
+		_cost_label.add_theme_color_override("font_outline_color",
+			Color(0.06, 0.04, 0.03, 0.96))
+		_cost_label.add_theme_constant_override("outline_size", 5)
 		_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 		_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
 		_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
@@ -3797,9 +3900,11 @@ func _build_chart_proto() -> void:
 		atk_seal.offset_bottom = 9
 		root.add_child(atk_seal)
 		_atk_label = _make_styled_label(
-			"" if bake_strip_stats else str(current_atk), stat_font, 15,
-			Color(1.000, 0.957, 0.839))
-		_atk_label.add_theme_constant_override("outline_size", 4)
+			"" if bake_strip_stats else str(current_atk), stat_font, 18,
+			Color(1, 1, 1))
+		_atk_label.add_theme_color_override("font_outline_color",
+			Color(0.06, 0.04, 0.03, 0.96))
+		_atk_label.add_theme_constant_override("outline_size", 5)
 		_atk_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 		_atk_label.offset_top = ORB_NUMERAL_Y_OFFSET
 		_atk_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
@@ -3817,9 +3922,11 @@ func _build_chart_proto() -> void:
 		hp_seal.offset_bottom = 9
 		root.add_child(hp_seal)
 		_hp_label = _make_styled_label(
-			"" if bake_strip_stats else str(current_hp), stat_font, 15,
-			Color(1.000, 0.941, 0.898))
-		_hp_label.add_theme_constant_override("outline_size", 4)
+			"" if bake_strip_stats else str(current_hp), stat_font, 18,
+			Color(1, 1, 1))
+		_hp_label.add_theme_color_override("font_outline_color",
+			Color(0.06, 0.04, 0.03, 0.96))
+		_hp_label.add_theme_constant_override("outline_size", 5)
 		_hp_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 		_hp_label.offset_top = ORB_NUMERAL_Y_OFFSET
 		_hp_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
@@ -3840,8 +3947,10 @@ func _build_chart_proto() -> void:
 		root.add_child(sp_cost)
 		_cost_label = _make_styled_label(
 			"" if bake_strip_stats else str(card_data.get("cost", 0)),
-			stat_font, 15, Color(0.996, 0.941, 0.800))
-		_cost_label.add_theme_constant_override("outline_size", 4)
+			stat_font, 18, Color(1, 1, 1))
+		_cost_label.add_theme_color_override("font_outline_color",
+			Color(0.06, 0.04, 0.03, 0.96))
+		_cost_label.add_theme_constant_override("outline_size", 5)
 		_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 		_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
 		_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
@@ -3881,6 +3990,25 @@ func _build_chart_proto() -> void:
 		ftl.add_theme_constant_override("shadow_offset_y", 1)
 		_center_at_point(ftl, Vector2(150, 374), Vector2(220, 24))
 		root.add_child(ftl)
+		# Explicit "SPELL" category word (P3): creature-vs-spell was read-only by
+		# omission (3 seals vs 1). Print the word above the targeting/timing
+		# footer so a spell is named, not merely inferred. Curses already label
+		# themselves "CURSE" in the footer and aren't cast, so skip them.
+		if not is_curse_card:
+			var sp_word := ""
+			for ci in range("SPELL".length()):
+				sp_word += "SPELL"[ci]
+				if ci < "SPELL".length() - 1:
+					sp_word += " "
+			var sp_lbl := _make_styled_label(sp_word, GameTheme.font_title \
+				if GameTheme.font_title != null else GameTheme.font_display,
+				11, Color(0.302, 0.224, 0.133, 0.95))
+			sp_lbl.add_theme_constant_override("outline_size", 0)
+			sp_lbl.add_theme_color_override("font_shadow_color",
+				Color(0, 0, 0, 0.5))
+			sp_lbl.add_theme_constant_override("shadow_offset_y", 1)
+			_center_at_point(sp_lbl, Vector2(150, 357), Vector2(220, 22))
+			root.add_child(sp_lbl)
 		_chart_diamond(root, Vector2(24, 280.5), 5.0, metal_dim)
 		_chart_diamond(root, Vector2(201, 280.5), 5.0, metal_dim)
 
@@ -5267,6 +5395,16 @@ func update_stat_display() -> void:
 
 
 func update_floop_display() -> void:
+	# HARD-GATED (P1#10): floop is fully vestigial dead code — no card carries a
+	# `floop` key and `will_floop` is read by zero combat logic. The cyan
+	# "CLICK · FLOOP" badge + border tint + art wash this used to build only
+	# confused new players with a non-functional affordance and a jargon word.
+	# We early-return so it can NEVER render a floop badge/border/tutorial.
+	# Signature and body are kept intact — Combat.gd may still call this, and
+	# the floop indicator is created (hidden) by every layout, so leaving it
+	# permanently hidden here is the complete fix. Do not delete below; it is
+	# the documented dead path. If floop is ever revived, drop this return.
+	return
 	# Three visible states:
 	#   - toggled (will_floop): solid cyan badge + cyan border + cool art tint
 	#   - available (on battlefield, has_floop, not yet used): "CLICK · FLOOP"
@@ -6050,6 +6188,12 @@ func enable_idle_bob() -> void:
 		return
 	if not is_on_battlefield:
 		return
+	# Never anchor the bob while this card is lifted for a reposition: position.y is
+	# then a transient drag value (in the hand layer's space, not the slot cell's),
+	# so capturing it as the base would freeze the card off its slot when it lands.
+	# The placement (play_wax_press / Combat re-anchor) arms the bob afterwards.
+	if _field_grabbing or _field_lifted:
+		return
 	_idle_bob_enabled = true
 	_bob_phase = randf_range(0.0, TAU)
 	_bob_freq = 1.4 + randf_range(-0.3, 0.5)
@@ -6061,7 +6205,10 @@ func enable_idle_bob() -> void:
 func _process(delta: float) -> void:
 	if not _idle_bob_enabled:
 		return
-	if _is_being_dragged or _is_playing:
+	# Field repositioning owns position.y while a board creature is lifted — the bob
+	# must NOT write it then or it pins the card to its anchor Y while only X tracks
+	# the cursor (that was the "moves jump to a random place" multiplayer bug).
+	if _is_being_dragged or _is_playing or _field_grabbing:
 		return
 	if not is_on_battlefield:
 		# Card just left the battlefield — stop bobbing.
@@ -6069,6 +6216,21 @@ func _process(delta: float) -> void:
 		return
 	_bob_time += delta
 	position.y = _bob_base_y + sin(_bob_time * _bob_freq + _bob_phase) * _bob_amplitude
+
+
+## Re-arm the idle bob one frame from now, after the slot cell's CenterContainer
+## has re-centered this card. Combat calls this for placements that don't run a
+## landing pop (e.g. a returned/cancelled reposition); the landing pop re-arms the
+## bob itself. The bob owns position.y, so its base must be re-captured from the
+## freshly centered position or the card freezes off-slot.
+func rearm_idle_bob_next_frame() -> void:
+	if static_display or not is_on_battlefield:
+		return
+	_idle_bob_enabled = false
+	await get_tree().process_frame
+	if not is_inside_tree() or not is_on_battlefield:
+		return
+	enable_idle_bob()
 
 
 func set_affordable(can_afford: bool) -> void:
@@ -6174,12 +6336,11 @@ func _on_mouse_exited() -> void:
 	if _is_being_dragged or _is_playing:
 		return
 	_is_hovered = false
-	if is_on_battlefield and will_floop:
-		_set_border_color(GameTheme.FLOOP_BLUE)
-	elif is_on_battlefield and has_floop() and not is_opponent:
-		_set_border_color(Color(GameTheme.FLOOP_BLUE.r, GameTheme.FLOOP_BLUE.g, GameTheme.FLOOP_BLUE.b, 0.85))
-	else:
-		_set_border_color(_get_default_frame_tint())
+	# Floop is hard-gated dead code (see update_floop_display, P1#10): the old
+	# will_floop / has_floop() cyan-border branches here are removed so a stray
+	# floop key can never paint a cyan affordance on hover-out. Always restore
+	# the default frame tint.
+	_set_border_color(_get_default_frame_tint())
 	if not is_on_battlefield:
 		z_index = 0
 		# Settle back to the resting hand pose set by set_hand_target. A
@@ -6334,6 +6495,10 @@ func _update_field_grab(mouse_pos: Vector2) -> void:
 		# manual positioning).
 		_field_lifted = true
 		_any_card_dragging = true
+		# The idle bob owns position.y; switch it off for the lift so it can't fight
+		# the cursor (it would otherwise hold the card at its anchor Y while only X
+		# followed the mouse). The landing re-arms it at the new slot's centered Y.
+		_idle_bob_enabled = false
 		# Centre pivot + unscaled half-size offset (same as the hand drag) so the
 		# card's visual centre == cursor regardless of any future drag scale.
 		pivot_offset = size * 0.5

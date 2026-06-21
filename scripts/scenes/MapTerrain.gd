@@ -2250,11 +2250,35 @@ func _draw_sites(tgt: CanvasItem) -> void:
 				PLAYER_AMBER.g, PLAYER_AMBER.b, 0.42), 1.7, true)
 			tgt.draw_circle(p, r + 14.0,
 				Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b, 0.07))
-		var tex: Texture2D = _node_icon(typ)
+		# Colour-blind-safe reachability cue (the amber-vs-ink ring is the only
+		# other tell): an open stop wears a small "march here" chevron pointing
+		# up at it; a locked one wears an ink padlock. Shape, not just colour.
+		if open_now:
+			var cy := p + Vector2(0, r + 9.0)
+			for dy in [0.0, 3.4]:
+				tgt.draw_polyline(PackedVector2Array([
+					cy + Vector2(-5.0, 3.0 + dy), cy + Vector2(0, -1.4 + dy),
+					cy + Vector2(5.0, 3.0 + dy)]),
+					Color(0.10, 0.07, 0.05, 0.92), 1.7, true)
+		else:
+			var kp := p + Vector2(0, r + 8.0)
+			tgt.draw_rect(Rect2(kp + Vector2(-3.6, -0.6), Vector2(7.2, 5.6)),
+				Color(0.15, 0.12, 0.08, 0.80))
+			tgt.draw_arc(kp + Vector2(0, -0.6), 2.6, PI, TAU, 12,
+				Color(0.15, 0.12, 0.08, 0.80), 1.4, true)
 		var ipx := r * 1.30
-		if tex != null:
-			tgt.draw_texture_rect(tex, Rect2(p - Vector2(ipx, ipx) * 0.5,
-				Vector2(ipx, ipx)), false, ink)
+		# Waysides draw a per-verb ink glyph (anvil / scales / banner / chest)
+		# so the four roadside halts aren't pixel-identical; everything else
+		# uses its site SVG.
+		var drew_glyph := false
+		if typ == "wayside":
+			drew_glyph = _draw_wayside_glyph(tgt, p, ipx * 0.5, ink,
+				String(nd.get("wayside_id", "")))
+		if not drew_glyph:
+			var tex: Texture2D = _node_icon(typ)
+			if tex != null:
+				tgt.draw_texture_rect(tex, Rect2(p - Vector2(ipx, ipx) * 0.5,
+					Vector2(ipx, ipx)), false, ink)
 		if String(nd.get("mutator_id", "")) != "":
 			# Mutator star — same signal as the old chart, on the chip's rim.
 			_draw_star(tgt, p + Vector2(r * 0.78, -r * 0.78), 6.0,
@@ -2380,6 +2404,29 @@ func _draw_camp(tgt: CanvasItem) -> void:
 		tgt.draw_string(GameTheme.font_display, camp + Vector2(-60, 32),
 			"YOUR CAMP", HORIZONTAL_ALIGNMENT_CENTER, 120, 12,
 			Color(0.88, 0.80, 0.64))
+	# "YOU ARE HERE" — a labelled static marker at the army's position, baked
+	# into the plate so it shows under BOTH the live overlay standard and the
+	# sandbox fallback. The swaying amber banner alone read like the conquered-
+	# keep pennants (same amber flag, no label); this ground-ring + named plate
+	# is the unambiguous "this is you" cue the clarity audit asked for.
+	if _has_player and GameTheme.font_display != null:
+		var you := _player_pos
+		# Twin ground-ring at the foot — a surveyed "mark" the bare pennants
+		# never wear, so the eye separates you from a planted conquest flag.
+		tgt.draw_circle(you + Vector2(0, 6), 11.0, Color(0, 0, 0, 0.30))
+		tgt.draw_arc(you + Vector2(0, 5), 10.0, 0, TAU, 28,
+			Color(0.05, 0.04, 0.03, 0.92), 2.6, true)
+		tgt.draw_arc(you + Vector2(0, 5), 10.0, 0, TAU, 28, PLAYER_AMBER,
+			1.5, true)
+		# Named plate just below the foot (clear of the staff + flag above).
+		var pw := 96.0
+		var plate := Rect2(you.x - pw * 0.5, you.y + 16.0, pw, 17.0)
+		tgt.draw_rect(plate, Color(0.05, 0.04, 0.03, 0.80))
+		tgt.draw_rect(plate, Color(PLAYER_AMBER.r, PLAYER_AMBER.g,
+			PLAYER_AMBER.b, 0.55), false, 1.0)
+		tgt.draw_string(GameTheme.font_display, Vector2(plate.position.x,
+			plate.position.y + 13.0), "YOU ARE HERE",
+			HORIZONTAL_ALIGNMENT_CENTER, pw, 10, Color(0.94, 0.84, 0.62))
 	# The army standard at the player's position is normally drawn (and
 	# animated) by MapView's pulse overlay; this static fallback keeps the
 	# render-only sandbox (map_proto.tscn) showing a complete picture.
@@ -2442,50 +2489,119 @@ func _draw_ui() -> void:
 		draw_string(GameTheme.font_display,
 			Vector2(band.position.x, band.position.y + 72),
 			sub_txt, HORIZONTAL_ALIGNMENT_CENTER, band_w, 12, sub_col)
+		# Objective line — the real gate is breaking holds to open the lord's
+		# road, not visiting every chip. Show that progress when a rival deal
+		# is in play; fall back to the province tally on a gateless run.
+		var obj_txt := "PROVINCES CLAIMED  %d / %d" % [owned, _nodes.size()]
+		var obj_col := Color(0.72, 0.64, 0.50, 0.80)
+		if not RunState.rival_lords.is_empty():
+			if RunState.is_lord_gate_open():
+				obj_txt = "THE LORD'S ROAD IS OPEN"
+				obj_col = Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b,
+					0.92)
+			else:
+				obj_txt = "HOLDS BROKEN  %d / %d  ·  OPEN THE LORD'S ROAD" % [
+					RunState.holds_broken_in_act, RunState.HOLDS_TO_OPEN_LORD]
 		draw_string(GameTheme.font_display,
 			Vector2(band.position.x, band.position.y + 92),
-			"PROVINCES CLAIMED  %d / %d" % [owned, _nodes.size()],
-			HORIZONTAL_ALIGNMENT_CENTER, band_w, 12,
-			Color(0.72, 0.64, 0.50, 0.80))
+			obj_txt, HORIZONTAL_ALIGNMENT_CENTER, band_w, 12, obj_col)
 	if GameTheme.font_display == null:
 		return
 	# Legend lists only the site types actually on this act's map (treasure
-	# is a 5% roll — most acts shouldn't advertise it).
+	# is a 5% roll — most acts shouldn't advertise it). Each entry is
+	# [type, LABEL, wayside_id] — wayside_id is "" except for the four
+	# roadside verbs, which now print their own glyph + name so the player
+	# can tell a Drill Yard from a Supply Cache at a glance. The qualifier
+	# clauses (Recruit "free draft" vs Shop "spend gold") settle the most
+	# confused pair from the clarity audit.
 	var present := {}
+	var waysides_present := {}
 	for nd2 in _nodes:
 		present[String(nd2.type)] = true
+		if String(nd2.type) == "wayside":
+			waysides_present[String(nd2.get("wayside_id", ""))] = true
 	var items: Array = []
-	for it0 in [["combat", "FIGHT"], ["elite", "GENERAL"], ["rest", "REST"],
-			["shop", "SHOP"], ["event", "EVENT"], ["treasure", "TREASURE"],
-			["recruit", "RECRUIT"], ["wayside", "WAYSIDE"]]:
+	for it0 in [["combat", "FIGHT", ""], ["elite", "GENERAL", ""],
+			["rest", "REST", ""], ["shop", "SHOP · spend gold", ""],
+			["event", "EVENT", ""], ["treasure", "TREASURE", ""],
+			["recruit", "RECRUIT · free draft", ""]]:
 		if present.has(it0[0]):
 			items.append(it0)
-	var lwid := float(items.size()) * 118.0
-	var lx := w * 0.5 - lwid * 0.5 + 15.0
-	# A faint band seats the legend on the sea instead of floating loose.
-	draw_rect(Rect2(lx - 32, h - 64, lwid + 34, 34), Color(0.02, 0.025, 0.03, 0.45))
-	draw_line(Vector2(lx - 32, h - 64), Vector2(lx + lwid + 2, h - 64),
-		Color(0.55, 0.48, 0.36, 0.25), 1.0, true)
+	# The four roadside verbs, each with its own glyph + short name.
+	for wv in [["drill_yard", "DRILL YARD"], ["muster_scale", "SCALES"],
+			["standard_bearer", "BANNER"], ["supply_cache", "CACHE"]]:
+		if waysides_present.has(wv[0]):
+			items.append(["wayside", wv[1], wv[0]])
+	# Variable label widths (the qualified Recruit/Shop entries need more
+	# room than a bare "REST"); pack each item to its own measured stride so
+	# nothing collides, then wrap the run to a second row if it overflows.
+	var strides: Array = []
 	for it in items:
-		# Miniature of the real site chip — the legend previews exactly what
-		# the player will see on the road (parchment disc, type dye, ink glyph).
-		var st: Dictionary = SITE_STYLE.get(it[0], SITE_STYLE["wayside"])
-		var lc := Vector2(lx + 9.0, h - 47.0)
-		var disc := Color(0.90, 0.84, 0.68).lerp(st.tint as Color,
-			float(st.wash))
-		draw_circle(lc, 10.0, disc)
-		draw_arc(lc, 10.0, 0, TAU, 24,
-			Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.95) if it[0] == "elite"
-			else Color(0.20, 0.16, 0.10, 0.9),
-			1.6 if it[0] == "elite" else 1.2, true)
-		var tex: Texture2D = _node_icon(it[0])
-		if tex != null:
-			draw_texture_rect(tex, Rect2(lc - Vector2(6.5, 6.5),
-				Vector2(13, 13)), false, Color(0.13, 0.10, 0.07))
-		draw_string(GameTheme.font_display, Vector2(lx + 24, h - 41),
-			it[1], HORIZONTAL_ALIGNMENT_LEFT, 90, 12,
-			Color(0.70, 0.64, 0.50, 0.85))
-		lx += 118.0
+		var tw := GameTheme.font_display.get_string_size(
+			String(it[1]), HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
+		var stride := 30.0 + tw + 22.0   # chip + label + gap
+		strides.append(stride)
+	# Choose a row split so neither row exceeds the canvas; the legend lives
+	# on the sea, so keep a comfortable margin.
+	var max_row_w := w - 80.0
+	var rows: Array = [[]]            # each row = Array of item indices
+	var row_w: Array = [0.0]
+	for i in range(items.size()):
+		var sd: float = strides[i]
+		if row_w[row_w.size() - 1] + sd > max_row_w and not rows[rows.size() - 1].is_empty():
+			rows.append([])
+			row_w.append(0.0)
+		rows[rows.size() - 1].append(i)
+		row_w[row_w.size() - 1] += sd
+	var row_h := 30.0
+	var base_y := h - 24.0 - float(rows.size()) * row_h
+	# A faint band seats the legend on the sea instead of floating loose.
+	var band_w2 := 0.0
+	for rw0 in row_w:
+		band_w2 = maxf(band_w2, float(rw0))
+	var band_x := w * 0.5 - band_w2 * 0.5
+	draw_rect(Rect2(band_x - 18, base_y - 16, band_w2 + 36,
+		float(rows.size()) * row_h + 12), Color(0.02, 0.025, 0.03, 0.45))
+	draw_line(Vector2(band_x - 18, base_y - 16),
+		Vector2(band_x + band_w2 + 18, base_y - 16),
+		Color(0.55, 0.48, 0.36, 0.25), 1.0, true)
+	for ri in range(rows.size()):
+		var lx := w * 0.5 - float(row_w[ri]) * 0.5
+		var ly := base_y + float(ri) * row_h
+		for idx in rows[ri]:
+			var it: Array = items[idx]
+			# Miniature of the real site chip — the legend previews exactly
+			# what the player sees on the road (parchment disc, dye, ink glyph).
+			var st: Dictionary = SITE_STYLE.get(it[0], SITE_STYLE["wayside"])
+			var lc := Vector2(lx + 9.0, ly)
+			var disc := Color(0.90, 0.84, 0.68).lerp(st.tint as Color,
+				float(st.wash))
+			draw_circle(lc, 10.0, disc)
+			draw_arc(lc, 10.0, 0, TAU, 24,
+				Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.95) if it[0] == "elite"
+				else Color(0.20, 0.16, 0.10, 0.9),
+				1.6 if it[0] == "elite" else 1.2, true)
+			var glyph_ink := Color(0.13, 0.10, 0.07)
+			var drew := false
+			if it[0] == "wayside":
+				drew = _draw_wayside_glyph(self, lc, 9.0, glyph_ink,
+					String(it[2]))
+			if not drew:
+				var tex: Texture2D = _node_icon(it[0])
+				if tex != null:
+					draw_texture_rect(tex, Rect2(lc - Vector2(6.5, 6.5),
+						Vector2(13, 13)), false, glyph_ink)
+			draw_string(GameTheme.font_display, Vector2(lx + 24, ly + 6),
+				String(it[1]), HORIZONTAL_ALIGNMENT_LEFT, strides[idx] - 24, 12,
+				Color(0.70, 0.64, 0.50, 0.85))
+			lx += strides[idx]
+	# "Reading the chart" primer — the non-chip signals (route colour, the
+	# mutator star, the pursuit pennant) that the site icons don't carry.
+	var primer := "READING THE CHART:  amber = open road  ·  ★ = mutator (changed rules)  ·  red pennant = pursuit (extra reinforcement)"
+	draw_string(GameTheme.font_display,
+		Vector2(w * 0.5 - 540.0, base_y - 24.0), primer,
+		HORIZONTAL_ALIGNMENT_CENTER, 1080, 11,
+		Color(0.66, 0.60, 0.47, 0.78))
 
 
 ## "THE FIRST MARCH" → "T H E   F I R S T   M A R C H" — the chart's
@@ -2525,3 +2641,85 @@ func _node_icon(typ: String) -> Texture2D:
 		"recruit": return GameTheme.tex_node_recruit
 		"wayside": return GameTheme.tex_node_wayside
 	return null
+
+
+## Per-verb wayside glyph, ink-drawn straight into the chart so the four
+## roadside halts read as four DIFFERENT stops at chart zoom (the shared
+## horned-helm SVG made Drill Yard / Scales / Standard-Bearer / Supply Cache
+## pixel-identical, breaking route-planning). Same hand-inked vocabulary as
+## the camp/keep/star furniture — `c` is the chip centre, `s` the half-extent
+## (~ the icon's reach from centre), `ink` the chip's glyph colour. Returns
+## true when it drew a known verb, so callers fall back to the SVG otherwise.
+func _draw_wayside_glyph(tgt: CanvasItem, c: Vector2, s: float,
+		ink: Color, wayside_id: String) -> bool:
+	var lw := maxf(1.3, s * 0.16)   # stroke scales with the chip
+	match wayside_id:
+		"drill_yard":
+			# Anvil — the drill yard where creatures are trained harder.
+			var top_l := c + Vector2(-s * 0.78, -s * 0.30)
+			var top_r := c + Vector2(s * 0.62, -s * 0.30)
+			var face := PackedVector2Array([
+				top_l, top_r,
+				c + Vector2(s * 0.40, -s * 0.04),
+				c + Vector2(-s * 0.46, -s * 0.04)])
+			tgt.draw_colored_polygon(face, ink)
+			# Horn — the pointed beak off the left of the face.
+			tgt.draw_colored_polygon(PackedVector2Array([
+				top_l, c + Vector2(-s * 0.96, -s * 0.18),
+				c + Vector2(-s * 0.46, -s * 0.04)]), ink)
+			# Waist + splayed base.
+			tgt.draw_line(c + Vector2(-s * 0.16, -s * 0.04),
+				c + Vector2(-s * 0.24, s * 0.40), ink, lw, true)
+			tgt.draw_line(c + Vector2(s * 0.10, -s * 0.04),
+				c + Vector2(s * 0.18, s * 0.40), ink, lw, true)
+			tgt.draw_line(c + Vector2(-s * 0.50, s * 0.46),
+				c + Vector2(s * 0.46, s * 0.46), ink, lw * 1.4, true)
+			return true
+		"muster_scale":
+			# Balance scales — the quartermaster's one weighed trade.
+			tgt.draw_line(c + Vector2(0, -s * 0.74), c + Vector2(0, s * 0.50),
+				ink, lw, true)               # central post
+			tgt.draw_line(c + Vector2(-s * 0.30, s * 0.62),
+				c + Vector2(s * 0.30, s * 0.62), ink, lw, true)  # foot
+			tgt.draw_circle(c + Vector2(0, -s * 0.74), lw * 0.9, ink)
+			var beam_l := c + Vector2(-s * 0.66, -s * 0.58)
+			var beam_r := c + Vector2(s * 0.66, -s * 0.58)
+			tgt.draw_line(beam_l, beam_r, ink, lw, true)        # beam
+			# Two hanging pans (open shallow bowls on cords).
+			for bx in [beam_l, beam_r]:
+				tgt.draw_line(bx, bx + Vector2(0, s * 0.30), ink, lw * 0.8, true)
+				tgt.draw_arc(bx + Vector2(0, s * 0.30), s * 0.26,
+					0.0, PI, 14, ink, lw, true)
+			return true
+		"standard_bearer":
+			# A pennant on a staff — the banner the standard-bearer re-pins.
+			# Inked (not amber) so it never reads as the live army standard.
+			var pole_top := c + Vector2(-s * 0.34, -s * 0.78)
+			tgt.draw_line(pole_top, c + Vector2(-s * 0.34, s * 0.74),
+				ink, lw, true)
+			tgt.draw_circle(pole_top, lw * 0.9, ink)
+			# Swallowtail flag flying off the staff.
+			tgt.draw_colored_polygon(PackedVector2Array([
+				pole_top,
+				c + Vector2(s * 0.74, -s * 0.58),
+				c + Vector2(s * 0.40, -s * 0.34),
+				c + Vector2(s * 0.74, -s * 0.10),
+				c + Vector2(-s * 0.34, -s * 0.10)]), ink)
+			return true
+		"supply_cache":
+			# A banded chest — the cache cracked open for spoils.
+			var box := Rect2(c + Vector2(-s * 0.66, -s * 0.30),
+				Vector2(s * 1.32, s * 0.78))
+			tgt.draw_rect(box, ink, false, lw)
+			# Domed lid as a capped arc across the top.
+			tgt.draw_arc(c + Vector2(0, -s * 0.30), s * 0.66,
+				PI, TAU, 18, ink, lw, true)
+			tgt.draw_line(c + Vector2(-s * 0.66, -s * 0.30),
+				c + Vector2(s * 0.66, -s * 0.30), ink, lw, true)
+			# Centre band + clasp.
+			tgt.draw_line(c + Vector2(0, -s * 0.78),
+				c + Vector2(0, s * 0.48), ink, lw, true)
+			tgt.draw_rect(Rect2(c + Vector2(-s * 0.12, -s * 0.16),
+				Vector2(s * 0.24, s * 0.22)), ink)
+			return true
+	return false
