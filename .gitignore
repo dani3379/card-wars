@@ -61,3 +61,10 @@ tools/*.log
 # Godot editor temp / backup files
 *.TMP
 project.godot~*
+
+# Large local render/preview scratch (like card_redesign_v6/ & screenshot/ above)
+tools/detail_redesign/
+tools/_textshot/
+tools/_kwprev_*
+# Orphan import sidecars for already-ignored screenshot PNGs
+_shot_*.png.import
