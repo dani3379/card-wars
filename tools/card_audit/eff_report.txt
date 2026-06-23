@@ -1,0 +1,165 @@
+[eff] === CARD EFFICIENCY ANALYZER ===
+[eff] budget=cost*2+2 ; power_delta=body-(budget-discount) ; <0 underpowered, >0 over-statted
+[eff] kw legend: { "swift": 2.0, "ranged": 1.5, "poison": 2.0, "piercing": 2.0, "summon": 2.0, "guardian": 1.5, "shield": 1.5, "last_stand": 1.5, "structure": 1.5, "lifelink": 1.0, "overrun": 1.0, "formation": 1.0, "rampage": 1.0, "regenerate": 1.0, "thorns": 1.0, "armored": 1.0, "retain": 0.5, "doom": -0.5, "wither": -2.0, "exhaust": -1.0, "sacrifice": -1.5 }
+[eff] ===== CREATURES (79) — power_delta ASC (most overcosted first) =====
+[eff] pdelta cost   body  bud  disc  rarity  id  [tags]
+[eff]   -2.5    4    0/6   10   1.5  rare    warchief  ["passive:warchief_aura"]
+[eff]   -1.5    1    0/1    4   1.5  uncommon copycat  ["on_enter:copy_friendly"]
+[eff]   -1.5    1    2/1    4  -0.5  common  cinder_pup  ["doom"]
+[eff]   -1.0    2    1/3    6   1.0  uncommon necromancer  ["on_death:summon"]
+[eff]   -1.0    1    1/2    4   0.0  starter sprite  []
+[eff]   -1.0    3    3/4    8   0.0  starter naga  []
+[eff]   -1.0    1    2/2    4  -1.0  starter ratling  ["wither", "on_death:damage_opposing_lane"]
+[eff]   -1.0    2    2/3    6   0.0  uncommon witch  []
+[eff]   -1.0    1    1/2    4   0.0  common  hound  []
+[eff]   -1.0    2    2/3    6   0.0  common  pikeman  []
+[eff]   -1.0    1    1/2    4   0.0  common  mana_sprite  []
+[eff]   -0.5    2    0/4    6   1.5  uncommon leyline_conduit  ["passive:mana_per_turn"]
+[eff]   -0.5    2    1/3    6   1.5  uncommon battle_drummer  ["adj_buff"]
+[eff]   -0.5    1    1/1    4   1.5  common  bloodhound  ["on_enter:damage_opposing_draw"]
+[eff]   -0.5    1    1/3    4  -0.5  common  torchbearer  ["wither", "adj_buff"]
+[eff]   -0.5    3    2/4    8   1.5  rare    treasure_hunter  ["on_enter:discover"]
+[eff]   -0.5    1    1/2    4   0.5  common  kindling  ["doom", "on_death:damage_face"]
+[eff]   -0.5    2    2/3    6   0.5  common  burning_martyr  ["doom", "on_death:damage_all_enemies"]
+[eff]   -0.5    2    2/2    6   1.5  common  crystal_sentry  ["shield"]
+[eff]   +0.0    1    1/3    4   0.0  uncommon blood_pyre  []
+[eff]   +0.0    1    1/3    4   0.0  uncommon mule  []
+[eff]   +0.0    1    2/1    4   1.0  common  ash_hound  ["rampage"]
+[eff]   +0.0    2    2/3    6   1.0  uncommon revenant  ["on_death:reborn"]
+[eff]   +0.0    2    1/4    6   1.0  common  shieldbearer  ["armored"]
+[eff]   +0.0    2    2/3    6   1.0  common  lancer  ["overrun"]
+[eff]   +0.0    2    1/3    6   2.0  uncommon summoner  ["summon"]
+[eff]   +0.0    1    1/1    4   2.0  common  plague_rat  ["poison"]
+[eff]   +0.0    2    2/2    6   2.0  common  harpy  ["swift"]
+[eff]   +0.5    3    2/5    8   1.5  uncommon royal_guard  ["passive:royal_guard"]
+[eff]   +0.5    2    3/2    6   1.5  uncommon hellfire_imp  ["doom", "swift"]
+[eff]   +0.5    2    1/4    6   1.5  uncommon the_apothecary  ["passive:plague_doctor"]
+[eff]   +0.5    2    2/3    6   1.5  uncommon standard_bearer  ["passive:standard_bearer_summon"]
+[eff]   +0.5    3    3/4    8   1.5  uncommon ironclad_veteran  ["on_enter:atk_per_cards_played"]
+[eff]   +0.5    3    3/4    8   1.5  rare    doppelganger  ["on_enter:copy_last_dead"]
+[eff]   +0.5    1    1/2    4   1.5  uncommon familiar  ["on_enter:discover"]
+[eff]   +0.5    2    1/4    6   1.5  uncommon ember_warden  ["passive:feeds_on_doom"]
+[eff]   +0.5    1    1/2    4   1.5  uncommon chaos_imp  ["on_enter:cast_random_spell"]
+[eff]   +0.5    1    1/2    4   1.5  starter goblin  ["on_enter:damage_face"]
+[eff]   +0.5    2    2/3    6   1.5  starter brute  ["on_enter:damage_opposing"]
+[eff]   +0.5    1    2/1    4   1.5  common  raven  ["ranged"]
+[eff]   +0.5    1    1/2    4   1.5  common  gravedigger  ["passive:draw_on_ally_death"]
+[eff]   +0.5    1    1/2    4   1.5  common  scavenger  ["on_enter:gain_gold"]
+[eff]   +0.5    1    1/2    4   1.5  common  tallow_doll  ["passive:tallow_stacking"]
+[eff]   +0.5    2    2/3    6   1.5  uncommon cleave_hound  ["passive:cleave"]
+[eff]   +1.0    2    1/4    6   2.0  uncommon basilisk  ["poison"]
+[eff]   +1.0    2    3/3    6   1.0  uncommon bloodsworn  ["lifelink"]
+[eff]   +1.0    3    3/3    8   3.0  uncommon ember_stalker  ["rampage", "swift"]
+[eff]   +1.0    2    2/4    6   1.0  starter troll  ["regenerate"]
+[eff]   +1.0    1    2/1    4   2.0  common  lookout  ["swift"]
+[eff]   +1.0    2    1/4    6   2.0  common  thornguard  ["thorns", "on_death:damage_all_enemies"]
+[eff]   +1.0    2    2/3    6   2.0  common  squire_captain  ["summon"]
+[eff]   +1.5    2    2/3    6   2.5  uncommon cinder_acolyte  ["lifelink", "ranged"]
+[eff]   +1.5    3    5/4    8   0.5  rare    cinder_whelp  ["doom", "on_death:damage_all_enemies"]
+[eff]   +1.5    2    0/5    6   2.5  rare    riteforge  ["formation", "passive:riteforge_ramp"]
+[eff]   +1.5    3    3/5    8   1.5  rare    siege_golem  ["passive:siege"]
+[eff]   +1.5    2    2/4    6   1.5  rare    warden_of_graves  ["passive:double_on_death"]
+[eff]   +1.5    3    3/4    8   2.5  rare    vampire_lord  ["regenerate", "passive:vampire_lord"]
+[eff]   +1.5    2    3/3    6   1.5  uncommon adaptable  ["on_enter:choose_keyword"]
+[eff]   +1.5    2    3/1    6   3.5  uncommon glass_knight  ["shield", "swift"]
+[eff]   +1.5    2    2/3    6   2.5  uncommon the_glutton  ["overrun", "on_enter:glutton_devour"]
+[eff]   +1.5    2    1/4    6   2.5  uncommon shieldmaiden  ["guardian", "formation"]
+[eff]   +2.0    2    3/3    6   2.0  uncommon berserker  ["passive:grow_on_attack", "xdmg1"]
+[eff]   +2.0    2    2/3    6   3.0  uncommon scholar  ["ranged", "on_enter:discover"]
+[eff]   +2.0    2    2/3    6   3.0  uncommon griffin  ["swift", "on_death:return_to_hand_once"]
+[eff]   +2.0    2    2/3    6   3.0  uncommon emberwright  ["ranged", "passive:ember_per_spell"]
+[eff]   +2.0    3    3/4    8   3.0  uncommon paladin  ["last_stand", "adj_buff"]
+[eff]   +2.5    4    5/4   10   3.5  rare    doom_knight  ["piercing", "swift", "doom"]
+[eff]   +2.5    4    4/5   10   3.5  rare    dragon_hatchling  ["swift", "on_enter:damage_all_enemies"]
+[eff]   +2.5    2    2/3    6   3.5  uncommon duelist  ["swift", "on_enter:damage_opposing"]
+[eff]   +2.5    3    3/6    8   1.5  rare    hydra  ["passive:attacks_all_lanes"]
+[eff]   +2.5    2    2/3    6   3.5  rare    corpse_eater  ["piercing", "passive:grow_on_ally_death"]
+[eff]   +2.5    1    1/3    4   2.5  uncommon vengeance  ["overrun", "passive:vengeance_growth"]
+[eff]   +3.0    1    1/3    4   3.0  common  hexblade  ["ranged", "passive:atk_per_spell"]
+[eff]   +3.0    2    1/5    6   3.0  uncommon husk  ["guardian", "passive:grow_on_any_death"]
+[eff]   +3.5    5    6/6   12   3.5  rare    the_leveler  ["piercing", "on_enter:damage_all_enemies"]
+[eff]   +3.5    2    5/1    6   3.5  rare    assassin  ["swift", "passive:dies_end_of_turn"]
+[eff]   +3.5    3    1/7    8   3.5  uncommon iron_bastion  ["armored", "formation", "passive:reduce_face_damage"]
+[eff]   +3.5    1    0/5    4   2.5  common  stone_wall  ["thorns", "passive:cannot_attack_wall"]
+[eff]   +5.0    1    0/5    4   4.0  common  warding_stone  ["guardian", "thorns", "passive:cannot_attack_wall"]
+[eff] ===== FLAGGED: UNDERPOWERED FOR COST (power_delta <= -1.5) =====
+[eff] FLAG  -2.5  warchief         c4 0/6  rar=rare  tags=["passive:warchief_aura"]
+[eff] FLAG  -1.5  copycat          c1 0/1  rar=uncommon  tags=["on_enter:copy_friendly"]
+[eff] FLAG  -1.5  cinder_pup       c1 2/1  rar=common  tags=["doom"]
+[eff] ===== FLAGGED: OVER-STATTED (power_delta >= +2.0) =====
+[eff] HIGH  +2.0  berserker        c2 3/3  rar=uncommon  tags=["passive:grow_on_attack", "xdmg1"]
+[eff] HIGH  +2.0  scholar          c2 2/3  rar=uncommon  tags=["ranged", "on_enter:discover"]
+[eff] HIGH  +2.0  griffin          c2 2/3  rar=uncommon  tags=["swift", "on_death:return_to_hand_once"]
+[eff] HIGH  +2.0  emberwright      c2 2/3  rar=uncommon  tags=["ranged", "passive:ember_per_spell"]
+[eff] HIGH  +2.0  paladin          c3 3/4  rar=uncommon  tags=["last_stand", "adj_buff"]
+[eff] HIGH  +2.5  doom_knight      c4 5/4  rar=rare  tags=["piercing", "swift", "doom"]
+[eff] HIGH  +2.5  dragon_hatchling c4 4/5  rar=rare  tags=["swift", "on_enter:damage_all_enemies"]
+[eff] HIGH  +2.5  duelist          c2 2/3  rar=uncommon  tags=["swift", "on_enter:damage_opposing"]
+[eff] HIGH  +2.5  hydra            c3 3/6  rar=rare  tags=["passive:attacks_all_lanes"]
+[eff] HIGH  +2.5  corpse_eater     c2 2/3  rar=rare  tags=["piercing", "passive:grow_on_ally_death"]
+[eff] HIGH  +2.5  vengeance        c1 1/3  rar=uncommon  tags=["overrun", "passive:vengeance_growth"]
+[eff] HIGH  +3.0  hexblade         c1 1/3  rar=common  tags=["ranged", "passive:atk_per_spell"]
+[eff] HIGH  +3.0  husk             c2 1/5  rar=uncommon  tags=["guardian", "passive:grow_on_any_death"]
+[eff] HIGH  +3.5  the_leveler      c5 6/6  rar=rare  tags=["piercing", "on_enter:damage_all_enemies"]
+[eff] HIGH  +3.5  assassin         c2 5/1  rar=rare  tags=["swift", "passive:dies_end_of_turn"]
+[eff] HIGH  +3.5  iron_bastion     c3 1/7  rar=uncommon  tags=["armored", "formation", "passive:reduce_face_damage"]
+[eff] HIGH  +3.5  stone_wall       c1 0/5  rar=common  tags=["thorns", "passive:cannot_attack_wall"]
+[eff] HIGH  +5.0  warding_stone    c1 0/5  rar=common  tags=["guardian", "thorns", "passive:cannot_attack_wall"]
+[eff] ===== SPELLS (55) — value/cost ASC (weakest payoff first) =====
+[eff] v/cost cost  value  spell_type     id               targeting
+[eff]   0.0    1      0  custom         pillage          any_creature
+[eff]   0.0    1      0  custom         echo_spell       none
+[eff]   0.0    0      0  custom         bloodletting     none
+[eff]   0.0    0      0  custom         turbo            none
+[eff]   0.0    0      0  custom         recycle          none
+[eff]   0.0    2      0  custom         kings_command    none
+[eff]   0.0    0      0  custom         unholy_bargain   none
+[eff]   0.0    1      0  custom         mass_grave       none
+[eff]   0.0    1      0  custom         dark_pact        none
+[eff]   0.0    0      0  custom         war_chant        none
+[eff]   0.0    1      0  custom         grave_robbery    none
+[eff]   0.0    3      0  custom         cataclysm        none
+[eff]   0.0    0      0  custom         soul_swap        any_creature
+[eff]   0.0    3      0  custom         apocalypse       none
+[eff]   0.0    1      0  custom         lay_on_hands     friendly_creature
+[eff]   0.0    1      0  custom         hoarfrost        friendly_creature
+[eff]   0.0    2      0  custom         banish           enemy_creature
+[eff]   0.0    2      0  custom         time_snare       none
+[eff]   0.0    1      0  custom         holy_smite       enemy_creature
+[eff]   0.0    1      0  custom         plague_bell      none
+[eff]   0.0    4      0  custom         inferno          none
+[eff]   0.0    3      0  custom         overwhelming_force none
+[eff]   0.0    1      0  custom         concentrate      any_creature
+[eff]   0.0    2      0  custom         battle_hymn      none
+[eff]   0.0    1      0  custom         mending_light    friendly_creature
+[eff]   0.0    1      0  custom         lost_tome        none
+[eff]   0.0    2      0  custom         war_council      none
+[eff]   0.0    1      0  custom         slash            any_creature
+[eff]   0.0    1      0  custom         shield_wall      friendly_creature
+[eff]   0.0    1      0  custom         war_cry          none
+[eff]   0.0    0      0  custom         provision        none
+[eff]   0.0    1      0  custom         patch_up         friendly_creature
+[eff]   0.0    1      0  custom         flame_bolt       none
+[eff]   0.0    0      0  custom         shove            enemy_creature
+[eff]   0.0    0      0  custom         gambit           none
+[eff]   0.0    0      0  custom         blood_tithe      none
+[eff]   0.0    1      0  custom         reckless_charge  any_creature
+[eff]   0.0    0      0  custom         quick_shot       any
+[eff]   0.0    0      0  custom         scrap            none
+[eff]   0.0    0      0  custom         frost_bolt       any_creature
+[eff]   0.0    0      0  custom         adrenaline       none
+[eff]   0.0    1      0  custom         hex              enemy_creature
+[eff]   0.0    2      0  custom         smite_spell      any_creature
+[eff]   0.0    2      0  custom         inspire          none
+[eff]   0.0    1      0  custom         ambush           none
+[eff]   0.0    1      0  custom         reanimate        none
+[eff]   0.0    1      0  custom         charge_spell     friendly_creature
+[eff]   0.0    1      0  custom         ricochet         none
+[eff]   0.0    0      0  custom         offering         friendly_creature
+[eff]   0.0    1      0  custom         grave_pact       none
+[eff]   0.0    1      0  custom         fuel_the_pyre    friendly_creature
+[eff]   0.0    1      0  custom         venom_tip        friendly_creature
+[eff]   1.5    2      3  damage_all     earthquake       none
+[eff]   3.0    1      3  damage_face    fireball         none
+[eff]   3.0    1      3  damage         strike           any_creature
+[eff] DONE

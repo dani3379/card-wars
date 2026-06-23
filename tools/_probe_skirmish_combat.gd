@@ -85,6 +85,7 @@ func _run_test() -> void:
 	_check(int(combat.enemy_hp) == SS.START_HP, "client hero at START_HP")
 	_check(combat._hand.size() > 0, "host drew an opening hand (%d cards)" % combat._hand.size())
 
+	await _test_opp_mana_seal()
 	await _host_plays_a_creature()
 	await _test_net_draw_spell()
 	await _host_attacks()
@@ -133,6 +134,34 @@ func _setup_state() -> void:
 	NM.client_peer_id = 0   # 0 => send_to_client no-ops, no rpc on a null peer
 	NM.entities.clear()
 	NM._next_entity_id = 1
+
+
+## Foe Command seal — the opponent's mana mirror. Built during _net_begin_combat
+## (same builder as the player's seal), seeded from the opponent slot, and fed by the
+## client's EV_HAND_COUNT, which now carries the client's live Command. Verifies the
+## host reads that into the foe seal with the player's exact numeral formatting
+## (including the banked "(+N)" overflow).
+func _test_opp_mana_seal() -> void:
+	print("— foe Command seal: built, seeded from the opponent slot, tracks synced Command")
+	_check(combat._net_opp_mana_post != null and is_instance_valid(combat._net_opp_mana_post),
+		"opponent Command seal instrument was built")
+	_check(combat._net_opp_mana_label != null and is_instance_valid(combat._net_opp_mana_label),
+		"opponent Command numeral label exists")
+	_check(int(combat._net_opp_max_mana) == SS.BASE_MAX_MANA,
+		"opp max Command seeded from the opponent slot (%d)" % int(combat._net_opp_max_mana))
+	# A client hand-count intent now carries the client's live Command; the host
+	# reads it into the foe seal.
+	combat._on_net_intent(2, {"t": NM.EV_HAND_COUNT, "n": 4, "mana": 2, "maxmana": 4})
+	await create_timer(0.1).timeout
+	_check(int(combat._net_opp_mana) == 2 and int(combat._net_opp_max_mana) == 4,
+		"host stored the client's synced Command (%d/%d)" % [int(combat._net_opp_mana), int(combat._net_opp_max_mana)])
+	_check(combat._net_opp_mana_label.text == "2 / 4",
+		"foe seal numeral reads '2 / 4' (got '%s')" % combat._net_opp_mana_label.text)
+	# Banked carryover (current > max) shows the (+N) overflow, mirroring the player.
+	combat._on_net_intent(2, {"t": NM.EV_HAND_COUNT, "n": 4, "mana": 5, "maxmana": 3})
+	await create_timer(0.1).timeout
+	_check(combat._net_opp_mana_label.text == "5 / 3 (+2)",
+		"foe seal shows banked overflow '5 / 3 (+2)' (got '%s')" % combat._net_opp_mana_label.text)
 
 
 func _first_hand_creature():
