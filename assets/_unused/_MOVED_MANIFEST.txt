@@ -22,3 +22,18 @@ Unused images shelved 2026-06-17. Restore by moving back + removing .gdignore.
   assets/spells/painterly-2/ (folder)
   assets/spells/painterly-3/ (folder)
   assets/spells/painterly-4/ (folder)
+
+----------------------------------------------------------------------
+Midjourney source originals shelved 2026-06-23.
+The raw MJ renders (dani3379_*.png) were copied into assets/ under their
+final ids on 2026-06-23 (60 placed: 25 new + 35 replacements). These are
+the untouched source files, kept as a local backup / for re-picking
+variants. Godot ignores this whole tree via assets/_unused/.gdignore, so
+none of it ships in an export.
+
+[mj source batch]
+  pictures/  ->  assets/_unused/mj_sources_2026-06-23/   (61 PNG + sidecars)
+  note: bulwark_engine had 2 renders; the game uses the 5d695121 variant.
+        the 9c07afe1 variant sits here unused.
+  note: 'inspire' (spell) and 'e_devil_champ' (optional) were never
+        generated, so their live art is unchanged.
