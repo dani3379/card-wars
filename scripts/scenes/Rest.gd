@@ -632,7 +632,7 @@ func _build_change_summary(base: Dictionary, upgraded: Dictionary) -> String:
 	if not removed.is_empty():
 		parts.append("- " + ", ".join(removed))
 	if parts.is_empty():
-		return "Bonus effects improved. Hover the upgraded card to read the new text."
+		return "Effect improved — see the upgraded card."
 	return "   ·   ".join(parts)
 
 

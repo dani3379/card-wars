@@ -2489,22 +2489,14 @@ func _draw_ui() -> void:
 		draw_string(GameTheme.font_display,
 			Vector2(band.position.x, band.position.y + 72),
 			sub_txt, HORIZONTAL_ALIGNMENT_CENTER, band_w, 12, sub_col)
-		# Objective line — the real gate is breaking holds to open the lord's
-		# road, not visiting every chip. Show that progress when a rival deal
-		# is in play; fall back to the province tally on a gateless run.
-		var obj_txt := "PROVINCES CLAIMED  %d / %d" % [owned, _nodes.size()]
-		var obj_col := Color(0.72, 0.64, 0.50, 0.80)
-		if not RunState.rival_lords.is_empty():
-			if RunState.is_lord_gate_open():
-				obj_txt = "THE LORD'S ROAD IS OPEN"
-				obj_col = Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b,
-					0.92)
-			else:
-				obj_txt = "HOLDS BROKEN  %d / %d  ·  OPEN THE LORD'S ROAD" % [
-					RunState.holds_broken_in_act, RunState.HOLDS_TO_OPEN_LORD]
+		# Province tally — a quiet "how much of the chart is yours" read. The
+		# gate objective (break holds → open the road) is NOT repeated here: it
+		# lives in MapView's standing-order banner just below, so the plate and
+		# the HUD never echo the same fact.
 		draw_string(GameTheme.font_display,
 			Vector2(band.position.x, band.position.y + 92),
-			obj_txt, HORIZONTAL_ALIGNMENT_CENTER, band_w, 12, obj_col)
+			"PROVINCES CLAIMED  %d / %d" % [owned, _nodes.size()],
+			HORIZONTAL_ALIGNMENT_CENTER, band_w, 12, Color(0.72, 0.64, 0.50, 0.80))
 	if GameTheme.font_display == null:
 		return
 	# Legend lists only the site types actually on this act's map (treasure
@@ -2597,7 +2589,7 @@ func _draw_ui() -> void:
 			lx += strides[idx]
 	# "Reading the chart" primer — the non-chip signals (route colour, the
 	# mutator star, the pursuit pennant) that the site icons don't carry.
-	var primer := "READING THE CHART:  amber = open road  ·  ★ = mutator (changed rules)  ·  red pennant = pursuit (extra reinforcement)"
+	var primer := "amber = open road   ·   ★ = mutator   ·   red pennant = pursuit"
 	draw_string(GameTheme.font_display,
 		Vector2(w * 0.5 - 540.0, base_y - 24.0), primer,
 		HORIZONTAL_ALIGNMENT_CENTER, 1080, 11,

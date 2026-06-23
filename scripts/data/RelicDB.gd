@@ -97,7 +97,7 @@ const RELICS: Dictionary = {
 		"desc": "After each fight: heal 1 HP per friendly death (max 5).",
 		"hooks": ["combat_end"], "effect": "heal_per_death", "value": 1},
 	"gamblers_coin": {"id": "gamblers_coin", "name": "Gambler's Coin", "tier": "combat",
-		"desc": "Start of fight: flip a coin. Heads: draw 1 extra card. Tails: deal 3 damage to a random enemy.",
+		"desc": "Start of fight: flip a coin — heads, draw 1 card; tails, deal 3 damage to a random enemy.",
 		"hooks": ["combat_start"], "effect": "gamblers_coin", "value": 0},
 	"bone_pile": {"id": "bone_pile", "name": "Bone Pile", "tier": "combat",
 		"desc": "When you sacrifice a creature: deal damage equal to its ATK to the opposing creature.",
@@ -131,7 +131,7 @@ const RELICS: Dictionary = {
 		"desc": "Once per round: the first friendly that would die survives at 1 HP.",
 		"hooks": ["creature_death"], "effect": "phantom_veil", "value": 1},
 	"hexagonal_shield": {"id": "hexagonal_shield", "name": "Hexagonal Shield", "tier": "combat",
-		"desc": "Enemy Ranged attacks can't target your back row.",
+		"desc": "Enemy Sniper attacks can't target your back row.",
 		"hooks": [], "effect": "back_ranged_immune", "value": 0},
 
 	# ═══════════════════════════════════════════
@@ -247,7 +247,7 @@ const RELICS: Dictionary = {
 		"desc": "Start of each fight: choose 1 of 3 extra cards to add to your hand.",
 		"hooks": ["combat_start"], "effect": "toolbox", "value": 3},
 	"bottled_talisman": {"id": "bottled_talisman", "name": "Bottled Talisman", "tier": "combat",
-		"desc": "Choose a card in your deck. Always start each fight with it in your hand.",
+		"desc": "Start each fight with a chosen card in your hand.",
 		"hooks": ["combat_start"], "effect": "bottled_talisman", "value": 0},
 	"looking_glass": {"id": "looking_glass", "name": "Looking Glass", "tier": "combat",
 		"desc": "First card drawn each turn is the cheapest card in your draw pile.",
@@ -265,7 +265,7 @@ const RELICS: Dictionary = {
 		"desc": "Empty lanes count as friendlies for your Adj. Buff effects.",
 		"hooks": [], "effect": "empty_lanes_as_adj", "value": 0},
 	"catapult_crew": {"id": "catapult_crew", "name": "Catapult Crew", "tier": "combat",
-		"desc": "Your back-row creatures gain Ranged.",
+		"desc": "Your back-row creatures gain Sniper.",
 		"hooks": [], "effect": "back_row_ranged", "value": 0},
 	"bridge_watcher": {"id": "bridge_watcher", "name": "Bridge Watcher", "tier": "combat",
 		"desc": "Center-lane friendlies (2 & 3) have Thorns 2 and +1 HP.",
@@ -390,7 +390,7 @@ const RELICS: Dictionary = {
 		"desc": "Each act, pick a keyword (Thorns / Swift / Regenerate / Armored). All friendlies have it this act.",
 		"hooks": ["act_start"], "effect": "totem_pole", "value": 0},
 	"death_card": {"id": "death_card", "name": "Death Card", "tier": "combat",
-		"desc": "Friendlies that die this fight go to your hand instead of discard. Each costs +1 more every time it returns this fight.",
+		"desc": "Friendlies that die this fight return to your hand, costing +1 more each time.",
 		"hooks": ["creature_death"], "effect": "death_card", "value": 1},
 
 	# ─── Backpack Hero imports (4x4 adjacency variants) ───
@@ -463,7 +463,7 @@ const RELICS: Dictionary = {
 		"desc": "Transform all your starting creatures into random rare creatures.",
 		"hooks": [], "effect": "pandoras_box", "value": 0},
 	"snecko_eye": {"id": "snecko_eye", "name": "Basilisk Eye", "tier": "boss",
-		"desc": "Draw 6 cards instead of 4. Every card in hand has its cost randomized 0-3 each turn.",
+		"desc": "Draw 6 cards instead of 4, but every card's cost is randomized 0-3 each turn.",
 		"hooks": ["turn_start"], "effect": "snecko_eye", "value": 6},
 	"calling_bell": {"id": "calling_bell", "name": "Calling Bell", "tier": "boss",
 		"desc": "Gain 3 boss relics. Add 3 Curses to your deck.",
@@ -484,7 +484,7 @@ const RELICS: Dictionary = {
 		"desc": "+2 max Command. Start each fight with 1 Command; gain 2 Command per round (capped at max).",
 		"hooks": ["combat_start", "turn_start"], "effect": "marathoners_sash", "value": 2},
 	"steady_banner": {"id": "steady_banner", "name": "Steady Banner", "tier": "boss",
-		"desc": "Friendlies that survive a full round on the field gain +2 ATK permanently. Friendlies have -1 ATK on turn 1.",
+		"desc": "Friendlies gain +2 ATK permanently for each full round they survive, but start at -1 ATK on turn 1.",
 		"hooks": ["round_end", "creature_played"], "effect": "steady_banner", "value": 2},
 
 	# ═══════════════════════════════════════════════════════════════════════

@@ -1708,7 +1708,7 @@ func _build_baked_overlay_layout() -> void:
 	root.add_child(cost_slot)
 	_cost_label = _make_stat_number(str(card_data.get("cost", 0)),
 		Color(1, 0.98, 0.90), 0,
-		Color(0.30, 0.65, 1.00, 0.85))
+		Color(0.30, 0.65, 1.00, 0.45))
 	cost_slot.add_child(_cost_label)
 	# _cost_badge is read externally by some hover code paths — point it at
 	# the overlay anchor so hover effects still have a Control to grab.
@@ -1730,7 +1730,7 @@ func _build_baked_overlay_layout() -> void:
 		# was tuned for the bright v3/v6 sphere and vanishes on the seal).
 		_atk_base_color = Color(1.000, 0.957, 0.839)
 		_atk_label = _make_stat_number(str(current_atk), _atk_base_color, 0,
-			Color(1.00, 0.78, 0.20, 0.90))
+			Color(1.00, 0.78, 0.20, 0.50))
 		atk_slot.add_child(_atk_label)
 		_atk_badge = null
 
@@ -1746,7 +1746,7 @@ func _build_baked_overlay_layout() -> void:
 		root.add_child(hp_slot)
 		_hp_base_color = Color(1, 0.97, 0.92)
 		_hp_label = _make_stat_number(str(current_hp), _hp_base_color, 0,
-			Color(1.00, 0.30, 0.20, 0.90))
+			Color(1.00, 0.30, 0.20, 0.50))
 		hp_slot.add_child(_hp_label)
 		_hp_badge = null
 
@@ -3257,11 +3257,15 @@ class EmptyPlateSigil extends Control:
 func _chart_metal(rarity: String) -> Color:
 	if CardDB.is_curse(String(card_data.get("id", ""))):
 		return Color(0.55, 0.52, 0.45)            # weathered bone
+	# Widened separation so rarity reads at a glance: the warm metals (bronze/
+	# gold) used to sit too close. Rare is now the brightest + most saturated
+	# gold, uncommon the coolest silver-blue, starter the darkest pewter, common
+	# a mid aged bronze — value AND hue step between every tier.
 	match rarity:
-		"rare":     return Color(0.87, 0.69, 0.30)  # gold
-		"uncommon": return Color(0.71, 0.75, 0.79)  # silver
-		"starter":  return Color(0.52, 0.50, 0.46)  # pewter
-	return Color(0.64, 0.48, 0.27)                 # common — aged bronze
+		"rare":     return Color(0.97, 0.75, 0.22)  # bright gold — rare pops loudest
+		"uncommon": return Color(0.64, 0.76, 0.90)  # cool silver-blue
+		"starter":  return Color(0.47, 0.46, 0.44)  # dark pewter
+	return Color(0.62, 0.45, 0.25)                 # common — aged bronze
 
 
 ## A rectangular rule (border only) inset uniformly from the card edge.
@@ -3385,59 +3389,23 @@ func _kw_stamp_row(root: Control, meds: Array, metal: Color,
 		more.add_child(more_lbl)
 
 
-## Short printed keyword reminders for the hand card. New players read+drag —
-## they don't hover the bottom-margin glyphs to learn what Swift/Armored/etc.
-## do. So we print a compact one-liner per combat keyword right under the rules
-## text, ON the paper. Kept short (card-sized, not the full hover tooltip) and
-## re-inked dark-bronze (the tooltip gold washes out on parchment). We SKIP any
-## keyword already named in the desc text (royal_guard/vampire_lord weave them
-## in) so the reminder never duplicates the rules line above it. Returns "" when
-## there is nothing left to remind. BBCode, for the desc RichTextLabel.
-const _KW_REMINDER: Dictionary = {
-	"armored":    "Takes 1 less from each hit.",
-	"swift":      "Strikes first, before the foe can.",
-	"ranged":     "Hits the back row first.",
-	"thorns":     "Hurts attackers for 1.",
-	"regenerate": "Heals 1 each round.",
-	"piercing":   "Overkill carries to the back, then face.",
-	"last_stand": "Survives a killing blow once.",
-	"poison":     "Anything it wounds dies.",
-	"shield":     "Soaks the first hit whole.",
-	"guardian":   "Nearby foes must strike it.",
-	"lifelink":   "Heals you when it deals damage.",
-	"rampage":    "Grows +1 ATK per kill.",
-	"overrun":    "+1 ATK while its lane is open.",
-	"formation":  "+1/+1 when standing beside an ally.",
-	"summon":     "Brings a 1/1 token alongside.",
-}
 
-func _chart_kw_reminder_bbcode(desc_lower: String, body_hex: String,
-		max_lines: int = 3) -> String:
-	if max_lines <= 0:
-		return ""
-	var lines: Array[String] = []
-	for k in card_data.get("keywords", []):
-		var ks := String(k)
-		if not _KW_REMINDER.has(ks):
-			continue
-		# Skip a keyword ONLY when the rules text actually EXPLAINS it (house
-		# style: "Keyword — explanation"). A desc that merely NAMES it
-		# ("Shield. Swift.") still needs the teaching line — otherwise a bare-
-		# keyword card stays silent, the worst case for a new player. The em-dash
-		# (or hyphen) right after the keyword is the "this is the gloss" tell.
-		var disp: String = KeywordEffects.KEYWORDS.get(ks, {}).get("display", ks)
-		var dl := String(disp).to_lower()
-		var alt := ks.replace("_", " ")
-		if (dl + " —") in desc_lower or (dl + " -") in desc_lower \
-				or (alt + " —") in desc_lower or (alt + " -") in desc_lower:
-			continue
-		lines.append("[b][color=#7a4f10]%s[/color][/b]  [color=%s]%s[/color]" \
-			% [disp, body_hex, _KW_REMINDER[ks]])
-		if lines.size() >= max_lines:
-			break
-	if lines.is_empty():
-		return ""
-	return "\n".join(lines)
+func _fit_desc_to_box(rt: RichTextLabel, max_h: float) -> void:
+	# Step the body font down (to a 10px floor) until the rules text fits the
+	# clip box. RichTextLabel.get_content_height() validates the line cache, so
+	# the loop re-measures correctly after each size change.
+	if not is_instance_valid(rt):
+		return
+	var guard := 0
+	while guard < 6:
+		if rt.get_content_height() <= max_h:
+			return
+		var cur := int(rt.get_theme_font_size("normal_font_size"))
+		if cur <= 10:
+			return
+		rt.add_theme_font_size_override("normal_font_size", cur - 1)
+		rt.add_theme_font_size_override("bold_font_size", cur - 1)
+		guard += 1
 
 
 func _build_chart_proto() -> void:
@@ -3675,16 +3643,25 @@ func _build_chart_proto() -> void:
 		mark.size = Vector2(5, 5)
 		root.add_child(mark)
 
-	# ── rarity gem at top-center: a faceted diamond SET into an ink mount
-	# on the rules — bigger and jeweled, so rarity reads at hand scale ────
-	if rarity == "uncommon" or rarity == "rare":
-		var gem_col := Color(0.949, 0.616, 0.137) if rarity == "rare" \
-			else Color(0.62, 0.72, 0.86)
-		_chart_diamond(root, Vector2(112.5, 7.0), 15.0, Color(0.10, 0.082, 0.060))
-		_chart_diamond(root, Vector2(112.5, 7.0), 9.0, gem_col)
-		_chart_diamond(root, Vector2(112.5, 5.4), 3.4,
-			Color(minf(gem_col.r * 1.5, 1.0), minf(gem_col.g * 1.5, 1.0),
-			minf(gem_col.b * 1.5, 1.0)))
+	# ── rarity gem at top-center: a faceted diamond SET into an ink mount on the
+	# rules. Now drawn on EVERY card (was uncommon/rare only — common/starter had
+	# no positive cue, so they were the hardest to tell apart) with a clearly
+	# distinct colour per tier: pewter starter, pale silver common, sapphire
+	# uncommon, gold rare. Rare/uncommon sit a touch larger so the top tiers also
+	# read by size. Curses keep their own bone/murk identity, no gem. ──────────
+	if not is_curse_card:
+		var gem_col: Color
+		match rarity:
+			"rare":     gem_col = Color(0.97, 0.72, 0.16)   # gold
+			"uncommon": gem_col = Color(0.36, 0.62, 0.96)   # sapphire
+			"starter":  gem_col = Color(0.55, 0.53, 0.49)   # pewter grey
+			_:          gem_col = Color(0.88, 0.90, 0.92)   # common — pale silver
+		var gem_r: float = 10.5 if (rarity == "rare" or rarity == "uncommon") else 8.5
+		_chart_diamond(root, Vector2(112.5, 7.5), gem_r + 6.0, Color(0.10, 0.082, 0.060))
+		_chart_diamond(root, Vector2(112.5, 7.5), gem_r, gem_col)
+		_chart_diamond(root, Vector2(112.5, 5.9), gem_r * 0.38,
+			Color(minf(gem_col.r * 1.4, 1.0), minf(gem_col.g * 1.4, 1.0),
+			minf(gem_col.b * 1.4, 1.0)))
 
 	# ── name cartouche: swallowtail ink banner, metal-edged — the name
 	# moment is crafted furniture now, not a flat full-width bar ──────────
@@ -3750,6 +3727,29 @@ func _build_chart_proto() -> void:
 	if not is_sp:
 		_kw_stamp_row(root, combat_meds, metal, kw_icon_total)
 
+	# ── clean inscribed-vellum panel under the rules text ────────────────
+	# The procedural ParchmentPlate ages the whole leaf with sepia washes +
+	# foxing; over a stain the dark body ink and bronze keyword gold drop below
+	# readable contrast. Lay a subtle sheet of cleaner stock over just the rules
+	# band so the writing always sits on fresh vellum — reads as an intentional
+	# inscribed panel, not a pasted rectangle. (Curse cards keep their murk.)
+	if not is_curse_card:
+		var stock := Panel.new()
+		stock.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		stock.anchor_left = 0.0
+		stock.anchor_right = 1.0
+		stock.anchor_top = 0.0
+		stock.anchor_bottom = 0.0
+		stock.offset_left = 16
+		stock.offset_right = -16
+		stock.offset_top = 189
+		stock.offset_bottom = 256
+		var sst := StyleBoxFlat.new()
+		sst.bg_color = Color(0.901, 0.843, 0.690, 0.55)  # clean warm vellum
+		sst.set_corner_radius_all(3)
+		stock.add_theme_stylebox_override("panel", sst)
+		root.add_child(stock)
+
 	# ── ruled text region: the page itself carries the rules text. A fine
 	# ink hairline box with metal corner ticks — chart-legend language —
 	# instead of v7's floating tooltip-like well. ─────────────────────────
@@ -3811,11 +3811,14 @@ func _build_chart_proto() -> void:
 		desc_rt.add_theme_font_override("bold_font",
 			desc_bold_font if desc_bold_font else desc_font)
 	var raw_desc: String = card_data.get("desc", "")
-	var dsz := 12
-	if raw_desc.length() > 105:
-		dsz = 10
-	elif raw_desc.length() > 72:
+	# Bigger, more readable body text: short/medium descs read at 13px, and the
+	# floor lifts 10→11. Breakpoints pushed later so the *typical* card gets the
+	# largest size; the deferred shrink-to-fit below guarantees nothing clips.
+	var dsz := 13
+	if raw_desc.length() > 115:
 		dsz = 11
+	elif raw_desc.length() > 85:
+		dsz = 12
 	desc_rt.add_theme_font_size_override("normal_font_size", dsz)
 	desc_rt.add_theme_font_size_override("bold_font_size", dsz)
 	desc_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
@@ -3824,40 +3827,12 @@ func _build_chart_proto() -> void:
 	# document contrast won (~5.5:1 on the leaf).
 	var desc_bbcode := KeywordEffects.colorize_keywords(
 		raw_desc).replace(KeywordEffects.KEYWORD_GOLD, "#7a4f10")
-	# ── on-card keyword reminders (P1#1) ─────────────────────────────────
-	# New players read+drag; they never hover the bottom-margin glyphs to
-	# learn what Swift/Poison/etc. do. Print a compact one-liner per silent
-	# keyword right under the rules text, ON the paper. Guarded for vertical
-	# room: the desc clip is ~65px tall, so a wordy desc leaves space for
-	# fewer reminders. We budget by estimating how many wrapped lines the desc
-	# already eats (≈170px wide well at `dsz`px), reserve a separator line,
-	# and give the rest to reminders (each runs ~1.6 wrapped lines here).
-	# `_chart_kw_reminder_bbcode` already skips any keyword the desc names, so
-	# this never duplicates the rules line and naturally prefers the keywords
-	# the desc doesn't explain.
-	if not is_curse_card:
-		var line_px: float = float(dsz) + 4.0
-		var avail_lines: float = 65.0 / line_px
-		# chars-per-line is ~ well_width / (dsz * 0.52) for this serif at these
-		# sizes; estimate the desc's own line count, then a generous ceil.
-		var cpl: float = maxf(170.0 / (float(dsz) * 0.52), 12.0)
-		var desc_lines: float = ceil(maxf(float(raw_desc.length()) / cpl, 1.0))
-		# Reserve one line for the hairline separator; reminders eat ~1.7
-		# wrapped lines each at this width.
-		var room: float = avail_lines - desc_lines - 1.0
-		var max_rem: int = int(floor(room / 1.7))
-		max_rem = clampi(max_rem, 0, 3)
-		if max_rem > 0:
-			var rem_hex := "#6b5530"  # muted bronze ink — secondary teaching tone
-			var rem := _chart_kw_reminder_bbcode(
-				raw_desc.to_lower(), rem_hex, max_rem)
-			if rem != "":
-				# A faint rule separates the printed reminders from the card's
-				# own rules so they read as a glossary footnote, not more rules.
-				desc_bbcode += "\n[color=#9a7a3a]· · ·[/color]\n" \
-					+ "[font_size=%d]%s[/font_size]" % [maxi(dsz - 1, 9), rem]
 	desc_rt.text = "[center]%s[/center]" % desc_bbcode
 	center_box.add_child(desc_rt)
+	# Shrink-to-fit safety net: once laid out, if the written text overflows the
+	# ~65px clip box (a long desc plus reminders), step the body size down until
+	# it fits — so a line is never cut top or bottom by the CenterContainer clip.
+	_fit_desc_to_box.call_deferred(desc_rt, 64.0)
 
 	# ── stats as wax seals OR the spell footer line ──────────────────────
 	var stat_font: Font = GameTheme.font_stat
@@ -3879,7 +3854,7 @@ func _build_chart_proto() -> void:
 		# bake-overlay contract (see CLAUDE.md).
 		_cost_label = _make_styled_label(
 			"" if bake_strip_stats else str(card_data.get("cost", 0)),
-			stat_font, 18, Color(1, 1, 1))
+			stat_font, 18, Color(0.96, 0.92, 0.83))
 		_cost_label.add_theme_color_override("font_outline_color",
 			Color(0.06, 0.04, 0.03, 0.96))
 		_cost_label.add_theme_constant_override("outline_size", 5)
@@ -3901,7 +3876,7 @@ func _build_chart_proto() -> void:
 		root.add_child(atk_seal)
 		_atk_label = _make_styled_label(
 			"" if bake_strip_stats else str(current_atk), stat_font, 18,
-			Color(1, 1, 1))
+			Color(0.96, 0.92, 0.83))
 		_atk_label.add_theme_color_override("font_outline_color",
 			Color(0.06, 0.04, 0.03, 0.96))
 		_atk_label.add_theme_constant_override("outline_size", 5)
@@ -3923,7 +3898,7 @@ func _build_chart_proto() -> void:
 		root.add_child(hp_seal)
 		_hp_label = _make_styled_label(
 			"" if bake_strip_stats else str(current_hp), stat_font, 18,
-			Color(1, 1, 1))
+			Color(0.96, 0.92, 0.83))
 		_hp_label.add_theme_color_override("font_outline_color",
 			Color(0.06, 0.04, 0.03, 0.96))
 		_hp_label.add_theme_constant_override("outline_size", 5)
@@ -3947,7 +3922,7 @@ func _build_chart_proto() -> void:
 		root.add_child(sp_cost)
 		_cost_label = _make_styled_label(
 			"" if bake_strip_stats else str(card_data.get("cost", 0)),
-			stat_font, 18, Color(1, 1, 1))
+			stat_font, 18, Color(0.96, 0.92, 0.83))
 		_cost_label.add_theme_color_override("font_outline_color",
 			Color(0.06, 0.04, 0.03, 0.96))
 		_cost_label.add_theme_constant_override("outline_size", 5)
@@ -5055,15 +5030,16 @@ func _make_stat_number(text: String, color: Color, vertical_offset: int = 0,
 	lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.98))
 	lbl.add_theme_constant_override("outline_size", 4)
 	# Colored halo via shadow_outline_size — only kicks in if the caller
-	# passes a glow_color. Centred (offset 0,0) so it bleeds equally on
-	# all sides; outline_size 7 = ~7 px soft halo past the black outline.
-	# AAA card games (Hearthstone, MtG Arena) pair this with the orb
-	# tint so the number reads as "made of mana / blood / gold".
+	# passes a glow_color. Centred (offset 0,0) so it bleeds equally on all
+	# sides. Dialed back 7→4 px (2026-06-22): the big bright bloom "poked at
+	# the eyes"; a tighter halo keeps the subtle mana/blood/gold tint that AAA
+	# card games use without the numbers glaring. (Caller alphas were also
+	# lowered in _build_baked_overlay_layout.)
 	if glow_color.a > 0.001:
 		lbl.add_theme_color_override("font_shadow_color", glow_color)
 		lbl.add_theme_constant_override("shadow_offset_x", 0)
 		lbl.add_theme_constant_override("shadow_offset_y", 0)
-		lbl.add_theme_constant_override("shadow_outline_size", 7)
+		lbl.add_theme_constant_override("shadow_outline_size", 4)
 	else:
 		# Fallback: traditional offset drop shadow, no glow.
 		lbl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.65))
@@ -5530,7 +5506,7 @@ func take_damage(amount: int) -> void:
 	# Shield: absorb the entire first hit, then pop the shield.
 	if state.has_shield:
 		state.has_shield = false
-		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
+		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0), "shield")
 		update_stat_display()
 		_flash_hit()
 		return
@@ -5546,14 +5522,14 @@ func take_damage(amount: int) -> void:
 		amount = maxi(1, amount - reduction)
 		var blocked: int = original - amount
 		if blocked > 0:
-			_spawn_keyword_chip("BLOCKED %d" % blocked, Color(0.55, 0.78, 1.0))
+			_spawn_keyword_chip("BLOCKED %d" % blocked, Color(0.55, 0.78, 1.0), "armored")
 	if card_data.get("extra_damage", 0) > 0:
 		amount += card_data.extra_damage
 	current_hp -= amount
 	if current_hp <= 0 and has_keyword("last_stand") and not last_stand_used:
 		current_hp = 1
 		last_stand_used = true
-		_spawn_keyword_chip("LAST STAND", Color(1.0, 0.85, 0.20))
+		_spawn_keyword_chip("LAST STAND", Color(1.0, 0.85, 0.20), "last_stand")
 		_play_last_stand_flare()
 	update_stat_display()
 	_spawn_damage_number(amount)
@@ -5569,7 +5545,7 @@ func take_damage_bypass_armor(amount: int) -> void:
 	# Bypasses Armored, but Shield still absorbs the whole hit and pops.
 	if state.has_shield:
 		state.has_shield = false
-		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
+		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0), "shield")
 		update_stat_display()
 		_flash_hit()
 		return
@@ -5581,7 +5557,7 @@ func take_damage_bypass_armor(amount: int) -> void:
 	if current_hp <= 0 and has_keyword("last_stand") and not last_stand_used:
 		current_hp = 1
 		last_stand_used = true
-		_spawn_keyword_chip("LAST STAND", Color(1.0, 0.85, 0.20))
+		_spawn_keyword_chip("LAST STAND", Color(1.0, 0.85, 0.20), "last_stand")
 		_play_last_stand_flare()
 	update_stat_display()
 	_spawn_damage_number(amount)
@@ -5605,16 +5581,22 @@ func try_die() -> void:
 	_die()
 
 
-func _spawn_keyword_chip(text: String, color: Color) -> void:
+func _spawn_keyword_chip(text: String, color: Color, kw_id: String = "") -> void:
 	# Floats a labeled chip above the card so hidden keyword math (Armored
-	# blocking, Last Stand triggering, Piercing carrying) reads on-screen.
+	# blocking, Last Stand triggering, Piercing carrying) reads on-screen. Routes
+	# through Combat.spawn_keyword_callout — a styled pill carrying the keyword's
+	# own icon, visually distinct from a bare damage number — when available.
 	if static_display:
 		return
 	var vfx := _combat_vfx_target()
 	if vfx == null:
 		return
-	var anchor := global_position + Vector2(size.x * scale.x * 0.5, size.y * scale.y * 0.10)
-	vfx.spawn_floating_number(anchor, text, color, false)
+	var anchor := global_position + Vector2(size.x * scale.x * 0.5, size.y * scale.y * 0.06)
+	if vfx.has_method("spawn_keyword_callout"):
+		var icon: Texture2D = GameTheme.get_keyword_icon(kw_id) if kw_id != "" else null
+		vfx.spawn_keyword_callout(anchor, text, color, icon)
+	else:
+		vfx.spawn_floating_number(anchor, text, color, false)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -6538,16 +6520,41 @@ func _show_detail_panel() -> void:
 	var vp = get_viewport()
 	if not vp:
 		return
-	var root = vp.get_child(0) if vp.get_child_count() > 0 else null
-	if not root:
+	# Parent the popup to a dedicated CanvasLayer ABOVE the combat HUD (layer 12)
+	# so it can't be drawn over. Previously it was added to the scene root (canvas
+	# layer 0), so the right-column HUD — the enemy Command seal, wave chip — drew
+	# on top of the popup's rules text ("the card text appears under the enemy
+	# mana so I can't see anything"). Layer 90 sits above the HUD and frame-grade
+	# (40) but below the modal pile / glossary viewers (100), and works in every
+	# scene that uses Card2D. The popup is transient (only up while hovering), so
+	# briefly overlapping the enemy stats is the right trade for readability.
+	var host := _detail_host_layer(vp)
+	if not host:
 		return
 
 	_detail_popup = _build_detail()
-	root.add_child(_detail_popup)
+	host.add_child(_detail_popup)
 
 	_detail_popup.modulate.a = 0.0
 	var tw = _detail_popup.create_tween()
 	tw.tween_property(_detail_popup, "modulate:a", 1.0, 0.12)
+
+	# Once Godot has laid the popup out, clamp it so a tall popup never runs off
+	# the bottom of the screen. The writ slip docks mid-LEFT (see _wd_build), which
+	# already clamps above the hero portrait; this is the final viewport safety net.
+	var tree := get_tree()
+	if tree == null:
+		return
+	var my_popup := _detail_popup
+	await tree.process_frame
+	if not is_instance_valid(my_popup):
+		return
+	var vph := 900.0
+	if get_viewport() != null:
+		vph = get_viewport().get_visible_rect().size.y
+	var max_y := vph - my_popup.size.y - 16.0
+	if my_popup.position.y > max_y:
+		my_popup.position.y = maxf(12.0, max_y)
 
 
 func _hide_detail_panel() -> void:
@@ -6559,218 +6566,475 @@ func _hide_detail_panel() -> void:
 	_detail_owner = null
 
 
-func _build_detail() -> PanelContainer:
-	const PW := 280.0
-	const MARGIN := 16.0
-	const PAD := 12.0
+func _detail_host_layer(vp: Viewport) -> CanvasLayer:
+	## Find-or-create the shared high-layer host for hover detail popups, so the
+	## popup draws above scene HUD CanvasLayers instead of behind them. Looked up
+	## by a fixed name under the scene root so every Card2D reuses ONE layer
+	## rather than spawning a new CanvasLayer per hover.
+	const LAYER_NAME := "CardDetailPopupLayer"
+	var root := vp.get_child(0) if vp.get_child_count() > 0 else null
+	if root == null:
+		return null
+	var existing := root.get_node_or_null(NodePath(LAYER_NAME))
+	if existing is CanvasLayer:
+		return existing
+	var layer := CanvasLayer.new()
+	layer.name = LAYER_NAME
+	layer.layer = 90
+	root.add_child(layer)
+	return layer
 
-	var panel := PanelContainer.new()
-	panel.z_index = 100
-	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-	if GameTheme.tex_panel_9p:
-		panel.add_theme_stylebox_override("panel",
-			GameTheme.make_panel_textured(Color(0.15, 0.12, 0.08), 20, int(PAD)))
-	else:
-		var style := StyleBoxFlat.new()
-		style.bg_color = Color(0.06, 0.05, 0.04, 0.95)
-		style.border_color = GameTheme.GILT
-		style.set_border_width_all(2)
-		style.set_corner_radius_all(8)
-		style.shadow_color = Color(0, 0, 0, 0.6)
-		style.shadow_size = 8
-		style.shadow_offset = Vector2(0, 4)
-		style.content_margin_left = PAD
-		style.content_margin_right = PAD
-		style.content_margin_top = PAD
-		style.content_margin_bottom = PAD
-		panel.add_theme_stylebox_override("panel", style)
-
-	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 6)
-	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	panel.add_child(vbox)
-
-	# ── Name + cost row ──
-	var header := HBoxContainer.new()
-	header.add_theme_constant_override("separation", 8)
-	header.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(header)
-
-	var cost_lbl := Label.new()
-	cost_lbl.text = "%d" % card_data.get("cost", 0)
-	if GameTheme.font_display:
-		cost_lbl.add_theme_font_override("font", GameTheme.font_display)
-	cost_lbl.add_theme_font_size_override("font_size", 22)
-	cost_lbl.add_theme_color_override("font_color", GameTheme.MANA_BLUE)
-	cost_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
-	cost_lbl.add_theme_constant_override("outline_size", 3)
-	cost_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	header.add_child(cost_lbl)
-
-	var name_lbl := Label.new()
-	name_lbl.text = card_data.get("name", "")
-	if GameTheme.font_display:
-		name_lbl.add_theme_font_override("font", GameTheme.font_display)
-	name_lbl.add_theme_font_size_override("font_size", 22)
-	name_lbl.add_theme_color_override("font_color", GameTheme.get_name_color(card_data))
-	name_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
-	name_lbl.add_theme_constant_override("outline_size", 3)
-	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	header.add_child(name_lbl)
-
-	# ── Type + rarity line ──
-	var type_text := "Creature" if is_creature() else "Spell"
-	var rarity_text: String = str(card_data.get("rarity", "common")).capitalize()
-	var type_lbl := Label.new()
-	type_lbl.text = "%s  •  %s" % [type_text, rarity_text]
-	if GameTheme.font_body:
-		type_lbl.add_theme_font_override("font", GameTheme.font_body)
-	type_lbl.add_theme_font_size_override("font_size", 13)
-	type_lbl.add_theme_color_override("font_color",
-		GameTheme.rarity_color(card_data.get("rarity", "common")))
-	type_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.7))
-	type_lbl.add_theme_constant_override("outline_size", 2)
-	type_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(type_lbl)
-
-	# ── Divider ──
-	var div := ColorRect.new()
-	div.custom_minimum_size = Vector2(0, 1)
-	div.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.4)
-	div.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(div)
-
-	# ── Stats (creatures only) ──
+func _build_detail() -> Control:
+	# v9 "illuminated writ" hover inspector — the panel is cut from the SAME aged
+	# parchment as the cards (deckled WritLeaf + ParchmentPlate ageing, swallowtail
+	# name cartouche, pressed wax-seal stats, ink rules text in the Alegreya book
+	# hand), so hovering reads as turning to a page in the same codex instead of a
+	# flat dark UI box bolted onto the board. Docked on the wide-open MID-LEFT so it
+	# clears the dense enemy HUD on the right (the old right dock collided with it).
+	#
+	# Live-stat injection: a battlefield creature that has grown (Hexblade,
+	# Corpse Eater, buffs) or taken damage must read its CURRENT atk/hp, not the
+	# printed base. effective_atk() folds temp+persistent buffs; current_hp tracks
+	# damage. For a hand card these equal the base, so it's identical there.
+	var cd := card_data.duplicate(true)
 	if is_creature():
-		var stats := HBoxContainer.new()
-		stats.add_theme_constant_override("separation", 24)
-		stats.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		vbox.add_child(stats)
+		cd["atk"] = effective_atk()
+		cd["hp"] = current_hp
+	return _wd_build(cd)
 
-		# Show LIVE stats, not the printed base. A creature that has grown on the
-		# battlefield (Hexblade's +1/spell, Corpse Eater, Vengeance, buffs, etc.)
-		# or taken damage must read its current values here — otherwise a Hexblade
-		# sitting at 4 ATK still showed "ATK 1" on hover, which read as "the buff
-		# didn't stack." For hand cards current_atk/current_hp == the base, so this
-		# is identical there. effective_atk() folds in temp + persistent buffs.
-		var atk_lbl := Label.new()
-		atk_lbl.text = "ATK  %d" % (effective_atk() if is_creature() else card_data.get("atk", 0))
-		if GameTheme.font_display:
-			atk_lbl.add_theme_font_override("font", GameTheme.font_display)
-		atk_lbl.add_theme_font_size_override("font_size", 18)
-		atk_lbl.add_theme_color_override("font_color", GameTheme.ATK_RED)
-		atk_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
-		atk_lbl.add_theme_constant_override("outline_size", 2)
-		atk_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		stats.add_child(atk_lbl)
 
-		var hp_lbl := Label.new()
-		hp_lbl.text = "HP  %d" % current_hp
-		if GameTheme.font_display:
-			hp_lbl.add_theme_font_override("font", GameTheme.font_display)
-		hp_lbl.add_theme_font_size_override("font_size", 18)
-		hp_lbl.add_theme_color_override("font_color", GameTheme.HEALTH_GREEN)
-		hp_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
-		hp_lbl.add_theme_constant_override("outline_size", 2)
-		hp_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		stats.add_child(hp_lbl)
+# ── The writ inspector builder. Self-contained: reads only GameTheme /
+#    KeywordEffects / the shared card material classes (WritLeaf / ParchmentPlate
+#    / InkCartouche / WaxSeal). Returns a Control sized + positioned ready to drop
+#    on the popup host layer. ────────────────────────────────────────────────
+func _wd_build(cd: Dictionary) -> Control:
+	const PW := 300.0
+	const PAD := 18.0          # page margin to the leaf edge
+	const TXT_L := PAD + 6.0   # inset for written text inside the page
+	const INK := Color(0.141, 0.094, 0.063)   # #241810 body ink
+	const WAX_ATK := Color(0.45, 0.12, 0.10)  # oxblood
+	const WAX_HP := Color(0.16, 0.34, 0.18)   # forest
+	const WAX_COST := Color(0.12, 0.18, 0.40) # navy command
 
-	# ── Description ──
-	var desc_text: String = str(card_data.get("desc", ""))
+	var rarity: String = String(cd.get("rarity", "common"))
+	var is_creature_card: bool = String(cd.get("type", "")) == "creature"
+	var metal: Color = GameTheme.rarity_color(rarity)
+	var metal_dim := Color(metal.r, metal.g, metal.b, 0.85)
+
+	var body_font: Font = GameTheme.font_card_body if GameTheme.font_card_body != null \
+		else GameTheme.font_body
+	var body_bold: Font = GameTheme.font_card_body_bold if GameTheme.font_card_body_bold != null \
+		else body_font
+	const DESC_SZ := 15
+	const KW_SZ := 14
+	var text_w := PW - TXT_L * 2.0
+
+	var desc_text: String = str(cd.get("desc", ""))
+	# Descless cards (some enemy-only creatures) synthesise their trigger text so
+	# the page is never blank.
+	if desc_text == "":
+		var ex: Array[String] = []
+		if cd.has("on_enter") and cd.on_enter.has("type"):
+			ex.append("On-Enter: " + _describe_trigger(cd.on_enter))
+		if cd.has("on_death") and cd.on_death.has("type"):
+			ex.append("On-Death: " + _describe_trigger(cd.on_death))
+		if cd.has("adj_buff"):
+			var ab = cd.adj_buff
+			var parts: Array[String] = []
+			if ab.get("atk", 0) != 0: parts.append("+%d ATK" % ab.atk)
+			if ab.get("hp", 0) != 0: parts.append("+%d HP" % ab.hp)
+			if parts.size() > 0: ex.append("Adjacent: %s" % ", ".join(parts))
+		desc_text = "\n".join(ex)
+	var kw_lines := _wd_keyword_lines(cd)
+
+	# ── pre-measure the writing so the slip grows to fit (no scrollbars) ──
+	var write_h := 0.0
 	if desc_text != "":
-		var desc := Label.new()
-		desc.text = desc_text
-		if GameTheme.font_body:
-			desc.add_theme_font_override("font", GameTheme.font_body)
-		desc.add_theme_font_size_override("font_size", 14)
-		desc.add_theme_color_override("font_color", GameTheme.DESC_DIM)
-		desc.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.6))
-		desc.add_theme_constant_override("outline_size", 2)
-		desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		desc.custom_minimum_size = Vector2(PW - PAD * 2, 0)
-		desc.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		vbox.add_child(desc)
+		write_h += _wd_wrapped_height(desc_text, body_font, DESC_SZ, text_w)
+	if kw_lines.size() > 0:
+		write_h += 10.0
+		for ln in kw_lines:
+			write_h += _wd_wrapped_height(ln, body_bold, KW_SZ, text_w) + 6.0
 
-	# ── Keywords ──
-	var keywords: Array = card_data.get("keywords", [])
-	if keywords.size() > 0:
-		var kw_div := ColorRect.new()
-		kw_div.custom_minimum_size = Vector2(0, 1)
-		kw_div.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.25)
-		kw_div.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		vbox.add_child(kw_div)
+	# vertical skeleton (real px down the slip)
+	var y_gem := 14.0
+	var y_cart := 30.0
+	var cart_h := 32.0
+	var y_type := y_cart + cart_h + 9.0
+	var type_h := 20.0
+	var y_seals := y_type + type_h + 10.0
+	var seal_d := 60.0
+	var y_after_seals := y_seals + (seal_d + 12.0 if is_creature_card else 4.0)
+	var y_writebox := y_after_seals
+	var write_pad := 14.0
+	var box_h: float = max(write_h + write_pad * 2.0, 56.0)
+	var panel_h := y_writebox + box_h + PAD
 
-		for kw in keywords:
-			var tip := KeywordEffects.tooltip_for(kw)
-			if tip == "":
-				continue
-			var kw_lbl := Label.new()
-			kw_lbl.text = tip
-			if GameTheme.font_body:
-				kw_lbl.add_theme_font_override("font", GameTheme.font_body)
-			kw_lbl.add_theme_font_size_override("font_size", 12)
-			kw_lbl.add_theme_color_override("font_color", GameTheme.KEYWORD_GOLD)
-			kw_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.6))
-			kw_lbl.add_theme_constant_override("outline_size", 2)
-			kw_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-			kw_lbl.custom_minimum_size = Vector2(PW - PAD * 2, 0)
-			kw_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			vbox.add_child(kw_lbl)
+	# ── root + drop shadow ──
+	var root := Control.new()
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.custom_minimum_size = Vector2(PW, panel_h)
+	root.size = Vector2(PW, panel_h)
+	root.z_index = 100
 
-	# ── On-enter / on-death / floop descriptions ──
-	var extra_lines: Array[String] = []
-	if card_data.has("on_enter"):
-		var oe_desc := str(card_data.get("desc", ""))
-		if oe_desc.begins_with("On-Enter") or oe_desc.begins_with("On Enter"):
-			extra_lines.append(oe_desc)
+	var seat := Panel.new()
+	seat.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	seat.position = Vector2(4, 5)
+	seat.size = Vector2(PW - 8, panel_h - 8)
+	var seat_st := StyleBoxFlat.new()
+	seat_st.bg_color = Color(0, 0, 0, 0.0)
+	seat_st.set_corner_radius_all(12)
+	seat_st.shadow_color = Color(0, 0, 0, 0.55)
+	seat_st.shadow_size = 16
+	seat_st.shadow_offset = Vector2(0, 5)
+	seat.add_theme_stylebox_override("panel", seat_st)
+	root.add_child(seat)
+
+	# quiet rarity glow halo
+	var glow_size := 3
+	match rarity:
+		"rare": glow_size = 11
+		"uncommon": glow_size = 7
+		"common": glow_size = 3
+		"starter": glow_size = 2
+	var glow := Panel.new()
+	glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	glow.position = Vector2(3, 3)
+	glow.size = Vector2(PW - 6, panel_h - 6)
+	var gs := StyleBoxFlat.new()
+	gs.bg_color = Color(0, 0, 0, 0.0)
+	gs.set_corner_radius_all(10)
+	var gcol: Color = metal
+	if rarity == "rare":
+		gcol = Color(0.95, 0.72, 0.25)
+	gs.shadow_color = Color(gcol.r, gcol.g, gcol.b, 0.50)
+	gs.shadow_size = glow_size
+	glow.add_theme_stylebox_override("panel", gs)
+	root.add_child(glow)
+
+	# ── the leaf: deckled parchment, the SAME stock the cards are cut from ──
+	var leaf := WritLeaf.new()
+	leaf.set_anchors_preset(Control.PRESET_FULL_RECT)
+	leaf.seed_text = String(cd.get("id", "?")) + "_writ"
+	leaf.corner_radius = 10.0
+	root.add_child(leaf)
+
+	var tooth := ParchmentPlate.new()
+	tooth.clip_contents = true
+	tooth.set_anchors_preset(Control.PRESET_FULL_RECT)
+	tooth.offset_left = 3; tooth.offset_top = 3
+	tooth.offset_right = -3; tooth.offset_bottom = -3
+	tooth.seed_text = String(cd.get("id", "?")) + "_writ"
+	tooth.strength = 0.85
+	root.add_child(tooth)
+
+	if GameTheme.tex_card_grain:
+		var bgn := TextureRect.new()
+		bgn.texture = GameTheme.tex_card_grain
+		bgn.stretch_mode = TextureRect.STRETCH_TILE
+		bgn.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		bgn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		bgn.offset_left = 3; bgn.offset_top = 3
+		bgn.offset_right = -3; bgn.offset_bottom = -3
+		bgn.modulate = Color(0.42, 0.30, 0.16, 0.09)
+		bgn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(bgn)
+
+	# metal rules: ink keyline + heavy outer + hairline inner (the card language)
+	_wd_rule_ring(root, 4.0, 1, Color(0.165, 0.125, 0.082, 0.50), 9)
+	_wd_rule_ring(root, 5.0, 2, metal, 8)
+	_wd_rule_ring(root, 9.0, 1, Color(metal.r * 0.8, metal.g * 0.8, metal.b * 0.8, 0.80), 6)
+
+	# ── rarity gem, top-center ──
+	var gem_col: Color
+	match rarity:
+		"rare": gem_col = Color(0.97, 0.72, 0.16)
+		"uncommon": gem_col = Color(0.36, 0.62, 0.96)
+		"starter": gem_col = Color(0.55, 0.53, 0.49)
+		_: gem_col = Color(0.88, 0.90, 0.92)
+	var gem_r: float = 9.0 if (rarity == "rare" or rarity == "uncommon") else 7.5
+	var cx := PW * 0.5
+	_wd_diamond(root, Vector2(cx, y_gem), gem_r + 5.0, Color(0.10, 0.082, 0.060))
+	_wd_diamond(root, Vector2(cx, y_gem), gem_r, gem_col)
+	_wd_diamond(root, Vector2(cx, y_gem - 1.4), gem_r * 0.38,
+		Color(minf(gem_col.r * 1.4, 1), minf(gem_col.g * 1.4, 1), minf(gem_col.b * 1.4, 1)))
+
+	# ── cost: a small navy wax seal, top-left of the page ──
+	var cost_seal := WaxSeal.new()
+	cost_seal.wax = WAX_COST
+	cost_seal.seed_text = String(cd.get("id", "?")) + "_cost"
+	cost_seal.position = Vector2(PAD - 2.0, y_cart - 4.0)
+	cost_seal.size = Vector2(38, 38)
+	cost_seal.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(cost_seal)
+	_wd_numeral(cost_seal, str(int(cd.get("cost", 0))), 20)
+
+	# ── name cartouche: swallowtail ink banner, metal-edged ──
+	var cart := InkCartouche.new()
+	cart.metal = metal
+	cart.position = Vector2(PAD + 30.0, y_cart)
+	cart.size = Vector2(PW - (PAD + 30.0) - PAD, cart_h)
+	root.add_child(cart)
+	var name_font: Font = GameTheme.font_title_black if GameTheme.font_title_black != null \
+		else GameTheme.font_display
+	var nm := String(cd.get("name", ""))
+	var nm_size := 20
+	if nm.length() > 18: nm_size = 15
+	elif nm.length() > 13: nm_size = 17
+	var name_lbl := _wd_label(nm, name_font, nm_size, Color(0.95, 0.85, 0.58))
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	name_lbl.clip_text = true
+	name_lbl.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	name_lbl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.55))
+	name_lbl.add_theme_constant_override("shadow_offset_y", 1)
+	name_lbl.position = Vector2(cart.position.x + 9.0, cart.position.y)
+	name_lbl.size = Vector2(cart.size.x - 18.0, cart_h)
+	root.add_child(name_lbl)
+
+	# ── type • rarity line ── (sepia ink, not the rarity metal: the gem + glow +
+	# cartouche already carry rarity, and grey starter-metal washes out on vellum)
+	var type_text := "Creature" if is_creature_card else "Spell"
+	var tl := _wd_label("%s   •   %s" % [type_text, rarity.capitalize()], body_font, 14,
+		Color(0.31, 0.22, 0.11))
+	tl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	tl.position = Vector2(PAD, y_type)
+	tl.size = Vector2(text_w + 12.0, type_h)
+	root.add_child(tl)
+
+	var head_rule := ColorRect.new()
+	head_rule.color = Color(metal.r, metal.g, metal.b, 0.38)
+	head_rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	head_rule.position = Vector2(PAD + 24.0, y_type + type_h + 2.0)
+	head_rule.size = Vector2(PW - (PAD + 24.0) * 2.0, 1.0)
+	root.add_child(head_rule)
+
+	# ── wax seals: ATK (oxblood) + HP (forest), creatures only ──
+	if is_creature_card:
+		var gap := 40.0
+		var pair_w := seal_d * 2.0 + gap
+		var sx := cx - pair_w * 0.5
+		var atk_seal := WaxSeal.new()
+		atk_seal.wax = WAX_ATK
+		atk_seal.seed_text = String(cd.get("id", "?")) + "_atk"
+		atk_seal.position = Vector2(sx, y_seals)
+		atk_seal.size = Vector2(seal_d, seal_d)
+		atk_seal.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(atk_seal)
+		_wd_numeral(atk_seal, str(int(cd.get("atk", 0))), 30)
+		_wd_caption(root, "ATK", Vector2(sx, y_seals + seal_d - 1.0), seal_d, WAX_ATK)
+
+		var hx := sx + seal_d + gap
+		var hp_seal := WaxSeal.new()
+		hp_seal.wax = WAX_HP
+		hp_seal.seed_text = String(cd.get("id", "?")) + "_hp"
+		hp_seal.position = Vector2(hx, y_seals)
+		hp_seal.size = Vector2(seal_d, seal_d)
+		hp_seal.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(hp_seal)
+		_wd_numeral(hp_seal, str(int(cd.get("hp", 0))), 30)
+		_wd_caption(root, "HP", Vector2(hx, y_seals + seal_d - 1.0), seal_d, WAX_HP)
+
+	# ── inscribed sub-panel: cleaner vellum + gilt hairline + corner ticks ──
+	var box_x := PAD - 2.0
+	var box_w := PW - box_x * 2.0
+	var stock := Panel.new()
+	stock.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stock.position = Vector2(box_x, y_writebox)
+	stock.size = Vector2(box_w, box_h)
+	var sst := StyleBoxFlat.new()
+	sst.bg_color = Color(0.901, 0.843, 0.690, 0.50)
+	sst.set_corner_radius_all(3)
+	stock.add_theme_stylebox_override("panel", sst)
+	root.add_child(stock)
+	var rbox := Panel.new()
+	rbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rbox.position = Vector2(box_x, y_writebox)
+	rbox.size = Vector2(box_w, box_h)
+	var rst := StyleBoxFlat.new()
+	rst.draw_center = false
+	rst.border_color = Color(0.255, 0.188, 0.118, 0.75)
+	rst.set_border_width_all(1)
+	rbox.add_theme_stylebox_override("panel", rst)
+	root.add_child(rbox)
+	for corner in [Vector2(box_x, y_writebox), Vector2(box_x + box_w, y_writebox),
+			Vector2(box_x, y_writebox + box_h), Vector2(box_x + box_w, y_writebox + box_h)]:
+		_wd_diamond(root, corner, 3.4, metal_dim)
+
+	# ── the writing: rules in ink, keyword defs in paper-gold ──
+	var vbox := VBoxContainer.new()
+	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_theme_constant_override("separation", 5)
+	vbox.position = Vector2(TXT_L, y_writebox + write_pad)
+	vbox.size = Vector2(text_w, box_h - write_pad * 2.0)
+	root.add_child(vbox)
+
+	if desc_text != "":
+		var dl := _wd_label(desc_text, body_font, DESC_SZ, INK)
+		dl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		dl.custom_minimum_size = Vector2(text_w, 0)
+		dl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		vbox.add_child(dl)
+
+	if kw_lines.size() > 0:
+		var spacer := Control.new()
+		spacer.custom_minimum_size = Vector2(0, 3)
+		spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		vbox.add_child(spacer)
+		var kdiv := ColorRect.new()
+		kdiv.color = Color(metal.r, metal.g, metal.b, 0.30)
+		kdiv.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		kdiv.custom_minimum_size = Vector2(text_w, 1)
+		vbox.add_child(kdiv)
+		for ln in kw_lines:
+			vbox.add_child(_wd_kw_label(ln, body_bold, KW_SZ, text_w))
+
+	# ── dock: mid-LEFT, clear of the dense enemy HUD on the right and clamped to
+	# sit above the hero portrait/HP cluster (bottom-left). Transient hover, so a
+	# brief overlap of the relic column is the right trade for legibility.
+	var band_bottom := 632.0
+	root.position = Vector2(34.0, clampf(300.0, 16.0, maxf(16.0, band_bottom - panel_h)))
+	return root
+
+
+# Keyword definition lines: "<display>: <desc>" — skip pure trigger-labels
+# (on_enter / on_death / adj_buff / adjacent) which the desc already spells out.
+# Doom / Wither show the card's live N.
+func _wd_keyword_lines(cd: Dictionary) -> Array[String]:
+	var out: Array[String] = []
+	var skip := ["on_enter", "on_death", "adj_buff", "adjacent"]
+	for kw in cd.get("keywords", []):
+		var k := String(kw)
+		if k in skip or not KeywordEffects.KEYWORDS.has(k):
+			continue
+		var kdef: Dictionary = KeywordEffects.KEYWORDS[k]
+		var disp := str(kdef.get("display", ""))
+		if k == "doom":
+			disp = "Doom %d" % int(cd.get("doom", 0))
+		elif k == "wither":
+			disp = "Wither %d" % int(cd.get("wither", 0))
+		out.append("%s: %s" % [disp, str(kdef.get("desc", ""))])
+	return out
+
+
+func _wd_label(text: String, font: Font, size: int, col: Color) -> Label:
+	var l := Label.new()
+	l.text = text
+	if font:
+		l.add_theme_font_override("font", font)
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", col)
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return l
+
+
+# A keyword line: bold paper-gold term, lighter brown definition body — one
+# RichTextLabel so the term reads as a heading without a second control.
+func _wd_kw_label(line: String, font: Font, size: int, w: float) -> RichTextLabel:
+	var rt := RichTextLabel.new()
+	rt.bbcode_enabled = true
+	rt.fit_content = true
+	rt.scroll_active = false
+	rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rt.custom_minimum_size = Vector2(w, 0)
+	if font:
+		rt.add_theme_font_override("normal_font", font)
+		rt.add_theme_font_override("bold_font", font)
+	rt.add_theme_font_size_override("normal_font_size", size)
+	rt.add_theme_font_size_override("bold_font_size", size)
+	rt.add_theme_color_override("default_color", Color(0.36, 0.24, 0.06))
+	var colon := line.find(":")
+	if colon > 0:
+		rt.text = "[color=#7a4f10][b]%s[/b][/color]:%s" % [line.substr(0, colon), line.substr(colon + 1)]
+	else:
+		rt.text = "[color=#7a4f10]%s[/color]" % line
+	return rt
+
+
+# Cream numeral centered over a seal, dark outline so it pops off the wax.
+func _wd_numeral(seal: Control, txt: String, size: int) -> void:
+	var l := Label.new()
+	l.text = txt
+	var f: Font = GameTheme.font_stat if GameTheme.font_stat != null else GameTheme.font_display
+	if f:
+		l.add_theme_font_override("font", f)
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", Color(0.96, 0.92, 0.82))
+	l.add_theme_color_override("font_outline_color", Color(0.10, 0.07, 0.04, 0.85))
+	l.add_theme_constant_override("outline_size", 4)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	l.set_anchors_preset(Control.PRESET_FULL_RECT)
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	seal.add_child(l)
+
+
+# Small engraved caption under a seal ("ATK" / "HP").
+func _wd_caption(root: Control, txt: String, pos: Vector2, w: float, tint: Color) -> void:
+	var l := _wd_label(txt, GameTheme.font_display, 11,
+		Color(tint.r * 0.75 + 0.10, tint.g * 0.55 + 0.08, tint.b * 0.55 + 0.06, 0.95))
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.position = pos
+	l.size = Vector2(w, 16)
+	root.add_child(l)
+
+
+# A rounded-rect border ring — the card's metal-rule language.
+func _wd_rule_ring(root: Control, inset: float, width: int, col: Color, radius: int) -> void:
+	var p := Panel.new()
+	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	p.set_anchors_preset(Control.PRESET_FULL_RECT)
+	p.offset_left = inset; p.offset_top = inset
+	p.offset_right = -inset; p.offset_bottom = -inset
+	var st := StyleBoxFlat.new()
+	st.draw_center = false
+	st.border_color = col
+	st.set_border_width_all(width)
+	st.set_corner_radius_all(radius)
+	p.add_theme_stylebox_override("panel", st)
+	root.add_child(p)
+
+
+func _wd_diamond(root: Control, center: Vector2, r: float, col: Color) -> void:
+	var d := WritDetailDiamond.new()
+	d.col = col
+	d.r = r
+	d.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	d.position = center - Vector2(r, r)
+	d.size = Vector2(r * 2.0, r * 2.0)
+	root.add_child(d)
+
+
+class WritDetailDiamond extends Control:
+	var col := Color(1, 1, 1)
+	var r := 5.0
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+	func _draw() -> void:
+		var c := size * 0.5
+		draw_colored_polygon(PackedVector2Array([
+			c + Vector2(0, -r), c + Vector2(r, 0), c + Vector2(0, r), c + Vector2(-r, 0)]), col)
+		draw_colored_polygon(PackedVector2Array([
+			c + Vector2(0, -r), c + Vector2(-r, 0), c]), Color(1, 1, 1, 0.18))
+
+
+# Wrapped-text height so the slip grows to fit its writing.
+func _wd_wrapped_height(text: String, font: Font, size: int, w: float) -> float:
+	if font == null:
+		return float(size) + 4.0
+	var lh: float = font.get_height(size) + 2.0
+	var lines := 1
+	var cur := ""
+	for word in text.split(" "):
+		var trial := word if cur == "" else cur + " " + word
+		if font.get_string_size(trial, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x > w:
+			lines += 1
+			cur = word
 		else:
-			extra_lines.append("On-Enter: " + oe_desc)
-	if card_data.has("on_death"):
-		var od = card_data.on_death
-		if od.has("type"):
-			extra_lines.append("On-Death: %s" % _describe_trigger(od))
-	if card_data.has("floop"):
-		var fl = card_data.floop
-		extra_lines.append("Floop: %s" % _describe_trigger(fl))
-	if card_data.has("adj_buff"):
-		var ab = card_data.adj_buff
-		var parts: Array[String] = []
-		if ab.get("atk", 0) != 0:
-			parts.append("+%d ATK" % ab.atk)
-		if ab.get("hp", 0) != 0:
-			parts.append("+%d HP" % ab.hp)
-		extra_lines.append("Adjacent: %s" % ", ".join(parts))
-
-	for line in extra_lines:
-		var el := Label.new()
-		el.text = line
-		if GameTheme.font_body:
-			el.add_theme_font_override("font", GameTheme.font_body)
-		el.add_theme_font_size_override("font_size", 12)
-		el.add_theme_color_override("font_color", Color(0.85, 0.75, 0.55))
-		el.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.6))
-		el.add_theme_constant_override("outline_size", 2)
-		el.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		el.custom_minimum_size = Vector2(PW - PAD * 2, 0)
-		el.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		vbox.add_child(el)
-
-	# Position the detail popup on the RIGHT side, BELOW the enemy banner. The
-	# combat enemy banner now runs y=14..318 with the incoming-damage chip just
-	# under it (ending ~382), so the popup starts at y=388 to clear both — at the
-	# old y=270 the popup's header tucked behind the enemy HP medallion (the HUD
-	# is a CanvasLayer that draws over this root-parented popup). The relic grid
-	# is on the LEFT column, so this right slot is free. Non-combat scenes have no
-	# banner here, so a lower start just centres the popup a touch — harmless.
-	# Uses the actual viewport width so it works at any resolution.
-	var vp_w := 1600.0
-	if get_viewport() != null:
-		vp_w = get_viewport().get_visible_rect().size.x
-	panel.position = Vector2(vp_w - PW - MARGIN, 388)
-	panel.size = Vector2(PW, 0)
-	return panel
+			cur = trial
+	return lh * float(lines)
 
 
 func _describe_trigger(data: Dictionary) -> String:

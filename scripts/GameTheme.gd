@@ -467,12 +467,12 @@ const GILT           := Color(0.82, 0.66, 0.30, 1.0)
 const GILT_BRIGHT    := Color(1.0, 0.88, 0.35, 1.0)
 const IVORY          := Color(0.96, 0.92, 0.78, 1.0)
 const BLOOD_RED      := Color(0.85, 0.22, 0.18, 1.0)
-const MANA_BLUE      := Color(0.35, 0.58, 0.95, 1.0)
-const HEALTH_GREEN   := Color(0.25, 0.85, 0.35, 1.0)
-const ATK_RED        := Color(1.0, 0.35, 0.25, 1.0)
+const MANA_BLUE      := Color(0.369, 0.525, 0.769, 1.0)  # hex #5E86C4 — dropped the digital-cornflower sat/value (S63→52,V95→77) into the period palette; hue held at 216° so it still reads "Command blue" and stays in the navy COST_BLUE_GEM family
+const HEALTH_GREEN   := Color(0.373, 0.659, 0.353, 1.0)  # hex #5FA85A — was electric #40D959 (S71/V85); muted to a herbal sage (S46/V66), hue nudged 130°→116° (warm-leaning) to sit with the parchment family without going muddy; ~6.5:1 on BOARD_BG
+const ATK_RED        := Color(0.886, 0.353, 0.235, 1.0)  # hex #E25A3C — pulled the pure #FF593F flame off max value/sat toward the burnished-bronze/oxblood warm family; still a hot orange-red (H11, ~5.2:1 on dark) for the attack/damage signal
 const ATK_BUFFED     := Color(1.0, 0.8, 0.2, 1.0)
 const HP_DAMAGED     := Color(1.0, 0.3, 0.3, 1.0)
-const SPELL_PURPLE   := Color(0.70, 0.55, 0.95, 1.0)
+const SPELL_PURPLE   := Color(0.624, 0.525, 0.788, 1.0)  # hex #9F86C9 — desaturated the bright lavender (S42/V95) to a dusty amethyst (S33/V79); hue held at 262° so spells stay distinct, but it no longer reads as glossy digital UI against parchment; ~6:1 on BOARD_BG
 const KEYWORD_GOLD   := Color(1.0, 0.85, 0.45, 1.0)
 const DESC_DIM       := Color(0.78, 0.74, 0.62, 1.0)
 const FLOOP_BLUE     := Color(0.30, 0.70, 0.95, 1.0)
@@ -480,7 +480,7 @@ const BOARD_BG       := Color(0.075, 0.065, 0.055, 1.0)
 const LANE_BORDER    := Color(0.38, 0.28, 0.15, 0.85)
 const DIMMED         := Color(0.50, 0.50, 0.50, 0.70)
 const RARITY_COMMON  := Color(0.75, 0.75, 0.75, 1.0)
-const RARITY_UNCOMMON := Color(0.40, 0.60, 0.95, 1.0)
+const RARITY_UNCOMMON := Color(0.435, 0.576, 0.800, 1.0)  # hex #6F93CC — the v4 comment warns off the digital-cornflower; pulled this rarity-text blue (S58/V95) to match the muted MANA_BLUE family (S46/V80), hue held at 217° so it reads identically as "uncommon blue"
 const RARITY_RARE    := Color(0.95, 0.78, 0.22, 1.0)
 const RARITY_STARTER := Color(0.55, 0.55, 0.55, 1.0)
 
@@ -493,6 +493,17 @@ const RARITY_STARTER := Color(0.55, 0.55, 0.55, 1.0)
 const COST_BLUE_GEM   := Color(0.149, 0.255, 0.404, 1.0)   # #264167  sealing-wax navy
 const ATK_GOLD_SHIELD := Color(0.471, 0.376, 0.157, 1.0)   # #786028  burnished bronze
 const HEALTH_RED_DROP := Color(0.510, 0.137, 0.106, 1.0)   # #82231B  oxblood wax
+# Enemy COMMAND wax — the foe's resource seal. Vermilion sealing-wax red, the
+# warm complement to the player's navy COST_BLUE_GEM, so "blue = your Command /
+# red = the foe's Command" reads as a team-colour pair. Pitched brighter & more
+# saturated than the oxblood HEALTH drop so an enemy Command seal never reads as
+# a health pip. (Palette pass may retune the exact value — keep it a clear red.)
+const COMMAND_RED_GEM := Color(0.698, 0.227, 0.157, 1.0)   # #B23A28  vermilion command wax — retuned for the warm/cool team split: hue eased 5°→8° (cleanly off the oxblood) and lifted to V70 vs HEALTH_RED_DROP's V51, so the enemy Command seal stays in one red family with oxblood/BLOOD_RED yet reads a full step brighter than a health pip
+# Enemy-side accent (warm team colour) — a slightly desaturated brick of the
+# COMMAND_RED_GEM hue for foe-side UI washes / outlines / banners. Sits in the
+# same warm red family as the enemy Command seal but muted (V69/S76) so it can
+# tint larger areas without shouting; complement to the player's navy.
+const ENEMY_TINT      := Color(0.690, 0.224, 0.169, 1.0)   # #B0392B  muted enemy brick
 # Parchment well: light tan with near-black body text. Contrast ~11.8:1 → AAA.
 const PARCHMENT_LIGHT := Color(0.910, 0.863, 0.753, 1.0)   # #E8DCC0
 const PARCHMENT_TEXT  := Color(0.141, 0.094, 0.063, 1.0)   # #241810
@@ -598,6 +609,28 @@ static func make_btn_style(bg: Color, border: Color = GILT, corner: int = 4) -> 
 #  BUTTON FACTORY
 # ═══════════════════════════════════════════
 
+## Inked-parchment plaque stylebox for buttons — a dark warm fill with the
+## caller's accent surviving as the gilt-blended keyline (+ a faint inner tint),
+## so a button reads as an aged plaque in the wax / cartouche kit instead of a
+## flat colour rectangle laid over the painted scenes. `accent_strength` 0..1
+## scales how much the accent shows (dim for disabled, full on hover).
+func _plaque_style(fill: Color, accent: Color, accent_strength: float) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = fill.lerp(accent, 0.08 * accent_strength)
+	var key := GILT.lerp(accent, 0.55 * accent_strength)
+	s.border_color = Color(key.r, key.g, key.b, 0.92)
+	s.set_border_width_all(2)
+	s.set_corner_radius_all(5)
+	s.shadow_color = Color(0, 0, 0, 0.42)
+	s.shadow_size = 4
+	s.shadow_offset = Vector2(0, 2)
+	s.content_margin_left = 14
+	s.content_margin_right = 14
+	s.content_margin_top = 7
+	s.content_margin_bottom = 7
+	return s
+
+
 func make_themed_button(text: String, bg: Color, min_size: Vector2 = Vector2(160, 44),
 		font_size: int = FONT_BODY, tooltip: String = "") -> Button:
 	var btn := Button.new()
@@ -611,23 +644,24 @@ func make_themed_button(text: String, bg: Color, min_size: Vector2 = Vector2(160
 	# font_display hasn't loaded yet (very early scene init).
 	if font_display:
 		btn.add_theme_font_override("font", font_display)
-	btn.add_theme_color_override("font_color", IVORY)
-	btn.add_theme_color_override("font_hover_color", Color(1, 0.95, 0.78))
-	btn.add_theme_color_override("font_disabled_color", Color(0.7, 0.65, 0.55, 0.6))
-	btn.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.45))
-	btn.add_theme_constant_override("outline_size", 2)
-	var normal = make_btn_style(bg, GILT, 4)
-	btn.add_theme_stylebox_override("normal", normal)
-	var hover = normal.duplicate() as StyleBoxFlat
-	hover.bg_color = bg.lightened(0.15)
-	btn.add_theme_stylebox_override("hover", hover)
-	var pressed = normal.duplicate() as StyleBoxFlat
-	pressed.bg_color = bg.darkened(0.20)
-	btn.add_theme_stylebox_override("pressed", pressed)
-	var disabled = normal.duplicate() as StyleBoxFlat
-	disabled.bg_color = bg.darkened(0.40)
-	disabled.border_color = Color(0.40, 0.30, 0.15, 0.55)
-	btn.add_theme_stylebox_override("disabled", disabled)
+	# Gilt-ivory letters with a heavier ink outline so the type reads on the dark
+	# plaque (the old thin outline leaned on the bright flat fill behind it).
+	btn.add_theme_color_override("font_color", Color(0.95, 0.88, 0.68))
+	btn.add_theme_color_override("font_hover_color", Color(1.0, 0.96, 0.80))
+	btn.add_theme_color_override("font_disabled_color", Color(0.62, 0.57, 0.47, 0.6))
+	btn.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.6))
+	btn.add_theme_constant_override("outline_size", 3)
+	# Inked-parchment plaque, NOT a flat colour fill — the caller's `bg` becomes
+	# the accent keyline so price / affordability / rarity colour-coding survives
+	# while the button stops reading as a generic UI rectangle.
+	btn.add_theme_stylebox_override("normal",
+		_plaque_style(Color(0.115, 0.090, 0.066, 0.96), bg, 0.85))
+	btn.add_theme_stylebox_override("hover",
+		_plaque_style(Color(0.160, 0.125, 0.088, 0.97), bg.lightened(0.10), 1.0))
+	btn.add_theme_stylebox_override("pressed",
+		_plaque_style(Color(0.085, 0.065, 0.050, 0.98), bg.darkened(0.10), 0.9))
+	btn.add_theme_stylebox_override("disabled",
+		_plaque_style(Color(0.100, 0.085, 0.070, 0.92), Color(0.40, 0.34, 0.22), 0.35))
 	return btn
 
 

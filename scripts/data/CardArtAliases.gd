@@ -29,6 +29,12 @@ const ALIASES: Dictionary = {
 	"adaptable":            "mirror_knight",
 	"tallow_doll":          "copycat",
 	"the_glutton":          "corpse_eater",
+	"lancer":               "duelist",
+	"shieldmaiden":         "royal_guard",
+	"the_leveler":          "siege_golem",
+	"the_apothecary":       "witch",
+	"emberwright":          "e_archer",
+	"ember_warden":         "torchbearer",
 
 	# ── Wolves / hounds ──────────────────────────────────────────────────
 	"wolf":                 "hound",

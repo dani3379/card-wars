@@ -1183,12 +1183,12 @@ class HowToPlayOverlay:
 		left.add_child(sect)
 
 		var primer := [
-			["Command", "Your turn resource (one bar of it each turn — you start with 3). Creatures and spells cost Command to play. Up to 2 unspent Command banks into next turn, so you can save up for a heavy play."],
-			["The board", "Four lanes, two ranks deep on each side. The front rank fights; the back rank is reserve. You place creatures into either rank from your hand."],
-			["Combat", "Both sides strike at the same time. In each lane the front rank trades first and is struck first — back-rank creatures wait their turn behind the front. Some creatures have Swift and strike in a pre-phase before any of this."],
-			["The Forge", "At a rest you can Forge a card: a permanent \"+\" upgrade with a hand-crafted before/after. No rolls, no path picking — you choose the card, you see exactly what it becomes."],
-			["Recruit camps", "A free draft. Pick 1 of 3 cards to join your deck at no cost — the main way your deck grows between fights."],
-			["The boss gate", "Each rival lord's keep starts barred. Break enough holds (the map shows how many remain) to open the road, then march on the keep itself."],
+			["Command", "Your turn resource — start with 3 each turn; spend it to play creatures and spells. Up to 2 unspent banks into next turn."],
+			["The board", "Four lanes, two ranks per side. The front rank fights; the back rank is reserve. Place creatures into either rank."],
+			["Combat", "Both sides strike at once. The front rank trades first and is hit first; the back waits behind it. Swift creatures strike in a pre-phase first."],
+			["The Forge", "At a rest, Forge a card for a permanent \"+\" upgrade. You pick the card and see exactly what it becomes — no rolls."],
+			["Recruit camps", "A free draft: pick 1 of 3 cards to join your deck. Your main way to grow it between fights."],
+			["The boss gate", "Each lord's keep starts barred. Break enough holds (the map shows how many) to open the road, then march on the keep."],
 		]
 		for entry in primer:
 			left.add_child(HowToPlayOverlay._make_primer_block(

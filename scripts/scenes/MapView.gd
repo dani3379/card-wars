@@ -26,7 +26,7 @@ const BOSS_HIT := 46.0        # click radius, the keep
 # stay Capitalized (COPY_STYLE §4); the phrasing names what the country
 # BREEDS, matching the terrain re-deal in RunState.apply_terrain_redeal.
 const TERRAIN_TIPS := {
-	"woods": "Wooded road — ambush country. Swift and Ranged favor it.",
+	"woods": "Wooded road — ambush country. Swift and Sniper favor it.",
 	"pass": "High pass — hard going. Armored kits hold passes.",
 	"ash": "Ash country — the burn. Doom and fire walk here.",
 	"meadow": "Meadow road — open country, lighter resistance.",
@@ -220,23 +220,20 @@ func _tip(nd: Dictionary) -> String:
 	if t == "elite":
 		label += "\nA General holds this ground — break them for a relic."
 	if t == "recruit":
-		label += "\nChoose 1 of 3 cards to join your deck. Free."
+		label += "\nFree draft — take 1 of 3 cards."
 	if t == "wayside":
 		var wid: String = String(nd.get("wayside_id", ""))
 		if WAYSIDE_TIPS.has(wid):
 			label = "%s\n%s" % [WAYSIDE_TIPS[wid][0], WAYSIDE_TIPS[wid][1]]
 	if t == "boss":
-		# Rival-lord intel: whose keep this is, and whether the road is open.
+		# Rival-lord intel: whose keep this is. The gate progress (break N holds)
+		# is NOT repeated here — the standing-order banner carries it at all times.
 		var rival: String = RunState.get_act_rival()
 		if rival != "" and String(nd.get("encounter_id", "")) == "rival_%s" % rival:
 			var title: String = String(HeroDB.faction_info(
 				HeroDB.get_faction(rival)).get("lord_title", ""))
 			if title != "":
 				label += "\n%s" % title
-		if not RunState.is_lord_gate_open():
-			var left: int = RunState.HOLDS_TO_OPEN_LORD - RunState.holds_broken_in_act
-			label += "\nThe gates are barred — break %d more %s to open the road." \
-				% [left, "hold" if left == 1 else "holds"]
 	# Mutator tag — surfaces "Stormy: enemies gain Swift" etc. so the player
 	# can route around a fight they don't want without entering it first.
 	var mut_id: String = String(nd.get("mutator_id", ""))
@@ -252,13 +249,13 @@ func _tip(nd: Dictionary) -> String:
 	elif t == "boss" and terrain == "ash":
 		label += "\nThe approach is ash the whole way."
 	if bool(nd.get("bridge", false)):
-		label += "\nA bridge crossing — something always waits at the water."
+		label += "\nBridge crossing — something waits at the water."
 	# Pursuit intel — once 2 holds fall the rival's outriders reach every
 	# hold still standing. Mirrors the crimson pennant on the chip.
 	if t == "combat" and not bool(nd.get("vis", false)) \
 			and RunState.holds_broken_in_act >= 2:
-		label += "\nOutriders hold it — an extra reinforcement on round 2%s." \
-			% (" and round 4" if RunState.holds_broken_in_act >= 3 else "")
+		label += "\nPursuit — extra reinforcement on round 2%s." \
+			% (" and 4" if RunState.holds_broken_in_act >= 3 else "")
 	return label
 
 
@@ -376,9 +373,8 @@ func _place_gate_banner() -> void:
 		text = "The road to the keep is open — march on the lord."
 		tint = Color(0.96, 0.84, 0.46)
 	else:
-		text = "Break %d more %s to open the road to the keep   ·   %d / %d" % [
-			left, "hold" if left == 1 else "holds",
-			RunState.holds_broken_in_act, RunState.HOLDS_TO_OPEN_LORD]
+		text = "Break %d more %s to open the road to the keep." % [
+			left, "hold" if left == 1 else "holds"]
 		tint = Color(0.92, 0.55, 0.42)
 
 	# A slim ink chip, width-fitted to the line, pinned top-center under the
@@ -771,12 +767,12 @@ func _build_how_to_play_overlay() -> Control:
 		GameTheme.FONT_SUBHEADER, GILT_B))
 
 	var primer := [
-		["Command", "Your turn resource (one bar of it each turn — you start with 3). Creatures and spells cost Command to play. Up to 2 unspent Command banks into next turn, so you can save up for a heavy play."],
-		["The board", "Four lanes, two ranks deep on each side. The front rank fights; the back rank is reserve. You place creatures into either rank from your hand."],
-		["Combat", "Both sides strike at the same time. In each lane the front rank trades first and is struck first — back-rank creatures wait their turn behind the front. Some creatures have Swift and strike in a pre-phase before any of this."],
-		["The Forge", "At a rest you can Forge a card: a permanent \"+\" upgrade with a hand-crafted before/after. No rolls, no path picking — you choose the card, you see exactly what it becomes."],
-		["Recruit camps", "A free draft. Pick 1 of 3 cards to join your deck at no cost — the main way your deck grows between fights."],
-		["The boss gate", "Each rival lord's keep starts barred. Break enough holds (the map banner shows how many remain) to open the road, then march on the keep itself."],
+		["Command", "Your turn resource — you start with 3 each turn and spend it to play creatures and spells. Up to 2 unspent Command banks into next turn."],
+		["The board", "Four lanes, two ranks deep. The front rank fights; the back rank is reserve. Play creatures into either rank."],
+		["Combat", "Both sides strike at once. In a lane the front rank trades first; the back waits behind it. Swift creatures strike in a pre-phase."],
+		["The Forge", "At a rest, Forge a card for a permanent \"+\" upgrade. You pick the card and see exactly what it becomes — no rolls."],
+		["Recruit camps", "A free draft — take 1 of 3 cards. The main way your deck grows between fights."],
+		["The boss gate", "Each lord's keep starts barred. Break enough holds to open the road, then march on the keep. The banner tracks how many remain."],
 	]
 	for entry in primer:
 		left.add_child(_make_primer_block(entry[0], entry[1], IVORY_C))

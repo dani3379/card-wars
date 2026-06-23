@@ -569,6 +569,14 @@ const MODAL_EFFECTS := [
 
 
 func _resolve_choice(choice: Dictionary) -> void:
+	# PlayLog: record the player's event decision (effect TYPES only, to stay
+	# JSON-safe — choice dicts can carry runtime Callables we must not serialize).
+	var _pl_eff: Array = []
+	for _e in choice.get("effects", []):
+		_pl_eff.append(_e.get("type", "") if _e is Dictionary else str(_e))
+	PlayLog.log_event("event_choice", {"event": _event_id,
+		"choice": choice.get("headline", choice.get("label", "")), "effects": _pl_eff})
+
 	var effects = choice.get("effects", [])
 	var follow_up: Dictionary = choice.get("follow_up", {})
 
@@ -2162,7 +2170,7 @@ const EVENTS: Dictionary = {
 
 	"thrice_blessed_spring": {
 		"name": "The Thrice-Blessed Spring",
-		"desc": "A spring boils with old miracles. The first sip is always free. After that, the spring starts counting.",
+		"desc": "A spring boils with old miracles. The first sip is always free. After that, it starts counting.",
 		"gate": {"type": "hp_below_pct", "value": 0.75},
 		"choices": [
 			{
@@ -2212,7 +2220,7 @@ const EVENTS: Dictionary = {
 
 	"pawnbrokers_window": {
 		"name": "The Pawnbroker's Window",
-		"desc": "Behind smoked glass, the pawnbroker fans her wares. She does not sell. She buys — but only what interests her, and the first figure she names is always the best one.",
+		"desc": "Behind smoked glass, the pawnbroker fans her wares. She does not sell — she buys, but only what interests her, and her first figure is always her best.",
 		"choices": [
 			{
 				"label": "Slide your pack through the slot\n\nShe pulls out what interests HER.\nIt is never what you would have chosen to sell.",
@@ -2223,7 +2231,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "potions_full"},
-				"label": "Set your full belt on the sill\n\nShe holds a bottle to the smoked light and almost smiles.\n\"Liquids,\" she says, \"keep their word.\" She pays over the odds.",
+				"label": "Set your full belt on the sill\n\nShe holds a bottle to the smoked light and almost smiles.\n\"Liquids keep their word.\" She pays over the odds.",
 				"desc": "Sell a potion for 65 gold",
 				"effects": [
 					{"type": "sell_potion", "value": 65},
@@ -2250,7 +2258,7 @@ const EVENTS: Dictionary = {
 
 	"fork_in_the_long_road": {
 		"name": "The Fork in the Long Road",
-		"desc": "Two paths split the moor. One smells of woodsmoke. The other, of iron. The smell is all the road will tell you in advance.",
+		"desc": "Two paths split the moor — one smells of woodsmoke, the other of iron. The smell is all the road tells you in advance.",
 		"choices": [
 			{
 				"label": "The Smoke Road\n\nWoodsmoke means people.\nUsually. You walk it and find out.",
@@ -2295,7 +2303,7 @@ const EVENTS: Dictionary = {
 		# run always rolls it (_pick_event override); later bridges compete
 		# normally via the at_bridge gate.
 		"name": "The Crossing",
-		"desc": "The river runs brown and fast under a bridge of black timber. A chain hangs across the far end, and three men who do not introduce themselves lean on it. The toll is whatever you look like you can pay.",
+		"desc": "The river runs brown and fast under a bridge of black timber. Three men lean on a chain across the far end. The toll is whatever you look like you can pay.",
 		"gate": {"type": "at_bridge"},
 		"art": "tollkeeper_bridge",
 		"choices": [
@@ -2308,7 +2316,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "hero_is", "value": "stalwart"},
-				"label": "Read the water like a soldier\n\nYou served on rivers like this one. There is always a ford,\nand it is always where the cattle cross. You find it in an hour.",
+				"label": "Read the water like a soldier\n\nYou served on rivers like this. There's always a ford,\nalways where the cattle cross. You find it in an hour.",
 				"desc": "Ford upstream, free — the river owes soldiers",
 				"effects": [
 					{"type": "roll_table", "outcomes": [
@@ -2348,7 +2356,7 @@ const EVENTS: Dictionary = {
 
 	"beekeeper": {
 		"name": "The Beekeeper",
-		"desc": "She wears no veil. The bees have made a hood of her face, and they move when she speaks. 'I have honey,' she says. 'And other things. The hive remembers everything that has ever stung.'",
+		"desc": "She wears no veil — the bees have made a hood of her face, and they move when she speaks. 'I have honey,' she says. 'And other things. The hive remembers everything that ever stung.'",
 		"choices": [
 			{
 				"label": "Take the honey jar\n\nIt is warm.\nIt is moving.",
@@ -2378,14 +2386,14 @@ const EVENTS: Dictionary = {
 
 	"woodcutter": {
 		"name": "The Woodcutter",
-		"desc": "He has been chopping the same tree for thirty years. The tree has not gotten smaller. He has. 'Swing for me,' he says, 'and I'll teach you the trick of it. Most don't get it the first swing.'",
+		"desc": "He has chopped the same tree for thirty years. The tree hasn't gotten smaller. He has. 'Swing for me,' he says, 'and I'll teach you the trick. Most don't get it first swing.'",
 		"choices": [
 			{
 				"label": "Take the axe and swing\n\nEvery swing costs you something.\nSomewhere in there, the trick clicks.",
 				"desc": "Pay 2 HP per swing; within 3 swings it lands, then upgrade a chosen card",
 				"effects": [
 					{"type": "risk_loop", "mode": "jackpot",
-						"open_text": "The axe is heavier than it looks. Most things are. He steps back into the shade to watch, arms folded, patient as the tree.",
+						"open_text": "The axe is heavier than it looks. He steps back into the shade to watch, arms folded, patient as the tree.",
 						"action": "Swing again",
 						"action_body": "Your shoulders already know this will hurt.",
 						"leave": "Hand back the axe",
@@ -2409,7 +2417,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "hero_is", "value": "raider"},
-				"label": "Take it on the first swing\n\nYou don't outlive trees; you outrun them. One swing,\nall your weight, the way you take everything. The trick was never patience.",
+				"label": "Take it on the first swing\n\nYou don't outlive trees; you outrun them. One swing,\nall your weight. The trick was never patience.",
 				"desc": "Upgrade a chosen card, free — speed is its own trick",
 				"effects": [
 					{"type": "upgrade_choice"},
@@ -2435,7 +2443,7 @@ const EVENTS: Dictionary = {
 
 	"gravesong_choir": {
 		"name": "The Gravesong Choir",
-		"desc": "Four hooded singers stand around an open grave, humming a tune you almost recognize. One pauses, lifts a finger to her lips, and beckons toward the empty fifth place in the circle.",
+		"desc": "Four hooded singers ring an open grave, humming a tune you almost know. One lifts a finger to her lips and beckons toward the empty fifth place in the circle.",
 		"choices": [
 			{
 				"label": "Take the fifth place and sing\n\nVerse by verse, the soil gives up its grave-gifts.\nVerse by verse, the song learns your voice.",
@@ -2447,7 +2455,7 @@ const EVENTS: Dictionary = {
 						"action_body": "The harmony opens a place for you in it.",
 						"leave": "Bow out of the circle",
 						"leave_sub": "Keep what the soil gave up.",
-						"leave_text": "You step back. The choir closes the gap without looking, and the song goes on without your name in it. That is the best ending this song has.",
+						"leave_text": "You step back. The choir closes the gap without looking, and the song goes on without your name in it.",
 						"leave_text_early": "You do not sing. The fifth place stays open behind you for a long way down the road.",
 						"steps": [
 							{"chance": 1.0, "sub": "Gain 25 gold — the first verse is welcome.",
@@ -2462,7 +2470,7 @@ const EVENTS: Dictionary = {
 						],
 						"bust": {"effects": [{"type": "add_curse"}],
 							"text": "The song turns on the high note. It walks down your throat, takes a verse of you with it, and lays it in the grave. The choir bows. To you, or to it."},
-						"done_text": "The hum fades. The grave is full now, though you never saw anything go in. The singers file out past you, and one squeezes your arm — kindly, you decide."},
+						"done_text": "The hum fades. The grave is full now, though you never saw anything go in. One singer squeezes your arm — kindly, you decide."},
 				],
 			},
 			{
@@ -2515,7 +2523,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "has_curse"},
-				"label": "Let it study your cracks\n\nThe glass cat circles you twice. \"You're already fractured,\" it says, almost\ntender. \"Hold one up to me. I'll take the flaw, not give you a new one.\"",
+				"label": "Let it study your cracks\n\nThe glass cat circles you twice. \"You're already fractured,\"\nit says, almost tender. \"I'll take the flaw, not add one.\"",
 				"desc": "Remove a chosen Curse, free",
 				"effects": [
 					{"type": "remove_choice_filtered", "filter": "curse"},
@@ -2531,7 +2539,7 @@ const EVENTS: Dictionary = {
 	# immediate effects only, so it can't go wrong.
 	"saints_day_feast": {
 		"name": "The Saint's Day Feast",
-		"desc": "You round a hill and walk straight into a festival. Bunting, a bonfire, three fiddlers who have clearly been at the wine. The whole village turns, sees a tired stranger with a sword, and decides — with the absolute certainty of people who have already eaten — that you are a guest. \"You'll sit,\" says an old woman who comes up to your elbow. It is not a question.",
+		"desc": "You walk straight into a festival — bunting, a bonfire, three drunk fiddlers. \"You'll sit,\" says an old woman at your elbow. It is not a question.",
 		"choices": [
 			{
 				"label": "Sit and eat your fill\n\nThere is more food than the village can possibly\nmean, and they keep putting it in front of you anyway.",
@@ -2546,10 +2554,10 @@ const EVENTS: Dictionary = {
 				"effects": [
 					{"type": "roll_table", "outcomes": [
 						{"weight": 2,
-							"text": "You hold your own longer than anyone expected, the widow least of all. She concedes at the eleventh cup, slaps a purse on the table, and declares you family. You wake under a cart with a headache and a friend for life.",
+							"text": "You hold your own longer than anyone expected. The widow concedes at the eleventh cup, slaps a purse down, and declares you family. You wake under a cart with a headache and a friend for life.",
 							"effects": [{"type": "gold", "value": 45}, {"type": "heal", "value": 4}]},
 						{"weight": 2,
-							"text": "She drinks you flat into the straw by the ninth cup. The village finds this the funniest thing to happen all year. You wake at noon, gently mocked, thoroughly fed, and somehow better rested than you've been in weeks.",
+							"text": "She drinks you flat into the straw by the ninth cup, to the village's delight. You wake at noon — mocked, thoroughly fed, and better rested than you've been in weeks.",
 							"effects": [{"type": "heal", "value": 8}]},
 						{"weight": 1,
 							"text": "Neither of you remembers who won. You wake holding a bottle of the good stuff someone pressed on you \"for the road,\" and a pounding head you have entirely earned.",
@@ -2559,7 +2567,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Dance until the fiddlers give out\n\nYou do not know the steps. Nobody minds.\nThe whole square is improvising and so, now, are you.",
-				"desc": "+25 gold (tossed at the stranger who danced), +4 HP",
+				"desc": "+25 gold, +4 HP",
 				"effects": [
 					{"type": "gold", "value": 25},
 					{"type": "heal", "value": 4},
@@ -2660,7 +2668,7 @@ const EVENTS: Dictionary = {
 			{
 				"label": "Tear it open\n\nThe paper comes apart\nlike old skin.",
 				"follow_up": {
-					"desc": "The moth lands on your sleeve. It is heavier than it looks. It begins to whisper into the cloth at your wrist.",
+					"desc": "The moth lands on your sleeve, heavier than it looks, and begins to whisper into the cloth at your wrist.",
 					"choices": [
 						{
 							"label": "Listen\n\nIt knows your name\nand uses it kindly.",
@@ -2684,7 +2692,7 @@ const EVENTS: Dictionary = {
 			{
 				"label": "Hold the lantern and walk on\n\nIt comes with you\nlike it was waiting.",
 				"follow_up": {
-					"desc": "The moth quiets. The paper glows. By dawn the lantern is dark and the moth is gone. The lantern is warm in your hand, like something owed.",
+					"desc": "The moth quiets, the paper glows. By dawn the moth is gone and the lantern is dark — but warm in your hand, like something owed.",
 					"choices": [
 						{
 							"label": "Open it in the morning\n\nSomething small and bright\nfalls into your palm.",
@@ -2713,7 +2721,7 @@ const EVENTS: Dictionary = {
 			{
 				"label": "The sleeping head\n\nIt does not stir at your hand.\nNot yet.",
 				"follow_up": {
-					"desc": "It opens its eyes. They are blue and very shallow. There is nothing behind them. It nuzzles your hand the way a thing that has been told to nuzzle hands nuzzles a hand.",
+					"desc": "It opens its eyes — blue, shallow, nothing behind them. It nuzzles your hand the way a thing told to nuzzle hands nuzzles a hand.",
 					"choices": [
 						{
 							"label": "Take the warmth\n\nYou rest a while in the road.\nSome of its heat stays in your chest.",
@@ -2759,7 +2767,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Walk on. The calf bleats once.\n\nYou do not turn around.",
-				"desc": "+20 gold (found in the road later)",
+				"desc": "+20 gold",
 				"effects": [
 					{"type": "gold", "value": 20},
 				],
@@ -2771,7 +2779,7 @@ const EVENTS: Dictionary = {
 
 	"sin_eater": {
 		"name": "The Sin-Eater",
-		"desc": "A man sits at a long table that should not be here. Before him: a single piece of bread, and a knife. \"Lay your worst card here,\" he says, not looking up. \"I will eat it. The price is meat.\"",
+		"desc": "A man sits at a long table that should not be here, a single piece of bread and a knife before him. \"Lay your worst card here,\" he says, not looking up. \"I'll eat it. The price is meat.\"",
 		"gate": {"type": "has_curse"},
 		"choices": [
 			{
@@ -2792,7 +2800,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"label": "Bring nothing\n\nHe nods. The knife sits where it sat.",
-				"desc": "+1 gold (he flicks one across the table)",
+				"desc": "+1 gold",
 				"effects": [
 					{"type": "gold", "value": 1},
 				],
@@ -2878,7 +2886,7 @@ const EVENTS: Dictionary = {
 	# still "The Last Tinker"; the key only drives the art + events_seen lookup.
 	"hermit": {
 		"name": "The Last Tinker",
-		"desc": "A man with no shop sits by a loaded cart, sorting other people's belongings. He looks up when you approach, as if he had been waiting for this specific collection of mistakes. \"You brought too many,\" he says. \"I'll keep what's heaviest.\"",
+		"desc": "A man with no shop sorts other people's belongings beside a loaded cart. He looks up as if he'd been waiting for this exact collection of mistakes. \"You brought too many,\" he says. \"I'll keep what's heaviest.\"",
 		"gate": {"type": "deck_at_least", "value": 18},
 		"choices": [
 			{
@@ -2919,7 +2927,7 @@ const EVENTS: Dictionary = {
 
 	"drowned_bell": {
 		"name": "The Drowned Bell",
-		"desc": "A bronze bell sits in the path, half-sunk in mud. Its tongue is missing. Water beads on the metal though there has been no rain in weeks.",
+		"desc": "A bronze bell, half-sunk in mud, its tongue missing. Water beads on the metal though it hasn't rained in weeks.",
 		"choices": [
 			{
 				"label": "Strike it with your fist\n\nThe sound will carry.\nYou will not get to choose what hears it.",
@@ -2948,7 +2956,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "hero_is", "value": "pyromancer"},
-				"label": "Heat the bronze until it sings\n\nA bell needs no tongue if you give it fire. You started this with flame\nand see no reason to stop. It rings true, and the rung note shakes coin from the mud.",
+				"label": "Heat the bronze until it sings\n\nA bell needs no tongue if you give it fire. It rings\ntrue, and the note shakes coin loose from the mud.",
 				"desc": "Gain gold for each spell in your deck",
 				"effects": [
 					{"type": "scaled", "count": "spells", "per": 8, "outcome": "gold", "cap": 120},
@@ -2966,7 +2974,7 @@ const EVENTS: Dictionary = {
 
 	"rotting_carnival": {
 		"name": "The Rotting Carnival",
-		"desc": "Three tents stand in a field. The barker is asleep at his post, or dead at his post; you can't tell, and he won't say. A handwritten sign reads: PICK ONE. WE ARE NOT RESPONSIBLE FOR WHAT THE TENTS REMEMBER. You may listen at the flaps, but the tents only show what they do once you're inside.",
+		"desc": "Three tents, a barker asleep or dead at his post. A sign: PICK ONE. WE ARE NOT RESPONSIBLE FOR WHAT THE TENTS REMEMBER. Listen at the flaps — they show nothing until you're inside.",
 		"choices": [
 			{
 				"hidden": true,
@@ -3034,7 +3042,7 @@ const EVENTS: Dictionary = {
 
 	"tollkeeper_bridge": {
 		"name": "The Tollkeeper",
-		"desc": "The bridge is the only way forward. The tollkeeper fills the chair at the far end. Behind her: a wedding ring, a fox skull, a child's drawing of a house, a long brown braid. She does not speak. She does not need to.",
+		"desc": "The bridge is the only way forward, and the tollkeeper fills the chair at the far end. Behind her: a wedding ring, a fox skull, a child's drawing, a long brown braid. She does not speak. She does not need to.",
 		"choices": [
 			{
 				"label": "Empty your purse onto her palm\n\nShe counts it slowly.\nShe counts it slowly again.",
@@ -3093,7 +3101,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "upgraded_at_least", "value": 3},
-				"label": "Let him study your edge-work\n\nHe turns your reworked steel over twice and almost smiles.\n\"Somebody taught you. Sit — this one is for the craft.\"",
+				"label": "Let him study your edge-work\n\nHe turns your reworked steel over twice and almost\nsmiles. \"Somebody taught you. Sit — this one's for the craft.\"",
 				"desc": "Upgrade a chosen card, free",
 				"effects": [
 					{"type": "upgrade_choice"},
@@ -3178,7 +3186,7 @@ const EVENTS: Dictionary = {
 
 	"strangers_hand": {
 		"name": "The Wet Cards",
-		"desc": "A stranger sits in the road, dealing cards face-up onto a flat stone. The cards are wet. The stranger looks up only once. \"Each of these is owed to someone. Pay it off — and you take what they leave behind.\"",
+		"desc": "A stranger deals wet cards face-up onto a flat stone, and looks up only once. \"Each of these is owed to someone. Pay it off — and take what they leave behind.\"",
 		"choices": [
 			{
 				"label": "Step closer\n\nThe stone is warm.\nSo are the cards.",
@@ -3200,7 +3208,7 @@ const EVENTS: Dictionary = {
 	# healthy player never sees a dead heal offer.
 	"blood_fountain": {
 		"name": "The Blood Fountain",
-		"desc": "A ring of stone cherubs weeps into a basin that is not water. By moonlight it looks [color=#8a1010]black[/color]; up close it is red, and warm, and moving very slightly — as if something beneath it were breathing. Rose petals rot on the steps. No voice says drink. The bowl simply waits.",
+		"desc": "Stone cherubs weep into a basin that is not water — [color=#8a1010]black[/color] by moonlight, up close red and warm and moving, as if something beneath it breathed. No voice says drink. The bowl simply waits.",
 		"gate": {"type": "hp_below_pct", "value": 0.75},
 		"choices": [
 			{
@@ -3236,7 +3244,7 @@ const EVENTS: Dictionary = {
 	# give. Loads assets/events/dark_altar.png.
 	"dark_altar": {
 		"name": "The Dark Altar",
-		"desc": "A slab of black stone sweats in the dark. Every groove cut into its face runs downhill to a single drain. Something beneath it is patient. Something beneath it is hungry. It does not ask out loud — but you already know the shape of what it wants.",
+		"desc": "A slab of black stone sweats in the dark, every groove running downhill to one drain. Something beneath it is patient, and hungry. It does not ask aloud — you already know the shape of what it wants.",
 		"choices": [
 			{
 				"label": "Offer a creature for power\n\nThe stone drinks it dry and leaves\nsomething hard and humming in the groove.",
@@ -3256,7 +3264,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "hero_is", "value": "kindler"},
-				"label": "Speak to it in its own tongue\n\nThe grooves know your hands. You feed fires for a living; you know what\nthe stone wants and why. It teaches you a word freely, the way it teaches its own.",
+				"label": "Speak to it in its own tongue\n\nThe grooves know your hands. You feed fires for a living —\nyou know what it wants. It teaches you a word, freely.",
 				"desc": "+1 rare card, no blood owed",
 				"effects": [
 					{"type": "add_rare"},
@@ -3280,11 +3288,11 @@ const EVENTS: Dictionary = {
 	# path stays live at any HP and carries its own cost (a watching curse).
 	"the_weeping_orchard": {
 		"name": "The Weeping Orchard",
-		"desc": "Rows of pale trees stand in dead air. The fruit hangs heavy and low, and each one has a [color=#c98a3a]face[/color] — eyes shut, mouths slightly open, all of them faintly familiar. As you pass, a few of them begin, very quietly, to cry. The ground beneath is wet, and it is not with rain.",
+		"desc": "Pale trees in dead air. The low, heavy fruit each wears a [color=#c98a3a]face[/color] — eyes shut, faintly familiar — and as you pass, a few begin to cry. The wet ground is not wet with rain.",
 		"gate": {"type": "hp_below_pct", "value": 0.6},
 		"choices": [
 			{
-				"label": "Eat until you're full\n\nThe fruit is sweet and warm and tastes of someone\nyou loved. You feel it knit you back together. You try not to chew.",
+				"label": "Eat until you're full\n\nIt is sweet and warm and tastes of someone you loved.\nIt knits you back together. You try not to chew.",
 				"desc": "Heal to full; -2 max HP",
 				"effects": [
 					{"type": "heal_full"},
@@ -3338,7 +3346,7 @@ const EVENTS: Dictionary = {
 	# small consolation so leaving is never a fully dead option.
 	"coin_on_edge": {
 		"name": "The Coin That Won't Land",
-		"desc": "A silver coin spins on its edge in the middle of the path. It has been spinning, by the look of the worn groove beneath it, for a very long time. It does not wobble. It does not slow. A small sign, propped against a stone, reads in a neat hand: CALL IT.",
+		"desc": "A silver coin spins on its edge in the path, and by the worn groove beneath it, it has spun a very long time. It does not wobble. It does not slow. A small sign reads: CALL IT.",
 		"choices": [
 			{
 				"label": "Put your stake down and call it\n\nDouble or nothing, as many times as your nerve holds.\nThe coin has all day. The coin has all century.",
@@ -3357,13 +3365,13 @@ const EVENTS: Dictionary = {
 						"bank_sub": "Take {pot} gold and walk.",
 						"bank_body": "Some bets are best left spinning.",
 						"grow_text": "It blurs, leans, nearly topples — and rights itself, still spinning. The pot stands at {pot} gold. Somewhere behind the sign, something exhales.",
-						"bust_text": "The coin falls flat at last. Tails. Your stake and the pot slide into the groove it has worn in the road, and are gone. The coin stands back up on its edge and resumes spinning.",
+						"bust_text": "The coin falls flat at last. Tails. Stake and pot slide into the worn groove and are gone. The coin stands back up on its edge and resumes spinning.",
 						"bank_text": "You bank {pot} gold and step back. The coin spins on, patient. The sign, you notice now, has your handwriting on it."},
 				],
 			},
 			{
 				"blue": {"type": "has_nonstarting_relic"},
-				"label": "Show the coin what you've already won\n\nYou spread your relics in the dust. The coin slows — actually slows —\nto look. \"A winner,\" the sign rewrites itself. \"The house calls one for you. No stake.\"",
+				"label": "Show the coin what you've already won\n\nYou spread your relics in the dust. The coin slows —\nactually slows. \"A winner,\" the sign rewrites itself. \"No stake.\"",
 				"desc": "Free flip: 90 gold on heads, nothing on tails",
 				"effects": [
 					{"type": "wager_gold", "stake": 0, "payout": 90},
@@ -3392,12 +3400,12 @@ const EVENTS: Dictionary = {
 	# no dead reward; every leaf carries a real cost or variance.
 	"the_answering_well": {
 		"name": "The Answering Well",
-		"desc": "An old stone well stands in a clearing, its bucket long rotted from the rope. As you lean over the lip, a voice rises out of the dark below — calm, patient, and pitched exactly like your own. It answers a question you are quite certain you did not ask aloud.",
+		"desc": "An old stone well, its bucket long rotted away. As you lean over the lip, a voice rises from the dark — calm, patient, pitched exactly like your own. It answers a question you never asked aloud.",
 		"choices": [
 			{
 				"label": "Ask it something you've always feared to\n\nThe water far below shifts.\nThe voice draws a slow breath it does not have.",
 				"follow_up": {
-					"desc": "It tells you. It is worse than you guessed, and truer, and the knowing settles into you like cold water into cloth. \"There,\" it says. \"Now you carry it too. Will you keep what I've given, or pour it back?\"",
+					"desc": "It tells you — worse than you guessed, and truer, and the knowing soaks in like cold water into cloth. \"Now you carry it too,\" it says. \"Keep what I've given, or pour it back?\"",
 					"choices": [
 						{
 							"label": "Keep the knowing\n\nIt sharpens something in you — a lesson\nyou will not be able to unlearn.",
@@ -3420,7 +3428,7 @@ const EVENTS: Dictionary = {
 			{
 				"label": "Drop a coin and make a wish\n\nIt does not splash. You wait\nfor the sound. It never comes.",
 				"follow_up": {
-					"desc": "The voice laughs, softly, the way you laugh when no one is meant to hear. \"A wish. How quaint. The well grants — it simply never grants the part you wanted.\" Something rattles up out of the dark and catches on the lip of the stone.",
+					"desc": "The voice laughs softly, the way you laugh when no one should hear. \"A wish. How quaint. The well grants — just never the part you wanted.\" Something rattles up and catches on the lip of the stone.",
 					"choices": [
 						{
 							"label": "Take what the well gives\n\nIt is not what you wished for.\nIt is, the voice insists, what you needed.",
@@ -3455,7 +3463,7 @@ const EVENTS: Dictionary = {
 	# image lands at assets/events/the_chrysalis.png.
 	"the_chrysalis": {
 		"name": "The Chrysalis Fence",
-		"desc": "Someone has strung cocoons along a fence line, each the size of a saddlebag, each gently steaming in the cold. A farmer's sign, repainted many times, reads: ONE IN, ONE OUT. NO PROMISES. The silk nearest you unseams itself a finger's width, politely.",
+		"desc": "Cocoons hang along a fence line, each the size of a saddlebag, gently steaming. A farmer's sign reads: ONE IN, ONE OUT. NO PROMISES. The nearest silk unseams a finger's width, politely.",
 		"choices": [
 			{
 				"label": "Feed it a card\n\nThe silk closes over it like a mouth\nthat has been waiting to be a mouth.",
@@ -3489,7 +3497,7 @@ const EVENTS: Dictionary = {
 	# grows 2-in-3 per cast and busts 1-in-3, bank any time.
 	"the_bone_pit": {
 		"name": "The Bone Pit",
-		"desc": "Four legionaries, dead these three hundred years, crouch around a shallow pit casting knucklebones cut from their own hands. They have been playing since the empire that owed them wages stopped existing. A space opens in the circle. The rules are short: roll, or bank. The pot is the pot.",
+		"desc": "Four legionaries, dead three hundred years, cast knucklebones cut from their own hands — still playing for wages the empire never paid. A space opens in the circle. The rules are short: roll, or bank.",
 		"choices": [
 			{
 				"label": "Take the open seat\n\nThe bones are warm.\nThey should not be warm.",

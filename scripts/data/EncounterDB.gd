@@ -278,7 +278,7 @@ const BOSS_PHASES: Dictionary = {
 			"transition_effect": {"type": "summon_multiple", "name": "Shieldbearer",
 				"atk": 2, "hp": 4, "count": 2, "kw": ["armored"]}},
 		{"threshold": 0, "passive_id": "doom_bell",
-			"passive_desc": "Every other round the throne tolls: a ticking Cinder drops into an empty lane, and other enemies swing +1 ATK while one ticks.",
+			"passive_desc": "Every other round the throne tolls: a ticking Cinder drops in, and other enemies gain +1 ATK while it ticks.",
 			"transition_msg": "THE EVERFLAME ANSWERS THE THRONE!",
 			"transition_effect": {"type": "buff_all_enemies_atk", "value": 1}},
 	],
@@ -291,7 +291,7 @@ const BOSS_PHASES: Dictionary = {
 			"transition_effect": {"type": "summon_multiple", "name": "Repossessed",
 				"atk": 2, "hp": 2, "count": 2, "kw": ["last_stand"]}},
 		{"threshold": 0, "passive_id": "doom_bell",
-			"passive_desc": "Every other round the throne tolls: a ticking Cinder drops into an empty lane, and other enemies swing +1 ATK while one ticks.",
+			"passive_desc": "Every other round the throne tolls: a ticking Cinder drops in, and other enemies gain +1 ATK while it ticks.",
 			"transition_msg": "THE LAST KINGDOM BURNS WITH HIM!",
 			"transition_effect": {"type": "buff_all_enemies_atk", "value": 1}},
 	],
@@ -304,7 +304,7 @@ const BOSS_PHASES: Dictionary = {
 			"transition_effect": {"type": "summon", "name": "Star-Reader",
 				"atk": 2, "hp": 3, "kw": ["ranged"]}},
 		{"threshold": 0, "passive_id": "forge_burn_all",
-			"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides). His wall is built to take it.",
+			"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
 			"transition_msg": "THE EVERFLAME TAKES THE HALL!",
 			"transition_effect": {"type": "buff_all_enemies_atk", "value": 1}},
 	],
@@ -352,14 +352,14 @@ const BOSS_PHASES: Dictionary = {
 		{"threshold": 10, "passive_id": "harpy_swift_face",
 			"passive_desc": "Enemy Swift creatures deal +1 face damage when attacking through empty lanes."},
 		{"threshold": 0, "passive_id": "throne_husks",
-			"passive_desc": "Start of each round: summon a 2/2 Swift creature in an empty enemy lane. The wake never empties.",
+			"passive_desc": "Start of each round: summon a 2/2 Swift creature in an empty enemy lane.",
 			"transition_msg": "THE WHOLE HORIZON RIDES!",
 			"transition_effect": {"type": "summon_multiple", "name": "Rider",
 				"atk": 2, "hp": 2, "count": 2, "kw": ["swift"]}},
 	],
 	"rival_acolyte": [
 		{"threshold": 10, "passive_id": "altar_sacrifice",
-			"passive_desc": "Start of each round: the weakest enemy creature is offered to the Furnace Altar (+1 Charge). At 3 Charges it cashes out: summon Paid in Full (5/6) and deal 3 face damage."},
+			"passive_desc": "Start of each round: the Altar claims the weakest enemy (+1 Charge). At 3, summon Paid in Full (5/6) and deal 3 face damage."},
 		{"threshold": 0, "passive_id": "crypt_ghost",
 			"passive_desc": "When an enemy creature dies: summon a 1/1 Swift Ghost in a random empty enemy lane.",
 			"transition_msg": "THE DEBT COMES DUE!",
@@ -379,7 +379,7 @@ const BOSS_PHASES: Dictionary = {
 		{"threshold": 11, "passive_id": "forge_burn_all",
 			"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides)."},
 		{"threshold": 0, "passive_id": "doom_bell",
-			"passive_desc": "Every other round a ticking Cinder (Doom 2) drops into an empty lane — kill it before it detonates into your face. While one ticks, other enemies gain +1 ATK.",
+			"passive_desc": "Every other round a ticking Cinder (Doom 2) drops in. While it ticks, other enemies gain +1 ATK.",
 			"transition_msg": "EVERYTHING PAYS AT ONCE!",
 			"transition_effect": {"type": "buff_all_enemies_atk", "value": 1}},
 	],
@@ -408,7 +408,7 @@ const BOSS_PHASES: Dictionary = {
 			"transition_effect": {"type": "debuff_all_player_atk", "value": 1}},
 	],
 	"the_devil": [
-		{"threshold": 20, "passive_id": "devil_cycle", "passive_desc": "Three-round cycle (repeats). Round 1: deal 2 face damage. Round 2: heal 1 HP for every enemy on the board. Round 3: deal 3 damage to your highest-ATK creature."},
+		{"threshold": 20, "passive_id": "devil_cycle", "passive_desc": "Repeating cycle. R1: deal 2 face damage. R2: heal 1 HP per enemy. R3: deal 3 damage to your highest-ATK creature."},
 		{"threshold": 10, "passive_id": "devil_phase2", "passive_desc": "The three-round cycle's effects double. All enemy creatures gain +1 ATK.",
 			"transition_msg": "THE DEVIL REVEALS HIS TRUE FORM!",
 			"transition_effect": {"type": "summon", "name": "Pit Fiend", "atk": 4, "hp": 5, "kw": ["armored", "regenerate"]}},
@@ -612,7 +612,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE STALWART", "act": 1, "type": "boss", "faction": "last_wall", "hp": 23,
 		"passive_id": "formation_muster",
 		"passive_desc": "From round 3: each FRONT-rank enemy standing beside another gains +1/+1.",
-		"preamble": "He has lost battles in every age there is and not one war. Stone does not argue. It drills. Every round you leave his wall standing, it stands harder.",
+		"preamble": "He has lost battles in every age and not one war. Stone does not argue — it drills. Leave his wall standing and it stands harder.",
 		"deck": [
 			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns"]},
 			{"name": "Shieldbearer", "atk": 1, "hp": 5, "kw": ["armored"]},
@@ -644,7 +644,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE RAIDER", "act": 1, "type": "boss", "faction": "grasswake", "hp": 22,
 		"passive_id": "harpy_swift_face",
 		"passive_desc": "Enemy Swift creatures deal +1 face damage when attacking through empty lanes.",
-		"preamble": "He crossed the water with forty lances and nothing to inherit, and was crowned at a dead gallop. Every lane you leave open is a road home for him, and his riders know all of them. Wall the field, or bleed for the gaps.",
+		"preamble": "He crossed the water with forty lances and was crowned at a dead gallop. Every lane you leave open is a road home, and his riders know them all.",
 		"deck": [
 			{"name": "Outrider", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
@@ -681,8 +681,8 @@ const ENCOUNTERS: Dictionary = {
 		# corpse-counter.
 		"name": "THE ACOLYTE", "act": 1, "type": "boss", "faction": "owed", "hp": 22,
 		"passive_id": "altar_sacrifice",
-		"passive_desc": "Start of each round: the weakest enemy creature is offered to the Furnace Altar (+1 Charge). At 3 Charges it cashes out: summon Paid in Full (5/6) and deal 3 face damage.",
-		"preamble": "He keeps his kingdom's books, and the books are graves. His god is a furnace that pays interest: everything that dies near him is banked and spent again, and his own soldiers walk to it smiling. You are already in the ledger.",
+		"passive_desc": "Start of each round: the Altar claims the weakest enemy (+1 Charge). At 3, summon Paid in Full (5/6) and deal 3 face damage.",
+		"preamble": "He keeps his kingdom's books, and the books are graves. Everything that dies near him is banked and spent again. You are already in the ledger.",
 		"structures": [
 			{"name": "Furnace Altar", "atk": 0, "hp": 99,
 				"kw": ["structure"], "charge_max": 3, "lane": 1},
@@ -722,7 +722,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE PYROMANCER", "act": 1, "type": "boss", "faction": "lanternhall", "hp": 28,
 		"passive_id": "void_exile",
 		"passive_desc": "Start of your turn: the top card of your draw pile is exiled (removed from this fight).",
-		"preamble": "He came up burning things, like everyone from the old war. Then the library found him and taught him the colder arithmetic: mirrors, circles, why burn a thing tomorrow when you can read its ending today. He has already read yours.",
+		"preamble": "He came up burning things, then the library taught him the colder arithmetic: mirrors, circles, endings read a season early. He has already read yours.",
 		"deck": [
 			{"name": "Star-Reader", "atk": 2, "hp": 2, "kw": ["ranged"]},
 			{"name": "Claw Adept", "atk": 1, "hp": 3, "kw": ["ranged"],
@@ -757,7 +757,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE KINDLER", "act": 1, "type": "boss", "faction": "everflame", "hp": 23,
 		"passive_id": "forge_burn_all",
 		"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
-		"preamble": "The recipe is his alone, sealed behind his teeth, and what it makes burns on water. Nothing in his camp pays its cost up front — every bomb and every martyr is a debt rolled forward to a louder day. You have arrived on the due date.",
+		"preamble": "The recipe is sealed behind his teeth, and what it makes burns on water. Every bomb and martyr is a debt rolled forward to a louder day. You have arrived on the due date.",
 		"deck": [
 			{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
 			{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
@@ -799,7 +799,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE ACOLYTE ASCENDANT", "act": 3, "type": "boss", "faction": "owed", "hp": 40,
 		"passive_id": "throne_husks",
 		"passive_desc": "Start of each round: summon a 2/2 Swift creature in an empty enemy lane.",
-		"preamble": "You burned three kingdoms to reach this chair, and he thanks you for every funeral — they all marched here ahead of you. Win, and the throne is yours. Everything it owes comes with it.",
+		"preamble": "You burned three kingdoms to reach this chair, and he thanks you for every funeral — they all marched here ahead of you. Win, and everything the throne owes comes with it.",
 		"deck": [
 			{"name": "Wraith", "atk": 3, "hp": 3, "kw": ["swift"]},
 			{"name": "Debtor", "atk": 2, "hp": 1, "kw": ["last_stand"]},
@@ -824,7 +824,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE RAIDER ASCENDANT", "act": 3, "type": "boss", "faction": "grasswake", "hp": 40,
 		"passive_id": "formation_drill",
 		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
-		"preamble": "You broke three kingdoms getting here, and he watched from horseback, delighted — fewer fences every time you won. Everything you tore down rides under his banner now. Win, and the throne is yours, if you can make it stand still.",
+		"preamble": "You broke three kingdoms getting here, and he watched from horseback — fewer fences every time you won. Everything you tore down rides under his banner now. Win, if you can make it stand still.",
 		"deck": [
 			{"name": "Salt Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
 			{"name": "Outrider", "atk": 2, "hp": 2, "kw": ["swift"],
@@ -851,7 +851,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE STALWART ASCENDANT", "act": 3, "type": "boss", "faction": "last_wall", "hp": 40,
 		"passive_id": "formation_drill",
 		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
-		"preamble": "You burned three kingdoms to rubble, and rubble is just stone waiting for a mason. He built the war you fought into the wall around this chair. Win, and the throne is yours — everything it was holding back comes with it.",
+		"preamble": "You burned three kingdoms to rubble, and rubble is just stone waiting for a mason. He built the war you fought into the wall around this chair. Win, and everything it held back comes with it.",
 		"deck": [
 			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
 			{"name": "Shieldbearer", "atk": 1, "hp": 5, "kw": ["armored"]},
@@ -875,7 +875,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE PYROMANCER ASCENDANT", "act": 3, "type": "boss", "faction": "lanternhall", "hp": 40,
 		"passive_id": "throne_husks",
 		"passive_desc": "Start of each round: summon a 2/2 Swift creature in an empty enemy lane.",
-		"preamble": "You burned three kingdoms to reach this chair, and he read each ending a season before you wrote it. What is left of them sits beside him now, cold and catalogued and pointed at you. Win, and the throne is yours. He has already seen whether you do.",
+		"preamble": "He read each kingdom's ending a season before you wrote it. What is left of them sits beside him now, cold and catalogued and pointed at you. He has already seen whether you win.",
 		"deck": [
 			{"name": "Star-Reader", "atk": 2, "hp": 3, "kw": ["ranged"]},
 			{"name": "Burning Glass", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
@@ -902,7 +902,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE KINDLER ASCENDANT", "act": 3, "type": "boss", "faction": "everflame", "hp": 40,
 		"passive_id": "void_exile",
 		"passive_desc": "Start of your turn: the top card of your draw pile is exiled (removed from this fight).",
-		"preamble": "You burned three kingdoms to get here, which he takes as flattery — it was his trick first. Their ashes are stacked as kindling around the chair you came for. Win, and the throne is yours. Everything burns on a timer, even thrones.",
+		"preamble": "You burned three kingdoms to get here, which he takes as flattery — it was his trick first. Their ashes are stacked as kindling around his chair. Everything burns on a timer, even thrones.",
 		"deck": [
 			{"name": "Cinder", "atk": 1, "hp": 3, "kw": ["doom"], "doom": 2, "doom_damage": 5},
 			{"name": "Cinder", "atk": 1, "hp": 3, "kw": ["doom"], "doom": 2, "doom_damage": 5},
@@ -1390,8 +1390,8 @@ const ENCOUNTERS: Dictionary = {
 		# Two clocks: the siege, and the phase shift. Plan for both.
 		"name": "The Iron Warden", "act": 1, "type": "boss", "faction": "last_wall", "hp": 23,
 		"passive_id": "siege_ritual",
-		"passive_desc": "Each enemy death loads the Trebuchet (+1 Charge). At 3 Charges it FIRES: deal 3 damage to all your creatures and 4 face damage.",
-		"preamble": "It was built to hold a wall that no longer stands. No one has told it the siege is over, and it would not believe you. Every death you hand it only loads it again.",
+		"passive_desc": "Each enemy death loads the Trebuchet (+1 Charge). At 3 it FIRES: deal 3 damage to all your creatures and 4 face damage.",
+		"preamble": "It was built to hold a wall that no longer stands, and no one has told it the siege is over. Every death you hand it only loads it again.",
 		"structures": [
 			{"name": "Trebuchet", "atk": 0, "hp": 99,
 				"kw": ["structure"], "charge_max": 3, "lane": 1},
@@ -1417,7 +1417,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "The Wyrm-Father", "act": 1, "type": "boss", "faction": "everflame", "hp": 21,
 		"passive_id": "dragon_lord_piercing",
 		"passive_desc": "All enemy creatures have Piercing.",
-		"preamble": "Something old coils across the road and calls it a nest. It has guarded this way longer than the meadow has burned. It does not know your name, and it does not need to.",
+		"preamble": "Something old coils across the road and calls it a nest. It has guarded this way longer than the meadow has burned, and it does not need your name.",
 		"deck": [
 			{"name": "Drake", "atk": 3, "hp": 3, "kw": ["swift"]},
 			{"name": "Drake", "atk": 3, "hp": 3, "kw": ["swift"]},
@@ -1619,8 +1619,8 @@ const ENCOUNTERS: Dictionary = {
 		# ignoring the board drains HP fast.
 		"name": "The Forge That Eats", "act": 2, "type": "combat", "faction": "everflame", "hp": 18,
 		"preamble": "The fire here is never allowed to die, and it is always a little hungry. The smiths feed it what the road sends.",
-		"passive_id": "forge_burn_all",
-		"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
+		"passive_id": "forge_heat",
+		"passive_desc": "Start of each round: deal 1 damage to all your creatures (2 from round 3), bypassing armor. The forge's own do not burn.",
 		"deck": [
 			{"name": "Apprentice", "atk": 1, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
@@ -1675,8 +1675,8 @@ const ENCOUNTERS: Dictionary = {
 		# — the pack is built to rush you down before round 4.
 		"name": "The Cinder-Hounds", "act": 2, "type": "combat", "faction": "everflame", "hp": 16,
 		"preamble": "They were dogs once, before the burning got into them. Now they run where the smoke runs, always downwind of dying.",
-		"passive_id": "forge_burn_all",
-		"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
+		"passive_id": "pack_hunt",
+		"passive_desc": "When one of your creatures dies: all Swift enemies gain +1 ATK this round.",
 		"deck": [
 			{"name": "Cinder Pup", "atk": 2, "hp": 2, "kw": ["swift"]},
 			{"name": "Ash Hound", "atk": 4, "hp": 2, "kw": ["swift", "piercing"], "wither": 1},
@@ -1708,8 +1708,8 @@ const ENCOUNTERS: Dictionary = {
 		# singers fast or get pecked to death.
 		"name": "The Carrion Choir", "act": 2, "type": "combat", "faction": "owed", "hp": 16,
 		"preamble": "They have followed the column for days, singing the only hymn they know. They are very good at it, and it is nearly done.",
-		"passive_id": "cultist_buff",
-		"passive_desc": "Start of each round: a random bird gains +1/+1. The murder always grows.",
+		"passive_id": "dirge_swell",
+		"passive_desc": "Start of each round: each Ranged enemy deals 1 face damage. Silence the choir.",
 		"deck": [
 			{"name": "Crow", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_death": {"type": "damage_face", "value": 1}},
@@ -1887,8 +1887,8 @@ const ENCOUNTERS: Dictionary = {
 		# Triage or die: the loudest clock in the game.
 		"name": "THE BELLRINGER", "act": 2, "type": "boss", "faction": "everflame", "hp": 30,
 		"passive_id": "doom_bell",
-		"passive_desc": "Every other round the Bell TOLLS and deploys a Doomspawn (Doom 2) — kill it before it detonates into your face. While any Doomspawn is ticking, all other enemies gain +1 ATK.",
-		"preamble": "He has been ringing for the end since before you were born, and he is patient, and he is nearly finished. Every toll is a number, and the numbers only go down. You are standing inside the count.",
+		"passive_desc": "Every other round the Bell TOLLS: a Doomspawn (Doom 2) drops in. While one ticks, all other enemies gain +1 ATK.",
+		"preamble": "He has rung for the end since before you were born, and he is nearly finished. Every toll is a number, and the numbers only go down.",
 		"deck": [
 			{"name": "Demon Soldier", "atk": 3, "hp": 4, "kw": ["armored"]},
 			{"name": "Demon Soldier", "atk": 3, "hp": 4, "kw": ["armored"]},
@@ -1962,7 +1962,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "The Storm Made Flesh", "act": 3, "type": "combat", "faction": "grasswake", "hp": 21,
 		"preamble": "The weather over the high passes grew tired of being weather. It has taken a shape, and the shape is walking down.",
 		"passive_id": "nexus_rotation",
-		"passive_desc": "Three-round cycle (repeats). Round 1: all enemies gain +1 ATK. Round 2: all enemies heal 2 HP. Round 3: all enemies gain Thorns this round.",
+		"passive_desc": "Repeating cycle. R1: all enemies gain +1 ATK. R2: all enemies heal 2 HP. R3: all enemies gain Thorns this round.",
 		"deck": [
 			{"name": "Flame Sprite", "atk": 4, "hp": 1, "kw": ["swift", "piercing"],
 				"on_death": {"type": "damage_all_enemies", "value": 1}},
@@ -2053,8 +2053,8 @@ const ENCOUNTERS: Dictionary = {
 		# threats. The periodic AoE passive punishes stalling.
 		"name": "Where the Old Drake Sleeps", "act": 3, "type": "combat", "faction": "everflame", "hp": 22,
 		"preamble": "The young one guarded a road. This one remembers when the whole island was its road. It sleeps lightly, and it sleeps here.",
-		"passive_id": "dragon_lair_periodic",
-		"passive_desc": "Every 3 rounds: deal 3 damage to all your creatures.",
+		"passive_id": "drake_breath",
+		"passive_desc": "Start of each round (from round 2): deal 1 damage to each of your creatures, +1 more for every creature beyond the second.",
 		"deck": [
 			{"name": "Hatchling", "atk": 2, "hp": 2, "kw": ["swift", "piercing"]},
 			{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": ["ranged"]},
@@ -2095,8 +2095,8 @@ const ENCOUNTERS: Dictionary = {
 		# flowing every round. No structures — the deck IS the theme.
 		"name": "The Pyre Cult", "act": 3, "type": "combat", "faction": "everflame", "hp": 20,
 		"preamble": "They believe the world ends in fire, and they have volunteered to help. Faith like that does not flinch or stop.",
-		"passive_id": "forge_burn_all",
-		"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
+		"passive_id": "pyre_spread",
+		"passive_desc": "When an enemy creature dies: deal 1 damage to the opposing creature and 1 face damage.",
 		"deck": [
 			{"name": "Cinder Whelp", "atk": 1, "hp": 2, "kw": ["swift", "piercing"]},
 			{"name": "Ember Mystic", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
@@ -2126,8 +2126,8 @@ const ENCOUNTERS: Dictionary = {
 		# this fight; creature-heavy decks struggle.
 		"name": "The Withered Court", "act": 3, "type": "combat", "faction": "owed", "hp": 22,
 		"preamble": "The court never adjourned; it only dried out where it sat. It will receive you warmly, and keep a little of your warmth.",
-		"passive_id": "cultist_buff",
-		"passive_desc": "Start of each round: a random Courtier gains +1/+1.",
+		"passive_id": "court_wither",
+		"passive_desc": "Start of each round (from round 2): your creatures lose 1 ATK this round.",
 		"deck": [
 			{"name": "Court Jester", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "discard_random"}},
@@ -2194,7 +2194,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "The Bone-Crowned", "act": 3, "type": "elite", "faction": "owed", "hp": 29,
 		"preamble": "He spends death the way he spent life: collecting. The crown is bone now, the court as well, and he is not yet finished.",
 		"passive_id": "archlich_immortal",
-		"passive_desc": "Creature attacks can't reduce enemies below 1 HP. Only spells and other effects can finish them off.",
+		"passive_desc": "Creature attacks can't reduce enemies below 1 HP — only spells and effects finish them.",
 		"deck": [
 			{"name": "Skeleton Knight", "atk": 3, "hp": 4},
 			{"name": "Skeleton Knight", "atk": 3, "hp": 4},
@@ -2219,7 +2219,7 @@ const ENCOUNTERS: Dictionary = {
 		# they can stabilize. The Void Maw shreds your hand on top. The
 		# fight pressures you to kill fast — every stalled turn costs you a
 		# card you might've needed.
-		"name": "The One Who Walks Sideways", "act": 3, "type": "elite", "faction": "lanternhall", "hp": 38,
+		"name": "The One Who Walks Sideways", "act": 3, "type": "elite", "faction": "lanternhall", "hp": 28,
 		"preamble": "It comes not at you but around you, through a corner the road did not have a breath ago. Geometry is on its side.",
 		"passive_id": "void_exile",
 		"passive_desc": "Start of your turn: the top card of your draw pile is exiled (removed from this fight).",
@@ -2252,8 +2252,8 @@ const ENCOUNTERS: Dictionary = {
 		# collapses. Real target-order puzzle.
 		"name": "The Shepherd Who Lost His Sheep", "act": 3, "type": "elite", "faction": "owed", "hp": 31,
 		"preamble": "He kept the flock long after it stopped breathing. He cannot tell the living from the led now, and he is reaching for you.",
-		"passive_id": "wolf_pack_revenge",
-		"passive_desc": "When an enemy creature dies: adjacent enemies gain +1 ATK this round.",
+		"passive_id": "flock_enrage",
+		"passive_desc": "When an enemy creature dies: enemies beside it gain +1 ATK for the rest of the fight.",
 		"deck": [
 			{"name": "Maggot-Lamb", "atk": 3, "hp": 2, "kw": ["swift"]},
 			{"name": "Maggot-Lamb", "atk": 3, "hp": 2, "kw": ["swift"]},
@@ -2287,8 +2287,8 @@ const ENCOUNTERS: Dictionary = {
 		# fast, sweep wide, end it before the menagerie reflects your whole deck.
 		"name": "The Glass Menagerie", "act": 3, "type": "elite", "faction": "lanternhall", "hp": 24,
 		"preamble": "Each was blown to one perfect purpose and cooled around it. They do not bleed — they break, into a handful of new edges.",
-		"passive_id": "executioner_face",
-		"passive_desc": "Each round: the highest-ATK enemy also deals its ATK as face damage. The biggest shard cuts deepest.",
+		"passive_id": "glass_refract",
+		"passive_desc": "Start of each round (from round 2): a 3/1 Swift glass shard forms in an empty enemy lane.",
 		"deck": [
 			{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["ranged", "piercing"]},
 			{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["ranged", "piercing"]},
@@ -2336,8 +2336,8 @@ const ENCOUNTERS: Dictionary = {
 		# play differently so the cycle hits different things.
 		"name": "THE DEVIL", "act": 3, "type": "boss", "faction": "everflame", "hp": 36,
 		"passive_id": "devil_cycle",
-		"passive_desc": "Three-round cycle (repeats). Round 1: deal 2 face damage. Round 2: heal 1 HP for every enemy on the board. Round 3: deal 3 damage to your highest-ATK creature.",
-		"preamble": "It deals fairly — that is the worst of it. Everything it offers, it takes back with interest, and you put your mark to the page a long walk ago. It is only here to collect.",
+		"passive_desc": "Repeating cycle. R1: deal 2 face damage. R2: heal 1 HP per enemy. R3: deal 3 damage to your highest-ATK creature.",
+		"preamble": "It deals fairly — that is the worst of it. Everything it offers, it takes back with interest, and you signed a long walk ago. It is only here to collect.",
 		"deck": [
 			{"name": "Demon Soldier", "atk": 3, "hp": 4, "kw": ["armored", "piercing"]},
 			{"name": "Demon Soldier", "atk": 3, "hp": 4, "kw": ["armored", "piercing"]},
@@ -2364,8 +2364,8 @@ const ENCOUNTERS: Dictionary = {
 		# removal decks shred this; slow decks drown in curses.
 		"name": "THE CRONE", "act": 3, "type": "boss", "faction": "owed", "hp": 32,
 		"passive_id": "cauldron_brew",
-		"passive_desc": "End of each round: the Cauldron gains 1 Charge and adds 1 Curse to your discard pile. At 5 Charges the Cauldron OVERFLOWS: summons a Wraith, adds 2 more Curses, and deals 3 face damage.",
-		"preamble": "She was old when the meadow was green. She has watched a great many of you climb this road, and she has never once been wrong about the ending. The kettle is already warm.",
+		"passive_desc": "End of each round: the Cauldron gains 1 Charge and adds 1 Curse to your discard. At 5 it OVERFLOWS — summon a Wraith, add 2 Curses, deal 3 face damage.",
+		"preamble": "She was old when the meadow was green, and she has never once been wrong about the ending. The kettle is already warm.",
 		"structures": [
 			{"name": "Cauldron", "atk": 0, "hp": 99,
 				"kw": ["structure"], "charge_max": 5, "lane": 1},
@@ -2392,7 +2392,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE BLACK TIDE", "act": 3, "type": "boss", "faction": "owed", "hp": 34,
 		"passive_id": "tide_swell",
 		"passive_desc": "End of each round: if there are fewer than 4 enemy creatures, summon a 2/3 Deepling.",
-		"preamble": "It is not water, though it rises like water. It has been climbing toward this place one drowned thing at a time, since long before you. It is patient about the rest of you.",
+		"preamble": "It is not water, though it rises like water. It has climbed toward this place one drowned thing at a time, and it is patient about the rest of you.",
 		# Black Tide (Act 3 boss) — THE WATER RISES. Inspired by Subnautica
 		# deep-horror + MtG Emrakul: the tide_swell passive summons a Deepling
 		# every round you don't keep the board full. Phase 2 (tide_surge)

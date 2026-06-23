@@ -143,11 +143,11 @@ func _build_ui() -> void:
 	# The kingdom line sells the conquest fantasy: these are the invaded
 	# land's people changing banners, not a shop shelf.
 	var faction: String = RunState.get_act_faction()
-	var flavor := "Wanderers seek your banner. Take one into your deck — no charge."
+	var flavor := "Wanderers seek your banner. Take one, no charge."
 	if faction != "":
 		var fname: String = String(HeroDB.faction_info(faction).get("name", ""))
 		if fname != "":
-			flavor = "Word of your claim spreads through %s. Banners offer their service — take one, no charge." % fname
+			flavor = "Word spreads through %s. Take one banner, no charge." % fname
 	var sub = GameTheme.make_label(flavor, GameTheme.FONT_SUBHEADER, GameTheme.IVORY)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	outer.add_child(sub)

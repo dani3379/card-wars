@@ -4,31 +4,31 @@ extends Node
 
 const KEYWORDS: Dictionary = {
 	"armored":    {"display": "Armored",     "desc": "Takes 1 less damage from each hit (minimum 1)."},
-	"swift":      {"display": "Swift",       "desc": "Attacks in the Swift pre-phase, before normal combat, while opposing creatures can't strike back."},
-	"ranged":     {"display": "Ranged",      "desc": "Attacks a random back-row enemy first, or the front row if the back is empty. Ignores blocking."},
+	"swift":      {"display": "Swift",       "desc": "Attacks first each round, before enemies can strike back."},
+	"ranged":     {"display": "Sniper",      "desc": "Attacks the lowest-HP enemy instead of the one across. If the shot kills, it fires again."},
 	"thorns":     {"display": "Thorns",      "desc": "Deals 1 damage back to each creature that attacks this."},
 	"regenerate": {"display": "Regenerate",  "desc": "Heals 1 HP at the start of each round."},
 	"summon":     {"display": "Summon",      "desc": "When played, also summons a 1/1 token in an adjacent empty lane."},
-	"last_stand": {"display": "Last Stand",  "desc": "The first lethal hit leaves this creature at 1 HP instead of killing it. Once per fight."},
-	"piercing":   {"display": "Piercing",    "desc": "When this kills its target, excess damage hits the enemy back row, then enemy face."},
+	"last_stand": {"display": "Last Stand",  "desc": "Survives the first killing blow at 1 HP. Once per fight."},
+	"piercing":   {"display": "Piercing",    "desc": "When this kills its target, leftover damage carries to the creature behind it, then to enemy face."},
 	"sacrifice":  {"display": "Sacrifice",   "desc": "Cost: destroy one of your own creatures to play this card."},
-	"exhaust":    {"display": "Exhaust",     "desc": "After you play it, this card is removed for the rest of the fight instead of going to your discard pile."},
+	"exhaust":    {"display": "Exhaust",     "desc": "Once played, this card is gone for the rest of the fight."},
 	"retain":     {"display": "Retain",      "desc": "Stays in your hand at end of turn instead of being discarded."},
-	"wither":     {"display": "Wither N",    "desc": "Loses N ATK at the start of each round (minimum 0). The number on the card is how much it loses each round."},
+	"wither":     {"display": "Wither N",    "desc": "Loses N ATK at the start of each round."},
 	"on_enter":   {"display": "On-Enter",    "desc": "Effect triggers the moment this creature is placed on the board."},
 	"on_death":   {"display": "On-Death",    "desc": "Effect triggers when this creature dies (HP reaches 0)."},
-	"adj_buff":   {"display": "Adj. Buff",   "desc": "Adjacent friendlies (same row, left and right columns) get a stat bonus while this is in play."},
-	"poison":     {"display": "Poison",      "desc": "Any creature damaged by this dies, regardless of remaining HP."},
+	"adj_buff":   {"display": "Adj. Buff",   "desc": "Friendlies to its left and right get a stat bonus while this is in play."},
+	"poison":     {"display": "Poison",      "desc": "Any creature it damages dies, no matter its remaining HP."},
 	"shield":     {"display": "Shield",      "desc": "Absorbs the first hit completely, then Shield is removed."},
-	"guardian":   {"display": "Guardian",    "desc": "Adjacent enemies are forced to attack this creature instead of their normal target."},
-	"structure":  {"display": "Structure",   "desc": "Can't be attacked or targeted by spells. May hold a charge counter that bosses use for triggers."},
-	"slay":       {"display": "Slay",        "desc": "Triggers when this card or creature kills its target. (Inline keyword in card text, not a chip.)"},
-	"adjacent":   {"display": "Adjacent",    "desc": "The creatures in the lanes to your immediate left and right. In 4×4 layouts, neighbors in both the front and back row of those columns count for adjacency buffs."},
-	"doom":       {"display": "Doom N",      "desc": "A ticking bomb. The counter drops by 1 at the start of each round; at 0 this creature detonates, dealing its ATK to the enemy face and then dying."},
-	"rampage":    {"display": "Rampage",     "desc": "Each time this kills an enemy creature in combat, it gains +1 ATK for the rest of the fight."},
-	"lifelink":   {"display": "Lifelink",    "desc": "Whenever this deals combat damage — to a creature or to the face — you heal 1 HP."},
-	"overrun":    {"display": "Overrun",     "desc": "Start of each round: if the front of the opposing lane is empty, this gains +1 ATK this round."},
-	"formation":  {"display": "Formation",   "desc": "Start of each round: if this stands beside a friendly creature in its row, it gains +1/+1 this fight."},
+	"guardian":   {"display": "Guardian",    "desc": "Enemies to its left and right must attack this creature."},
+	"structure":  {"display": "Structure",   "desc": "Can't be attacked or targeted by spells."},
+	"slay":       {"display": "Slay",        "desc": "An effect that fires when this kills the creature it's fighting."},
+	"adjacent":   {"display": "Adjacent",    "desc": "The creatures directly to its left and right."},
+	"doom":       {"display": "Doom N",      "desc": "Counts down 1 per round. At 0, deals its ATK to enemy face, then dies."},
+	"rampage":    {"display": "Rampage",     "desc": "Gains +1 ATK this fight each time it kills an enemy creature."},
+	"lifelink":   {"display": "Lifelink",    "desc": "You heal 1 HP whenever this deals damage in battle."},
+	"overrun":    {"display": "Overrun",     "desc": "Start of each round: +1 ATK this round if no enemy stands directly across."},
+	"formation":  {"display": "Formation",   "desc": "Start of each round: +1/+1 this fight if a friendly stands beside it."},
 }
 
 
@@ -110,8 +110,12 @@ static func dispatch_on_enter(card, lane_idx: int, is_enemy: bool, ctx) -> void:
 	var summon_on_play: bool = data.has("keywords") and data.keywords.has("summon")
 	if data.has("on_enter"):
 		_run_on_enter(data.on_enter, card, lane_idx, is_enemy, ctx)
+		# Name the battlecry on the creature that cast it, so the visible result
+		# (a card drawn, the foe's face ticking down) ties back to its cause.
+		_trigger_callout(card, ctx, _effect_label(data.on_enter, false, is_enemy), false)
 	if summon_on_play:
 		_do_summon(lane_idx, is_enemy, ctx)
+		_trigger_callout(card, ctx, "SUMMON", false)
 		if not is_enemy:
 			ctx._dispatch_reactive("ON_PLAYER_SUMMON", card, lane_idx)
 
@@ -123,6 +127,14 @@ static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx) -> void
 	if data.is_empty() or not data.has("on_death"):
 		return
 	var effect = data.on_death
+	# Capture the dying card's screen anchor NOW — it may be freed before the
+	# effect (and our deathrattle callout) resolve.
+	var death_anchor := Vector2.ZERO
+	var have_anchor := false
+	if card is Control and is_instance_valid(card):
+		death_anchor = card.global_position + Vector2(
+			card.size.x * card.scale.x * 0.5, card.size.y * card.scale.y * 0.06)
+		have_anchor = true
 	var times = 1
 	if not was_enemy and ctx._has_passive_on_field("double_on_death"):
 		times = 2
@@ -137,6 +149,9 @@ static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx) -> void
 		times = 2
 	for i in times:
 		_run_on_death(effect, lane_idx, was_enemy, ctx)
+	if have_anchor and ctx.has_method("spawn_trigger_callout"):
+		ctx.spawn_trigger_callout(death_anchor,
+			_effect_label(effect, true, was_enemy), true)
 
 
 static func dispatch_start_of_round(ctx) -> void:
@@ -146,13 +161,20 @@ static func dispatch_start_of_round(ctx) -> void:
 	# skip neighbours.
 	var doomed: Array = []
 	for card in ctx._all_creatures_both_sides():
-		if card.has_keyword("regenerate"):
-			card.current_hp = mini(card.current_hp + 1, card.card_data.hp)
+		if card.has_keyword("regenerate") and card.current_hp < int(card.card_data.hp):
+			card.current_hp = mini(card.current_hp + 1, int(card.card_data.hp))
 			card.update_stat_display()
+			# Surface the heal — this used to tick silently, so the player never
+			# saw WHY an enemy kept coming back to full each round.
+			if ctx.has_method("spawn_keyword_callout_kw"):
+				ctx.spawn_keyword_callout_kw(card, "regenerate", " +1")
 		if card.has_keyword("wither"):
 			var w = card.card_data.get("wither", 1)
-			card.current_atk = maxi(0, card.current_atk - w)
-			card.update_stat_display()
+			if card.current_atk > 0:
+				card.current_atk = maxi(0, card.current_atk - w)
+				card.update_stat_display()
+				if ctx.has_method("spawn_keyword_callout_kw"):
+					ctx.spawn_keyword_callout_kw(card, "wither", " -%d" % w)
 		# Doom: tick the per-creature countdown. At 0 the creature is queued to
 		# detonate (damage opposing face + destroy via the canonical routine).
 		if card.has_keyword("doom"):
@@ -267,6 +289,54 @@ static func _copy_creature_onto(card, src: Dictionary) -> void:
 	if src.has("wither"):
 		card.card_data["wither"] = src["wither"]
 	card.update_stat_display()
+
+
+## Fire a trigger (battlecry / deathrattle) callout above `card`, when a non-empty
+## label was derived. Static, so it routes through the ctx (Combat) to spawn.
+static func _trigger_callout(card, ctx, text: String, is_death: bool) -> void:
+	if text == "" or not (card is Control) or not is_instance_valid(card):
+		return
+	if not ctx.has_method("spawn_trigger_callout"):
+		return
+	var anchor: Vector2 = card.global_position + Vector2(
+		card.size.x * card.scale.x * 0.5, card.size.y * card.scale.y * 0.06)
+	ctx.spawn_trigger_callout(anchor, text, is_death)
+
+
+## Map an on-enter / on-death effect dict to a short callout label. Returns ""
+## (no callout) for an effect that does nothing on this side — an enemy creature
+## can't "draw" — or that already shows its own UI (Discover opens a picker), so
+## a chip never claims something that did not happen.
+static func _effect_label(effect: Dictionary, is_death: bool, side_is_enemy: bool) -> String:
+	var t := String(effect.get("type", ""))
+	var v := int(effect.get("value", 0))
+	if is_death:
+		match t:
+			"damage_opposing_lane", "damage_opposing": return "DEATH BLOW %d" % v
+			"damage_all_enemies":    return "DEATH NOVA %d" % v
+			"summon":                return "SUMMON"
+			"bonus_mana":            return "" if side_is_enemy else "+%d COMMAND" % v
+			"return_to_hand_once":   return "" if side_is_enemy else "RETURN"
+			"damage_face":           return "TO FACE %d" % v
+			"debuff_all_player_atk": return ("WEAKEN ALL %d" % v) if side_is_enemy else ""
+			"damage_adjacent":       return "BACKLASH %d" % v
+		return ""
+	match t:
+		"damage_opposing", "damage_opposing_draw", "damage_random_player":
+			return "STRIKE %d" % v
+		"damage_all_enemies":     return "VOLLEY %d" % v
+		"damage_face":            return "TO FACE %d" % v
+		"draw":                   return ("DRAW %d" % v) if not side_is_enemy else ""
+		"gain_gold":              return ("+%d GOLD" % v) if not side_is_enemy else ""
+		"debuff_opposing_atk":    return "WEAKEN %d" % v
+		"discard_random":         return "DISCARD" if side_is_enemy else ""
+		"copy_friendly":          return "COPY"
+		"copy_opposing_keywords": return "MIMIC"
+		"copy_last_dead":         return "RAISE DEAD"
+		"look_top":               return "SCRY" if not side_is_enemy else ""
+		"cast_random_spell":      return "CAST" if not side_is_enemy else ""
+		"glutton_devour":         return "DEVOUR"
+	return ""
 
 
 static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: bool, ctx) -> void:

@@ -147,6 +147,61 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 			if ctx.round_number > 1 and (ctx.round_number - 1) % ctx.PASSIVE_HEAL_INTERVAL == 0:
 				for c in ctx._all_player_creatures():
 					c.take_damage(3)
+		"drake_breath":
+			# Where the Old Drake Sleeps (A3): the old dragon exhales from round 2 —
+			# 1 damage to each of your creatures, +1 more for every creature beyond
+			# the second. Going wide is punished; a tall board of 1-2 big bodies
+			# shrugs it. Replaces the DEAD dragon_lair_periodic, which only fired on
+			# round 4 — past the life of a real fight.
+			if ctx.round_number >= 2:
+				var drake_crs: Array = ctx._all_player_creatures()
+				var drake_burn: int = 1 + maxi(0, drake_crs.size() - 2)
+				for c in drake_crs:
+					c.take_damage(drake_burn)
+				if not drake_crs.is_empty():
+					ctx._show_info("The drake breathes — %d damage to each of your creatures." % drake_burn)
+		"forge_heat":
+			# The Forge That Eats (A2): the forge cooks YOUR line, not its own forged
+			# bodies. 1 from the start, 2 from round 3 — wide fragile boards melt and
+			# the player is pushed onto tall bruisers + burst. Bypasses armor (ambient
+			# heat, not an attack). Replaces a shared forge_burn_all.
+			var forge_heat_amt: int = 2 if ctx.round_number >= 3 else 1
+			for c in ctx._all_player_creatures():
+				c.take_damage_bypass_armor(forge_heat_amt)
+		"court_wither":
+			# The Withered Court (A3): from round 2 the court leaches your army —
+			# every one of your creatures loses 1 ATK this round (temp, refreshed each
+			# round, self-corrects when you break the court). Replaces the generic,
+			# invisible cultist_buff with a legible "your army is dying, hurry" clock.
+			if ctx.round_number >= 2:
+				var court_any := false
+				for c in ctx._all_player_creatures():
+					c.temp_atk_buff -= 1
+					c.update_stat_display()
+					court_any = true
+				if court_any:
+					ctx._show_info("The court withers your army — your creatures lose 1 ATK this round.")
+		"dirge_swell":
+			# The Carrion Choir (A2): the hymn itself bleeds you. Each Ranged singer
+			# chips 1 face at the top of the round, so walling the front and waiting
+			# loses — you must push damage onto the back-row singers. Replaces a
+			# shared cultist_buff. Skips the setup round.
+			if ctx.round_number >= 2:
+				var dirge_singers := 0
+				for c in ctx._all_enemy_creatures():
+					if c.has_keyword("ranged"):
+						dirge_singers += 1
+				if dirge_singers > 0:
+					ctx.damage_player_hero(dirge_singers)
+					ctx._show_info("The choir sings — %d damage." % dirge_singers)
+		"glass_refract":
+			# The Glass Menagerie (A3): the hall replaces a shattered pane — a 3/1
+			# Swift shard each round from round 2. Spot-killing one-at-a-time never
+			# gets ahead; you must sweep wide. Replaces a shared executioner_face so
+			# the Menagerie reads as "endless fragile swarm," distinct from the
+			# Executioner's Block ("one big telegraphed axe").
+			if ctx.round_number >= 2:
+				ctx._summon_enemy_token_with_keyword(3, 1, "swift")
 		"devil_cycle":
 			var cycle = (ctx.round_number - 1) % ctx.PASSIVE_HEAL_INTERVAL
 			match cycle:
@@ -255,6 +310,26 @@ static func dispatch_encounter_on_enemy_death(ctx, lane_idx: int, dead_card = nu
 				for adj_card in ctx._adjacent_in_row(true, row, lane_idx):
 					adj_card.temp_atk_buff += 1
 					adj_card.update_stat_display()
+		"flock_enrage":
+			# The Shepherd Who Lost His Sheep (A3): a death feeds the survivors beside
+			# it +1 ATK PERMANENTLY (current_atk, not temp), so kill order compounds.
+			# Replaces a shared wolf_pack_revenge with a louder, weightier version so
+			# the A1 wolves and the A3 shepherd no longer feel like the same fight.
+			for row in [ctx.ROW_FRONT, ctx.ROW_BACK]:
+				for adj_card in ctx._adjacent_in_row(true, row, lane_idx):
+					adj_card.current_atk += 1
+					adj_card.update_stat_display()
+			ctx._show_info("The flock rages — survivors beside the fallen gain +1 ATK.")
+		"pyre_spread":
+			# The Pyre Cult (A3): every cultist that dies bursts — 1 damage to the
+			# opposing creature and 1 face. Killing the line all at once lights the
+			# whole row, so HOW you kill matters. Replaces a shared forge_burn_all.
+			# Structure deaths don't chain.
+			if dead_card == null or not dead_card.has_keyword("structure"):
+				var pyre_opp = ctx._player_field[lane_idx] if lane_idx >= 0 and lane_idx < ctx._player_field.size() else null
+				if pyre_opp != null and is_instance_valid(pyre_opp):
+					pyre_opp.take_damage(1)
+				ctx.damage_player_hero(1)
 		"necro_death_summon":
 			if dead_card == null or dead_card.card_data.get("name", "") != "Skeleton":
 				ctx._summon_enemy_token(1, 1)
@@ -305,6 +380,16 @@ static func dispatch_encounter_on_player_death(ctx, _lane_idx: int) -> void:
 	match ctx._encounter_passive:
 		"mirror_instant_place":
 			ctx._enemy_place_creatures()
+		"pack_hunt":
+			# The Cinder-Hounds (A2): your dead is their scent. Every friendly death
+			# whets the Swift pack +1 ATK this round (temp, clears next round —
+			# pressure, not permanent snowball). Replaces a shared forge_burn_all so
+			# the rush deck and its passive finally pull the same direction.
+			for c in ctx._all_enemy_creatures():
+				if c.has_keyword("swift"):
+					c.temp_atk_buff += 1
+					c.update_stat_display()
+			ctx._show_info("Blood in the air — the pack quickens.")
 
 
 static func dispatch_encounter_on_enter(ctx, _data: Dictionary, _lane_idx: int) -> void:

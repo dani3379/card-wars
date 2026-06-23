@@ -353,11 +353,11 @@ func _build_drill_intro() -> void:
 	if eligible.is_empty():
 		_clear_ui()
 		_add_header("THE DRILL YARD",
-			"The sergeant looks over your line and finds nothing green enough to teach. He pays you to haul targets for an hour instead.")
+			"Nothing green enough to drill. The sergeant pays you to haul targets instead.")
 		RunState.gain_gold(20)
 		_show_drill_consolation()
 		return
-	var grid = _make_card_grid("The sergeant spits. \"Bring me one. It comes back harder.\" — pick a creature to drill (+1/+1)")
+	var grid = _make_card_grid("Pick a creature to drill (+1/+1).")
 	for i in eligible:
 		var data = RunState.get_upgraded_card_data(i)
 		_add_card_to_grid(grid, data, _on_drill_pick.bind(i))
@@ -393,7 +393,7 @@ func _build_drill_push() -> void:
 	var data = RunState.get_upgraded_card_data(_drill_index)
 	var nm: String = String(data.get("name", "The recruit"))
 	_add_header("THE DRILL YARD",
-		"%s finishes the pass — +%d/+%d banked so far. The sergeant raises an eyebrow: \"Again?\"" \
+		"%s has banked +%d/+%d. Push for more, or march on?" \
 		% [nm, _drill_stacks, _drill_stacks])
 
 	# The creature on the yard, current stats showing.
@@ -413,7 +413,7 @@ func _build_drill_push() -> void:
 	var tiles: Array = []
 	if _drill_stacks < DRILL_MAX_STACKS:
 		tiles.append(_make_tile("Run another pass",
-			"Even odds: +1/+1 more — or the yard takes %d HP from you and closes. Banked passes are kept." % DRILL_FAIL_HP,
+			"Even odds: +1/+1 more, or lose %d HP and the yard closes. Banked passes are kept." % DRILL_FAIL_HP,
 			_on_drill_again))
 	tiles.append(_make_tile("March on",
 		"%s keeps +%d/+%d." % [nm, _drill_stacks, _drill_stacks],
@@ -478,27 +478,27 @@ func _sell_price(card_id: String) -> int:
 func _build_scales() -> void:
 	_clear_ui()
 	_add_header("THE QUARTERMASTER'S SCALES",
-		"A folding table, a balance, a strongbox. He weighs, he does not haggle. One trade per caller — the line behind you is imaginary but he respects it.")
+		"He weighs, he doesn't haggle. One trade per visit.")
 	var tiles: Array = []
 	tiles.append(_make_tile("Sell a card by weight",
-		"Remove a card from your deck. He pays 15 gold + 12 per Command it costs.",
+		"Remove a card. He pays 15 gold + 12 per Command it costs.",
 		_build_scales_sell))
 	var can_potion: bool = RunState.gold >= SCALE_POTION_COST and RunState.can_add_potion()
 	var potion_note: String = "Pay %d gold. Gain a Healing Potion." % SCALE_POTION_COST
 	if not RunState.can_add_potion():
-		potion_note = "Your potion belt is full."
+		potion_note = "Potion belt is full."
 	elif RunState.gold < SCALE_POTION_COST:
-		potion_note = "You haven't the coin (%d gold)." % SCALE_POTION_COST
-	tiles.append(_make_tile("Buy a draught off the back shelf", potion_note,
+		potion_note = "Costs %d gold." % SCALE_POTION_COST
+	tiles.append(_make_tile("Buy a draught", potion_note,
 		_on_scales_potion, can_potion))
 	var can_meal: bool = RunState.gold >= SCALE_MEAL_COST \
 		and RunState.hero_hp < RunState.hero_max_hp
 	var meal_note: String = "Pay %d gold. Heal %d HP." % [SCALE_MEAL_COST, SCALE_MEAL_HEAL]
 	if RunState.hero_hp >= RunState.hero_max_hp:
-		meal_note = "You're not hungry — not a scratch on you."
+		meal_note = "Already at full health."
 	elif RunState.gold < SCALE_MEAL_COST:
-		meal_note = "You haven't the coin (%d gold)." % SCALE_MEAL_COST
-	tiles.append(_make_tile("A hot meal off the cookfire", meal_note,
+		meal_note = "Costs %d gold." % SCALE_MEAL_COST
+	tiles.append(_make_tile("A hot meal", meal_note,
 		_on_scales_meal, can_meal))
 	_add_tile_stack(tiles)
 	_add_leave_button()
@@ -531,7 +531,7 @@ func _on_scales_sell_pick(deck_index: int) -> void:
 	RunState.remove_card_at(deck_index)
 	RunState.gain_gold(price)
 	AudioBank.play_sfx("button_click")
-	_show_result("He sets %s on the pan, reads the needle, and counts out %d gold. He does not say goodbye to it. Neither do you." \
+	_show_result("He weighs %s and counts out %d gold." \
 		% [String(data.get("name", "the card")), price])
 
 
@@ -544,7 +544,7 @@ func _on_scales_potion() -> void:
 	if not RunState.add_potion("healing"):
 		return
 	RunState.gold -= SCALE_POTION_COST
-	_show_result("Paid %d gold. The draught is the colour of a bruise and smells worse. It will work." % SCALE_POTION_COST)
+	_show_result("Paid %d gold. Gained a Healing Potion." % SCALE_POTION_COST)
 
 
 func _on_scales_meal() -> void:
@@ -552,7 +552,7 @@ func _on_scales_meal() -> void:
 		return
 	RunState.gold -= SCALE_MEAL_COST
 	RunState.heal_hero(SCALE_MEAL_HEAL)
-	_show_result("Paid %d gold. Healed %d HP. The stew has been simmering since the last war and is better for it." \
+	_show_result("Paid %d gold. Healed %d HP." \
 		% [SCALE_MEAL_COST, SCALE_MEAL_HEAL])
 
 
@@ -610,7 +610,7 @@ func _build_banner_donor() -> void:
 	if valid.is_empty():
 		_clear_ui()
 		_add_header("THE STANDARD-BEARER",
-			"He reads your line twice and shakes his head — no banner here can change hands. He shares the road's news and a coin for your trouble.")
+			"No banner here can change hands. He spares you a coin for the trouble.")
 		RunState.gain_gold(15)
 		var lbl := GameTheme.make_label("Gained 15 gold.", 22, GameTheme.KEYWORD_GOLD)
 		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -622,7 +622,7 @@ func _build_banner_donor() -> void:
 		add_child(lbl)
 		_add_leave_button("Continue")
 		return
-	var grid = _make_card_grid("\"Every banner I carry was carried first.\" — choose who GIVES UP a keyword")
+	var grid = _make_card_grid("Choose who gives up a keyword.")
 	for i in valid:
 		var data = RunState.get_upgraded_card_data(i)
 		_add_card_to_grid(grid, data, _on_banner_donor_pick.bind(i))
@@ -662,7 +662,7 @@ func _build_banner_receiver() -> void:
 	var info: Dictionary = KeywordEffects.KEYWORDS.get(_banner_kw, {})
 	var disp: String = String(info.get("display", _banner_kw))
 	var donor = CardDB.get_card_data(RunState.deck[_banner_from])
-	var grid = _make_card_grid("%s gives up %s — choose who takes it up" \
+	var grid = _make_card_grid("%s gives up %s. Choose who takes it." \
 		% [String(donor.get("name", "The creature")), disp])
 	for i in _banner_receivers(_banner_from, _banner_kw):
 		var data = RunState.get_upgraded_card_data(i)
@@ -688,7 +688,7 @@ func _on_banner_receiver_pick(deck_index: int) -> void:
 	RunState.apply_wayside_upgrade(deck_index,
 		{"path": "grant_kw", "keyword": _banner_kw})
 	AudioBank.play_sfx("card_play")
-	_show_result("The bearer lifts %s from %s and pins it to %s. \"Carried well,\" he says, to one of them." \
+	_show_result("The bearer lifts %s from %s and pins it to %s." \
 		% [disp, String(donor.get("name", "the giver")),
 			String(taker.get("name", "the taker"))])
 
@@ -701,11 +701,11 @@ func _on_banner_receiver_pick(deck_index: int) -> void:
 func _build_cache() -> void:
 	_clear_ui()
 	_add_header("THE SUPPLY CACHE",
-		"A tarred chest under a cairn of stones — provisions laid down for a column that never came back. You can carry one thing away.")
+		"A buried chest, long forgotten. Carry one thing away.")
 	var pool: Array = [
 		{"id": "purse", "head": "A buried pay-chest", "note": "Gain 45 gold."},
 		{"id": "levy", "head": "A levy's kit",
-			"note": "Next fight starts with a 2/4 Levy Spearman in your front line."},
+			"note": "Start next fight with a 2/4 Levy Spearman in front."},
 		{"id": "dispatches", "head": "A captain's dispatches",
 			"note": "+1 max Command next fight."},
 		{"id": "banner_case", "head": "A banner case",
@@ -732,21 +732,21 @@ func _on_cache_take(id: String) -> void:
 	match id:
 		"purse":
 			RunState.gain_gold(45)
-			_show_result("The coins are old enough that both kings on them are forgotten. Gained 45 gold.")
+			_show_result("Old, forgotten coin. Gained 45 gold.")
 		"draught":
 			RunState.add_potion("healing")
 			_show_result("The wax seal is unbroken. Gained a Healing Potion.")
 		"rations":
 			RunState.heal_hero(8)
-			_show_result("Hard bread, harder cheese, and someone's hoarded wine. Healed 8 HP.")
+			_show_result("Hard bread and hoarded wine. Healed 8 HP.")
 		"levy":
 			RunState.next_combat_gift_creature = {
 				"name": "Levy Spearman", "atk": 2, "hp": 4, "kw": [],
 			}
-			_show_result("Helmet, spear, and a name scratched off the tag. Someone will wear it into the next fight.")
+			_show_result("Helmet and spear. A Levy Spearman joins your next fight.")
 		"dispatches":
 			RunState.next_combat_mana_bonus += 1
-			_show_result("Orders, maps, and a captain's neat cold handwriting. +1 max Command next fight.")
+			_show_result("A captain's orders. +1 max Command next fight.")
 		"banner_case":
 			var pool_c = CardDB.cards_of_rarity("common")
 			if pool_c.is_empty():

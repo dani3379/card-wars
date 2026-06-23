@@ -260,6 +260,10 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	_select_rivals()
 	CardTextureCache.clear()
 	_generate_map()
+	# PlayLog: open a per-run telemetry session now that deck + relics are built.
+	PlayLog.start_session({
+		"hero": current_hero_id, "seed": run_seed, "ascension": current_ascension,
+		"deck": deck.duplicate(), "relics": relics.duplicate()})
 
 
 ## Successor Wars rival deal. The pool is every hero the player didn't pick;
@@ -354,6 +358,8 @@ func _rebake_boss_node(act_idx: int) -> void:
 func end_run(victorious: bool) -> void:
 	run_active = false
 	_append_run_log(victorious)
+	PlayLog.end_session({"result": "victory" if victorious else "defeat",
+		"act": get_act(), "floor": current_floor, "fights_won": fights_won})
 	clear_save()  # save only persists in-progress runs; ended ones are gone
 	if victorious:
 		MetaState.record_victory()
@@ -416,6 +422,7 @@ func add_card(id: String) -> int:
 	var uid = _next_uid
 	deck_uids.append(uid)
 	_next_uid += 1
+	PlayLog.log_event("deck_add", {"id": id, "uid": uid})
 	return uid
 
 
@@ -423,6 +430,7 @@ func remove_card_at(index: int) -> bool:
 	if index < 0 or index >= deck.size():
 		return false
 	var uid = deck_uids[index]
+	PlayLog.log_event("deck_remove", {"id": deck[index], "uid": uid})
 	deck.remove_at(index)
 	deck_uids.remove_at(index)
 	card_upgrades.erase(uid)
@@ -450,6 +458,9 @@ func remove_card_at(index: int) -> bool:
 func upgrade_card(deck_index: int, path: String, keyword: String = "") -> void:
 	if deck_index < 0 or deck_index >= deck_uids.size():
 		return
+	PlayLog.log_event("card_upgrade", {
+		"id": deck[deck_index] if deck_index < deck.size() else "",
+		"path": path, "keyword": keyword})
 	_append_upgrade(deck_uids[deck_index], {"path": path, "keyword": keyword})
 
 
@@ -483,6 +494,8 @@ func get_upgrade_entry(deck_index: int, path: String) -> Dictionary:
 func apply_wayside_upgrade(deck_index: int, entry: Dictionary) -> void:
 	if deck_index < 0 or deck_index >= deck_uids.size():
 		return
+	PlayLog.log_event("card_upgrade", {
+		"id": deck[deck_index] if deck_index < deck.size() else "", "wayside": entry})
 	var uid = deck_uids[deck_index]
 	if String(entry.get("path", "")) == "drill":
 		var stack: Array = card_upgrades.get(uid, [])
@@ -709,6 +722,7 @@ func add_relic(id: String) -> void:
 	if relics.has(id):
 		return
 	relics.append(id)
+	PlayLog.log_event("relic_add", {"id": id})
 	_apply_relic_on_acquire(id)
 
 
@@ -807,6 +821,7 @@ func add_potion(id: String) -> bool:
 		push_warning("RunState.add_potion: unknown id '%s'" % id)
 		return false
 	potions.append(id)
+	PlayLog.log_event("potion_add", {"id": id})
 	return true
 
 
@@ -874,6 +889,8 @@ func visit_node(row: int, col: int) -> void:
 			n.visited = true
 			current_node_type = n.type
 			current_encounter_id = n.get("encounter_id", "")
+			PlayLog.log_event("map_visit", {"row": row, "col": col,
+				"node_type": current_node_type, "encounter": current_encounter_id})
 			current_mutator_id = n.get("mutator_id", "")
 			current_terrain = String(n.get("terrain", ""))
 			current_bridge = bool(n.get("bridge", false))
