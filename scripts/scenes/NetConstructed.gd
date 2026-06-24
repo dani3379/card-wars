@@ -39,6 +39,8 @@ var _deck_box: VBoxContainer
 var _deck_count_lbl: Label
 var _ready_btn: Button
 var _pool_rows: Dictionary = {}   # id -> {"add": Button, "cnt": Label}
+var _name_field: LineEdit         # save-as name
+var _saved_option: OptionButton   # saved-deck picker
 
 
 func _ready() -> void:
@@ -163,6 +165,34 @@ func _build_scaffold() -> void:
 	clear_btn.pressed.connect(_on_clear)
 	tools.add_child(clear_btn)
 
+	# Saved-decks row: name + SAVE (keep a finished warband), and a picker +
+	# LOAD / DELETE to reuse one without drafting or rebuilding.
+	var saved := HBoxContainer.new()
+	saved.add_theme_constant_override("separation", 6)
+	deck_col.add_child(saved)
+	_name_field = LineEdit.new()
+	_name_field.placeholder_text = "Deck name"
+	_name_field.custom_minimum_size = Vector2(120, 30)
+	if GameTheme.font_body:
+		_name_field.add_theme_font_override("font", GameTheme.font_body)
+	saved.add_child(_name_field)
+	var save_btn := GameTheme.make_themed_button("SAVE",
+		Color(0.18, 0.30, 0.22), Vector2(62, 30), 12)
+	save_btn.pressed.connect(_on_save_deck)
+	saved.add_child(save_btn)
+	_saved_option = OptionButton.new()
+	_saved_option.custom_minimum_size = Vector2(140, 30)
+	saved.add_child(_saved_option)
+	var load_btn := GameTheme.make_themed_button("LOAD",
+		Color(0.20, 0.24, 0.34), Vector2(62, 30), 12)
+	load_btn.pressed.connect(_on_load_deck)
+	saved.add_child(load_btn)
+	var del_btn := GameTheme.make_themed_button("DEL",
+		Color(0.30, 0.18, 0.16), Vector2(50, 30), 12)
+	del_btn.pressed.connect(_on_delete_deck)
+	saved.add_child(del_btn)
+	_refresh_saved_options()
+
 	_root.add_child(GameTheme.make_separator(
 		Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.30), 500.0))
 
@@ -265,6 +295,74 @@ func _on_fill_random() -> void:
 			_deck.append(id)
 			_counts[id] = int(_counts.get(id, 0)) + 1
 	_refresh_all()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  SAVED DECKS  (save a finished warband / reuse one without rebuilding)
+# ─────────────────────────────────────────────────────────────────────────
+
+func _refresh_saved_options() -> void:
+	if _saved_option == null:
+		return
+	_saved_option.clear()
+	var saved := SavedDecks.list_decks()
+	if saved.is_empty():
+		_saved_option.add_item("(no saved decks)")
+		_saved_option.disabled = true
+		return
+	_saved_option.disabled = false
+	for i in saved.size():
+		var nm := String(saved[i].get("name", "Warband"))
+		var n := (saved[i].get("cards", []) as Array).size()
+		_saved_option.add_item("%s  (%d)" % [nm, n])
+
+
+func _on_save_deck() -> void:
+	if _local_finished:
+		return
+	if _deck.size() != _target:
+		_flash_status("Build a full %d-card warband before saving." % _target, RED_WARN)
+		return
+	var nm := SavedDecks.save_deck(_name_field.text, _deck)
+	_refresh_saved_options()
+	_flash_status("Saved \"%s\"." % nm, GREEN)
+
+
+func _on_load_deck() -> void:
+	if _local_finished or SavedDecks.count() == 0:
+		return
+	var idx := _saved_option.selected
+	var cards := SavedDecks.get_cards(idx)
+	if cards.is_empty():
+		return
+	_deck.clear()
+	_counts.clear()
+	for cid in cards:
+		var id := String(cid)
+		if not _pool.has(id):
+			continue                     # card no longer skirmish-legal — skip
+		if _deck.size() >= _target:
+			break
+		if int(_counts.get(id, 0)) >= MAX_COPIES:
+			continue
+		_deck.append(id)
+		_counts[id] = int(_counts.get(id, 0)) + 1
+	_refresh_all()
+	_flash_status("Loaded \"%s\"." % SavedDecks.deck_name(idx), GREEN)
+
+
+func _on_delete_deck() -> void:
+	if SavedDecks.count() == 0:
+		return
+	SavedDecks.delete_deck(_saved_option.selected)
+	_refresh_saved_options()
+
+
+## Transient one-liner in the status line (overwritten by the next _refresh_all).
+func _flash_status(msg: String, col: Color) -> void:
+	if _status != null:
+		_status.text = msg
+		_status.add_theme_color_override("font_color", col)
 
 
 # ─────────────────────────────────────────────────────────────────────────

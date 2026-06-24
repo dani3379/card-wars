@@ -37,6 +37,8 @@ CardTextureCache="*res://scripts/state/CardTextureCache.gd"
 AudioBank="*res://scripts/AudioBank.gd"
 NetMatch="*res://scripts/net/NetMatch.gd"
 SkirmishState="*res://scripts/net/SkirmishState.gd"
+SkirmishBot="*res://scripts/net/SkirmishBot.gd"
+SavedDecks="*res://scripts/state/SavedDecks.gd"
 
 [display]
 

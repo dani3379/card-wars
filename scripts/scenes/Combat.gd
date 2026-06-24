@@ -22,6 +22,12 @@ var combat_mode: int = CombatMode.SOLO
 
 # Online-skirmish runtime state (see the net section near EOF). All unused in SOLO.
 var _net_active_index: int = 0          # whose turn it is (0 = host, 1 = client)
+# Practice bot (SkirmishState.vs_bot): slot 1's virtual hand + Command, drawn and
+# spent locally so the bot plays as a stand-in for an absent client.
+var _bot_hand: Array = []               # [{uid:int, id:String, data:Dictionary}]
+var _bot_deck_cursor: int = 0
+var _bot_banked_mana: int = 0
+var _bot_turns_taken: int = 0
 var _net_turn_round: int = 0            # full-alternating turn counter
 var _net_spells_this_turn: int = 0      # spells the active side has cast this turn (flame_bolt combo)
 var _net_token_id_next: int = 1000000   # token/summon entity ids live above any uid
@@ -14197,6 +14203,9 @@ func _net_start_turn(active_index: int) -> void:
 		_net_set_local_active(false)
 		_show_info(_net_opp_turn_msg())
 	_net_sync_board()
+	# Practice bot: no remote client will send intents for slot 1 — drive it locally.
+	if SkirmishState.vs_bot and active_index == 1 and not _net_match_over:
+		_bot_take_turn()
 
 
 ## Runs on whichever side just became active: draw + Command + enable the board.
@@ -14839,6 +14848,70 @@ func _net_apply_remote_reposition(intent: Dictionary) -> void:
 	_moves_used_this_turn += 1
 	_play_landing_pop(node)
 	_net_sync_board()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  PRACTICE BOT — drives slot 1 in a vs-bot match (SkirmishState.vs_bot).
+#  The bot stands in for an absent client: it keeps its own hand drawn from slot
+#  1's deck and a flat Command budget (3 + bank 2), asks SkirmishBot for an
+#  ordered list of plays, applies each through the SAME host intent path a remote
+#  client would hit, then ends actions (which resolves its strike + passes turn).
+# ─────────────────────────────────────────────────────────────────────────
+
+func _bot_refill_hand() -> void:
+	var slot: SkirmishState.PlayerSlot = SkirmishState.get_slot(1)
+	if slot == null:
+		return
+	# One extra card on the bot's first turn — the going-second compensation that
+	# the client gets via the pre-deal in _net_begin_combat.
+	var target: int = HAND_REFILL_TARGET + (1 if _bot_turns_taken == 0 else 0)
+	while _bot_hand.size() < target and _bot_deck_cursor < slot.deck.size():
+		var id := String(slot.deck[_bot_deck_cursor])
+		var uid: int = int(slot.deck_uids[_bot_deck_cursor]) \
+			if _bot_deck_cursor < slot.deck_uids.size() else _net_issue_token_id()
+		_bot_hand.append({"uid": uid, "id": id, "data": CardDB.get_card_data(id)})
+		_bot_deck_cursor += 1
+
+
+func _bot_take_turn() -> void:
+	await _short_pause(COMBAT_PAUSE_SHORT)
+	if _net_match_over or _net_active_index != 1:
+		return
+	_bot_refill_hand()
+	var mana: int = SkirmishState.BASE_MAX_MANA + _bot_banked_mana
+	var plays: Array = SkirmishBot.decide_turn(self, _bot_hand, mana)
+	var spent := 0
+	for intent in plays:
+		if _net_match_over or _net_active_index != 1:
+			break
+		await _short_pause(COMBAT_PAUSE_SHORT)
+		spent += _bot_consume_card(int(intent.get("uid", -1)))
+		await _bot_apply_intent(intent)
+	_bot_banked_mana = clampi(mana - spent, 0, MAX_BANKED_MANA)
+	_bot_turns_taken += 1
+	await _short_pause(COMBAT_PAUSE_SHORT)
+	if not _net_match_over and _net_active_index == 1:
+		_net_run_attack(1)
+
+
+## Remove the played card from the bot's hand and return its Command cost.
+func _bot_consume_card(uid: int) -> int:
+	for i in _bot_hand.size():
+		if int(_bot_hand[i].get("uid", -2)) == uid:
+			var cost := int((_bot_hand[i].get("data", {}) as Dictionary).get("cost", 0))
+			_bot_hand.remove_at(i)
+			return cost
+	return 0
+
+
+func _bot_apply_intent(intent: Dictionary) -> void:
+	match String(intent.get("t", "")):
+		NetMatch.IN_PLAY_CREATURE:
+			await _net_apply_remote_creature(intent)
+		NetMatch.IN_PLAY_SPELL:
+			await _net_apply_remote_spell(intent)
+		NetMatch.IN_REPOSITION:
+			await _net_apply_remote_reposition(intent)
 
 
 # ── Events (host → client) ───────────────────────────────────────────────

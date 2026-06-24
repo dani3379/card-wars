@@ -134,6 +134,10 @@ var match_seed: int = 0
 ## combat code reads best_of. Both ride the start RPC so the client always has them.
 var match_mode: int = 0
 var best_of: int = 1
+## True for a local practice match against SkirmishBot — no real peer. The host
+## path runs normally; this just makes is_connected_to_peer() pass, makes the deck
+## "finished" handoff answer with a bot deck, and keeps launch_combat off the wire.
+var vs_bot: bool = false
 var _peer: ENetMultiplayerPeer = null
 var _connected: bool = false
 ## Host-side: the connected client's ENet peer id (0 = no client). Set when the
@@ -287,9 +291,10 @@ func leave() -> void:
 	if _peer != null:
 		_peer.close()
 		_peer = null
-	if multiplayer.multiplayer_peer != null:
+	if multiplayer != null and multiplayer.multiplayer_peer != null:
 		multiplayer.multiplayer_peer = null
 	is_host = false
+	vs_bot = false
 	local_player_index = -1
 	_connected = false
 	client_peer_id = 0
@@ -315,7 +320,24 @@ func leave() -> void:
 
 
 func is_connected_to_peer() -> bool:
-	return _connected and remote_present
+	return vs_bot or (_connected and remote_present)
+
+
+## Begin a local practice match against SkirmishBot. No networking: we synthesize
+## the connection state a finished host handshake leaves behind (host, slot 0,
+## chosen mode/format, fresh seed) so the deck-acquisition scenes and combat run
+## their normal host path. The opponent "peer" is emulated in send_draft_event
+## (auto-finishes with a bot deck) and Combat drives slot 1 via SkirmishBot.
+func start_vs_bot(mode: int, bo: int) -> void:
+	leave()                      # clean slate (also clears any relay/peer state)
+	vs_bot = true
+	is_host = true
+	local_player_index = 0
+	_connected = true
+	remote_present = false
+	match_mode = mode
+	best_of = bo
+	match_seed = randi()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -507,6 +529,13 @@ func get_entity(entity_id: int) -> Object:
 
 ## Send a draft message to the other peer (e.g. {"t":"pick","n":3}).
 func send_draft_event(event: Dictionary) -> void:
+	if vs_bot:
+		# Emulate the opponent: when the local player "finishes" their deck, the bot
+		# answers with its own warband so the scene's both-ready check launches.
+		if String(event.get("t", "")) == "finished":
+			var bot_cards := SkirmishBot.build_deck(match_seed ^ 0x80B0)
+			call_deferred("_apply_draft_event", {"t": "finished", "cards": bot_cards})
+		return
 	if not _can_send():
 		return
 	if transport == Transport.RELAY:
@@ -590,6 +619,9 @@ func send_to_client(event: Dictionary) -> void:
 ## side change_scenes on its own (the draft client waits for this).
 func launch_combat() -> void:
 	if not is_host:
+		return
+	if vs_bot:
+		_enter_combat_local()   # no peer to signal — just drop into combat locally
 		return
 	if transport == Transport.RELAY:
 		_relay_ship({"t": _RK_LAUNCH})   # client enters via the relay

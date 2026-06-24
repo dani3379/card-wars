@@ -45,6 +45,14 @@ var _mode_info_label: Label          # client: shows the host's chosen mode/form
 var _selected_mode: int = 0          # host's current pick (SkirmishState.MatchMode)
 var _selected_best_of: int = 1       # host's current pick (1 or 3)
 
+# ── Practice vs Bot (offline; no peer) ──
+var _vs_bot_btn: Button
+var _vs_bot_panel: VBoxContainer
+var _vsbot_mode: int = 0
+var _vsbot_bo: int = 1
+var _vsbot_mode_buttons: Dictionary = {}
+var _vsbot_bo_buttons: Dictionary = {}
+
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "main_menu")
@@ -156,6 +164,19 @@ func _build_ui() -> void:
 		Color(0.20, 0.28, 0.42), Vector2(110, 44), 18)
 	_join_btn.pressed.connect(_on_join_pressed)
 	addr_row.add_child(_join_btn)
+
+	# ── Practice vs Bot (offline) — sits under the connect controls ──
+	_vs_bot_btn = GameTheme.make_themed_button("PRACTICE vs BOT",
+		Color(0.20, 0.30, 0.22), Vector2(360, 44), 17,
+		"Play any mode against a local AI opponent — no connection needed.")
+	_vs_bot_btn.pressed.connect(_on_vs_bot_pressed)
+	_connect_panel.add_child(_vs_bot_btn)
+
+	_vs_bot_panel = VBoxContainer.new()
+	_vs_bot_panel.alignment = BoxContainer.ALIGNMENT_CENTER
+	_vs_bot_panel.add_theme_constant_override("separation", 6)
+	_vs_bot_panel.visible = false
+	col.add_child(_vs_bot_panel)
 
 	# ── Ready panel (after connect) ──
 	_ready_panel = VBoxContainer.new()
@@ -529,6 +550,110 @@ func _refresh_host_picker_highlight() -> void:
 	for bo in _bo_buttons:
 		(_bo_buttons[bo] as Button).modulate = \
 			Color.WHITE if bo == _selected_best_of else Color(0.5, 0.5, 0.5)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  PRACTICE vs BOT (offline) — pick a mode/format, then run the normal deck
+#  scene + combat with NetMatch.vs_bot set (no peer; SkirmishBot drives slot 1).
+# ─────────────────────────────────────────────────────────────────────────
+
+func _on_vs_bot_pressed() -> void:
+	_connect_panel.visible = false
+	if _lan_panel != null:
+		_lan_panel.visible = false
+	_vs_bot_panel.visible = true
+	_populate_vs_bot_panel()
+	_set_status("Practice match — pick a mode, then BEGIN.", GILT_BRIGHT)
+
+
+func _populate_vs_bot_panel() -> void:
+	for c in _vs_bot_panel.get_children():
+		c.queue_free()
+	_vsbot_mode_buttons.clear()
+	_vsbot_bo_buttons.clear()
+
+	var title := GameTheme.make_label("PRACTICE vs BOT", 20, GILT_BRIGHT)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_vs_bot_panel.add_child(title)
+
+	var ml := GameTheme.make_label("MODE", 14, GILT_BRIGHT)
+	ml.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_vs_bot_panel.add_child(ml)
+	var mode_row := HBoxContainer.new()
+	mode_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	mode_row.add_theme_constant_override("separation", 8)
+	_vs_bot_panel.add_child(mode_row)
+	var modes := SkirmishState.available_modes()
+	if not modes.has(_vsbot_mode):
+		_vsbot_mode = int(modes[0])
+	for mode in modes:
+		var b := GameTheme.make_themed_button(SkirmishState.mode_name(mode).to_upper(),
+			Color(0.20, 0.24, 0.34), Vector2(150, 40), 14, SkirmishState.mode_blurb(mode))
+		b.pressed.connect(_on_vsbot_mode_chosen.bind(mode))
+		mode_row.add_child(b)
+		_vsbot_mode_buttons[mode] = b
+
+	var fl := GameTheme.make_label("FORMAT", 14, GILT_BRIGHT)
+	fl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_vs_bot_panel.add_child(fl)
+	var bo_row := HBoxContainer.new()
+	bo_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	bo_row.add_theme_constant_override("separation", 8)
+	_vs_bot_panel.add_child(bo_row)
+	for bo in [1, 3]:
+		var b2 := GameTheme.make_themed_button(
+			"SINGLE GAME" if bo == 1 else "BEST OF 3",
+			Color(0.20, 0.24, 0.34), Vector2(150, 36), 13)
+		b2.pressed.connect(_on_vsbot_bo_chosen.bind(bo))
+		bo_row.add_child(b2)
+		_vsbot_bo_buttons[bo] = b2
+
+	_vs_bot_panel.add_child(GameTheme.make_separator(GILT_BRIGHT, 300.0))
+
+	var begin := GameTheme.make_themed_button("BEGIN",
+		Color(0.18, 0.36, 0.18), Vector2(220, 46), 18)
+	begin.pressed.connect(_on_vs_bot_begin)
+	_vs_bot_panel.add_child(begin)
+
+	var back := GameTheme.make_themed_button("BACK",
+		Color(0.26, 0.16, 0.14), Vector2(160, 38), 15)
+	back.pressed.connect(_on_vs_bot_back)
+	_vs_bot_panel.add_child(back)
+
+	_refresh_vsbot_highlight()
+
+
+func _on_vsbot_mode_chosen(mode: int) -> void:
+	_vsbot_mode = mode
+	_refresh_vsbot_highlight()
+
+
+func _on_vsbot_bo_chosen(bo: int) -> void:
+	_vsbot_bo = bo
+	_refresh_vsbot_highlight()
+
+
+func _refresh_vsbot_highlight() -> void:
+	for mode in _vsbot_mode_buttons:
+		(_vsbot_mode_buttons[mode] as Button).modulate = \
+			Color.WHITE if mode == _vsbot_mode else Color(0.5, 0.5, 0.5)
+	for bo in _vsbot_bo_buttons:
+		(_vsbot_bo_buttons[bo] as Button).modulate = \
+			Color.WHITE if bo == _vsbot_bo else Color(0.5, 0.5, 0.5)
+
+
+func _on_vs_bot_back() -> void:
+	_vs_bot_panel.visible = false
+	_connect_panel.visible = true
+	_set_status("", IVORY)
+
+
+func _on_vs_bot_begin() -> void:
+	NetMatch.start_vs_bot(_vsbot_mode, _vsbot_bo)
+	var scene := SkirmishState.mode_scene(_vsbot_mode)
+	if not ResourceLoader.exists(scene):
+		scene = DRAFT_SCENE
+	get_tree().change_scene_to_file(scene)
 
 
 func _build_client_mode_display() -> void:

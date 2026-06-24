@@ -112,6 +112,10 @@ class PlayerSlot:
 
 
 var combat_mode: int = CombatMode.SOLO
+## True when the "opponent" is the local practice bot (no network peer). The host
+## path runs exactly as in a real match; Combat just drives slot 1 via SkirmishBot
+## instead of waiting for remote intents, and NetMatch emulates the peer handshake.
+var vs_bot: bool = false
 var rng_seed: int = 0
 var slots: Array[PlayerSlot] = []
 ## Index into `slots` for the local player (== NetMatch.local_player_index).
@@ -137,6 +141,7 @@ const UID_SLOT_STRIDE: int = 100000
 
 func reset() -> void:
 	combat_mode = CombatMode.SOLO
+	vs_bot = false
 	rng_seed = 0
 	local_index = -1
 	slots = []
@@ -164,6 +169,7 @@ func refresh_heroes() -> void:
 ## calls NetMatch.launch_combat.
 func begin_session() -> void:
 	reset()
+	vs_bot = NetMatch.vs_bot   # carry the practice-bot flag past reset() into combat
 	combat_mode = CombatMode.NET_HOST if NetMatch.is_host else CombatMode.NET_CLIENT
 	local_index = NetMatch.local_player_index
 	rng_seed = NetMatch.match_seed

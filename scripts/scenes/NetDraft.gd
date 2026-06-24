@@ -180,6 +180,11 @@ func _on_pick(id: String) -> void:
 func _finish_draft() -> void:
 	_local_finished = true
 	var my_deck: Array = SkirmishState.local_slot().deck.duplicate()
+	# Auto-keep the drafted warband so it can be replayed later via Constructed →
+	# LOAD without drafting again (the player asked for exactly this). Timestamped
+	# name keeps each draft distinct; SavedDecks caps the list and drops the oldest.
+	var stamp := Time.get_datetime_string_from_system().substr(5, 11).replace("T", " ")
+	SavedDecks.save_deck("Draft %s" % stamp, my_deck)
 	NetMatch.send_draft_event({"t": "finished", "cards": my_deck})
 	_build_waiting_ui()
 	_maybe_begin_combat()
