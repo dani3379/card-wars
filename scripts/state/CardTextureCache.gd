@@ -109,6 +109,10 @@ func bake(card_data: Dictionary) -> Texture2D:
 		# Scene shut down mid-bake (player exited combat etc.) — give up.
 		return null
 	var image: Image = _bake_viewport.get_texture().get_image()
+	# Mipmaps so the baked card minifies cleanly when shown smaller than the bake
+	# (compact battlefield tokens are ~140px from this 249px bake). The project's
+	# canvas filter is Linear-Mipmap, which needs mips present to avoid aliasing.
+	image.generate_mipmaps()
 	var tex: ImageTexture = ImageTexture.create_from_image(image)
 	# Sync detach so the next bake starts with an empty viewport. queue_free
 	# alone defers to end-of-frame, leaving a brief window where both cards
