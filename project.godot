@@ -49,7 +49,7 @@ window/stretch/mode="canvas_items"
 
 [rendering]
 
-textures/canvas_textures/default_texture_filter=2
+textures/canvas_textures/default_texture_filter=3
 renderer/rendering_method="gl_compatibility"
 anti_aliasing/quality/msaa_2d=3
 environment/defaults/default_clear_color=Color(0.04, 0.03, 0.025, 1)
