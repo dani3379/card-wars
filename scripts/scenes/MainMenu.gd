@@ -74,7 +74,10 @@ func _rebuild_menu() -> void:
 	var col := VBoxContainer.new()
 	col.name = "Menu"
 	col.alignment = BoxContainer.ALIGNMENT_CENTER
-	col.add_theme_constant_override("separation", 12)
+	# Tight separation: the full menu (save + ascension) stacks ~11 buttons plus
+	# the title/epigraph/ornaments, which overflowed 900px and pushed Settings/Quit
+	# off-screen. 8px keeps it inside the canvas.
+	col.add_theme_constant_override("separation", 8)
 	# Left-aligned column (Hades / StS-2 layout): a fixed 610×640 rect pinned to
 	# the left edge and vertically centered. The character splash sits center-
 	# right, so keeping the menu on the left leaves the hero unobstructed.
@@ -124,7 +127,7 @@ func _rebuild_menu() -> void:
 
 	# Spacer pushes the buttons down so the title has breathing room.
 	var spacer := Control.new()
-	spacer.custom_minimum_size = Vector2(0, 22)
+	spacer.custom_minimum_size = Vector2(0, 8)
 	col.add_child(spacer)
 
 	# Default the selected ascension to the highest unlocked tier so returning
@@ -143,7 +146,7 @@ func _rebuild_menu() -> void:
 	# 17/19/20/22/24 sizes felt random; uniform sizing reads like a single
 	# menu group (matches Ratropolis / Slay the Spire conventions).
 	const MENU_FONT := 22
-	const MENU_H := 50
+	const MENU_H := 40
 	if has_any_save:
 		var btn_continue := _make_menu_button("CONTINUE RUN",
 			Color(0.32, 0.26, 0.14), MENU_FONT, MENU_H)
