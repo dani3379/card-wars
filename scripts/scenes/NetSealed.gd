@@ -18,6 +18,8 @@ const MENU_SCENE := "res://scenes/main_menu.tscn"
 # id the pool will contain (so a roll can't hand you 30 of the same card).
 const SEALED_POOL_SIZE: int = 30
 const SEALED_MAX_PER_ID: int = 3
+# Deck-builder card-thumbnail scale (225×300 → ~104×138).
+const THUMB_SCALE: float = 0.46
 
 const GILT_BRIGHT := Color(1.0, 0.85, 0.45, 1.0)
 const IVORY := Color(0.96, 0.92, 0.78, 1.0)
@@ -46,12 +48,12 @@ var _remote_finished: bool = false
 var _root: VBoxContainer
 var _header: Label
 var _status: Label
-var _pool_grid: GridContainer
-var _deck_box: VBoxContainer
+var _pool_grid: HFlowContainer
+var _deck_box: HFlowContainer
 var _deck_count_lbl: Label
 var _ready_btn: Button
 var _mirror_btn: Button
-var _pool_rows: Dictionary = {}   # id -> {"add": Button, "cnt": Label}
+var _pool_rows: Dictionary = {}   # id -> {"button": Button, "badge": Label, "card": Card2D}
 
 
 func _ready() -> void:
@@ -162,10 +164,9 @@ func _build_scaffold() -> void:
 	pool_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	pool_col.add_child(pool_scroll)
 
-	_pool_grid = GridContainer.new()
-	_pool_grid.columns = 2
-	_pool_grid.add_theme_constant_override("h_separation", 18)
-	_pool_grid.add_theme_constant_override("v_separation", 4)
+	_pool_grid = HFlowContainer.new()
+	_pool_grid.add_theme_constant_override("h_separation", 10)
+	_pool_grid.add_theme_constant_override("v_separation", 10)
 	_pool_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	pool_scroll.add_child(_pool_grid)
 
@@ -183,8 +184,9 @@ func _build_scaffold() -> void:
 	deck_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	deck_col.add_child(deck_scroll)
 
-	_deck_box = VBoxContainer.new()
-	_deck_box.add_theme_constant_override("separation", 3)
+	_deck_box = HFlowContainer.new()
+	_deck_box.add_theme_constant_override("h_separation", 8)
+	_deck_box.add_theme_constant_override("v_separation", 8)
 	_deck_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	deck_scroll.add_child(_deck_box)
 
@@ -236,41 +238,17 @@ func _rebuild_pool_ui() -> void:
 		c.queue_free()
 	_pool_rows.clear()
 	for id in _sorted_avail_ids():
-		_pool_grid.add_child(_build_pool_row(id))
+		_pool_grid.add_child(_build_pool_thumb(id))
 
 
-func _build_pool_row(id: String) -> Control:
+func _build_pool_thumb(id: String) -> Control:
 	var d := CardDB.get_card_data(id)
-	var is_creature := String(d.get("type", "creature")) == "creature"
-
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 6)
-
-	var cost := GameTheme.make_label(str(int(d.get("cost", 0))), 14, GILT_BRIGHT)
-	cost.custom_minimum_size = Vector2(18, 0)
-	cost.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	row.add_child(cost)
-
-	var txt := String(d.get("name", id))
-	if is_creature:
-		txt += "  %d/%d" % [int(d.get("atk", 0)), int(d.get("hp", 0))]
-	else:
-		txt += "  · Spell"
-	var nm := GameTheme.make_label(txt, 13, IVORY if is_creature else SPELL_BLUE)
-	nm.custom_minimum_size = Vector2(180, 0)
-	row.add_child(nm)
-
-	var cnt := GameTheme.make_label("", 12, GREEN)
-	cnt.custom_minimum_size = Vector2(40, 0)
-	row.add_child(cnt)
-
-	var add := GameTheme.make_themed_button("+",
-		Color(0.18, 0.30, 0.18), Vector2(30, 26), 15)
-	add.pressed.connect(_on_add.bind(id))
-	row.add_child(add)
-
-	_pool_rows[id] = {"add": add, "cnt": cnt}
-	return row
+	var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
+	var btn := thumb["button"] as Button
+	btn.pressed.connect(_on_add.bind(id))
+	btn.tooltip_text = String(d.get("name", id))
+	_pool_rows[id] = {"button": btn, "badge": thumb["badge"], "card": thumb["card"]}
+	return thumb["root"]
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -340,40 +318,36 @@ func _refresh_pool_counts() -> void:
 		var have := int(_avail.get(id, 0))
 		var used := int(_counts.get(id, 0))
 		var refs: Dictionary = _pool_rows[id]
-		(refs["cnt"] as Label).text = "%d/%d" % [used, have]
-		(refs["add"] as Button).disabled = _local_finished or full or used >= have
+		var badge := refs["badge"] as Label
+		badge.text = "%d/%d" % [used, have]
+		badge.visible = true
+		# Dim only cards you've used all opened copies of; a merely-full deck
+		# disables the click but keeps the art bright.
+		var copies_maxed := used >= have
+		(refs["button"] as Button).disabled = _local_finished or full or copies_maxed
+		(refs["card"] as Control).modulate = \
+			Color(0.45, 0.45, 0.45, 0.8) if copies_maxed else Color.WHITE
 
 
 func _refresh_deck_panel() -> void:
 	for c in _deck_box.get_children():
 		c.queue_free()
 	for id in _sorted_avail_ids():
-		if int(_counts.get(id, 0)) <= 0:
+		var n := int(_counts.get(id, 0))
+		if n <= 0:
 			continue
 		var d := CardDB.get_card_data(id)
-		var n := int(_counts[id])
-		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 6)
-		_deck_box.add_child(row)
-
-		var cost := GameTheme.make_label(str(int(d.get("cost", 0))), 13, GILT_BRIGHT)
-		cost.custom_minimum_size = Vector2(16, 0)
-		cost.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		row.add_child(cost)
-
-		var nm_txt := String(d.get("name", id))
-		if n > 1:
-			nm_txt += "  ×%d" % n
-		var is_creature := String(d.get("type", "creature")) == "creature"
-		var nm := GameTheme.make_label(nm_txt, 13, IVORY if is_creature else SPELL_BLUE)
-		nm.custom_minimum_size = Vector2(170, 0)
-		row.add_child(nm)
-
-		if not _local_finished:
-			var rem := GameTheme.make_themed_button("−",
-				Color(0.30, 0.18, 0.16), Vector2(28, 24), 15)
-			rem.pressed.connect(_on_remove.bind(id))
-			row.add_child(rem)
+		var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
+		var badge := thumb["badge"] as Label
+		badge.text = "×%d" % n
+		badge.visible = n > 1
+		var btn := thumb["button"] as Button
+		btn.tooltip_text = "%s — click to remove" % String(d.get("name", id))
+		if _local_finished:
+			btn.disabled = true
+		else:
+			btn.pressed.connect(_on_remove.bind(id))
+		_deck_box.add_child(thumb["root"])
 
 
 func _update_ready() -> void:

@@ -2194,6 +2194,76 @@ func show_confirm_dialog(host: Node, title: String, message: String,
 # the same CanvasLayer(1000) modal idiom as show_confirm_dialog so they render
 # above the settings overlay and die with the scene on a mid-modal transition.
 
+## Interactive deck-builder card thumbnail: a scaled, cache-baked Card2D in a
+## clickable slot with a mutable ×N badge and a gilt hover outline. Returns
+## {root, card, badge, button} — the caller wires `button.pressed` and updates
+## `badge.text` / `badge.visible` / `button.disabled` / `card.modulate` as the
+## deck changes. Lets deck screens show real card art instead of a name list.
+func make_card_thumb(card_data: Dictionary, card_scale: float = 0.46) -> Dictionary:
+	var w: float = 225.0 * card_scale
+	var h: float = 300.0 * card_scale
+	var slot := Control.new()
+	slot.custom_minimum_size = Vector2(w, h)
+	slot.size = Vector2(w, h)
+	slot.mouse_filter = Control.MOUSE_FILTER_PASS
+
+	var card = load("res://scenes/card_2d.tscn").instantiate()
+	card.card_data = card_data.duplicate(true)
+	card.card_id = card_data.get("id", "")
+	card.is_on_battlefield = true       # no drag / hover-lift
+	card.live_baked_mode = true         # cheap once the cache is warm
+	card.scale = Vector2(card_scale, card_scale)
+	card.position = Vector2.ZERO
+	slot.add_child(card)
+	CardTextureCache.bake(card_data)
+
+	# Full-rect transparent click catcher with a gilt hover outline (the "add /
+	# remove" affordance). Sits above the card, below the badge.
+	var btn := Button.new()
+	btn.flat = true
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+	btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+	var hov := StyleBoxFlat.new()
+	hov.bg_color = Color(1, 1, 1, 0.0)
+	hov.border_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.85)
+	hov.set_border_width_all(2)
+	hov.set_corner_radius_all(6)
+	btn.add_theme_stylebox_override("hover", hov)
+	btn.add_theme_stylebox_override("pressed", hov)
+	slot.add_child(btn)
+
+	# ×N count chip, bottom-right (gilt-on-dark). Hidden until the caller sets it.
+	var badge := Label.new()
+	badge.add_theme_font_size_override("font_size", 16)
+	if font_stat != null:
+		badge.add_theme_font_override("font", font_stat)
+	badge.add_theme_color_override("font_color", GILT_BRIGHT)
+	badge.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	badge.add_theme_constant_override("outline_size", 4)
+	badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	badge.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var bbg := StyleBoxFlat.new()
+	bbg.bg_color = Color(0.06, 0.05, 0.04, 0.92)
+	bbg.border_color = GILT
+	bbg.set_border_width_all(1)
+	bbg.set_corner_radius_all(4)
+	badge.add_theme_stylebox_override("normal", bbg)
+	badge.anchor_left = 1.0
+	badge.anchor_right = 1.0
+	badge.anchor_top = 1.0
+	badge.anchor_bottom = 1.0
+	badge.offset_left = -36.0
+	badge.offset_right = -5.0
+	badge.offset_top = -27.0
+	badge.offset_bottom = -5.0
+	badge.visible = false
+	slot.add_child(badge)
+
+	return {"root": slot, "card": card, "badge": badge, "button": btn}
+
+
 func show_deck_picker(host: Node, title: String, type_filter: String = "",
 		allow_cancel: bool = false) -> int:
 	## Modal grid of the run deck; the player clicks a card. Returns the chosen
