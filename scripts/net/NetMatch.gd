@@ -530,11 +530,20 @@ func get_entity(entity_id: int) -> Object:
 ## Send a draft message to the other peer (e.g. {"t":"pick","n":3}).
 func send_draft_event(event: Dictionary) -> void:
 	if vs_bot:
-		# Emulate the opponent: when the local player "finishes" their deck, the bot
-		# answers with its own warband so the scene's both-ready check launches.
-		if String(event.get("t", "")) == "finished":
+		# Emulate the absent opponent so single-player (vs-bot) lobbies clear the same
+		# handshakes a real peer would answer — without these echoes the scene waits
+		# on "Opponent: waiting" forever. Real multiplayer is unaffected (it never
+		# enters this branch and the live peer answers instead).
+		var t := String(event.get("t", ""))
+		if t == "finished":
+			# Deck handoff: answer with the bot's own randomly built warband.
 			var bot_cards := SkirmishBot.build_deck(match_seed ^ 0x80B0)
 			call_deferred("_apply_draft_event", {"t": "finished", "cards": bot_cards})
+		elif t == "ready":
+			# Quick Battle's both-ready gate: the bot is instantly ready, so echo it
+			# back. (Draft/Constructed/Sealed have no ready step — they go straight to
+			# "finished" above.)
+			call_deferred("_apply_draft_event", {"t": "ready"})
 		return
 	if not _can_send():
 		return
