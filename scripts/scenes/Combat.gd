@@ -378,6 +378,8 @@ var _incoming_dmg_chip: PanelContainer  # framed "incoming face damage" indicato
 var _incoming_dmg_icon: TextureRect  # crossed-swords / skull glyph in the chip
 var _enemy_hp_label: Label
 var _mana_label: Label
+var _gold_label: Label = null   # combat gold readout (campaign only; absent in skirmish)
+var _gold_displayed: int = -1   # last shown gold, for the change-flash
 var _mana_seal_post: Control = null   # player Command instrument (hover → tooltip)
 var _bank_pips: HBoxContainer = null  # carryover dots on the seal's plinth shelf
 var _turn_label: Label
@@ -2602,6 +2604,15 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 		spawn_keyword_callout_kw(defender, "poison")
 		defender.try_die()
 	var was_lethal: bool = defender.current_hp <= 0
+
+	# Audio: distinct creature-clash cues so a KILL no longer sounds identical to
+	# a glancing blow (the only combat where nothing played before). Graceful
+	# no-op until CC0 clips land in assets/audio/sfx/creature_death/ and /hit_creature/.
+	if strike_dealt_damage:
+		if was_lethal:
+			AudioBank.play_sfx("creature_death", 0.05)
+		else:
+			AudioBank.play_sfx("hit_creature", 0.08)
 
 	# Royal Guard "+1 ATK when hit" (+2 if upgraded) — if the defender is a
 	# Royal Guard and is still alive after the hit, it grows in fury.
@@ -10555,6 +10566,7 @@ func _build_left_info_column() -> void:
 	_build_encounter_scroll_diegetic()
 	_build_mana_post_diegetic()
 	_build_piles_diegetic()
+	_build_gold_chip_diegetic()
 	_build_potion_bar_diegetic()
 	_build_incoming_damage_chip()
 
@@ -11434,10 +11446,16 @@ func _build_command_seal_post(is_opp: bool) -> void:
 	# Caption below — letterspaced Cinzel in dim gilt, the chart-caption
 	# voice (the old light-blue Nunito "MANA" read as a debug label and was
 	# the loudest cheap note on the bottom rail).
-	var caption := _make_text_label("C O M M A N D", 11,
+	var caption := _make_text_label("COMMAND", 11,
 		Color(GILT.r, GILT.g, GILT.b, 0.85))
+	# Real letter-spacing (typographic tracking) via FontVariation instead of
+	# faking the wide-caps look with literal spaces between glyphs — keeps the
+	# chart-caption voice without the spaced-out string.
 	if GameTheme.font_title != null:
-		caption.add_theme_font_override("font", GameTheme.font_title)
+		var caption_fv := FontVariation.new()
+		caption_fv.base_font = GameTheme.font_title
+		caption_fv.spacing_glyph = 4
+		caption.add_theme_font_override("font", caption_fv)
 	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	caption.anchor_left = 0.0
 	caption.anchor_right = 1.0
@@ -11467,11 +11485,14 @@ func _build_command_seal_post(is_opp: bool) -> void:
 
 	# Lamp flicker: the wax is inert (no arcane breathing) — only the table
 	# light moves. Uneven up/down times keep the loop from reading metronomic.
-	var aura_tw := aura.create_tween().set_loops()
-	aura_tw.tween_property(aura, "modulate:a", 0.95, 1.3) \
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	aura_tw.tween_property(aura, "modulate:a", 0.55, 0.9) \
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	if UserSettings.reduce_motion:
+		aura.modulate.a = 0.9   # steady lamplight, no flicker
+	else:
+		var aura_tw := aura.create_tween().set_loops()
+		aura_tw.tween_property(aura, "modulate:a", 0.95, 1.3) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		aura_tw.tween_property(aura, "modulate:a", 0.55, 0.9) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 
 	if is_opp:
 		_net_opp_mana_post = post
@@ -11574,6 +11595,62 @@ func _build_piles_diegetic() -> void:
 	exhaust_box.visible = false
 	_exhaust_box = exhaust_box
 	_hud_layer.add_child(exhaust_box)
+
+
+func _build_gold_chip_diegetic() -> void:
+	# Combat gold readout — gold accrues mid-fight (Coin / Scroll of Greed relics,
+	# slay-gold, gain_gold effects) but was never shown in combat. Small struck
+	# coin + numeral in the left column under the piles. Campaign only (skirmish
+	# has no RunState gold context).
+	if _is_net():
+		return
+	var chip := Control.new()
+	chip.name = "GoldChip"
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.anchor_left = 0.0
+	chip.anchor_right = 0.0
+	chip.anchor_top = 0.0
+	chip.anchor_bottom = 0.0
+	chip.offset_left = 16
+	chip.offset_right = 16 + 130
+	chip.offset_top = 232
+	chip.offset_bottom = 232 + 28
+	_hud_layer.add_child(chip)
+	# Struck-coin disc: gilt fill, dark milled rim, a faint inner ring so it reads
+	# as a coin rather than a plain dot.
+	var coin := Panel.new()
+	coin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var cs := StyleBoxFlat.new()
+	cs.bg_color = Color(0.85, 0.66, 0.22)
+	cs.border_color = Color(0.28, 0.18, 0.05)
+	cs.set_border_width_all(2)
+	cs.set_corner_radius_all(999)
+	coin.add_theme_stylebox_override("panel", cs)
+	coin.position = Vector2(0, 3)
+	coin.size = Vector2(22, 22)
+	chip.add_child(coin)
+	var coin_inner := Panel.new()
+	coin_inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var cis := StyleBoxFlat.new()
+	cis.bg_color = Color(0, 0, 0, 0.0)
+	cis.border_color = Color(0.30, 0.20, 0.05, 0.6)
+	cis.set_border_width_all(1)
+	cis.set_corner_radius_all(999)
+	coin_inner.add_theme_stylebox_override("panel", cis)
+	coin_inner.position = Vector2(4, 4)
+	coin_inner.size = Vector2(14, 14)
+	coin.add_child(coin_inner)
+	var lbl := _make_text_label(str(RunState.gold), 18, Color(0.98, 0.86, 0.46))
+	if GameTheme.font_title_black:
+		lbl.add_theme_font_override("font", GameTheme.font_title_black)
+	lbl.position = Vector2(30, 0)
+	lbl.size = Vector2(100, 28)
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_child(lbl)
+	_gold_label = lbl
+	_gold_displayed = RunState.gold
 
 
 func _build_potion_bar_diegetic() -> void:
@@ -12017,7 +12094,6 @@ func _make_text_label(text: String, sz: int, color: Color) -> Label:
 var _glossary_layer: CanvasLayer = null
 
 const MECHANICS_HELP: Array = [
-	{"name": "Floop", "desc": "Skip a creature's attack this turn to use its ability instead. Toggle it before ending your turn."},
 	{"name": "Sacrifice", "desc": "Some cards destroy one of your own creatures as a cost — never free. Its On-Death effect still triggers."},
 	{"name": "Banking", "desc": "Carry up to 2 unused Command into next turn. Pay it like normal Command."},
 	{"name": "Front / Back row", "desc": "Both rows attack each turn — front goes first and is hit first. Back is queue space, not a separate tier."},
@@ -12432,6 +12508,10 @@ func _update_hud() -> void:
 		# The exhaust stack only exists on-screen once something has been removed
 		# for the fight — so an empty pile never sits there as a mystery.
 		_exhaust_box.visible = not _exhaust_pile.is_empty()
+	if _gold_label != null and RunState.gold != _gold_displayed:
+		_gold_displayed = RunState.gold
+		_gold_label.text = str(RunState.gold)
+		_punch_label(_gold_label, 1.18)
 	match phase:
 		Phase.PLAYER_TURN:
 			_phase_label.text = "YOUR TURN"
@@ -12478,7 +12558,7 @@ func screen_flash(color: Color, duration: float) -> void:
 	else:
 		add_child(flash)
 	var tw := create_tween()
-	tw.tween_property(flash, "color:a", 0.0, duration)
+	tw.tween_property(flash, "color:a", 0.0, UserSettings.anim_time(duration))
 	tw.tween_callback(flash.queue_free)
 
 
@@ -12618,6 +12698,9 @@ func spawn_floating_number(global_pos: Vector2, text: String, color: Color, big:
 	# it survives the source node's death and rides the screen-shake offset.
 	# Rises while fading; pops in with a slight back-eased scale.
 	var parent: Node = _hud_layer if _hud_layer != null else self
+	# Colour-blind: remap the float colour centrally so heal greens read distinct
+	# from damage reds under deuteranopia/protanopia (no-op when colorblind is off).
+	color = GameTheme.cb_color(color)
 	var lbl := Label.new()
 	lbl.text = text
 	lbl.add_theme_font_size_override("font_size", 38 if big else 26)
@@ -12635,9 +12718,9 @@ func spawn_floating_number(global_pos: Vector2, text: String, color: Color, big:
 	var rise := -54.0 if not big else -72.0
 	var tw := lbl.create_tween()
 	tw.set_parallel(true)
-	tw.tween_property(lbl, "scale", Vector2.ONE, 0.16).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	tw.tween_property(lbl, "position:y", lbl.position.y + rise, 0.72).set_ease(Tween.EASE_OUT)
-	tw.tween_property(lbl, "modulate:a", 0.0, 0.72).set_ease(Tween.EASE_IN).set_delay(0.18)
+	tw.tween_property(lbl, "scale", Vector2.ONE, UserSettings.anim_time(0.16)).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(lbl, "position:y", lbl.position.y + rise, UserSettings.anim_time(0.72)).set_ease(Tween.EASE_OUT)
+	tw.tween_property(lbl, "modulate:a", 0.0, UserSettings.anim_time(0.72)).set_ease(Tween.EASE_IN).set_delay(UserSettings.anim_time(0.18))
 	tw.chain().tween_callback(lbl.queue_free)
 
 
@@ -12809,6 +12892,11 @@ func _start_low_hp_dread() -> void:
 	if _low_hp_tween != null and _low_hp_tween.is_valid():
 		_low_hp_tween.kill()
 	_low_hp_vignette.visible = true
+	if UserSettings.reduce_motion:
+		# Reduce Motion: hold the dread vignette steady instead of the breathing
+		# heartbeat pulse. Still signals low HP (informational), no oscillation.
+		_set_low_hp_vignette_alpha(0.75)
+		return
 	_low_hp_tween = create_tween().set_loops()
 	_low_hp_tween.tween_method(_set_low_hp_vignette_alpha, 0.12, 1.0, 0.62) \
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
@@ -13111,6 +13199,8 @@ func _play_pierce_lance(from_pos: Vector2, to_pos: Vector2) -> void:
 
 
 func spawn_ash_burst(global_pos: Vector2, color: Color, amount: int = 26) -> void:
+	if not UserSettings.particles:
+		return
 	# One-shot rising ember/ash burst, parented to the HUD layer so it survives the
 	# source card being freed. Used by the sacrifice ritual and piercing exit spark.
 	var parent: Node = _hud_layer if _hud_layer != null else self
@@ -13597,6 +13687,8 @@ func _legacy_spell_color(spell_type: String) -> Color:
 
 
 func spawn_spell_burst(global_pos: Vector2, color: Color) -> void:
+	if not UserSettings.particles:
+		return
 	# One-shot particle pop where a spell resolves. CPUParticles so it renders on
 	# every backend. Self-frees once the burst finishes.
 	var burst := CPUParticles2D.new()
@@ -13629,6 +13721,8 @@ func spawn_spell_burst(global_pos: Vector2, color: Color) -> void:
 # =====================================================================
 
 func _spawn_family_particles(global_pos: Vector2, params: Dictionary) -> void:
+	if not UserSettings.particles:
+		return
 	# Generic CPUParticles2D emitter. `params` keys mirror the Godot 4
 	# CPUParticles2D property names but with Pythonic min/max suffixes so the
 	# six per-family preset dicts above stay readable.

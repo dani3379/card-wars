@@ -170,7 +170,7 @@ func _build_ui() -> void:
 		pcolor)
 	if RunState.has_downside("no_potions"):
 		potion.button.disabled = true
-		potion.label.text = "%s\nBlocked by Temperance Vow" % pname
+		potion.label.text = "%s\nCan't buy potions (Temperance Vow)" % pname
 	elif RunState.gold < potion_price:
 		potion.button.disabled = true
 	elif not RunState.can_add_potion():
@@ -182,7 +182,7 @@ func _build_ui() -> void:
 	# Card removal service
 	var remove_price = _price(REMOVE_COST)
 	var removal = _make_service_slot("res://assets/icons/downloaded/cards1.png",
-		"Remove a Card\nBuy — %dg" % remove_price,
+		"Thin your deck\nBuy — %dg" % remove_price,
 		Color(0.45, 0.15, 0.15))
 	removal.button.disabled = RunState.gold < remove_price or RunState.deck.size() <= 1
 	removal.button.pressed.connect(_start_remove_mode.bind(remove_price))

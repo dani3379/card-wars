@@ -86,9 +86,9 @@ func _ready() -> void:
 	# Open INSIDE the dress crossfade band (DRESS_ZOOM_LO 1.10 .. HI 1.30) so
 	# the keep/region/place-name plaques are legible on arrival. The old 1.45
 	# sat above the band, fading every campaign label to zero until the player
-	# happened to wheel out. 1.20 ≈ a 50% campaign-dress blend — names read,
-	# the march chips still lead.
-	_animate_focus(_player_pos if _has_player else _camp_pos, 1.20)
+	# happened to wheel out. 1.15 ≈ a 75% campaign-dress blend — place/kingdom
+	# names read clearly on arrival, the march chips still lead.
+	_animate_focus(_player_pos if _has_player else _camp_pos, 1.15)
 	# Checkpoint: every return to the map captures post-room state (HP, gold,
 	# deck changes, relics earned). Clear the room-in-progress fields first so a
 	# later resume lands on the map rather than re-entering the room the player

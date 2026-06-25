@@ -1328,10 +1328,10 @@ func _load_keyword_icons() -> void:
 	var keywords = [
 		"armored", "swift", "ranged", "thorns", "regenerate", "summon",
 		"last_stand", "piercing", "sacrifice", "exhaust", "retain",
-		"wither", "on_enter", "on_death", "floop", "adj_buff",
+		"wither", "on_enter", "on_death", "adj_buff",
 		# Redesign keywords — were silently icon-less (no bottom-margin device).
 		"shield", "poison", "guardian", "doom", "rampage", "lifelink",
-		"overrun", "formation",
+		"overrun", "formation", "structure",
 	]
 	for k in keywords:
 		var p = "res://assets/icons/keywords/%s.svg" % k
@@ -1341,6 +1341,35 @@ func _load_keyword_icons() -> void:
 
 func get_keyword_icon(keyword: String) -> Texture2D:
 	return _keyword_icons.get(keyword, null)
+
+
+## Colour-blind remap. Critical red/green (and blue/yellow) signals route through
+## this so the `colorblind_mode` setting (UserSettings) actually changes what's on
+## screen — it had ZERO consumers before. "off" returns the colour unchanged, so
+## default players pay only one string compare. Strategy: shift the CONFUSABLE hue
+## family to a distinguishable one (cheap + predictable; enough for stat/float
+## legibility) rather than a full per-pixel daltonisation.
+func cb_color(c: Color) -> Color:
+	var mode: String = UserSettings.colorblind_mode
+	if mode == "off":
+		return c
+	var h := c.h
+	match mode:
+		"deuteranopia", "protanopia":
+			# Red↔green confusable. Keep red/orange; rotate the GREEN family
+			# (hue ~75°..165°) toward blue so heal/buff greens read distinct
+			# from damage reds.
+			if h >= 0.21 and h <= 0.46:
+				return Color.from_hsv(0.56, clampf(c.s, 0.4, 1.0),
+					clampf(c.v * 1.04, 0.0, 1.0), c.a)
+			return c
+		"tritanopia":
+			# Blue↔yellow confusable. Push the BLUE family (hue ~190°..260°)
+			# toward teal/cyan so navy/cost blues don't collapse into greens.
+			if h >= 0.52 and h <= 0.72:
+				return Color.from_hsv(0.47, c.s, c.v, c.a)
+			return c
+	return c
 
 
 func get_card_frame(card_data: Dictionary) -> Texture2D:

@@ -1035,6 +1035,7 @@ var _default_border_color: Color
 # invisible against the gold shield.
 var _atk_base_color: Color = Color.WHITE
 var _hp_base_color: Color = Color.WHITE
+var _atk_caret: Control = null   # ▲/▼ shape cue beside a buffed/debuffed ATK seal
 
 var _is_hovered := false
 var _is_being_dragged := false
@@ -3138,7 +3139,7 @@ class WaxSeal extends Control:
 		# face sits directly under the stat label on both the 56px hand seal and
 		# the 38px battlefield token; a deeper well is what lets the brightened
 		# field numeral read over dark art (see _build_orb_number_label).
-		draw_circle(center, ring_r - 2.5, Color(0, 0, 0, 0.20), true, -1.0, true)
+		draw_circle(center, ring_r - 2.5, Color(0, 0, 0, 0.32), true, -1.0, true)
 		# 6 — matte sheen: one soft crescent toward the light (PI..1.5PI =
 		# left → up-left → up), wide and dim — wax, not glass.
 		draw_arc(center, base_r * 0.55, PI * 1.02, PI * 1.55, 18,
@@ -3152,6 +3153,31 @@ class WaxSeal extends Control:
 			draw_circle(center + Vector2(cos(a), sin(a)) * rr,
 				0.8 + rng.randf() * 1.0,
 				Color(1, 1, 1, 0.05 + rng.randf() * 0.05), true, -1.0, true)
+
+
+## A small drawn caret (triangle) marking a buffed (▲) or debuffed (▼) ATK — the
+## non-colour redundancy for the gold/red stat recolour, so the buff signal
+## survives colour-blindness. Drawn, not a font glyph, so it renders regardless of
+## the card font's glyph coverage.
+class StatCaret extends Control:
+	var up := true
+	var col := Color(1.0, 0.8, 0.2)
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+	func _draw() -> void:
+		var w := size.x
+		var h := size.y
+		var pts: PackedVector2Array
+		if up:
+			pts = PackedVector2Array([Vector2(w * 0.5, 0.0), Vector2(w, h), Vector2(0.0, h)])
+		else:
+			pts = PackedVector2Array([Vector2(0.0, 0.0), Vector2(w, 0.0), Vector2(w * 0.5, h)])
+		# Dark halo (offset copy) first so the caret reads on any background.
+		var halo := PackedVector2Array()
+		for p in pts:
+			halo.append(p + Vector2(0.0, 1.0))
+		draw_colored_polygon(halo, Color(0, 0, 0, 0.85))
+		draw_colored_polygon(pts, col)
 
 
 ## Aged-paper tooth for the card leaf interior: seeded mottling washes,
@@ -3321,7 +3347,7 @@ func _chart_seal(wax: Color, _metal: Color) -> Control:
 ## in the document's bottom margin — printed ON the paper, never pinned
 ## over the painting (the art plate stays clean; that was v7's mistake).
 func _kw_stamp_row(root: Control, meds: Array, metal: Color,
-		total_meds: int = -1) -> void:
+		total_meds: int = -1, kw_ids: Array = []) -> void:
 	var n: int = min(meds.size(), 3)
 	if n == 0:
 		return
@@ -3351,6 +3377,11 @@ func _kw_stamp_row(root: Control, meds: Array, metal: Color,
 		stamp.position = Vector2(x0 + float(i) * (box + gap), 260.5)
 		stamp.size = Vector2(box, box)
 		root.add_child(stamp)
+		if i < kw_ids.size():
+			# Hover reminder on the live keyword roundel (previously mute). PASS so
+			# the card's own drag/hover still works underneath.
+			stamp.mouse_filter = Control.MOUSE_FILTER_PASS
+			stamp.tooltip_text = KeywordEffects.tooltip_for(String(kw_ids[i]))
 		var glyph := TextureRect.new()
 		glyph.texture = meds[i]
 		glyph.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
@@ -3715,6 +3746,7 @@ func _build_chart_proto() -> void:
 	# Count ALL icon-bearing keywords (don't cap the count here) so the rail can
 	# render a "+N" overflow marker when a card carries more devices than fit.
 	var combat_meds: Array = []
+	var combat_kw_ids: Array = []
 	var kw_icon_total := 0
 	for k in card_data.get("keywords", []):
 		var k_str := String(k)
@@ -3724,8 +3756,9 @@ func _build_chart_proto() -> void:
 		kw_icon_total += 1
 		if combat_meds.size() < 3:
 			combat_meds.append(icon_tex)
+			combat_kw_ids.append(k_str)
 	if not is_sp:
-		_kw_stamp_row(root, combat_meds, metal, kw_icon_total)
+		_kw_stamp_row(root, combat_meds, metal, kw_icon_total, combat_kw_ids)
 
 	# ── clean inscribed-vellum panel under the rules text ────────────────
 	# The procedural ParchmentPlate ages the whole leaf with sepia washes +
@@ -3854,10 +3887,13 @@ func _build_chart_proto() -> void:
 		# bake-overlay contract (see CLAUDE.md).
 		_cost_label = _make_styled_label(
 			"" if bake_strip_stats else str(card_data.get("cost", 0)),
-			stat_font, 18, Color(0.96, 0.92, 0.83))
+			stat_font, 19, Color(1, 1, 1))
 		_cost_label.add_theme_color_override("font_outline_color",
-			Color(0.06, 0.04, 0.03, 0.96))
-		_cost_label.add_theme_constant_override("outline_size", 5)
+			Color(0, 0, 0, 1.0))
+		_cost_label.add_theme_constant_override("outline_size", 6)
+		_cost_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+		_cost_label.add_theme_constant_override("shadow_offset_x", 1)
+		_cost_label.add_theme_constant_override("shadow_offset_y", 1)
 		_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 		_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
 		_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
@@ -3875,11 +3911,14 @@ func _build_chart_proto() -> void:
 		atk_seal.offset_bottom = 9
 		root.add_child(atk_seal)
 		_atk_label = _make_styled_label(
-			"" if bake_strip_stats else str(current_atk), stat_font, 18,
-			Color(0.96, 0.92, 0.83))
+			"" if bake_strip_stats else str(current_atk), stat_font, 19,
+			Color(1, 1, 1))
 		_atk_label.add_theme_color_override("font_outline_color",
-			Color(0.06, 0.04, 0.03, 0.96))
-		_atk_label.add_theme_constant_override("outline_size", 5)
+			Color(0, 0, 0, 1.0))
+		_atk_label.add_theme_constant_override("outline_size", 6)
+		_atk_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+		_atk_label.add_theme_constant_override("shadow_offset_x", 1)
+		_atk_label.add_theme_constant_override("shadow_offset_y", 1)
 		_atk_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 		_atk_label.offset_top = ORB_NUMERAL_Y_OFFSET
 		_atk_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
@@ -3897,11 +3936,14 @@ func _build_chart_proto() -> void:
 		hp_seal.offset_bottom = 9
 		root.add_child(hp_seal)
 		_hp_label = _make_styled_label(
-			"" if bake_strip_stats else str(current_hp), stat_font, 18,
-			Color(0.96, 0.92, 0.83))
+			"" if bake_strip_stats else str(current_hp), stat_font, 19,
+			Color(1, 1, 1))
 		_hp_label.add_theme_color_override("font_outline_color",
-			Color(0.06, 0.04, 0.03, 0.96))
-		_hp_label.add_theme_constant_override("outline_size", 5)
+			Color(0, 0, 0, 1.0))
+		_hp_label.add_theme_constant_override("outline_size", 6)
+		_hp_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+		_hp_label.add_theme_constant_override("shadow_offset_x", 1)
+		_hp_label.add_theme_constant_override("shadow_offset_y", 1)
 		_hp_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 		_hp_label.offset_top = ORB_NUMERAL_Y_OFFSET
 		_hp_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
@@ -3922,10 +3964,13 @@ func _build_chart_proto() -> void:
 		root.add_child(sp_cost)
 		_cost_label = _make_styled_label(
 			"" if bake_strip_stats else str(card_data.get("cost", 0)),
-			stat_font, 18, Color(0.96, 0.92, 0.83))
+			stat_font, 19, Color(1, 1, 1))
 		_cost_label.add_theme_color_override("font_outline_color",
-			Color(0.06, 0.04, 0.03, 0.96))
-		_cost_label.add_theme_constant_override("outline_size", 5)
+			Color(0, 0, 0, 1.0))
+		_cost_label.add_theme_constant_override("outline_size", 6)
+		_cost_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+		_cost_label.add_theme_constant_override("shadow_offset_x", 1)
+		_cost_label.add_theme_constant_override("shadow_offset_y", 1)
 		_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 		_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
 		_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
@@ -5364,10 +5409,43 @@ func update_stat_display() -> void:
 		_atk_label.text = str(display_atk)
 		if display_atk > card_data.atk:
 			_atk_label.add_theme_color_override("font_color", GameTheme.ATK_BUFFED)
+			_set_atk_caret(1)
 		elif display_atk < card_data.atk:
 			_atk_label.add_theme_color_override("font_color", GameTheme.HP_DAMAGED)
+			_set_atk_caret(-1)
 		else:
 			_atk_label.add_theme_color_override("font_color", _atk_base_color)
+			_set_atk_caret(0)
+
+
+func _set_atk_caret(state: int) -> void:
+	# state: 1 = buffed (▲ gold), -1 = debuffed (▼ red), 0 = none. The drawn caret
+	# is the non-colour redundancy for the ATK recolour (colour-blind safety).
+	if _atk_label == null:
+		return
+	if _atk_caret == null:
+		if state == 0:
+			return
+		var seal := _atk_label.get_parent()
+		if seal == null:
+			return
+		var c := StatCaret.new()
+		c.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+		c.offset_left = -15
+		c.offset_right = -3
+		c.offset_top = 2
+		c.offset_bottom = 13
+		c.z_index = 6
+		seal.add_child(c)
+		_atk_caret = c
+	var caret := _atk_caret as StatCaret
+	if state == 0:
+		caret.visible = false
+		return
+	caret.visible = true
+	caret.up = state > 0
+	caret.col = GameTheme.cb_color(GameTheme.ATK_BUFFED if state > 0 else GameTheme.HP_DAMAGED)
+	caret.queue_redraw()
 
 
 func update_floop_display() -> void:
@@ -5431,6 +5509,8 @@ func _start_floop_pulse() -> void:
 	# from the corner of the eye. Kept slow (1.4s full cycle) and shallow
 	# (alpha 0.55-1.0) so it never crosses into "distracting" territory.
 	if _floop_indicator == null:
+		return
+	if UserSettings.reduce_motion:
 		return
 	if _floop_pulse_tween and _floop_pulse_tween.is_valid():
 		return
@@ -5991,10 +6071,13 @@ func set_danger_marked(on: bool, amount: int = 0) -> void:
 		badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		ov.add_child(badge)
 		_danger_overlay = ov
-		var tw := create_tween().set_loops()
-		tw.tween_property(ov, "modulate:a", 0.5, 0.55).set_trans(Tween.TRANS_SINE)
-		tw.tween_property(ov, "modulate:a", 1.0, 0.55).set_trans(Tween.TRANS_SINE)
-		_danger_tween = tw
+		if UserSettings.reduce_motion:
+			ov.modulate.a = 1.0
+		else:
+			var tw := create_tween().set_loops()
+			tw.tween_property(ov, "modulate:a", 0.5, 0.55).set_trans(Tween.TRANS_SINE)
+			tw.tween_property(ov, "modulate:a", 1.0, 0.55).set_trans(Tween.TRANS_SINE)
+			_danger_tween = tw
 	else:
 		if _danger_tween != null:
 			_danger_tween.kill()
@@ -6136,10 +6219,16 @@ func set_threat_flagged(on: bool, damage: int = 0) -> void:
 				_threat_dmg_label.visible = false
 		if _threat_tween != null and _threat_tween.is_valid():
 			_threat_tween.kill()
-		# Gentler pulse floor — the old 0.35 trough strobed against warm art.
-		_threat_tween = create_tween().set_loops()
-		_threat_tween.tween_property(_threat_overlay, "modulate:a", 0.55, 0.50).set_trans(Tween.TRANS_SINE)
-		_threat_tween.tween_property(_threat_overlay, "modulate:a", 1.0, 0.50).set_trans(Tween.TRANS_SINE)
+			_threat_tween = null
+		if UserSettings.reduce_motion:
+			# Reduce Motion: keep the threat overlay visible (informational) but
+			# hold it steady — the alpha oscillation is the decorative part.
+			_threat_overlay.modulate.a = 1.0
+		else:
+			# Gentler pulse floor — the old 0.35 trough strobed against warm art.
+			_threat_tween = create_tween().set_loops()
+			_threat_tween.tween_property(_threat_overlay, "modulate:a", 0.55, 0.50).set_trans(Tween.TRANS_SINE)
+			_threat_tween.tween_property(_threat_overlay, "modulate:a", 1.0, 0.50).set_trans(Tween.TRANS_SINE)
 	else:
 		if _threat_tween != null:
 			_threat_tween.kill()
@@ -6167,6 +6256,9 @@ func enable_idle_bob() -> void:
 	# the slot cell) doesn't re-layout unless children change, so writing
 	# position.y each frame sticks.
 	if _idle_bob_enabled or static_display:
+		return
+	if UserSettings.reduce_motion:
+		# Reduce Motion: the idle breathing bob is purely decorative — never start it.
 		return
 	if not is_on_battlefield:
 		return
@@ -6613,9 +6705,13 @@ func _wd_build(cd: Dictionary) -> Control:
 	const PAD := 18.0          # page margin to the leaf edge
 	const TXT_L := PAD + 6.0   # inset for written text inside the page
 	const INK := Color(0.141, 0.094, 0.063)   # #241810 body ink
-	const WAX_ATK := Color(0.45, 0.12, 0.10)  # oxblood
-	const WAX_HP := Color(0.16, 0.34, 0.18)   # forest
-	const WAX_COST := Color(0.12, 0.18, 0.40) # navy command
+	# Match the board/hand seal family exactly (ATK=bronze, HP=oxblood, Cost=navy)
+	# — these were previously inverted (ATK read red, HP read green), so red meant
+	# HP on the card face but ATK in this inspector. Unified to the canonical
+	# GameTheme constants so one colour means one stat everywhere.
+	const WAX_ATK := Color(0.471, 0.376, 0.157)  # burnished bronze (ATK_GOLD_SHIELD)
+	const WAX_HP := Color(0.510, 0.137, 0.106)   # oxblood (HEALTH_RED_DROP)
+	const WAX_COST := Color(0.149, 0.255, 0.404) # navy command (COST_BLUE_GEM)
 
 	var rarity: String = String(cd.get("rarity", "common"))
 	var is_creature_card: bool = String(cd.get("type", "")) == "creature"

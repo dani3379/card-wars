@@ -315,12 +315,15 @@ func _wire_banner(banner: Control, row: HBoxContainer, accent: Color, on_click: 
 	banner.add_child(glow)
 	# Subtle infinite pulse — slow enough not to distract, just enough to
 	# read as living firelight reflected on the parchment.
-	var tw := create_tween()
-	tw.set_loops()
-	tw.tween_property(glow, "modulate:a", 0.55, 1.8) \
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	tw.tween_property(glow, "modulate:a", 0.85, 1.8) \
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	if UserSettings.reduce_motion:
+		glow.modulate.a = 0.7   # steady firelight, no pulse
+	else:
+		var tw := create_tween()
+		tw.set_loops()
+		tw.tween_property(glow, "modulate:a", 0.55, 1.8) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		tw.tween_property(glow, "modulate:a", 0.85, 1.8) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 
 
 func _make_hotspot_glow(accent: Color) -> TextureRect:

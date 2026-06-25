@@ -2192,6 +2192,10 @@ const SITE_STYLE := {
 	"treasure": {"r": 14.0, "tint": Color(0.88, 0.68, 0.18), "wash": 0.24},
 	"recruit": {"r": 14.0, "tint": Color(0.22, 0.38, 0.55), "wash": 0.18},
 	"wayside": {"r": 13.0, "tint": Color(0.42, 0.35, 0.24), "wash": 0.10},
+	# Boss ("THE KEEP") is drawn as separate keep furniture on the plate, but the
+	# legend looks its style up here — deep crimson so the legend chip reads as the
+	# act climax rather than a dull wayside-fallback disc.
+	"boss": {"r": 20.0, "tint": Color(0.55, 0.10, 0.08), "wash": 0.30},
 }
 
 
@@ -2514,6 +2518,7 @@ func _draw_ui() -> void:
 			waysides_present[String(nd2.get("wayside_id", ""))] = true
 	var items: Array = []
 	for it0 in [["combat", "FIGHT", ""], ["elite", "GENERAL", ""],
+			["boss", "THE KEEP", ""],
 			["rest", "REST", ""], ["shop", "SHOP · spend gold", ""],
 			["event", "EVENT", ""], ["treasure", "TREASURE", ""],
 			["recruit", "RECRUIT · free draft", ""]]:

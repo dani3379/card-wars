@@ -78,7 +78,7 @@ func _build_ui() -> void:
 		btn.pressed.connect(_pick_relic.bind(id))
 		relic_row.add_child(btn)
 
-	var skip_btn = GameTheme.make_back_button("Skip Relic", Vector2(160, 42))
+	var skip_btn = GameTheme.make_back_button("Take Gold Only", Vector2(160, 42))
 	skip_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	skip_btn.pressed.connect(_leave)
 	outer.add_child(skip_btn)

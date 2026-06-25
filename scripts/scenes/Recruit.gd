@@ -173,7 +173,7 @@ func _build_ui() -> void:
 			card.is_on_battlefield = true
 			slot.add_child(card)
 
-			var pick_btn = GameTheme.make_back_button("Enlist", Vector2(120, 36), 16,
+			var pick_btn = GameTheme.make_back_button("Enlist — free", Vector2(120, 36), 16,
 				GameTheme.KEYWORD_GOLD)
 			pick_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 			pick_btn.pressed.connect(_enlist.bind(id))
