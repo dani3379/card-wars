@@ -82,8 +82,20 @@ func _run() -> void:
 	_check(int(combat._net_active_index) == 0, "opening turn is the host's (active=0)")
 
 	# End the host's empty opening turn → passes to the bot (active=1) → bot plays.
+	# The bot now ANIMATES each creature out of its hand (a ~0.4 s arc per play), so
+	# poll on _bot_turns_taken (a latching "the bot finished a turn" counter) rather
+	# than a fixed wait — a fixed sleep would be racy against the play animations, and
+	# active_index is 0 both before the handoff AND after the bot passes back.
 	combat._net_run_attack(0)
-	await create_timer(4.5).timeout
+	var waited := 0
+	while int(combat._bot_turns_taken) < 1 and not combat._net_match_over and waited < 250:
+		await create_timer(0.1).timeout
+		waited += 1
+	# Let the bot's post-play attack settle and the turn hand back to the host.
+	var waited2 := 0
+	while int(combat._net_active_index) != 0 and not combat._net_match_over and waited2 < 100:
+		await create_timer(0.1).timeout
+		waited2 += 1
 
 	var bot_creatures := 0
 	for row in [0, 1]:

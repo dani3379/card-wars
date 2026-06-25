@@ -14257,6 +14257,15 @@ func _net_begin_combat() -> void:
 	phase = Phase.PLAYER_TURN
 	if _is_host():
 		_show_info("Skirmish — you have the first move.")
+		# Practice bot: deal its opening hand now so the human sees the opponent
+		# holding cards through their whole first turn (the +1 going-second card is
+		# folded in by _bot_refill_hand while _bot_turns_taken == 0 — no double draw
+		# when its first _bot_take_turn tops the same hand up to the same target), and
+		# warm its deck's card faces (fire-and-forget — ready by the bot's first play).
+		if SkirmishState.vs_bot:
+			_bot_refill_hand()
+			_bot_sync_hand_display()
+			_net_prebake_bot_textures()
 		await get_tree().create_timer(0.6).timeout
 		_net_start_turn(0)
 	else:
@@ -14842,7 +14851,7 @@ func _on_net_intent(sender_id: int, intent: Dictionary) -> void:
 
 ## HOST: seat the client's creature on the host's ENEMY side, run its on-enter
 ## authoritatively, then snapshot the new board to the client.
-func _net_apply_remote_creature(intent: Dictionary) -> void:
+func _net_apply_remote_creature(intent: Dictionary, animate: bool = false) -> void:
 	if _net_active_index != 1:
 		return   # not the client's turn
 	var lane: int = int(intent.get("lane", -1))
@@ -14855,6 +14864,14 @@ func _net_apply_remote_creature(intent: Dictionary) -> void:
 	if data.is_empty():
 		return
 	var uid: int = int(intent.get("uid", _net_issue_token_id()))
+	if animate:
+		# Bot play: throw the card from the foe's hand into the slot before seating it.
+		await _bot_animate_creature_play(data, lane, row)
+		# The throw awaited a few frames — re-validate the turn/slot before committing.
+		if _net_match_over or _net_active_index != 1:
+			return
+		if _row_array(true, row)[lane] != null:
+			return
 	_net_spawn_creature(data, uid, lane, row, true, true)
 	_net_sync_board()
 
@@ -14973,6 +14990,7 @@ func _bot_take_turn() -> void:
 		return
 	_bot_refill_hand()
 	var mana: int = SkirmishState.BASE_MAX_MANA + _bot_banked_mana
+	_bot_sync_hand_display(mana)   # the foe's hand fills up + Command seal lights
 	var plays: Array = SkirmishBot.decide_turn(self, _bot_hand, mana)
 	var spent := 0
 	for intent in plays:
@@ -14980,6 +14998,9 @@ func _bot_take_turn() -> void:
 			break
 		await _short_pause(COMBAT_PAUSE_SHORT)
 		spent += _bot_consume_card(int(intent.get("uid", -1)))
+		# Drop the card from the visible fan BEFORE the play animates, so the throw
+		# reads as that card leaving the hand (not a phantom extra).
+		_bot_sync_hand_display(mana - spent)
 		await _bot_apply_intent(intent)
 	_bot_banked_mana = clampi(mana - spent, 0, MAX_BANKED_MANA)
 	_bot_turns_taken += 1
@@ -15001,11 +15022,112 @@ func _bot_consume_card(uid: int) -> int:
 func _bot_apply_intent(intent: Dictionary) -> void:
 	match String(intent.get("t", "")):
 		NetMatch.IN_PLAY_CREATURE:
-			await _net_apply_remote_creature(intent)
+			# animate=true → the card arcs from the foe's hand into its slot first.
+			await _net_apply_remote_creature(intent, true)
 		NetMatch.IN_PLAY_SPELL:
 			await _net_apply_remote_spell(intent)
 		NetMatch.IN_REPOSITION:
 			await _net_apply_remote_reposition(intent)
+
+
+## Push the bot's virtual hand (count) and Command budget to the readouts the human
+## watches — the face-down fan up top and the foe Command seal — so the bot reads as
+## an opponent who holds, then spends, a real hand. `mana_now` is the bot's REMAINING
+## budget this turn (-1 = recompute the full turn budget, e.g. on the opening deal).
+func _bot_sync_hand_display(mana_now: int = -1) -> void:
+	_net_opp_hand_count = _bot_hand.size()
+	_net_refresh_opp_hand()
+	if mana_now < 0:
+		mana_now = SkirmishState.BASE_MAX_MANA + _bot_banked_mana
+	_net_set_opp_mana(maxi(0, mana_now), SkirmishState.BASE_MAX_MANA)
+
+
+## Warm the CardTextureCache for the bot's whole deck so its played creatures fly in
+## showing their real FACE (not the fallback card back). Mirrors _prebake_hand_textures:
+## the same headless guard skips it in automated runs (bake_many parks on the
+## RenderingServer frames that never fire under the dummy display server). Fired
+## (not awaited) at match start, so it warms during the human's opening turn.
+func _net_prebake_bot_textures() -> void:
+	if DisplayServer.get_name() == "headless" or CardTextureCache == null:
+		return
+	var slot: SkirmishState.PlayerSlot = SkirmishState.get_slot(1)
+	if slot == null:
+		return
+	var seen := {}
+	var to_bake: Array = []
+	for id in slot.deck:
+		var sid := String(id)
+		if seen.has(sid):
+			continue
+		seen[sid] = true
+		to_bake.append(CardDB.get_card_data(sid))
+	await CardTextureCache.bake_many(to_bake)
+
+
+## Cosmetic: a ghost of the card the bot is about to play arcs from the opponent's
+## hand (top) down to its destination slot, so a bot creature reads as "taken from
+## hand and set down" rather than teleported onto the board. Awaited by
+## _net_apply_remote_creature before the real creature is seated. Shows the card FACE
+## when its texture is already baked (the bot's deck is warmed at match start via
+## _net_prebake_bot_textures), and the face-down card back otherwise. It NEVER awaits
+## bake() — that blocks on RenderingServer frames which never fire headless, and this
+## is purely cosmetic, so it must not be able to stall the bot's turn.
+func _bot_animate_creature_play(data: Dictionary, lane: int, row: int) -> void:
+	if _hud_layer == null or not is_instance_valid(_hud_layer):
+		return
+	var slots: Array = _slot_array(true, row)
+	if lane < 0 or lane >= slots.size() or slots[lane] == null \
+			or not is_instance_valid(slots[lane]):
+		return
+	var dest: Vector2 = slots[lane].get_global_rect().get_center()
+	# Origin = the opponent's hand fan (top-right); fall back to the top-right corner.
+	var origin := Vector2(get_viewport_rect().size.x - 150.0, 56.0)
+	if _net_opp_hand_box != null and is_instance_valid(_net_opp_hand_box) \
+			and _net_opp_hand_box.visible:
+		origin = _net_opp_hand_box.get_global_rect().get_center()
+	var tex: Texture2D = null
+	if CardTextureCache != null:
+		tex = CardTextureCache.get_texture(data)   # sync read; null if not yet baked
+	if tex == null:
+		tex = _net_card_back_tex                    # face-down fallback (always loaded)
+	var travel := Vector2(132, 172)   # readable card in flight
+	var land := Vector2(104, 136)     # settles toward the board-token footprint
+	var ghost := TextureRect.new()
+	if tex != null:
+		ghost.texture = tex
+	ghost.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	ghost.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ghost.z_index = 220
+	ghost.size = travel
+	ghost.pivot_offset = travel * 0.5   # rotate/settle about the card's centre
+	ghost.position = origin - travel * 0.5
+	ghost.modulate.a = 0.0
+	_hud_layer.add_child(ghost)
+
+	var duration := 0.42
+	# Bow the path downward — the foe reaches up out of its hand and sets the card down.
+	var ctrl := origin.lerp(dest, 0.5) + Vector2(0, -86.0)
+	var tw := ghost.create_tween().set_parallel(true)
+	tw.tween_method(func(t: float):
+		if not is_instance_valid(ghost):
+			return
+		var p1 := origin.lerp(ctrl, t)
+		var p2 := ctrl.lerp(dest, t)
+		var sz: Vector2 = travel.lerp(land, t)
+		ghost.size = sz
+		ghost.position = p1.lerp(p2, t) - sz * 0.5
+	, 0.0, 1.0, duration).set_ease(Tween.EASE_IN_OUT).set_trans(Tween.TRANS_QUAD)
+	tw.tween_property(ghost, "modulate:a", 1.0, 0.12)
+	tw.tween_property(ghost, "rotation", 0.0, duration).from(randf_range(-0.12, 0.12)) \
+		.set_ease(Tween.EASE_OUT)
+	# Gate on a real timer (NOT tw.finished) so the bot's turn can never stall on a
+	# tween — the tween only drives the cosmetics in parallel; the timer is the clock.
+	await _short_pause(duration)
+	if is_instance_valid(ghost):
+		ghost.queue_free()
+	if AudioBank != null:
+		AudioBank.play_sfx("card_play")
 
 
 # ── Events (host → client) ───────────────────────────────────────────────
