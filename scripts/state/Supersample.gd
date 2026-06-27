@@ -146,14 +146,14 @@ func _unhandled_input(event: InputEvent) -> void:
 	# they don't consume is forwarded into the SubViewport so the game — buttons,
 	# card drags, spell-target _input, hover — receives it.
 	#
-	# Coords need a remap: the SubViewport RENDERS at window×render_scale, and
-	# push_input() applies that stretch (override→render = ×render_scale) to the
-	# event. The event arrives in window space, so we must pre-divide by
-	# render_scale or the two multiply out — clicks then drift further off the
-	# further the cursor is from the top-left (error grows with distance). The
-	# transform is identity at scale 1, but the rig is only active above 1 anyway.
+	# Push in LOCAL coords. Because size_2d_override pins the SubViewport's 2D
+	# space to the window size, the window-space event is ALREADY in the viewport's
+	# local coordinate system — so in_local_coords=true tells push_input NOT to
+	# apply its own stretch transform. Applying that transform (the default, and
+	# the cause of the earlier bugs) mis-scales the position so clicks miss every
+	# control. This also leaves InputEvent.global_position as true screen coords,
+	# which the card-drag system depends on. Verified against a headless hit-test
+	# rig: only this (and an equivalent ×scale remap) actually lands on controls.
 	if not is_active():
 		return
-	var inv := 1.0 / render_scale
-	var xform := Transform2D(0.0, Vector2(inv, inv), 0.0, Vector2.ZERO)
-	_svp.push_input(event.xformed_by(xform))
+	_svp.push_input(event, true)
