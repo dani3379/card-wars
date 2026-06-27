@@ -3,11 +3,15 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://bbksfsbd8oax0"
-valid=false
+path="res://.godot/imported/echo_spell.png-f32691b5d6d539f38ca4ceb879e120b6.ctex"
+metadata={
+"vram_texture": false
+}
 
 [deps]
 
 source_file="res://assets/spells/echo_spell.png"
+dest_files=["res://.godot/imported/echo_spell.png-f32691b5d6d539f38ca4ceb879e120b6.ctex"]
 
 [params]
 
