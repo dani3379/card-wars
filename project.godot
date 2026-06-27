@@ -46,11 +46,9 @@ SavedDecks="*res://scripts/state/SavedDecks.gd"
 window/size/viewport_width=1920
 window/size/viewport_height=1080
 window/size/mode=2
-window/stretch/mode="disabled"
 
 [rendering]
 
 textures/canvas_textures/default_texture_filter=3
 renderer/rendering_method="gl_compatibility"
-anti_aliasing/quality/msaa_2d=0
 environment/defaults/default_clear_color=Color(0.04, 0.03, 0.025, 1)
