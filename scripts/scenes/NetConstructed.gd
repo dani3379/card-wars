@@ -132,8 +132,8 @@ func _build_scaffold() -> void:
 	_pool_box.add_theme_constant_override("v_separation", 10)
 	_pool_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	pool_scroll.add_child(_pool_box)
-	# Built in batches (see _populate_pool) so spawning ~N Card2D thumbnails at
-	# once doesn't hitch the frame.
+	# Streamed bake-then-build (see _populate_pool) so the ~N Card2D thumbnails come
+	# in cheap (baked) and top-down instead of hitching the frame as live layouts.
 	_populate_pool()
 
 	# ── Deck column ──
@@ -216,16 +216,19 @@ func _build_scaffold() -> void:
 
 
 func _populate_pool() -> void:
-	# Build muster-roll thumbnails in small batches so spawning ~N Card2D nodes
-	# at once doesn't freeze the frame (mirrors the deck-viewer batching).
-	var i := 0
+	# Bake each card's texture BEFORE building its thumbnail (the Collection
+	# pattern): the thumb's Card2D then hits a warm cache and builds the cheap
+	# ~5-node baked overlay instead of the heavy ~20-node live layout. Cards stream
+	# in top-down; a warm cache (revisit / after combat) returns instantly. Baking
+	# sequentially also stops the shared bake viewport being stomped by the dozens of
+	# concurrent fire-and-forget bakes the old burst-build kicked off.
 	for id in _pool:
-		if not is_instance_valid(_pool_box):
+		if not is_instance_valid(_pool_box) or not is_inside_tree():
+			return
+		await CardTextureCache.bake(CardDB.get_card_data(id))
+		if not is_instance_valid(_pool_box) or not is_inside_tree():
 			return
 		_pool_box.add_child(_build_pool_thumb(id))
-		i += 1
-		if i % 5 == 0:
-			await get_tree().process_frame
 	_refresh_pool_counts()
 
 

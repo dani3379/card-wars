@@ -21,8 +21,16 @@ extends Node
 const BAKE_PAD := 12
 const SLOT_W := 225
 const SLOT_H := 300
-const TEX_W := SLOT_W + BAKE_PAD * 2  # 249
+const TEX_W := SLOT_W + BAKE_PAD * 2  # 249  (LOGICAL display size — overlay keys off this)
 const TEX_H := SLOT_H + BAKE_PAD * 2  # 324
+# Supersample factor: bake at SUPERSAMPLE× the logical size so the baked art/text
+# has enough pixels to stay crisp when a card is lifted/zoomed. The display scales
+# the hi-res texture back DOWN into the 249px rect (STRETCH_SCALE + mipmaps = clean).
+# Bumped 2→3: the bake is the ONLY place the card's procedurally-drawn frame
+# (fillets, gems, wax seals) gets antialiased, and at 2× those curved edges read
+# rough once on screen. 3× + MSAA on the bake viewport (see _ready) downsamples
+# them to a clean, smooth edge — proper SSAA for the busiest art on screen.
+const SUPERSAMPLE := 3
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 
 var _cache: Dictionary = {}  # String → ImageTexture
@@ -31,7 +39,7 @@ var _bake_viewport: SubViewport = null
 
 func _ready() -> void:
 	_bake_viewport = SubViewport.new()
-	_bake_viewport.size = Vector2i(TEX_W, TEX_H)
+	_bake_viewport.size = Vector2i(TEX_W * SUPERSAMPLE, TEX_H * SUPERSAMPLE)
 	# transparent_bg lets the card's drop shadow alpha out into surrounding
 	# UI when displayed. disable_3d kills the 3D camera the viewport would
 	# otherwise spin up. gui_disable_input stops the off-screen card from
@@ -40,7 +48,16 @@ func _ready() -> void:
 	_bake_viewport.transparent_bg = true
 	_bake_viewport.disable_3d = true
 	_bake_viewport.gui_disable_input = true
-	_bake_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	# NOTE: 2D MSAA is a no-op in the gl_compatibility renderer (engine issue
+	# #69462 — not implemented), so it is intentionally left DISABLED here. The
+	# baked cards stay crisp purely from SUPERSAMPLE (3× bake) + mipmaps, which is
+	# real supersampling and renderer-independent. Setting MSAA here did nothing
+	# but emit a "2D MSAA not supported" warning per bake.
+	_bake_viewport.msaa_2d = Viewport.MSAA_DISABLED
+	# DISABLED between bakes (was UPDATE_ALWAYS, which re-rendered this 3×-res
+	# viewport every frame for the whole session). bake() flips it to ALWAYS only
+	# while a card is parented, then back to DISABLED once the image is captured.
+	_bake_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	add_child(_bake_viewport)
 
 
@@ -91,11 +108,23 @@ func bake(card_data: Dictionary) -> Texture2D:
 	# labels paint the numbers on top of the orb sphere.
 	card.static_display = true
 	card.bake_strip_stats = true
+	# Bake the frame + art but NOT the rules text — the live overlay draws the text
+	# with the font renderer (StS model) so it stays crisp at any zoom.
+	card.bake_strip_desc = true
+	# Same for the NAME: bake the cartouche banner but leave its text blank; the
+	# live overlay draws the name with the font renderer so it doesn't show up as
+	# a downscaled bitmap (the residual "card names look pixelly" after MSDF).
+	card.bake_strip_name = true
+	# Wake the viewport for the duration of this bake only (it sits DISABLED
+	# between bakes so it isn't re-rendered every frame all session long).
+	_bake_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	_bake_viewport.add_child(card)
 	# Card2D._ready sets size = (225, 300). The viewport is 12 px larger on
 	# each axis so the cost/ATK/HP orbs that hang -9 px past the silhouette
-	# get captured instead of clipped at the framebuffer edge.
-	card.position = Vector2(BAKE_PAD, BAKE_PAD)
+	# get captured instead of clipped. Everything scales by SUPERSAMPLE so the card
+	# fills the SUPERSAMPLE× viewport and its fonts/art rasterize at higher res.
+	card.scale = Vector2(SUPERSAMPLE, SUPERSAMPLE)
+	card.position = Vector2(BAKE_PAD, BAKE_PAD) * SUPERSAMPLE
 	# Use frame_post_draw — process_frame is too early. Dynamic fonts
 	# rasterize glyphs into an atlas asynchronously; capturing on
 	# process_frame fires BEFORE the first glyph atlas pass completes, so the
@@ -109,9 +138,10 @@ func bake(card_data: Dictionary) -> Texture2D:
 		# Scene shut down mid-bake (player exited combat etc.) — give up.
 		return null
 	var image: Image = _bake_viewport.get_texture().get_image()
-	# Mipmaps so the baked card minifies cleanly when shown smaller than the bake
-	# (compact battlefield tokens are ~140px from this 249px bake). The project's
-	# canvas filter is Linear-Mipmap, which needs mips present to avoid aliasing.
+	# Image captured — put the viewport back to sleep until the next bake.
+	_bake_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	# Mipmaps so the supersampled bake minifies cleanly when the card is shown small
+	# (compact tokens / tight hands) — without them a 498px texture at ~120px aliases.
 	image.generate_mipmaps()
 	var tex: ImageTexture = ImageTexture.create_from_image(image)
 	# Sync detach so the next bake starts with an empty viewport. queue_free

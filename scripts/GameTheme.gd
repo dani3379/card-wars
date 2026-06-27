@@ -1663,25 +1663,32 @@ static func _make_decorative_frame(frame_color: Color) -> Control:
 	var dim := Color(frame_color.r, frame_color.g, frame_color.b,
 		frame_color.a * 0.5)
 
+	# Span the actual design canvas (project base viewport), not a hardcoded
+	# 1600×900 — the frame is PRESET_FULL_RECT over the canvas, so these absolute
+	# coords must track the base size or the right/bottom edges float inward when
+	# the base resolution changes.
+	var vw := float(ProjectSettings.get_setting("display/window/size/viewport_width", 1920))
+	var vh := float(ProjectSettings.get_setting("display/window/size/viewport_height", 1080))
+
 	# Corner L-shapes (8 rects: 2 per corner)
 	_add_frame_rect(frame, Vector2(inset, inset), Vector2(clen, w), frame_color)
 	_add_frame_rect(frame, Vector2(inset, inset), Vector2(w, clen), frame_color)
-	_add_frame_rect(frame, Vector2(1600 - inset - clen, inset), Vector2(clen, w), frame_color)
-	_add_frame_rect(frame, Vector2(1600 - inset - w, inset), Vector2(w, clen), frame_color)
-	_add_frame_rect(frame, Vector2(inset, 900 - inset - w), Vector2(clen, w), frame_color)
-	_add_frame_rect(frame, Vector2(inset, 900 - inset - clen), Vector2(w, clen), frame_color)
-	_add_frame_rect(frame, Vector2(1600 - inset - clen, 900 - inset - w), Vector2(clen, w), frame_color)
-	_add_frame_rect(frame, Vector2(1600 - inset - w, 900 - inset - clen), Vector2(w, clen), frame_color)
+	_add_frame_rect(frame, Vector2(vw - inset - clen, inset), Vector2(clen, w), frame_color)
+	_add_frame_rect(frame, Vector2(vw - inset - w, inset), Vector2(w, clen), frame_color)
+	_add_frame_rect(frame, Vector2(inset, vh - inset - w), Vector2(clen, w), frame_color)
+	_add_frame_rect(frame, Vector2(inset, vh - inset - clen), Vector2(w, clen), frame_color)
+	_add_frame_rect(frame, Vector2(vw - inset - clen, vh - inset - w), Vector2(clen, w), frame_color)
+	_add_frame_rect(frame, Vector2(vw - inset - w, vh - inset - clen), Vector2(w, clen), frame_color)
 
 	# Thin connecting lines between corners
 	_add_frame_rect(frame, Vector2(inset + clen, inset),
-		Vector2(1600 - 2 * (inset + clen), w), dim)
-	_add_frame_rect(frame, Vector2(inset + clen, 900 - inset - w),
-		Vector2(1600 - 2 * (inset + clen), w), dim)
+		Vector2(vw - 2 * (inset + clen), w), dim)
+	_add_frame_rect(frame, Vector2(inset + clen, vh - inset - w),
+		Vector2(vw - 2 * (inset + clen), w), dim)
 	_add_frame_rect(frame, Vector2(inset, inset + clen),
-		Vector2(w, 900 - 2 * (inset + clen)), dim)
-	_add_frame_rect(frame, Vector2(1600 - inset - w, inset + clen),
-		Vector2(w, 900 - 2 * (inset + clen)), dim)
+		Vector2(w, vh - 2 * (inset + clen)), dim)
+	_add_frame_rect(frame, Vector2(vw - inset - w, inset + clen),
+		Vector2(w, vh - 2 * (inset + clen)), dim)
 
 	# Small diamond dots at the four corners
 	var ds := 5.0
@@ -1689,11 +1696,11 @@ static func _make_decorative_frame(frame_color: Color) -> Control:
 		frame_color.b * 1.4, minf(frame_color.a * 1.5, 1.0))
 	_add_frame_rect(frame, Vector2(inset - ds / 2, inset - ds / 2),
 		Vector2(ds, ds), bright)
-	_add_frame_rect(frame, Vector2(1600 - inset - ds / 2, inset - ds / 2),
+	_add_frame_rect(frame, Vector2(vw - inset - ds / 2, inset - ds / 2),
 		Vector2(ds, ds), bright)
-	_add_frame_rect(frame, Vector2(inset - ds / 2, 900 - inset - ds / 2),
+	_add_frame_rect(frame, Vector2(inset - ds / 2, vh - inset - ds / 2),
 		Vector2(ds, ds), bright)
-	_add_frame_rect(frame, Vector2(1600 - inset - ds / 2, 900 - inset - ds / 2),
+	_add_frame_rect(frame, Vector2(vw - inset - ds / 2, vh - inset - ds / 2),
 		Vector2(ds, ds), bright)
 
 	return frame

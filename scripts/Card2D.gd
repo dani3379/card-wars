@@ -676,6 +676,17 @@ var entity_id: int = -1
 # fills in the actual numbers. Without this flag the baked numerals would
 # show through and clash with the live overlay text on any stat change.
 @export var bake_strip_stats: bool = false
+# Sibling of bake_strip_stats for the RULES TEXT. The bake omits the description
+# (StS model: bake the frame + art, but draw the text LIVE on top), so the baked
+# texture never burns in a low-res raster of the rules — the live overlay in
+# _build_baked_overlay_layout draws the same text with the font renderer, staying
+# razor-sharp at any zoom. Without this the baked text would show through, doubled.
+@export var bake_strip_desc: bool = false
+# Sibling of bake_strip_desc for the card NAME. The bake paints the swallowtail
+# cartouche furniture but leaves the name text BLANK; the live overlay draws the
+# name with the font renderer (MSDF) so it stays razor-sharp at any zoom, instead
+# of being a downscaled bitmap baked into the texture. Same StS model as the rules.
+@export var bake_strip_name: bool = false
 # When true, _build_layout dispatches to _build_baked_overlay_layout instead
 # of the heavy v4 layout. That layout is just a TextureRect (pulled from
 # CardTextureCache) plus a handful of live overlay nodes (cost / atk / hp /
@@ -1680,7 +1691,11 @@ func _build_baked_overlay_layout() -> void:
 
 	var tex_rect := TextureRect.new()
 	tex_rect.texture = tex
-	tex_rect.stretch_mode = TextureRect.STRETCH_KEEP
+	# The bake is supersampled (SUPERSAMPLE× TEX_W/H pixels). SCALE it down to fill
+	# the 249×324 logical rect; IGNORE_SIZE is REQUIRED so the texture's native pixel
+	# size doesn't force the rect bigger than the card (that bug showed only the art).
+	tex_rect.stretch_mode = TextureRect.STRETCH_SCALE
+	tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	# Centre the 249×324 texture over the 225×300 card. The 12 px padding on
 	# each side carries the cost/ATK/HP orb overhang past the card edge —
 	# same visual as the v4 live layout's intentional orb-overhang.
@@ -1750,6 +1765,83 @@ func _build_baked_overlay_layout() -> void:
 			Color(1.00, 0.30, 0.20, 0.50))
 		hp_slot.add_child(_hp_label)
 		_hp_badge = null
+
+	# ── Live overlay: RULES TEXT (StS model — drawn live, not baked) ──
+	# Same geometry the v9 live layout (_build_chart_proto) uses for its desc, so it
+	# lands exactly on the blank vellum panel baked underneath. Because it's the font
+	# renderer (not a baked raster), it stays razor-sharp when the card is lifted or
+	# zoomed — the fix for "I can't read the card text."
+	var od_clip := Control.new()
+	od_clip.clip_contents = true
+	od_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	od_clip.anchor_left = 0.0; od_clip.anchor_right = 1.0
+	od_clip.anchor_top = 0.0; od_clip.anchor_bottom = 0.0
+	od_clip.offset_left = 17; od_clip.offset_right = -17
+	od_clip.offset_top = 190; od_clip.offset_bottom = 255
+	root.add_child(od_clip)
+	var od_center := CenterContainer.new()
+	od_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	od_center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	od_clip.add_child(od_center)
+	var od_rt := RichTextLabel.new()
+	od_rt.bbcode_enabled = true
+	od_rt.fit_content = true
+	od_rt.scroll_active = false
+	od_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	od_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	od_rt.custom_minimum_size = Vector2(170, 0)
+	var od_font: Font = GameTheme.font_card_body if GameTheme.font_card_body != null \
+		else GameTheme.font_body
+	var od_bold: Font = GameTheme.font_card_body_bold if GameTheme.font_card_body_bold != null \
+		else od_font
+	if od_font:
+		od_rt.add_theme_font_override("normal_font", od_font)
+		od_rt.add_theme_font_override("bold_font", od_bold if od_bold else od_font)
+	var od_raw: String = card_data.get("desc", "")
+	var od_sz := 13
+	if od_raw.length() > 115:
+		od_sz = 11
+	elif od_raw.length() > 85:
+		od_sz = 12
+	od_rt.add_theme_font_size_override("normal_font_size", od_sz)
+	od_rt.add_theme_font_size_override("bold_font_size", od_sz)
+	od_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
+	var od_bb := KeywordEffects.colorize_keywords(od_raw).replace(
+		KeywordEffects.KEYWORD_GOLD, "#7a4f10")
+	od_rt.text = "[center]%s[/center]" % od_bb
+	od_center.add_child(od_rt)
+	_fit_desc_to_box.call_deferred(od_rt, 64.0)
+
+	# ── Live overlay: NAME (StS model — drawn live over the baked cartouche) ──
+	# The bake paints the swallowtail banner but blanks the name (bake_strip_name);
+	# drawing it live with the font renderer keeps it razor-sharp at any zoom like
+	# the rules text, instead of a downscaled bitmap. Mirrors the name block in
+	# _build_chart_proto so it lands exactly on the baked cartouche (center y=170
+	# real → 226.67 in _center_at_point's 300×400 space).
+	var nm_is_curse := CardDB.is_curse(String(card_data.get("id", "")))
+	var nm_is_upg := bool(card_data.get("is_upgraded", false)) and not nm_is_curse
+	var nm_font: Font = GameTheme.font_title_black \
+		if GameTheme.font_title_black != null else GameTheme.font_display
+	var nm_col := Color(0.93, 0.82, 0.55)
+	if nm_is_curse:
+		nm_col = Color(0.74, 0.72, 0.66)
+	elif nm_is_upg:
+		nm_col = Color(1.0, 0.886, 0.541)
+	var nm_text := String(card_data.get("name", ""))
+	var nm_size := 14
+	if nm_text.length() > 17:
+		nm_size = 11
+	elif nm_text.length() > 13:
+		nm_size = 12
+	_name_label = _make_styled_label(nm_text, nm_font, nm_size, nm_col)
+	_name_label.add_theme_constant_override("outline_size", 0)
+	_name_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.55))
+	_name_label.add_theme_constant_override("shadow_offset_x", 0)
+	_name_label.add_theme_constant_override("shadow_offset_y", 1)
+	_name_label.clip_text = true
+	_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_center_at_point(_name_label, Vector2(150, 226.67), SIZE_NAME)
+	root.add_child(_name_label)
 
 	# ── Live overlay: floop indicator ──
 	# Same anchors as the v4 layout's floop label so it lands in the same
@@ -3717,7 +3809,9 @@ func _build_chart_proto() -> void:
 		# reads as upgraded at a glance, independent of the " +" suffix.
 		name_col = Color(1.0, 0.886, 0.541)
 	# Cinzel caps run wide — long names step down instead of ellipsizing.
-	var nm := String(card_data.get("name", ""))
+	# bake_strip_name: leave the cartouche text BLANK in the bake — the live
+	# overlay draws the name with the font renderer so it stays crisp at any zoom.
+	var nm := "" if bake_strip_name else String(card_data.get("name", ""))
 	var nm_size := 14
 	if nm.length() > 17:
 		nm_size = 11
@@ -3843,7 +3937,10 @@ func _build_chart_proto() -> void:
 		desc_rt.add_theme_font_override("normal_font", desc_font)
 		desc_rt.add_theme_font_override("bold_font",
 			desc_bold_font if desc_bold_font else desc_font)
-	var raw_desc: String = card_data.get("desc", "")
+	# bake_strip_desc: leave the rules region BLANK in the bake — the live overlay
+	# (_build_baked_overlay_layout) draws the text with the font renderer so it stays
+	# crisp at any zoom (the StS model). The vellum panel above is still baked.
+	var raw_desc: String = "" if bake_strip_desc else card_data.get("desc", "")
 	# Bigger, more readable body text: short/medium descs read at 13px, and the
 	# floor lifts 10→11. Breakpoints pushed later so the *typical* card gets the
 	# largest size; the deferred shrink-to-fit below guarantees nothing clips.

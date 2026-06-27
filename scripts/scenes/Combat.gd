@@ -5916,9 +5916,14 @@ func _draw_card(entry: String) -> void:
 	# randomized cost and the orb shows the new number on first paint.
 	if _has_relic("snecko_eye"):
 		card.card_data["cost"] = randi() % 4
-	# Use the baked-overlay layout if CardTextureCache has the texture; falls
-	# back to v4 silently on cache miss (rare — happens only if the card was
-	# added to the draw pile after _prebake_hand_textures ran).
+	# Hand cards use the BAKED-overlay path: the frame + art + furniture are a single
+	# pre-baked 3× texture (cheap to draw and to drag), while the name, rules text and
+	# stats are drawn LIVE on top with the MSDF font renderer so they stay razor-sharp
+	# at any scale. This keeps card-dragging smooth — a full live render (chart_proto)
+	# re-composites ~20-40 sub-draws PER card every frame, which is what made dragging
+	# a hand choppy (×4 under supersampling). On a bake cache-miss (a card drawn before
+	# the pre-bake ran) _build_layout falls back to the live chart_proto render anyway,
+	# so nothing ever renders wrong — it's just not the cheap path until the next draw.
 	card.live_baked_mode = true
 	_hand_container.add_child(card)
 	_hand.append(card)
@@ -7225,7 +7230,7 @@ func _add_discovered_card_to_hand(card_id: String) -> int:
 	card_node.card_id = card_id
 	card_node.deck_uid = uid
 	card_node.card_data = data.duplicate(true)
-	card_node.live_baked_mode = true
+	card_node.live_baked_mode = true   # baked frame+art, live text (see _draw_card note)
 	_hand_container.add_child(card_node)
 	_hand.append(card_node)
 	# Hook up the same signals draw_card connects — without these the card

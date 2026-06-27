@@ -178,7 +178,7 @@ var _last_dress_mix := -1.0
 #     plate bake re-records ink over the cached quad in a few frames.
 # The pipeline is fully seeded (run map + act), so clones bake
 # pixel-identical plates.
-const PLATE_BAKE_SCALE := 2.0
+const PLATE_BAKE_SCALE := 2.5
 var _plate_item = null   # untyped: typed Control fails on script-only members
 var _geo_tex: ImageTexture = null     # per act, cached in RunState
 var _march_tex: ImageTexture = null   # per open — the clean march dress

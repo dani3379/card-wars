@@ -7,17 +7,25 @@ const AUDIO_ON_PATH = "res://assets/icons/kenney_game-icons/PNG/White/2x/audioOn
 const DIVIDER_PATH = "res://assets/ui/kenney_fantasy-ui-borders/PNG/Double/Divider Fade/divider-fade-003.png"
 const PANEL_9P_PATH = "res://assets/ui/kenney_fantasy-ui-borders/PNG/Double/Panel/panel-009.png"
 
+# 1280×720 removed: the combat board's fixed-width lanes need a ≥~1360px-wide
+# canvas, so 720p windows overflow the play area and overlap the side UI.
+# 1366×768 is the floor (tight but the lanes stay on screen). See UserSettings
+# MIN_RES for the underlying constraint.
 const RESOLUTIONS := [
-	Vector2i(1280, 720),
 	Vector2i(1366, 768),
 	Vector2i(1600, 900),
 	Vector2i(1920, 1080),
 	Vector2i(2560, 1440),
 ]
 
+# Graphics preset dropdown order → UserSettings.graphics_preset values.
+const _PRESET_NAMES := ["auto", "low", "medium", "high", "ultra", "custom"]
+const _PRESET_LABELS := ["Auto-detect", "Low", "Medium", "High", "Ultra", "Custom"]
+
 var _gear_btn: TextureButton
 var _backdrop: ColorRect
 var _panel_root: Control
+var _panel_wrap: PanelContainer
 var _is_open := false
 
 var _master_slider: HSlider
@@ -30,8 +38,11 @@ var _res_option: OptionButton
 var _display_mode_option: OptionButton
 var _fps_cap_option: OptionButton
 var _colorblind_option: OptionButton
-var _ui_scale_slider: HSlider
-var _ui_scale_pct: Label
+var _ui_scale_option: OptionButton
+var _render_scale_option: OptionButton
+var _graphics_preset_option: OptionButton
+var _gpu_info_label: Label
+var _particles_toggle: Button
 var _brightness_slider: HSlider
 var _brightness_pct: Label
 var _anim_speed_option: OptionButton
@@ -129,6 +140,7 @@ func _build_overlay() -> void:
 	panel_wrap.custom_minimum_size = Vector2(1020, 0)
 	_apply_panel_style(panel_wrap)
 	center.add_child(panel_wrap)
+	_panel_wrap = panel_wrap
 
 	var vbox := VBoxContainer.new()
 	vbox.add_theme_constant_override("separation", 2)
@@ -137,6 +149,12 @@ func _build_overlay() -> void:
 	# Title + divider span the full panel width.
 	_add_title(vbox)
 	_add_fancy_divider(vbox)
+
+	# Headline graphics control spans the full width, above the two columns.
+	# A thin spacer (not a full divider) keeps the panel height in budget — it was
+	# already near the 576p minimum-resolution ceiling before this block.
+	_add_graphics_quality_block(vbox)
+	_add_spacer(vbox, 8)
 
 	# ── Two-column body ──
 	# Right column gets the longest section (DISPLAY, 9 rows); left column
@@ -217,11 +235,15 @@ func _build_overlay() -> void:
 		func(v: bool): UserSettings.set_vsync(v))
 	_add_fps_cap_row(right_col)
 	_add_ui_scale_row(right_col)
+	_add_render_scale_row(right_col)
 	_add_brightness_row(right_col)
 	_add_toggle_row(right_col, "Screen Shake", UserSettings.screen_shake,
 		func(v: bool): UserSettings.set_screen_shake(v))
-	_add_toggle_row(right_col, "Particles", UserSettings.particles,
-		func(v: bool): UserSettings.set_particles(v))
+	_particles_toggle = _add_toggle_row(right_col, "Particles", UserSettings.particles,
+		func(v: bool):
+			UserSettings.set_particles(v)  # flips preset → custom
+			_sync_graphics_preset_dropdown()
+			_refresh_gpu_info_label())
 	_add_toggle_row(right_col, "Mute on Focus Loss", UserSettings.mute_on_focus_loss,
 		func(v: bool): UserSettings.set_mute_on_focus_loss(v))
 
@@ -541,6 +563,33 @@ func _add_resolution_row(parent: VBoxContainer) -> void:
 
 	row.add_child(_res_option)
 	parent.add_child(row)
+	_update_res_option_display(UserSettings.display_mode)
+
+
+## The resolution dropdown reflects the display mode: in Windowed it lists the real
+## resolution choices; in Borderless/Fullscreen it's disabled and shows the monitor's
+## NATIVE size (what those modes actually render at) instead of the layout-base value,
+## which read misleadingly as "1600 x 900".
+func _update_res_option_display(mode: String) -> void:
+	if _res_option == null:
+		return
+	var is_windowed := mode == "windowed"
+	_res_option.disabled = not is_windowed
+	_res_option.clear()
+	if is_windowed:
+		var want: Vector2i = _pending_res if _pending_res in _available_res \
+			else UserSettings.resolution
+		var sel := 0
+		for i in _available_res.size():
+			var r: Vector2i = _available_res[i]
+			_res_option.add_item("%d x %d" % [r.x, r.y], i)
+			if r == want:
+				sel = i
+		_res_option.selected = sel
+	else:
+		var native: Vector2i = DisplayServer.screen_get_size()
+		_res_option.add_item("Native (%d x %d)" % [native.x, native.y])
+		_res_option.selected = 0
 
 
 func _style_option_button(opt: OptionButton) -> void:
@@ -627,8 +676,8 @@ func _add_display_mode_row(parent: VBoxContainer) -> void:
 	_style_option_button(_display_mode_option)
 	_display_mode_option.item_selected.connect(func(idx: int):
 		_pending_display_mode = modes[idx]
-		_res_option.disabled = (_pending_display_mode != "windowed"))
-	_res_option.disabled = (current != "windowed")
+		_update_res_option_display(_pending_display_mode))
+	_update_res_option_display(current)
 	row.add_child(_display_mode_option)
 	parent.add_child(row)
 
@@ -662,28 +711,160 @@ func _add_ui_scale_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("UI Scale", 100)
+	var lbl := _make_row_label("UI Scale", 160)
 	row.add_child(lbl)
 
-	_ui_scale_slider = HSlider.new()
-	_ui_scale_slider.min_value = 0.7
-	_ui_scale_slider.max_value = 1.5
-	_ui_scale_slider.step = 0.05
-	_ui_scale_slider.value = UserSettings.ui_scale
-	_ui_scale_slider.custom_minimum_size = Vector2(220, 24)
-	_ui_scale_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_style_slider(_ui_scale_slider)
-	row.add_child(_ui_scale_slider)
-
-	_ui_scale_pct = _make_pct_label("%d%%" % int(UserSettings.ui_scale * 100))
-	row.add_child(_ui_scale_pct)
-
-	_ui_scale_slider.value_changed.connect(func(v: float):
-		UserSettings.set_ui_scale(v)
-		_ui_scale_pct.text = "%d%%" % int(v * 100))
-
-	_add_row_pad(row)
+	# Dropdown, not a slider: a live slider re-applied content_scale_factor on every
+	# drag tick, which resized the slider out from under the cursor mid-drag (you
+	# could never land on a value). An OptionButton closes its menu BEFORE the
+	# rescale fires, so the control never moves under the pointer — same model as
+	# the Resolution / FPS Cap dropdowns.
+	_ui_scale_option = OptionButton.new()
+	_ui_scale_option.custom_minimum_size = Vector2(170, 30)
+	_ui_scale_option.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	# CAPPED AT 100%. content_scale_factor > 1.0 triggers Godot bug #99440: every
+	# antialiased draw_* primitive (and all text) is rasterised at the base size
+	# then UPSCALED, so the AA is computed at the wrong scale and the whole game
+	# smears. Our art is built almost entirely from antialiased draws, so values
+	# above 100% blur everything. Until the engine fixes it (or we move to
+	# resolution-independent shader AA), UI Scale only goes DOWN from 100%.
+	var scales := [0.8, 0.9, 1.0]
+	var scale_labels := ["80%", "90%", "100%"]
+	var selected := 0
+	for i in scales.size():
+		_ui_scale_option.add_item(scale_labels[i], i)
+		if abs(scales[i] - UserSettings.ui_scale) < 0.01:
+			selected = i
+	_ui_scale_option.selected = selected
+	_style_option_button(_ui_scale_option)
+	_ui_scale_option.item_selected.connect(func(idx: int):
+		UserSettings.set_ui_scale(scales[idx]))
+	row.add_child(_ui_scale_option)
 	parent.add_child(row)
+
+
+func _add_render_scale_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_add_row_pad(row)
+
+	var lbl := _make_row_label("Supersampling", 160)
+	row.add_child(lbl)
+
+	# Renders the whole game at scale× the window, then downsamples = true 2D SSAA
+	# (smooth, crisp procedural draws/fonts). Off = native. Higher = sharper but
+	# costs ~scale² the GPU fill. Resolution-independent: the Supersample autoload
+	# pins logical size to the live window, so it works at any resolution.
+	_render_scale_option = OptionButton.new()
+	_render_scale_option.custom_minimum_size = Vector2(170, 30)
+	_render_scale_option.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	var rscales := [1.0, 1.5, 2.0]
+	var rscale_labels := ["Off (native)", "1.5× (sharper)", "2× (sharpest)"]
+	var rselected := 0
+	for i in rscales.size():
+		_render_scale_option.add_item(rscale_labels[i], i)
+		if abs(rscales[i] - UserSettings.render_scale) < 0.01:
+			rselected = i
+	_render_scale_option.selected = rselected
+	_style_option_button(_render_scale_option)
+	_render_scale_option.item_selected.connect(func(idx: int):
+		UserSettings.set_render_scale(rscales[idx])  # flips preset → custom
+		_sync_graphics_preset_dropdown()
+		_refresh_gpu_info_label())
+	row.add_child(_render_scale_option)
+	parent.add_child(row)
+
+
+# ═══════════════════════════════════════════════════
+#  GRAPHICS QUALITY  (full-width preset + GPU read-out)
+# ═══════════════════════════════════════════════════
+
+func _add_graphics_quality_block(parent: VBoxContainer) -> void:
+	# One headline control that drives the heavy perf levers together, plus a line
+	# showing the detected GPU + the auto-chosen tier so the player can see the
+	# game "read" their machine. The fine-grained Supersampling / Particles
+	# controls still live in the DISPLAY column for manual override.
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 12)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var lbl := Label.new()
+	lbl.text = "Graphics Quality"
+	if GameTheme.font_body:
+		lbl.add_theme_font_override("font", GameTheme.font_body)
+	lbl.add_theme_font_size_override("font_size", 16)
+	lbl.add_theme_color_override("font_color", GameTheme.IVORY)
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(lbl)
+
+	_graphics_preset_option = OptionButton.new()
+	_graphics_preset_option.custom_minimum_size = Vector2(200, 32)
+	_graphics_preset_option.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	for i in _PRESET_LABELS.size():
+		_graphics_preset_option.add_item(_PRESET_LABELS[i], i)
+	_style_option_button(_graphics_preset_option)
+	_sync_graphics_preset_dropdown()
+	_graphics_preset_option.item_selected.connect(_on_graphics_preset_selected)
+	row.add_child(_graphics_preset_option)
+
+	parent.add_child(row)
+
+	# GPU read-out line, centered under the dropdown.
+	var info_center := CenterContainer.new()
+	info_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_gpu_info_label = Label.new()
+	if GameTheme.font_body:
+		_gpu_info_label.add_theme_font_override("font", GameTheme.font_body)
+	_gpu_info_label.add_theme_font_size_override("font_size", 12)
+	_gpu_info_label.add_theme_color_override("font_color", GameTheme.DIMMED)
+	_gpu_info_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	info_center.add_child(_gpu_info_label)
+	parent.add_child(info_center)
+	_refresh_gpu_info_label()
+
+
+func _on_graphics_preset_selected(idx: int) -> void:
+	UserSettings.apply_graphics_preset(_PRESET_NAMES[idx])
+	# Pull the manual Supersampling / Particles controls in line with the preset.
+	_refresh_graphics_controls()
+	_refresh_gpu_info_label()
+
+
+func _sync_graphics_preset_dropdown() -> void:
+	if _graphics_preset_option == null:
+		return
+	var idx := _PRESET_NAMES.find(UserSettings.graphics_preset)
+	if idx == -1:
+		idx = _PRESET_NAMES.find("custom")
+	_graphics_preset_option.selected = idx
+
+
+func _refresh_gpu_info_label() -> void:
+	if _gpu_info_label == null:
+		return
+	var gpu := UserSettings.get_gpu_name()
+	var rec: String = UserSettings.detect_recommended_preset().capitalize()
+	if UserSettings.graphics_preset == "auto":
+		_gpu_info_label.text = "Detected: %s   ·   Auto → %s" % [gpu, rec]
+	else:
+		_gpu_info_label.text = "Detected: %s   ·   Recommended: %s" % [gpu, rec]
+
+
+func _refresh_graphics_controls() -> void:
+	# Re-sync the Supersampling dropdown + Particles toggle to whatever values the
+	# active preset resolved to.
+	if _render_scale_option != null:
+		var rscales := [1.0, 1.5, 2.0]
+		for i in rscales.size():
+			if abs(rscales[i] - UserSettings.render_scale) < 0.01:
+				_render_scale_option.selected = i
+				break
+	if _particles_toggle != null:
+		_particles_toggle.button_pressed = UserSettings.particles
+		_particles_toggle.text = "ON" if UserSettings.particles else "OFF"
+		_style_toggle(_particles_toggle, UserSettings.particles)
+	_sync_graphics_preset_dropdown()
 
 
 func _add_brightness_row(parent: VBoxContainer) -> void:
@@ -813,7 +994,7 @@ func _make_pct_label(text: String) -> Label:
 # ═══════════════════════════════════════════════════
 
 func _add_toggle_row(parent: VBoxContainer, label_text: String, initial: bool,
-		callback: Callable) -> void:
+		callback: Callable) -> Button:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
@@ -836,6 +1017,7 @@ func _add_toggle_row(parent: VBoxContainer, label_text: String, initial: bool,
 
 	row.add_child(toggle_btn)
 	parent.add_child(row)
+	return toggle_btn
 
 
 func _style_toggle(btn: Button, is_on: bool) -> void:
@@ -916,6 +1098,24 @@ func _toggle() -> void:
 	else: _open()
 
 
+## Largest scale ≤ 1.0 at which the panel's full content fits inside the viewport
+## (with a small margin), so nothing gets clipped at 720p / 576p. Falls back to
+## 1.0 if the panel hasn't computed a min size yet.
+func _compute_fit_scale(vp_size: Vector2) -> float:
+	if _panel_wrap == null:
+		return 1.0
+	var panel_min := _panel_wrap.get_combined_minimum_size()
+	if panel_min.x <= 0.0 or panel_min.y <= 0.0:
+		return 1.0
+	var margin := 24.0
+	var fit := 1.0
+	if panel_min.y + margin > vp_size.y:
+		fit = minf(fit, (vp_size.y - margin) / panel_min.y)
+	if panel_min.x + margin > vp_size.x:
+		fit = minf(fit, (vp_size.x - margin) / panel_min.x)
+	return clampf(fit, 0.45, 1.0)
+
+
 func _open() -> void:
 	if _anim_tween and _anim_tween.is_valid():
 		_anim_tween.kill()
@@ -931,6 +1131,11 @@ func _open() -> void:
 		_title_label.text = "PAUSED" if RunState.run_active else "SETTINGS"
 	_rebuild_system_row()
 
+	# Re-sync graphics controls — values may have shifted since build (e.g. a
+	# first-boot auto-config, or a preset applied on a previous open).
+	_refresh_graphics_controls()
+	_refresh_gpu_info_label()
+
 	_master_slider.value = UserSettings.master_volume
 	_music_slider.value = UserSettings.music_volume
 	_sfx_slider.value = UserSettings.sfx_volume
@@ -941,22 +1146,25 @@ func _open() -> void:
 	# Sync resolution dropdown and pending state
 	_pending_res = UserSettings.resolution
 	_pending_display_mode = UserSettings.display_mode
-	for i in _available_res.size():
-		if _available_res[i] == UserSettings.resolution:
-			_res_option.selected = i
-			break
-	_res_option.disabled = (UserSettings.display_mode != "windowed")
+	_update_res_option_display(UserSettings.display_mode)
 
+	# Fit-to-viewport: the settings panel is taller than a 720p (or 576p) window,
+	# so scale it down to fit rather than clipping the title / APPLY-RESUME row off
+	# screen. Centered pivot keeps it anchored as it scales. content_scale_factor
+	# (UI Scale) already pre-shrinks the canvas, so derive the fit from the live
+	# viewport size and never scale ABOVE 1.0.
+	var vp_size := get_viewport().get_visible_rect().size
+	var fit := _compute_fit_scale(vp_size)
 	_backdrop.modulate = Color(1, 1, 1, 0)
 	_panel_root.modulate = Color(1, 1, 1, 0)
-	_panel_root.scale = Vector2(0.95, 0.95)
-	_panel_root.pivot_offset = get_viewport().get_visible_rect().size / 2.0
+	_panel_root.scale = Vector2(fit, fit) * 0.95
+	_panel_root.pivot_offset = vp_size / 2.0
 
 	_anim_tween = create_tween()
 	_anim_tween.set_parallel(true)
 	_anim_tween.tween_property(_backdrop, "modulate", Color(1, 1, 1, 1), 0.2)
 	_anim_tween.tween_property(_panel_root, "modulate", Color(1, 1, 1, 1), 0.25)
-	_anim_tween.tween_property(_panel_root, "scale", Vector2.ONE, 0.25) \
+	_anim_tween.tween_property(_panel_root, "scale", Vector2(fit, fit), 0.25) \
 		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
 
 

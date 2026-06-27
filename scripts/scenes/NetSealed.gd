@@ -54,6 +54,9 @@ var _deck_count_lbl: Label
 var _ready_btn: Button
 var _mirror_btn: Button
 var _pool_rows: Dictionary = {}   # id -> {"button": Button, "badge": Label, "card": Card2D}
+# Bumped each pool rebuild; the async bake loop checks it after every await so a
+# re-sort / reopen that fires mid-build abandons the stale stream cleanly.
+var _pool_gen: int = 0
 
 
 func _ready() -> void:
@@ -234,10 +237,21 @@ func _build_scaffold() -> void:
 func _rebuild_pool_ui() -> void:
 	if _pool_grid == null:
 		return
+	# Bake-then-build (Collection pattern): warm each card's texture before its
+	# thumbnail so the Card2D builds the cheap baked overlay, not the heavy live
+	# layout. Cards stream in; a warm cache returns instantly. The gen guard lets a
+	# later rebuild supersede this one without two streams fighting over the grid.
+	_pool_gen += 1
+	var gen := _pool_gen
 	for c in _pool_grid.get_children():
 		c.queue_free()
 	_pool_rows.clear()
 	for id in _sorted_avail_ids():
+		if gen != _pool_gen or not is_instance_valid(_pool_grid):
+			return
+		await CardTextureCache.bake(CardDB.get_card_data(id))
+		if gen != _pool_gen or not is_instance_valid(_pool_grid):
+			return
 		_pool_grid.add_child(_build_pool_thumb(id))
 
 

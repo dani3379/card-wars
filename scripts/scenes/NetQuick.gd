@@ -18,6 +18,9 @@ const MENU_SCENE := "res://scenes/main_menu.tscn"
 # Max duplicate copies of the same id allowed in the generated deck.
 const MAX_COPIES: int = 2
 
+# Card-thumbnail scale for the warband preview (matches Constructed / Sealed).
+const THUMB_SCALE: float = 0.46
+
 const GILT_BRIGHT := Color(1.0, 0.85, 0.45, 1.0)
 const IVORY := Color(0.96, 0.92, 0.78, 1.0)
 const ASH := Color(0.62, 0.58, 0.52, 1.0)
@@ -43,7 +46,10 @@ var _remote_ready: bool = false
 var _root: VBoxContainer
 var _header: Label
 var _status: Label
-var _deck_grid: GridContainer
+var _deck_box: HFlowContainer
+# Bumped each preview rebuild; the async bake loop checks it after every await so a
+# Reroll / Mirror / cfg change that fires mid-build abandons the stale stream.
+var _deck_gen: int = 0
 var _reroll_btn: Button
 var _ready_btn: Button
 var _mirror_btn: Button
@@ -129,17 +135,18 @@ func _build_scaffold() -> void:
 	_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_root.add_child(_header)
 
-	# Deck grid (scrollable name list — compact, fast to scan)
+	# Deck preview — real card art (wrapping grid of thumbnails), matching the
+	# Constructed / Sealed builders rather than a text list.
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	_root.add_child(scroll)
 
-	_deck_grid = GridContainer.new()
-	_deck_grid.columns = 4
-	_deck_grid.add_theme_constant_override("h_separation", 10)
-	_deck_grid.add_theme_constant_override("v_separation", 6)
-	scroll.add_child(_deck_grid)
+	_deck_box = HFlowContainer.new()
+	_deck_box.add_theme_constant_override("h_separation", 8)
+	_deck_box.add_theme_constant_override("v_separation", 8)
+	_deck_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_deck_box)
 
 	_root.add_child(GameTheme.make_separator(Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.35), 400.0))
 
@@ -171,30 +178,46 @@ func _build_scaffold() -> void:
 
 
 func _refresh_deck_ui() -> void:
-	for c in _deck_grid.get_children():
+	if _deck_box == null:
+		return
+	_deck_gen += 1
+	var gen := _deck_gen
+	for c in _deck_box.get_children():
 		c.queue_free()
 
+	# Group the random warband by id and show each as real card art with a ×N
+	# badge, sorted by cost then name. No click: the deck is fixed — you Reroll it,
+	# you don't edit it — so the thumbnails are a read-only preview.
+	var counts: Dictionary = {}
+	var order: Array[String] = []
 	for id in _local_deck:
+		if not counts.has(id):
+			counts[id] = 0
+			order.append(id)
+		counts[id] = int(counts[id]) + 1
+	order.sort_custom(func(a: String, b: String) -> bool:
+		var ca := int(CardDB.get_card_data(a).get("cost", 0))
+		var cb := int(CardDB.get_card_data(b).get("cost", 0))
+		if ca != cb:
+			return ca < cb
+		return String(CardDB.get_card_data(a).get("name", a)) < String(CardDB.get_card_data(b).get("name", b)))
+
+	# Bake-then-add (Collection pattern): warm each card's texture before its thumb
+	# so the Card2D builds the cheap baked overlay; a warm-cache Reroll fills instantly.
+	for id in order:
+		if gen != _deck_gen or not is_instance_valid(_deck_box):
+			return
+		await CardTextureCache.bake(CardDB.get_card_data(id))
+		if gen != _deck_gen or not is_instance_valid(_deck_box):
+			return
+		var n := int(counts[id])
 		var d := CardDB.get_card_data(id)
-		var name_str: String = String(d.get("name", id))
-		var cost: int = int(d.get("cost", 0))
-		var dtype: String = String(d.get("type", "creature"))
-
-		var chip := HBoxContainer.new()
-		chip.add_theme_constant_override("separation", 6)
-		_deck_grid.add_child(chip)
-
-		# Cost pip
-		var cost_lbl := GameTheme.make_label(str(cost), 13, GILT_BRIGHT)
-		cost_lbl.custom_minimum_size = Vector2(16, 0)
-		cost_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		chip.add_child(cost_lbl)
-
-		# Name
-		var type_color: Color = IVORY if dtype == "creature" else Color(0.70, 0.88, 1.0)
-		var name_lbl := GameTheme.make_label(name_str, 13, type_color)
-		name_lbl.custom_minimum_size = Vector2(130, 0)
-		chip.add_child(name_lbl)
+		var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
+		var badge := thumb["badge"] as Label
+		badge.text = "×%d" % n
+		badge.visible = n > 1
+		(thumb["button"] as Button).tooltip_text = String(d.get("name", id))   # hover-name; no add/remove
+		_deck_box.add_child(thumb["root"])
 
 
 func _update_status() -> void:
@@ -342,7 +365,7 @@ func _show_marching() -> void:
 func _on_peer_lost(_id: int = 0) -> void:
 	if _root == null:
 		return
-	for c in _deck_grid.get_children():
+	for c in _deck_box.get_children():
 		c.queue_free()
 	if _header != null:
 		_header.text = "Opponent disconnected."
