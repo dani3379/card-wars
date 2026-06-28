@@ -1156,19 +1156,42 @@ func make_relic_chip(rid: String, size: int = 40) -> Panel:
 	return chip
 
 
+# ── Shared stacked-tile skeleton ─────────────────────────────────────────────
+# Both relic cards (make_relic_card, used on Shop/Reward/Treasure) and Shop's
+# service slots (potion/removal) are the same shape: an empty Button so the whole
+# tile is one hit target, with a centered, mouse-ignoring VBox inset from the
+# edges that callers stack icon + text into. This builds that skeleton so the two
+# tile builders can't drift in layout. Callers add their own styleboxes + content.
+# Returns {"button": Button, "col": VBoxContainer}.
+func make_tile_skeleton(min_size: Vector2, separation: int = 4) -> Dictionary:
+	var btn := Button.new()
+	btn.custom_minimum_size = min_size
+	btn.focus_mode = Control.FOCUS_NONE
+	var col := VBoxContainer.new()
+	col.set_anchors_preset(Control.PRESET_FULL_RECT)
+	col.offset_left = 10
+	col.offset_right = -10
+	col.offset_top = 8
+	col.offset_bottom = -8
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.add_theme_constant_override("separation", separation)
+	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(col)
+	return {"button": btn, "col": col}
+
+
 func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 172),
 		price: int = -1) -> Button:
 	# A relic "card" button: gilt-trimmed panel with the relic's icon stacked
 	# above its name + description (and an optional price line for the shop).
-	# Built as an empty Button + child VBox (mouse_filter IGNORE) so the whole
-	# tile is one hit target and the icon gets a controlled size — the source
+	# Built on the shared make_tile_skeleton (empty Button + centered VBox) so the
+	# whole tile is one hit target and the icon gets a controlled size — the source
 	# SVGs are 512px, so they can't be dropped into Button.icon directly. The
 	# icon comes from RelicDB.get_relic_icon by convention; if it isn't imported
 	# yet the card just renders text-only instead of breaking.
 	var r := RelicDB.get_relic(rid)
-	var btn := Button.new()
-	btn.custom_minimum_size = min_size
-	btn.focus_mode = Control.FOCUS_NONE
+	var skel := make_tile_skeleton(min_size, 3)
+	var btn: Button = skel.button
 	btn.tooltip_text = "%s — %s" % [r.get("name", rid), r.get("desc", "")]
 	var normal := make_btn_style(bg, GILT, 10)
 	btn.add_theme_stylebox_override("normal", normal)
@@ -1184,16 +1207,7 @@ func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 17
 	disabled.border_color = Color(0.40, 0.30, 0.15, 0.55)
 	btn.add_theme_stylebox_override("disabled", disabled)
 
-	var col := VBoxContainer.new()
-	col.set_anchors_preset(Control.PRESET_FULL_RECT)
-	col.offset_left = 10
-	col.offset_right = -10
-	col.offset_top = 8
-	col.offset_bottom = -8
-	col.alignment = BoxContainer.ALIGNMENT_CENTER
-	col.add_theme_constant_override("separation", 3)
-	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	btn.add_child(col)
+	var col: VBoxContainer = skel.col
 
 	var chip := make_relic_chip(rid, 56)
 	chip.size_flags_horizontal = Control.SIZE_SHRINK_CENTER

@@ -222,10 +222,13 @@ func _make_service_slot(icon_path: String, text: String, color: Color) -> Dictio
 	# the praised chart look enforced via the shared parchment panel helper. The
 	# `color` accent only tints the rest-state border so potion/removal read as a
 	# matched set with the relic card beside them — not pills in clashing hues.
+	# Same stacked-tile skeleton as the relic card beside it (one Button hit
+	# target + centered inset VBox) so potion/removal read as a matched set; only
+	# the stylebox differs — the inked-parchment panel instead of the relic's
+	# solid-fill button style.
 	var panel_bg := Color(0.055, 0.048, 0.040, 0.96)
-	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(264, 216)
-	btn.focus_mode = Control.FOCUS_NONE
+	var skel := GameTheme.make_tile_skeleton(Vector2(264, 216), 4)
+	var btn: Button = skel.button
 	btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	var normal := GameTheme.make_panel_style(panel_bg,
 		color.lerp(GameTheme.GILT, 0.55), 1, 4, true, true)
@@ -240,16 +243,7 @@ func _make_service_slot(icon_path: String, text: String, color: Color) -> Dictio
 		Color(0.40, 0.30, 0.15, 0.55), 1, 4, true, true)
 	btn.add_theme_stylebox_override("disabled", disabled)
 
-	var col := VBoxContainer.new()
-	col.set_anchors_preset(Control.PRESET_FULL_RECT)
-	col.offset_left = 10
-	col.offset_right = -10
-	col.offset_top = 8
-	col.offset_bottom = -8
-	col.alignment = BoxContainer.ALIGNMENT_CENTER
-	col.add_theme_constant_override("separation", 4)
-	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	btn.add_child(col)
+	var col: VBoxContainer = skel.col
 
 	var icon := TextureRect.new()
 	if ResourceLoader.exists(icon_path):

@@ -1785,11 +1785,19 @@ func _start_dice_run(effect: Dictionary) -> void:
 		"The space in the circle is yours. The pot sits at {pot} gold."))
 
 
-func _build_dice_screen(beat: String) -> void:
+# Shared scaffold for the interactive push-your-luck / appraisal event screens
+# (dice run, risk loop, appraisal). Clears the page, shows the art, pins the
+# standard top-left title + description, and returns an empty bottom-left VBox
+# sized for `n_choices` frameless 118px choice cards. The choices column defaults
+# to the 80–700 gutter; appraisal widens its left inset to clear the card it
+# stands beside. The interactions stay bespoke — callers fill the returned VBox
+# with their own choices.
+func _build_event_screen(title_text: String, beat: String, n_choices: int,
+		choices_left: int = 80, choices_right: int = 700) -> VBoxContainer:
 	_clear_ui()
 	_set_event_art_visible(true)
 
-	var title := _make_event_title("The pot: [color=#e8b547]%d gold[/color]" % _dice_pot)
+	var title := _make_event_title(title_text)
 	title.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	title.offset_left = 80
 	title.offset_top = 72
@@ -1802,12 +1810,18 @@ func _build_dice_screen(beat: String) -> void:
 
 	var choices_vbox := VBoxContainer.new()
 	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	choices_vbox.offset_left = 80
-	choices_vbox.offset_right = 700
-	choices_vbox.offset_top = -(2 * 118 + 12 + 110)
+	choices_vbox.offset_left = choices_left
+	choices_vbox.offset_right = choices_right
+	choices_vbox.offset_top = -(n_choices * 118 + (n_choices - 1) * 12 + 110)
 	choices_vbox.offset_bottom = -110
 	choices_vbox.add_theme_constant_override("separation", 12)
 	add_child(choices_vbox)
+	return choices_vbox
+
+
+func _build_dice_screen(beat: String) -> void:
+	var choices_vbox := _build_event_screen(
+		"The pot: [color=#e8b547]%d gold[/color]" % _dice_pot, beat, 2)
 
 	choices_vbox.add_child(_make_frameless_choice(
 		_dice_text("roll_label", "Cast the bones"),
@@ -1890,17 +1904,6 @@ func _effects_hp_cost(effects: Array) -> int:
 
 
 func _build_risk_screen(beat: String) -> void:
-	_clear_ui()
-	_set_event_art_visible(true)
-
-	var title := _make_event_title(_event_data.name)
-	title.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	title.offset_left = 80
-	title.offset_top = 72
-	title.offset_right = 700
-	title.offset_bottom = 132
-	add_child(title)
-
 	var steps: Array = _risk_cfg.get("steps", [])
 	var can_act: bool = _risk_step < steps.size()
 	if can_act:
@@ -1910,18 +1913,8 @@ func _build_risk_screen(beat: String) -> void:
 			can_act = false
 			beat += "\n\nYou haven't the blood for another."
 
-	var desc = _make_event_desc(beat)
-	add_child(desc)
-
 	var n_choices: int = 2 if can_act else 1
-	var choices_vbox := VBoxContainer.new()
-	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	choices_vbox.offset_left = 80
-	choices_vbox.offset_right = 700
-	choices_vbox.offset_top = -(n_choices * 118 + (n_choices - 1) * 12 + 110)
-	choices_vbox.offset_bottom = -110
-	choices_vbox.add_theme_constant_override("separation", 12)
-	add_child(choices_vbox)
+	var choices_vbox := _build_event_screen(_event_data.name, beat, n_choices)
 
 	if can_act:
 		var step: Dictionary = steps[_risk_step]
@@ -2040,24 +2033,16 @@ func _appraisal_price(deck_index: int) -> int:
 
 
 func _build_appraisal_screen() -> void:
-	_clear_ui()
-	_set_event_art_visible(true)
-
 	var data = RunState.get_upgraded_card_data(_appr_index)
 	var price := _appraisal_price(_appr_index)
 
-	var title := _make_event_title(
-		"She holds up [color=#e8b547]%s[/color]" % String(data.get("name", "a card")))
-	title.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	title.offset_left = 80
-	title.offset_top = 72
-	title.offset_right = 700
-	title.offset_bottom = 132
-	add_child(title)
-
-	var desc = _make_event_desc(
-		"She turns it over twice behind the smoked glass, taps it once, and names a figure. She does not repeat herself.")
-	add_child(desc)
+	var can_another: bool = _appr_shown < 3 and RunState.deck.size() > 1
+	var n_choices: int = 3 if can_another else 2
+	# Choices sit right of the appraised card (96–321), so widen the left inset.
+	var choices_vbox := _build_event_screen(
+		"She holds up [color=#e8b547]%s[/color]" % String(data.get("name", "a card")),
+		"She turns it over twice behind the smoked glass, taps it once, and names a figure. She does not repeat herself.",
+		n_choices, 360, 980)
 
 	# The card itself, stood on the scrim left of the choices.
 	var wrapper := Control.new()
@@ -2072,17 +2057,6 @@ func _build_appraisal_screen() -> void:
 	card_node.card_data = data
 	wrapper.add_child(card_node)
 	add_child(wrapper)
-
-	var can_another: bool = _appr_shown < 3 and RunState.deck.size() > 1
-	var n_choices: int = 3 if can_another else 2
-	var choices_vbox := VBoxContainer.new()
-	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	choices_vbox.offset_left = 360
-	choices_vbox.offset_right = 980
-	choices_vbox.offset_top = -(n_choices * 118 + (n_choices - 1) * 12 + 110)
-	choices_vbox.offset_bottom = -110
-	choices_vbox.add_theme_constant_override("separation", 12)
-	add_child(choices_vbox)
 
 	choices_vbox.add_child(_make_frameless_choice("Sell it",
 		"Trade %s for %d gold." % [String(data.get("name", "the card")), price],

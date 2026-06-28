@@ -38,12 +38,33 @@
   24pt Cinzel, pointing-hand cursor. The loudest control on the screen.
 
 **Fake-settings** → verified NOT fake (Color Blind via `GameTheme.cb_color`, Animation Speed
-via `_short_pause`). **Event mini-game consolidation = HELD** (large refactor, not a blind
-sweep). **Still-deferred refactors** (maintainability, not legibility): Net deck-builder
-base class (NetQuick/Constructed/Sealed share a builder), Shop tile-type unify (relic-card
-vs service-slot). All uncommitted, re-verified parse-clean (combat/main_menu/map/event/shop
+via `_short_pause`). All uncommitted, re-verified parse-clean (combat/main_menu/map/event/shop
 opened headless in `--editor`, autoloads present); pending user **visual** verification on a
 clean restart — no in-shell rendering/screenshots are possible in the dev shell.
+
+### Deferred-refactor follow-up — 2026-06-28 (DONE, separate commit)
+
+The three "maintainability, not legibility" refactors were done as a behavior-
+preserving pass (user chose "safe dedup" for the subjective one). All three are
+**no visual change by construction** (identical node trees / inherited-identical
+values), so they don't need the visual-verification gate above:
+- **Shop tile-type unify** — extracted `GameTheme.make_tile_skeleton` (the empty
+  Button + centered inset VBox shared by `make_relic_card` and Shop's
+  `_make_service_slot`). Each tile keeps its own styleboxes/content, so
+  Reward/Treasure relic tiles are pixel-identical; only the construction is shared.
+- **Net deck-builder base class** — new `scripts/scenes/NetDeckBuilder.gd` owns the
+  shared palette/scene-constants/sync-flags + the byte-identical `_build_pool_thumb`;
+  all four modes (`NetQuick/Constructed/Sealed/Draft`) now `extends` it. Verified:
+  parse-clean, `_probe_skirmish`/`_probe_vsbot` pass, and `_probe_netbase` confirms
+  all four resolve their inherited members at runtime.
+- **Event safe dedup** — extracted `Event._build_event_screen` (the clear→art→title→
+  desc→bottom-choices scaffold shared verbatim by the dice / risk-loop / appraisal
+  screens). The distinct *interactions* stay bespoke — only the scaffold is shared.
+  Verified parse-clean, `_probe_events` clean (33 events / 362 effects / 0 errors),
+  and `_probe_eventscaffold` confirms the helper's node tree.
+- **Event mini-game full consolidation** = still HELD (forcing the distinct dice /
+  risk / picker / appraisal interactions into one layout would flatten variety; not
+  a blind sweep — needs visual sign-off).
 
 ---
 ### Wave 1 original notes (superseded by Wave 2 above)

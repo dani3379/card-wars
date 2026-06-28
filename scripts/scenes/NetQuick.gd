@@ -1,4 +1,4 @@
-extends Control
+extends "res://scripts/scenes/NetDeckBuilder.gd"
 ## NetQuick.gd — Quick Battle mode: both players get a randomly generated
 ## 20-card deck, preview it, and fight immediately. No pick screen, no wait.
 ##
@@ -13,38 +13,20 @@ extends Control
 ##   local deck → "finished" event → peer stores it → _maybe_begin_combat.
 ##   HOST calls NetMatch.launch_combat(); CLIENT waits.
 
-const MENU_SCENE := "res://scenes/main_menu.tscn"
+# Scene constants + palette (MENU_SCENE, MAX_COPIES, THUMB_SCALE, and the
+# colors) are inherited from NetDeckBuilder.
 
-# Max duplicate copies of the same id allowed in the generated deck.
-const MAX_COPIES: int = 2
-
-# Card-thumbnail scale for the warband preview (matches Constructed / Sealed).
-const THUMB_SCALE: float = 0.46
-
-const GILT_BRIGHT := Color(1.0, 0.85, 0.45, 1.0)
-const IVORY := Color(0.96, 0.92, 0.78, 1.0)
-const ASH := Color(0.62, 0.58, 0.52, 1.0)
-const GREEN := Color(0.55, 0.85, 0.45, 1.0)
-const RED_WARN := Color(0.90, 0.45, 0.35, 1.0)
-const HOST_BLUE := Color(0.45, 0.70, 1.0, 1.0)
-
-# ── Deck generation state ──
+# ── Deck generation state ── (_rng, _target inherited from NetDeckBuilder)
 var _pool: Array[String] = []
-var _rng := RandomNumberGenerator.new()
 var _mirror: bool = true
 var _sub_seed: int = 0      # host-chosen; 0 means unset (use base seed)
 var _local_deck: Array[String] = []
-var _target: int = 20   # SkirmishState.DECK_TARGET
 
-# ── Handoff state (mirrors NetDraft) ──
-var _local_finished: bool = false
-var _remote_finished: bool = false
+# ── Handoff state (mirrors NetDraft) ── (_local/_remote_finished inherited)
 var _local_ready: bool = false
 var _remote_ready: bool = false
 
-# ── UI refs ──
-var _root: VBoxContainer
-var _header: Label
+# ── UI refs ── (_root, _header inherited)
 var _status: Label
 var _deck_box: HFlowContainer
 # Bumped each preview rebuild; the async bake loop checks it after every await so a

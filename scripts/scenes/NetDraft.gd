@@ -1,4 +1,4 @@
-extends Control
+extends "res://scripts/scenes/NetDeckBuilder.gd"
 ## NetDraft.gd — the online Skirmish draft (Phase 1). Each player independently
 ## drafts a DECK_TARGET-card deck by picking 1 of 3 cards, DECK_TARGET times.
 ## Picks/progress sync over NetMatch; on finish each player ships its full deck
@@ -12,27 +12,18 @@ extends Control
 ## See docs/MULTIPLAYER_SKIRMISH_PLAN.md §11.
 
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
-const MENU_SCENE := "res://scenes/main_menu.tscn"
-# The combat scene is launched via NetMatch.launch_combat() (host-authoritative,
-# both peers transition together) — this script never change_scenes into it.
-
-const GILT_BRIGHT := Color(1.0, 0.85, 0.45, 1.0)
-const IVORY := Color(0.96, 0.92, 0.78, 1.0)
-const ASH := Color(0.62, 0.58, 0.52, 1.0)
-const GREEN := Color(0.55, 0.85, 0.45, 1.0)
+# Scene constants, palette, and sync flags (MENU_SCENE, the colors, _rng,
+# _target, _local_finished/_remote_finished, _root, _header) are inherited from
+# NetDeckBuilder. The combat scene is launched via NetMatch.launch_combat()
+# (host-authoritative, both peers transition together) — this script never
+# change_scenes into it.
 
 # ── Draft state ──
 var _pool: Array[String] = []
-var _rng := RandomNumberGenerator.new()
-var _target: int = 20   # set from SkirmishState.DECK_TARGET in _ready
 var _picks_made: int = 0
 var _remote_picks: int = 0
-var _local_finished: bool = false
-var _remote_finished: bool = false
 
 # ── UI refs ──
-var _root: VBoxContainer
-var _header: Label
 var _progress: Label
 var _card_row: HBoxContainer
 

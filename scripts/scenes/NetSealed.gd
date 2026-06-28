@@ -1,4 +1,4 @@
-extends Control
+extends "res://scripts/scenes/NetDeckBuilder.gd"
 ## NetSealed.gd — Sealed mode: each player OPENS a fixed pool of cards rolled from
 ## the shared seed, then builds a DECK_TARGET-card deck using only what they pulled
 ## (each card capped at the number of copies opened). Half luck-of-the-pull, half
@@ -12,48 +12,31 @@ extends Control
 ## Deck handoff (mirrors NetDraft/NetQuick):
 ##   local deck → "finished" event → peer stores it → _maybe_begin_combat.
 
-const MENU_SCENE := "res://scenes/main_menu.tscn"
+# MENU_SCENE, THUMB_SCALE, the palette, and the shared sync flags / refs
+# (_target, _rng, _local_finished, _remote_finished, _root, _header, _pool_rows)
+# are inherited from NetDeckBuilder.
 
 # How many cards are opened into the sealed pool, and the most copies of any one
 # id the pool will contain (so a roll can't hand you 30 of the same card).
 const SEALED_POOL_SIZE: int = 30
 const SEALED_MAX_PER_ID: int = 3
-# Deck-builder card-thumbnail scale (225×300 → ~104×138).
-const THUMB_SCALE: float = 0.46
 
-const GILT_BRIGHT := Color(1.0, 0.85, 0.45, 1.0)
-const IVORY := Color(0.96, 0.92, 0.78, 1.0)
-const ASH := Color(0.62, 0.58, 0.52, 1.0)
-const GREEN := Color(0.55, 0.85, 0.45, 1.0)
-const RED_WARN := Color(0.90, 0.45, 0.35, 1.0)
-const HOST_BLUE := Color(0.45, 0.70, 1.0, 1.0)
-const SPELL_BLUE := Color(0.70, 0.88, 1.0, 1.0)
-
-var _target: int = 20            # SkirmishState.DECK_TARGET
 var _legal: Array[String] = []   # full skirmish-legal pool (the roll source)
 var _avail: Dictionary = {}      # id -> copies opened into the sealed pool
 var _deck: Array[String] = []    # working deck (ids), in add order
 var _counts: Dictionary = {}     # id -> copies currently in deck
-var _rng := RandomNumberGenerator.new()
 
 # Host-broadcast pool config.
 var _mirror: bool = false        # Sealed (per-side) by default
 var _sub_seed: int = 0           # 0 = use base seed unchanged
 
-# Handoff state.
-var _local_finished: bool = false
-var _remote_finished: bool = false
-
 # UI refs.
-var _root: VBoxContainer
-var _header: Label
 var _status: Label
 var _pool_grid: HFlowContainer
 var _deck_box: HFlowContainer
 var _deck_count_lbl: Label
 var _ready_btn: Button
 var _mirror_btn: Button
-var _pool_rows: Dictionary = {}   # id -> {"button": Button, "badge": Label, "card": Card2D}
 # Bumped each pool rebuild; the async bake loop checks it after every await so a
 # re-sort / reopen that fires mid-build abandons the stale stream cleanly.
 var _pool_gen: int = 0
@@ -255,14 +238,8 @@ func _rebuild_pool_ui() -> void:
 		_pool_grid.add_child(_build_pool_thumb(id))
 
 
-func _build_pool_thumb(id: String) -> Control:
-	var d := CardDB.get_card_data(id)
-	var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
-	var btn := thumb["button"] as Button
-	btn.pressed.connect(_on_add.bind(id))
-	btn.tooltip_text = String(d.get("name", id))
-	_pool_rows[id] = {"button": btn, "badge": thumb["badge"], "card": thumb["card"]}
-	return thumb["root"]
+# _build_pool_thumb is inherited from NetDeckBuilder (identical across the
+# pool-based modes); _on_add below overrides the base no-op.
 
 
 # ─────────────────────────────────────────────────────────────────────────

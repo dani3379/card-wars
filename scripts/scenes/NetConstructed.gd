@@ -1,4 +1,4 @@
-extends Control
+extends "res://scripts/scenes/NetDeckBuilder.gd"
 ## NetConstructed.gd — Constructed mode: each player builds any DECK_TARGET-card
 ## deck from the full skirmish-legal pool, then both fight. No seed, no triplets —
 ## pure deckbuilding. Each side builds INDEPENDENTLY and ships its finished deck on
@@ -9,39 +9,19 @@ extends Control
 ##   local deck → "finished" event → peer stores it → _maybe_begin_combat.
 ##   HOST calls NetMatch.launch_combat(); CLIENT waits.
 
-const MENU_SCENE := "res://scenes/main_menu.tscn"
-
-# Max copies of any single card id in the built deck.
-const MAX_COPIES: int = 2
-# Deck-builder card-thumbnail scale (225×300 → ~104×138).
-const THUMB_SCALE: float = 0.46
-
-const GILT_BRIGHT := Color(1.0, 0.85, 0.45, 1.0)
-const IVORY := Color(0.96, 0.92, 0.78, 1.0)
-const ASH := Color(0.62, 0.58, 0.52, 1.0)
-const GREEN := Color(0.55, 0.85, 0.45, 1.0)
-const RED_WARN := Color(0.90, 0.45, 0.35, 1.0)
-const SPELL_BLUE := Color(0.70, 0.88, 1.0, 1.0)
-
-var _target: int = 20            # SkirmishState.DECK_TARGET
+# Scene constants + palette (MENU_SCENE, MAX_COPIES, THUMB_SCALE, the colors)
+# and shared sync flags / refs (_target, _rng, _local_finished, _remote_finished,
+# _root, _header, _pool_rows) are inherited from NetDeckBuilder.
 var _pool: Array[String] = []    # legal ids, sorted by cost then name
 var _deck: Array[String] = []    # working deck (ids), in add order
 var _counts: Dictionary = {}     # id -> copies currently in deck
-var _rng := RandomNumberGenerator.new()
-
-# Handoff state (mirrors NetDraft).
-var _local_finished: bool = false
-var _remote_finished: bool = false
 
 # UI refs.
-var _root: VBoxContainer
-var _header: Label
 var _status: Label
 var _deck_box: HFlowContainer
 var _pool_box: HFlowContainer
 var _deck_count_lbl: Label
 var _ready_btn: Button
-var _pool_rows: Dictionary = {}   # id -> {"button": Button, "badge": Label, "card": Card2D}
 var _name_field: LineEdit         # save-as name
 var _saved_option: OptionButton   # saved-deck picker
 
@@ -232,14 +212,8 @@ func _populate_pool() -> void:
 	_refresh_pool_counts()
 
 
-func _build_pool_thumb(id: String) -> Control:
-	var d := CardDB.get_card_data(id)
-	var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
-	var btn := thumb["button"] as Button
-	btn.pressed.connect(_on_add.bind(id))
-	btn.tooltip_text = String(d.get("name", id))
-	_pool_rows[id] = {"button": btn, "badge": thumb["badge"], "card": thumb["card"]}
-	return thumb["root"]
+# _build_pool_thumb is inherited from NetDeckBuilder (identical across the
+# pool-based modes); _on_add below overrides the base no-op.
 
 
 # ─────────────────────────────────────────────────────────────────────────
