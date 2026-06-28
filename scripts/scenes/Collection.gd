@@ -284,8 +284,8 @@ func _make_plaque(icon_node: Control, name_text: String, desc_text: String,
 	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	if GameTheme.font_body:
 		desc_lbl.add_theme_font_override("font", GameTheme.font_body)
-	desc_lbl.add_theme_font_size_override("font_size", 13)
-	desc_lbl.add_theme_color_override("font_color", Color(0.85, 0.79, 0.68, 0.95))
+	desc_lbl.add_theme_font_size_override("font_size", 16)
+	desc_lbl.add_theme_color_override("font_color", Color(0.90, 0.84, 0.73, 1.0))
 	desc_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	desc_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	col.add_child(desc_lbl)

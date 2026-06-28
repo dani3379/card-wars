@@ -1442,35 +1442,29 @@ func _place_labels() -> void:
 	# only (the lore bible forbids proper nouns for the world itself).
 	# Pinned to the north-coast chain (real geography beats cluster-hunting —
 	# the largest rock cluster can land in the south-east hills).
+	# Region names sized up (18-19px) and given heavy outlines in _draw_labels:
+	# they orient the player to the terrain bands that matter (ash = the boss's
+	# lava country). The decorative sea/strait/mainland labels below were CUT —
+	# pure flavour the player can't read that added to the "overcomplicated" feel.
 	_labels.append({"pos": _geo(14.300, 37.940) + Vector2(0, -18.0),
-		"text": "T H E   H I G H   F E L L S", "size": 15,
+		"text": "T H E   H I G H   F E L L S", "size": 18,
 		"crimson": false})
 	var wood_c := _largest_cluster([B_FOREST])
 	if wood_c.z >= 12.0:
 		_labels.append({"pos": _dodge_corridor(Vector2(wood_c.x, wood_c.y)),
-			"text": "T H E   B L A C K   P I N E S", "size": 14,
+			"text": "T H E   B L A C K   P I N E S", "size": 18,
 			"crimson": false})
 	var ash_c := _largest_cluster([B_SCORCH])
 	if ash_c.z >= 8.0:
 		_labels.append({"pos": Vector2(ash_c.x, ash_c.y - 90.0),
-			"text": "T H E   A S H   M A R C H", "size": 15,
+			"text": "T H E   A S H   M A R C H", "size": 19,
 			"crimson": true})
-	# Chart furniture names — descriptive common nouns only (lore rule).
-	_labels.append({"pos": Vector2(size.x * 0.135, size.y * 0.140),
-		"text": "T H E   U P P E R   S E A", "size": 16, "crimson": false})
-	_labels.append({"pos": Vector2(size.x * 0.170, size.y * 0.880),
-		"text": "T H E   M I D D L E   S E A", "size": 16, "crimson": false})
-	_labels.append({"pos": _geo(15.470, 38.455), "text": "THE NARROW STRAIT",
-		"size": 10, "crimson": false})
-	_labels.append({"pos": _geo(15.900, 38.130), "text": "THE MAINLAND",
-		"size": 12, "crimson": false})
-	# Harbour towns — tiny ring + name, pure chart flavour.
-	_labels.append({"pos": _geo(12.530, 38.000), "text": "SALT HAVEN",
-		"size": 10, "crimson": false, "harbor": true})
-	_labels.append({"pos": _geo(13.380, 38.100), "text": "NORTH HAVEN",
-		"size": 10, "crimson": false, "harbor": true})
-	_labels.append({"pos": _geo(15.190, 37.060), "text": "THE OLD CITY",
-		"size": 10, "crimson": false, "harbor": true})
+	# (Sea / strait / mainland chart labels were cut here: at 15-16px over the
+	# dark ocean they read as unreadable clutter, and naming empty water added
+	# nothing the player acts on. The compass rose still says "this is a chart".)
+	# (The three tiny harbour-town labels — SALT HAVEN / NORTH HAVEN / THE OLD
+	# CITY — were cut: pure 10px flavour with no gameplay signal, they read as
+	# unreadable clutter rather than chart decoration.)
 
 
 func _largest_cluster(biomes: Array) -> Vector3:
@@ -1748,15 +1742,20 @@ func _draw_kingdom_names(tgt: CanvasItem) -> void:
 		if String(k.state) == "front":
 			continue
 		elif String(k.state) == "taken":
-			col = Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b, 0.62)
+			col = Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b, 0.95)
 		else:
 			var c: Color = k.color
-			col = Color(minf(c.r * 1.35, 1.0), minf(c.g * 1.35, 1.0),
-				minf(c.b * 1.35, 1.0), 0.72)
-		tgt.draw_string(GameTheme.font_display,
-			_dodge_corridor(k.centroid as Vector2, 116.0) + Vector2(-150.0, 4.0),
-			_letterspace(String(k.name)), HORIZONTAL_ALIGNMENT_CENTER,
-			300, 13, col)
+			col = Color(minf(c.r * 1.4, 1.0), minf(c.g * 1.4, 1.0),
+				minf(c.b * 1.4, 1.0), 0.95)
+		# Real dark outline (was a faint half-alpha shadow that washed out over
+		# the dyed land) at 18px so the realm names read as labels, not noise.
+		var name_p: Vector2 = _dodge_corridor(k.centroid as Vector2, 116.0) \
+			+ Vector2(-150.0, 4.0)
+		var name_txt := _letterspace(String(k.name))
+		tgt.draw_string_outline(GameTheme.font_display, name_p, name_txt,
+			HORIZONTAL_ALIGNMENT_CENTER, 300, 18, 5, Color(0, 0, 0, 0.85))
+		tgt.draw_string(GameTheme.font_display, name_p, name_txt,
+			HORIZONTAL_ALIGNMENT_CENTER, 300, 18, col)
 
 
 func _draw_labels(tgt: CanvasItem) -> void:
@@ -1765,7 +1764,9 @@ func _draw_labels(tgt: CanvasItem) -> void:
 	for lb in _labels:
 		var p: Vector2 = lb.pos
 		var txt: String = lb.text
-		var sz: int = lb.size
+		# Floor place-name labels at a legible size — many were authored at 10-12px,
+		# which read as unreadable clutter rather than the chart flavour intended.
+		var sz: int = maxi(17, int(lb.size))
 		if bool(lb.get("harbor", false)):
 			# Harbour mark: a tiny town cluster + ring, name set off right.
 			tgt.draw_rect(Rect2(p + Vector2(-9.0, -10.0), Vector2(5.0, 4.5)),
@@ -1779,14 +1780,15 @@ func _draw_labels(tgt: CanvasItem) -> void:
 			tgt.draw_circle(p, 1.6, Color(0.85, 0.80, 0.66, 0.8))
 			tgt.draw_string(GameTheme.font_display, p + Vector2(9, 4), txt,
 				HORIZONTAL_ALIGNMENT_LEFT, 160, sz,
-				Color(0.82, 0.76, 0.62, 0.60))
+				Color(0.86, 0.80, 0.66, 0.82))
 			continue
-		var col := Color(0.93, 0.87, 0.70, 0.80)
+		# Real dark outline (was a faint 2px shadow that washed out over busy
+		# terrain) and fuller alpha so the region names read at a glance.
+		var col := Color(0.95, 0.89, 0.73, 0.95)
 		if bool(lb.crimson):
-			col = Color(0.95, 0.55, 0.40, 0.85)
-		tgt.draw_string(GameTheme.font_display, p + Vector2(-199, 2),
-			txt, HORIZONTAL_ALIGNMENT_CENTER, 400, sz,
-			Color(0, 0, 0, 0.65))
+			col = Color(0.97, 0.60, 0.44, 0.97)
+		tgt.draw_string_outline(GameTheme.font_display, p + Vector2(-200, 0),
+			txt, HORIZONTAL_ALIGNMENT_CENTER, 400, sz, 5, Color(0, 0, 0, 0.9))
 		tgt.draw_string(GameTheme.font_display, p + Vector2(-200, 0),
 			txt, HORIZONTAL_ALIGNMENT_CENTER, 400, sz, col)
 
@@ -1810,18 +1812,8 @@ func _draw_furniture(tgt: CanvasItem) -> void:
 	if GameTheme.font_display != null:
 		tgt.draw_string(GameTheme.font_display, cp + Vector2(-8, -32), "N",
 			HORIZONTAL_ALIGNMENT_CENTER, 16, 13, Color(0.85, 0.80, 0.66, 0.8))
-	# Scale bar — bottom-right ocean.
-	var sb := Vector2(w - 264.0, h - 64.0)
-	tgt.draw_line(sb, sb + Vector2(150, 0), Color(0.70, 0.74, 0.68, 0.6),
-		1.6, true)
-	for k2 in range(4):
-		var x := sb.x + 150.0 * float(k2) / 3.0
-		tgt.draw_line(Vector2(x, sb.y - 4), Vector2(x, sb.y + 4),
-			Color(0.70, 0.74, 0.68, 0.6), 1.4, true)
-	if GameTheme.font_display != null:
-		tgt.draw_string(GameTheme.font_display, sb + Vector2(0, -10),
-			"TWELVE LEAGUES", HORIZONTAL_ALIGNMENT_CENTER, 150, 11,
-			Color(0.72, 0.74, 0.66, 0.65))
+	# Scale bar removed: it implied a distance mechanic the game doesn't have, and
+	# its 11px "TWELVE LEAGUES" was unreadable clutter in the corner. Compass kept.
 	# Sea serpent — every honest chart has one.
 	var sp := Vector2(w * 0.155, h * 0.815)
 	var scol := Color(0.16, 0.30, 0.28, 0.85)
@@ -2222,7 +2214,9 @@ func _draw_sites(tgt: CanvasItem) -> void:
 				p + Vector2(15, -14.5), p + Vector2(0, -10)]), PLAYER_AMBER)
 			continue
 		var st: Dictionary = SITE_STYLE.get(typ, SITE_STYLE["wayside"])
-		var r: float = float(st.r) + (2.0 if open_now else 0.0)
+		# Reachable stops sit a bigger chip (+4) so the "where can I go next"
+		# read is unmistakable; far-future stops stay at base size, dimmed.
+		var r: float = float(st.r) + (4.0 if open_now else 0.0)
 		var disc := Color(0.90, 0.84, 0.68).lerp(st.tint as Color,
 			float(st.wash))
 		var ink := Color(0.13, 0.10, 0.07)
@@ -2248,29 +2242,33 @@ func _draw_sites(tgt: CanvasItem) -> void:
 		else:
 			tgt.draw_arc(p, r, 0, TAU, 30,
 				PLAYER_AMBER if open_now else Color(0.20, 0.16, 0.10, 0.9),
-				2.4 if open_now else 1.5, true)
+				3.2 if open_now else 1.5, true)
 		if open_now:
 			tgt.draw_arc(p, r + 5.0, 0, TAU, 30, Color(PLAYER_AMBER.r,
-				PLAYER_AMBER.g, PLAYER_AMBER.b, 0.42), 1.7, true)
-			tgt.draw_circle(p, r + 14.0,
-				Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b, 0.07))
+				PLAYER_AMBER.g, PLAYER_AMBER.b, 0.50), 2.0, true)
+			tgt.draw_circle(p, r + 15.0,
+				Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b, 0.08))
 		# Colour-blind-safe reachability cue (the amber-vs-ink ring is the only
 		# other tell): an open stop wears a small "march here" chevron pointing
 		# up at it; a locked one wears an ink padlock. Shape, not just colour.
 		if open_now:
-			var cy := p + Vector2(0, r + 9.0)
-			for dy in [0.0, 3.4]:
+			var cy := p + Vector2(0, r + 10.0)
+			for dy in [0.0, 4.0]:
 				tgt.draw_polyline(PackedVector2Array([
-					cy + Vector2(-5.0, 3.0 + dy), cy + Vector2(0, -1.4 + dy),
-					cy + Vector2(5.0, 3.0 + dy)]),
-					Color(0.10, 0.07, 0.05, 0.92), 1.7, true)
+					cy + Vector2(-6.2, 3.6 + dy), cy + Vector2(0, -1.8 + dy),
+					cy + Vector2(6.2, 3.6 + dy)]),
+					Color(0.10, 0.07, 0.05, 0.95), 2.1, true)
 		else:
 			var kp := p + Vector2(0, r + 8.0)
 			tgt.draw_rect(Rect2(kp + Vector2(-3.6, -0.6), Vector2(7.2, 5.6)),
 				Color(0.15, 0.12, 0.08, 0.80))
 			tgt.draw_arc(kp + Vector2(0, -0.6), 2.6, PI, TAU, 12,
 				Color(0.15, 0.12, 0.08, 0.80), 1.4, true)
-		var ipx := r * 1.30
+		# Bigger type glyph (was 1.30) so each site's KIND reads at a glance —
+		# the icon, not the legend hunt, should carry the type. Open stops grew
+		# their disc, so divide the glyph off the BASE radius to keep it centred
+		# at a consistent symbol size across open/locked chips.
+		var ipx := float(st.r) * 1.55
 		# Waysides draw a per-verb ink glyph (anvil / scales / banner / chest)
 		# so the four roadside halts aren't pixel-identical; everything else
 		# uses its site SVG.
@@ -2382,18 +2380,26 @@ func _draw_keep(tgt: CanvasItem) -> void:
 		# the passes, the grain country, the lava country.
 		var keep_names := ["THE PASS GATE", "THE GRANARY KEEP",
 			"THE CINDER SEAT"]
-		var plaque := Rect2(kp.x - 95.0, base_y + 12.0, 190.0, 38.0)
-		tgt.draw_rect(plaque, Color(0.05, 0.04, 0.035, 0.85))
-		tgt.draw_rect(plaque, Color(banner.r, banner.g, banner.b, 0.8),
-			false, 1.0)
+		# Plaque bumped to 17px lines + a taller, slightly wider box so the keep
+		# name (and the lord beneath it) read as the act's destination.
+		var plaque := Rect2(kp.x - 108.0, base_y + 12.0, 216.0, 44.0)
+		tgt.draw_rect(plaque, Color(0.05, 0.04, 0.035, 0.88))
+		tgt.draw_rect(plaque, Color(banner.r, banner.g, banner.b, 0.85),
+			false, 1.5)
+		var keep_lbl: String = keep_names[clampi(_act - 1, 0, 2)]
+		tgt.draw_string_outline(GameTheme.font_display,
+			Vector2(kp.x - 120.0, base_y + 29.0), keep_lbl,
+			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 17, 5, Color(0, 0, 0, 0.9))
 		tgt.draw_string(GameTheme.font_display,
-			Vector2(kp.x - 120.0, base_y + 26.0),
-			keep_names[clampi(_act - 1, 0, 2)],
-			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 10,
-			Color(0.74, 0.66, 0.52, 0.95))
+			Vector2(kp.x - 120.0, base_y + 29.0), keep_lbl,
+			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 17,
+			Color(0.83, 0.74, 0.58, 1.0))
+		tgt.draw_string_outline(GameTheme.font_display,
+			Vector2(kp.x - 120.0, base_y + 50.0), _boss_name,
+			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 17, 5, Color(0, 0, 0, 0.9))
 		tgt.draw_string(GameTheme.font_display,
-			Vector2(kp.x - 120.0, base_y + 44.0), _boss_name,
-			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 14, Color(0.92, 0.80, 0.62))
+			Vector2(kp.x - 120.0, base_y + 50.0), _boss_name,
+			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 17, Color(0.95, 0.84, 0.66))
 
 
 func _draw_camp(tgt: CanvasItem) -> void:
@@ -2405,9 +2411,12 @@ func _draw_camp(tgt: CanvasItem) -> void:
 		camp + Vector2(0, -14), camp + Vector2(18, 11),
 		camp + Vector2(-18, 11)]), Color(0.05, 0.04, 0.03), 1.8, true)
 	if GameTheme.font_display != null:
-		tgt.draw_string(GameTheme.font_display, camp + Vector2(-60, 32),
-			"YOUR CAMP", HORIZONTAL_ALIGNMENT_CENTER, 120, 12,
-			Color(0.88, 0.80, 0.64))
+		tgt.draw_string_outline(GameTheme.font_display, camp + Vector2(-75, 35),
+			"YOUR CAMP", HORIZONTAL_ALIGNMENT_CENTER, 150, 17, 5,
+			Color(0, 0, 0, 0.9))
+		tgt.draw_string(GameTheme.font_display, camp + Vector2(-75, 35),
+			"YOUR CAMP", HORIZONTAL_ALIGNMENT_CENTER, 150, 17,
+			Color(0.92, 0.84, 0.68))
 	# "YOU ARE HERE" — a labelled static marker at the army's position, baked
 	# into the plate so it shows under BOTH the live overlay standard and the
 	# sandbox fallback. The swaying amber banner alone read like the conquered-
@@ -2423,14 +2432,19 @@ func _draw_camp(tgt: CanvasItem) -> void:
 		tgt.draw_arc(you + Vector2(0, 5), 10.0, 0, TAU, 28, PLAYER_AMBER,
 			1.5, true)
 		# Named plate just below the foot (clear of the staff + flag above).
-		var pw := 96.0
-		var plate := Rect2(you.x - pw * 0.5, you.y + 16.0, pw, 17.0)
-		tgt.draw_rect(plate, Color(0.05, 0.04, 0.03, 0.80))
+		# Bigger plate + 17px outlined text + brighter rim: this is the core
+		# "where am I" cue, and at 15px with no outline it was easy to lose.
+		var pw := 152.0
+		var plate := Rect2(you.x - pw * 0.5, you.y + 16.0, pw, 27.0)
+		tgt.draw_rect(plate, Color(0.05, 0.04, 0.03, 0.90))
 		tgt.draw_rect(plate, Color(PLAYER_AMBER.r, PLAYER_AMBER.g,
-			PLAYER_AMBER.b, 0.55), false, 1.0)
+			PLAYER_AMBER.b, 0.80), false, 1.5)
+		tgt.draw_string_outline(GameTheme.font_display, Vector2(plate.position.x,
+			plate.position.y + 19.0), "YOU ARE HERE",
+			HORIZONTAL_ALIGNMENT_CENTER, pw, 17, 5, Color(0, 0, 0, 0.9))
 		tgt.draw_string(GameTheme.font_display, Vector2(plate.position.x,
-			plate.position.y + 13.0), "YOU ARE HERE",
-			HORIZONTAL_ALIGNMENT_CENTER, pw, 10, Color(0.94, 0.84, 0.62))
+			plate.position.y + 19.0), "YOU ARE HERE",
+			HORIZONTAL_ALIGNMENT_CENTER, pw, 17, Color(0.98, 0.89, 0.68))
 	# The army standard at the player's position is normally drawn (and
 	# animated) by MapView's pulse overlay; this static fallback keeps the
 	# render-only sandbox (map_proto.tscn) showing a complete picture.
@@ -2482,25 +2496,37 @@ func _draw_ui() -> void:
 		var sub: String = marches[clampi(RunState.get_act() - 1, 0, 2)]
 		if _faction_name != "":
 			sub += " · AGAINST " + _faction_name
+		# Sub-line + tally bumped to 20px with a real dark outline: they sit
+		# BELOW the cartouche band, over open terrain, where the old un-outlined
+		# 18px tan washed out (the "still too small" report).
+		var sub_sz := 20
 		var sub_txt := _letterspace(sub)
 		if GameTheme.font_display.get_string_size(sub_txt,
-				HORIZONTAL_ALIGNMENT_CENTER, -1, 12).x > band_w - 28.0:
+				HORIZONTAL_ALIGNMENT_CENTER, -1, sub_sz).x > band_w - 20.0:
 			sub_txt = sub   # longest kingdom names drop the letterspacing
-		var sub_col := Color(0.82, 0.70, 0.48, 0.95)
+		var sub_col := Color(0.92, 0.80, 0.58, 1.0)
 		if _faction_name != "":
 			var bn := _banner_color()
-			sub_col = Color(bn.r, bn.g, bn.b, 0.95).lerp(sub_col, 0.40)
+			sub_col = Color(bn.r, bn.g, bn.b, 1.0).lerp(sub_col, 0.40)
+		draw_string_outline(GameTheme.font_display,
+			Vector2(band.position.x, band.position.y + 74),
+			sub_txt, HORIZONTAL_ALIGNMENT_CENTER, band_w, sub_sz, 5,
+			Color(0, 0, 0, 0.9))
 		draw_string(GameTheme.font_display,
-			Vector2(band.position.x, band.position.y + 72),
-			sub_txt, HORIZONTAL_ALIGNMENT_CENTER, band_w, 12, sub_col)
+			Vector2(band.position.x, band.position.y + 74),
+			sub_txt, HORIZONTAL_ALIGNMENT_CENTER, band_w, sub_sz, sub_col)
 		# Province tally — a quiet "how much of the chart is yours" read. The
 		# gate objective (break holds → open the road) is NOT repeated here: it
 		# lives in MapView's standing-order banner just below, so the plate and
 		# the HUD never echo the same fact.
-		draw_string(GameTheme.font_display,
-			Vector2(band.position.x, band.position.y + 92),
+		draw_string_outline(GameTheme.font_display,
+			Vector2(band.position.x, band.position.y + 96),
 			"PROVINCES CLAIMED  %d / %d" % [owned, _nodes.size()],
-			HORIZONTAL_ALIGNMENT_CENTER, band_w, 12, Color(0.72, 0.64, 0.50, 0.80))
+			HORIZONTAL_ALIGNMENT_CENTER, band_w, 20, 5, Color(0, 0, 0, 0.9))
+		draw_string(GameTheme.font_display,
+			Vector2(band.position.x, band.position.y + 96),
+			"PROVINCES CLAIMED  %d / %d" % [owned, _nodes.size()],
+			HORIZONTAL_ALIGNMENT_CENTER, band_w, 20, Color(0.90, 0.80, 0.60, 1.0))
 	if GameTheme.font_display == null:
 		return
 	# Legend lists only the site types actually on this act's map (treasure
@@ -2529,14 +2555,18 @@ func _draw_ui() -> void:
 			["standard_bearer", "BANNER"], ["supply_cache", "CACHE"]]:
 		if waysides_present.has(wv[0]):
 			items.append(["wayside", wv[1], wv[0]])
-	# Variable label widths (the qualified Recruit/Shop entries need more
-	# room than a bare "REST"); pack each item to its own measured stride so
-	# nothing collides, then wrap the run to a second row if it overflows.
+	# Legend sizing bumped for the "still too small" report: 18px labels, 12px
+	# chip discs, 16px glyphs. Variable label widths (the qualified Recruit/Shop
+	# entries need more room than a bare "REST"); pack each item to its own
+	# measured stride so nothing collides, then wrap to a second row on overflow.
+	var leg_sz := 18
+	var chip_r := 12.0
+	var chip_col := 34.0   # horizontal space the chip + its padding owns
 	var strides: Array = []
 	for it in items:
 		var tw := GameTheme.font_display.get_string_size(
-			String(it[1]), HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
-		var stride := 30.0 + tw + 22.0   # chip + label + gap
+			String(it[1]), HORIZONTAL_ALIGNMENT_LEFT, -1, leg_sz).x
+		var stride := chip_col + tw + 26.0   # chip + label + gap
 		strides.append(stride)
 	# Choose a row split so neither row exceeds the canvas; the legend lives
 	# on the sea, so keep a comfortable margin.
@@ -2550,55 +2580,65 @@ func _draw_ui() -> void:
 			row_w.append(0.0)
 		rows[rows.size() - 1].append(i)
 		row_w[row_w.size() - 1] += sd
-	var row_h := 30.0
-	var base_y := h - 24.0 - float(rows.size()) * row_h
-	# A faint band seats the legend on the sea instead of floating loose.
+	var row_h := 34.0
+	var base_y := h - 26.0 - float(rows.size()) * row_h
+	# A stronger ink band seats the legend on the sea and keeps the labels
+	# legible — the old 0.45 wash let the busy coastline bleed through them.
 	var band_w2 := 0.0
 	for rw0 in row_w:
 		band_w2 = maxf(band_w2, float(rw0))
 	var band_x := w * 0.5 - band_w2 * 0.5
-	draw_rect(Rect2(band_x - 18, base_y - 16, band_w2 + 36,
-		float(rows.size()) * row_h + 12), Color(0.02, 0.025, 0.03, 0.45))
-	draw_line(Vector2(band_x - 18, base_y - 16),
-		Vector2(band_x + band_w2 + 18, base_y - 16),
-		Color(0.55, 0.48, 0.36, 0.25), 1.0, true)
+	draw_rect(Rect2(band_x - 22, base_y - 18, band_w2 + 44,
+		float(rows.size()) * row_h + 14), Color(0.03, 0.03, 0.035, 0.74))
+	draw_rect(Rect2(band_x - 22, base_y - 18, band_w2 + 44,
+		float(rows.size()) * row_h + 14),
+		Color(0.55, 0.48, 0.36, 0.30), false, 1.0)
 	for ri in range(rows.size()):
 		var lx := w * 0.5 - float(row_w[ri]) * 0.5
-		var ly := base_y + float(ri) * row_h
+		var ly := base_y + float(ri) * row_h + row_h * 0.5
 		for idx in rows[ri]:
 			var it: Array = items[idx]
 			# Miniature of the real site chip — the legend previews exactly
 			# what the player sees on the road (parchment disc, dye, ink glyph).
 			var st: Dictionary = SITE_STYLE.get(it[0], SITE_STYLE["wayside"])
-			var lc := Vector2(lx + 9.0, ly)
+			var lc := Vector2(lx + chip_r, ly)
 			var disc := Color(0.90, 0.84, 0.68).lerp(st.tint as Color,
 				float(st.wash))
-			draw_circle(lc, 10.0, disc)
-			draw_arc(lc, 10.0, 0, TAU, 24,
+			draw_circle(lc + Vector2(1.5, 2.0), chip_r + 0.5, Color(0, 0, 0, 0.4))
+			draw_circle(lc, chip_r, disc)
+			draw_arc(lc, chip_r, 0, TAU, 26,
 				Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.95) if it[0] == "elite"
 				else Color(0.20, 0.16, 0.10, 0.9),
-				1.6 if it[0] == "elite" else 1.2, true)
+				2.0 if it[0] == "elite" else 1.4, true)
 			var glyph_ink := Color(0.13, 0.10, 0.07)
 			var drew := false
 			if it[0] == "wayside":
-				drew = _draw_wayside_glyph(self, lc, 9.0, glyph_ink,
+				drew = _draw_wayside_glyph(self, lc, 11.0, glyph_ink,
 					String(it[2]))
 			if not drew:
 				var tex: Texture2D = _node_icon(it[0])
 				if tex != null:
-					draw_texture_rect(tex, Rect2(lc - Vector2(6.5, 6.5),
-						Vector2(13, 13)), false, glyph_ink)
-			draw_string(GameTheme.font_display, Vector2(lx + 24, ly + 6),
-				String(it[1]), HORIZONTAL_ALIGNMENT_LEFT, strides[idx] - 24, 12,
-				Color(0.70, 0.64, 0.50, 0.85))
+					draw_texture_rect(tex, Rect2(lc - Vector2(8.0, 8.0),
+						Vector2(16, 16)), false, glyph_ink)
+			draw_string_outline(GameTheme.font_display,
+				Vector2(lx + chip_col, ly + leg_sz * 0.36),
+				String(it[1]), HORIZONTAL_ALIGNMENT_LEFT,
+				strides[idx] - chip_col, leg_sz, 4, Color(0, 0, 0, 0.85))
+			draw_string(GameTheme.font_display,
+				Vector2(lx + chip_col, ly + leg_sz * 0.36),
+				String(it[1]), HORIZONTAL_ALIGNMENT_LEFT,
+				strides[idx] - chip_col, leg_sz, Color(0.90, 0.81, 0.62, 1.0))
 			lx += strides[idx]
 	# "Reading the chart" primer — the non-chip signals (route colour, the
 	# mutator star, the pursuit pennant) that the site icons don't carry.
-	var primer := "amber = open road   ·   ★ = mutator   ·   red pennant = pursuit"
+	var primer := "amber ring = open road      ★ = changed rules      red pennant = pursuit"
+	draw_string_outline(GameTheme.font_display,
+		Vector2(w * 0.5 - 560.0, base_y - 28.0), primer,
+		HORIZONTAL_ALIGNMENT_CENTER, 1120, 17, 4, Color(0, 0, 0, 0.85))
 	draw_string(GameTheme.font_display,
-		Vector2(w * 0.5 - 540.0, base_y - 24.0), primer,
-		HORIZONTAL_ALIGNMENT_CENTER, 1080, 11,
-		Color(0.66, 0.60, 0.47, 0.78))
+		Vector2(w * 0.5 - 560.0, base_y - 28.0), primer,
+		HORIZONTAL_ALIGNMENT_CENTER, 1120, 17,
+		Color(0.86, 0.77, 0.60, 1.0))
 
 
 ## "THE FIRST MARCH" → "T H E   F I R S T   M A R C H" — the chart's

@@ -379,12 +379,15 @@ func _place_gate_banner() -> void:
 
 	# A slim ink chip, width-fitted to the line, pinned top-center under the
 	# 560-wide act cartouche (which bottoms out around y≈130 in canvas space).
-	const BANNER_Y := 138.0
-	const BANNER_H := 30.0
+	# Dropped from 138 to 164: the enlarged (20px) province tally line above
+	# now reaches ~y150, and the banner is the campaign's standing order — it
+	# must never collide with the plate text. A notch taller/bigger too.
+	const BANNER_Y := 164.0
+	const BANNER_H := 34.0
 	var font: Font = GameTheme.font_display
 	var fw: float = 360.0
 	if font != null:
-		fw = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x + 52.0
+		fw = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 17).x + 56.0
 	fw = clampf(fw, 320.0, size.x - 80.0)
 	var bx: float = size.x * 0.5 - fw * 0.5
 
@@ -411,10 +414,10 @@ func _place_gate_banner() -> void:
 	lbl.text = text
 	if font != null:
 		lbl.add_theme_font_override("font", font)
-	lbl.add_theme_font_size_override("font_size", 15)
+	lbl.add_theme_font_size_override("font_size", 17)
 	lbl.add_theme_color_override("font_color", tint)
-	lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
-	lbl.add_theme_constant_override("outline_size", 4)
+	lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	lbl.add_theme_constant_override("outline_size", 5)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -695,160 +698,11 @@ func _show_deck_viewer() -> void:
 func _show_how_to_play() -> void:
 	if has_node("HowToPlayOverlay"):
 		get_node("HowToPlayOverlay").queue_free()
-	add_child(_build_how_to_play_overlay())
+	add_child(GameTheme.make_how_to_play_overlay())
 
 
-func _build_how_to_play_overlay() -> Control:
-	var GILT_B := Color(1.0, 0.88, 0.35, 1.0)
-	var IVORY_C := Color(0.96, 0.92, 0.78, 1.0)
-	var ASH_C := Color(0.62, 0.58, 0.52, 1.0)
-
-	var scrim := ColorRect.new()
-	scrim.name = "HowToPlayOverlay"
-	scrim.color = Color(0.02, 0.015, 0.03, 0.90)
-	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
-	scrim.z_index = 50
-	scrim.mouse_filter = Control.MOUSE_FILTER_STOP
-	scrim.gui_input.connect(func(ev: InputEvent):
-		if ev is InputEventMouseButton and ev.pressed \
-				and ev.button_index == MOUSE_BUTTON_LEFT:
-			scrim.queue_free())
-
-	var panel := PanelContainer.new()
-	panel.set_anchors_preset(Control.PRESET_CENTER)
-	panel.custom_minimum_size = Vector2(1180, 740)
-	panel.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
-		Color(0.06, 0.05, 0.045, 0.99),
-		Color(0.60, 0.51, 0.34, 0.95), 2, 6, true))
-	panel.mouse_filter = Control.MOUSE_FILTER_STOP
-	scrim.add_child(panel)
-
-	var pad := MarginContainer.new()
-	for m in ["margin_left", "margin_right", "margin_top", "margin_bottom"]:
-		pad.add_theme_constant_override(m, 28)
-	panel.add_child(pad)
-
-	var outer := VBoxContainer.new()
-	outer.add_theme_constant_override("separation", 14)
-	pad.add_child(outer)
-
-	var head := HBoxContainer.new()
-	head.add_theme_constant_override("separation", 12)
-	outer.add_child(head)
-	var title := GameTheme.make_label("HOW TO PLAY", GameTheme.FONT_HEADER, GILT_B)
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	head.add_child(title)
-	var close := GameTheme.make_back_button("CLOSE", Vector2(120, 36), 16)
-	close.pressed.connect(func(): scrim.queue_free())
-	head.add_child(close)
-
-	var rule := ColorRect.new()
-	rule.color = Color(0.60, 0.51, 0.34, 0.55)
-	rule.custom_minimum_size = Vector2(0, 2)
-	outer.add_child(rule)
-
-	var cols := HBoxContainer.new()
-	cols.add_theme_constant_override("separation", 26)
-	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	outer.add_child(cols)
-
-	# LEFT — the campaign primer.
-	var left_scroll := ScrollContainer.new()
-	left_scroll.custom_minimum_size = Vector2(500, 0)
-	left_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	left_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	cols.add_child(left_scroll)
-	var left := VBoxContainer.new()
-	left.add_theme_constant_override("separation", 10)
-	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	left_scroll.add_child(left)
-
-	left.add_child(GameTheme.make_label("HOW THE CAMPAIGN WORKS",
-		GameTheme.FONT_SUBHEADER, GILT_B))
-
-	var primer := [
-		["Command", "Your turn resource — you start with 3 each turn and spend it to play creatures and spells. Up to 2 unspent Command banks into next turn."],
-		["The board", "Four lanes, two ranks deep. The front rank fights; the back rank is reserve. Play creatures into either rank."],
-		["Combat", "Both sides strike at once. In a lane the front rank trades first; the back waits behind it. Swift creatures strike in a pre-phase."],
-		["The Forge", "At a rest, Forge a card for a permanent \"+\" upgrade. You pick the card and see exactly what it becomes — no rolls."],
-		["Recruit camps", "A free draft — take 1 of 3 cards. The main way your deck grows between fights."],
-		["The boss gate", "Each lord's keep starts barred. Break enough holds to open the road, then march on the keep. The banner tracks how many remain."],
-	]
-	for entry in primer:
-		left.add_child(_make_primer_block(entry[0], entry[1], IVORY_C))
-
-	var vrule := ColorRect.new()
-	vrule.color = Color(0.50, 0.42, 0.28, 0.40)
-	vrule.custom_minimum_size = Vector2(2, 0)
-	vrule.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	cols.add_child(vrule)
-
-	# RIGHT — the full keyword glossary, sourced live from KeywordEffects.
-	var right_col := VBoxContainer.new()
-	right_col.add_theme_constant_override("separation", 8)
-	right_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	right_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	cols.add_child(right_col)
-	right_col.add_child(GameTheme.make_label("KEYWORD GLOSSARY",
-		GameTheme.FONT_SUBHEADER, GILT_B))
-	right_col.add_child(GameTheme.make_label(
-		"Every keyword that can appear on a card.", 13, ASH_C))
-
-	var gloss_scroll := ScrollContainer.new()
-	gloss_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	gloss_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	gloss_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	right_col.add_child(gloss_scroll)
-	var gloss := VBoxContainer.new()
-	gloss.add_theme_constant_override("separation", 9)
-	gloss.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	gloss_scroll.add_child(gloss)
-
-	for key in KeywordEffects.KEYWORDS.keys():
-		var kw: Dictionary = KeywordEffects.KEYWORDS[key]
-		gloss.add_child(_make_keyword_row(
-			String(kw.get("display", key)), String(kw.get("desc", "")), IVORY_C))
-
-	return scrim
-
-
-func _make_primer_block(heading: String, body: String, ivory: Color) -> Control:
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 2)
-	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	box.add_child(GameTheme.make_label(heading, 16, Color(0.92, 0.80, 0.50, 1.0)))
-	var b := GameTheme.make_label(body, 13, ivory)
-	b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	b.custom_minimum_size = Vector2(460, 0)
-	box.add_child(b)
-	return box
-
-
-func _make_keyword_row(name: String, desc: String, ivory: Color) -> Control:
-	# Gilt keyword name + dim body on a hairline ink chip — the chart kit.
-	var row := PanelContainer.new()
-	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.085, 0.072, 0.060, 0.65)
-	sb.border_color = Color(0.45, 0.38, 0.26, 0.45)
-	sb.set_border_width_all(1)
-	sb.set_corner_radius_all(3)
-	sb.content_margin_left = 12
-	sb.content_margin_right = 12
-	sb.content_margin_top = 7
-	sb.content_margin_bottom = 7
-	row.add_theme_stylebox_override("panel", sb)
-	var v := VBoxContainer.new()
-	v.add_theme_constant_override("separation", 1)
-	row.add_child(v)
-	v.add_child(GameTheme.make_label(name, 15, Color(0.95, 0.82, 0.48, 1.0)))
-	var d := GameTheme.make_label(desc, 13, ivory)
-	d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	d.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	d.custom_minimum_size = Vector2(560, 0)
-	v.add_child(d)
-	return row
+# (How-To-Play overlay now lives in GameTheme.make_how_to_play_overlay — one
+# shared builder for both MapView and MainMenu so the primer copy can't drift.)
 
 
 # ═══════════════════ PARCHMENT TOOLTIP ═══════════════════
@@ -876,19 +730,25 @@ func _build_map_tooltip(text: String) -> Control:
 	name_lbl.text = lines[0]
 	if GameTheme.font_display != null:
 		name_lbl.add_theme_font_override("font", GameTheme.font_display)
-	name_lbl.add_theme_font_size_override("font_size", 15)
-	name_lbl.add_theme_color_override("font_color", Color(0.90, 0.78, 0.52))
+	# Name 20px, body 17px (were 18/16) with a dark outline — the site tooltip
+	# is the read-before-you-commit intel and was reported too small.
+	name_lbl.add_theme_font_size_override("font_size", 20)
+	name_lbl.add_theme_color_override("font_color", Color(0.96, 0.84, 0.56))
+	name_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	name_lbl.add_theme_constant_override("outline_size", 4)
 	box.add_child(name_lbl)
 	if lines.size() > 1:
 		var body := Label.new()
 		body.text = "\n".join(lines.slice(1))
 		if body.text.length() > 36:
 			body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-			body.custom_minimum_size = Vector2(280, 0)
+			body.custom_minimum_size = Vector2(300, 0)
 		if GameTheme.font_body != null:
 			body.add_theme_font_override("font", GameTheme.font_body)
-		body.add_theme_font_size_override("font_size", 13)
-		body.add_theme_color_override("font_color", Color(0.82, 0.78, 0.68))
+		body.add_theme_font_size_override("font_size", 17)
+		body.add_theme_color_override("font_color", Color(0.92, 0.88, 0.78))
+		body.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.75))
+		body.add_theme_constant_override("outline_size", 3)
 		box.add_child(body)
 	return panel
 

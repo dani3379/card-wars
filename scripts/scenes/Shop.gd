@@ -76,32 +76,32 @@ func _build_ui() -> void:
 		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
 
-	var title = GameTheme.make_screen_title("SHOP", GameTheme.GILT_BRIGHT)
+	var title = GameTheme.make_screen_title("SHOP", GameTheme.GILT_BRIGHT, GameTheme.FONT_TITLE)
 	title.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	title.offset_top = 16
-	title.offset_bottom = 68
+	title.offset_top = 18
+	title.offset_bottom = 74
 	add_child(title)
 
-	var gold_label = GameTheme.make_label("%d gold" % RunState.gold, 20, GameTheme.KEYWORD_GOLD, true)
+	var gold_label = GameTheme.make_label("%d gold" % RunState.gold, 26, GameTheme.KEYWORD_GOLD, true)
 	gold_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	gold_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	gold_label.offset_top = 72
-	gold_label.offset_bottom = 100
+	gold_label.offset_top = 78
+	gold_label.offset_bottom = 112
 	add_child(gold_label)
 
 	# Card stock — real Card2D renders with a Buy button below (matches Reward).
 	# Shelf label gets the chart's ruled-heading furniture so it reads as a
 	# section of the page, not floating text.
-	var cards_label = GameTheme.make_section_divider("Cards for Sale", GameTheme.GILT)
+	var cards_label = GameTheme.make_section_divider("Cards for Sale", GameTheme.GILT, 22)
 	cards_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	cards_label.offset_top = 104
-	cards_label.offset_bottom = 134
+	cards_label.offset_top = 120
+	cards_label.offset_bottom = 152
 	add_child(cards_label)
 
 	var card_row = HBoxContainer.new()
 	card_row.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	card_row.offset_top = 140
-	card_row.offset_bottom = 470
+	card_row.offset_top = 160
+	card_row.offset_bottom = 492
 	card_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	card_row.add_theme_constant_override("separation", 28)
 	add_child(card_row)
@@ -123,32 +123,32 @@ func _build_ui() -> void:
 
 		var color = Color(0.15, 0.12, 0.30) if data.type == "spell" else Color(0.20, 0.25, 0.35)
 		var buy_btn = GameTheme.make_themed_button("Buy — %dg" % price, color,
-			Vector2(160, 38), 15, data.desc)
+			Vector2(200, 50), 20, data.desc)
 		buy_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		buy_btn.disabled = RunState.gold < price
 		buy_btn.pressed.connect(_buy_card.bind(id, price))
 		slot.add_child(buy_btn)
 
 	# Relic + Services — one centered row below the cards.
-	var svc_label = GameTheme.make_section_divider("Relics & Services", GameTheme.GILT)
+	var svc_label = GameTheme.make_section_divider("Relics & Services", GameTheme.GILT, 22)
 	svc_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	svc_label.offset_top = 486
-	svc_label.offset_bottom = 516
+	svc_label.offset_top = 516
+	svc_label.offset_bottom = 548
 	add_child(svc_label)
 
 	var svc_row = HBoxContainer.new()
 	svc_row.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	svc_row.offset_top = 522
-	svc_row.offset_bottom = 700
+	svc_row.offset_top = 558
+	svc_row.offset_bottom = 786
 	svc_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	svc_row.add_theme_constant_override("separation", 32)
+	svc_row.add_theme_constant_override("separation", 40)
 	add_child(svc_row)
 
 	if _relic_stock.size() > 0:
 		for id in _relic_stock:
 			var price = _price(RELIC_COST)
 			var btn = GameTheme.make_relic_card(id, Color(0.55, 0.30, 0.20),
-				Vector2(220, 150), price)
+				Vector2(264, 216), price)
 			btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 			btn.disabled = RunState.gold < price
 			btn.pressed.connect(_buy_relic.bind(id, price))
@@ -165,9 +165,12 @@ func _build_ui() -> void:
 	var picon_path := "res://assets/icons/potions/%s.png" % _shop_potion_id
 	if not ResourceLoader.exists(picon_path):
 		picon_path = "res://assets/icons/downloaded/potion1.png"
+	# Lead with the EFFECT + price (the icon already reads as a potion); the full
+	# name rides in the tooltip instead of cramming a 3-line name/desc/price block.
 	var potion = _make_service_slot(picon_path,
-		"%s\n%s\nBuy — %dg" % [pname, pdesc, potion_price],
+		"%s\nBuy — %dg" % [pdesc, potion_price],
 		pcolor)
+	potion.button.tooltip_text = "%s — %s" % [pname, pdesc]
 	if RunState.has_downside("no_potions"):
 		potion.button.disabled = true
 		potion.label.text = "%s\nCan't buy potions (Temperance Vow)" % pname
@@ -184,13 +187,21 @@ func _build_ui() -> void:
 	var removal = _make_service_slot("res://assets/icons/downloaded/cards1.png",
 		"Thin your deck\nBuy — %dg" % remove_price,
 		Color(0.45, 0.15, 0.15))
+	removal.button.tooltip_text = "Permanently remove one card from your deck."
 	removal.button.disabled = RunState.gold < remove_price or RunState.deck.size() <= 1
 	removal.button.pressed.connect(_start_remove_mode.bind(remove_price))
 	svc_row.add_child(removal.slot)
 
 	# Leave button — gold pill with ← arrow, distinct from the buy buttons.
-	var leave_btn = GameTheme.make_back_button("Leave Shop", Vector2(180, 44))
-	leave_btn.position = Vector2(710, 820)
+	# Centered off size.x (the 1600×900 stretch canvas) rather than a hardcoded
+	# window pixel, so it stays put if the canvas changes.
+	var leave_btn = GameTheme.make_back_button("Leave Shop", Vector2(220, 50), 20)
+	leave_btn.anchor_left = 0.5
+	leave_btn.anchor_right = 0.5
+	leave_btn.offset_left = -110
+	leave_btn.offset_right = 110
+	leave_btn.offset_top = 822
+	leave_btn.offset_bottom = 872
 	leave_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
 	add_child(leave_btn)
 
@@ -213,7 +224,7 @@ func _make_service_slot(icon_path: String, text: String, color: Color) -> Dictio
 	# matched set with the relic card beside them — not pills in clashing hues.
 	var panel_bg := Color(0.055, 0.048, 0.040, 0.96)
 	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(220, 150)
+	btn.custom_minimum_size = Vector2(264, 216)
 	btn.focus_mode = Control.FOCUS_NONE
 	btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	var normal := GameTheme.make_panel_style(panel_bg,
@@ -243,13 +254,13 @@ func _make_service_slot(icon_path: String, text: String, color: Color) -> Dictio
 	var icon := TextureRect.new()
 	if ResourceLoader.exists(icon_path):
 		icon.texture = load(icon_path)
-	icon.custom_minimum_size = Vector2(54, 54)
+	icon.custom_minimum_size = Vector2(64, 64)
 	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	icon.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	col.add_child(icon)
 
-	var lbl := GameTheme.make_label(text, 12, GameTheme.IVORY)
+	var lbl := GameTheme.make_label(text, 19, GameTheme.IVORY)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	col.add_child(lbl)
@@ -311,10 +322,10 @@ func _start_remove_mode(price: int) -> void:
 			child.queue_free()
 
 	var title = GameTheme.make_label("Choose a card to remove",
-		GameTheme.FONT_HEADER, GameTheme.KEYWORD_GOLD)
+		GameTheme.FONT_TITLE, GameTheme.KEYWORD_GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.position = Vector2(500, 30)
-	title.size = Vector2(600, 40)
+	title.size = Vector2(600, 48)
 	add_child(title)
 
 	var scroll = ScrollContainer.new()

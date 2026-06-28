@@ -145,7 +145,11 @@ func _load_assets() -> void:
 	# font's missing glyphs (Lilita One's character set is narrow — no arrow,
 	# star, geometric-shape codepoints — so symbol characters tofu'd as boxes
 	# until we wired this fallback up).
-	var nunito := load("res://assets/fonts/Nunito-Regular.ttf") as Font
+	# CACHE_MODE_IGNORE — same stale-MSDF-cache workaround (#92778) as Lilita/Cinzel
+	# below; plain load() can return the pre-MSDF Nunito (body + menu text, and the
+	# glyph fallback for the other fonts).
+	var nunito := ResourceLoader.load("res://assets/fonts/Nunito-Regular.ttf",
+		"FontFile", ResourceLoader.CACHE_MODE_IGNORE) as Font
 
 	if lilita != null:
 		# Lilita One is the display weight we want; attach Nunito as a glyph
@@ -200,10 +204,14 @@ func _load_assets() -> void:
 	# gravitas. Kept SEPARATE from font_display/font_stat (Lilita One) on purpose:
 	# Card2D's orb numerals carry per-label pixel Y-offsets tuned to Lilita's
 	# metrics, so swapping the global card font would misalign every card face.
-	# The HUD has no such tuning, so it can carry the serif freely. Two weights:
-	# SemiBold (640) for header/caption text, Black (860) for big stat numerals —
-	# the chunky-numeral convention shared by Hearthstone / MtG Arena stat orbs.
-	var cinzel := load("res://assets/fonts/Cinzel-Variable.ttf") as FontFile
+	# The HUD has no per-label Y-offset tuning (it centers numerals via containers),
+	# so it can carry any font freely. font_title = Cinzel SemiBold (640) for header
+	# / caption text — its engraved serif reads beautifully at large title sizes.
+	# CACHE_MODE_IGNORE — same workaround as Lilita above. Plain load() hits Godot's
+	# resource cache, which after Cinzel was re-imported as MSDF can hand back the
+	# STALE pre-MSDF FontFile (bug godotengine/godot#92778) — load fresh for MSDF.
+	var cinzel := ResourceLoader.load("res://assets/fonts/Cinzel-Variable.ttf",
+		"FontFile", ResourceLoader.CACHE_MODE_IGNORE) as FontFile
 	if cinzel != null:
 		if nunito != null:
 			cinzel.fallbacks = [nunito]
@@ -211,12 +219,14 @@ func _load_assets() -> void:
 		title.base_font = cinzel
 		title.variation_opentype = {"wght": 640}
 		font_title = title
-		var title_black := FontVariation.new()
-		title_black.base_font = cinzel
-		title_black.variation_opentype = {"wght": 860}
-		font_title_black = title_black
+		# HUD NUMERALS (HP / Command / counts) use the chunky Lilita stat font
+		# (font_stat), NOT a thin-serif Cinzel weight. Readability research: thick,
+		# high-x-height strokes read cleaner AND render far crisper at small HUD
+		# sizes — thin serifs alias/pixelate worst there (the pixelated-numbers
+		# complaint). Cinzel stays for TITLES via font_title above.
+		font_title_black = font_stat
 		if OS.is_debug_build():
-			print("[GameTheme] font_title/font_title_black set to Cinzel")
+			print("[GameTheme] font_title=Cinzel; font_title_black=stat font (Lilita)")
 	else:
 		push_warning("[GameTheme] Cinzel unavailable — HUD falls back to display/stat font")
 		font_title = font_display
@@ -227,7 +237,9 @@ func _load_assets() -> void:
 	# diegetic book hand; HUD/menus keep Nunito (clean UI voice). SCOPED TO
 	# CARDS on purpose. wght 500 (not 400): hairline serifs at 10-12px need
 	# the half-step of weight to survive AA against the parchment fill.
-	var alegreya := load("res://assets/fonts/Alegreya-Variable.ttf") as FontFile
+	# CACHE_MODE_IGNORE — same stale-MSDF-cache workaround (#92778) as the other fonts.
+	var alegreya := ResourceLoader.load("res://assets/fonts/Alegreya-Variable.ttf",
+		"FontFile", ResourceLoader.CACHE_MODE_IGNORE) as FontFile
 	if alegreya != null:
 		if nunito != null:
 			alegreya.fallbacks = [nunito]
@@ -522,9 +534,13 @@ const FRAME_TRIM_UNCOMMON := Color(0.529, 0.667, 0.851, 1.0)  # #87AAD9 cool blu
 const FRAME_TRIM_RARE     := Color(0.961, 0.784, 0.259, 1.0)  # #F5C842 bright gold (unchanged — already pops)
 
 # ── Font Sizes ──
-const FONT_HEADER := 26
-const FONT_SUBHEADER := 19
-const FONT_BODY := 15
+# Tuned for the ~1920×1080 logical canvas: body text below ~16px is genuinely
+# hard to read from a couch. FONT_BODY is the make_label() default and the most
+# leveraged number in the game — a large fraction of every screen's label/desc
+# text inherits it. Keep it at the legibility floor, never below.
+const FONT_HEADER := 28
+const FONT_SUBHEADER := 20
+const FONT_BODY := 16
 const FONT_TITLE := 34
 
 
@@ -774,7 +790,7 @@ func make_choice_banner(title: String, desc: String, accent: Color,
 
 	var title_lbl := Label.new()
 	title_lbl.text = title
-	title_lbl.add_theme_font_size_override("font_size", 22)
+	title_lbl.add_theme_font_size_override("font_size", 24)
 	title_lbl.add_theme_color_override("font_color",
 		Color(0.90, 0.78, 0.52) if not disabled else Color(0.6, 0.6, 0.55, 0.7))
 	title_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.6))
@@ -798,9 +814,9 @@ func make_choice_banner(title: String, desc: String, accent: Color,
 	var body_lbl := Label.new()
 	body_lbl.text = body_text
 	body_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	body_lbl.add_theme_font_size_override("font_size", 13)
+	body_lbl.add_theme_font_size_override("font_size", 17)
 	body_lbl.add_theme_color_override("font_color",
-		Color(0.86, 0.82, 0.70, 0.92) if not disabled else Color(0.65, 0.55, 0.45, 0.75))
+		Color(0.88, 0.84, 0.72, 0.95) if not disabled else Color(0.82, 0.72, 0.60, 0.92))
 	body_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.5))
 	body_lbl.add_theme_constant_override("outline_size", 2)
 	if font_body:
@@ -1140,7 +1156,7 @@ func make_relic_chip(rid: String, size: int = 40) -> Panel:
 	return chip
 
 
-func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 120),
+func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 172),
 		price: int = -1) -> Button:
 	# A relic "card" button: gilt-trimmed panel with the relic's icon stacked
 	# above its name + description (and an optional price line for the shop).
@@ -1183,10 +1199,10 @@ func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 12
 	chip.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	col.add_child(chip)
 
-	var name_lbl := make_label(r.get("name", rid), FONT_BODY, KEYWORD_GOLD)
+	var name_lbl := make_label(r.get("name", rid), 18, KEYWORD_GOLD)
 	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(name_lbl)
-	var desc_lbl := make_label(r.get("desc", ""), 12, IVORY)
+	var desc_lbl := make_label(r.get("desc", ""), 16, IVORY)
 	desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	col.add_child(desc_lbl)
@@ -1195,6 +1211,161 @@ func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 12
 		price_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		col.add_child(price_lbl)
 	return btn
+
+
+# ── How-To-Play overlay (shared by MapView + MainMenu) ───────────────────────
+# Single source of truth for the campaign primer + keyword glossary. The two
+# screens used to build their own near-identical copies, which drifted ("Play"
+# vs "Place creatures", different combat wording). Now both call this.
+const HOW_TO_PLAY_PRIMER := [
+	["Command", "Your turn resource — you start with 3 each turn and spend it to play creatures and spells. Up to 2 unspent Command banks into next turn."],
+	["The board", "Four lanes, two ranks per side. The front rank fights; the back rank is reserve. Place creatures into either rank."],
+	["Combat", "Both sides strike at once. In each lane the front rank trades first and is hit first; the back waits behind it. Swift creatures strike in a pre-phase."],
+	["The Forge", "At a rest, Forge a card for a permanent \"+\" upgrade. You pick the card and see exactly what it becomes — no rolls."],
+	["Recruit camps", "A free draft — take 1 of 3 cards to join your deck. The main way your deck grows between fights."],
+	["The boss gate", "Each lord's keep starts barred. Break enough holds to open the road, then march on the keep. The map tracks how many remain."],
+]
+
+## Builds the full-screen "How to Play" overlay. Add the returned Control as a
+## child; CLOSE or a click on the dim scrim dismisses it.
+func make_how_to_play_overlay() -> Control:
+	var gilt_b := Color(1.0, 0.88, 0.35, 1.0)
+	var ivory_c := Color(0.96, 0.92, 0.78, 1.0)
+	var ash_c := Color(0.62, 0.58, 0.52, 1.0)
+
+	var scrim := ColorRect.new()
+	scrim.name = "HowToPlayOverlay"
+	scrim.color = Color(0.02, 0.015, 0.03, 0.90)
+	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scrim.z_index = 50
+	scrim.mouse_filter = Control.MOUSE_FILTER_STOP
+	scrim.gui_input.connect(func(ev: InputEvent):
+		if ev is InputEventMouseButton and ev.pressed \
+				and ev.button_index == MOUSE_BUTTON_LEFT:
+			scrim.queue_free())
+
+	var panel := PanelContainer.new()
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.custom_minimum_size = Vector2(1180, 740)
+	panel.add_theme_stylebox_override("panel", make_panel_style(
+		Color(0.06, 0.05, 0.045, 0.99),
+		Color(0.60, 0.51, 0.34, 0.95), 2, 6, true))
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	scrim.add_child(panel)
+
+	var pad := MarginContainer.new()
+	for m in ["margin_left", "margin_right", "margin_top", "margin_bottom"]:
+		pad.add_theme_constant_override(m, 28)
+	panel.add_child(pad)
+
+	var outer := VBoxContainer.new()
+	outer.add_theme_constant_override("separation", 14)
+	pad.add_child(outer)
+
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 12)
+	outer.add_child(head)
+	var title := make_label("HOW TO PLAY", FONT_HEADER, gilt_b)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(title)
+	var close := make_back_button("CLOSE", Vector2(120, 36), 16)
+	close.pressed.connect(func(): scrim.queue_free())
+	head.add_child(close)
+
+	var rule := ColorRect.new()
+	rule.color = Color(0.60, 0.51, 0.34, 0.55)
+	rule.custom_minimum_size = Vector2(0, 2)
+	outer.add_child(rule)
+
+	var cols := HBoxContainer.new()
+	cols.add_theme_constant_override("separation", 26)
+	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	outer.add_child(cols)
+
+	# LEFT — campaign primer.
+	var left_scroll := ScrollContainer.new()
+	left_scroll.custom_minimum_size = Vector2(500, 0)
+	left_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	left_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	cols.add_child(left_scroll)
+	var left := VBoxContainer.new()
+	left.add_theme_constant_override("separation", 10)
+	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left_scroll.add_child(left)
+	left.add_child(make_label("HOW THE CAMPAIGN WORKS", FONT_SUBHEADER, gilt_b))
+	for entry in HOW_TO_PLAY_PRIMER:
+		left.add_child(_htp_primer_block(entry[0], entry[1], ivory_c))
+
+	var vrule := ColorRect.new()
+	vrule.color = Color(0.50, 0.42, 0.28, 0.40)
+	vrule.custom_minimum_size = Vector2(2, 0)
+	vrule.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	cols.add_child(vrule)
+
+	# RIGHT — keyword glossary, sourced live from KeywordEffects.
+	var right_col := VBoxContainer.new()
+	right_col.add_theme_constant_override("separation", 8)
+	right_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	cols.add_child(right_col)
+	right_col.add_child(make_label("KEYWORD GLOSSARY", FONT_SUBHEADER, gilt_b))
+	right_col.add_child(make_label(
+		"Every keyword that can appear on a card.", 15, ash_c))
+
+	var gloss_scroll := ScrollContainer.new()
+	gloss_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	gloss_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	gloss_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	right_col.add_child(gloss_scroll)
+	var gloss := VBoxContainer.new()
+	gloss.add_theme_constant_override("separation", 9)
+	gloss.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	gloss_scroll.add_child(gloss)
+	for key in KeywordEffects.KEYWORDS.keys():
+		var kw: Dictionary = KeywordEffects.KEYWORDS[key]
+		gloss.add_child(_htp_keyword_row(
+			String(kw.get("display", key)), String(kw.get("desc", "")), ivory_c))
+
+	return scrim
+
+
+func _htp_primer_block(heading: String, body: String, ivory: Color) -> Control:
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 2)
+	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	box.add_child(make_label(heading, 18, Color(0.92, 0.80, 0.50, 1.0)))
+	var b := make_label(body, 16, ivory)
+	b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.custom_minimum_size = Vector2(460, 0)
+	box.add_child(b)
+	return box
+
+
+func _htp_keyword_row(name: String, desc: String, ivory: Color) -> Control:
+	# Gilt keyword name + dim body on a hairline ink chip — the chart kit.
+	var row := PanelContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.085, 0.072, 0.060, 0.65)
+	sb.border_color = Color(0.45, 0.38, 0.26, 0.45)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(3)
+	sb.content_margin_left = 12
+	sb.content_margin_right = 12
+	sb.content_margin_top = 7
+	sb.content_margin_bottom = 7
+	row.add_theme_stylebox_override("panel", sb)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 1)
+	row.add_child(v)
+	v.add_child(make_label(name, 17, Color(0.95, 0.82, 0.48, 1.0)))
+	var d := make_label(desc, 16, ivory)
+	d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	d.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	d.custom_minimum_size = Vector2(560, 0)
+	v.add_child(d)
+	return row
 
 
 # ═══════════════════════════════════════════

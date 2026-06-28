@@ -60,20 +60,20 @@ func _build_ui() -> void:
 
 	var margin := MarginContainer.new()
 	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
-	margin.add_theme_constant_override("margin_left", 40)
-	margin.add_theme_constant_override("margin_right", 40)
-	margin.add_theme_constant_override("margin_top", 20)
-	margin.add_theme_constant_override("margin_bottom", 20)
+	margin.add_theme_constant_override("margin_left", 60)
+	margin.add_theme_constant_override("margin_right", 60)
+	margin.add_theme_constant_override("margin_top", 40)
+	margin.add_theme_constant_override("margin_bottom", 40)
 	add_child(margin)
 
 	var outer := VBoxContainer.new()
-	outer.add_theme_constant_override("separation", 14)
+	outer.add_theme_constant_override("separation", 26)
 	margin.add_child(outer)
 
 	# Title
 	var title = GameTheme.make_screen_title(
 		"VICTORY  —  Floor %d" % RunState.current_floor, GameTheme.GILT_BRIGHT,
-		GameTheme.FONT_HEADER)
+		GameTheme.FONT_TITLE)
 	outer.add_child(title)
 
 	# Relic choices
@@ -82,7 +82,7 @@ func _build_ui() -> void:
 		outer.add_child(_make_section_header("Choose a Relic"))
 
 		var relic_row = HBoxContainer.new()
-		relic_row.add_theme_constant_override("separation", 24)
+		relic_row.add_theme_constant_override("separation", 40)
 		relic_row.alignment = BoxContainer.ALIGNMENT_CENTER
 		relic_row.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		outer.add_child(relic_row)
@@ -90,8 +90,10 @@ func _build_ui() -> void:
 		for id in _relic_choices:
 			# Chart-look tile: dark-ink PARCHMENT body → document tile (gilt rule,
 			# small corners) with the painted relic icon on top, not a flat slab.
+			# Big tiles (340×300): the three spoils floated tiny in a sea of empty
+			# space at 220×172 — grow them to fill the row and let the rules read.
 			var btn = GameTheme.make_relic_card(id, GameTheme.PARCHMENT,
-				Vector2(220, 150))
+				Vector2(340, 300))
 			# Shrink-center: the row owns the freed vertical space now that
 			# the card rack is gone, and HBox children stretch by default —
 			# without this the relic panels render as full-height columns.
@@ -99,7 +101,7 @@ func _build_ui() -> void:
 			btn.pressed.connect(_pick_relic.bind(id))
 			relic_row.add_child(btn)
 
-	var skip_btn = GameTheme.make_back_button("Continue", Vector2(160, 42))
+	var skip_btn = GameTheme.make_back_button("Continue", Vector2(200, 52), 20)
 	skip_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	skip_btn.pressed.connect(_skip)
 	outer.add_child(skip_btn)
@@ -166,7 +168,7 @@ func _show_march_choice(next_idx: int) -> void:
 		var desc := "%s — %s\n%s" % [String(info.get("name", "")),
 			String(info.get("engine", "")), String(info.get("engine_line", ""))]
 		var banner = GameTheme.make_choice_banner(lord_name, desc,
-			info.get("color", Color(0.60, 0.51, 0.34)), "", Vector2(380, 170))
+			info.get("color", Color(0.60, 0.51, 0.34)), "", Vector2(440, 210))
 		var click := banner.get_node_or_null("ClickButton") as Button
 		if click != null:
 			click.pressed.connect(_pick_march.bind(lord))
@@ -188,7 +190,7 @@ func _make_section_header(text: String) -> HBoxContainer:
 	left.color = rule_col
 	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(left)
-	var lbl := GameTheme.make_label(text, GameTheme.FONT_SUBHEADER, GameTheme.KEYWORD_GOLD)
+	var lbl := GameTheme.make_label(text, 24, GameTheme.KEYWORD_GOLD)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(lbl)

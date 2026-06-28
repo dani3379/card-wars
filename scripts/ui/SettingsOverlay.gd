@@ -617,7 +617,7 @@ func _style_option_button(opt: OptionButton) -> void:
 
 	if GameTheme.font_body:
 		opt.add_theme_font_override("font", GameTheme.font_body)
-	opt.add_theme_font_size_override("font_size", 14)
+	opt.add_theme_font_size_override("font_size", 16)
 	opt.add_theme_color_override("font_color", GameTheme.IVORY)
 	opt.add_theme_color_override("font_hover_color", GameTheme.GILT_BRIGHT)
 
@@ -634,7 +634,7 @@ func _style_option_button(opt: OptionButton) -> void:
 		popup.add_theme_stylebox_override("hover", _make_popup_hover_style())
 		if GameTheme.font_body:
 			popup.add_theme_font_override("font", GameTheme.font_body)
-		popup.add_theme_font_size_override("font_size", 14)
+		popup.add_theme_font_size_override("font_size", 16)
 		popup.add_theme_color_override("font_color", GameTheme.IVORY)
 		popup.add_theme_color_override("font_hover_color", Color(1, 0.95, 0.8))
 
@@ -816,7 +816,7 @@ func _add_graphics_quality_block(parent: VBoxContainer) -> void:
 	_gpu_info_label = Label.new()
 	if GameTheme.font_body:
 		_gpu_info_label.add_theme_font_override("font", GameTheme.font_body)
-	_gpu_info_label.add_theme_font_size_override("font_size", 12)
+	_gpu_info_label.add_theme_font_size_override("font_size", 15)
 	_gpu_info_label.add_theme_color_override("font_color", GameTheme.DIMMED)
 	_gpu_info_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	info_center.add_child(_gpu_info_label)

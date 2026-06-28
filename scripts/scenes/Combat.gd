@@ -3589,8 +3589,8 @@ func _build_wave_chip() -> void:
 	chip.anchor_bottom = 0.0
 	chip.offset_left = -250
 	chip.offset_right = -14
-	chip.offset_top = 388
-	chip.offset_bottom = 446
+	chip.offset_top = 406
+	chip.offset_bottom = 478
 	chip.z_index = 5
 	chip.visible = false
 
@@ -3603,7 +3603,7 @@ func _build_wave_chip() -> void:
 	var caption := Label.new()
 	caption.name = "WaveCaption"
 	caption.text = "NEXT WAVE"
-	caption.add_theme_font_size_override("font_size", 10)
+	caption.add_theme_font_size_override("font_size", 22)
 	caption.add_theme_color_override("font_color", Color(0.85, 0.72, 1.0))
 	caption.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
 	caption.add_theme_constant_override("outline_size", 3)
@@ -3622,7 +3622,7 @@ func _build_wave_chip() -> void:
 
 	var icon := TextureRect.new()
 	icon.name = "WaveIcon"
-	icon.custom_minimum_size = Vector2(22, 22)
+	icon.custom_minimum_size = Vector2(30, 30)
 	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	icon.modulate = Color(0.80, 0.55, 1.0)
@@ -3636,7 +3636,7 @@ func _build_wave_chip() -> void:
 	var num := Label.new()
 	num.name = "WaveNum"
 	num.text = ""
-	num.add_theme_font_size_override("font_size", 22)
+	num.add_theme_font_size_override("font_size", 34)
 	num.add_theme_color_override("font_color", Color(0.85, 0.65, 1.0))
 	num.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
 	num.add_theme_constant_override("outline_size", 5)
@@ -3650,8 +3650,8 @@ func _build_wave_chip() -> void:
 	var suffix := Label.new()
 	suffix.name = "WaveSuffix"
 	suffix.text = "NEXT ROUND"
-	suffix.add_theme_font_size_override("font_size", 10)
-	suffix.add_theme_color_override("font_color", Color(0.72, 0.66, 0.78))
+	suffix.add_theme_font_size_override("font_size", 19)
+	suffix.add_theme_color_override("font_color", Color(0.86, 0.80, 0.92))
 	suffix.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
 	suffix.add_theme_constant_override("outline_size", 3)
 	suffix.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -7452,10 +7452,12 @@ func _update_intent_display(card: Control, intent: String) -> void:
 		lbl = Label.new()
 		# Intent text is the enemy's telegraph — it has to read from across the
 		# board. The old 11px bare label vanished against the art on a 1080p
-		# capture; a dark pill + 15px caps gives it a nameplate's presence.
+		# capture; a dark pill + bold 22px caps gives it a nameplate's presence
+			# so this CHARGE / GUARD / RALLY telegraph reads from across the board.
+			# (size set on the lbl just below)
 		if GameTheme.font_display:
 			lbl.add_theme_font_override("font", GameTheme.font_display)
-		lbl.add_theme_font_size_override("font_size", 15)
+		lbl.add_theme_font_size_override("font_size", 22)
 		lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
 		lbl.add_theme_constant_override("outline_size", 4)
 		var pill := StyleBoxFlat.new()
@@ -9837,9 +9839,11 @@ func _make_portrait_card(is_enemy: bool) -> Panel:
 	caption.anchor_right = 1.0
 	caption.anchor_top = 1.0
 	caption.anchor_bottom = 1.0
-	caption.offset_top = -22
-	caption.offset_bottom = -4
-	caption.add_theme_font_size_override("font_size", 11)
+	caption.offset_top = -26
+	caption.offset_bottom = -2
+	caption.add_theme_font_size_override("font_size", 18)
+	if GameTheme.font_display:
+		caption.add_theme_font_override("font", GameTheme.font_display)
 	caption.add_theme_color_override("font_color", rim_color)
 	caption.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
 	caption.add_theme_constant_override("outline_size", 4)
@@ -10625,7 +10629,7 @@ func _build_incoming_damage_chip() -> void:
 	chip.offset_left = -250
 	chip.offset_right = -14
 	chip.offset_top = 324
-	chip.offset_bottom = 382
+	chip.offset_bottom = 398
 	chip.z_index = 5
 	chip.visible = false
 
@@ -10641,7 +10645,7 @@ func _build_incoming_damage_chip() -> void:
 	var caption := Label.new()
 	caption.name = "ThreatCaption"
 	caption.text = "INCOMING"
-	caption.add_theme_font_size_override("font_size", 10)
+	caption.add_theme_font_size_override("font_size", 22)
 	caption.add_theme_color_override("font_color", Color(0.96, 0.66, 0.46))
 	caption.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
 	caption.add_theme_constant_override("outline_size", 3)
@@ -10659,7 +10663,7 @@ func _build_incoming_damage_chip() -> void:
 
 	var icon := TextureRect.new()
 	icon.name = "ThreatIcon"
-	icon.custom_minimum_size = Vector2(24, 24)
+	icon.custom_minimum_size = Vector2(32, 32)
 	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	icon.modulate = Color(1.0, 0.45, 0.30)
@@ -10673,7 +10677,7 @@ func _build_incoming_damage_chip() -> void:
 	var num := Label.new()
 	num.name = "ThreatNum"
 	num.text = ""
-	num.add_theme_font_size_override("font_size", 22)
+	num.add_theme_font_size_override("font_size", 34)
 	num.add_theme_color_override("font_color", Color(1.0, 0.58, 0.40))
 	num.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
 	num.add_theme_constant_override("outline_size", 5)
@@ -11157,10 +11161,14 @@ func _build_encounter_scroll_diegetic() -> void:
 	strip.anchor_right = 0.5
 	strip.anchor_top = 0.0
 	strip.anchor_bottom = 0.0
-	strip.offset_left = -270
-	strip.offset_right = 270
-	strip.offset_top = 10
-	strip.offset_bottom = 104
+	# Widened (was 540px) and lengthened (was 94px) so the now-larger title /
+	# phase / turn / EDICT stack reads without crowding or overflowing the rect.
+	# The flanking plates (relic strip far-left, enemy banner far-right) start at
+	# ~x=218 and ~x=-250, so a 640px centred strip stays well clear of both.
+	strip.offset_left = -320
+	strip.offset_right = 320
+	strip.offset_top = 8
+	strip.offset_bottom = 150
 	strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_hud_layer.add_child(strip)
 
@@ -11196,14 +11204,15 @@ func _build_encounter_scroll_diegetic() -> void:
 	strip.add_child(stack)
 
 	# Encounter name — the title anchor. The fight-start intro banner already
-	# announces it big, so the persistent strip carries it at a slimmer 23pt;
-	# the goal here is a clean board read, not a second billboard.
+	# announces it big; the persistent strip carries it at a readable 30pt so
+	# the foe's name reads from a normal seating distance in the 1600-wide
+	# window (the prior 23pt vanished against the dark top bar).
 	var encounter_text := _encounter_name if _encounter_name != "" \
 		else "Floor %d" % RunState.current_floor
-	_floor_label = _make_text_label(encounter_text, 23, GILT)
+	_floor_label = _make_text_label(encounter_text, 34, GILT)
 	_floor_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_floor_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
-	_floor_label.add_theme_constant_override("outline_size", 4)
+	_floor_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	_floor_label.add_theme_constant_override("outline_size", 5)
 	stack.add_child(_floor_label)
 
 	# Thin gilt divider flourish with a centred diamond — a touch of craft under
@@ -11212,23 +11221,30 @@ func _build_encounter_scroll_diegetic() -> void:
 	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	stack.add_child(rule)
 	var rule_line := ColorRect.new()
-	rule_line.custom_minimum_size = Vector2(170, 2)
-	rule_line.color = Color(GILT.r, GILT.g, GILT.b, 0.5)
+	rule_line.custom_minimum_size = Vector2(210, 2)
+	rule_line.color = Color(GILT.r, GILT.g, GILT.b, 0.6)
 	rule_line.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	rule.add_child(rule_line)
 
-	_phase_label = _make_text_label("YOUR TURN", 17, GameTheme.GILT_BRIGHT)
+	# The phase line ("YOUR TURN" / "SWIFT STRIKES" / "CLASH" …) is the running
+	# "whose move / what's happening" status — it must read at a glance, so it's
+	# the second-loudest line in the strip after the foe's name. 27pt Cinzel.
+	_phase_label = _make_text_label("YOUR TURN", 27, GameTheme.GILT_BRIGHT)
 	# Cinzel, like the encounter title above it — the phase line is part of
 	# the chart furniture, not a plain UI status string.
 	if GameTheme.font_title != null:
 		_phase_label.add_theme_font_override("font", GameTheme.font_title)
 	_phase_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_phase_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
-	_phase_label.add_theme_constant_override("outline_size", 4)
+	_phase_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	_phase_label.add_theme_constant_override("outline_size", 5)
 	stack.add_child(_phase_label)
 
-	_turn_label = _make_text_label("Round 1 · Set your line", 12, Color(0.80, 0.72, 0.52))
+	# Round / instruction line under the phase ("Round 1 · Set your line"). Bumped
+	# 21→23 and to near-white so the per-turn guidance stops reading as a whisper.
+	_turn_label = _make_text_label("Round 1 · Set your line", 23, Color(1.0, 0.97, 0.86))
 	_turn_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_turn_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	_turn_label.add_theme_constant_override("outline_size", 5)
 	stack.add_child(_turn_label)
 
 	if _encounter_passive != "":
@@ -11247,22 +11263,24 @@ func _build_encounter_scroll_diegetic() -> void:
 		threat_bg.shadow_color = Color(0, 0, 0, 0.45)
 		threat_bg.shadow_size = 4
 		threat_bg.shadow_offset = Vector2(0, 2)
-		threat_bg.content_margin_left = 12
-		threat_bg.content_margin_right = 12
-		threat_bg.content_margin_top = 3
-		threat_bg.content_margin_bottom = 4
+		threat_bg.content_margin_left = 20
+		threat_bg.content_margin_right = 20
+		threat_bg.content_margin_top = 8
+		threat_bg.content_margin_bottom = 9
 		threat_frame.add_theme_stylebox_override("panel", threat_bg)
 		threat_frame.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		# A slim posted edict, not a billboard: 14pt over a narrower well keeps
-		# the standing rule readable while freeing the top of the board.
-		var passive := _make_text_label(enc.get("passive_desc", ""), 14,
-			Color(0.20, 0.11, 0.07))
+		# The standing rule is the fight's permanent threat — it must read at a
+		# glance. 23pt dark ink on a wider (560px) parchment well: this is the one
+		# line the player most needs to internalise, so it gets real size, not the
+		# whisper it was at 15pt. The strip was widened to 640px to seat it.
+		var passive := _make_text_label(enc.get("passive_desc", ""), 23,
+			Color(0.14, 0.08, 0.04))
 		if GameTheme.font_card_body_bold != null:
 			passive.add_theme_font_override("font", GameTheme.font_card_body_bold)
 		passive.add_theme_constant_override("outline_size", 0)
 		passive.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		passive.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		passive.custom_minimum_size = Vector2(384, 0)
+		passive.custom_minimum_size = Vector2(560, 0)
 		threat_frame.add_child(passive)
 		stack.add_child(threat_frame)
 
@@ -11451,25 +11469,25 @@ func _build_command_seal_post(is_opp: bool) -> void:
 	# Caption below — letterspaced Cinzel in dim gilt, the chart-caption
 	# voice (the old light-blue Nunito "MANA" read as a debug label and was
 	# the loudest cheap note on the bottom rail).
-	var caption := _make_text_label("COMMAND", 11,
-		Color(GILT.r, GILT.g, GILT.b, 0.85))
+	var caption := _make_text_label("COMMAND", 18,
+		Color(GILT.r, GILT.g, GILT.b, 1.0))
 	# Real letter-spacing (typographic tracking) via FontVariation instead of
 	# faking the wide-caps look with literal spaces between glyphs — keeps the
 	# chart-caption voice without the spaced-out string.
 	if GameTheme.font_title != null:
 		var caption_fv := FontVariation.new()
 		caption_fv.base_font = GameTheme.font_title
-		caption_fv.spacing_glyph = 4
+		caption_fv.spacing_glyph = 2
 		caption.add_theme_font_override("font", caption_fv)
 	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	caption.anchor_left = 0.0
 	caption.anchor_right = 1.0
 	caption.anchor_top = 1.0
 	caption.anchor_bottom = 1.0
-	caption.offset_top = -22
-	caption.offset_bottom = -6
-	caption.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
-	caption.add_theme_constant_override("outline_size", 3)
+	caption.offset_top = -27
+	caption.offset_bottom = -3
+	caption.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	caption.add_theme_constant_override("outline_size", 4)
 	post.add_child(caption)
 
 	# Carryover pips — small dots on the plinth shelf showing how much unspent
@@ -11772,7 +11790,7 @@ func _make_pile_panel_diegetic(caption_text: String, kind: int) -> Control:
 	art.anchor_right = 1.0
 	art.anchor_top = 0.0
 	art.anchor_bottom = 1.0
-	art.offset_bottom = -18
+	art.offset_bottom = -22
 	art.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	pile.add_child(art)
 
@@ -11879,22 +11897,22 @@ func _make_pile_panel_diegetic(caption_text: String, kind: int) -> Control:
 	badge.anchor_right = 1.0
 	badge.anchor_top = 1.0
 	badge.anchor_bottom = 1.0
-	badge.offset_left = -30
-	badge.offset_top = -30
-	badge.offset_right = -2
-	badge.offset_bottom = -2
+	badge.offset_left = -34
+	badge.offset_top = -34
+	badge.offset_right = -1
+	badge.offset_bottom = -1
 	badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var badge_style := StyleBoxFlat.new()
-	badge_style.bg_color = Color(0.08, 0.05, 0.035, 0.96)
-	badge_style.border_color = Color(GILT.r, GILT.g, GILT.b, 0.85)
+	badge_style.bg_color = Color(0.08, 0.05, 0.035, 0.97)
+	badge_style.border_color = Color(GILT.r, GILT.g, GILT.b, 0.9)
 	badge_style.set_border_width_all(2)
-	badge_style.set_corner_radius_all(14)
-	badge_style.shadow_color = Color(0, 0, 0, 0.5)
+	badge_style.set_corner_radius_all(16)
+	badge_style.shadow_color = Color(0, 0, 0, 0.55)
 	badge_style.shadow_size = 4
 	badge.add_theme_stylebox_override("panel", badge_style)
 	art.add_child(badge)
 
-	var count_label := _make_text_label("0", 18, IVORY)
+	var count_label := _make_text_label("0", 22, IVORY)
 	count_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 	count_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	count_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -11903,22 +11921,19 @@ func _make_pile_panel_diegetic(caption_text: String, kind: int) -> Control:
 		count_label.add_theme_font_override("font", GameTheme.font_title_black)
 	badge.add_child(count_label)
 
-	# Letterspaced Cinzel caption — the same chart-caption voice as M A N A.
-	var spaced := ""
-	for ci in range(caption_text.length()):
-		spaced += caption_text[ci]
-		if ci < caption_text.length() - 1:
-			spaced += " "
-	var caption := _make_text_label(spaced, 10,
-		Color(GILT.r, GILT.g, GILT.b, 0.85))
+	# Caption ("DECK" / "DISCARD" / "EXHAUST"). No letter-spacing: at small HUD sizes
+	# the inserted spaces thin the word and hurt legibility — kept tight and bigger.
+	var caption := _make_text_label(caption_text, 18,
+		Color(GILT.r, GILT.g, GILT.b, 1.0))
 	if GameTheme.font_title != null:
 		caption.add_theme_font_override("font", GameTheme.font_title)
+	caption.add_theme_constant_override("outline_size", 4)
 	caption.anchor_left = 0.0
 	caption.anchor_right = 1.0
 	caption.anchor_top = 1.0
 	caption.anchor_bottom = 1.0
-	caption.offset_top = -16
-	caption.offset_bottom = 0
+	caption.offset_top = -21
+	caption.offset_bottom = 1
 	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	pile.add_child(caption)
@@ -12225,20 +12240,56 @@ func _make_glossary_row(entry_name: String, desc: String) -> PanelContainer:
 
 
 func _build_end_turn_button() -> void:
-	# Pinned bottom-right, sits beside the HUD strip above the hand.
+	# Pinned bottom-right, sits beside the HUD strip above the hand. This is the
+	# PRIMARY action — the one button the player presses every turn — so unlike
+	# the frameless minor buttons it gets a real raised plate (warm ink fill +
+	# gilt rim) so it reads unmistakably as "click here to advance." The old
+	# frameless gilt text dissolved into the dark board (the button looked
+	# absent). Enlarged hit area + 24pt Cinzel so it's the loudest control.
 	var btn := Button.new()
 	btn.text = "END TURN  [E]"
 	btn.anchor_left = 1.0
 	btn.anchor_right = 1.0
 	btn.anchor_top = 1.0
 	btn.anchor_bottom = 1.0
-	btn.offset_left = -180
-	btn.offset_top = -230
+	btn.offset_left = -210
+	btn.offset_top = -244
 	btn.offset_right = -20
-	btn.offset_bottom = -194
+	btn.offset_bottom = -192
 	btn.pressed.connect(_on_end_turn)
-	_style_button(btn)
-	btn.add_theme_font_size_override("font_size", 20)  # primary action — larger than the rest
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	if GameTheme.font_display:
+		btn.add_theme_font_override("font", GameTheme.font_display)
+	btn.add_theme_color_override("font_color", Color(1.0, 0.95, 0.80))
+	btn.add_theme_color_override("font_hover_color", Color(1.0, 0.99, 0.90))
+	btn.add_theme_color_override("font_pressed_color", Color(0.92, 0.85, 0.65))
+	btn.add_theme_color_override("font_disabled_color", Color(0.66, 0.60, 0.50, 0.55))
+	btn.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	btn.add_theme_constant_override("outline_size", 5)
+	btn.add_theme_font_size_override("font_size", 24)  # primary action — loudest control
+	# Raised plate styleboxes — warm ink fill, bright gilt rim, soft drop shadow.
+	var et_normal := StyleBoxFlat.new()
+	et_normal.bg_color = Color(0.14, 0.085, 0.052, 0.96)
+	et_normal.border_color = GameTheme.GILT_BRIGHT
+	et_normal.set_border_width_all(2)
+	et_normal.set_corner_radius_all(6)
+	et_normal.shadow_color = Color(0, 0, 0, 0.6)
+	et_normal.shadow_size = 8
+	et_normal.shadow_offset = Vector2(0, 3)
+	var et_hover := et_normal.duplicate()
+	et_hover.bg_color = Color(0.22, 0.13, 0.07, 0.98)
+	et_hover.border_color = Color(1.0, 0.92, 0.62)
+	var et_pressed := et_normal.duplicate()
+	et_pressed.bg_color = Color(0.10, 0.06, 0.04, 0.98)
+	var et_disabled := et_normal.duplicate()
+	et_disabled.bg_color = Color(0.10, 0.075, 0.06, 0.80)
+	et_disabled.border_color = Color(0.45, 0.36, 0.22, 0.55)
+	btn.add_theme_stylebox_override("normal", et_normal)
+	btn.add_theme_stylebox_override("hover", et_hover)
+	btn.add_theme_stylebox_override("pressed", et_pressed)
+	btn.add_theme_stylebox_override("focus", et_normal)
+	btn.add_theme_stylebox_override("disabled", et_disabled)
 	_end_turn_btn = btn
 	_hud_layer.add_child(btn)
 
@@ -13982,9 +14033,11 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 	if not quick:
 		var prefix_label := Label.new()
 		prefix_label.text = "— BOSS —" if is_boss else "— GENERAL —"
-		prefix_label.add_theme_font_size_override("font_size", 26)
+		prefix_label.add_theme_font_size_override("font_size", 32)
+		if GameTheme.font_display:
+			prefix_label.add_theme_font_override("font", GameTheme.font_display)
 		prefix_label.add_theme_color_override("font_color",
-			Color(1.0, 0.45, 0.20) if is_boss else Color(1.0, 0.78, 0.30))
+			Color(1.0, 0.52, 0.26) if is_boss else Color(1.0, 0.82, 0.36))
 		prefix_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
 		prefix_label.add_theme_constant_override("outline_size", 6)
 		prefix_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -14026,8 +14079,9 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 
 	# Boss/elite preamble — one diegetic line of ill omen, above the mechanical
 	# passive. Ambient voice only: never names the unnameable, never references
-	# another encounter (each preamble is a standalone card of ill omen).
-	if _encounter_preamble != "":
+	# another encounter (each preamble is a standalone card of ill omen). Shown for
+	# BOSSES only now — routine General intros stay name-first to cut the text wall.
+	if is_boss and _encounter_preamble != "":
 		var pre_label := Label.new()
 		pre_label.text = _encounter_preamble
 		pre_label.add_theme_font_size_override("font_size", 18)
@@ -14045,12 +14099,14 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 	# only nods at it with one muted line instead of re-stacking the wall. If
 	# there's a desc but no posted edict (no passive_id → no banner), show the rule
 	# itself, but small, so the intro never silently drops a threat read.
-	if _encounter_passive_desc != "":
+	# Only when there is NO permanent EDICT banner (no passive_id) does the intro
+	# carry the rule — otherwise the standing edict in the HUD already shows it, so
+	# the intro no longer re-stacks a redundant "see the posted edict" line.
+	if _encounter_passive_desc != "" and _encounter_passive == "":
 		var rule_tag := Label.new()
-		rule_tag.text = "Special rule — see the posted edict" if _encounter_passive != "" \
-			else _encounter_passive_desc
-		rule_tag.add_theme_font_size_override("font_size", 16)
-		rule_tag.add_theme_color_override("font_color", Color(1.0, 0.82, 0.55, 0.88))
+		rule_tag.text = _encounter_passive_desc
+		rule_tag.add_theme_font_size_override("font_size", 18)
+		rule_tag.add_theme_color_override("font_color", Color(1.0, 0.82, 0.55, 0.95))
 		rule_tag.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
 		rule_tag.add_theme_constant_override("outline_size", 4)
 		rule_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -14116,10 +14172,11 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 	# passive description; elites are quicker; the quick variant is just long
 	# enough to register the one line that matters.
 	var hold := 1.5 if is_boss else (0.8 if quick else 1.0)
-	if _encounter_preamble != "":
+	if is_boss and _encounter_preamble != "":
 		# Give the player time to read the ill-omen line, scaled to its length
 		# and capped tight — the heavy passive wall now lives in the standing
-		# edict banner, so the intro doesn't need to hold for it.
+		# edict banner, so the intro doesn't need to hold for it. (Bosses only —
+		# General intros no longer show the preamble, so they don't hold for it.)
 		hold += clampf(_encounter_preamble.length() * 0.022, 1.0, 2.2)
 	tw.chain().tween_interval(hold)
 	tw.chain().tween_property(dim, "color:a", 0.0, 0.32)
@@ -15243,7 +15300,7 @@ func _net_build_opp_hand_ui() -> void:
 
 	var label := Label.new()
 	label.text = "OPPONENT"
-	label.add_theme_font_size_override("font_size", 10)
+	label.add_theme_font_size_override("font_size", 13)
 	label.add_theme_color_override("font_color", Color(0.90, 0.80, 0.60, 0.7))
 	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
 	label.add_theme_constant_override("outline_size", 3)

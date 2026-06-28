@@ -351,7 +351,7 @@ func _stat_chip(label: String, value: String) -> VBoxContainer:
 	var box := VBoxContainer.new()
 	box.alignment = BoxContainer.ALIGNMENT_CENTER
 	box.add_theme_constant_override("separation", 2)
-	var lbl := _make_summary_label(label, 14, Color(0.82, 0.76, 0.62, 1.0))
+	var lbl := _make_summary_label(label, 16, Color(0.84, 0.78, 0.64, 1.0))
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(lbl)
 	var val := _make_summary_label(value, 26, Color(1.0, 0.86, 0.46))

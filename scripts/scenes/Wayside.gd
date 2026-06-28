@@ -120,7 +120,7 @@ func _make_tile(headline: String, payload: String, on_press: Callable,
 	var btn := Button.new()
 	btn.flat = false
 	btn.focus_mode = Control.FOCUS_NONE
-	btn.custom_minimum_size = Vector2(560, 96)
+	btn.custom_minimum_size = Vector2(560, 112)
 	# Parchment-variant chart panel: dark ink body, tan rule, ~4px corners, deep
 	# shadow — the praised make_choice_banner look, enforced via the shared helper.
 	btn.add_theme_stylebox_override("normal",
@@ -206,7 +206,7 @@ func _make_tile(headline: String, payload: String, on_press: Callable,
 	vbox.add_child(rule)
 
 	if payload != "":
-		var body := GameTheme.make_label(payload, 15, GameTheme.IVORY)
+		var body := GameTheme.make_label(payload, 17, GameTheme.IVORY)
 		body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		body.custom_minimum_size = Vector2(440, 0)
 		body.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -220,7 +220,7 @@ func _add_tile_stack(tiles: Array) -> void:
 	vbox.add_theme_constant_override("separation", 14)
 	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
 	vbox.set_anchors_preset(Control.PRESET_CENTER)
-	var h: int = tiles.size() * 110
+	var h: int = tiles.size() * 126
 	vbox.offset_left = -290
 	vbox.offset_right = 290
 	vbox.offset_top = -h / 2 + 40
@@ -255,7 +255,7 @@ func _leave() -> void:
 ## screen so the road's stops all end on the same breath.
 func _show_result(text: String) -> void:
 	_clear_ui()
-	var lbl := GameTheme.make_label(text, 22, GameTheme.IVORY)
+	var lbl := GameTheme.make_label(text, 24, GameTheme.IVORY)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	lbl.set_anchors_preset(Control.PRESET_CENTER)

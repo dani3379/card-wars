@@ -101,7 +101,7 @@ func _build_scaffold() -> void:
 	_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_root.add_child(_header)
 
-	_progress = GameTheme.make_label("", 14, ASH)
+	_progress = GameTheme.make_label("", 16, ASH)
 	_progress.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_root.add_child(_progress)
 

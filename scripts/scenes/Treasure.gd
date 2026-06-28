@@ -36,21 +36,21 @@ func _build_ui() -> void:
 
 	var margin := MarginContainer.new()
 	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
-	margin.add_theme_constant_override("margin_left", 40)
-	margin.add_theme_constant_override("margin_right", 40)
-	margin.add_theme_constant_override("margin_top", 40)
-	margin.add_theme_constant_override("margin_bottom", 40)
+	margin.add_theme_constant_override("margin_left", 60)
+	margin.add_theme_constant_override("margin_right", 60)
+	margin.add_theme_constant_override("margin_top", 48)
+	margin.add_theme_constant_override("margin_bottom", 48)
 	add_child(margin)
 
 	var outer := VBoxContainer.new()
-	outer.add_theme_constant_override("separation", 24)
+	outer.add_theme_constant_override("separation", 28)
 	margin.add_child(outer)
 
 	var title = GameTheme.make_screen_title("TREASURE", GameTheme.KEYWORD_GOLD,
-		GameTheme.FONT_HEADER)
+		GameTheme.FONT_TITLE)
 	outer.add_child(title)
 
-	var gold_label = GameTheme.make_label("+%d gold" % _gold_reward, 20, GameTheme.GILT_BRIGHT)
+	var gold_label = GameTheme.make_label("+%d gold" % _gold_reward, 24, GameTheme.GILT_BRIGHT)
 	gold_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	outer.add_child(gold_label)
 
@@ -60,7 +60,7 @@ func _build_ui() -> void:
 
 	var relics = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
 	var relic_row = HBoxContainer.new()
-	relic_row.add_theme_constant_override("separation", 24)
+	relic_row.add_theme_constant_override("separation", 40)
 	relic_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	relic_row.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	outer.add_child(relic_row)
@@ -69,8 +69,10 @@ func _build_ui() -> void:
 		# Chart-look tile: dark-ink PARCHMENT body so make_relic_card's internal
 		# make_btn_style paints a document tile (gilt rule, small corners) instead
 		# of the old flat orange slab. The painted relic icon rides on top.
+		# Big tiles (340×300): the relics were narrow/tall slabs marooning their
+		# rules text — grow them to fill the row and make the effect legible.
 		var btn = GameTheme.make_relic_card(id, GameTheme.PARCHMENT,
-			Vector2(220, 150))
+			Vector2(340, 300))
 		# Hold the tile at its natural 220×150 and center it in the expanded row —
 		# without this the Button fills the tall row vertically and reads as a big
 		# slab with the content marooned in the middle.
@@ -78,7 +80,7 @@ func _build_ui() -> void:
 		btn.pressed.connect(_pick_relic.bind(id))
 		relic_row.add_child(btn)
 
-	var skip_btn = GameTheme.make_back_button("Take Gold Only", Vector2(160, 42))
+	var skip_btn = GameTheme.make_back_button("Take Gold Only", Vector2(220, 52), 20)
 	skip_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	skip_btn.pressed.connect(_leave)
 	outer.add_child(skip_btn)
@@ -99,7 +101,7 @@ func _make_section_header(text: String) -> HBoxContainer:
 	left.color = rule_col
 	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(left)
-	var lbl := GameTheme.make_label(text, GameTheme.FONT_SUBHEADER, GameTheme.KEYWORD_GOLD)
+	var lbl := GameTheme.make_label(text, 24, GameTheme.KEYWORD_GOLD)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(lbl)

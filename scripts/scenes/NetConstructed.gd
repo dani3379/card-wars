@@ -181,18 +181,18 @@ func _build_scaffold() -> void:
 		_name_field.add_theme_font_override("font", GameTheme.font_body)
 	saved.add_child(_name_field)
 	var save_btn := GameTheme.make_themed_button("SAVE",
-		Color(0.18, 0.30, 0.22), Vector2(62, 30), 12)
+		Color(0.18, 0.30, 0.22), Vector2(72, 32), 14)
 	save_btn.pressed.connect(_on_save_deck)
 	saved.add_child(save_btn)
 	_saved_option = OptionButton.new()
 	_saved_option.custom_minimum_size = Vector2(140, 30)
 	saved.add_child(_saved_option)
 	var load_btn := GameTheme.make_themed_button("LOAD",
-		Color(0.20, 0.24, 0.34), Vector2(62, 30), 12)
+		Color(0.20, 0.24, 0.34), Vector2(72, 32), 14)
 	load_btn.pressed.connect(_on_load_deck)
 	saved.add_child(load_btn)
 	var del_btn := GameTheme.make_themed_button("DEL",
-		Color(0.30, 0.18, 0.16), Vector2(50, 30), 12)
+		Color(0.30, 0.18, 0.16), Vector2(60, 32), 14)
 	del_btn.pressed.connect(_on_delete_deck)
 	saved.add_child(del_btn)
 	_refresh_saved_options()
@@ -211,7 +211,7 @@ func _build_scaffold() -> void:
 	_ready_btn.pressed.connect(_on_ready_pressed)
 	bottom.add_child(_ready_btn)
 
-	_status = GameTheme.make_label("", 14, ASH)
+	_status = GameTheme.make_label("", 16, ASH)
 	_root.add_child(_status)
 
 

@@ -175,12 +175,12 @@ func _build_ui() -> void:
 	# ~half of the art stays fully visible. Text and art share the screen
 	# instead of competing for the same pixels.
 	const COLUMN_LEFT := 80
-	const COLUMN_WIDTH := 620
+	const COLUMN_WIDTH := 720
 
 	var title := _make_event_title(_event_data.name)
 	title.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	title.offset_left = COLUMN_LEFT
-	title.offset_top = 72
+	title.offset_top = 64
 	title.offset_right = COLUMN_LEFT + COLUMN_WIDTH
 	title.offset_bottom = 132
 	add_child(title)
@@ -203,28 +203,28 @@ func _build_ui() -> void:
 	# (Hades / StS dialogue beat-by-beat) — only the column anchor changed
 	# from center to left, the cinematic style is preserved.
 	var num_choices: int = visible_choices.size()
-	# Tall enough for three stacked lines: headline + gold outcome + dim flavor.
-	# 118 keeps a 3-choice stack (stack_h 378, top y≈412) clear of the desc box
-	# (bottom 400) on the 900px viewport, while still absorbing a rare two-line
-	# outcome label. Bumping it to 124 made the top choice graze the description.
-	var choice_h: int = 118
-	var stack_h: int = num_choices * choice_h + (num_choices - 1) * 12
+	# Tall enough for three stacked lines: headline + gold outcome + dim flavor,
+	# now sized for the larger 30/24/19 text. The desc box ends higher (340) so a
+	# 3-choice stack at 128 (stack_h 408, top y≈398) still clears it with a hair
+	# of air, while a 1-2 choice event simply sits lower with more breathing room.
+	var choice_h: int = 128
+	var stack_h: int = num_choices * choice_h + (num_choices - 1) * 14
 	var choices_vbox := VBoxContainer.new()
 	choices_vbox.name = "ChoicesBox"
 	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	choices_vbox.offset_left = COLUMN_LEFT
 	choices_vbox.offset_right = COLUMN_LEFT + COLUMN_WIDTH
-	choices_vbox.offset_top = -(stack_h + 110)
-	choices_vbox.offset_bottom = -110
-	choices_vbox.add_theme_constant_override("separation", 12)
+	choices_vbox.offset_top = -(stack_h + 96)
+	choices_vbox.offset_bottom = -96
+	choices_vbox.add_theme_constant_override("separation", 14)
 	choices_vbox.alignment = BoxContainer.ALIGNMENT_BEGIN
 	add_child(choices_vbox)
 
 	for choice in visible_choices:
 		choices_vbox.add_child(_make_event_choice(choice, choice_h))
 
-	var skip_btn = GameTheme.make_back_button("LEAVE", Vector2(140, 40))
-	skip_btn.position = Vector2(40, 830)
+	var skip_btn = GameTheme.make_back_button("LEAVE", Vector2(160, 46), 18)
+	skip_btn.position = Vector2(40, 824)
 	skip_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
 	add_child(skip_btn)
 
@@ -491,8 +491,8 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 		fx.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		fx.text = effect_text
 		fx.custom_minimum_size = Vector2(500, 0)
-		fx.add_theme_font_size_override("normal_font_size", 17)
-		fx.add_theme_font_size_override("bold_font_size", 17)
+		fx.add_theme_font_size_override("normal_font_size", 22)
+		fx.add_theme_font_size_override("bold_font_size", 22)
 		fx.add_theme_color_override("default_color", GameTheme.KEYWORD_GOLD)
 		fx.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
 		fx.add_theme_constant_override("outline_size", 3)
@@ -507,7 +507,7 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 	if not body_text.is_empty():
 		var body := Label.new()
 		body.text = body_text
-		body.add_theme_font_size_override("font_size", 19)
+		body.add_theme_font_size_override("font_size", 17)
 		body.add_theme_color_override("font_color", GameTheme.DESC_DIM)
 		body.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.70))
 		body.add_theme_constant_override("outline_size", 2)
@@ -1025,7 +1025,7 @@ func _show_result(text: String) -> void:
 	result_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	result_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	result_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	result_label.add_theme_font_size_override("font_size", 22)
+	result_label.add_theme_font_size_override("font_size", 24)
 	result_label.add_theme_color_override("font_color", GameTheme.IVORY)
 	result_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.80))
 	result_label.add_theme_constant_override("outline_size", 3)
@@ -1058,10 +1058,10 @@ func _make_card_picker_grid(title_text: String, title_color: Color) -> GridConta
 	_clear_ui()
 	_set_event_art_visible(false)
 
-	var title = GameTheme.make_label(title_text, 22, title_color)
+	var title = GameTheme.make_label(title_text, 26, title_color)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.position = Vector2(300, 30)
-	title.size = Vector2(1000, 40)
+	title.position = Vector2(300, 28)
+	title.size = Vector2(1000, 44)
 	add_child(title)
 
 	var scroll = ScrollContainer.new()

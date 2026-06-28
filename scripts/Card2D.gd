@@ -1615,55 +1615,11 @@ func _build_compact_layout() -> void:
 		_doom_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		_doom_badge.add_child(_doom_label)
 
-	# Icon-less combat keywords (rampage / lifelink / overrun / formation) have
-	# no SVG glyph, so the icon rail above skips them. Show them as short violet
-	# text orbs on the LEFT edge (below the doom badge, if any) so they're not
-	# invisible on the battlefield token. Matches the arcane-violet keyword-orb
-	# look.
-	_build_text_keyword_chips(root, keywords, _doom_badge != null)
-
-
-# Abbreviations for keywords that render as text chips (no icon asset).
-const _TEXT_KW_ABBR := {"rampage": "RMP", "lifelink": "LL", "overrun": "OVR", "formation": "FRM"}
-
-func _build_text_keyword_chips(root: Control, keywords: Array, below_doom: bool) -> void:
-	var labels: Array[String] = []
-	for kw in keywords:
-		var ks := String(kw)
-		if _TEXT_KW_ABBR.has(ks) and not labels.has(_TEXT_KW_ABBR[ks]):
-			labels.append(_TEXT_KW_ABBR[ks])
-	if labels.is_empty():
-		return
-	var chip_box := 30.0
-	var chip_gap := 4.0
-	var top0: float = (3.0 + 38.0 + chip_gap) if below_doom else 3.0
-	for i in range(labels.size()):
-		var chip := GemOrb.new()
-		chip.shape = "circle"
-		chip.style = "smooth"
-		chip.fill_color = Color(0.247, 0.153, 0.376)  # deep arcane violet (keyword idiom)
-		chip.gloss = 0.42
-		chip.anchor_left = 0.0; chip.anchor_right = 0.0
-		chip.anchor_top = 0.0; chip.anchor_bottom = 0.0
-		chip.offset_left = 3.0
-		chip.offset_right = 3.0 + chip_box
-		chip.offset_top = top0 + float(i) * (chip_box + chip_gap)
-		chip.offset_bottom = chip.offset_top + chip_box
-		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		root.add_child(chip)
-		var lbl := Label.new()
-		lbl.text = labels[i]
-		if GameTheme.font_display:
-			lbl.add_theme_font_override("font", GameTheme.font_display)
-		lbl.add_theme_font_size_override("font_size", 10)
-		lbl.add_theme_color_override("font_color", GameTheme.GILT_BRIGHT)
-		lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
-		lbl.add_theme_constant_override("outline_size", 3)
-		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
-		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		chip.add_child(lbl)
+	# rampage / lifelink / overrun / formation all ship SVG icons now, so the
+	# icon rail above already shows them. The old cryptic RMP/OVR/FRM/LL violet
+	# text chips were redundant duplicates of those icons (and unreadable as
+	# 3-letter codes), so they were removed — keyword detail still lives in the
+	# hover tooltip.
 
 
 # ═══════════════════════════════════════════
@@ -1777,7 +1733,9 @@ func _build_baked_overlay_layout() -> void:
 	od_clip.anchor_left = 0.0; od_clip.anchor_right = 1.0
 	od_clip.anchor_top = 0.0; od_clip.anchor_bottom = 0.0
 	od_clip.offset_left = 17; od_clip.offset_right = -17
-	od_clip.offset_top = 190; od_clip.offset_bottom = 255
+	# MUST match _build_chart_proto's desc_clip (176→258) so the live text lands
+	# on the vellum panel baked underneath by chart_proto.
+	od_clip.offset_top = 176; od_clip.offset_bottom = 258
 	root.add_child(od_clip)
 	var od_center := CenterContainer.new()
 	od_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1790,6 +1748,8 @@ func _build_baked_overlay_layout() -> void:
 	od_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	od_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	od_rt.custom_minimum_size = Vector2(170, 0)
+	# Match _build_chart_proto's tightened leading so wrapping/fit is identical.
+	od_rt.add_theme_constant_override("line_separation", -2)
 	var od_font: Font = GameTheme.font_card_body if GameTheme.font_card_body != null \
 		else GameTheme.font_body
 	var od_bold: Font = GameTheme.font_card_body_bold if GameTheme.font_card_body_bold != null \
@@ -1798,11 +1758,12 @@ func _build_baked_overlay_layout() -> void:
 		od_rt.add_theme_font_override("normal_font", od_font)
 		od_rt.add_theme_font_override("bold_font", od_bold if od_bold else od_font)
 	var od_raw: String = card_data.get("desc", "")
-	var od_sz := 13
+	# Ramp MUST match _build_chart_proto's dsz block (17 / 16 / 15, 14px floor).
+	var od_sz := 17
 	if od_raw.length() > 115:
-		od_sz = 11
+		od_sz = 15
 	elif od_raw.length() > 85:
-		od_sz = 12
+		od_sz = 16
 	od_rt.add_theme_font_size_override("normal_font_size", od_sz)
 	od_rt.add_theme_font_size_override("bold_font_size", od_sz)
 	od_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
@@ -1810,14 +1771,14 @@ func _build_baked_overlay_layout() -> void:
 		KeywordEffects.KEYWORD_GOLD, "#7a4f10")
 	od_rt.text = "[center]%s[/center]" % od_bb
 	od_center.add_child(od_rt)
-	_fit_desc_to_box.call_deferred(od_rt, 64.0)
+	_fit_desc_to_box.call_deferred(od_rt, 80.0)
 
 	# ── Live overlay: NAME (StS model — drawn live over the baked cartouche) ──
 	# The bake paints the swallowtail banner but blanks the name (bake_strip_name);
 	# drawing it live with the font renderer keeps it razor-sharp at any zoom like
 	# the rules text, instead of a downscaled bitmap. Mirrors the name block in
-	# _build_chart_proto so it lands exactly on the baked cartouche (center y=170
-	# real → 226.67 in _center_at_point's 300×400 space).
+	# _build_chart_proto so it lands exactly on the baked cartouche (center y=164
+	# real → 218.67 in _center_at_point's 300×400 space).
 	var nm_is_curse := CardDB.is_curse(String(card_data.get("id", "")))
 	var nm_is_upg := bool(card_data.get("is_upgraded", false)) and not nm_is_curse
 	var nm_font: Font = GameTheme.font_title_black \
@@ -1830,9 +1791,9 @@ func _build_baked_overlay_layout() -> void:
 	var nm_text := String(card_data.get("name", ""))
 	var nm_size := 14
 	if nm_text.length() > 17:
-		nm_size = 11
-	elif nm_text.length() > 13:
 		nm_size = 12
+	elif nm_text.length() > 13:
+		nm_size = 13
 	_name_label = _make_styled_label(nm_text, nm_font, nm_size, nm_col)
 	_name_label.add_theme_constant_override("outline_size", 0)
 	_name_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.55))
@@ -1840,7 +1801,8 @@ func _build_baked_overlay_layout() -> void:
 	_name_label.add_theme_constant_override("shadow_offset_y", 1)
 	_name_label.clip_text = true
 	_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	_center_at_point(_name_label, Vector2(150, 226.67), SIZE_NAME)
+	# Must match _build_chart_proto's cartouche center (y=157 real → 209.33).
+	_center_at_point(_name_label, Vector2(150, 209.33), SIZE_NAME)
 	root.add_child(_name_label)
 
 	# ── Live overlay: floop indicator ──
@@ -3514,17 +3476,25 @@ func _kw_stamp_row(root: Control, meds: Array, metal: Color,
 
 
 func _fit_desc_to_box(rt: RichTextLabel, max_h: float) -> void:
-	# Step the body font down (to a 10px floor) until the rules text fits the
+	# Step the body font down (to a 14px floor) until the rules text fits the
 	# clip box. RichTextLabel.get_content_height() validates the line cache, so
-	# the loop re-measures correctly after each size change.
+	# the loop re-measures correctly after each size change. 14px is the hard
+	# legibility floor on the ~225px card — at the real windowed (1600×900,
+	# no global scaling) size the rules text was the #1 "too small to read"
+	# complaint, so we'd rather clip the rare 5-line card than render any
+	# card's rules below 14px. The taller rules box + tightened leading (see
+	# _build_chart_proto) means even long cards rarely need to step down this far.
+	# The ramp now STARTS at 17/16/15, so this is a true safety net for the few
+	# very wordy cards — most cards render at their full ramp size.
 	if not is_instance_valid(rt):
 		return
 	var guard := 0
-	while guard < 6:
+	# Ramp top is 17 → 14 floor is 3 steps; the guard is generous headroom.
+	while guard < 8:
 		if rt.get_content_height() <= max_h:
 			return
 		var cur := int(rt.get_theme_font_size("normal_font_size"))
-		if cur <= 10:
+		if cur <= 14:
 			return
 		rt.add_theme_font_size_override("normal_font_size", cur - 1)
 		rt.add_theme_font_size_override("bold_font_size", cur - 1)
@@ -3654,7 +3624,9 @@ func _build_chart_proto() -> void:
 	mat.offset_left = 9
 	mat.offset_right = -9
 	mat.offset_top = 9
-	mat.offset_bottom = 152
+	# Art plate gives up ~6px at the bottom so the rules band can grow taller —
+	# the painting still occupies ~44% of the leaf, the most area of any element.
+	mat.offset_bottom = 140
 	var mat_st := StyleBoxFlat.new()
 	mat_st.bg_color = Color(0.118, 0.096, 0.072)
 	mat.add_theme_stylebox_override("panel", mat_st)
@@ -3669,7 +3641,7 @@ func _build_chart_proto() -> void:
 	art_clip.offset_left = 11
 	art_clip.offset_right = -11
 	art_clip.offset_top = 11
-	art_clip.offset_bottom = 150
+	art_clip.offset_bottom = 138
 	root.add_child(art_clip)
 	_art_rect = art_clip
 	if card_art:
@@ -3745,7 +3717,7 @@ func _build_chart_proto() -> void:
 	fillet.offset_left = 8
 	fillet.offset_right = -8
 	fillet.offset_top = 8
-	fillet.offset_bottom = 153
+	fillet.offset_bottom = 141
 	var fst := StyleBoxFlat.new()
 	fst.draw_center = false
 	fst.border_color = metal_dim
@@ -3754,7 +3726,7 @@ func _build_chart_proto() -> void:
 	root.add_child(fillet)
 	# Plate marks: small metal squares on the fillet corners — the mounting
 	# hardware that makes the painting read as a fixed museum plate.
-	for pm in [Vector2(8, 8), Vector2(217, 8), Vector2(8, 153), Vector2(217, 153)]:
+	for pm in [Vector2(8, 8), Vector2(217, 8), Vector2(8, 141), Vector2(217, 141)]:
 		var mark := Panel.new()
 		mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var mst := StyleBoxFlat.new()
@@ -3795,8 +3767,10 @@ func _build_chart_proto() -> void:
 	plate.anchor_bottom = 0.0
 	plate.offset_left = 12
 	plate.offset_right = -12
-	plate.offset_top = 156
-	plate.offset_bottom = 184
+	# Cartouche follows the art plate up (was 150→178) so the freed space lands
+	# in the rules band below, not as dead air between art and name.
+	plate.offset_top = 143
+	plate.offset_bottom = 171
 	plate.metal = metal
 	root.add_child(plate)
 	var name_font: Font = GameTheme.font_title_black \
@@ -3814,9 +3788,9 @@ func _build_chart_proto() -> void:
 	var nm := "" if bake_strip_name else String(card_data.get("name", ""))
 	var nm_size := 14
 	if nm.length() > 17:
-		nm_size = 11
-	elif nm.length() > 13:
 		nm_size = 12
+	elif nm.length() > 13:
+		nm_size = 13
 	_name_label = _make_styled_label(nm, name_font, nm_size, name_col)
 	_name_label.add_theme_constant_override("outline_size", 0)
 	_name_label.add_theme_color_override("font_shadow_color",
@@ -3825,16 +3799,16 @@ func _build_chart_proto() -> void:
 	_name_label.add_theme_constant_override("shadow_offset_y", 1)
 	_name_label.clip_text = true
 	_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	# Cartouche center y=170 real → 226.67 in _center_at_point's 300x400 space.
-	_center_at_point(_name_label, Vector2(150, 226.67), SIZE_NAME)
+	# Cartouche center y=157 real → 209.33 in _center_at_point's 300x400 space.
+	_center_at_point(_name_label, Vector2(150, 209.33), SIZE_NAME)
 	root.add_child(_name_label)
 	if is_upg:
 		# Gilt forge finials flank the name cartouche (real-px coords, like the
 		# rulebox ticks). Always visible regardless of rarity or name length —
 		# the redundant non-text half of the forged glance cue.
 		var forge_gilt := Color(1.0, 0.835, 0.4)
-		_chart_diamond(root, Vector2(21, 170), 5.0, forge_gilt)
-		_chart_diamond(root, Vector2(204, 170), 5.0, forge_gilt)
+		_chart_diamond(root, Vector2(21, 163), 5.0, forge_gilt)
+		_chart_diamond(root, Vector2(204, 163), 5.0, forge_gilt)
 
 	# ── keyword rail (chart roundels) ────────────────────────────────────
 	# Count ALL icon-bearing keywords (don't cap the count here) so the rail can
@@ -3869,10 +3843,13 @@ func _build_chart_proto() -> void:
 		stock.anchor_bottom = 0.0
 		stock.offset_left = 16
 		stock.offset_right = -16
-		stock.offset_top = 189
-		stock.offset_bottom = 256
+		# Taller, higher vellum band (was 183→256) — the rules text now starts
+		# ~8px higher and runs ~4px lower for ~13px more height, so the larger
+		# (17/16/15) ramp fits without shrinking on the typical card.
+		stock.offset_top = 175
+		stock.offset_bottom = 259
 		var sst := StyleBoxFlat.new()
-		sst.bg_color = Color(0.901, 0.843, 0.690, 0.55)  # clean warm vellum
+		sst.bg_color = Color(0.901, 0.843, 0.690, 0.62)  # clean warm vellum
 		sst.set_corner_radius_all(3)
 		stock.add_theme_stylebox_override("panel", sst)
 		root.add_child(stock)
@@ -3888,8 +3865,8 @@ func _build_chart_proto() -> void:
 	rulebox.anchor_bottom = 0.0
 	rulebox.offset_left = 15
 	rulebox.offset_right = -15
-	rulebox.offset_top = 188
-	rulebox.offset_bottom = 257
+	rulebox.offset_top = 174
+	rulebox.offset_bottom = 260
 	var pst := StyleBoxFlat.new()
 	pst.draw_center = false
 	pst.border_color = Color(0.255, 0.188, 0.118, 0.80) if not is_curse_card \
@@ -3897,10 +3874,10 @@ func _build_chart_proto() -> void:
 	pst.set_border_width_all(1)
 	rulebox.add_theme_stylebox_override("panel", pst)
 	root.add_child(rulebox)
-	_chart_diamond(root, Vector2(15, 188), 3.6, metal_dim)
-	_chart_diamond(root, Vector2(210, 188), 3.6, metal_dim)
-	_chart_diamond(root, Vector2(15, 257), 3.6, metal_dim)
-	_chart_diamond(root, Vector2(210, 257), 3.6, metal_dim)
+	_chart_diamond(root, Vector2(15, 174), 3.6, metal_dim)
+	_chart_diamond(root, Vector2(210, 174), 3.6, metal_dim)
+	_chart_diamond(root, Vector2(15, 260), 3.6, metal_dim)
+	_chart_diamond(root, Vector2(210, 260), 3.6, metal_dim)
 
 	# ── description (dark ink written on the page) ───────────────────────
 	var desc_clip := Control.new()
@@ -3912,8 +3889,9 @@ func _build_chart_proto() -> void:
 	desc_clip.anchor_bottom = 0.0
 	desc_clip.offset_left = 17
 	desc_clip.offset_right = -17
-	desc_clip.offset_top = 190
-	desc_clip.offset_bottom = 255
+	# Text region grows with the band (was 184→255 = 71px → 176→258 = 82px).
+	desc_clip.offset_top = 176
+	desc_clip.offset_bottom = 258
 	root.add_child(desc_clip)
 	var center_box := CenterContainer.new()
 	center_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -3926,6 +3904,10 @@ func _build_chart_proto() -> void:
 	desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	desc_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	desc_rt.custom_minimum_size = Vector2(170, 0)
+	# Tighten Alegreya's generous default leading so the larger ramp still fits
+	# the band. -2px/line claws back ~6px on a 4-line card without touching
+	# legibility. Keep identical in the baked-overlay path below.
+	desc_rt.add_theme_constant_override("line_separation", -2)
 	# The writ writes its rules in a book hand (Alegreya) — a modern rounded
 	# sans on period paper breaks the document fiction. Serif sizes run +1
 	# on the sans scale: hairline serifs need it at these px sizes.
@@ -3941,14 +3923,18 @@ func _build_chart_proto() -> void:
 	# (_build_baked_overlay_layout) draws the text with the font renderer so it stays
 	# crisp at any zoom (the StS model). The vellum panel above is still baked.
 	var raw_desc: String = "" if bake_strip_desc else card_data.get("desc", "")
-	# Bigger, more readable body text: short/medium descs read at 13px, and the
-	# floor lifts 10→11. Breakpoints pushed later so the *typical* card gets the
-	# largest size; the deferred shrink-to-fit below guarantees nothing clips.
-	var dsz := 13
+	# Bigger, more readable body text. The 15/14/13 ramp was still the #1
+	# "too small to read" complaint at the real windowed (1600×900, no global
+	# scaling) card size, so the ramp is lifted to 17/16/15: short/medium descs
+	# read at 17px, wordy cards step to 15px here and a 14px floor in
+	# _fit_desc_to_box. The taller band + tightened leading above absorb the
+	# growth. Keep this ramp IDENTICAL to the baked-overlay path below — they
+	# draw the same live text and must not diverge.
+	var dsz := 17
 	if raw_desc.length() > 115:
-		dsz = 11
+		dsz = 15
 	elif raw_desc.length() > 85:
-		dsz = 12
+		dsz = 16
 	desc_rt.add_theme_font_size_override("normal_font_size", dsz)
 	desc_rt.add_theme_font_size_override("bold_font_size", dsz)
 	desc_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
@@ -3960,9 +3946,9 @@ func _build_chart_proto() -> void:
 	desc_rt.text = "[center]%s[/center]" % desc_bbcode
 	center_box.add_child(desc_rt)
 	# Shrink-to-fit safety net: once laid out, if the written text overflows the
-	# ~65px clip box (a long desc plus reminders), step the body size down until
-	# it fits — so a line is never cut top or bottom by the CenterContainer clip.
-	_fit_desc_to_box.call_deferred(desc_rt, 64.0)
+	# ~82px clip box, step the body size down (to the 14px floor) until it fits —
+	# so a line is never cut top or bottom by the CenterContainer clip.
+	_fit_desc_to_box.call_deferred(desc_rt, 80.0)
 
 	# ── stats as wax seals OR the spell footer line ──────────────────────
 	var stat_font: Font = GameTheme.font_stat
@@ -4101,7 +4087,7 @@ func _build_chart_proto() -> void:
 			foot_col = Color(0.318, 0.310, 0.255, 0.95)
 		var ftl := _make_styled_label(spaced, GameTheme.font_title \
 			if GameTheme.font_title != null else GameTheme.font_display,
-			10, foot_col)
+			14, foot_col)
 		ftl.add_theme_constant_override("outline_size", 0)
 		ftl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.5))
 		ftl.add_theme_constant_override("shadow_offset_y", 1)
@@ -4119,7 +4105,7 @@ func _build_chart_proto() -> void:
 					sp_word += " "
 			var sp_lbl := _make_styled_label(sp_word, GameTheme.font_title \
 				if GameTheme.font_title != null else GameTheme.font_display,
-				11, Color(0.302, 0.224, 0.133, 0.95))
+				12, Color(0.302, 0.224, 0.133, 0.95))
 			sp_lbl.add_theme_constant_override("outline_size", 0)
 			sp_lbl.add_theme_color_override("font_shadow_color",
 				Color(0, 0, 0, 0.5))

@@ -229,7 +229,7 @@ func _build_scaffold() -> void:
 	_ready_btn.pressed.connect(_on_ready_pressed)
 	bottom.add_child(_ready_btn)
 
-	_status = GameTheme.make_label("", 14, ASH)
+	_status = GameTheme.make_label("", 16, ASH)
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_root.add_child(_status)
 

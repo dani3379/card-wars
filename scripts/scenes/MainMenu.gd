@@ -101,7 +101,9 @@ func _rebuild_menu() -> void:
 	col.add_child(title)
 
 	# ── Subtitle ──
-	var sub := _make_display_label("a lane combat roguelike deckbuilder", 17, ASH)
+	# Brighter than ASH (0.62 grey washed out over the fire) so the tagline reads.
+	var sub := _make_display_label("a lane combat roguelike deckbuilder", 19,
+		Color(0.86, 0.80, 0.66))
 	sub.name = "Subtitle"
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	col.add_child(sub)
@@ -113,11 +115,11 @@ func _rebuild_menu() -> void:
 	# not a spoiler. Left-flush + autowrapped to the column width.
 	var epigraph := _make_display_label(
 		"You lit the first flame so long ago you've forgotten it was you. The road remembers. Everything on it is already expecting you — they always are.",
-		14, IVORY)
+		17, IVORY)
 	epigraph.name = "Epigraph"
 	epigraph.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	epigraph.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	epigraph.custom_minimum_size = Vector2(560, 0)
+	epigraph.custom_minimum_size = Vector2(600, 0)
 	col.add_child(epigraph)
 
 	# ── Ornament: gilt line with central rosette glyph (a diamond, NOT a triangle).
@@ -238,7 +240,7 @@ func _rebuild_menu() -> void:
 
 	# Bottom decorative line + run stats.
 	col.add_child(_make_ornament_row(200.0, true))
-	var stats := _make_display_label(_stats_text(), 13, ASH)
+	var stats := _make_display_label(_stats_text(), 17, Color(0.80, 0.75, 0.64))
 	stats.name = "StatsLabel"
 	stats.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	col.add_child(stats)
@@ -250,9 +252,9 @@ func _rebuild_menu() -> void:
 	credits_btn.flat = true
 	credits_btn.focus_mode = Control.FOCUS_NONE
 	credits_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	credits_btn.custom_minimum_size = Vector2(0, 24)
-	credits_btn.add_theme_font_size_override("font_size", 12)
-	credits_btn.add_theme_color_override("font_color", ASH)
+	credits_btn.custom_minimum_size = Vector2(0, 26)
+	credits_btn.add_theme_font_size_override("font_size", 14)
+	credits_btn.add_theme_color_override("font_color", Color(0.74, 0.70, 0.62))
 	credits_btn.add_theme_color_override("font_hover_color", GILT_BRIGHT)
 	if GameTheme.font_body:
 		credits_btn.add_theme_font_override("font", GameTheme.font_body)
@@ -453,7 +455,7 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	inner.add_child(title_lbl)
-	var sub_lbl := _make_display_label(sub_text, 12, ASH if not has_save else Color(0.85, 0.78, 0.58))
+	var sub_lbl := _make_display_label(sub_text, 14, Color(0.74, 0.70, 0.62) if not has_save else Color(0.90, 0.83, 0.62))
 	sub_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	sub_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	inner.add_child(sub_lbl)
@@ -687,7 +689,7 @@ func _show_load_screen(overwrite_mode: bool) -> void:
 
 	if overwrite_mode:
 		var hint := _make_display_label(
-			"All slots are full — pick one to replace.", 13, ASH)
+			"All slots are full — pick one to replace.", 16, Color(0.82, 0.62, 0.55))
 		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		menu.add_child(hint)
 
@@ -723,54 +725,57 @@ func _show_hero_select() -> void:
 	_hero_cards.clear()
 	_hero_portraits.clear()
 	_selected_hero = ""
-	_center_menu_for_subscreen(960.0, 700.0)
+	# Use nearly the whole 1600×900 canvas — the old 960×700 box left the bottom
+	# half of the screen empty while the loadout text was squeezed into ~190px.
+	_center_menu_for_subscreen(1240.0, 820.0)
 
-	var title := _make_display_label("CHOOSE YOUR HERO", 30, GILT_BRIGHT)
+	var title := _make_display_label("CHOOSE YOUR HERO", 44, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	menu.add_child(title)
-	menu.add_child(_make_ornament_row(260.0))
+	menu.add_child(_make_ornament_row(320.0))
 	var spacer := Control.new()
-	spacer.custom_minimum_size = Vector2(0, 8)
+	spacer.custom_minimum_size = Vector2(0, 10)
 	menu.add_child(spacer)
 
 	# The cast: one frameless portrait card per hero, in a row.
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.add_theme_constant_override("separation", 18)
+	row.add_theme_constant_override("separation", 26)
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	menu.add_child(row)
 	for hid in HeroDB.HERO_ORDER:
 		row.add_child(_make_hero_card(hid))
 
 	var gap := Control.new()
-	gap.custom_minimum_size = Vector2(0, 12)
+	gap.custom_minimum_size = Vector2(0, 14)
 	menu.add_child(gap)
 
 	# Shared detail pane — filled for the focused hero only, so the dense loadout
 	# text appears once (with room to breathe) instead of on all four cards. A soft
-	# dark scrim sits behind it (no hard border) so the small text stays legible
-	# over the busy fire background.
+	# dark scrim sits behind it (no hard border) so the larger text stays legible
+	# over the busy fire background. Grown to fill the freed bottom-half space so
+	# the loadout reads at arm's length.
 	var detail_frame := PanelContainer.new()
 	var detail_bg := StyleBoxFlat.new()
-	detail_bg.bg_color = Color(0.05, 0.035, 0.045, 0.55)
+	detail_bg.bg_color = Color(0.05, 0.035, 0.045, 0.66)
 	detail_bg.set_corner_radius_all(8)
-	detail_bg.content_margin_left = 26
-	detail_bg.content_margin_right = 26
-	detail_bg.content_margin_top = 14
-	detail_bg.content_margin_bottom = 14
+	detail_bg.content_margin_left = 36
+	detail_bg.content_margin_right = 36
+	detail_bg.content_margin_top = 22
+	detail_bg.content_margin_bottom = 22
 	detail_frame.add_theme_stylebox_override("panel", detail_bg)
 	detail_frame.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	detail_frame.custom_minimum_size = Vector2(700, 190)
+	detail_frame.custom_minimum_size = Vector2(1000, 250)
 	menu.add_child(detail_frame)
 	_hero_detail = VBoxContainer.new()
-	_hero_detail.add_theme_constant_override("separation", 5)
+	_hero_detail.add_theme_constant_override("separation", 9)
 	detail_frame.add_child(_hero_detail)
 
 	var back_spacer := Control.new()
-	back_spacer.custom_minimum_size = Vector2(0, 6)
+	back_spacer.custom_minimum_size = Vector2(0, 10)
 	menu.add_child(back_spacer)
 
-	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 15, 40)
+	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 20, 44)
 	back.pressed.connect(_rebuild_menu)
 	menu.add_child(back)
 
@@ -785,7 +790,7 @@ func _make_hero_card(hid: String) -> Button:
 	# fall through to the Button.
 	var hero := HeroDB.get_hero(hid)
 	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(188, 292)
+	btn.custom_minimum_size = Vector2(216, 340)
 	btn.focus_mode = Control.FOCUS_NONE
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
@@ -801,7 +806,11 @@ func _make_hero_card(hid: String) -> Button:
 
 	# Portrait (or a color-wash fallback if its art isn't painted yet). Stored so
 	# _focus_hero can brighten the spotlighted hero and dim the rest.
-	var port_size := Vector2(168, 210)
+	# Box aspect (192/255 = 0.753) is matched to the source art aspect
+	# (928×1232 = 0.753) so KEEP_ASPECT_COVERED fills it with ZERO crop — the old
+	# 168×210 box shaved ~13px off the top/bottom of every face ("portraits not in
+	# frame"). Grown to fill more of the reframed, larger hero-select screen.
+	var port_size := Vector2(192, 255)
 	var portrait_path := "res://assets/portraits/hero_portrait_%s.png" % hid
 	if ResourceLoader.exists(portrait_path):
 		var portrait := TextureRect.new()
@@ -809,9 +818,12 @@ func _make_hero_card(hid: String) -> Button:
 		portrait.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		portrait.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 		portrait.custom_minimum_size = port_size
+		portrait.clip_contents = true
 		portrait.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		portrait.modulate = Color(0.70, 0.68, 0.66)
+		# Idle portraits stay bright enough to read across a room — the old 0.70
+		# wash made all five faces murky. _focus_hero lifts the picked one.
+		portrait.modulate = Color(0.88, 0.86, 0.84)
 		col.add_child(portrait)
 		_hero_portraits[hid] = portrait
 	else:
@@ -835,25 +847,25 @@ func _make_hero_card(hid: String) -> Button:
 		plate.add_child(pcol)
 		var mono := _make_display_label(
 			String(hero.get("name", hid)).strip_edges().left(1).to_upper(),
-			84, Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.85))
+			96, Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.85))
 		mono.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		pcol.add_child(mono)
-		var coming := _make_display_label("portrait to come", 11, ASH)
+		var coming := _make_display_label("portrait to come", 15, ASH)
 		coming.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		pcol.add_child(coming)
 		col.add_child(plate)
-		plate.modulate = Color(0.70, 0.68, 0.66)
+		plate.modulate = Color(0.88, 0.86, 0.84)
 		_hero_portraits[hid] = plate
 
-	var name_lbl := _make_display_label(String(hero.get("name", hid)), 22, GILT_BRIGHT)
+	var name_lbl := _make_display_label(String(hero.get("name", hid)), 27, GILT_BRIGHT)
 	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	col.add_child(name_lbl)
 
-	var tag_lbl := _make_display_label(String(hero.get("tagline", "")), 12, Color(0.95, 0.82, 0.55))
+	var tag_lbl := _make_display_label(String(hero.get("tagline", "")), 17, Color(1.0, 0.88, 0.62))
 	tag_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	tag_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	tag_lbl.custom_minimum_size = Vector2(168, 0)
+	tag_lbl.custom_minimum_size = Vector2(192, 0)
 	tag_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	col.add_child(tag_lbl)
 
@@ -873,7 +885,7 @@ func _focus_hero(hid: String) -> void:
 	for k in _hero_portraits:
 		var p = _hero_portraits[k]
 		if is_instance_valid(p):
-			p.modulate = Color(1.08, 1.04, 0.98) if k == hid else Color(0.62, 0.60, 0.60)
+			p.modulate = Color(1.08, 1.04, 0.98) if k == hid else Color(0.78, 0.76, 0.74)
 	for k in _hero_cards:
 		var b = _hero_cards[k]
 		if is_instance_valid(b):
@@ -910,47 +922,65 @@ func _build_hero_detail(hid: String) -> void:
 		c.queue_free()
 	var hero := HeroDB.get_hero(hid)
 
+	# Generous wrap width so the now-larger text fills the wide pane instead of
+	# rag-wrapping in a narrow column.
+	const DETAIL_WRAP := 910.0
+
 	var lore := String(hero.get("lore", ""))
 	if lore != "":
-		var lore_lbl := _make_display_label(lore, 15, Color(0.82, 0.76, 0.88))
+		var lore_lbl := _make_display_label(lore, 19, Color(0.90, 0.84, 0.96))
 		lore_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		lore_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		lore_lbl.custom_minimum_size = Vector2(DETAIL_WRAP, 0)
 		_hero_detail.add_child(lore_lbl)
 
-	var desc_lbl := _make_display_label(String(hero.get("desc", "")), 14, IVORY)
+	var desc_lbl := _make_display_label(String(hero.get("desc", "")), 18, IVORY)
 	desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc_lbl.custom_minimum_size = Vector2(DETAIL_WRAP, 0)
 	_hero_detail.add_child(desc_lbl)
 
-	_hero_detail.add_child(_make_ornament_row(300.0, true))
+	_hero_detail.add_child(_make_ornament_row(320.0, true))
 
-	var deck_lbl := _make_display_label("DECK    " + _summarize_deck(hero.get("deck", [])), 12, Color(0.80, 0.76, 0.64))
+	# Deck line: a bright gilt "DECK" header in front of the composition so the
+	# section reads at a glance instead of as one grey run-on.
+	var deck_row := HBoxContainer.new()
+	deck_row.add_theme_constant_override("separation", 14)
+	deck_row.alignment = BoxContainer.ALIGNMENT_BEGIN
+	var deck_hdr := _make_display_label("DECK", 18, GILT_BRIGHT)
+	deck_hdr.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	deck_row.add_child(deck_hdr)
+	var deck_lbl := _make_display_label(_summarize_deck(hero.get("deck", [])), 18, Color(0.94, 0.90, 0.78))
 	deck_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	deck_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_hero_detail.add_child(deck_lbl)
+	deck_lbl.custom_minimum_size = Vector2(DETAIL_WRAP - 70.0, 0)
+	deck_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	deck_row.add_child(deck_lbl)
+	_hero_detail.add_child(deck_row)
 
 	var relic_id := String(hero.get("relic", ""))
 	if relic_id != "":
 		var relic_row := HBoxContainer.new()
-		relic_row.add_theme_constant_override("separation", 10)
+		relic_row.add_theme_constant_override("separation", 14)
 		relic_row.alignment = BoxContainer.ALIGNMENT_BEGIN
-		var chip := GameTheme.make_relic_chip(relic_id, 40)
+		var chip := GameTheme.make_relic_chip(relic_id, 52)
 		chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		relic_row.add_child(chip)
 		var rcol := VBoxContainer.new()
 		rcol.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		rcol.add_theme_constant_override("separation", 1)
+		rcol.add_theme_constant_override("separation", 2)
 		relic_row.add_child(rcol)
 		var rd := RelicDB.get_relic(relic_id)
-		var rname := _make_display_label(String(rd.get("name", relic_id)), 13, GILT_BRIGHT)
+		var rname := _make_display_label(String(rd.get("name", relic_id)), 19, GILT_BRIGHT)
 		rcol.add_child(rname)
-		var rdesc := _make_display_label(String(rd.get("desc", "")), 11, IVORY)
+		var rdesc := _make_display_label(String(rd.get("desc", "")), 17, IVORY)
 		rdesc.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		rdesc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		rdesc.custom_minimum_size = Vector2(DETAIL_WRAP - 70.0, 0)
 		rcol.add_child(rdesc)
 		_hero_detail.add_child(relic_row)
 
-	var hint := _make_display_label("Click a hero to begin the run.", 11, ASH)
+	var hint := _make_display_label("Click a hero to begin the run.", 17, Color(0.82, 0.78, 0.70))
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_hero_detail.add_child(hint)
 
@@ -1021,7 +1051,7 @@ func _show_custom_seed_input() -> void:
 
 	var hint := _make_display_label(
 		"Type a seed. Same seed → same map.\nShare it with a friend for a head-to-head run.",
-		15, ASH)
+		16, Color(0.82, 0.78, 0.70))
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	menu.add_child(hint)
@@ -1105,180 +1135,12 @@ func _show_how_to_play() -> void:
 	var existing := get_node_or_null("HowToPlayOverlay")
 	if existing != null:
 		existing.queue_free()
-	add_child(HowToPlayOverlay.build(self))
+	add_child(GameTheme.make_how_to_play_overlay())
 
 
-# Shared builder so the map screen can show the exact same reference. Static so
-# MapView can call MainMenu's nothing — instead MapView carries its own copy
-# (disjoint file set), but the layout logic is identical and kept in sync by
-# eye. `host` only needs to be a Control we can parent to.
-class HowToPlayOverlay:
-	static func build(_host: Control) -> Control:
-		var GILT_B := Color(1.0, 0.88, 0.35, 1.0)
-		var IVORY_C := Color(0.96, 0.92, 0.78, 1.0)
-		var ASH_C := Color(0.62, 0.58, 0.52, 1.0)
-
-		var scrim := ColorRect.new()
-		scrim.name = "HowToPlayOverlay"
-		scrim.color = Color(0.02, 0.015, 0.03, 0.88)
-		scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
-		scrim.mouse_filter = Control.MOUSE_FILTER_STOP
-		# Click the dark margin to dismiss.
-		scrim.gui_input.connect(func(ev: InputEvent):
-			if ev is InputEventMouseButton and ev.pressed \
-					and ev.button_index == MOUSE_BUTTON_LEFT:
-				scrim.queue_free())
-
-		var panel := PanelContainer.new()
-		panel.set_anchors_preset(Control.PRESET_CENTER)
-		panel.custom_minimum_size = Vector2(1180, 740)
-		panel.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
-			Color(0.06, 0.05, 0.045, 0.99),
-			Color(0.60, 0.51, 0.34, 0.95), 2, 6, true))
-		# Eat clicks inside the panel so they don't reach the dismiss scrim.
-		panel.mouse_filter = Control.MOUSE_FILTER_STOP
-		scrim.add_child(panel)
-
-		var pad := MarginContainer.new()
-		for m in ["margin_left", "margin_right", "margin_top", "margin_bottom"]:
-			pad.add_theme_constant_override(m, 28)
-		panel.add_child(pad)
-
-		var outer := VBoxContainer.new()
-		outer.add_theme_constant_override("separation", 14)
-		pad.add_child(outer)
-
-		# ── Header row: title + close ──
-		var head := HBoxContainer.new()
-		head.add_theme_constant_override("separation", 12)
-		outer.add_child(head)
-		var title := GameTheme.make_label("HOW TO PLAY", GameTheme.FONT_HEADER, GILT_B)
-		title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		head.add_child(title)
-		var close := GameTheme.make_back_button("CLOSE", Vector2(120, 36), 16)
-		close.pressed.connect(func(): scrim.queue_free())
-		head.add_child(close)
-
-		var rule := ColorRect.new()
-		rule.color = Color(0.60, 0.51, 0.34, 0.55)
-		rule.custom_minimum_size = Vector2(0, 2)
-		outer.add_child(rule)
-
-		# ── Two columns ──
-		var cols := HBoxContainer.new()
-		cols.add_theme_constant_override("separation", 26)
-		cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		outer.add_child(cols)
-
-		# LEFT — the campaign primer.
-		var left_scroll := ScrollContainer.new()
-		left_scroll.custom_minimum_size = Vector2(500, 0)
-		left_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		left_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-		cols.add_child(left_scroll)
-		var left := VBoxContainer.new()
-		left.add_theme_constant_override("separation", 10)
-		left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		left_scroll.add_child(left)
-
-		var sect := GameTheme.make_label("HOW THE CAMPAIGN WORKS",
-			GameTheme.FONT_SUBHEADER, GILT_B)
-		left.add_child(sect)
-
-		var primer := [
-			["Command", "Your turn resource — start with 3 each turn; spend it to play creatures and spells. Up to 2 unspent banks into next turn."],
-			["The board", "Four lanes, two ranks per side. The front rank fights; the back rank is reserve. Place creatures into either rank."],
-			["Combat", "Both sides strike at once. The front rank trades first and is hit first; the back waits behind it. Swift creatures strike in a pre-phase first."],
-			["The Forge", "At a rest, Forge a card for a permanent \"+\" upgrade. You pick the card and see exactly what it becomes — no rolls."],
-			["Recruit camps", "A free draft: pick 1 of 3 cards to join your deck. Your main way to grow it between fights."],
-			["The boss gate", "Each lord's keep starts barred. Break enough holds (the map shows how many) to open the road, then march on the keep."],
-		]
-		for entry in primer:
-			left.add_child(HowToPlayOverlay._make_primer_block(
-				entry[0], entry[1], GILT_B, IVORY_C))
-
-		# Vertical divider between columns.
-		var vrule := ColorRect.new()
-		vrule.color = Color(0.50, 0.42, 0.28, 0.40)
-		vrule.custom_minimum_size = Vector2(2, 0)
-		vrule.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		cols.add_child(vrule)
-
-		# RIGHT — the full keyword glossary, sourced live from KeywordEffects.
-		var right_col := VBoxContainer.new()
-		right_col.add_theme_constant_override("separation", 8)
-		right_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		right_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		cols.add_child(right_col)
-		var gloss_head := GameTheme.make_label("KEYWORD GLOSSARY",
-			GameTheme.FONT_SUBHEADER, GILT_B)
-		right_col.add_child(gloss_head)
-		var gloss_note := GameTheme.make_label(
-			"Every keyword that can appear on a card.", 13, ASH_C)
-		right_col.add_child(gloss_note)
-
-		var gloss_scroll := ScrollContainer.new()
-		gloss_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		gloss_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		gloss_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-		right_col.add_child(gloss_scroll)
-		var gloss := VBoxContainer.new()
-		gloss.add_theme_constant_override("separation", 9)
-		gloss.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		gloss_scroll.add_child(gloss)
-
-		for key in KeywordEffects.KEYWORDS.keys():
-			var kw: Dictionary = KeywordEffects.KEYWORDS[key]
-			gloss.add_child(HowToPlayOverlay._make_keyword_row(
-				String(kw.get("display", key)), String(kw.get("desc", "")),
-				GILT_B, IVORY_C))
-
-		return scrim
-
-
-	static func _make_primer_block(heading: String, body: String,
-			gilt: Color, ivory: Color) -> Control:
-		var box := VBoxContainer.new()
-		box.add_theme_constant_override("separation", 2)
-		box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var h := GameTheme.make_label(heading, 16,
-			Color(0.92, 0.80, 0.50, 1.0))
-		box.add_child(h)
-		var b := GameTheme.make_label(body, 13, ivory)
-		b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		b.custom_minimum_size = Vector2(460, 0)
-		box.add_child(b)
-		return box
-
-
-	static func _make_keyword_row(name: String, desc: String,
-			gilt: Color, ivory: Color) -> Control:
-		# Gilt keyword name + dim body on a hairline ink chip — the chart kit.
-		var row := PanelContainer.new()
-		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var sb := StyleBoxFlat.new()
-		sb.bg_color = Color(0.085, 0.072, 0.060, 0.65)
-		sb.border_color = Color(0.45, 0.38, 0.26, 0.45)
-		sb.set_border_width_all(1)
-		sb.set_corner_radius_all(3)
-		sb.content_margin_left = 12
-		sb.content_margin_right = 12
-		sb.content_margin_top = 7
-		sb.content_margin_bottom = 7
-		row.add_theme_stylebox_override("panel", sb)
-		var v := VBoxContainer.new()
-		v.add_theme_constant_override("separation", 1)
-		row.add_child(v)
-		var n := GameTheme.make_label(name, 15,
-			Color(0.95, 0.82, 0.48, 1.0))
-		v.add_child(n)
-		var d := GameTheme.make_label(desc, 13, ivory)
-		d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		d.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		d.custom_minimum_size = Vector2(560, 0)
-		v.add_child(d)
-		return row
+# (The HowToPlayOverlay class was removed — both this screen and MapView now call
+# the single shared builder GameTheme.make_how_to_play_overlay(), so the primer
+# copy can no longer drift between the two.)
 
 
 # ---------------------------------------------------------------------------
