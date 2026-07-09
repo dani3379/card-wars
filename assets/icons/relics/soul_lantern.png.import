@@ -2,7 +2,7 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://xgjt5aopy4b"
+uid="uid://dslly3mwq5g1u"
 path="res://.godot/imported/soul_lantern.png-6a3295f1d1df649ae77cc3bbf259f6a5.ctex"
 metadata={
 "vram_texture": false
@@ -23,7 +23,7 @@ compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=true
+mipmaps/generate=false
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""

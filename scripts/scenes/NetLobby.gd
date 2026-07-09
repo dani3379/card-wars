@@ -15,6 +15,8 @@ const IVORY := Color(0.96, 0.92, 0.78, 1.0)
 const ASH := Color(0.62, 0.58, 0.52, 1.0)
 const GREEN := Color(0.55, 0.85, 0.45, 1.0)
 const RED := Color(0.90, 0.45, 0.35, 1.0)
+const AZURE := Color(0.52, 0.68, 0.95, 1.0)   # join accent (answer-the-call blue)
+const EMBER := Color(0.90, 0.62, 0.30, 1.0)   # practice / drill accent
 
 # ── UI refs ──
 var _status_label: Label
@@ -26,11 +28,12 @@ var _code_field: LineEdit           # room-code entry (join, online)
 var _host_online_btn: Button       # relay host (primary path)
 var _join_online_btn: Button       # relay join by code
 var _lan_toggle: Button            # expands the direct/LAN fallback section
-var _lan_panel: VBoxContainer      # direct host/join controls (collapsed by default)
+var _lan_panel: Control            # direct host/join controls (collapsed by default)
 var _host_btn: Button              # LAN/direct host
 var _join_btn: Button              # LAN/direct join
 var _ready_btn: Button
 var _start_btn: Button
+var _back_btn: Button               # outer "leave to menu" — hidden while the practice sub-panel owns the back
 var _connect_panel: VBoxContainer   # host/join controls (hidden once connected)
 var _ready_panel: VBoxContainer     # ready/start controls (shown once connected)
 var _you_ready_label: Label
@@ -41,27 +44,42 @@ var _relay_host: String = ""        # resolved relay address (empty = online dis
 var _mode_panel: VBoxContainer       # built on connect (host buttons / client label)
 var _mode_buttons: Dictionary = {}   # MatchMode id -> Button (host only)
 var _bo_buttons: Dictionary = {}     # best_of value (1/3) -> Button (host only)
+var _style_buttons: Dictionary = {}  # NetMatch.STYLE_* -> Button (host only)
 var _mode_info_label: Label          # client: shows the host's chosen mode/format
 var _selected_mode: int = 0          # host's current pick (SkirmishState.MatchMode)
 var _selected_best_of: int = 1       # host's current pick (1 or 3)
+var _selected_style: int = 0         # host's current pick (NetMatch.STYLE_*)
 
 # ── Practice vs Bot (offline; no peer) ──
 var _vs_bot_btn: Button
 var _vs_bot_panel: VBoxContainer
 var _vsbot_mode: int = 0
 var _vsbot_bo: int = 1
+var _vsbot_style: int = 0
 var _vsbot_mode_buttons: Dictionary = {}
 var _vsbot_bo_buttons: Dictionary = {}
+var _vsbot_style_buttons: Dictionary = {}
 
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "main_menu")
+	# The muster pool: quiet war-council medieval, shared by every skirmish
+	# prep screen (lobby, quick-match, draft, sealed, constructed).
+	AudioBank.play_music_random(["map_c", "map_d", "rest_c"])
 	_relay_host = NetMatch.get_relay_host()
 	# Fresh lobby: drop any stale connection from a previous visit.
 	NetMatch.leave()
 	_build_ui()
 	_wire_net_signals()
 	_refresh_state()
+	GameTheme.make_settings_gear(self)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	# Esc = the BACK button: drop any connection and return to the main menu.
+	if event.is_action_pressed("ui_cancel"):
+		_on_back_pressed()
+		get_viewport().set_input_as_handled()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -72,109 +90,76 @@ func _build_ui() -> void:
 	var col := VBoxContainer.new()
 	col.name = "Lobby"
 	col.alignment = BoxContainer.ALIGNMENT_CENTER
-	col.add_theme_constant_override("separation", 16)
+	col.add_theme_constant_override("separation", 13)
 	col.anchor_left = 0.5
 	col.anchor_right = 0.5
 	col.anchor_top = 0.5
 	col.anchor_bottom = 0.5
-	col.offset_left = -300
-	col.offset_right = 300
-	col.offset_top = -260
-	col.offset_bottom = 260
+	col.offset_left = -430
+	col.offset_right = 430
+	col.offset_top = -330
+	col.offset_bottom = 330
 	add_child(col)
 
-	col.add_child(GameTheme.make_screen_title("SKIRMISH — ONLINE", GILT_BRIGHT))
+	col.add_child(GameTheme.make_screen_title("SKIRMISH", GILT_BRIGHT))
 
 	var blurb := GameTheme.make_label(
-		"Pick a mode, then fight a friend anywhere.\n"
-		+ "Host gets a room code — share it, your friend types it in. No IP, no setup.",
-		15, ASH)
+		"Duel a friend anywhere — or drill against a bot.", 16, ASH)
 	blurb.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	blurb.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	blurb.custom_minimum_size = Vector2(560, 0)
 	col.add_child(blurb)
 
-	col.add_child(GameTheme.make_separator(GILT_BRIGHT, 360.0))
-
-	# ── Connect panel (host / join) ──
+	# ── Connect panel (host / join / practice) ──
 	_connect_panel = VBoxContainer.new()
 	_connect_panel.alignment = BoxContainer.ALIGNMENT_CENTER
-	_connect_panel.add_theme_constant_override("separation", 12)
+	_connect_panel.add_theme_constant_override("separation", 11)
 	col.add_child(_connect_panel)
 
-	# ── Online (relay / room code) — the primary, NAT-free path ──
-	_host_online_btn = GameTheme.make_themed_button("HOST ONLINE",
-		Color(0.18, 0.36, 0.18), Vector2(360, 48), 20,
-		"Open a room on the relay and get a code to share. Plays across the internet — no port forwarding, no VPN.")
+	# Whether the relay is wired into this build. When it isn't, the two online
+	# tiles render greyed with the reason printed on them (honest dead-state)
+	# rather than as live-looking buttons that only flash a red error on click.
+	var online_ok := _relay_host != ""
+	var online_reason := "" if online_ok else \
+		"Online isn't wired into this build yet — use the direct-IP option below."
+
+	# ── Face a friend: HOST and JOIN as two matched chart panels, side by side ──
+	_connect_panel.add_child(GameTheme.make_section_divider("FACE A FRIEND", GameTheme.GILT, 17, 130.0))
+
+	var duel_row := HBoxContainer.new()
+	duel_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	duel_row.add_theme_constant_override("separation", 18)
+	_connect_panel.add_child(duel_row)
+
+	var host_tile := _build_host_tile(online_ok, online_reason)
+	_host_online_btn = host_tile.get_node("ClickButton")
 	_host_online_btn.pressed.connect(_on_host_online_pressed)
-	_connect_panel.add_child(_host_online_btn)
+	duel_row.add_child(host_tile)
 
-	var or_lbl := GameTheme.make_label("— or join with a code —", 14, ASH)
-	or_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_connect_panel.add_child(or_lbl)
+	duel_row.add_child(_build_join_tile(online_ok, online_reason))
 
-	var code_row := HBoxContainer.new()
-	code_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	code_row.add_theme_constant_override("separation", 8)
-	_connect_panel.add_child(code_row)
+	# ── Or drill solo: one wide practice banner ──
+	_connect_panel.add_child(GameTheme.make_section_divider("OR DRILL SOLO", GameTheme.GILT, 17, 130.0))
+	var bot_banner := GameTheme.make_choice_banner(
+		"PRACTICE vs BOT",
+		"Play any mode against a local AI opponent — no connection needed.",
+		EMBER, "res://assets/icons/shield.png", Vector2(802, 90))
+	_vs_bot_btn = bot_banner.get_node("ClickButton")
+	_vs_bot_btn.pressed.connect(_on_vs_bot_pressed)
+	_connect_panel.add_child(bot_banner)
 
-	_code_field = _make_field("", 200, "ROOM CODE")
-	_code_field.max_length = NetMatch.ROOM_CODE_LEN
-	_code_field.text_changed.connect(_on_code_typed)
-	_code_field.text_submitted.connect(func(_t): _on_join_online_pressed())
-	code_row.add_child(_code_field)
-
-	_join_online_btn = GameTheme.make_themed_button("JOIN ONLINE",
-		Color(0.20, 0.28, 0.42), Vector2(150, 44), 18,
-		"Enter your friend's room code to connect.")
-	_join_online_btn.pressed.connect(_on_join_online_pressed)
-	code_row.add_child(_join_online_btn)
-
-	# ── Same-network / direct fallback (LAN or a Tailscale IP) — collapsed ──
-	_lan_toggle = GameTheme.make_themed_button("Same network / direct IP  ▾",
-		Color(0.16, 0.16, 0.20), Vector2(360, 32), 13,
-		"Play over a LAN or a Tailscale address with no relay — best when you're on the same WiFi.")
+	# ── Advanced: quiet frameless toggle that unfolds the direct-IP controls ──
+	_lan_toggle = GameTheme.make_back_button("Same network / direct IP  ▾",
+		Vector2(300, 32), 14, ASH)
+	_lan_toggle.tooltip_text = "Play over a LAN or a Tailscale address with no relay — best on the same WiFi."
 	_lan_toggle.pressed.connect(_on_lan_toggle_pressed)
 	_connect_panel.add_child(_lan_toggle)
 
-	_lan_panel = VBoxContainer.new()
-	_lan_panel.alignment = BoxContainer.ALIGNMENT_CENTER
-	_lan_panel.add_theme_constant_override("separation", 10)
-	_lan_panel.visible = false
+	_lan_panel = _build_lan_panel()
 	_connect_panel.add_child(_lan_panel)
 
-	_host_btn = GameTheme.make_themed_button("HOST (LAN)",
-		Color(0.18, 0.32, 0.22), Vector2(360, 42), 17,
-		"Start a server on this machine; share your LAN / Tailscale IP.")
-	_host_btn.pressed.connect(_on_host_pressed)
-	_lan_panel.add_child(_host_btn)
-
-	# Address row: IP + port fields.
-	var addr_row := HBoxContainer.new()
-	addr_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	addr_row.add_theme_constant_override("separation", 8)
-	_lan_panel.add_child(addr_row)
-
-	_ip_field = _make_field("127.0.0.1", 240, "Host's LAN / Tailscale IP")
-	addr_row.add_child(_ip_field)
-	_port_field = _make_field(str(NetMatch.DEFAULT_PORT), 90, "Port")
-	addr_row.add_child(_port_field)
-
-	_join_btn = GameTheme.make_themed_button("JOIN",
-		Color(0.20, 0.28, 0.42), Vector2(110, 44), 18)
-	_join_btn.pressed.connect(_on_join_pressed)
-	addr_row.add_child(_join_btn)
-
-	# ── Practice vs Bot (offline) — sits under the connect controls ──
-	_vs_bot_btn = GameTheme.make_themed_button("PRACTICE vs BOT",
-		Color(0.20, 0.30, 0.22), Vector2(360, 44), 17,
-		"Play any mode against a local AI opponent — no connection needed.")
-	_vs_bot_btn.pressed.connect(_on_vs_bot_pressed)
-	_connect_panel.add_child(_vs_bot_btn)
-
+	# ── Practice-vs-bot sub-panel (offline mode/format pick, shown on demand) ──
 	_vs_bot_panel = VBoxContainer.new()
 	_vs_bot_panel.alignment = BoxContainer.ALIGNMENT_CENTER
-	_vs_bot_panel.add_theme_constant_override("separation", 6)
+	_vs_bot_panel.add_theme_constant_override("separation", 8)
 	_vs_bot_panel.visible = false
 	col.add_child(_vs_bot_panel)
 
@@ -202,21 +187,19 @@ func _build_ui() -> void:
 	_opp_ready_label = GameTheme.make_label("Opponent: —", 16, ASH)
 	ready_row.add_child(_opp_ready_label)
 
-	_ready_btn = GameTheme.make_themed_button("READY",
-		Color(0.18, 0.36, 0.18), Vector2(360, 48), 20)
+	_ready_btn = GameTheme.make_back_button("READY", Vector2(300, 46), 20, GREEN)
 	_ready_btn.pressed.connect(_on_ready_pressed)
 	_ready_panel.add_child(_ready_btn)
 
-	_start_btn = GameTheme.make_themed_button("START MATCH",
-		Color(0.40, 0.30, 0.12), Vector2(360, 48), 20,
-		"Host only — enabled once both players are ready.")
+	_start_btn = GameTheme.make_back_button("START MATCH", Vector2(300, 46), 20, GILT_BRIGHT)
+	_start_btn.tooltip_text = "Host only — enabled once both players are ready."
 	_start_btn.pressed.connect(_on_start_pressed)
 	_start_btn.disabled = true
 	_ready_panel.add_child(_start_btn)
 
 	col.add_child(GameTheme.make_separator(GILT_BRIGHT, 360.0))
 
-	# ── Status + hint ──
+	# ── Status + shareable code + hint ──
 	_status_label = GameTheme.make_label("", 16, IVORY)
 	_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(_status_label)
@@ -230,26 +213,268 @@ func _build_ui() -> void:
 	_hint_label = GameTheme.make_label("", 13, ASH)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_hint_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_hint_label.custom_minimum_size = Vector2(560, 0)
+	_hint_label.custom_minimum_size = Vector2(620, 0)
 	col.add_child(_hint_label)
 
 	# ── Back ──
-	var back_btn := GameTheme.make_themed_button("BACK",
-		Color(0.26, 0.16, 0.14), Vector2(160, 42), 16)
-	back_btn.pressed.connect(_on_back_pressed)
-	col.add_child(back_btn)
+	_back_btn = GameTheme.make_back_button("BACK", Vector2(160, 42), 16)
+	_back_btn.pressed.connect(_on_back_pressed)
+	col.add_child(_back_btn)
+
+
+## Shared skeleton for the two FACE-A-FRIEND tiles (HOST and JOIN) so they read
+## as identical siblings: chart panel, engraved sigil, display title, accent rule.
+## Returns {"root": PanelContainer, "vbox": VBoxContainer} — the caller fills the
+## vbox with its body text + controls (and, for HOST, a whole-tile click overlay).
+func _duel_tile_base(title_text: String, accent: Color, icon_path: String,
+		online_ok: bool) -> Dictionary:
+	var root := PanelContainer.new()
+	root.custom_minimum_size = Vector2(392, 152)
+	root.add_theme_stylebox_override("panel", _chart_panel_style(not online_ok))
+
+	var hbox := HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 14)
+	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(hbox)
+
+	var icon_box := Control.new()
+	icon_box.custom_minimum_size = Vector2(56, 56)
+	icon_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	icon_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_add_engraved_icon(icon_box, icon_path, not online_ok)
+	hbox.add_child(icon_box)
+
+	var vb := VBoxContainer.new()
+	vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vb.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	vb.add_theme_constant_override("separation", 7)
+	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(vb)
+
+	var title := GameTheme.make_label(title_text, 24,
+		Color(0.90, 0.78, 0.52) if online_ok else Color(0.6, 0.6, 0.55, 0.7))
+	if GameTheme.font_display:
+		title.add_theme_font_override("font", GameTheme.font_display)
+	vb.add_child(title)
+
+	var rule := ColorRect.new()
+	rule.color = Color(accent.r, accent.g, accent.b, 0.80 if online_ok else 0.30)
+	rule.custom_minimum_size = Vector2(38, 2)
+	rule.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vb.add_child(rule)
+
+	return {"root": root, "vbox": vb}
+
+
+## HOST tile — a whole-tile click target (mirrors make_choice_banner's hover lift).
+func _build_host_tile(online_ok: bool, reason: String) -> Control:
+	var base := _duel_tile_base("HOST", GREEN, "res://assets/icons/crown.png", online_ok)
+	var root: PanelContainer = base.root
+	var vb: VBoxContainer = base.vbox
+
+	var body := GameTheme.make_label(
+		"Open a war-room and get a code to share. Plays anywhere — no IP, no port forwarding." \
+			if online_ok else reason,
+		15, Color(0.88, 0.84, 0.72) if online_ok else Color(0.82, 0.72, 0.60))
+	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	body.custom_minimum_size = Vector2(300, 0)
+	vb.add_child(body)
+
+	var click := Button.new()
+	click.name = "ClickButton"
+	click.flat = true
+	click.focus_mode = Control.FOCUS_NONE
+	click.disabled = not online_ok
+	click.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	click.set_anchors_preset(Control.PRESET_FULL_RECT)
+	for st in ["normal", "hover", "pressed", "disabled"]:
+		click.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+	root.add_child(click)
+	if online_ok:
+		click.mouse_entered.connect(func(): root.modulate = Color(1.10, 1.08, 1.02))
+		click.mouse_exited.connect(func(): root.modulate = Color.WHITE)
+	else:
+		root.modulate = Color(0.85, 0.82, 0.78, 0.95)
+	return root
+
+
+## JOIN tile — sibling to HOST, but it carries the room-code field + CONNECT
+## instead of a single click target.
+func _build_join_tile(online_ok: bool, reason: String) -> Control:
+	var base := _duel_tile_base("JOIN", AZURE, "res://assets/icons/sword.png", online_ok)
+	var vb: VBoxContainer = base.vbox
+
+	var hint := GameTheme.make_label(
+		"Enter your friend's room code." if online_ok else reason, 15,
+		Color(0.88, 0.84, 0.72) if online_ok else Color(0.82, 0.72, 0.60))
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.custom_minimum_size = Vector2(300, 0)
+	vb.add_child(hint)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	vb.add_child(row)
+
+	_code_field = _make_field("", 176, "ROOM CODE")
+	_code_field.max_length = NetMatch.ROOM_CODE_LEN
+	_code_field.editable = online_ok
+	_code_field.text_changed.connect(_on_code_typed)
+	_code_field.text_submitted.connect(func(_t): _on_join_online_pressed())
+	row.add_child(_code_field)
+
+	_join_online_btn = GameTheme.make_back_button("CONNECT", Vector2(118, 40), 17, GILT_BRIGHT)
+	_join_online_btn.tooltip_text = "Enter your friend's room code to connect."
+	_join_online_btn.disabled = not online_ok
+	_join_online_btn.pressed.connect(_on_join_online_pressed)
+	row.add_child(_join_online_btn)
+
+	return base.root
+
+
+## The collapsible direct-IP fallback, wrapped in a chart panel so the advanced
+## section reads as one grouped card rather than loose controls.
+func _build_lan_panel() -> Control:
+	var panel := PanelContainer.new()
+	panel.visible = false
+	panel.add_theme_stylebox_override("panel", _chart_panel_style(false))
+
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.add_theme_constant_override("separation", 10)
+	panel.add_child(vb)
+
+	var note := GameTheme.make_label(
+		"No relay needed — connect straight over a LAN or a Tailscale address.", 14, ASH)
+	note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(note)
+
+	_host_btn = GameTheme.make_back_button("HOST (LAN)", Vector2(320, 40), 17, GREEN)
+	_host_btn.tooltip_text = "Start a server on this machine; share your LAN / Tailscale IP."
+	_host_btn.pressed.connect(_on_host_pressed)
+	vb.add_child(_host_btn)
+
+	var addr_row := HBoxContainer.new()
+	addr_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	addr_row.add_theme_constant_override("separation", 8)
+	vb.add_child(addr_row)
+
+	_ip_field = _make_field("127.0.0.1", 220, "Host's LAN / Tailscale IP")
+	addr_row.add_child(_ip_field)
+	_port_field = _make_field(str(NetMatch.DEFAULT_PORT), 80, "Port")
+	addr_row.add_child(_port_field)
+
+	_join_btn = GameTheme.make_back_button("JOIN", Vector2(100, 40), 17, AZURE)
+	_join_btn.pressed.connect(_on_join_pressed)
+	addr_row.add_child(_join_btn)
+
+	return panel
+
+
+## Chart-language panel stylebox — the dark-ink body + tan rule + drop shadow
+## used across the map tooltips and choice banners, so the lobby's custom tiles
+## sit in the same material world as make_choice_banner.
+func _chart_panel_style(dim: bool) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(0.055, 0.048, 0.040, 0.96 if not dim else 0.60)
+	s.border_color = Color(0.60, 0.51, 0.34, 0.90 if not dim else 0.35)
+	s.set_border_width_all(1)
+	s.set_corner_radius_all(3)
+	s.shadow_color = Color(0, 0, 0, 0.65)
+	s.shadow_size = 8
+	s.shadow_offset = Vector2(0, 4)
+	s.content_margin_left = 14
+	s.content_margin_right = 14
+	s.content_margin_top = 12
+	s.content_margin_bottom = 12
+	return s
+
+
+## Two-layer engraved sigil (shadow + parchment tint) — the same treatment
+## make_choice_banner gives its icons, so the JOIN tile's sword matches.
+func _add_engraved_icon(host: Control, path: String, dim: bool) -> void:
+	if not ResourceLoader.exists(path):
+		return
+	var tex: Texture2D = load(path)
+	for layer in range(2):
+		var t := TextureRect.new()
+		t.texture = tex
+		# IGNORE_SIZE (not FIT_WIDTH_PROPORTIONAL): the icon fills its 56×56 host
+		# box and never propagates the texture's native size up the layout, so a
+		# big source PNG can't blow the tile out of shape.
+		t.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		t.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		t.set_anchors_preset(Control.PRESET_FULL_RECT)
+		t.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if layer == 0:
+			for p in ["offset_left", "offset_top", "offset_right", "offset_bottom"]:
+				t.set(p, 2.0)
+			t.modulate = Color(0, 0, 0, 0.55 if not dim else 0.30)
+		else:
+			t.modulate = Color(0.82, 0.74, 0.56) if not dim \
+				else Color(0.50, 0.48, 0.44, 0.55)
+		host.add_child(t)
 
 
 func _make_field(default_text: String, width: int, placeholder: String) -> LineEdit:
+	# Ink-well field: dark parchment recess with a tan hairline (gilt on focus),
+	# so text entry sits in the chart language instead of a raw OS rectangle.
 	var f := LineEdit.new()
 	f.text = default_text
 	f.placeholder_text = placeholder
-	f.custom_minimum_size = Vector2(width, 44)
+	f.custom_minimum_size = Vector2(width, 40)
 	f.alignment = HORIZONTAL_ALIGNMENT_CENTER
 	if GameTheme.font_body:
 		f.add_theme_font_override("font", GameTheme.font_body)
-	f.add_theme_font_size_override("font_size", 16)
+	f.add_theme_font_size_override("font_size", 18)
+	f.add_theme_color_override("font_color", IVORY)
+	f.add_theme_color_override("font_placeholder_color", Color(0.60, 0.55, 0.45, 0.65))
+	f.add_theme_color_override("caret_color", GILT_BRIGHT)
+	var box := StyleBoxFlat.new()
+	box.bg_color = Color(0.02, 0.015, 0.01, 0.85)
+	box.border_color = Color(0.60, 0.51, 0.34, 0.75)
+	box.set_border_width_all(1)
+	box.set_corner_radius_all(3)
+	box.content_margin_left = 10
+	box.content_margin_right = 10
+	box.content_margin_top = 6
+	box.content_margin_bottom = 6
+	f.add_theme_stylebox_override("normal", box)
+	var focus := box.duplicate() as StyleBoxFlat
+	focus.border_color = GILT_BRIGHT
+	f.add_theme_stylebox_override("focus", focus)
 	return f
+
+
+## Selectable mode/format chip — a subtle chart-chip with a tan hairline that
+## brightens to gilt on hover. The picker's highlight logic modulates the whole
+## chip white (selected) / grey (unselected), so this only defines the rest look.
+func _make_pick_chip(text: String, tooltip: String = "") -> Button:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(150, 38)
+	b.focus_mode = Control.FOCUS_NONE
+	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	if tooltip != "":
+		b.tooltip_text = tooltip
+	if GameTheme.font_display:
+		b.add_theme_font_override("font", GameTheme.font_display)
+	b.add_theme_font_size_override("font_size", GameTheme.MIN_LABEL_SIZE)
+	b.add_theme_color_override("font_color", IVORY)
+	b.add_theme_color_override("font_hover_color", GILT_BRIGHT)
+	var normal := GameTheme.make_panel_style(
+		Color(0.055, 0.048, 0.040, 0.92), Color(0.60, 0.51, 0.34, 0.55), 1, 3, false)
+	normal.content_margin_left = 10
+	normal.content_margin_right = 10
+	normal.content_margin_top = 6
+	normal.content_margin_bottom = 6
+	b.add_theme_stylebox_override("normal", normal)
+	b.add_theme_stylebox_override("focus", normal)
+	var hover := normal.duplicate() as GameTheme.ChartPanelStyle
+	hover.border_color = GILT_BRIGHT
+	b.add_theme_stylebox_override("hover", hover)
+	b.add_theme_stylebox_override("pressed", hover)
+	return b
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -486,7 +711,7 @@ func _populate_mode_panel() -> void:
 	if NetMatch.is_host:
 		_build_host_mode_picker()
 		# Broadcast the current selection so a connected client shows it at once.
-		NetMatch.set_match_config(_selected_mode, _selected_best_of)
+		NetMatch.set_match_config(_selected_mode, _selected_best_of, _selected_style)
 	else:
 		_build_client_mode_display()
 
@@ -506,8 +731,8 @@ func _build_host_mode_picker() -> void:
 	if not modes.has(_selected_mode):
 		_selected_mode = int(modes[0])
 	for mode in modes:
-		var b := GameTheme.make_themed_button(SkirmishState.mode_name(mode).to_upper(),
-			Color(0.20, 0.24, 0.34), Vector2(150, 40), 14, SkirmishState.mode_blurb(mode))
+		var b := _make_pick_chip(SkirmishState.mode_name(mode).to_upper(),
+			SkirmishState.mode_blurb(mode))
 		b.pressed.connect(_on_mode_chosen.bind(mode))
 		mode_row.add_child(b)
 		_mode_buttons[mode] = b
@@ -521,25 +746,47 @@ func _build_host_mode_picker() -> void:
 	bo_row.add_theme_constant_override("separation", 8)
 	_mode_panel.add_child(bo_row)
 	for bo in [1, 3]:
-		var b2 := GameTheme.make_themed_button(
-			"SINGLE GAME" if bo == 1 else "BEST OF 3",
-			Color(0.20, 0.24, 0.34), Vector2(150, 36), 13)
+		var b2 := _make_pick_chip("SINGLE GAME" if bo == 1 else "BEST OF 3")
 		b2.pressed.connect(_on_best_of_chosen.bind(bo))
 		bo_row.add_child(b2)
 		_bo_buttons[bo] = b2
+
+	var sl := GameTheme.make_label("BATTLE STYLE", 14, GILT_BRIGHT)
+	sl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_mode_panel.add_child(sl)
+
+	var style_row := HBoxContainer.new()
+	style_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	style_row.add_theme_constant_override("separation", 8)
+	_mode_panel.add_child(style_row)
+	for st in [NetMatch.STYLE_ALTERNATING, NetMatch.STYLE_SEALED]:
+		var b3 := _make_pick_chip(
+			"ALTERNATING" if st == NetMatch.STYLE_ALTERNATING else "SEALED ORDERS",
+			"Take turns — your line strikes when your turn ends"
+				if st == NetMatch.STYLE_ALTERNATING
+				else "Both place in secret, reveal together, one clash per round")
+		b3.pressed.connect(_on_style_chosen.bind(st))
+		style_row.add_child(b3)
+		_style_buttons[st] = b3
 
 	_refresh_host_picker_highlight()
 
 
 func _on_mode_chosen(mode: int) -> void:
 	_selected_mode = mode
-	NetMatch.set_match_config(_selected_mode, _selected_best_of)
+	NetMatch.set_match_config(_selected_mode, _selected_best_of, _selected_style)
 	_refresh_host_picker_highlight()
 
 
 func _on_best_of_chosen(bo: int) -> void:
 	_selected_best_of = bo
-	NetMatch.set_match_config(_selected_mode, _selected_best_of)
+	NetMatch.set_match_config(_selected_mode, _selected_best_of, _selected_style)
+	_refresh_host_picker_highlight()
+
+
+func _on_style_chosen(st: int) -> void:
+	_selected_style = st
+	NetMatch.set_match_config(_selected_mode, _selected_best_of, _selected_style)
 	_refresh_host_picker_highlight()
 
 
@@ -550,6 +797,9 @@ func _refresh_host_picker_highlight() -> void:
 	for bo in _bo_buttons:
 		(_bo_buttons[bo] as Button).modulate = \
 			Color.WHITE if bo == _selected_best_of else Color(0.5, 0.5, 0.5)
+	for st in _style_buttons:
+		(_style_buttons[st] as Button).modulate = \
+			Color.WHITE if st == _selected_style else Color(0.5, 0.5, 0.5)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -562,6 +812,10 @@ func _on_vs_bot_pressed() -> void:
 	if _lan_panel != null:
 		_lan_panel.visible = false
 	_vs_bot_panel.visible = true
+	# The sub-panel carries its own BACK (returns to the lobby choices), so hide
+	# the outer leave-to-menu BACK — one back button, one meaning.
+	if _back_btn != null:
+		_back_btn.visible = false
 	_populate_vs_bot_panel()
 	_set_status("Practice match — pick a mode, then BEGIN.", GILT_BRIGHT)
 
@@ -587,8 +841,8 @@ func _populate_vs_bot_panel() -> void:
 	if not modes.has(_vsbot_mode):
 		_vsbot_mode = int(modes[0])
 	for mode in modes:
-		var b := GameTheme.make_themed_button(SkirmishState.mode_name(mode).to_upper(),
-			Color(0.20, 0.24, 0.34), Vector2(150, 40), 14, SkirmishState.mode_blurb(mode))
+		var b := _make_pick_chip(SkirmishState.mode_name(mode).to_upper(),
+			SkirmishState.mode_blurb(mode))
 		b.pressed.connect(_on_vsbot_mode_chosen.bind(mode))
 		mode_row.add_child(b)
 		_vsbot_mode_buttons[mode] = b
@@ -601,22 +855,32 @@ func _populate_vs_bot_panel() -> void:
 	bo_row.add_theme_constant_override("separation", 8)
 	_vs_bot_panel.add_child(bo_row)
 	for bo in [1, 3]:
-		var b2 := GameTheme.make_themed_button(
-			"SINGLE GAME" if bo == 1 else "BEST OF 3",
-			Color(0.20, 0.24, 0.34), Vector2(150, 36), 13)
+		var b2 := _make_pick_chip("SINGLE GAME" if bo == 1 else "BEST OF 3")
 		b2.pressed.connect(_on_vsbot_bo_chosen.bind(bo))
 		bo_row.add_child(b2)
 		_vsbot_bo_buttons[bo] = b2
 
+	var sl := GameTheme.make_label("BATTLE STYLE", 14, GILT_BRIGHT)
+	sl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_vs_bot_panel.add_child(sl)
+	var style_row := HBoxContainer.new()
+	style_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	style_row.add_theme_constant_override("separation", 8)
+	_vs_bot_panel.add_child(style_row)
+	for st in [NetMatch.STYLE_ALTERNATING, NetMatch.STYLE_SEALED]:
+		var b3 := _make_pick_chip(
+			"ALTERNATING" if st == NetMatch.STYLE_ALTERNATING else "SEALED ORDERS")
+		b3.pressed.connect(_on_vsbot_style_chosen.bind(st))
+		style_row.add_child(b3)
+		_vsbot_style_buttons[st] = b3
+
 	_vs_bot_panel.add_child(GameTheme.make_separator(GILT_BRIGHT, 300.0))
 
-	var begin := GameTheme.make_themed_button("BEGIN",
-		Color(0.18, 0.36, 0.18), Vector2(220, 46), 18)
+	var begin := GameTheme.make_back_button("BEGIN", Vector2(220, 46), 18, GILT_BRIGHT)
 	begin.pressed.connect(_on_vs_bot_begin)
 	_vs_bot_panel.add_child(begin)
 
-	var back := GameTheme.make_themed_button("BACK",
-		Color(0.26, 0.16, 0.14), Vector2(160, 38), 15)
+	var back := GameTheme.make_back_button("BACK", Vector2(160, 38), 15)
 	back.pressed.connect(_on_vs_bot_back)
 	_vs_bot_panel.add_child(back)
 
@@ -633,6 +897,11 @@ func _on_vsbot_bo_chosen(bo: int) -> void:
 	_refresh_vsbot_highlight()
 
 
+func _on_vsbot_style_chosen(st: int) -> void:
+	_vsbot_style = st
+	_refresh_vsbot_highlight()
+
+
 func _refresh_vsbot_highlight() -> void:
 	for mode in _vsbot_mode_buttons:
 		(_vsbot_mode_buttons[mode] as Button).modulate = \
@@ -640,15 +909,22 @@ func _refresh_vsbot_highlight() -> void:
 	for bo in _vsbot_bo_buttons:
 		(_vsbot_bo_buttons[bo] as Button).modulate = \
 			Color.WHITE if bo == _vsbot_bo else Color(0.5, 0.5, 0.5)
+	for st in _vsbot_style_buttons:
+		(_vsbot_style_buttons[st] as Button).modulate = \
+			Color.WHITE if st == _vsbot_style else Color(0.5, 0.5, 0.5)
 
 
 func _on_vs_bot_back() -> void:
 	_vs_bot_panel.visible = false
 	_connect_panel.visible = true
-	_set_status("", IVORY)
+	if _back_btn != null:
+		_back_btn.visible = true
+	_refresh_state()
 
 
 func _on_vs_bot_begin() -> void:
+	# No peer to sync with — set the style directly before the local start.
+	NetMatch.battle_style = _vsbot_style
 	NetMatch.start_vs_bot(_vsbot_mode, _vsbot_bo)
 	var scene := SkirmishState.mode_scene(_vsbot_mode)
 	if not ResourceLoader.exists(scene):
@@ -666,9 +942,10 @@ func _build_client_mode_display() -> void:
 func _refresh_client_mode_display() -> void:
 	if _mode_info_label == null:
 		return
-	_mode_info_label.text = "Host chose:  %s  ·  %s" % [
+	_mode_info_label.text = "Host chose:  %s  ·  %s  ·  %s" % [
 		SkirmishState.mode_name(NetMatch.match_mode),
-		"Best of 3" if NetMatch.best_of == 3 else "Single game"]
+		"Best of 3" if NetMatch.best_of == 3 else "Single game",
+		"Sealed Orders" if NetMatch.battle_style == NetMatch.STYLE_SEALED else "Alternating"]
 
 
 func _on_match_config_changed() -> void:
@@ -696,11 +973,15 @@ func _set_connect_buttons_enabled(on: bool) -> void:
 
 
 func _refresh_state() -> void:
-	_set_status("Host a match, or join a friend's room code.", IVORY)
+	# The HOST/JOIN tiles already print the online-unavailable reason on themselves
+	# (greyed), so the bottom hint stays quiet here — it fills with the host address
+	# / room code once a match is actually being set up.
+	if _relay_host == "":
+		_set_status("Drill against the bot, or open the direct-IP option to play a friend.", IVORY)
+	else:
+		_set_status("Host a room and share the code, or join a friend's.", IVORY)
 	_hint_label.text = ""
 	_set_connect_buttons_enabled(true)
-	if _relay_host == "":
-		_hint_label.text = "Online play isn't set up in this build yet — open “Same network / direct IP” to play over LAN or Tailscale."
 
 
 func _refresh_ready_labels() -> void:

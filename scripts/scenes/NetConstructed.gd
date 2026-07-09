@@ -28,6 +28,7 @@ var _saved_option: OptionButton   # saved-deck picker
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "reward")
+	AudioBank.play_music_random(["map_c", "map_d", "rest_c"])  # muster pool
 
 	if not NetMatch.is_connected_to_peer():
 		get_tree().change_scene_to_file(MENU_SCENE)
@@ -44,6 +45,7 @@ func _ready() -> void:
 
 	_build_scaffold()
 	_refresh_all()
+	_install_net_chrome()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -258,13 +260,25 @@ func _on_clear() -> void:
 func _on_fill_random() -> void:
 	if _local_finished or _pool.is_empty():
 		return
+	var blocked: Array[String] = []
+	for counted_id in _counts.keys():
+		if int(_counts.get(counted_id, 0)) > 0:
+			blocked.append(String(counted_id))
+	var need: int = _target - _deck.size()
+	for dealt_id in SkirmishState.deal_unique_cards(_pool, need, _rng, blocked):
+		if _deck.size() >= _target:
+			break
+		_deck.append(dealt_id)
+		_counts[dealt_id] = int(_counts.get(dealt_id, 0)) + 1
+
+	# Fallback only matters if the legal pool is smaller than the deck target.
 	var guard := 0
 	while _deck.size() < _target and guard < 4000:
 		guard += 1
-		var id: String = _pool[_rng.randi() % _pool.size()]
-		if int(_counts.get(id, 0)) < MAX_COPIES:
-			_deck.append(id)
-			_counts[id] = int(_counts.get(id, 0)) + 1
+		var pick_id: String = _pool[_rng.randi() % _pool.size()]
+		if int(_counts.get(pick_id, 0)) < MAX_COPIES:
+			_deck.append(pick_id)
+			_counts[pick_id] = int(_counts.get(pick_id, 0)) + 1
 	_refresh_all()
 
 
@@ -364,6 +378,7 @@ func _refresh_pool_counts() -> void:
 
 
 func _refresh_deck_panel() -> void:
+	_clear_hover_preview_under(_deck_box)   # a previewed deck tile may be freed below
 	for c in _deck_box.get_children():
 		c.queue_free()
 	# Group the deck by id and list it sorted by cost then name.
@@ -385,6 +400,7 @@ func _refresh_deck_panel() -> void:
 		badge.visible = n > 1
 		var btn := thumb["button"] as Button
 		btn.tooltip_text = "%s — click to remove" % String(d.get("name", id))
+		_attach_hover_preview(btn, id)
 		if _local_finished:
 			btn.disabled = true
 		else:
@@ -425,6 +441,8 @@ func _on_ready_pressed() -> void:
 	# Ship the full deck to the peer (same "finished" contract as the draft).
 	NetMatch.send_draft_event({"t": "finished",
 		"cards": SkirmishState.local_slot().deck.duplicate()})
+	# Bake the sealed warband's textures behind the waiting screen (idle time).
+	ScenePreload.warm_card_ids(_deck)
 	if _ready_btn != null:
 		_ready_btn.text = "READY ✓"
 	_refresh_all()

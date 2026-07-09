@@ -32,7 +32,7 @@ const TICK := 0.1
 # discard/keyword/Discover pick). The bot draws them but never plays them.
 const MODAL_BLOCKLIST := ["familiar", "scholar", "treasure_hunter", "adaptable",
 	"copycat", "doppelganger", "lost_tome", "war_council", "chaos_imp",
-	"war_chant", "scrap", "gambit", "censer_light", "recycle"]
+	"war_chant", "gambit", "censer_light", "recycle"]
 # `--draft`: simulate a DEVELOPED deck (not the bare starter) so the boss tier
 # becomes actionable rather than a "bare-deck floor, not readable" caveat. A
 # generically-strong package any deck would be glad to have: removal + an

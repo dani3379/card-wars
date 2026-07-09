@@ -289,7 +289,20 @@ func _rebuild_system_row() -> void:
 	for child in _system_row.get_children():
 		child.queue_free()
 
-	if RunState.run_active:
+	# An online / practice Skirmish has no campaign run to save or abandon — the
+	# only clean way out is to leave the match (which disconnects the peer). The
+	# old logic fell through to "QUIT GAME only" here, forcing players to quit the
+	# whole app just to escape a match.
+	var nm = get_node_or_null("/root/NetMatch")
+	var in_match: bool = nm != null and nm.is_connected_to_peer()
+
+	if in_match:
+		var leave_match_btn := GameTheme.make_themed_button("LEAVE MATCH",
+			Color(0.36, 0.12, 0.10), Vector2(170, 38), 14)
+		leave_match_btn.add_theme_color_override("font_color", Color(1.0, 0.85, 0.75))
+		leave_match_btn.pressed.connect(_leave_match)
+		_system_row.add_child(leave_match_btn)
+	elif RunState.run_active:
 		# Save & exit path: preserves the run so it can be resumed from the
 		# load screen. Sits left of ABANDON because it's the safer choice.
 		var menu_btn := GameTheme.make_themed_button("MAIN MENU",
@@ -302,10 +315,12 @@ func _rebuild_system_row() -> void:
 		abandon_btn.add_theme_color_override("font_color", Color(1.0, 0.85, 0.75))
 		abandon_btn.pressed.connect(_abandon_run)
 		_system_row.add_child(abandon_btn)
-	elif get_tree() != null and get_tree().current_scene != null:
-		# Out of a run: a "MAIN MENU" path makes sense from any scene except the
-		# main menu itself.
-		if get_tree().current_scene.name != "MainMenu":
+	else:
+		# Out of a run/match: a "MAIN MENU" path makes sense from any scene except
+		# the main menu itself. Guard a null current_scene so the player is never
+		# left with only QUIT.
+		var scene := get_tree().current_scene if get_tree() != null else null
+		if scene == null or scene.name != "MainMenu":
 			var menu_btn := GameTheme.make_themed_button("MAIN MENU",
 				Color(0.18, 0.14, 0.10), Vector2(150, 38), 14)
 			menu_btn.pressed.connect(_to_main_menu)
@@ -489,6 +504,7 @@ func _add_slider_row(parent: VBoxContainer, label_text: String, initial: float) 
 		pct.add_theme_font_override("font", GameTheme.font_body)
 	pct.add_theme_font_size_override("font_size", 14)
 	pct.add_theme_color_override("font_color", GameTheme.GILT)
+	_make_text_legible(pct)
 	pct.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(pct)
 
@@ -620,6 +636,7 @@ func _style_option_button(opt: OptionButton) -> void:
 	opt.add_theme_font_size_override("font_size", 16)
 	opt.add_theme_color_override("font_color", GameTheme.IVORY)
 	opt.add_theme_color_override("font_hover_color", GameTheme.GILT_BRIGHT)
+	_make_text_legible(opt)
 
 	# Style the popup list
 	var popup := opt.get_popup()
@@ -634,7 +651,7 @@ func _style_option_button(opt: OptionButton) -> void:
 		popup.add_theme_stylebox_override("hover", _make_popup_hover_style())
 		if GameTheme.font_body:
 			popup.add_theme_font_override("font", GameTheme.font_body)
-		popup.add_theme_font_size_override("font_size", 16)
+		popup.add_theme_font_size_override("font_size", GameTheme.MIN_LABEL_SIZE)
 		popup.add_theme_color_override("font_color", GameTheme.IVORY)
 		popup.add_theme_color_override("font_hover_color", Color(1, 0.95, 0.8))
 
@@ -728,8 +745,12 @@ func _add_ui_scale_row(parent: VBoxContainer) -> void:
 	# smears. Our art is built almost entirely from antialiased draws, so values
 	# above 100% blur everything. Until the engine fixes it (or we move to
 	# resolution-independent shader AA), UI Scale only goes DOWN from 100%.
-	var scales := [0.8, 0.9, 1.0]
-	var scale_labels := ["80%", "90%", "100%"]
+	# Down to 60% (the UserSettings clamp floor): smaller UI scales fit more on
+	# screen, which is the practical fix when HUD/board crowd a given resolution.
+	# Still capped at 100% — content_scale_factor > 1.0 trips Godot bug #99440
+	# (everything upscales and blurs), so we only scale DOWN from native.
+	var scales := [0.6, 0.7, 0.8, 0.9, 1.0]
+	var scale_labels := ["60%", "70%", "80%", "90%", "100%"]
 	var selected := 0
 	for i in scales.size():
 		_ui_scale_option.add_item(scale_labels[i], i)
@@ -795,6 +816,7 @@ func _add_graphics_quality_block(parent: VBoxContainer) -> void:
 		lbl.add_theme_font_override("font", GameTheme.font_body)
 	lbl.add_theme_font_size_override("font_size", 16)
 	lbl.add_theme_color_override("font_color", GameTheme.IVORY)
+	_make_text_legible(lbl)
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(lbl)
 
@@ -817,7 +839,8 @@ func _add_graphics_quality_block(parent: VBoxContainer) -> void:
 	if GameTheme.font_body:
 		_gpu_info_label.add_theme_font_override("font", GameTheme.font_body)
 	_gpu_info_label.add_theme_font_size_override("font_size", 15)
-	_gpu_info_label.add_theme_color_override("font_color", GameTheme.DIMMED)
+	_gpu_info_label.add_theme_color_override("font_color", GameTheme.DESC_DIM)
+	_make_text_legible(_gpu_info_label)
 	_gpu_info_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	info_center.add_child(_gpu_info_label)
 	parent.add_child(info_center)
@@ -985,6 +1008,7 @@ func _make_pct_label(text: String) -> Label:
 		pct.add_theme_font_override("font", GameTheme.font_body)
 	pct.add_theme_font_size_override("font_size", 14)
 	pct.add_theme_color_override("font_color", GameTheme.GILT)
+	_make_text_legible(pct)
 	pct.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return pct
 
@@ -1046,7 +1070,7 @@ func _style_toggle(btn: Button, is_on: bool) -> void:
 
 	if GameTheme.font_body:
 		btn.add_theme_font_override("font", GameTheme.font_body)
-	btn.add_theme_font_size_override("font_size", 13)
+	btn.add_theme_font_size_override("font_size", GameTheme.MIN_LABEL_SIZE)  # ON/OFF pill
 	btn.add_theme_color_override("font_color", text_color)
 	btn.add_theme_color_override("font_hover_color", text_color.lightened(0.2))
 	btn.add_theme_color_override("font_pressed_color", text_color)
@@ -1056,6 +1080,31 @@ func _style_toggle(btn: Button, is_on: bool) -> void:
 #  SHARED HELPERS
 # ═══════════════════════════════════════════════════
 
+# Small body text on the mottled parchment panel reads as semi-transparent
+# without an edge: at 14–16px most of a thin stroke is partial-alpha anti-alias
+# pixels, so a thin stem fades into the dark panel (and the 2× supersample
+# downsample softens it further). A tight dark outline + 1px shadow wraps every
+# glyph in opaque pixels so it reads solid — the same trick the section headers
+# (AUDIO / DISPLAY / …) already use, which is why those look crisp and the row
+# labels didn't. `font_outline_color` / `outline_size` are shared by Label and
+# Button (OptionButton), so this also fits the dropdown values.
+func _make_text_legible(node: Control) -> void:
+	# Enforce the global readability floor: these settings labels set explicit small
+	# sizes (13–16) and don't route through GameTheme.make_label, so bump anything
+	# below the floor here (every row label / value / dropdown passes through this).
+	var cur := node.get_theme_font_size("font_size")
+	if cur > 0 and cur < GameTheme.MIN_LABEL_SIZE:
+		node.add_theme_font_size_override("font_size", GameTheme.MIN_LABEL_SIZE)
+	node.add_theme_color_override("font_outline_color", Color(0.05, 0.03, 0.02, 0.92))
+	# 2px matches the section headers (which already read solid) and stays under
+	# the size where an MSDF outline floods letter counters at small sizes.
+	node.add_theme_constant_override("outline_size", 2)
+	if node is Label:
+		node.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.45))
+		node.add_theme_constant_override("shadow_offset_x", 0)
+		node.add_theme_constant_override("shadow_offset_y", 1)
+
+
 func _make_row_label(text: String, min_w: float) -> Label:
 	var lbl := Label.new()
 	lbl.text = text
@@ -1064,6 +1113,7 @@ func _make_row_label(text: String, min_w: float) -> Label:
 		lbl.add_theme_font_override("font", GameTheme.font_body)
 	lbl.add_theme_font_size_override("font_size", 15)
 	lbl.add_theme_color_override("font_color", GameTheme.IVORY)
+	_make_text_legible(lbl)
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return lbl
 
@@ -1203,6 +1253,25 @@ func _confirm_abandon_run() -> void:
 func _to_main_menu() -> void:
 	# Direct path back to the title screen from non-run scenes (Collection,
 	# Credits, etc. where Esc was pressed). Closes the overlay then fades.
+	_close()
+	GameTheme.fade_out_then_change_scene(self, "res://scenes/main_menu.tscn", 0.30)
+
+
+func _leave_match() -> void:
+	# Confirm before tearing down a live match — a mis-click shouldn't drop the
+	# other player. NetMatch.leave() disconnects the peer and resets lobby state.
+	GameTheme.show_confirm_dialog(self,
+		"LEAVE MATCH?",
+		"You'll disconnect from this match and return to the main menu.",
+		"YES, LEAVE",
+		"KEEP PLAYING",
+		Callable(self, "_confirm_leave_match"))
+
+
+func _confirm_leave_match() -> void:
+	var nm = get_node_or_null("/root/NetMatch")
+	if nm != null:
+		nm.leave()
 	_close()
 	GameTheme.fade_out_then_change_scene(self, "res://scenes/main_menu.tscn", 0.30)
 

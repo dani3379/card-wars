@@ -182,14 +182,14 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 				if court_any:
 					ctx._show_info("The court withers your army — your creatures lose 1 ATK this round.")
 		"dirge_swell":
-			# The Carrion Choir (A2): the hymn itself bleeds you. Each Ranged singer
-			# chips 1 face at the top of the round, so walling the front and waiting
-			# loses — you must push damage onto the back-row singers. Replaces a
-			# shared cultist_buff. Skips the setup round.
+			# The Carrion Choir (A2): the hymn itself bleeds you. Each singing crow
+			# — one that shrieks on death (an on_death face hit) — chips 1 face at
+			# the top of the round, so walling the front and waiting loses: you must
+			# push damage onto the back-row singers. Skips the setup round.
 			if ctx.round_number >= 2:
 				var dirge_singers := 0
 				for c in ctx._all_enemy_creatures():
-					if c.has_keyword("ranged"):
+					if c.card_data.get("on_death", {}).get("type", "") == "damage_face":
 						dirge_singers += 1
 				if dirge_singers > 0:
 					ctx.damage_player_hero(dirge_singers)

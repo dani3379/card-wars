@@ -18,7 +18,7 @@ extends "res://scripts/scenes/NetDeckBuilder.gd"
 
 # ── Deck generation state ── (_rng, _target inherited from NetDeckBuilder)
 var _pool: Array[String] = []
-var _mirror: bool = true
+var _mirror: bool = false
 var _sub_seed: int = 0      # host-chosen; 0 means unset (use base seed)
 var _local_deck: Array[String] = []
 
@@ -39,6 +39,7 @@ var _mirror_btn: Button
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "reward")
+	AudioBank.play_music_random(["map_c", "map_d", "rest_c"])  # muster pool
 
 	if not NetMatch.is_connected_to_peer():
 		get_tree().change_scene_to_file(MENU_SCENE)
@@ -65,6 +66,7 @@ func _ready() -> void:
 	_regenerate_deck()
 	_refresh_deck_ui()
 	_update_status()
+	_install_net_chrome()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -83,18 +85,23 @@ func _effective_seed() -> int:
 
 func _regenerate_deck() -> void:
 	_rng.seed = _effective_seed()
-	_local_deck.clear()
+	_local_deck = SkirmishState.deal_unique_cards(_pool, _target, _rng)
+	if _local_deck.size() >= _target:
+		return
+
 	var counts: Dictionary = {}
+	for existing_id in _local_deck:
+		counts[existing_id] = int(counts.get(existing_id, 0)) + 1
 	var guard := 0
-	while _local_deck.size() < _target and guard < 2000:
+	while _local_deck.size() < _target and guard < 4000:
 		guard += 1
 		if _pool.is_empty():
 			break
-		var id: String = _pool[_rng.randi() % _pool.size()]
-		var cnt: int = int(counts.get(id, 0))
+		var pick_id: String = _pool[_rng.randi() % _pool.size()]
+		var cnt: int = int(counts.get(pick_id, 0))
 		if cnt < MAX_COPIES:
-			_local_deck.append(id)
-			counts[id] = cnt + 1
+			_local_deck.append(pick_id)
+			counts[pick_id] = cnt + 1
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -139,7 +146,7 @@ func _build_scaffold() -> void:
 	_root.add_child(ctrl_row)
 
 	if NetMatch.is_host:
-		_mirror_btn = GameTheme.make_themed_button("Mirrored",
+		_mirror_btn = GameTheme.make_themed_button("Mirrored" if _mirror else "Random",
 			Color(0.15, 0.25, 0.40), Vector2(140, 38), 15)
 		_mirror_btn.pressed.connect(_on_toggle_mirror)
 		ctrl_row.add_child(_mirror_btn)
@@ -237,7 +244,7 @@ func _on_toggle_mirror() -> void:
 func _on_reroll() -> void:
 	if not NetMatch.is_host:
 		return
-	_sub_seed = randi()
+	_sub_seed = NetMatch.fresh_seed()
 	_regenerate_deck()
 	_refresh_deck_ui()
 	_update_status()
@@ -285,6 +292,8 @@ func _finish_and_handoff() -> void:
 	# Send full deck to peer (same "finished" contract as NetDraft).
 	var my_deck: Array = SkirmishState.local_slot().deck.duplicate()
 	NetMatch.send_draft_event({"t": "finished", "cards": my_deck})
+	# Bake the sealed warband's textures behind the waiting screen (idle time).
+	ScenePreload.warm_card_ids(my_deck)
 	_show_marching()
 	_maybe_begin_combat()
 

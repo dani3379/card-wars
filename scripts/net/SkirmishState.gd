@@ -20,9 +20,15 @@ enum CombatMode { SOLO, NET_HOST, NET_CLIENT }
 ## an entry here. DRAFT is the original 1-of-3 ×20.
 enum MatchMode { DRAFT, CONSTRUCTED, QUICK, SEALED }
 
-const START_HP: int = 25
+const START_HP: int = 30
 const BASE_MAX_MANA: int = 3
 const DECK_TARGET: int = 20   # cards drafted per player
+
+## The act whose reward ODDS the draft rolls at. Act 3 (30/50/20 common/uncommon/
+## rare — see CardDB.ACT_REWARD_WEIGHTS) so a drafted warband feels like a
+## late-campaign deck rather than a flat sample of the pool. See NetDraft and
+## deal_weighted_triplet below.
+const DRAFT_ACT: int = 3
 
 ## Mode registry: id → display name, deck-acquisition scene, and a one-line blurb.
 ## The lobby builds its picker from this and routes to `scene` on START. A mode is
@@ -46,17 +52,89 @@ const MODE_DEFS: Array = [
 const SKIRMISH_DENYLIST: Array[String] = [
 	# Gold economy — no shop/gold in skirmish v1.
 	"scavenger", "pillage",
-	# Draw / discard / exhaust pile mutation — needs per-deck pile sync (deferred).
-	# (unholy_bargain came OFF this list — pure draw, now handled by the EV_DRAW channel.)
-	"gravedigger", "bloodhound", "gambit", "mass_grave", "turbo",
+	# Draw / discard / exhaust pile mutation that still lacks a net port.
+	# (unholy_bargain came off via the EV_DRAW channel; gambit / mass_grave / turbo
+	# came off via the caster-local pile path — see NET_SPELL_CUSTOMS. gravedigger +
+	# bloodhound came off 2026-07-09: their draw routes through the same host→owner
+	# EV_DRAW channel via _battlecry_draw, so the owner draws on its own machine.)
 	# Discover / tutor — injects arbitrary cards into hand; needs pool coordination.
 	"familiar", "scholar", "lost_tome", "war_council", "treasure_hunter",
+	# Solo campaign systems: Old Campaigner reads the run's kill ledger and
+	# Sin-Eater eats Curses — neither exists in skirmish.
+	"ironclad_veteran", "sin_eater",
+	# 2026-07-07 fun slate: The Volunteer rides the dismissal (hand-local in
+	# net — its muster wouldn't sync), Muster the Fallen reads the run's Roll
+	# of the Fallen, and Slow Match / Trebuchet lack net resolver ports
+	# (hand-fuse state / start-round volley).
+	"volunteer", "muster_fallen", "slow_match", "trebuchet",
 ]
 
 ## Draftable rarities for skirmish. Mirrors CardDB's draftable convention (starter
 ## + common + uncommon + rare); curses and enemy-only cards are excluded by rarity
 ## and filtered defensively below.
 const DRAFTABLE_RARITIES: Array[String] = ["starter", "common", "uncommon", "rare"]
+
+## Battle relics legal in the skirmish draft. Two kinds qualify:
+##   1. RESOURCE-LOCAL — touches only the owner's hand refill / Command / banking /
+##      card cost, which each peer computes for itself inside its own _start_round
+##      (net turns route through it). Combat._has_relic reads the local slot.
+##   2. BOARD/HP, HOST-AUTHORITATIVE (2026-07-09) — the effect mutates the board or
+##      a hero's HP at a hook that already runs per-side on the host, gated through
+##      Combat._relic_active_for_side(owner_is_enemy, id). The host applies the
+##      owner's relic to the owner's side and the board snapshot animates it on the
+##      client. To add one: wire the hook to _relic_active_for_side, then list it here.
+## Still OUT: gold/map/reward/deck-upgrade relics (no such systems in skirmish) and
+## pile/draw relics owned by the client (need caster-local routing like the draw spells).
+const NET_RELIC_POOL: Array[String] = [
+	"ember_crown",
+	"pact_of_embers",
+	"last_breath",
+	"cavalry_sigil",
+	"spell_tome",
+	"mana_drunkard",
+	"snecko_eye",
+	"marathoners_sash",
+	"deep_satchel",   # hand refills to 6 instead of 5
+	"ice_cream",      # Miser's Coffer — banking uncapped
+	"lantern",        # +1 Command on turn 1
+	"couriers_bag",   # +1 refill on turn 1
+	"tome_of_many",   # +2 draw/turn (deck is 20, so always on — reads _ctx_deck)
+	# 2026-07-08: happy_flower + mana_tide dropped here too, to match the solo relic
+	# balance pass that merged them away (→ lantern / sigil_of_hunger). lantern already
+	# covers the Command-trickle slot; both ids still exist in RelicDB so legacy peers
+	# resolve fine — they're just no longer offered in the draft.
+	# 2026-07-09 — first host-authoritative BOARD/HP relics (see _relic_active_for_side):
+	"bulwark_engine",   # round start: your Armored creatures gain +1 max HP
+	"gravewardens_pact",# first 3 of your creatures to die are reborn as 1/1 Imps
+	"rear_guard_charm", # a front-row death buffs your back-row column-mate +1/+1
+	"worn_spellbook",   # your damage spells deal +1 (net spell resolver, per caster)
+]
+
+## Battle potions legal in the skirmish draft. Command and draw are pure
+## caster-local (each peer owns its hand/Command); every board/HP effect is
+## host-authoritative, routed through IN_USE_POTION → _net_apply_host_potion and
+## board-synced back. TARGETED bottles came in 2026-07-09: the caster ships the
+## picked creature to the host as an entity_id (the same handle targeted spells
+## use), so friendly buffs / enemy strikes / sacrifices all resolve for both peers
+## with animation. Combat reads the drafted potion(s) from the local slot
+## (_ctx_potions) and consumes them there. Only grave_diggers_nip stays out — it
+## purges Curses, which skirmish decks never carry, so it would drink for nothing.
+const NET_POTION_POOL: Array[String] = [
+	"inferno_vial",
+	"chain_flask",
+	"aegis_brew",
+	"conscript_brew",
+	"phoenix_brew",
+	"healing",         # heal 8 HP (host-authoritative)
+	"mana_surge",      # Rallying Horn — +2 Command this turn (caster-local)
+	"insight_tonic",   # draw 3 cards (caster-local)
+	# 2026-07-09 — net-aware potion targeting + host board resolvers:
+	"bottled_fury",    # Sapper's Charge — 4 to a target enemy + its lane-mate
+	"war_paint",       # Rampage +1 ATK on a target friendly (fight)
+	"vampiric_draught",# Lifelink on a target friendly + 4 HP caster heal
+	"butchers_dram",   # sacrifice a target friendly → +3 Command (caster-local)
+	"doomsday_draught",# detonate all your Doom creatures (non-targeted)
+]
 
 ## ── Net-playable spells (single source of truth) ────────────────────────────
 ## A spell is draftable in skirmish ONLY if the host can resolve it over the wire,
@@ -69,21 +147,45 @@ const NET_SPELL_TYPES: Array[String] = [
 	"damage", "damage_face", "damage_all_enemies", "damage_all",
 	"buff_atk", "buff_hp", "heal", "buff_all_atk",
 ]
-## type:"custom" spell ids with a perspective-aware handler in
-## Combat._net_resolve_custom_spell. Faithful ports only — anything needing draw,
-## pile mutation, gold, Command-gain, sacrifice, Discover, or a hand picker stays
-## OUT (it would resolve wrong host-only) until pile+draw sync lands post-v1.
+## type:"custom" spell ids playable over the wire. Most resolve host-authoritatively
+## in Combat._net_resolve_custom_spell; draw/Command spells use the EV_DRAW/EV_MANA
+## caster channel; grave spells use per-side death tracking + EV_GIVE_CARD; and the
+## caster-local pile/hand spells resolve on the caster's own machine via
+## _net_play_caster_local_spell. Still OUT: gold economy (no shop) and Discover/tutor
+## (needs shared-pool coordination) — see SKIRMISH_DENYLIST.
 const NET_SPELL_CUSTOMS: Array[String] = [
-	"shove", "hex", "soul_swap", "shield_wall", "censer_light", "lay_on_hands",
-	"immolate", "cataclysm", "inferno", "wildfire", "ambush", "plague_bell",
+	# NOTE: these are SPELL ids (card_data.spell.id), not card ids — the 2026-07-02
+	# card overhaul renamed four (lay_on_hands→virulence, overwhelming_force→rout,
+	# time_snare→doubled_hour, grave_pact→last_rites); keep this list on the NEW ids.
+	"shove", "hex", "soul_swap", "shield_wall", "censer_light", "virulence",
+	"immolate", "cataclysm", "inferno", "wildfire", "ambush", "plague_bell", "earthquake", "petard",
 	"dark_pact", "apocalypse", "blood_tithe", "kings_command", "war_cry",
-	"inspire", "overwhelming_force", "flame_bolt",
+	"inspire", "rout", "flame_bolt",
+	# Board / utility spells — pure damage / summon / face / Command resolved with the
+	# primitives the net engine already has. Last Rites is plain conditional damage.
+	"holy_smite", "ricochet", "provision", "adrenaline", "last_rites",
+	# Temp-state spells: the net attack resolver honours freeze/stun/charge/poison and
+	# the per-side round flags (Virulence / Doubled Hour); _net_decay_side_states
+	# expires them at the end of the owning side's turn and the board snapshot ships
+	# frz/stn/shd so the client renders the state.
+	"doubled_hour", "frost_bolt", "hoarfrost", "venom_tip", "charge_spell",
 	# Draw / Command spells — resolved via the host→caster EV_DRAW / EV_MANA channel
 	# (the caster draws/gains on its OWN client). No hand-picker or pile reads needed.
-	"reckless_charge", "quick_shot", "slash", "patch_up", "smite_spell", "unholy_bargain",
+	# (reckless_charge left this list 2026-07-05 — its Penance rework reads the
+	# caster's hand for Curses, which skirmish decks never carry.)
+	"quick_shot", "slash", "patch_up", "smite_spell", "unholy_bargain",
 	# Sacrifice spells — kill the caster's own target (the inert relic/reactive hooks
 	# solo's sacrifice path fires don't exist in skirmish, so a plain kill is faithful).
 	"offering", "fuel_the_pyre",
+	# Grave / exile spells — host-authoritative. Banish exiles (no on-death, no
+	# discard); Reanimate raises the caster's last corpse; Grave Robbery returns a
+	# corpse to the caster's hand (per-side death tracking + the EV_GIVE_CARD caster
+	# channel); Echo re-resolves the caster's last host-resolved spell.
+	"banish", "reanimate", "grave_robbery", "echo_spell",
+	# Caster-local pile / hand spells — the hand, piles, Command and draw resolve on
+	# the caster's OWN machine (_net_play_caster_local_spell); War Chant / Mass Grave
+	# also forward a board consequence (Soldier count / discard size) to the host.
+	"recycle", "gambit", "turbo", "war_chant", "mass_grave",
 ]
 
 
@@ -104,10 +206,11 @@ func is_net_playable_spell(card_data: Dictionary) -> bool:
 class PlayerSlot:
 	var deck: Array = []
 	var deck_uids: Array = []
-	var hero_hp: int = 25
-	var hero_max_hp: int = 25
+	var hero_hp: int = 30
+	var hero_max_hp: int = 30
 	var base_max_mana: int = 3
-	var relics: Array = []          # empty in v1
+	var relics: Array = []          # drafted battle relic(s) — see NET_RELIC_POOL
+	var potions: Array = []         # drafted battle potion(s) — see NET_POTION_POOL
 	var card_upgrades: Dictionary = {}   # empty in v1
 
 
@@ -283,3 +386,110 @@ func skirmish_legal_pool() -> Array:
 				pool.append(id)
 	pool.sort()
 	return pool
+
+
+## Deterministic bag helpers for skirmish card generation. The old generated
+## deck modes sampled from the full pool every time, so a fair seed could still
+## clump the same few ids. These helpers deal without replacement first; callers
+## can opt into copy fallback only when the source pool is genuinely too small.
+func shuffled_card_bag(source: Array, rng: RandomNumberGenerator,
+		blocked: Array = []) -> Array[String]:
+	var bag: Array[String] = []
+	for raw_id in source:
+		var id := String(raw_id)
+		if blocked.has(id):
+			continue
+		bag.append(id)
+	for i in range(bag.size() - 1, 0, -1):
+		var j: int = rng.randi() % (i + 1)
+		var tmp: String = bag[i]
+		bag[i] = bag[j]
+		bag[j] = tmp
+	return bag
+
+
+func deal_unique_cards(source: Array, count: int, rng: RandomNumberGenerator,
+		blocked: Array = []) -> Array[String]:
+	var bag := shuffled_card_bag(source, rng, blocked)
+	var out: Array[String] = []
+	while out.size() < count and not bag.is_empty():
+		out.append(String(bag.pop_back()))
+	return out
+
+
+## ── Rarity-weighted draft dealing ───────────────────────────────────────────
+## The draft's answer to "make the odds like act 3": instead of a flat bag over
+## the whole pool (whose rarity mix just mirrored how many of each exist), each
+## triplet slot rolls a RARITY against the act reward weights, then draws an id of
+## that rarity. See NetDraft._roll_triplet + CardDB.act_rarity_weights.
+
+## Split a legal id list into the three reward tiers (common / uncommon / rare).
+## STARTER cards are deliberately dropped — act rewards, whose odds the draft
+## mirrors, never offer them. Returns {"common":[...], "uncommon":[...], "rare":[...]}.
+func rarity_buckets(source: Array) -> Dictionary:
+	var out: Dictionary = {"common": [], "uncommon": [], "rare": []}
+	for raw_id in source:
+		var id := String(raw_id)
+		var rarity := String(CardDB.get_card_data(id).get("rarity", ""))
+		if out.has(rarity):
+			out[rarity].append(id)
+	return out
+
+
+## Deal one weighted triplet: three DISTINCT ids, each slot's rarity rolled against
+## `weights` [common, uncommon, rare] out of 100, then an id drawn from that
+## rarity's bag WITHOUT replacement. `buckets` is the rarity→ids map from
+## rarity_buckets(); `bags` is the caller's running draw-down state (rarity→shuffled
+## ids), mutated here and refilled from `buckets` when a tier empties — so across a
+## whole draft a rarity's ids don't recur until its bag cycles. Falls back to any
+## non-empty tier if the rolled one is dry. Deterministic over `rng` (the salted
+## per-player stream), so the slate is reproducible from the match seed.
+func deal_weighted_triplet(buckets: Dictionary, bags: Dictionary,
+		rng: RandomNumberGenerator, weights: Array) -> Array[String]:
+	var out: Array[String] = []
+	var guard := 0
+	while out.size() < 3 and guard < 500:
+		guard += 1
+		var id := _draw_weighted_bag(_roll_rarity(rng, weights), buckets, bags, rng)
+		if id == "":
+			id = _draw_any_bag(buckets, bags, rng)   # rolled tier ran dry
+		if id == "":
+			break                                    # pool genuinely exhausted
+		if not out.has(id):
+			out.append(id)
+	return out
+
+
+## Roll a rarity name against [common, uncommon, rare] weights (percentages).
+func _roll_rarity(rng: RandomNumberGenerator, weights: Array) -> String:
+	var c: int = int(weights[0]) if weights.size() > 0 else 0
+	var u: int = int(weights[1]) if weights.size() > 1 else 0
+	var roll: int = rng.randi() % 100
+	if roll < c:
+		return "common"
+	elif roll < c + u:
+		return "uncommon"
+	return "rare"
+
+
+## Pop one id from a rarity's draw bag, refilling+shuffling it from `buckets` when
+## empty. Returns "" only if that rarity has no legal cards at all.
+func _draw_weighted_bag(rarity: String, buckets: Dictionary, bags: Dictionary,
+		rng: RandomNumberGenerator) -> String:
+	var bag: Array = bags.get(rarity, [])
+	if bag.is_empty():
+		bag = shuffled_card_bag(buckets.get(rarity, []), rng)
+		bags[rarity] = bag
+		if bag.is_empty():
+			return ""
+	return String(bag.pop_back())
+
+
+## Fallback for a dry rolled tier: try the reward tiers in a fixed order.
+func _draw_any_bag(buckets: Dictionary, bags: Dictionary,
+		rng: RandomNumberGenerator) -> String:
+	for rarity in ["common", "uncommon", "rare"]:
+		var id := _draw_weighted_bag(rarity, buckets, bags, rng)
+		if id != "":
+			return id
+	return ""

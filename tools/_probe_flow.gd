@@ -5,8 +5,8 @@ extends SceneTree
 ## 338 non-modal _apply_effect calls, 0 crashes). THE GAP this probe fills is
 ## everything that probe SKIPPED because it needs a live scene tree + button
 ## handlers:
-##   • Event MODAL pickers (MODAL_EFFECTS): copy/remove(+variants)/butcher/
-##     mirror_twin/upgrade(+multi)/stranger_hand/relic_sacrifice/sacrifice/
+##   • Event MODAL pickers (MODAL_EFFECTS): copy/remove(+variants)/grant_kw/
+##     veteran_swap/upgrade(+multi)/stranger_hand/relic_sacrifice/sacrifice/
 ##     transform/dice_run/risk_loop/pawn_appraisal — each builds a picker and
 ##     resolves on click. We invoke the _start_* entry and drive the _on_*
 ##     pick/confirm/again handlers to resolution.
@@ -158,14 +158,15 @@ func _free_scene(node: Node) -> void:
 
 func _run_event_modals() -> void:
 	print("[flow] === EVENT MODAL PICKERS ===")
-	# copy_card (single + multi via re-entry), remove family, butcher,
-	# mirror_twin, upgrade (single+multi), stranger_hand, relic_sacrifice,
+	# copy_card (single + multi via re-entry), remove family, grant_keyword,
+	# veteran_swap, upgrade (single+multi), stranger_hand, relic_sacrifice,
 	# sacrifice (gold/max_hp/relic), transform (1+2), dice_run (add+double),
 	# risk_loop (bust+jackpot), pawn_appraisal.
 	for fixture in ["rich", "poor", "one_card", "all_curse", "full_potions"]:
 		_drive_remove_pickers(fixture)
 		_drive_copy_picker(fixture)
-		_drive_butcher_mirror(fixture)
+		_drive_grant_kw(fixture)
+		_drive_veteran_swap(fixture)
 		_drive_upgrade_pickers(fixture)
 		_drive_stranger_hand(fixture)
 		_drive_relic_sacrifice(fixture)
@@ -178,7 +179,7 @@ func _run_event_modals() -> void:
 
 ## Event needs a parked event id so _show_result (which reads _event_data.name
 ## via _build_risk_screen etc.) has something. We hand-set it after _ready.
-func _event_scene(event_id: String = "butcher") -> Node:
+func _event_scene(event_id: String = "pawnbrokers_window") -> Node:
 	var ev = _make_scene("res://scenes/event.tscn")
 	var EvScript = load("res://scripts/scenes/Event.gd")
 	ev._event_id = event_id
@@ -191,7 +192,7 @@ func _drive_remove_pickers(fixture: String) -> void:
 	# remove_choice
 	_new_run(fixture)
 	print("[flow] remove_choice [%s] deck=%d" % [fixture, RS.deck.size()])
-	var ev = _event_scene("woodcutter")
+	var ev = _event_scene("fattened_sin_eater")
 	ev._start_remove_mode()
 	if RS.deck.size() > 0:
 		ev._on_remove_pick(0)
@@ -201,7 +202,7 @@ func _drive_remove_pickers(fixture: String) -> void:
 	# remove_choice_multi (value 2 and 3)
 	_new_run(fixture)
 	print("[flow] remove_choice_multi [%s] deck=%d" % [fixture, RS.deck.size()])
-	ev = _event_scene("hermit")
+	ev = _event_scene("gravesong_choir")
 	ev._start_multi_remove_mode(3)
 	# Drive picks until the loop ends or deck would hit floor.
 	var guard := 0
@@ -227,7 +228,7 @@ func _drive_remove_pickers(fixture: String) -> void:
 	# remove_choice_all_copies
 	_new_run(fixture)
 	print("[flow] remove_all_copies [%s] deck=%d" % [fixture, RS.deck.size()])
-	ev = _event_scene("hermit")
+	ev = _event_scene("the_free_company")
 	ev._start_remove_all_copies_mode("starter")
 	var cid := _first_starter_id()
 	if cid != "":
@@ -239,7 +240,7 @@ func _drive_remove_pickers(fixture: String) -> void:
 func _drive_copy_picker(fixture: String) -> void:
 	_new_run(fixture)
 	print("[flow] copy_card x2 [%s] deck=%d" % [fixture, RS.deck.size()])
-	var ev = _event_scene("glass_familiar")
+	var ev = _event_scene("the_remount_fair")
 	ev._start_copy_mode(2, "pre")
 	var guard := 0
 	while ev._copy_remaining > 0 and RS.deck.size() > 0 and guard < 6:
@@ -249,32 +250,38 @@ func _drive_copy_picker(fixture: String) -> void:
 	_free_scene(ev); _drivers += 1
 
 
-func _drive_butcher_mirror(fixture: String) -> void:
+func _drive_grant_kw(fixture: String) -> void:
+	# The Pensioned Master's lesson: a chosen creature permanently gains a
+	# keyword via the wayside grant_kw mod stack.
 	_new_run(fixture)
-	print("[flow] butcher_buff [%s] deck=%d" % [fixture, RS.deck.size()])
-	var ev = _event_scene("butcher")
-	ev._start_butcher_mode()
+	print("[flow] grant_keyword_pick [%s] deck=%d" % [fixture, RS.deck.size()])
+	var ev = _event_scene("the_lame_master")
+	ev._start_grant_keyword_mode({"keyword": "armored", "prompt": "x"})
 	var ci := _first_creature_index()
 	if ci >= 0:
-		ev._on_butcher_pick(ci)
-	_check_invariants("butcher/%s" % fixture)
+		ev._on_grant_keyword_pick(ci)
+	_check_invariants("grant_kw/%s" % fixture)
 	_free_scene(ev); _drivers += 1
 
+
+func _drive_veteran_swap(fixture: String) -> void:
+	# The Free Company's muster: every copy of one starter out, the same
+	# count of uncommons in.
 	_new_run(fixture)
-	print("[flow] mirror_twin_buff [%s] deck=%d" % [fixture, RS.deck.size()])
-	ev = _event_scene("mirror_twin")
-	ev._start_mirror_twin_mode()
-	ci = _first_creature_index()
-	if ci >= 0:
-		ev._on_mirror_twin_pick(ci)
-	_check_invariants("mirror_twin/%s" % fixture)
+	print("[flow] veteran_swap [%s] deck=%d" % [fixture, RS.deck.size()])
+	var ev = _event_scene("the_free_company")
+	ev._start_veteran_swap_mode()
+	var cid := _first_starter_id()
+	if cid != "":
+		ev._on_veteran_swap_pick(cid)
+	_check_invariants("veteran_swap/%s" % fixture)
 	_free_scene(ev); _drivers += 1
 
 
 func _drive_upgrade_pickers(fixture: String) -> void:
 	_new_run(fixture)
 	print("[flow] upgrade_choice [%s] deck=%d" % [fixture, RS.deck.size()])
-	var ev = _event_scene("beekeeper")
+	var ev = _event_scene("gravesong_choir")
 	ev._start_upgrade_mode(1)
 	var ui := _first_upgradeable_index()
 	if ui >= 0:
@@ -284,7 +291,7 @@ func _drive_upgrade_pickers(fixture: String) -> void:
 
 	_new_run(fixture)
 	print("[flow] upgrade_choice_multi(2) [%s] deck=%d" % [fixture, RS.deck.size()])
-	ev = _event_scene("beekeeper_again")
+	ev = _event_scene("the_kings_measure")
 	ev._start_upgrade_mode(2)
 	var guard := 0
 	while ev._upgrade_choice_remaining > 0 and guard < 12:
@@ -318,7 +325,7 @@ func _drive_stranger_hand(fixture: String) -> void:
 func _drive_relic_sacrifice(fixture: String) -> void:
 	_new_run(fixture)
 	print("[flow] relic_sacrifice_pick [%s] relics=%d" % [fixture, RS.relics.size()])
-	var ev = _event_scene("old_forge")
+	var ev = _event_scene("the_reliquary_cart")
 	ev._start_relic_sacrifice_mode()
 	# Pick the first non-starting relic if any.
 	var rid := _first_nonstarting_relic()
@@ -332,7 +339,7 @@ func _drive_sacrifice(fixture: String) -> void:
 	for reward in ["gold", "max_hp", "relic"]:
 		_new_run(fixture)
 		print("[flow] sacrifice(%s) [%s] deck=%d" % [reward, fixture, RS.deck.size()])
-		var ev = _event_scene("dark_altar")
+		var ev = _event_scene("the_scapegoat")
 		var effect := {"reward": reward, "base": 3, "per_atk": 6, "prompt": "x"}
 		ev._start_sacrifice_mode(effect)
 		var ci := _first_creature_index()
@@ -345,7 +352,7 @@ func _drive_sacrifice(fixture: String) -> void:
 func _drive_transform(fixture: String) -> void:
 	_new_run(fixture)
 	print("[flow] transform_choice(2) [%s] deck=%d" % [fixture, RS.deck.size()])
-	var ev = _event_scene("the_chrysalis")
+	var ev = _event_scene("the_remount_fair")
 	ev._start_transform_mode(2)
 	var guard := 0
 	while ev._transform_remaining > 0 and guard < 12:
@@ -384,25 +391,38 @@ func _drive_dice_run(fixture: String) -> void:
 
 
 func _drive_risk_loop(fixture: String) -> void:
-	# bust mode (spring) — drive action until it resolves to a result.
+	# bust mode (Gravesong Choir) — drive action until it resolves to a result.
 	_new_run(fixture)
 	print("[flow] risk_loop(bust) [%s] hp=%d" % [fixture, RS.hero_hp])
 	var EvScript = load("res://scripts/scenes/Event.gd")
-	var spring: Dictionary = EvScript.EVENTS["thrice_blessed_spring"]
-	var bust_cfg: Dictionary = spring.choices[0].effects[0]
-	var ev = _event_scene("thrice_blessed_spring")
+	var choir: Dictionary = EvScript.EVENTS["gravesong_choir"]
+	var bust_cfg: Dictionary = choir.choices[0].effects[0]
+	var ev = _event_scene("gravesong_choir")
 	ev._start_risk_loop(bust_cfg)
 	for _i in range(8):
 		ev._on_risk_action()
 	_check_invariants("risk_loop_bust/%s" % fixture)
 	_free_scene(ev); _drivers += 1
 
-	# jackpot mode (woodcutter) — has a modal upgrade jackpot.
+	# jackpot mode — no live event wears it since the 2026-07-03 pool remake,
+	# but the engine mode remains authorable; keep it covered via an inline
+	# config (HP-cost steps + a modal upgrade jackpot, the old Woodcutter shape).
 	_new_run(fixture)
 	print("[flow] risk_loop(jackpot) [%s] hp=%d" % [fixture, RS.hero_hp])
-	var wc: Dictionary = EvScript.EVENTS["woodcutter"]
-	var jp_cfg: Dictionary = wc.choices[0].effects[0]
-	ev = _event_scene("woodcutter")
+	var jp_cfg: Dictionary = {
+		"mode": "jackpot",
+		"open_text": "x", "action": "Swing", "leave": "Leave",
+		"steps": [
+			{"chance": 0.34, "sub": "x",
+				"effects": [{"type": "damage", "value": 2}], "text": "x"},
+			{"chance": 0.5, "sub": "x",
+				"effects": [{"type": "damage", "value": 2}], "text": "x"},
+			{"chance": 1.0, "sub": "x",
+				"effects": [{"type": "damage", "value": 2}], "text": ""},
+		],
+		"jackpot": {"modal": "upgrade_choice", "text": "x"},
+	}
+	ev = _event_scene("the_lame_master")
 	ev._start_risk_loop(jp_cfg)
 	for _i in range(8):
 		ev._on_risk_action()
@@ -602,10 +622,10 @@ func _run_shop() -> void:
 			s._buy_relic(s._relic_stock[0], s._price(s.RELIC_COST))
 		# Buy potion.
 		s._buy_potion(s._price(s.POTION_COST))
-		# Removal flow.
-		s._start_remove_mode(s._price(s.REMOVE_COST))
+		# The sutler's buy-back (replaced the flat removal fee, 2026-07-02).
+		s._start_sell_mode()
 		if RS.deck.size() > 1:
-			s._confirm_remove(0, s._price(s.REMOVE_COST))
+			s._confirm_sell(0)
 		_check_invariants("shop/%s" % fixture)
 		_free_scene(s); _drivers += 1
 

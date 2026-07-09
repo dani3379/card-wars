@@ -68,3 +68,14 @@ tools/_textshot/
 tools/_kwprev_*
 # Orphan import sidecars for already-ignored screenshot PNGs
 _shot_*.png.import
+# Debug zoom crops (scratch, same family as _shot_*)
+/_zoom_*.png
+_zoom_*.png.import
+
+# --- Raw art source dumps (Midjourney downloads) ---
+# The processed, cropped versions the game actually loads live under assets/.
+# These are the untouched source outputs — kept on disk as a local archive (like
+# assets/_unused/), never committed, so git history isn't bloated by ~160MB of
+# working art.
+pictures/
+new_pictures/

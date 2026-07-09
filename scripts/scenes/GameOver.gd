@@ -13,6 +13,133 @@ const DEATH_REFRAINS := [
 	"That's one more walk that didn't reach the fire. There will be others.",
 ]
 
+# ── Chronicle ink palette ──────────────────────────────────────────────
+# The run summary is written ON parchment (see ChroniclePage below), so all
+# its text uses ink-on-paper colors, not the gilt-on-dark HUD palette. The
+# gilt values here would wash out on paper exactly like the card faces'
+# keyword gold did (CLAUDE.md: re-inked #7a4f10 on the page).
+const INK := GameTheme.PARCHMENT_TEXT                   # body ink  #241810
+const INK_DIM := Color(0.36, 0.27, 0.18, 1.0)           # captions / the fallen
+const INK_BRONZE := Color(0.42, 0.28, 0.10, 1.0)        # section headers
+const INK_GOLD := Color(0.478, 0.310, 0.063, 1.0)       # gold values (#7a4f10)
+const INK_RUBRIC := Color(0.56, 0.13, 0.07, 1.0)        # red rubric — what the win changed
+const INK_LAUREL := Color(0.22, 0.37, 0.16, 1.0)        # fastest-march laurel line
+
+
+## The parchment sheet the run's chronicle is written on. Replaces the old
+## flat dark summary panel — the run ends as a PAGE in the campaign ledger,
+## drawn with the same material kit as the cards (deckled edge, edge toast,
+## washes, foxing, a double bronze rule). Subclassing PanelContainer keeps
+## the auto-height-from-content layout; the stylebox is empty (margins only)
+## and the paper is painted in _draw underneath the children.
+## A lost run chars the page: blackened deckle, an ember line still eating
+## inward, scorch blotches in the corners.
+class ChroniclePage extends PanelContainer:
+	var charred := false
+	var page_seed := 0
+
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_RESIZED:
+			queue_redraw()
+
+	## Deckled perimeter path, seeded — same idiom as the cards' WritLeaf.
+	func _sheet_path(inset: float, rng: RandomNumberGenerator) -> PackedVector2Array:
+		var pts := PackedVector2Array()
+		var r := Rect2(Vector2(inset, inset), size - Vector2(inset * 2.0, inset * 2.0))
+		var step := 26.0
+		var amp := 5.0
+		# Walk the 4 edges; wobble perpendicular to each.
+		var edges := [
+			[r.position, Vector2(r.end.x, r.position.y), Vector2(0, 1)],
+			[Vector2(r.end.x, r.position.y), r.end, Vector2(-1, 0)],
+			[r.end, Vector2(r.position.x, r.end.y), Vector2(0, -1)],
+			[Vector2(r.position.x, r.end.y), r.position, Vector2(1, 0)],
+		]
+		for e in edges:
+			var a: Vector2 = e[0]
+			var b: Vector2 = e[1]
+			var n: Vector2 = e[2]
+			var count := maxi(2, int(a.distance_to(b) / step))
+			for i in range(count):
+				var t := float(i) / float(count)
+				# Corners stay pinned (wobble eases to 0 at each end) so the
+				# sheet keeps its rectangular stance.
+				var ease_w := sin(t * PI)
+				pts.append(a.lerp(b, t) + n * rng.randf_range(-amp, amp) * ease_w)
+		return pts
+
+	func _draw() -> void:
+		if size.x < 120.0 or size.y < 120.0:
+			return
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash("chronicle_%d" % page_seed)
+		var sheet := _sheet_path(8.0, rng)
+		# Cast shadow — the page lies ON the scene, so it throws one.
+		for sh in [[Vector2(0, 10), 0.30, 26.0], [Vector2(0, 5), 0.22, 10.0]]:
+			var off: Vector2 = sh[0]
+			var spts := PackedVector2Array()
+			for p in sheet:
+				spts.append(p + off)
+			draw_colored_polygon(spts, Color(0, 0, 0, sh[1]))
+		# The paper. A charred page is smoke-dimmed toward ash.
+		var paper := Color(0.855, 0.795, 0.665)
+		if charred:
+			paper = Color(0.760, 0.690, 0.560)
+		draw_colored_polygon(sheet, paper)
+		# Interior ageing — broad sepia washes, foxing spots, stray fibers.
+		var wash := Color(0.42, 0.30, 0.17)
+		for i in range(6):
+			var c := Vector2(rng.randf_range(size.x * 0.12, size.x * 0.88),
+				rng.randf_range(size.y * 0.15, size.y * 0.85))
+			draw_circle(c, rng.randf_range(70.0, 180.0),
+				Color(wash.r, wash.g, wash.b, rng.randf_range(0.020, 0.040)))
+		for i in range(26):
+			var c := Vector2(rng.randf_range(size.x * 0.06, size.x * 0.94),
+				rng.randf_range(size.y * 0.06, size.y * 0.94))
+			draw_circle(c, rng.randf_range(1.5, 5.5),
+				Color(0.45, 0.32, 0.16, rng.randf_range(0.045, 0.11)))
+		for i in range(34):
+			var c := Vector2(rng.randf_range(size.x * 0.08, size.x * 0.92),
+				rng.randf_range(size.y * 0.08, size.y * 0.92))
+			var d := Vector2(rng.randf_range(-7.0, 7.0), rng.randf_range(-3.0, 3.0))
+			draw_line(c, c + d, Color(0.40, 0.30, 0.18, 0.06), 1.0, true)
+		# Edge treatment along the SAME deckled path, so shading never
+		# separates from the silhouette (the WritLeaf rule).
+		var loop := sheet.duplicate()
+		loop.append(sheet[0])
+		if charred:
+			# Burnt: wide blackened toast, then the ember line still creeping.
+			draw_polyline(loop, Color(0.10, 0.07, 0.05, 0.90), 7.0, true)
+			draw_polyline(loop, Color(0.62, 0.25, 0.08, 0.28), 2.6, true)
+			for i in range(5):
+				var t := rng.randf()
+				var idx := int(t * (sheet.size() - 1))
+				draw_circle(sheet[idx], rng.randf_range(14.0, 34.0),
+					Color(0.08, 0.055, 0.04, rng.randf_range(0.10, 0.22)))
+		else:
+			draw_polyline(loop, Color(0.47, 0.33, 0.18, 0.50), 4.0, true)
+			draw_polyline(loop, Color(0.47, 0.33, 0.18, 0.16), 11.0, true)
+		draw_polyline(loop, Color(0.16, 0.11, 0.07, 0.80), 1.4, true)
+		# Document furniture: the double bronze rule framing the entry.
+		var f := Rect2(Vector2(24, 22), size - Vector2(48, 44))
+		draw_rect(f, Color(0.55, 0.40, 0.20, 0.50), false, 1.6, true)
+		draw_rect(f.grow(-5.0), Color(0.55, 0.40, 0.20, 0.28), false, 1.0, true)
+
+
+## A hand-ruled ledger separator: heavier line over a hairline, in bronze
+## ink — the same double-rule furniture the cards print between regions.
+class RuleSep extends Control:
+	func _ready() -> void:
+		custom_minimum_size = Vector2(540, 7)
+		size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		var w := size.x
+		draw_line(Vector2(0, 2), Vector2(w, 2), Color(0.45, 0.31, 0.14, 0.55), 1.6, true)
+		draw_line(Vector2(w * 0.06, 5), Vector2(w * 0.94, 5),
+			Color(0.45, 0.31, 0.14, 0.28), 1.0, true)
+
 
 func _ready() -> void:
 	# Lift the crushed background. Two crushers were stacking: the .tscn's
@@ -48,10 +175,10 @@ func _ready() -> void:
 		# A conquest run ends on the throne — and the throne is the eternal
 		# cycle (§15.1 #1): winning makes you the next thing worth marching on.
 		if RunState.finale_stage == 1:
-			$Subtitle.text = "The throne is yours, and everything it owes.\nFloors cleared: %d%s" % [
+			$Subtitle.text = "The throne is yours, and everything it owes.\nProvinces claimed: %d%s" % [
 				RunState.current_floor, asc_suffix]
 		else:
-			$Subtitle.text = "The first flame is extinguished.\nFloors cleared: %d%s" % [
+			$Subtitle.text = "The first flame is extinguished.\nProvinces claimed: %d%s" % [
 				RunState.current_floor, asc_suffix]
 	else:
 		$Title.text = "DEFEAT"
@@ -68,45 +195,58 @@ func _ready() -> void:
 		# Rotate the loop refrain by defeat count. Modulo keeps the index valid
 		# even on a mid-run quit (total_defeats may be 0 → index 0).
 		var refrain: String = DEATH_REFRAINS[MetaState.total_defeats % DEATH_REFRAINS.size()]
-		$Subtitle.text = "%s\nFloors reached: %d%s%s" % [
+		$Subtitle.text = "%s\nProvinces reached: %d%s%s" % [
 			refrain, RunState.current_floor, asc_suffix, death_line]
 
-	$Stats.text = "Total Runs %d  •  Victories %d" % [
-		MetaState.total_runs, MetaState.total_victories,
-	]
-	# The .tscn ships this at 14px / dim grey — too faint to read over the lifted
-	# background. Bump to a legible gilt caption.
-	$Stats.add_theme_font_size_override("font_size", 17)
-	$Stats.add_theme_color_override("font_color", Color(0.90, 0.80, 0.52, 1.0))
-	$Stats.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.6))
-	$Stats.add_theme_constant_override("outline_size", 3)
+	# The lifetime tally used to float here between the subtitle and the
+	# summary panel, where the defeat subtitle's third line ("Felled by…")
+	# collided with it. It now closes the chronicle page instead — the ledger
+	# keeps its own count (see the footnote in _build_run_summary).
+	$Stats.visible = false
 
 	_build_run_summary()
 
-	# Replace the .tscn's plain BackBtn with our themed back button (gold pill,
-	# leading ← arrow, display font). Rename + free the original first so the
-	# replacement can take the "BackBtn" name immediately (queue_free is deferred,
-	# so child-name lookups would otherwise see two nodes for one frame).
+	# The .tscn's plain BackBtn is superseded: the exit actions (MARCH AGAIN /
+	# BACK TO MENU) are now written at the FOOT of the chronicle page itself —
+	# see the foot row in _build_run_summary. Living inside the page means
+	# they can never collide with it however tall the deck strip grows, and
+	# they read as the document's own closing marks.
 	var old_btn: Node = $BackBtn
 	old_btn.name = "BackBtn_old"
 	old_btn.queue_free()
-	var styled := GameTheme.make_back_button("BACK TO MENU", Vector2(240, 50))
-	styled.name = "BackBtn"
-	# Anchor a 240×50 rect to the bottom-center. Manual anchors+offsets avoid
-	# the PRESET_CENTER_BOTTOM+position trap that pushed the control off-screen.
-	styled.anchor_left = 0.5
-	styled.anchor_right = 0.5
-	styled.anchor_top = 1.0
-	styled.anchor_bottom = 1.0
-	styled.offset_left = -120
-	styled.offset_right = 120
-	styled.offset_top = -150
-	styled.offset_bottom = -100
-	styled.pressed.connect(_back)
-	add_child(styled)
 	GameTheme.make_settings_gear(self)
 
+	_add_seed_chip()
 	_animate_intro()
+
+
+func _add_seed_chip() -> void:
+	# The run seed, bottom-left, click-to-copy. Daily marchers and seed-sharers
+	# need this number — it existed nowhere in the game until now. Frameless
+	# and dim so it reads as a footnote, not a button.
+	var chip := Button.new()
+	chip.name = "SeedChip"
+	chip.text = "Seed %d  ·  click to copy" % RunState.run_seed
+	chip.flat = true
+	chip.focus_mode = Control.FOCUS_NONE
+	chip.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	chip.add_theme_font_size_override("font_size", 16)
+	chip.add_theme_color_override("font_color", Color(0.62, 0.56, 0.46, 0.85))
+	chip.add_theme_color_override("font_hover_color", Color(0.90, 0.82, 0.60))
+	if GameTheme.font_body:
+		chip.add_theme_font_override("font", GameTheme.font_body)
+	chip.anchor_left = 0.0
+	chip.anchor_right = 0.0
+	chip.anchor_top = 1.0
+	chip.anchor_bottom = 1.0
+	chip.offset_left = 18
+	chip.offset_right = 320
+	chip.offset_top = -42
+	chip.offset_bottom = -12
+	chip.pressed.connect(func():
+		DisplayServer.clipboard_set(str(RunState.run_seed))
+		chip.text = "Seed %d  ·  copied" % RunState.run_seed)
+	add_child(chip)
 
 
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
@@ -116,8 +256,8 @@ const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 # cards in 2 rows without colliding with the BackBtn at y≈800. The slot
 # Control claims THUMB_SIZE so HFlowContainer lays them out compactly while
 # the Card2D child shrinks via `scale`.
-const THUMB_W: float = 90.0
-const THUMB_H: float = 120.0
+const THUMB_W: float = 82.0
+const THUMB_H: float = 109.0
 const THUMB_SIZE := Vector2(THUMB_W, THUMB_H)
 const THUMB_SCALE: float = THUMB_W / 225.0
 
@@ -128,49 +268,81 @@ func _build_run_summary() -> void:
 	# summary so the post-mortem matches the AAA polish of the in-combat HUD:
 	# gilded relic chips instead of a comma list, deduplicated deck thumbnails
 	# (with ×N stack badges) instead of "Deck: 12 cards".
-	var panel := PanelContainer.new()
+	# The chronicle page — the run written into the campaign ledger. The
+	# parchment (and its charred defeat dress) is painted by ChroniclePage;
+	# an empty stylebox carries only the writing margins, kept generous so
+	# the text never rides the deckled edge.
+	var panel := ChroniclePage.new()
 	panel.name = "RunSummaryPanel"
-	panel.custom_minimum_size = Vector2(1280, 0)
-	# Chart-look document plate (dark ink body + tan rule + small corners +
-	# shadow) via the shared helper, instead of the old flat rounded rect.
-	# make_panel_style returns a StyleBoxFlat, so we add the content margins it
-	# doesn't expose afterward.
-	var s := GameTheme.make_panel_style(
-		Color(0.055, 0.048, 0.040, 0.94), GameTheme.GILT, 1, 4, true)
-	s.content_margin_left = 28
-	s.content_margin_right = 28
-	s.content_margin_top = 16
-	s.content_margin_bottom = 18
+	panel.charred = RunState.hero_hp <= 0
+	panel.page_seed = RunState.run_seed
+	panel.custom_minimum_size = Vector2(1180, 0)
+	var s := StyleBoxEmpty.new()
+	s.content_margin_left = 60
+	s.content_margin_right = 60
+	s.content_margin_top = 30
+	s.content_margin_bottom = 32
 	panel.add_theme_stylebox_override("panel", s)
-	# Top-anchored at y=315 so it sits under the repositioned Stats label
-	# (y≈275-305) with headroom for the BackBtn at y≈800.
+	# Top-anchored under the title block. The page must ALWAYS fit the 900px
+	# canvas with its foot buttons visible: the deck is a one-row scroll strip
+	# and veterans/fallen share a row, so worst-case height stays bounded.
 	panel.anchor_left = 0.5
 	panel.anchor_right = 0.5
 	panel.anchor_top = 0.0
 	panel.anchor_bottom = 0.0
-	panel.offset_left = -640
-	panel.offset_right = 640
-	panel.offset_top = 315
-	panel.offset_bottom = 315  # height auto-expands from content
+	panel.offset_left = -590
+	panel.offset_right = 590
+	panel.offset_top = 292
+	panel.offset_bottom = 292  # height auto-expands from content
 	add_child(panel)
 
 	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 8)
+	col.add_theme_constant_override("separation", 6)
 	panel.add_child(col)
 
-	var head := _make_summary_label("YOUR RUN", 20, Color(1.0, 0.85, 0.45))
+	var head := _make_summary_label("THE CHRONICLE OF THE MARCH", 21, INK_BRONZE)
 	head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(head)
 
-	# Stats row: floor / fights won / gold. Deck count moved into the deck
-	# strip header below since we now visualize the deck.
+	# What this win CHANGED — the meta bumps used to happen silently (the
+	# player only noticed a new ascension tier next time they opened run
+	# setup). Announce them here, at the moment they were earned.
+	if RunState.hero_hp > 0:
+		if MetaState.last_victory_unlocked_tier > 0:
+			var tier: int = MetaState.last_victory_unlocked_tier
+			var rule: String = ""
+			if tier < RunState.ASCENSION_RULES.size():
+				rule = "\n" + RunState.ASCENSION_RULES[tier]
+			var unlock := _make_summary_label(
+				"ASCENSION %d UNLOCKED%s" % [tier, rule],
+				16, INK_RUBRIC)
+			unlock.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			unlock.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			unlock.custom_minimum_size = Vector2(560, 0)
+			col.add_child(unlock)
+		if MetaState.last_victory_was_fastest:
+			var fastest := _make_summary_label(
+				"Your fastest march yet — %d provinces." % RunState.current_floor,
+				14, INK_LAUREL)
+			fastest.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			col.add_child(fastest)
+
+	# Stats row: floor / fights won / gold, plus the campaign-memory honors
+	# (total kills, veterans lost) when the run produced any.
 	var stats_row := HBoxContainer.new()
 	stats_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	stats_row.add_theme_constant_override("separation", 28)
 	col.add_child(stats_row)
-	stats_row.add_child(_stat_chip("Floor", str(RunState.current_floor)))
+	stats_row.add_child(_stat_chip("Province", str(RunState.current_floor)))
 	stats_row.add_child(_stat_chip("Fights Won", str(RunState.fights_won)))
-	stats_row.add_child(_stat_chip("Gold", str(RunState.gold)))
+	stats_row.add_child(_stat_chip("Gold", str(RunState.gold), true))
+	var total_kills: int = 0
+	for uid in RunState.creature_kills:
+		total_kills += int(RunState.creature_kills[uid])
+	if total_kills > 0:
+		stats_row.add_child(_stat_chip("Kills", str(total_kills)))
+	if RunState.fallen.size() > 0:
+		stats_row.add_child(_stat_chip("Veterans Lost", str(RunState.fallen.size())))
 
 	# Mutators survived — only show the strip if the player actually braved
 	# any. Still rendered as text since mutators are conceptual debuffs, not
@@ -179,7 +351,7 @@ func _build_run_summary() -> void:
 		_add_separator(col)
 		var mhead := _make_summary_label(
 			"MUTATORS SURVIVED  (%d)" % RunState.mutators_survived.size(),
-			16, Color(0.90, 0.80, 0.56, 1.0))
+			16, INK_BRONZE)
 		mhead.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		col.add_child(mhead)
 
@@ -191,7 +363,7 @@ func _build_run_summary() -> void:
 			else:
 				mnames.append(mid)
 		var mlist := _make_summary_label(", ".join(mnames), 13,
-			Color(1.0, 0.78, 0.42, 0.92))
+			Color(INK.r, INK.g, INK.b, 0.88))
 		mlist.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		mlist.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		mlist.custom_minimum_size = Vector2(480, 0)
@@ -203,7 +375,7 @@ func _build_run_summary() -> void:
 	if RunState.relics.size() > 0:
 		_add_separator(col)
 		var rel_head := _make_summary_label("RELICS  (%d)" % RunState.relics.size(),
-			16, Color(0.90, 0.80, 0.56, 1.0))
+			16, INK_BRONZE)
 		rel_head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		col.add_child(rel_head)
 
@@ -214,7 +386,11 @@ func _build_run_summary() -> void:
 		rel_flow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		col.add_child(rel_flow)
 		for rid in RunState.relics:
-			rel_flow.add_child(GameTheme.make_relic_chip(rid, 52))
+			rel_flow.add_child(GameTheme.make_relic_chip(rid, 46))
+
+	# Campaign memory (docs/CAMPAIGN_MEMORY.md) — the run closes as history:
+	# the named veterans who carried the march, then the Roll of the Fallen.
+	_add_campaign_memory_section(col)
 
 	# Deck — deduplicated Card2D thumbnails with ×N stack badges. Uses
 	# CardTextureCache to cache the heavy v4 layout into a single TextureRect
@@ -225,30 +401,149 @@ func _build_run_summary() -> void:
 		_add_separator(col)
 		var deck_head := _make_summary_label(
 			"DECK  (%d cards)" % RunState.deck.size(),
-			16, Color(0.90, 0.80, 0.56, 1.0))
+			16, INK_BRONZE)
 		deck_head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		col.add_child(deck_head)
 
-		var deck_flow := HFlowContainer.new()
-		deck_flow.alignment = FlowContainer.ALIGNMENT_CENTER
-		deck_flow.add_theme_constant_override("h_separation", 10)
-		deck_flow.add_theme_constant_override("v_separation", 12)
-		deck_flow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		col.add_child(deck_flow)
+		# One scrolling row, however big the deck — the Reward screen's forge
+		# strip idiom. A multi-row flow made a memory-heavy defeat page taller
+		# than the canvas, drowning the foot buttons.
+		var deck_scroll := ScrollContainer.new()
+		deck_scroll.custom_minimum_size = Vector2(0, THUMB_H + 16)
+		deck_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+		deck_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+		col.add_child(deck_scroll)
+		var deck_row := HBoxContainer.new()
+		deck_row.add_theme_constant_override("separation", 10)
+		deck_row.alignment = BoxContainer.ALIGNMENT_CENTER
+		deck_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		deck_scroll.add_child(deck_row)
 		# Build deferred so the panel skeleton renders immediately and the
 		# fade-in animation can start while bakes are still in flight.
-		_populate_deck_strip(deck_flow)
+		_populate_deck_strip(deck_row)
+
+	# ── The document's closing marks: the exit actions, inked at the foot ──
+	# MARCH AGAIN wears the rubric red (the "do it again" line is the page's
+	# one imperative); BACK TO MENU signs off in plain ink. Frameless, per
+	# the shell-wide button idiom — the label IS the button.
+	_add_separator(col)
+	var foot := HBoxContainer.new()
+	foot.alignment = BoxContainer.ALIGNMENT_CENTER
+	foot.add_theme_constant_override("separation", 64)
+	col.add_child(foot)
+	var rematch := GameTheme.make_back_button("MARCH AGAIN", Vector2(240, 46),
+		18, INK_RUBRIC)
+	rematch.name = "RematchBtn"
+	_ink_button(rematch, Color(0.78, 0.16, 0.07))
+	rematch.pressed.connect(_march_again)
+	foot.add_child(rematch)
+	var styled := GameTheme.make_back_button("BACK TO MENU", Vector2(240, 46),
+		18, INK_DIM)
+	styled.name = "BackBtn"
+	_ink_button(styled, INK)
+	styled.pressed.connect(_back)
+	foot.add_child(styled)
+
+	# The ledger keeps its own count — lifetime tally as the page's footnote.
+	var tally := _make_summary_label("Total runs %d  ·  victories %d" % [
+		MetaState.total_runs, MetaState.total_victories], 13,
+		Color(INK_DIM.r, INK_DIM.g, INK_DIM.b, 0.85))
+	tally.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(tally)
+
+
+## Re-ink a shell button for parchment: the heavy dark outline that keeps
+## labels legible over painted scenes just looks like smudge on paper, and
+## the gilt hover washes out — hover instead deepens toward the given ink.
+func _ink_button(btn: Button, hover: Color) -> void:
+	btn.add_theme_color_override("font_hover_color", hover)
+	btn.add_theme_color_override("font_pressed_color", hover)
+	btn.add_theme_color_override("font_outline_color", Color(0.90, 0.85, 0.72, 0.55))
+	btn.add_theme_constant_override("outline_size", 3)
+
+
+## Campaign memory: the named veterans (3+ kills) and the last entries of the
+## Roll of the Fallen. A veteran's display name is resolved from the live deck
+## when it still marches, else from its last recorded fall — a veteran sold or
+## transformed away simply drops off the honors list.
+func _add_campaign_memory_section(col: VBoxContainer) -> void:
+	# ── Named veterans (top 3 by kills, named ones only) ──
+	var vets: Array = []
+	for uid in RunState.creature_kills:
+		var kills: int = int(RunState.creature_kills[uid])
+		if kills < RunState.VETERAN_EPITHET_KILLS:
+			continue
+		var vname := ""
+		var di: int = RunState.deck_uids.find(int(uid))
+		if di >= 0:
+			vname = String(RunState.get_upgraded_card_data(di).get("name", ""))
+		else:
+			for f in RunState.fallen:
+				if int(f.get("uid", -1)) == int(uid):
+					vname = String(f.get("name", ""))
+		if vname != "":
+			vets.append({"name": vname, "kills": kills})
+	# Veterans and the fallen share one ledger row — honors on the left page
+	# margin, losses on the right — so a memory-heavy defeat can't push the
+	# page's foot off the canvas. Either alone takes the full width.
+	var vets_box: VBoxContainer = null
+	if not vets.is_empty():
+		vets.sort_custom(func(a, b): return int(a["kills"]) > int(b["kills"]))
+		vets_box = VBoxContainer.new()
+		vets_box.add_theme_constant_override("separation", 4)
+		var vhead := _make_summary_label("NAMED VETERANS", 16, INK_BRONZE)
+		vhead.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		vets_box.add_child(vhead)
+		var vlines: Array = []
+		for v in vets.slice(0, 3):
+			vlines.append("%s — %d kills" % [v["name"], v["kills"]])
+		var vlist := _make_summary_label("\n".join(vlines), 13,
+			Color(INK.r, INK.g, INK.b, 0.92))
+		vlist.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		vets_box.add_child(vlist)
+
+	var fallen_box: VBoxContainer = null
+	if not RunState.fallen.is_empty():
+		fallen_box = VBoxContainer.new()
+		fallen_box.add_theme_constant_override("separation", 4)
+		var fhead := _make_summary_label(
+			"THE ROLL OF THE FALLEN  (%d)" % RunState.fallen.size(),
+			16, INK_BRONZE)
+		fhead.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		fallen_box.add_child(fhead)
+		var acts := ["I", "II", "III"]
+		var flines: Array = []
+		var recent: Array = RunState.fallen.slice(maxi(0, RunState.fallen.size() - 4))
+		for f in recent:
+			var act_n: String = acts[clampi(int(f.get("act", 1)) - 1, 0, 2)]
+			flines.append("%s — fell at %s (Act %s)"
+				% [String(f.get("name", "?")), String(f.get("enc", "the road")), act_n])
+		if RunState.fallen.size() > 4:
+			flines.append("…and %d earlier falls" % (RunState.fallen.size() - 4))
+		var flist := _make_summary_label("\n".join(flines), 13, INK_DIM)
+		flist.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		flist.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		flist.custom_minimum_size = Vector2(430, 0)
+		fallen_box.add_child(flist)
+
+	if vets_box != null and fallen_box != null:
+		_add_separator(col)
+		var mem_row := HBoxContainer.new()
+		mem_row.alignment = BoxContainer.ALIGNMENT_CENTER
+		mem_row.add_theme_constant_override("separation", 70)
+		mem_row.add_child(vets_box)
+		mem_row.add_child(fallen_box)
+		col.add_child(mem_row)
+	elif vets_box != null or fallen_box != null:
+		_add_separator(col)
+		col.add_child(vets_box if vets_box != null else fallen_box)
 
 
 func _add_separator(col: VBoxContainer) -> void:
-	var sep := ColorRect.new()
-	sep.custom_minimum_size = Vector2(520, 1.5)
-	sep.color = Color(0.83, 0.74, 0.54, 0.30)
-	sep.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	col.add_child(sep)
+	col.add_child(RuleSep.new())
 
 
-func _populate_deck_strip(parent: HFlowContainer) -> void:
+func _populate_deck_strip(parent: Container) -> void:
 	# Aggregate deck entries by visual identity (id + cost + atk + hp + sorted
 	# keywords). Two upgraded Goblins stack; an upgraded + un-upgraded Goblin
 	# do not. Order by cost ascending so the strip reads left-to-right cheap
@@ -345,28 +640,36 @@ func _make_count_badge(n: int) -> Label:
 	return badge
 
 
-func _stat_chip(label: String, value: String) -> VBoxContainer:
-	# Pair of stacked labels: small dim label on top, large bright value below.
-	# Reads as a "stat plaque" — clearer than "Floor: 8" inline.
+func _stat_chip(label: String, value: String, is_gold: bool = false) -> VBoxContainer:
+	# Pair of stacked labels: small dim caption over a large inked value —
+	# ledger entries on the chronicle page. Only the Gold tally wears the
+	# paper-gold ink, so gold on this page still means currency rather than
+	# "every number."
 	var box := VBoxContainer.new()
 	box.alignment = BoxContainer.ALIGNMENT_CENTER
 	box.add_theme_constant_override("separation", 2)
-	var lbl := _make_summary_label(label, 16, Color(0.84, 0.78, 0.64, 1.0))
+	var lbl := _make_summary_label(label, 15, INK_DIM)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(lbl)
-	var val := _make_summary_label(value, 26, Color(1.0, 0.86, 0.46))
+	var val_col: Color = INK_GOLD if is_gold else INK
+	var val := _make_summary_label(value, 26, val_col)
 	val.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(val)
 	return box
 
 
 func _make_summary_label(text: String, size: int, color: Color) -> Label:
+	# On the chronicle page: headers (16+) are set in the display caps, body
+	# lines in the cards' book hand (font_card_body) — the same "written on
+	# the page" register the card rules text uses.
 	var lbl := Label.new()
 	lbl.text = text
 	lbl.add_theme_font_size_override("font_size", size)
 	lbl.add_theme_color_override("font_color", color)
-	if size >= 18 and GameTheme.font_display:
+	if size >= 16 and GameTheme.font_display:
 		lbl.add_theme_font_override("font", GameTheme.font_display)
+	elif GameTheme.font_card_body:
+		lbl.add_theme_font_override("font", GameTheme.font_card_body)
 	elif GameTheme.font_body:
 		lbl.add_theme_font_override("font", GameTheme.font_body)
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -377,12 +680,12 @@ func _animate_intro() -> void:
 	# Title slams in with a back-eased overshoot; subtitle and stats follow.
 	# Victory feels celebratory, defeat feels heavy — same beat, different colors
 	# (color is already set above).
+	# The exit buttons live INSIDE the chronicle page now, so the summary
+	# fade carries them — no separate button tweens.
 	$Title.pivot_offset = $Title.size * 0.5
 	$Title.scale = Vector2(0.7, 0.7)
 	$Title.modulate.a = 0.0
 	$Subtitle.modulate.a = 0.0
-	$Stats.modulate.a = 0.0
-	$BackBtn.modulate.a = 0.0
 	var summary := get_node_or_null("RunSummaryPanel")
 	if summary != null:
 		summary.modulate.a = 0.0
@@ -392,10 +695,25 @@ func _animate_intro() -> void:
 	tw.tween_property($Title, "scale", Vector2.ONE, 0.65) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	tw.tween_property($Subtitle, "modulate:a", 1.0, 0.40).set_delay(0.45)
-	tw.tween_property($Stats, "modulate:a", 1.0, 0.35).set_delay(0.65)
 	if summary != null:
 		tw.tween_property(summary, "modulate:a", 1.0, 0.50).set_delay(0.80)
-	tw.tween_property($BackBtn, "modulate:a", 1.0, 0.30).set_delay(1.05)
+
+
+func _march_again() -> void:
+	# Same hero, same ascension, fresh seed. The main menu consumes the
+	# request in _ready and restarts straight into the war chest.
+	RunState.rematch_request = {
+		"hero": RunState.current_hero_id,
+		"ascension": RunState.current_ascension,
+	}
+	GameTheme.fade_out_then_change_scene(self, MAIN_MENU)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	# Esc returns to the main menu (the run is already over).
+	if event.is_action_pressed("ui_cancel"):
+		_back()
+		get_viewport().set_input_as_handled()
 
 
 func _back() -> void:

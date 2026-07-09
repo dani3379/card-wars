@@ -12,18 +12,23 @@ signal destroyed
 # relic, Reborn on_death) can set current_hp back > 0 to cancel the death.
 # If no listener rescues, _die() runs and destroyed fires.
 signal will_die
+## Fired the moment Last Stand saves this creature (once per fight) — Combat
+## listens for rally passives (Paladin).
+signal last_stand_fired
 # Fires AFTER current_hp is reduced (any path: combat, spell, thorns, on-death
 # damage). amount is the post-armor damage actually applied. Used by relics
 # like Stalwart's Anvil, Wormwood, Spike Driver that need to react to a
 # friendly being hit.
 signal damaged(amount: int)
-signal floop_clicked
 # Drag lifecycle — Combat listens so it can light up the slot the player is
 # about to drop on. `dragging` fires each time the cursor moves while the
 # card is held; `drag_ended` fires once when the mouse is released, before
 # `played` (so highlights are cleared whether or not the drop is valid).
 signal dragging(global_pos: Vector2)
 signal drag_ended
+# Right-click on a HAND card: ask Combat to dismiss it to the discard (the
+# player-driven churn valve of the persistent hand). Combat gates the rest.
+signal dismiss_requested
 # Battlefield repositioning ("move"). A friendly creature already on the board
 # can be dragged to an empty friendly slot during the player's turn. Combat
 # owns the slot grid + hand layer, so Card2D only signals intent:
@@ -694,6 +699,12 @@ var entity_id: int = -1
 # _atk_label / _hp_label refs, so combat logic is unchanged. Falls back to
 # v4 silently if CardTextureCache hasn't pre-baked this card yet.
 @export var live_baked_mode: bool = false
+# When true, a card whose card_data carries no `desc` (enemy-only creatures from
+# EncounterDB are terse — {name,atk,hp,kw}) synthesises its rules text from its
+# triggers + keywords so the face isn't blank. Opt-in: ONLY the battle-log hover
+# preview sets it, so real in-hand/battlefield/reward faces keep the
+# no-glossary-on-face rule (teaching stays in tooltips). See _synthesized_rules_text.
+@export var synth_desc_if_empty: bool = false
 # Visual-redesign prototype path. ONLY set true by tools/render_cards harness.
 # When true, _build_layout dispatches to _build_redesign_proto so the live game
 # (which never sets this) is completely unaffected.
@@ -1016,6 +1027,15 @@ var doom_counter: int = -999
 # the live countdown; the panel gives the red disc its frame.
 var _doom_badge: Control = null
 var _doom_label: Label = null
+# The compact layout's root control, kept so a mid-fight Doom grant (Mark of
+# Ash) can build the countdown badge late — it's normally built with the layout.
+var _compact_root: Control = null
+# Live status rail (battlefield tokens): the top-right keyword roundels are
+# rebuilt whenever the creature's keywords or transient statuses change, so a
+# mid-fight Shield / Frozen / war-school Armored is visible on the token.
+var _status_orbs: Array = []          # the roundel Panels currently on the rail
+var _status_rail_sig: String = ""     # last-rendered signature (dirty check)
+var _status_poll_accum: float = 0.0   # throttles the _process rail poll
 # Battlefield cards render at ~73% size so 4 rows fit on screen without
 # clipping. Hand cards stay full size for readability. Set before _ready
 # (e.g. on instantiate) or via set_compact_mode() after.
@@ -1027,8 +1047,7 @@ var _hp_label: Label
 var _cost_label: Label
 var _desc_label: Label
 var _type_label: Label
-var _floop_indicator: Label
-var _floop_pulse_tween: Tween = null
+var _floop_indicator: Label  # inert: created hidden by layouts; floop UI is dead
 # Bottom-of-card type plate (rarity gem + type text). Always present on both
 # spells and creatures, mirrors the StS "Skill" tag. For creatures it's
 # hidden when the FLOOP indicator activates — see update_floop_display.
@@ -1056,6 +1075,10 @@ var _is_being_dragged := false
 # child's inset offsets on every layout pass.
 var _hover_tween: Tween = null
 var _lift_shadow: Control = null
+# Desaturating grey wash shown over a hand card the current Command pool can't
+# afford. Lazily built (see _ensure_unplayable_veil); toggled by set_affordable.
+# A full-rect direct child so container layout fits it to the card automatically.
+var _unplayable_veil: ColorRect = null
 # Static flag: true while ANY Card2D is being dragged anywhere. Hand siblings
 # read this in _on_mouse_entered to suppress their hover-pop animation —
 # without it, dragging a card over the rest of the hand made each neighbour
@@ -1068,14 +1091,33 @@ var _field_grabbing := false      # a left-press is active on a board creature
 var _field_lifted := false        # the grab crossed the threshold → real drag
 var _field_grab_start := Vector2.ZERO
 const FIELD_MOVE_THRESHOLD := 10.0  # px the cursor must travel to start a move
-# Gate for board interaction (move-drag + floop click). Combat sets this false
-# while combat resolves / the enemy acts, so the player can't grab mid-swing.
+# Gate for board interaction (move-drag). Combat sets this false while combat
+# resolves / the enemy acts, so the player can't grab mid-swing.
 static var board_interactive := true
-# Sub-gate for the floop CLICK specifically. Online skirmish re-enables board
-# interaction (so the active player can reposition) but keeps floop toggles off,
-# since floop abilities aren't resolved over the wire yet — so reposition rides
-# board_interactive while floop_clicked stays suppressed here.
-static var floop_interactive := true
+# Gate for playing cards OUT of hand (the play-drag). In skirmish Combat sets
+# this false during the opponent's turn so hand cards can't be lifted (paired
+# with the grey "unplayable" veil) — you shouldn't be able to grab a card while
+# your foe is acting. Always true in solo (the phase gate covers that path);
+# Combat re-arms it to true at the start of every combat scene so a locked net
+# match can't leak the lock into a later solo fight.
+static var hand_interactive := true
+# Net mirror for the Last Stand save: the flare below is Card2D-local (it only
+# ever shows on the machine that ran take_damage — the HOST in skirmish), so the
+# host combat scene installs a callback here (_net_begin_combat) and the flare
+# site calls it with the survivor. Hooked AT the flare so coverage is by
+# construction — tokens, granted keywords, copies: anything that flares, mirrors.
+# is_valid() is false for an unset callable AND for a freed combat scene, so solo
+# and stale-scene cases are no-ops.
+static var net_last_stand_cb: Callable = Callable()
+# SIMULTANEOUS CLASH contract. Combat sets this true for the duration of a combat
+# clash (Swift phase, main clash) so a creature that takes a LETHAL hit does NOT
+# die on the spot — it sits at current_hp<=0, stays in the board array, and can
+# still land its own already-scheduled strike (can_attack() ignores HP). Combat
+# flushes the held deaths with _cleanup_dead() once both sides have swung, so
+# mutual kills resolve together. False everywhere else → spells/abilities kill
+# immediately as before. This is what makes the clash actually simultaneous
+# instead of handing a de-facto Swift to whoever strikes first.
+static var defer_deaths := false
 var _hand_target_position := Vector2.ZERO
 var _hand_target_rotation := 0.0
 # Resting scale for hand cards. Set via set_hand_target by Combat._layout_hand
@@ -1087,10 +1129,21 @@ var _hand_target_scale := Vector2.ONE
 # card is hovered, dragged, or re-targeted so those snappy interactions win.
 var _hand_tween: Tween = null
 var _lunge_tween: Tween = null
+var _lunge_scale_tween: Tween = null
 var _recoil_tween: Tween = null
 # Set true just before a sacrificed creature is destroyed so _die() plays the
 # "ash away upward" ritual variant instead of the normal shrink-and-fade.
 var _sacrifice_death: bool = false
+# Latched the first time _die() runs. Combat nulls the field slot synchronously on
+# the destroyed signal, so the corpse is normally unreachable — but any path that
+# holds a direct reference across the kill and calls take_damage/try_die again
+# would otherwise re-emit destroyed and double-fire every on-death payoff
+# (on_death effect, coin_landed gold, encounter death hooks). Cheap insurance.
+var _dead: bool = false
+# Set by Combat when the clash path already sounded the kill at the moment of
+# impact (play_sfx("creature_death")). _die() checks it so the deferred-death
+# flush doesn't play a second death cue for the same kill.
+var death_cue_played: bool = false
 
 const CARD_W := 225
 const CARD_H := 300
@@ -1254,6 +1307,7 @@ func set_compact_mode(enabled: bool) -> void:
 	_hp_badge = null
 	_doom_badge = null
 	_doom_label = null
+	_compact_root = null
 	for child in get_children():
 		child.free()
 	_build_layout()
@@ -1304,6 +1358,8 @@ func _spell_target_label() -> String:
 		_:                   return ""
 
 func has_floop() -> bool:
+	# Vestigial: no card carries a `floop` key (always false). Kept because a
+	# local screenshot tool still probes it.
 	return card_data.has("floop")
 
 func can_attack() -> bool:
@@ -1424,6 +1480,7 @@ func _build_compact_layout() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(root)
+	_compact_root = root
 
 	var card_art: Texture2D = _find_card_art()
 	if card_art == null:
@@ -1526,100 +1583,160 @@ func _build_compact_layout() -> void:
 	_floop_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(_floop_indicator)
 
-	# Keyword orbs along the top-right so Swift / Piercing / Armored etc.
-	# stay readable at a glance on battlefield tokens.
-	var keywords: Array = card_data.get("keywords", [])
-	if keywords.size() > 0:
-		# Filter to icon-bearing, non-floop keywords (floop owns the FLOOP
-		# indicator; on_enter et al. have no glyph). Cap at 3 for token width.
-		var kw_icons: Array[Texture2D] = []
-		for kw in keywords:
-			if String(kw) == "floop":
-				continue
-			var icon_tex: Texture2D = GameTheme.get_keyword_icon(kw)
-			if icon_tex == null:
-				continue
-			kw_icons.append(icon_tex)
-			if kw_icons.size() >= 3:
-				break
-		# v7 chart material: ink roundels with a metal rim + gilt glyph (same
-		# 30px seats as the old violet gems — keywords still read at a glance,
-		# now in the same material family as the hand card's rail).
-		if kw_icons.size() > 0:
-			var kw_orb := 30.0
-			var kw_gap := 4.0
-			var kw_total := float(kw_icons.size()) * kw_orb + float(kw_icons.size() - 1) * kw_gap
-			for i in range(kw_icons.size()):
-				var korb := Panel.new()
-				var kost := StyleBoxFlat.new()
-				kost.bg_color = Color(0.105, 0.088, 0.066, 0.97)
-				kost.border_color = Color(0.62, 0.50, 0.26, 0.85)
-				kost.set_border_width_all(1)
-				kost.set_corner_radius_all(999)
-				kost.shadow_color = Color(0, 0, 0, 0.45)
-				kost.shadow_size = 3
-				kost.shadow_offset = Vector2(0, 1)
-				korb.add_theme_stylebox_override("panel", kost)
-				korb.anchor_left = 1.0; korb.anchor_right = 1.0
-				korb.anchor_top = 0.0; korb.anchor_bottom = 0.0
-				korb.offset_left = -4.0 - kw_total + float(i) * (kw_orb + kw_gap)
-				korb.offset_right = korb.offset_left + kw_orb
-				korb.offset_top = 4.0
-				korb.offset_bottom = 4.0 + kw_orb
-				korb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-				root.add_child(korb)
-				var kglyph := TextureRect.new()
-				kglyph.texture = kw_icons[i]
-				kglyph.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-				kglyph.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-				kglyph.set_anchors_preset(Control.PRESET_FULL_RECT)
-				kglyph.offset_left = 6; kglyph.offset_right = -6
-				kglyph.offset_top = 6; kglyph.offset_bottom = -6
-				kglyph.modulate = GameTheme.GILT_BRIGHT
-				kglyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
-				korb.add_child(kglyph)
+	# Keyword + status roundels along the top-right so Swift / Piercing /
+	# Armored etc. stay readable at a glance on battlefield tokens. The rail is
+	# LIVE — a keyword or status gained mid-fight (war-school Armored, a granted
+	# Shield, Frozen/Stunned) re-renders it; see _refresh_status_rail.
+	_refresh_status_rail(true)
+	# The rail re-checks itself on a throttled _process poll (cheap signature
+	# diff) so the ~30 keyword-mutation sites in Combat.gd don't each need an
+	# explicit refresh call. The idle bob normally arms _process anyway; arm it
+	# here too so the poll survives reduce-motion / no-bob paths.
+	set_process(true)
 
 	# Doom countdown badge — a big red disc in the TOP-LEFT (keyword orbs own
 	# top-right, ATK/HP own the bottom corners). THIS is the telegraph: a boss
 	# "Doom 2" must read as a scary clock from across the board.
 	if has_keyword("doom"):
-		_ensure_doom_init()
-		var doom_box := 38.0
-		_doom_badge = GemOrb.new()
-		_doom_badge.shape = "circle"
-		_doom_badge.style = "smooth"
-		_doom_badge.fill_color = Color(0.78, 0.10, 0.10)  # alarm red
-		_doom_badge.gloss = 0.9
-		_doom_badge.anchor_left = 0.0; _doom_badge.anchor_right = 0.0
-		_doom_badge.anchor_top = 0.0; _doom_badge.anchor_bottom = 0.0
-		_doom_badge.offset_left = 3.0
-		_doom_badge.offset_right = 3.0 + doom_box
-		_doom_badge.offset_top = 3.0
-		_doom_badge.offset_bottom = 3.0 + doom_box
-		_doom_badge.pivot_offset = Vector2(doom_box * 0.5, doom_box * 0.5)
-		_doom_badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		root.add_child(_doom_badge)
-		_doom_label = Label.new()
-		_doom_label.text = str(maxi(doom_counter, 0))
-		if GameTheme.font_stat:
-			_doom_label.add_theme_font_override("font", GameTheme.font_stat)
-		elif GameTheme.font_display:
-			_doom_label.add_theme_font_override("font", GameTheme.font_display)
-		_doom_label.add_theme_font_size_override("font_size", 18)
-		_doom_label.add_theme_color_override("font_color", Color(1, 1, 1))
-		_doom_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
-		_doom_label.add_theme_constant_override("outline_size", 4)
-		_doom_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		_doom_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		_doom_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_doom_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		_doom_badge.add_child(_doom_label)
+		_build_doom_badge(root)
 
 	# rampage / lifelink / overrun / formation all ship SVG icons now, so the
 	# icon rail above already shows them. The old cryptic RMP/OVR/FRM/LL violet
 	# text chips were redundant duplicates of those icons (and unreadable as
 	# 3-letter codes), so they were removed — keyword detail still lives in the
 	# hover tooltip.
+
+
+# ═══════════════════════════════════════════
+#  LIVE STATUS RAIL — battlefield keyword/effect roundels
+# ═══════════════════════════════════════════
+#
+# The top-right icon rail re-renders whenever the creature's keyword list or
+# transient statuses (Shield, Frozen, Stunned, this-round Armored/Thorns)
+# change, so an effect gained mid-fight shows on the token itself, not just in
+# the hover panel. Printed/granted keywords keep the gilt ink-roundel voice;
+# transient statuses speak in their own tint so "will expire" reads apart from
+# "is part of the card". Refresh triggers: update_stat_display (most mutation
+# sites already call it) + a throttled _process signature poll for the rest.
+
+const _STATUS_RAIL_CAP := 5
+
+func _status_signature() -> String:
+	# Cheap change-detector for the rail. Anything that should alter the rail
+	# must be folded in here.
+	var parts: PackedStringArray = []
+	for kw in card_data.get("keywords", []):
+		parts.append(String(kw))
+	if state.has_shield:
+		parts.append("@shield")
+	if state.is_frozen:
+		parts.append("@frozen")
+	if state.stunned:
+		parts.append("@stunned")
+	if bool(get_meta("temp_armored", false)):
+		parts.append("@t_armored")
+	if int(get_meta("temp_thorns", 0)) > 0 or int(get_meta("bonus_thorns", 0)) > 0:
+		parts.append("@t_thorns")
+	return ",".join(parts)
+
+
+func _refresh_status_rail(initial_build: bool = false) -> void:
+	if _compact_root == null or not is_instance_valid(_compact_root):
+		return
+	var sig := _status_signature()
+	if not initial_build and sig == _status_rail_sig:
+		return
+	_status_rail_sig = sig
+	for o in _status_orbs:
+		if is_instance_valid(o):
+			o.queue_free()
+	_status_orbs.clear()
+
+	# Collect rail entries — transient statuses FIRST (they're what the player
+	# must react to this turn), then printed/granted keywords.
+	var entries: Array = []
+	if state.has_shield:
+		entries.append({"tex": GameTheme.get_keyword_icon("shield"),
+			"glyph": Color(0.65, 0.85, 1.0), "rim": Color(0.55, 0.75, 0.95, 0.9)})
+	if state.is_frozen:
+		entries.append({"tex": GameTheme.get_keyword_icon("frozen"),
+			"glyph": Color(0.78, 0.94, 1.0), "rim": Color(0.60, 0.85, 1.0, 0.9)})
+	if state.stunned:
+		entries.append({"tex": GameTheme.get_keyword_icon("stunned"),
+			"glyph": Color(1.0, 0.80, 0.32), "rim": Color(0.95, 0.72, 0.28, 0.9)})
+	var kws: Array = card_data.get("keywords", [])
+	if bool(get_meta("temp_armored", false)) and not ("armored" in kws):
+		entries.append({"tex": GameTheme.get_keyword_icon("armored"),
+			"glyph": Color(0.72, 0.82, 0.95), "rim": Color(0.60, 0.72, 0.90, 0.9)})
+	if (int(get_meta("temp_thorns", 0)) > 0 or int(get_meta("bonus_thorns", 0)) > 0) \
+			and not ("thorns" in kws):
+		entries.append({"tex": GameTheme.get_keyword_icon("thorns"),
+			"glyph": Color(0.72, 0.92, 0.60), "rim": Color(0.58, 0.82, 0.50, 0.9)})
+	var seen: Dictionary = {}
+	for kw in kws:
+		var k := String(kw)
+		# floop owns its own indicator; doom its countdown badge. A printed
+		# Shield icon would lie once the bubble pops — the status entry above
+		# owns the glyph while the shield holds.
+		if k in ["floop", "doom", "shield"] or seen.has(k):
+			continue
+		seen[k] = true
+		var icon_tex: Texture2D = GameTheme.get_keyword_icon(k)
+		if icon_tex == null:
+			continue
+		entries.append({"tex": icon_tex, "glyph": GameTheme.GILT_BRIGHT,
+			"rim": Color(0.62, 0.50, 0.26, 0.85)})
+	entries = entries.filter(func(e): return e["tex"] != null)
+	if entries.size() > _STATUS_RAIL_CAP:
+		entries.resize(_STATUS_RAIL_CAP)
+	if entries.is_empty():
+		return
+
+	# v7 chart material: ink roundels with a metal rim + tinted glyph (same
+	# 30px seats as the old violet gems — statuses read at a glance, in the
+	# same material family as the hand card's rail).
+	var kw_orb := 30.0
+	var kw_gap := 4.0
+	var kw_total := float(entries.size()) * kw_orb + float(entries.size() - 1) * kw_gap
+	for i in range(entries.size()):
+		var e: Dictionary = entries[i]
+		var korb := Panel.new()
+		var kost := StyleBoxFlat.new()
+		kost.bg_color = Color(0.105, 0.088, 0.066, 0.97)
+		kost.border_color = e["rim"]
+		kost.set_border_width_all(1)
+		kost.set_corner_radius_all(999)
+		kost.shadow_color = Color(0, 0, 0, 0.45)
+		kost.shadow_size = 3
+		kost.shadow_offset = Vector2(0, 1)
+		korb.add_theme_stylebox_override("panel", kost)
+		korb.anchor_left = 1.0; korb.anchor_right = 1.0
+		korb.anchor_top = 0.0; korb.anchor_bottom = 0.0
+		korb.offset_left = -4.0 - kw_total + float(i) * (kw_orb + kw_gap)
+		korb.offset_right = korb.offset_left + kw_orb
+		korb.offset_top = 4.0
+		korb.offset_bottom = 4.0 + kw_orb
+		korb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_compact_root.add_child(korb)
+		var kglyph := TextureRect.new()
+		kglyph.texture = e["tex"]
+		kglyph.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		kglyph.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		kglyph.set_anchors_preset(Control.PRESET_FULL_RECT)
+		kglyph.offset_left = 6; kglyph.offset_right = -6
+		kglyph.offset_top = 6; kglyph.offset_bottom = -6
+		kglyph.modulate = e["glyph"]
+		kglyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		korb.add_child(kglyph)
+		_status_orbs.append(korb)
+		# A mid-fight change pops the rail in so the new effect draws the eye;
+		# the initial build renders quietly with the token.
+		if not initial_build and not static_display:
+			korb.pivot_offset = Vector2(kw_orb * 0.5, kw_orb * 0.5)
+			korb.scale = Vector2(0.4, 0.4)
+			var tw := korb.create_tween()
+			tw.tween_property(korb, "scale", Vector2.ONE, 0.22) \
+				.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 
 # ═══════════════════════════════════════════
@@ -1758,6 +1875,8 @@ func _build_baked_overlay_layout() -> void:
 		od_rt.add_theme_font_override("normal_font", od_font)
 		od_rt.add_theme_font_override("bold_font", od_bold if od_bold else od_font)
 	var od_raw: String = card_data.get("desc", "")
+	if od_raw == "" and synth_desc_if_empty:
+		od_raw = _synthesized_rules_text()
 	# Ramp MUST match _build_chart_proto's dsz block (17 / 16 / 15, 14px floor).
 	var od_sz := 17
 	if od_raw.length() > 115:
@@ -3284,6 +3403,45 @@ class ParchmentPlate extends Control:
 				1.0, true)
 
 
+## Campaign memory (docs/CAMPAIGN_MEMORY.md): kill-tally scratches down the
+## writ's left margin — the creature's service record inked on the document
+## itself. Groups of five (four strokes + a diagonal cross), rust-brown dried
+## ink, seeded jitter per card so no two records look machine-made. Display
+## caps at 15 scratches; the epithet and veteran rank carry the story past that.
+class TallyMarks extends Control:
+	var kills := 0
+	var seed_text := "writ"
+
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		if kills <= 0 or size.y <= 8.0:
+			return
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash(seed_text) ^ 0x7A11
+		var ink := Color(0.42, 0.16, 0.10, 0.78)
+		var n: int = mini(kills, 15)
+		var y := 2.0
+		var i := 0
+		while i < n:
+			var group: int = mini(n - i, 5)
+			var g_top := y
+			for s in range(mini(group, 4)):
+				var jx := rng.randf_range(-0.8, 0.8)
+				var jy := rng.randf_range(-0.6, 0.6)
+				draw_line(Vector2(1.5 + jx, y + jy),
+					Vector2(size.x - 1.5 + jx, y + jy + rng.randf_range(-0.7, 0.7)),
+					ink, 1.2, true)
+				y += 5.0
+			if group == 5:
+				# The fifth stroke slashes diagonally across its four fellows.
+				draw_line(Vector2(0.5, y - 2.0), Vector2(size.x - 0.5, g_top - 1.0),
+					Color(ink.r, ink.g, ink.b, 0.85), 1.4, true)
+			y += 4.0
+			i += group
+
+
 ## Engraved device for the no-art plate: a small manuscript sigil drawn in
 ## dim gilt ink on the parchment — a compass-rosette for spells, a crossed-
 ## blade roundel for creatures. Replaces the old giant near-black initial
@@ -3475,7 +3633,7 @@ func _kw_stamp_row(root: Control, meds: Array, metal: Color,
 
 
 
-func _fit_desc_to_box(rt: RichTextLabel, max_h: float) -> void:
+func _fit_desc_to_box(rt_obj: Variant, max_h: float) -> void:
 	# Step the body font down (to a 14px floor) until the rules text fits the
 	# clip box. RichTextLabel.get_content_height() validates the line cache, so
 	# the loop re-measures correctly after each size change. 14px is the hard
@@ -3486,7 +3644,14 @@ func _fit_desc_to_box(rt: RichTextLabel, max_h: float) -> void:
 	# _build_chart_proto) means even long cards rarely need to step down this far.
 	# The ramp now STARTS at 17/16/15, so this is a true safety net for the few
 	# very wordy cards — most cards render at their full ramp size.
-	if not is_instance_valid(rt):
+	# rt_obj is deliberately UNTYPED: this runs via call_deferred, and a layout
+	# rebuild in the same frame (chart proto → baked overlay swap) frees the
+	# label first — a freed object fails a typed-parameter conversion at
+	# dispatch, erroring before any in-body is_instance_valid guard can run.
+	if not is_instance_valid(rt_obj):
+		return
+	var rt := rt_obj as RichTextLabel
+	if rt == null:
 		return
 	var guard := 0
 	# Ramp top is 17 → 14 floor is 3 steps; the guard is generous headroom.
@@ -3923,6 +4088,8 @@ func _build_chart_proto() -> void:
 	# (_build_baked_overlay_layout) draws the text with the font renderer so it stays
 	# crisp at any zoom (the StS model). The vellum panel above is still baked.
 	var raw_desc: String = "" if bake_strip_desc else card_data.get("desc", "")
+	if raw_desc == "" and not bake_strip_desc and synth_desc_if_empty:
+		raw_desc = _synthesized_rules_text()
 	# Bigger, more readable body text. The 15/14/13 ramp was still the #1
 	# "too small to read" complaint at the real windowed (1600×900, no global
 	# scaling) card size, so the ramp is lifted to 17/16/15: short/medium descs
@@ -4032,6 +4199,21 @@ func _build_chart_proto() -> void:
 		_hp_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
 		_hp_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		hp_seal.add_child(_hp_label)
+
+		# Campaign memory: kill tallies scratched down the left page margin
+		# (the strip between the art plate's foot and the ATK seal — marginalia
+		# space, never over the painting). veteran_kills rides the folded card
+		# data, so hand cards, deck viewers and Rest previews all show the record.
+		var vk_kills: int = int(card_data.get("veteran_kills", 0))
+		if vk_kills > 0:
+			var tally := TallyMarks.new()
+			tally.kills = vk_kills
+			tally.seed_text = String(card_data.get("id", "?")) + str(deck_uid)
+			tally.position = Vector2(3.5, 148.0)
+			tally.size = Vector2(9.0, 102.0)
+			tally.tooltip_text = "%d kills on campaign" % vk_kills
+			tally.mouse_filter = Control.MOUSE_FILTER_PASS
+			root.add_child(tally)
 	else:
 		# Spells still pay a cost — the seal stays; the bottom carries the
 		# letterspaced footer line instead of ATK/HP.
@@ -5499,6 +5681,11 @@ func update_stat_display() -> void:
 		else:
 			_atk_label.add_theme_color_override("font_color", _atk_base_color)
 			_set_atk_caret(0)
+	# Most keyword/status mutation sites in Combat.gd call update_stat_display
+	# right after — piggyback the status-rail dirty check here so a granted
+	# keyword shows the same frame the stats refresh (the _process poll is only
+	# the fallback for sites that don't).
+	_refresh_status_rail()
 
 
 func _set_atk_caret(state: int) -> void:
@@ -5532,90 +5719,12 @@ func _set_atk_caret(state: int) -> void:
 
 
 func update_floop_display() -> void:
-	# HARD-GATED (P1#10): floop is fully vestigial dead code — no card carries a
-	# `floop` key and `will_floop` is read by zero combat logic. The cyan
-	# "CLICK · FLOOP" badge + border tint + art wash this used to build only
-	# confused new players with a non-functional affordance and a jargon word.
-	# We early-return so it can NEVER render a floop badge/border/tutorial.
-	# Signature and body are kept intact — Combat.gd may still call this, and
-	# the floop indicator is created (hidden) by every layout, so leaving it
-	# permanently hidden here is the complete fix. Do not delete below; it is
-	# the documented dead path. If floop is ever revived, drop this return.
-	return
-	# Three visible states:
-	#   - toggled (will_floop): solid cyan badge + cyan border + cool art tint
-	#   - available (on battlefield, has_floop, not yet used): "CLICK · FLOOP"
-	#     pulsing in cyan with a cyan border so the player can SEE the
-	#     affordance from across the room. Previously this was dim brown text
-	#     reading "click: floop" — players reported they couldn't tell the
-	#     mechanic existed.
-	#   - hidden (anything else): pulse killed, label off, default border.
-	var toggled := will_floop
-	var available := is_on_battlefield and has_floop() and not is_opponent and not toggled
-	if _floop_indicator:
-		if toggled:
-			_floop_indicator.text = "FLOOP"
-			_floop_indicator.add_theme_color_override("font_color", GameTheme.FLOOP_BLUE)
-			_floop_indicator.modulate = Color(1, 1, 1, 1)
-			_floop_indicator.visible = true
-			_stop_floop_pulse()
-		elif available:
-			_floop_indicator.text = "CLICK · FLOOP"
-			_floop_indicator.add_theme_color_override("font_color", GameTheme.FLOOP_BLUE)
-			_floop_indicator.visible = true
-			_start_floop_pulse()
-		else:
-			_floop_indicator.visible = false
-			_floop_indicator.modulate = Color(1, 1, 1, 1)
-			_stop_floop_pulse()
-	# Type plate occupies the same bottom strip as FLOOP — hide one when
-	# the other is showing so they don't overlap into mush.
-	if _type_plate:
-		_type_plate.visible = (_floop_indicator == null
-			or not _floop_indicator.visible)
-	if toggled:
-		_set_border_color(GameTheme.FLOOP_BLUE)
-		if _art_rect:
-			_art_rect.modulate = Color(0.6, 0.7, 1.0, 0.9)
-	elif available:
-		_set_border_color(Color(GameTheme.FLOOP_BLUE.r, GameTheme.FLOOP_BLUE.g, GameTheme.FLOOP_BLUE.b, 0.85))
-		if _art_rect:
-			_art_rect.modulate = Color.WHITE
-	else:
-		_set_border_color(_get_default_frame_tint())
-		if _art_rect:
-			_art_rect.modulate = Color.WHITE
-
-
-func _start_floop_pulse() -> void:
-	# Gentle alpha oscillation on the FLOOP label so it reads as "interactable"
-	# from the corner of the eye. Kept slow (1.4s full cycle) and shallow
-	# (alpha 0.55-1.0) so it never crosses into "distracting" territory.
-	if _floop_indicator == null:
-		return
-	if UserSettings.reduce_motion:
-		return
-	if _floop_pulse_tween and _floop_pulse_tween.is_valid():
-		return
-	_floop_pulse_tween = create_tween()
-	_floop_pulse_tween.set_loops()
-	_floop_pulse_tween.tween_property(_floop_indicator, "modulate:a", 0.55, 0.7).set_trans(Tween.TRANS_SINE)
-	_floop_pulse_tween.tween_property(_floop_indicator, "modulate:a", 1.0, 0.7).set_trans(Tween.TRANS_SINE)
-
-
-func _stop_floop_pulse() -> void:
-	if _floop_pulse_tween and _floop_pulse_tween.is_valid():
-		_floop_pulse_tween.kill()
-	_floop_pulse_tween = null
-	if _floop_indicator:
-		_floop_indicator.modulate.a = 1.0
-
-
-func toggle_floop() -> void:
-	if not has_floop():
-		return
-	will_floop = not will_floop
-	update_floop_display()
+	# Floop is fully vestigial dead code: no card carries a `floop` key and
+	# will_floop is read by zero combat logic. Kept as a no-op stub because
+	# Combat.gd still calls it on placement/turn-flip; the (permanently hidden)
+	# _floop_indicator label is still created inert by the layout builders. If
+	# floop is ever revived, restore the badge/border rendering from git history.
+	pass
 
 
 # ═══════════════════════════════════════════
@@ -5628,6 +5737,53 @@ func _ensure_doom_init() -> void:
 	# rely on a constructor — lazy-init on first display/tick instead.
 	if doom_counter == -999:
 		doom_counter = int(card_data.get("doom", 0))
+
+
+func _build_doom_badge(parent: Control) -> void:
+	# The countdown disc + numeral. Called from the compact layout build, and
+	# late via ensure_doom_badge when a spell brands Doom mid-fight.
+	_ensure_doom_init()
+	var doom_box := 38.0
+	_doom_badge = GemOrb.new()
+	_doom_badge.shape = "circle"
+	_doom_badge.style = "smooth"
+	_doom_badge.fill_color = Color(0.78, 0.10, 0.10)  # alarm red
+	_doom_badge.gloss = 0.9
+	_doom_badge.anchor_left = 0.0; _doom_badge.anchor_right = 0.0
+	_doom_badge.anchor_top = 0.0; _doom_badge.anchor_bottom = 0.0
+	_doom_badge.offset_left = 3.0
+	_doom_badge.offset_right = 3.0 + doom_box
+	_doom_badge.offset_top = 3.0
+	_doom_badge.offset_bottom = 3.0 + doom_box
+	_doom_badge.pivot_offset = Vector2(doom_box * 0.5, doom_box * 0.5)
+	_doom_badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	parent.add_child(_doom_badge)
+	_doom_label = Label.new()
+	_doom_label.text = str(maxi(doom_counter, 0))
+	if GameTheme.font_stat:
+		_doom_label.add_theme_font_override("font", GameTheme.font_stat)
+	elif GameTheme.font_display:
+		_doom_label.add_theme_font_override("font", GameTheme.font_display)
+	_doom_label.add_theme_font_size_override("font_size", 18)
+	_doom_label.add_theme_color_override("font_color", Color(1, 1, 1))
+	_doom_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	_doom_label.add_theme_constant_override("outline_size", 4)
+	_doom_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_doom_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_doom_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_doom_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_doom_badge.add_child(_doom_label)
+
+
+func ensure_doom_badge() -> void:
+	# Mark of Ash brands Doom onto a creature mid-fight — the badge is normally
+	# built with the compact layout, so build it late here. No-op off the
+	# battlefield or when the badge already exists.
+	if _doom_badge != null and is_instance_valid(_doom_badge):
+		return
+	if _compact_root == null or not is_instance_valid(_compact_root):
+		return
+	_build_doom_badge(_compact_root)
 
 
 func update_doom_display() -> void:
@@ -5647,42 +5803,63 @@ func update_doom_display() -> void:
 
 func flash_doom_tick() -> void:
 	# LOUD per-tick telegraph: a red punch + shake on the badge (and a light
-	# body flash) so the player feels the clock advance each round.
+	# body flash) so the player feels the clock advance each round. The final
+	# tick (counter at 1, or 0 on the detonation round) escalates — bigger
+	# punch, deeper wash, lower-louder tick — so "about to blow" is unmissable.
 	if static_display:
 		return
+	_ensure_doom_init()
+	var final_tick: bool = doom_counter <= 1
+	if AudioBank != null:
+		# Clock tick each round. Pitched down hard while button_click stands in
+		# for the cue (SFX_FALLBACKS) — a UI click at full pitch reads as a
+		# misclick, not a clock; a real clip plays near-straight.
+		var tick_base: float = 1.0 if AudioBank.has_own_sfx("doom_tick") else 0.72
+		AudioBank.play_sfx("doom_tick", 0.03, -2.0 if final_tick else -8.0,
+			tick_base * (0.82 if final_tick else 1.0))
 	if _doom_badge != null and is_instance_valid(_doom_badge):
+		var punch: float = 1.9 if final_tick else 1.5
 		var tw := create_tween()
-		tw.tween_property(_doom_badge, "scale", Vector2(1.5, 1.5), 0.10).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tw.tween_property(_doom_badge, "scale", Vector2(punch, punch), 0.10).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 		tw.tween_property(_doom_badge, "scale", Vector2(1.0, 1.0), 0.18).set_ease(Tween.EASE_OUT)
 	# A brief red wash on the card body underscores the danger.
 	var base := modulate
 	var btw := create_tween()
-	btw.tween_property(self, "modulate", Color(base.r * 1.6, base.g * 0.55, base.b * 0.5, base.a), 0.08)
-	btw.tween_property(self, "modulate", base, 0.24).set_ease(Tween.EASE_OUT)
+	if final_tick:
+		btw.tween_property(self, "modulate", Color(base.r * 1.9, base.g * 0.40, base.b * 0.35, base.a), 0.10)
+		btw.tween_property(self, "modulate", base, 0.40).set_ease(Tween.EASE_OUT)
+	else:
+		btw.tween_property(self, "modulate", Color(base.r * 1.6, base.g * 0.55, base.b * 0.5, base.a), 0.08)
+		btw.tween_property(self, "modulate", base, 0.24).set_ease(Tween.EASE_OUT)
 
 
 # ═══════════════════════════════════════════
 #  DAMAGE
 # ═══════════════════════════════════════════
 
+## Bulwark Novice (shield_rage): losing the Shield stokes it — +2 ATK this fight
+## (+3 upgraded). Self-contained on the card so every shield-pop path (normal
+## hits, armor-bypass hits) pays out identically.
+func _apply_shield_rage() -> void:
+	if card_data.get("passive", "") != "shield_rage":
+		return
+	var rage: int = 3 if bool(card_data.get("is_upgraded", false)) else 2
+	current_atk += rage
+	_spawn_keyword_chip("RAGE +%d" % rage, Color(1.0, 0.55, 0.25))
+
+
 func take_damage(amount: int) -> void:
 	# Shield: absorb the entire first hit, then pop the shield.
 	if state.has_shield:
 		state.has_shield = false
 		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0), "shield")
+		_apply_shield_rage()
 		update_stat_display()
 		_flash_hit()
 		return
 	var original := amount
 	if has_keyword("armored"):
-		# Fortress Stone relic makes the player's own armored creatures block 2
-		# instead of 1. Enemy armored stays at 1 (the relic is a player buff).
-		# Previously the reduction was hardcoded to 1, so Fortress Stone was a
-		# dead pickup that did nothing — a wasted shop slot / reward choice.
-		var reduction := 1
-		if not is_opponent and RunState.has_relic("fortress_stone"):
-			reduction = 2
-		amount = maxi(1, amount - reduction)
+		amount = maxi(1, amount - 1)
 		var blocked: int = original - amount
 		if blocked > 0:
 			_spawn_keyword_chip("BLOCKED %d" % blocked, Color(0.55, 0.78, 1.0), "armored")
@@ -5694,12 +5871,20 @@ func take_damage(amount: int) -> void:
 		last_stand_used = true
 		_spawn_keyword_chip("LAST STAND", Color(1.0, 0.85, 0.20), "last_stand")
 		_play_last_stand_flare()
+		last_stand_fired.emit()
+		if net_last_stand_cb.is_valid():
+			net_last_stand_cb.call(self)
 	update_stat_display()
 	_spawn_damage_number(amount)
 	if amount > 0:
 		damaged.emit(amount)
 	if current_hp <= 0:
-		try_die()
+		# During a simultaneous clash the death is HELD (see defer_deaths) so this
+		# creature still gets its retaliation; Combat._cleanup_dead flushes it after.
+		if not defer_deaths:
+			try_die()
+		else:
+			_mark_mortally_struck()
 	else:
 		_flash_hit()
 
@@ -5709,6 +5894,7 @@ func take_damage_bypass_armor(amount: int) -> void:
 	if state.has_shield:
 		state.has_shield = false
 		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0), "shield")
+		_apply_shield_rage()
 		update_stat_display()
 		_flash_hit()
 		return
@@ -5722,12 +5908,19 @@ func take_damage_bypass_armor(amount: int) -> void:
 		last_stand_used = true
 		_spawn_keyword_chip("LAST STAND", Color(1.0, 0.85, 0.20), "last_stand")
 		_play_last_stand_flare()
+		last_stand_fired.emit()
+		if net_last_stand_cb.is_valid():
+			net_last_stand_cb.call(self)
 	update_stat_display()
 	_spawn_damage_number(amount)
 	if amount > 0:
 		damaged.emit(amount)
 	if current_hp <= 0:
-		try_die()
+		# Held during a simultaneous clash (see defer_deaths / take_damage).
+		if not defer_deaths:
+			try_die()
+		else:
+			_mark_mortally_struck()
 	else:
 		_flash_hit()
 
@@ -5740,6 +5933,9 @@ func try_die() -> void:
 	will_die.emit()
 	if current_hp > 0:
 		update_stat_display()
+		# A rescue (Phantom Veil, Reborn) pulled it back — undo the mortal slump
+		# so the survivor doesn't stand around in corpse gray.
+		_recover_from_mortal_slump()
 		return
 	_die()
 
@@ -5754,6 +5950,10 @@ func _spawn_keyword_chip(text: String, color: Color, kw_id: String = "") -> void
 	var vfx := _combat_vfx_target()
 	if vfx == null:
 		return
+	# Battle log: keyword math that fires as a chip (SHIELD pop, ARMORED block,
+	# LAST STAND, POISON) is exactly what the chronicle should remember.
+	if vfx.has_method("log_status"):
+		vfx.log_status(self, text)
 	var anchor := global_position + Vector2(size.x * scale.x * 0.5, size.y * scale.y * 0.06)
 	if vfx.has_method("spawn_keyword_callout"):
 		var icon: Texture2D = GameTheme.get_keyword_icon(kw_id) if kw_id != "" else null
@@ -5884,16 +6084,51 @@ func _flash_hit() -> void:
 	tw.tween_property(self, "modulate", Color(base.r * 1.8, base.g * 0.5, base.b * 0.45, base.a), 0.06)
 	tw.tween_property(self, "modulate", base, 0.22).set_ease(Tween.EASE_OUT)
 	if AudioBank != null:
-		AudioBank.play_sfx("hit")
+		# "hit_creature" is the bespoke creature-impact cue; it falls back to the
+		# generic "hit" until clips land (AudioBank.SFX_FALLBACKS). This is the
+		# SOLE owner of struck-survivor audio — Combat's clash path plays no hit
+		# cue of its own, or every strike would sound twice.
+		AudioBank.play_sfx("hit_creature")
+
+
+var _mortal_slumped: bool = false
+var _mortal_slump_base: Color = Color(1, 1, 1, 1)
+
+func _mark_mortally_struck() -> void:
+	# A killed creature's death is HELD during a simultaneous clash (defer_deaths)
+	# so it still gets its retaliation — but with no feedback the fatal blow read
+	# as a MISS: the card kept idling at 0 HP until the flush, seconds later. Red
+	# impact punch settling into a drained corpse-gray slump, held until _die()'s
+	# flourish takes over (or a rescue restores the living tint — see try_die).
+	if static_display or _mortal_slumped:
+		return
+	_mortal_slumped = true
+	_mortal_slump_base = modulate
+	var b := _mortal_slump_base
+	var tw := create_tween()
+	tw.tween_property(self, "modulate", Color(b.r * 1.8, b.g * 0.5, b.b * 0.45, b.a), 0.06)
+	tw.tween_property(self, "modulate", Color(0.42, 0.38, 0.36, b.a), 0.30) \
+		.set_ease(Tween.EASE_OUT)
+
+
+func _recover_from_mortal_slump() -> void:
+	if not _mortal_slumped:
+		return
+	_mortal_slumped = false
+	var tw := create_tween()
+	tw.tween_property(self, "modulate", _mortal_slump_base, 0.25).set_ease(Tween.EASE_OUT)
 
 
 func _die() -> void:
+	if _dead:
+		return
+	_dead = true
 	destroyed.emit()
 	# Stop idle bob from writing position.y each frame — it would fight the death
 	# tween (and the sacrifice rise in particular).
 	_idle_bob_enabled = false
 	if static_display or not is_inside_tree():
-		if AudioBank != null:
+		if AudioBank != null and not death_cue_played:
 			AudioBank.play_sfx("death")
 		queue_free()
 		return
@@ -5915,7 +6150,9 @@ func _die() -> void:
 		stw.tween_property(self, "rotation", rotation + randf_range(-0.12, 0.12), 0.6)
 		stw.chain().tween_callback(queue_free)
 		return
-	if AudioBank != null:
+	# Skipped when the clash path already sounded "creature_death" at the impact
+	# beat (death_cue_played) — the flush is the visual flourish, not a second hit.
+	if AudioBank != null and not death_cue_played:
 		AudioBank.play_sfx("death")
 	# Death flourish: fade to a dark red while shrinking + spinning slightly, then free.
 	var tw := create_tween()
@@ -6036,7 +6273,19 @@ func _spawn_press_ring() -> void:
 	tw.chain().tween_callback(ring.queue_free)
 
 
-func play_attack_lunge() -> void:
+## True while this card's lunge or hit-recoil tween is mid-flight. The idle bob
+## (_process) checks this and yields position.y to the combat tween so the two
+## don't fight — see the note there. Scale-only tweens are intentionally excluded
+## (the bob writes position.y, not scale, so they can't conflict).
+func _combat_tween_active() -> bool:
+	if _lunge_tween != null and _lunge_tween.is_valid() and _lunge_tween.is_running():
+		return true
+	if _recoil_tween != null and _recoil_tween.is_valid() and _recoil_tween.is_running():
+		return true
+	return false
+
+
+func play_attack_lunge(strength: float = 1.0) -> void:
 	# Quick wind-up → thrust toward the opponent's side → recoil back. Player
 	# creatures lunge up, enemy creatures lunge down. The brief anticipation
 	# pull-back (away from the target) before the strike makes simultaneous combat
@@ -6044,10 +6293,15 @@ func play_attack_lunge() -> void:
 	# rather than numbers silently changing. Kept fast so the forward apex still
 	# lands near the combat code's LUNGE_APEX (0.09s) impact beat, and position is
 	# restored exactly so the slot's CenterContainer layout is unaffected.
+	#
+	# The idle bob yields position.y for the duration (see _combat_tween_active) so
+	# the strike stays perfectly clean instead of fighting the breathe each frame.
 	if static_display or not is_inside_tree():
 		return
 	var dir := 1.0 if is_opponent else -1.0
 	var rest := position
+	var rest_scale := scale
+	pivot_offset = size * 0.5
 	if _lunge_tween != null and _lunge_tween.is_valid():
 		_lunge_tween.kill()
 	_lunge_tween = create_tween()
@@ -6055,11 +6309,26 @@ func play_attack_lunge() -> void:
 	# strike still peaks on time.
 	_lunge_tween.tween_property(self, "position", rest - Vector2(0, dir * 7.0), 0.05) \
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-	# Strike: drive forward into the target.
-	_lunge_tween.tween_property(self, "position", rest + Vector2(0, dir * 26.0), 0.08) \
+	# Strike: drive forward into the target. `strength` scales the drive so a
+	# heavy blow visibly travels deeper before snapping back (Combat passes
+	# _lunge_strength(atk); 1.0 = the historical 26px).
+	_lunge_tween.tween_property(self, "position", rest + Vector2(0, dir * 26.0 * strength), 0.08) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	# Settle home.
 	_lunge_tween.tween_property(self, "position", rest, 0.16) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	# Secondary motion (own tween so it can't perturb the position timing above):
+	# a subtle squash-&-stretch — the body stretches along the line of travel as it
+	# drives in (weight behind the blow), then settles. Scale is bob-independent so
+	# this never fights the breathe, and it complements the defender's recoil squash
+	# for a readable, juicy clash.
+	if _lunge_scale_tween != null and _lunge_scale_tween.is_valid():
+		_lunge_scale_tween.kill()
+	_lunge_scale_tween = create_tween()
+	var stretch := Vector2(1.0 - 0.04 * strength, 1.0 + 0.07 * strength)
+	_lunge_scale_tween.tween_property(self, "scale", rest_scale * stretch, 0.13) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_lunge_scale_tween.tween_property(self, "scale", rest_scale, 0.17) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 
@@ -6360,12 +6629,28 @@ func enable_idle_bob() -> void:
 
 
 func _process(delta: float) -> void:
+	# Live status rail fallback poll: a cheap signature diff 4×/sec catches the
+	# keyword/status mutation sites that don't route through update_stat_display
+	# (there are ~30 spread across Combat.gd — polling beats chasing them all).
+	if is_on_battlefield and _compact_root != null:
+		_status_poll_accum += delta
+		if _status_poll_accum >= 0.25:
+			_status_poll_accum = 0.0
+			_refresh_status_rail()
 	if not _idle_bob_enabled:
 		return
 	# Field repositioning owns position.y while a board creature is lifted — the bob
 	# must NOT write it then or it pins the card to its anchor Y while only X tracks
 	# the cursor (that was the "moves jump to a random place" multiplayer bug).
 	if _is_being_dragged or _is_playing or _field_grabbing:
+		return
+	# A lunge or hit-recoil tween owns position.y for its whole duration. If the
+	# idle bob also writes position.y every frame the two fight, superimposing a
+	# tremor on the strike (the "not quite buttery" combat motion). Yield to the
+	# combat tween; _bob_time is frozen while we skip (it advances below this
+	# guard), so when the tween finishes the breathe resumes exactly where it
+	# paused — seamless, no pop.
+	if _combat_tween_active():
 		return
 	if not is_on_battlefield:
 		# Card just left the battlefield — stop bobbing.
@@ -6391,18 +6676,42 @@ func rearm_idle_bob_next_frame() -> void:
 
 
 func set_affordable(can_afford: bool) -> void:
-	# Slay-the-Spire-style readability: unaffordable cards dim noticeably so the
-	# player can see at a glance which cards their mana can play. Skip on
-	# battlefield/static cards (no cost concept there).
+	# Slay-the-Spire / Hearthstone readability: a card the current Command pool
+	# can't pay for reads as clearly DISABLED — a cool darken PLUS a desaturating
+	# grey veil that drains the art's colour. Darkening alone left vivid art (e.g.
+	# Inferno's flames) looking merely "a bit dark" next to its neighbours; the
+	# veil flattens the colour so unplayable cards are unmistakable at a glance.
+	# Skip battlefield/static cards (no cost concept) and mid-drag (the drag owns
+	# modulate during the drag → release flow).
 	if is_on_battlefield or static_display:
 		return
 	if _is_being_dragged:
-		# Dragging owns the modulate during the drag → release flow. Skip.
 		return
 	if can_afford:
 		modulate = Color(1.0, 1.0, 1.0, 1.0)
+		if _unplayable_veil != null and is_instance_valid(_unplayable_veil):
+			_unplayable_veil.visible = false
 	else:
-		modulate = Color(0.55, 0.55, 0.62, 0.92)
+		modulate = Color(0.60, 0.62, 0.70, 1.0)
+		_ensure_unplayable_veil()
+		_unplayable_veil.visible = true
+
+
+func _ensure_unplayable_veil() -> void:
+	# Cool grey wash over the whole card face. Blended over the (varied) art it
+	# pulls every colour toward flat grey — the canonical "can't play this" read
+	# that pure modulate-darkening can't achieve (multiply darkens but never
+	# desaturates). Full-rect + mouse-ignore so it never eats input; z_index 5
+	# sits above the card face but below the battlefield threat flag (6).
+	if _unplayable_veil != null and is_instance_valid(_unplayable_veil):
+		return
+	var veil := ColorRect.new()
+	veil.color = Color(0.40, 0.42, 0.49, 0.42)
+	veil.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	veil.set_anchors_preset(Control.PRESET_FULL_RECT)
+	veil.z_index = 5
+	add_child(veil)
+	_unplayable_veil = veil
 
 
 func set_display_cost(effective_cost: int) -> void:
@@ -6470,8 +6779,11 @@ func _on_mouse_entered() -> void:
 		_hover_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 		_hover_tween.tween_property(self, "scale", Vector2(1.15, 1.15), 0.11)
 		_hover_tween.tween_property(self, "rotation", 0.0, 0.11)
+		# -96 tracks Combat._layout_hand's PEEK 92 (was -80 at PEEK 76): the
+		# resting fan tucked 16px lower, so the lift grew 16px to keep the
+		# hovered pose at the same screen height.
 		_hover_tween.tween_property(self, "position",
-			_hand_target_position + Vector2(0, -80), 0.11)
+			_hand_target_position + Vector2(0, -96), 0.11)
 		_hover_tween.tween_property(_lift_shadow, "modulate:a", 1.0, 0.13)
 	# Honour the tooltip delay setting — 0 = show instantly. The lift/scale
 	# still happens immediately; only the detail panel is deferred so brief
@@ -6542,8 +6854,6 @@ func _gui_input(event: InputEvent) -> void:
 				# Combat didn't wire (e.g. tokens) fall through instead of lifting
 				# off into a handler-less drag.
 				_begin_field_grab(event.global_position)
-			elif floop_interactive and is_on_battlefield and not is_opponent and has_floop():
-				floop_clicked.emit()
 			elif not is_on_battlefield:
 				_start_drag(event.global_position)
 		else:
@@ -6551,6 +6861,14 @@ func _gui_input(event: InputEvent) -> void:
 				_end_field_grab(event.global_position)
 			else:
 				_end_drag()
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT \
+			and event.pressed:
+		# Hand cards only — battlefield/opponent/static cards ignore it. Going
+		# through _gui_input (not Combat._input) means any modal overlay with
+		# MOUSE_FILTER_STOP naturally shields the hand from stray dismissals.
+		if not is_on_battlefield and not is_opponent and not static_display \
+				and not _is_being_dragged:
+			dismiss_requested.emit()
 	elif event is InputEventMouseMotion:
 		if _field_grabbing:
 			_update_field_grab(event.global_position)
@@ -6558,9 +6876,103 @@ func _gui_input(event: InputEvent) -> void:
 			_update_drag(event.global_position)
 
 
+## Freeze the hand-fan/hover motion so an external flight tween (dismissal's
+## arc to the discard pile) owns this card's transform until it frees. The
+## fan and hover tweens write position/scale every frame and would fight any
+## outside animation — same reason _start_drag kills them.
+func begin_flight() -> void:
+	if _hand_tween != null and _hand_tween.is_valid():
+		_hand_tween.kill()
+	if _hover_tween != null and _hover_tween.is_valid():
+		_hover_tween.kill()
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	pivot_offset = size * 0.5
+
+
+## ── Marked-for-discard (2026-07-07 discard rework) ─────────────────────────
+## Right-click toggles this via Combat._on_card_dismiss_requested; every marked
+## card is flushed to the discard pile when the turn ends. The card stays fully
+## playable while marked — grabbing it to play rescinds the mark (_start_drag).
+var marked_for_discard: bool = false
+var _discard_mark: Control = null
+
+
+func set_discard_marked(on: bool) -> void:
+	if marked_for_discard == on:
+		return
+	marked_for_discard = on
+	if not on:
+		if _discard_mark != null and is_instance_valid(_discard_mark):
+			_discard_mark.queue_free()
+		_discard_mark = null
+		modulate = Color.WHITE
+		return
+	# The writ's ink drains (dim) and a discard band is laid across it. The band
+	# stamps DOWN into place (scale 1.35 → 1) so marking reads as an act, not a
+	# state flip; Combat._layout_hand additionally sinks the card in the fan.
+	# The band rides the card's UPPER third (anchor 0.26), NOT its centre: the
+	# resting hand hangs most of each card below the screen fold (cards lift on
+	# hover), and a sunk marked card shows only its top — a centre band would be
+	# off-screen, hiding the very label that says the card is marked.
+	modulate = Color(0.80, 0.75, 0.68)
+	_discard_mark = Control.new()
+	_discard_mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_discard_mark.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_discard_mark)
+
+	var band := Panel.new()
+	band.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	band.anchor_left = 0.0
+	band.anchor_right = 1.0
+	band.anchor_top = 0.26
+	band.anchor_bottom = 0.26
+	band.offset_left = -8.0
+	band.offset_right = 8.0
+	band.offset_top = -21.0
+	band.offset_bottom = 21.0
+	var st := StyleBoxFlat.new()
+	st.bg_color = Color(0.26, 0.09, 0.07, 0.93)      # oxblood seal-wax band
+	st.border_color = Color(0.82, 0.68, 0.44, 0.85)  # gilt edge, kit standard
+	st.set_border_width_all(2)
+	st.shadow_color = Color(0, 0, 0, 0.45)
+	st.shadow_size = 8
+	band.add_theme_stylebox_override("panel", st)
+	_discard_mark.add_child(band)
+
+	var lbl := Label.new()
+	lbl.text = "DISCARD"
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if GameTheme.font_display != null:
+		lbl.add_theme_font_override("font", GameTheme.font_display)
+	lbl.add_theme_font_size_override("font_size", 26)
+	lbl.add_theme_color_override("font_color", Color(0.93, 0.86, 0.72))
+	lbl.add_theme_color_override("font_outline_color", Color(0.12, 0.04, 0.03, 0.9))
+	lbl.add_theme_constant_override("outline_size", 4)
+	band.add_child(lbl)
+
+	_discard_mark.pivot_offset = size * 0.5
+	_discard_mark.scale = Vector2(1.35, 1.35)
+	_discard_mark.modulate.a = 0.0
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(_discard_mark, "scale", Vector2.ONE, 0.16) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(_discard_mark, "modulate:a", 1.0, 0.12)
+
+
 func _start_drag(mouse_pos: Vector2) -> void:
 	if _is_playing or is_on_battlefield or is_opponent:
 		return
+	# Not your turn (skirmish): the hand is locked — don't even lift the card.
+	# The grey unplayable veil is already showing; this makes it truly inert.
+	if not hand_interactive:
+		return
+	# Grabbing a marked card rescinds its discard — playing it is the clearest
+	# possible "I changed my mind" (and the band must never ride onto the board).
+	if marked_for_discard:
+		set_discard_marked(false)
 	_is_being_dragged = true
 	_any_card_dragging = true
 	_is_hovered = false
@@ -6673,9 +7085,6 @@ func _end_field_grab(_mouse_pos: Vector2) -> void:
 		_field_lifted = false
 		drag_ended.emit()
 		field_move_dropped.emit(global_position + size * 0.5)
-	elif floop_interactive and has_floop() and not is_opponent:
-		# A press that never travelled is a floop toggle, not a move.
-		floop_clicked.emit()
 
 
 # ═══════════════════════════════════════════
@@ -6684,13 +7093,23 @@ func _end_field_grab(_mouse_pos: Vector2) -> void:
 
 static var _detail_popup: Control = null
 static var _detail_owner = null
+# Per-card cached writ inspector. The panel is ~30-40 nodes including the
+# procedural parchment painters (WritLeaf/ParchmentPlate/WaxSeal), so rebuilding
+# it on every hover-sweep was the dominant "spike when moving cards". It is built
+# once per card and reused while its displayed content is unchanged; because it
+# lives on the SHARED popup layer (not under this card) it is freed explicitly in
+# NOTIFICATION_PREDELETE so a drawn-then-discarded card can't orphan it.
+var _detail_cache: Control = null
+var _detail_cache_key := ""
 
 func _show_detail_panel() -> void:
 	if card_data.is_empty():
 		return
+	# Only one inspector shows at a time: hide the one another card left up.
+	# Hide, don't free — that card keeps it cached for its own next hover.
+	if _detail_popup != null and is_instance_valid(_detail_popup) and _detail_owner != self:
+		_detail_popup.visible = false
 	_detail_owner = self
-	if _detail_popup and is_instance_valid(_detail_popup):
-		_detail_popup.queue_free()
 
 	var vp = get_viewport()
 	if not vp:
@@ -6707,12 +7126,34 @@ func _show_detail_panel() -> void:
 	if not host:
 		return
 
-	_detail_popup = _build_detail()
-	host.add_child(_detail_popup)
+	# Build-once / reuse, keyed by the displayed content (card_data + live atk/hp).
+	# A battlefield creature that took damage or grew re-keys and rebuilds; a static
+	# hand card builds once and is reused for the whole turn. The panel docks at a
+	# FIXED screen position (see _wd_build tail), so a reused panel needs no move.
+	var key := str(card_data.hash()) + "|" + str(effective_atk()) + "|" + str(current_hp)
+	var reused: bool = _detail_cache != null and is_instance_valid(_detail_cache) \
+		and _detail_cache_key == key
+	if reused:
+		_detail_popup = _detail_cache
+		if _detail_popup.get_parent() == null:
+			host.add_child(_detail_popup)
+		_detail_popup.visible = true
+	else:
+		if _detail_cache != null and is_instance_valid(_detail_cache):
+			_detail_cache.queue_free()
+		_detail_cache = _build_detail()
+		_detail_cache_key = key
+		_detail_popup = _detail_cache
+		host.add_child(_detail_popup)
 
 	_detail_popup.modulate.a = 0.0
 	var tw = _detail_popup.create_tween()
 	tw.tween_property(_detail_popup, "modulate:a", 1.0, 0.12)
+
+	# A reused panel was already laid out + clamped on its first build, so skip the
+	# frame-deferred clamp below — re-hovers stay allocation- and await-free.
+	if reused:
+		return
 
 	# Once Godot has laid the popup out, clamp it so a tall popup never runs off
 	# the bottom of the screen. The writ slip docks mid-LEFT (see _wd_build), which
@@ -6735,10 +7176,24 @@ func _show_detail_panel() -> void:
 func _hide_detail_panel() -> void:
 	if _detail_owner != self:
 		return
+	# Hide (not free): the panel stays cached on this card for the next hover.
 	if _detail_popup and is_instance_valid(_detail_popup):
-		_detail_popup.queue_free()
-		_detail_popup = null
+		_detail_popup.visible = false
+	_detail_popup = null
 	_detail_owner = null
+
+
+func _notification(what: int) -> void:
+	# The cached inspector lives on the shared popup layer, not under this card, so
+	# free it explicitly when the card is deleted — otherwise every drawn-then-
+	# discarded card would orphan a hidden panel on that layer.
+	if what == NOTIFICATION_PREDELETE:
+		if _detail_owner == self:
+			_detail_owner = null
+			_detail_popup = null
+		if _detail_cache != null and is_instance_valid(_detail_cache):
+			_detail_cache.queue_free()
+			_detail_cache = null
 
 
 func _detail_host_layer(vp: Viewport) -> CanvasLayer:
@@ -7240,3 +7695,37 @@ func _describe_trigger(data: Dictionary) -> String:
 		"heal_all_friendly": return "Heal all friendlies %d HP" % v
 		"summon_token": return "Summon a token creature"
 	return t.replace("_", " ").capitalize()
+
+
+## Compose face rules text for a descless card (enemy-only creatures carry no
+## `desc`). Trigger lines first — the custom rules a keyword device can't show —
+## then keyword glossary lines. Only used when synth_desc_if_empty is set (the
+## battle-log hover preview), so it's a teaching surface like the detail panel.
+func _synthesized_rules_text() -> String:
+	var lines: Array[String] = []
+	if card_data.has("on_enter") and card_data.on_enter is Dictionary and card_data.on_enter.has("type"):
+		lines.append("On enter: %s." % _describe_trigger(card_data.on_enter))
+	if card_data.has("on_death") and card_data.on_death is Dictionary and card_data.on_death.has("type"):
+		lines.append("On death: %s." % _describe_trigger(card_data.on_death))
+	if card_data.has("adj_buff") and card_data.adj_buff is Dictionary:
+		var ab: Dictionary = card_data.adj_buff
+		var parts: Array[String] = []
+		if int(ab.get("atk", 0)) != 0: parts.append("+%d ATK" % int(ab.atk))
+		if int(ab.get("hp", 0)) != 0: parts.append("+%d HP" % int(ab.hp))
+		if parts.size() > 0:
+			lines.append("Adjacent friendlies: %s." % ", ".join(parts))
+	for kw in card_data.get("keywords", []):
+		var k := String(kw)
+		if k in ["on_enter", "on_death", "adj_buff", "adjacent"]:
+			continue
+		if not KeywordEffects.KEYWORDS.has(k):
+			continue
+		var kdef: Dictionary = KeywordEffects.KEYWORDS[k]
+		var disp := str(kdef.get("display", ""))
+		if k == "doom":
+			disp = "Doom %d" % int(card_data.get("doom", 0))
+		elif k == "wither":
+			disp = "Wither %d" % int(card_data.get("wither", 0))
+		var kd := str(kdef.get("desc", ""))
+		lines.append("%s — %s" % [disp, kd] if kd != "" else disp)
+	return "\n".join(lines)

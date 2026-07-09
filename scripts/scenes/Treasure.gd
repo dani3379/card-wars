@@ -29,6 +29,14 @@ func _ready() -> void:
 	GameTheme.make_settings_gear(self)
 
 
+func _unhandled_input(event: InputEvent) -> void:
+	# Esc opens the pause/Settings overlay — leaving with the loot is the
+	# deliberate "Take Gold Only" button, not a stray keypress.
+	if event.is_action_pressed("ui_cancel"):
+		GameTheme.open_settings_overlay()
+		get_viewport().set_input_as_handled()
+
+
 func _build_ui() -> void:
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere":
@@ -101,7 +109,9 @@ func _make_section_header(text: String) -> HBoxContainer:
 	left.color = rule_col
 	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(left)
-	var lbl := GameTheme.make_label(text, 24, GameTheme.KEYWORD_GOLD)
+	# Quiet parchment caption, not gold — a document subheading shouldn't compete
+	# with the screen title. Gold is reserved for the "+N gold" reward line.
+	var lbl := GameTheme.make_label(text, 24, GameTheme.DESC_DIM)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(lbl)

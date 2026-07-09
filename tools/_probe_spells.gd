@@ -13,7 +13,7 @@ extends SceneTree
 const TURN_WAIT_TICKS := 80
 const TICK := 0.1
 # Spells whose resolver opens a discard/Discover/keyword picker (await input).
-const PICKER_BLOCKLIST := ["war_chant", "lost_tome", "war_council", "scrap",
+const PICKER_BLOCKLIST := ["war_chant", "lost_tome", "war_council",
 	"gambit", "censer_light", "recycle"]
 
 var RS: Node

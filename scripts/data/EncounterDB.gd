@@ -74,7 +74,7 @@ func get_kingdom_pool(act: int, type: String, faction: String) -> Array:
 ## terrain (RunState.apply_terrain_redeal assigns one terrain at a time),
 ## so the scales don't need to agree across terrains.
 const TERRAIN_KW := {
-	"woods": ["swift", "ranged", "piercing"],
+	"woods": ["swift", "piercing"],
 	"pass": ["armored", "thorns", "shield", "last_stand", "formation"],
 	"ash": ["doom", "rampage", "overrun"],
 }
@@ -184,6 +184,8 @@ func make_card_data(creature: Dictionary) -> Dictionary:
 			data[key] = creature[key].duplicate(true)
 	if creature.has("wither"):
 		data["wither"] = creature.wither
+	if bool(creature.get("sniper", false)) and not data["keywords"].has("sniper"):
+		data["keywords"].append("sniper")
 	# Doom bombs: the countdown rides the card data (Card2D seeds doom_counter
 	# from card_data.doom; Combat reads doom_damage on detonation). Without
 	# this passthrough a deck-authored Cinder lands at Doom 0 and blows on its
@@ -302,7 +304,7 @@ const BOSS_PHASES: Dictionary = {
 			"passive_desc": "Start of your turn: the top card of your draw pile is exiled (removed from this fight).",
 			"transition_msg": "THE LANTERNHALL READS YOUR LAST PAGES!",
 			"transition_effect": {"type": "summon", "name": "Star-Reader",
-				"atk": 2, "hp": 3, "kw": ["ranged"]}},
+				"atk": 2, "hp": 3, "kw": []}},
 		{"threshold": 0, "passive_id": "forge_burn_all",
 			"passive_desc": "Start of each round: deal 1 damage to every creature on the board (both sides).",
 			"transition_msg": "THE EVERFLAME TAKES THE HALL!",
@@ -649,7 +651,7 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Outrider", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
 			{"name": "Salt Harpy", "atk": 2, "hp": 2, "kw": ["swift"]},
-			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["swift"]},
 			{"name": "Banner-Bearer", "atk": 1, "hp": 3,
 				"adj_buff": {"atk": 1, "hp": 0}},
 			{"name": "Wake Hound", "atk": 2, "hp": 2, "kw": ["swift"],
@@ -661,7 +663,7 @@ const ENCOUNTERS: Dictionary = {
 		],
 		"reinforcement": {"name": "Rider", "atk": 2, "hp": 2, "kw": ["swift"]},
 		"reinforcement_pool": [
-			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["swift"]},
 			{"name": "Outrider", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
 		],
@@ -724,23 +726,23 @@ const ENCOUNTERS: Dictionary = {
 		"passive_desc": "Start of your turn: the top card of your draw pile is exiled (removed from this fight).",
 		"preamble": "He came up burning things, then the library taught him the colder arithmetic: mirrors, circles, endings read a season early. He has already read yours.",
 		"deck": [
-			{"name": "Star-Reader", "atk": 2, "hp": 2, "kw": ["ranged"]},
-			{"name": "Claw Adept", "atk": 1, "hp": 3, "kw": ["ranged"],
+			{"name": "Star-Reader", "atk": 2, "hp": 2, "kw": []},
+			{"name": "Claw Adept", "atk": 1, "hp": 3, "kw": [],
 				"on_enter": {"type": "debuff_opposing_atk", "value": 2}},
-			{"name": "Burning Glass", "atk": 4, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Burning Glass", "atk": 4, "hp": 2, "kw": ["piercing"]},
 			{"name": "Reflection", "atk": 2, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "copy_opposing_keywords"}},
 			{"name": "Ink Beast", "atk": 3, "hp": 4,
 				"on_enter": {"type": "discard_random"}},
 			{"name": "Hall-Watcher", "atk": 1, "hp": 6, "kw": ["thorns", "armored"]},
-			{"name": "Cold Lector", "atk": 4, "hp": 4, "kw": ["ranged"],
+			{"name": "Cold Lector", "atk": 4, "hp": 4, "kw": [],
 				"intents": ["ATK", "ABILITY", "ATK", "ABILITY"],
 				"ability": {"type": "steal_atk", "value": 1}},
 		],
 		"reinforcement": {"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
 		"reinforcement_pool": [
-			{"name": "Star-Reader", "atk": 2, "hp": 2, "kw": ["ranged"]},
-			{"name": "Burning Glass", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Star-Reader", "atk": 2, "hp": 2, "kw": []},
+			{"name": "Burning Glass", "atk": 3, "hp": 2, "kw": ["piercing"]},
 		],
 	},
 
@@ -829,7 +831,7 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Salt Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
 			{"name": "Outrider", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
-			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["swift"]},
 			{"name": "Banner-Bearer", "atk": 1, "hp": 3,
 				"adj_buff": {"atk": 1, "hp": 0}},
 			{"name": "Shieldbearer", "atk": 1, "hp": 5, "kw": ["armored"]},
@@ -877,16 +879,16 @@ const ENCOUNTERS: Dictionary = {
 		"passive_desc": "Start of each round: summon a 2/2 Swift creature in an empty enemy lane.",
 		"preamble": "He read each kingdom's ending a season before you wrote it. What is left of them sits beside him now, cold and catalogued and pointed at you. He has already seen whether you win.",
 		"deck": [
-			{"name": "Star-Reader", "atk": 2, "hp": 3, "kw": ["ranged"]},
-			{"name": "Burning Glass", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Star-Reader", "atk": 2, "hp": 3, "kw": []},
+			{"name": "Burning Glass", "atk": 3, "hp": 2, "kw": ["piercing"]},
 			{"name": "Reflection", "atk": 2, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "copy_opposing_keywords"}},
-			{"name": "Claw Adept", "atk": 1, "hp": 3, "kw": ["ranged"],
+			{"name": "Claw Adept", "atk": 1, "hp": 3, "kw": [],
 				"on_enter": {"type": "debuff_opposing_atk", "value": 2}},
 			{"name": "Hall-Watcher", "atk": 1, "hp": 6, "kw": ["thorns", "armored"]},
 			{"name": "Ink Beast", "atk": 3, "hp": 5,
 				"on_enter": {"type": "discard_random"}},
-			{"name": "Cold Lector", "atk": 4, "hp": 5, "kw": ["ranged"]},
+			{"name": "Cold Lector", "atk": 4, "hp": 5, "kw": []},
 		],
 		"reinforcement": {"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
 	},
@@ -933,7 +935,7 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Runt", "atk": 1, "hp": 2, "kw": ["swift"],
 				"on_death": {"type": "summon", "atk": 1, "hp": 1}},
 			{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
-			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["swift"]},
 			{"name": "Pyro", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_random_player", "value": 1}},
 			{"name": "Looter", "atk": 2, "hp": 2, "kw": ["swift"],
@@ -950,7 +952,7 @@ const ENCOUNTERS: Dictionary = {
 					"on_death": {"type": "summon", "atk": 1, "hp": 1}},
 				{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
 				{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
-				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["swift"]},
 				{"name": "Pyro", "atk": 2, "hp": 2, "kw": ["swift"],
 					"on_enter": {"type": "damage_random_player", "value": 1}},
 				{"name": "Chief", "atk": 3, "hp": 3, "kw": ["swift"],
@@ -958,8 +960,8 @@ const ENCOUNTERS: Dictionary = {
 			],
 			# Variant: slinger line — ranged-heavy, less swift up close.
 			[
-				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
-				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["swift"]},
+				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["swift"]},
 				{"name": "Looter", "atk": 2, "hp": 2, "kw": ["swift"],
 					"on_enter": {"type": "damage_face", "value": 1}},
 				{"name": "Pyro", "atk": 2, "hp": 2, "kw": ["swift"],
@@ -973,7 +975,7 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement": {"name": "Whelp", "atk": 1, "hp": 1, "kw": ["swift"]},
 		"reinforcement_pool": [
 			{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
-			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["swift"]},
 		],
 	},
 
@@ -1056,9 +1058,9 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Cutpurse", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
 			{"name": "Brawler", "atk": 3, "hp": 3, "kw": ["armored"]},
-			{"name": "Archer", "atk": 2, "hp": 2, "kw": ["ranged"],
+			{"name": "Archer", "atk": 2, "hp": 2, "kw": [],
 				"on_enter": {"type": "damage_random_player", "value": 1}},
-			{"name": "Hexer", "atk": 1, "hp": 3, "kw": ["ranged"],
+			{"name": "Hexer", "atk": 1, "hp": 3, "kw": [],
 				"on_enter": {"type": "debuff_opposing_atk", "value": 1}},
 			{"name": "Saboteur", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
@@ -1071,10 +1073,10 @@ const ENCOUNTERS: Dictionary = {
 			[
 				{"name": "Cutpurse", "atk": 2, "hp": 2,
 					"on_enter": {"type": "damage_face", "value": 1}},
-				{"name": "Archer", "atk": 2, "hp": 2, "kw": ["ranged"],
+				{"name": "Archer", "atk": 2, "hp": 2, "kw": [],
 					"on_enter": {"type": "damage_random_player", "value": 1}},
-				{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": ["ranged"]},
-				{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": ["ranged"]},
+				{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": []},
+				{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": []},
 				{"name": "Camp Mutt", "atk": 2, "hp": 2, "kw": ["swift"]},
 				{"name": "Captain", "atk": 3, "hp": 4,
 					"intents": ["ATK", "ATK", "CHARGE", "ATK"]},
@@ -1179,7 +1181,7 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Pebble", "atk": 1, "hp": 3, "kw": ["thorns"],
 				"on_death": {"type": "damage_opposing_lane", "value": 1}},
 			{"name": "Bastion", "atk": 1, "hp": 5, "kw": ["armored", "thorns"]},
-			{"name": "Stone Hurler", "atk": 2, "hp": 3, "kw": ["ranged", "armored"]},
+			{"name": "Stone Hurler", "atk": 2, "hp": 3, "kw": ["armored"]},
 			{"name": "Granite Guard", "atk": 2, "hp": 4, "kw": ["armored"]},
 			{"name": "Earthshaker", "atk": 3, "hp": 3, "kw": ["armored"],
 				"on_enter": {"type": "damage_random_player", "value": 2}},
@@ -1206,10 +1208,10 @@ const ENCOUNTERS: Dictionary = {
 		"deck": [
 			{"name": "Chick", "atk": 1, "hp": 1, "kw": ["swift", "last_stand"]},
 			{"name": "Wind Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
-			{"name": "Storm Harpy", "atk": 2, "hp": 2, "kw": ["swift", "ranged"]},
+			{"name": "Storm Harpy", "atk": 2, "hp": 2, "kw": ["swift"]},
 			{"name": "Plunderer", "atk": 2, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
-			{"name": "Brood Harpy", "atk": 1, "hp": 3, "kw": ["ranged"],
+			{"name": "Brood Harpy", "atk": 1, "hp": 3, "kw": [],
 				"on_death": {"type": "summon", "atk": 1, "hp": 1}},
 			{"name": "Sky Stalker", "atk": 3, "hp": 3, "kw": ["swift", "piercing"]},
 			{"name": "Matron", "atk": 2, "hp": 5, "kw": ["swift"],
@@ -1294,8 +1296,8 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
 			{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
 			{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
-			{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": ["ranged"]},
-			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+			{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": []},
+			{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["swift"]},
 			{"name": "Chief", "atk": 3, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
 		],
@@ -1307,7 +1309,7 @@ const ENCOUNTERS: Dictionary = {
 				{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
 				{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
 				{"name": "Cinder", "atk": 2, "hp": 3, "kw": ["doom"], "doom": 3, "doom_damage": 5},
-				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["ranged", "swift"]},
+				{"name": "Slinger", "atk": 1, "hp": 2, "kw": ["swift"]},
 				{"name": "Chief", "atk": 3, "hp": 3, "kw": ["swift"],
 					"on_enter": {"type": "damage_face", "value": 1}},
 			],
@@ -1402,7 +1404,7 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Iron Guard", "atk": 2, "hp": 4, "kw": ["armored", "thorns"]},
 			{"name": "Warden's Champion", "atk": 4, "hp": 3, "kw": ["swift", "piercing"]},
 			{"name": "Iron Vanguard", "atk": 4, "hp": 4, "kw": ["armored", "last_stand"]},
-			{"name": "Bombardier", "atk": 2, "hp": 2, "kw": ["ranged", "armored"]},
+			{"name": "Bombardier", "atk": 2, "hp": 2, "kw": ["armored"]},
 		],
 		"reinforcement": {"name": "Iron Recruit", "atk": 2, "hp": 2, "kw": ["armored"]},
 	},
@@ -1513,7 +1515,7 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Mosquito", "atk": 2, "hp": 1, "kw": ["swift"]},
 			{"name": "Bog Slime", "atk": 1, "hp": 3, "kw": ["regenerate"],
 				"on_death": {"type": "summon", "atk": 1, "hp": 2}},
-			{"name": "Tendril", "atk": 3, "hp": 2, "kw": ["ranged", "regenerate"]},
+			{"name": "Tendril", "atk": 3, "hp": 2, "kw": ["regenerate"]},
 			{"name": "Drowned", "atk": 2, "hp": 6, "kw": ["armored", "regenerate"]},
 			{"name": "Mire Druid", "atk": 1, "hp": 3, "kw": ["regenerate"],
 				"adj_buff": {"atk": 0, "hp": 1}},
@@ -1536,8 +1538,8 @@ const ENCOUNTERS: Dictionary = {
 			[
 				{"name": "Mosquito", "atk": 2, "hp": 1, "kw": ["swift"]},
 				{"name": "Mosquito", "atk": 2, "hp": 1, "kw": ["swift"]},
-				{"name": "Tendril", "atk": 3, "hp": 2, "kw": ["ranged"]},
-				{"name": "Tendril", "atk": 3, "hp": 2, "kw": ["ranged"]},
+				{"name": "Tendril", "atk": 3, "hp": 2, "kw": []},
+				{"name": "Tendril", "atk": 3, "hp": 2, "kw": []},
 				{"name": "Mire Druid", "atk": 1, "hp": 3,
 					"adj_buff": {"atk": 0, "hp": 1}},
 				{"name": "Witch Doctor", "atk": 2, "hp": 3,
@@ -1549,7 +1551,7 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement": {"name": "Leech", "atk": 1, "hp": 3, "kw": ["regenerate"]},
 		"reinforcement_pool": [
 			{"name": "Mosquito", "atk": 2, "hp": 1, "kw": ["swift"]},
-			{"name": "Tendril", "atk": 3, "hp": 2, "kw": ["ranged"]},
+			{"name": "Tendril", "atk": 3, "hp": 2, "kw": []},
 		],
 	},
 
@@ -1566,7 +1568,7 @@ const ENCOUNTERS: Dictionary = {
 		"deck": [
 			{"name": "Recruit", "atk": 2, "hp": 3, "kw": ["armored"]},
 			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
-			{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": ["ranged"]},
+			{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": []},
 			{"name": "Lieutenant", "atk": 1, "hp": 4, "kw": ["armored"],
 				"adj_buff": {"atk": 2, "hp": 0}},
 			{"name": "Standard Bearer", "atk": 1, "hp": 3,
@@ -1580,7 +1582,7 @@ const ENCOUNTERS: Dictionary = {
 			"adj_buff": {"atk": 1, "hp": 0}},
 		"reinforcement_pool": [
 			{"name": "Recruit", "atk": 2, "hp": 3, "kw": ["armored"]},
-			{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": ["ranged"]},
+			{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": []},
 		],
 	},
 
@@ -1624,7 +1626,7 @@ const ENCOUNTERS: Dictionary = {
 		"deck": [
 			{"name": "Apprentice", "atk": 1, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
-			{"name": "Ember", "atk": 2, "hp": 1, "kw": ["swift", "ranged"]},
+			{"name": "Ember", "atk": 2, "hp": 1, "kw": ["swift"]},
 			{"name": "Coal Carrier", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
 			{"name": "Forgeling", "atk": 3, "hp": 3, "kw": ["armored", "thorns"]},
 			{"name": "Hammerer", "atk": 3, "hp": 3, "kw": ["armored"],
@@ -1637,7 +1639,7 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement": {"name": "Cinder Sprite", "atk": 1, "hp": 1, "kw": ["swift"],
 			"on_enter": {"type": "damage_face", "value": 1}},
 		"reinforcement_pool": [
-			{"name": "Ember", "atk": 2, "hp": 1, "kw": ["swift", "ranged"]},
+			{"name": "Ember", "atk": 2, "hp": 1, "kw": ["swift"]},
 			{"name": "Forgeling", "atk": 3, "hp": 3, "kw": ["armored", "thorns"]},
 		],
 	},
@@ -1653,7 +1655,7 @@ const ENCOUNTERS: Dictionary = {
 		"deck": [
 			{"name": "Squire", "atk": 2, "hp": 2, "kw": ["armored"]},
 			{"name": "Black Lancer", "atk": 4, "hp": 2, "kw": ["swift", "piercing"]},
-			{"name": "Crossbow Knight", "atk": 2, "hp": 3, "kw": ["ranged", "armored"]},
+			{"name": "Crossbow Knight", "atk": 2, "hp": 3, "kw": ["armored"]},
 			{"name": "Fallen Knight", "atk": 3, "hp": 5, "kw": ["armored", "piercing"]},
 			{"name": "Standard Bearer", "atk": 1, "hp": 4, "kw": ["armored"],
 				"adj_buff": {"atk": 1, "hp": 0},
@@ -1664,7 +1666,7 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement": {"name": "Footman", "atk": 2, "hp": 3, "kw": ["armored"]},
 		"reinforcement_pool": [
 			{"name": "Squire", "atk": 2, "hp": 2, "kw": ["armored"]},
-			{"name": "Crossbow Knight", "atk": 2, "hp": 3, "kw": ["ranged", "armored"]},
+			{"name": "Crossbow Knight", "atk": 2, "hp": 3, "kw": ["armored"]},
 		],
 	},
 
@@ -1680,7 +1682,7 @@ const ENCOUNTERS: Dictionary = {
 		"deck": [
 			{"name": "Cinder Pup", "atk": 2, "hp": 2, "kw": ["swift"]},
 			{"name": "Ash Hound", "atk": 4, "hp": 2, "kw": ["swift", "piercing"], "wither": 1},
-			{"name": "Smoldering Crow", "atk": 2, "hp": 2, "kw": ["ranged", "swift"]},
+			{"name": "Smoldering Crow", "atk": 2, "hp": 2, "kw": ["swift"]},
 			{"name": "Char-Hide", "atk": 1, "hp": 5, "kw": ["thorns", "armored"]},
 			{"name": "Pack-Master", "atk": 2, "hp": 4, "kw": ["swift"],
 				"adj_buff": {"atk": 1, "hp": 0}},
@@ -1691,7 +1693,7 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement": {"name": "Cinder Pup", "atk": 2, "hp": 2, "kw": ["swift"]},
 		"reinforcement_pool": [
 			{"name": "Ash Hound", "atk": 4, "hp": 2, "kw": ["swift", "piercing"], "wither": 1},
-			{"name": "Smoldering Crow", "atk": 2, "hp": 2, "kw": ["ranged", "swift"]},
+			{"name": "Smoldering Crow", "atk": 2, "hp": 2, "kw": ["swift"]},
 		],
 	},
 
@@ -1709,20 +1711,20 @@ const ENCOUNTERS: Dictionary = {
 		"name": "The Carrion Choir", "act": 2, "type": "combat", "faction": "owed", "hp": 16,
 		"preamble": "They have followed the column for days, singing the only hymn they know. They are very good at it, and it is nearly done.",
 		"passive_id": "dirge_swell",
-		"passive_desc": "Start of each round: each Ranged enemy deals 1 face damage. Silence the choir.",
+		"passive_desc": "Start of each round: each surviving crow deals 1 face damage. Silence the choir.",
 		"deck": [
 			{"name": "Crow", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_death": {"type": "damage_face", "value": 1}},
-			{"name": "Raven", "atk": 2, "hp": 2, "kw": ["ranged"],
+			{"name": "Raven", "atk": 2, "hp": 2, "kw": [],
 				"on_death": {"type": "damage_face", "value": 1}},
-			{"name": "Raven", "atk": 2, "hp": 2, "kw": ["ranged"],
+			{"name": "Raven", "atk": 2, "hp": 2, "kw": [],
 				"on_death": {"type": "damage_face", "value": 1}},
-			{"name": "Smoldering Crow", "atk": 3, "hp": 3, "kw": ["ranged"],
+			{"name": "Smoldering Crow", "atk": 3, "hp": 3, "kw": [],
 				"on_death": {"type": "damage_face", "value": 2}},
 			{"name": "Stitched Hand", "atk": 2, "hp": 4, "kw": ["thorns"]},
-			{"name": "Gravedigger", "atk": 2, "hp": 4, "kw": ["ranged"],
+			{"name": "Gravedigger", "atk": 2, "hp": 4, "kw": [],
 				"adj_buff": {"atk": 1, "hp": 0}},
-			{"name": "Maestro", "atk": 3, "hp": 5, "kw": ["ranged"],
+			{"name": "Maestro", "atk": 3, "hp": 5, "kw": [],
 				"on_death": {"type": "damage_all_enemies", "value": 2}},
 		],
 		"deck_variants": [
@@ -1731,24 +1733,140 @@ const ENCOUNTERS: Dictionary = {
 			[
 				{"name": "Crow", "atk": 2, "hp": 2, "kw": ["swift"],
 					"on_death": {"type": "damage_face", "value": 1}},
-				{"name": "Raven", "atk": 2, "hp": 2, "kw": ["ranged"],
+				{"name": "Raven", "atk": 2, "hp": 2, "kw": [],
 					"on_death": {"type": "damage_face", "value": 1}},
 				{"name": "Husk", "atk": 3, "hp": 4, "kw": ["thorns"]},
 				{"name": "Husk", "atk": 3, "hp": 4, "kw": ["thorns"]},
-				{"name": "Smoldering Crow", "atk": 3, "hp": 3, "kw": ["ranged"],
+				{"name": "Smoldering Crow", "atk": 3, "hp": 3, "kw": [],
 					"on_death": {"type": "damage_face", "value": 2}},
-				{"name": "Maestro", "atk": 3, "hp": 5, "kw": ["ranged"],
+				{"name": "Maestro", "atk": 3, "hp": 5, "kw": [],
 					"on_death": {"type": "damage_all_enemies", "value": 2}},
 			],
 		],
 		"reinforcement": {"name": "Crow", "atk": 2, "hp": 2, "kw": ["swift"],
 			"on_death": {"type": "damage_face", "value": 1}},
 		"reinforcement_pool": [
-			{"name": "Raven", "atk": 2, "hp": 2, "kw": ["ranged"],
+			{"name": "Raven", "atk": 2, "hp": 2, "kw": [],
 				"on_death": {"type": "damage_face", "value": 1}},
-			{"name": "Smoldering Crow", "atk": 3, "hp": 3, "kw": ["ranged"],
+			{"name": "Smoldering Crow", "atk": 3, "hp": 3, "kw": [],
 				"on_death": {"type": "damage_face", "value": 2}},
 		],
+	},
+
+	# ── 2026-07-03 act-2 pool widening: the middle act had 8 combats to act 1's
+	# 12 (the samey-est stretch of the run), and NONE flying grasswake or
+	# lanternhall colors — a player marching on those lords fought only
+	# borrowed fights. Four new lineups, all reusing PROVEN passive handlers
+	# (harpy_swift_face / wolf_pack_revenge / mirror_instant_place /
+	# glass_refract) and art-backed creature names, so no new Combat.gd code.
+
+	"outriders_hour": {
+		# Grasswake tempo — THE EMPTY LANE IS THEIR HIGHWAY. Swift riders that
+		# punch face harder wherever you leave a column open. The fight teaches
+		# act-2 board discipline: hold every lane or bleed for the gaps. Bodies
+		# are lean (they trade badly) — the threat is the tempo, not the stats.
+		"name": "The Outriders' Hour", "act": 2, "type": "combat", "faction": "grasswake", "hp": 16,
+		"preamble": "You hear them before you see them, and you see them exactly once. The grass bends the wrong way, and then the hour is theirs.",
+		"passive_id": "harpy_swift_face",
+		"passive_desc": "Enemy Swift creatures deal +1 face damage when attacking through empty lanes.",
+		"deck": [
+			{"name": "Flanker", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Flanker", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Stalker", "atk": 2, "hp": 3, "kw": ["swift"]},
+			{"name": "Bloodfang", "atk": 4, "hp": 3, "kw": ["swift"]},
+			{"name": "Slinger", "atk": 2, "hp": 3, "kw": [],
+				"on_enter": {"type": "damage_random_player", "value": 1}},
+			{"name": "Captain", "atk": 3, "hp": 5, "kw": [],
+				"adj_buff": {"atk": 1, "hp": 0}},
+		],
+		"deck_variants": [
+			# Variant: the double column — two captains drumming two wings.
+			[
+				{"name": "Flanker", "atk": 3, "hp": 2, "kw": ["swift"]},
+				{"name": "Stalker", "atk": 2, "hp": 3, "kw": ["swift"]},
+				{"name": "Captain", "atk": 3, "hp": 5, "kw": [],
+					"adj_buff": {"atk": 1, "hp": 0}},
+				{"name": "Captain", "atk": 3, "hp": 5, "kw": [],
+					"adj_buff": {"atk": 1, "hp": 0}},
+				{"name": "Bloodfang", "atk": 4, "hp": 3, "kw": ["swift"]},
+			],
+		],
+		"reinforcement": {"name": "Flanker", "atk": 3, "hp": 2, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Stalker", "atk": 2, "hp": 3, "kw": ["swift"]},
+		],
+	},
+
+	"grass_that_hunts": {
+		# Grasswake pack — GRIEF IS A WHETSTONE. Every death sharpens the wolves
+		# beside it (wolf_pack_revenge), so sweeping the pack left-to-right walks
+		# your own damage into ever-angrier teeth. Kill from the EDGES in, or
+		# burst the Den Mother before the pack notices. Act-2 sequel to act 1's
+		# Den Mother's Brood — the cubs grew up.
+		"name": "The Grass That Hunts", "act": 2, "type": "combat", "faction": "grasswake", "hp": 17,
+		"preamble": "The brood you scattered in the foothills had an older litter. It has been following you at exactly the pace you march.",
+		"passive_id": "wolf_pack_revenge",
+		"passive_desc": "When an enemy creature dies: adjacent enemies gain +1 ATK this round.",
+		"deck": [
+			{"name": "Pack Wolf", "atk": 3, "hp": 3, "kw": []},
+			{"name": "Pack Wolf", "atk": 3, "hp": 3, "kw": []},
+			{"name": "Yearling", "atk": 2, "hp": 3, "kw": ["swift"]},
+			{"name": "Alpha", "atk": 4, "hp": 4, "kw": [],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Bloodfang", "atk": 4, "hp": 3, "kw": ["swift"]},
+			{"name": "Den Mother", "atk": 3, "hp": 6, "kw": ["regenerate"],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+		],
+		"reinforcement": {"name": "Pack Wolf", "atk": 3, "hp": 3, "kw": []},
+		"reinforcement_pool": [
+			{"name": "Yearling", "atk": 2, "hp": 3, "kw": ["swift"]},
+		],
+	},
+
+	"borrowed_faces": {
+		# Lanternhall foresight — THEY SAW THIS TRADE COMING. Every death on
+		# YOUR side is answered instantly (mirror_instant_place), so chump-
+		# blocking and cheap sacrifices hand the Hall free tempo. Keep your
+		# creatures alive and the mirror stays quiet. Lighter act-2 cousin of
+		# act 3's Hall of Wrong Reflections.
+		"name": "The Borrowed Faces", "act": 2, "type": "combat", "faction": "lanternhall", "hp": 16,
+		"preamble": "The watchers wear faces one march out of date. Yours is among them, worn slightly wrong, listening to your orders before you give them.",
+		"passive_id": "mirror_instant_place",
+		"passive_desc": "When a friendly creature dies: the enemy draws and places a creature immediately.",
+		"deck": [
+			{"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Reflection", "atk": 2, "hp": 3, "kw": []},
+			{"name": "Reflection", "atk": 2, "hp": 3, "kw": []},
+			{"name": "Doppel", "atk": 3, "hp": 3, "kw": [],
+				"on_enter": {"type": "copy_opposing_keywords"}},
+			{"name": "Hall-Watcher", "atk": 2, "hp": 5, "kw": ["armored"]},
+			{"name": "Shattered Twin", "atk": 4, "hp": 2, "kw": ["piercing"]},
+		],
+		"reinforcement": {"name": "Reflection", "atk": 2, "hp": 3, "kw": []},
+		"reinforcement_pool": [
+			{"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
+		],
+	},
+
+	"signal_glass": {
+		# Lanternhall glass — THE MIRRORS KEEP MAKING KNIVES. From round 2 a
+		# 3/1 Swift shard forms in an empty enemy lane every round
+		# (glass_refract): brittle bodies you must keep sweeping or they cut
+		# face. Board-wipe value swings this fight; so does simply killing the
+		# face before the glass adds up. Combat-scale preview of act 3's
+		# Glass Menagerie.
+		"name": "The Signal Glass", "act": 2, "type": "combat", "faction": "lanternhall", "hp": 17,
+		"preamble": "On the ridge a mirror turns, catching the sun in slow code. Down here, everything it spells arrives edge-first.",
+		"passive_id": "glass_refract",
+		"passive_desc": "Start of each round (from round 2): a 3/1 Swift glass shard forms in an empty enemy lane.",
+		"deck": [
+			{"name": "Glass Knight", "atk": 3, "hp": 4, "kw": ["armored"]},
+			{"name": "Glass Sniper", "atk": 2, "hp": 2, "kw": [], "sniper": true},
+			{"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Reflection", "atk": 2, "hp": 3, "kw": []},
+			{"name": "Glass Knight", "atk": 3, "hp": 4, "kw": ["armored"]},
+		],
+		"reinforcement": {"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
 	},
 
 	# =================== ACT 2 — ELITE ============================
@@ -1771,12 +1889,12 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Hellhound", "atk": 3, "hp": 3, "kw": ["swift"]},
 			{"name": "Pit Fiend", "atk": 3, "hp": 6, "kw": ["regenerate"],
 				"adj_buff": {"atk": 1, "hp": 0}},
-			{"name": "Imp", "atk": 1, "hp": 3, "kw": ["ranged"],
+			{"name": "Imp", "atk": 1, "hp": 3, "kw": [],
 				"on_enter": {"type": "damage_face", "value": 1}},
 			{"name": "Infernal", "atk": 4, "hp": 4, "kw": ["piercing"],
 				"on_death": {"type": "damage_face", "value": 3}},
 		],
-		"reinforcement": {"name": "Imp", "atk": 1, "hp": 3, "kw": ["ranged"],
+		"reinforcement": {"name": "Imp", "atk": 1, "hp": 3, "kw": [],
 			"on_enter": {"type": "damage_face", "value": 1}},
 		"reinforcement_pool": [
 			{"name": "Hellhound", "atk": 3, "hp": 3, "kw": ["swift"]},
@@ -1815,6 +1933,35 @@ const ENCOUNTERS: Dictionary = {
 				"on_enter": {"type": "copy_opposing_keywords"}},
 			{"name": "Shadow Double", "atk": 3, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "copy_opposing_keywords"}},
+		],
+	},
+
+	"horse_lords_toll": {
+		# Grasswake elite (2026-07-03, part of the act-2 widening — the act had
+		# only everflame/lanternhall Generals). EVERY LOSS FEEDS THE CHARGE:
+		# pack_hunt turns each of YOUR deaths into +1 ATK on all Swift enemies
+		# this round, and most of the column is Swift. Trading bodies into the
+		# riders arms them; the fight rewards Armored walls, healing, and
+		# killing the Chief (the adj-buff heart) before the toll compounds.
+		"name": "The Horse-Lords' Toll", "act": 2, "type": "elite", "faction": "grasswake", "hp": 24,
+		"preamble": "The toll here is not coin. The riders count what falls on your side of the line and pay themselves accordingly.",
+		"passive_id": "pack_hunt",
+		"passive_desc": "When one of your creatures dies: all Swift enemies gain +1 ATK this round.",
+		"deck": [
+			{"name": "Flanker", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Flanker", "atk": 3, "hp": 3, "kw": ["swift"]},
+			{"name": "Bloodfang", "atk": 4, "hp": 4, "kw": ["swift"]},
+			{"name": "Chief", "atk": 3, "hp": 7, "kw": ["armored"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Alpha", "atk": 4, "hp": 5, "kw": [],
+				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
+			{"name": "Stalker", "atk": 2, "hp": 4, "kw": ["swift"]},
+			{"name": "Banner-Bearer", "atk": 2, "hp": 5, "kw": [],
+				"adj_buff": {"atk": 1, "hp": 0}},
+		],
+		"reinforcement": {"name": "Flanker", "atk": 3, "hp": 3, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Stalker", "atk": 2, "hp": 4, "kw": ["swift"]},
 		],
 	},
 
@@ -1917,7 +2064,7 @@ const ENCOUNTERS: Dictionary = {
 		"passive_desc": "When a friendly creature dies: the enemy draws and places a creature immediately.",
 		"deck": [
 			{"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
-			{"name": "Glass Sniper", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Glass Sniper", "atk": 3, "hp": 2, "kw": ["piercing"], "sniper": true},
 			{"name": "Hall-Watcher", "atk": 1, "hp": 6, "kw": ["thorns", "armored"]},
 			{"name": "Reflection", "atk": 2, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "copy_opposing_keywords"}},
@@ -1949,13 +2096,13 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement": {"name": "Glass Shard", "atk": 2, "hp": 2},
 		"reinforcement_pool": [
 			{"name": "Mirror Wisp", "atk": 2, "hp": 2, "kw": ["swift"]},
-			{"name": "Glass Sniper", "atk": 3, "hp": 2, "kw": ["ranged"]},
+			{"name": "Glass Sniper", "atk": 3, "hp": 2, "kw": [], "sniper": true},
 		],
 	},
 
 	"elemental_nexus": {
 		# Elemental Nexus — EVERY KEYWORD AT ONCE. Each sprite embodies one
-		# element via its keyword (Flame=swift, Ice=armored, Storm=ranged+piercing,
+		# element via its keyword (Flame=swift, Ice=armored, Storm=piercing,
 		# Tide=regen, Stone=thorns, Shadow=swift+on_enter chip). The nexus_rotation
 		# passive amps the whole board on a 3-round cycle. The puzzle is "no
 		# single counter covers all of them."
@@ -1967,8 +2114,8 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Flame Sprite", "atk": 4, "hp": 1, "kw": ["swift", "piercing"],
 				"on_death": {"type": "damage_all_enemies", "value": 1}},
 			{"name": "Ice Sprite", "atk": 1, "hp": 5, "kw": ["armored", "thorns"]},
-			{"name": "Storm Sprite", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
-			{"name": "Tide Sprite", "atk": 2, "hp": 3, "kw": ["regenerate", "ranged"]},
+			{"name": "Storm Sprite", "atk": 2, "hp": 2, "kw": ["piercing"]},
+			{"name": "Tide Sprite", "atk": 2, "hp": 3, "kw": ["regenerate"]},
 			{"name": "Stone Sprite", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
 			{"name": "Shadow Sprite", "atk": 3, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "damage_random_player", "value": 2}},
@@ -1982,7 +2129,7 @@ const ENCOUNTERS: Dictionary = {
 					"on_death": {"type": "damage_all_enemies", "value": 1}},
 				{"name": "Flame Sprite", "atk": 4, "hp": 1, "kw": ["swift"],
 					"on_death": {"type": "damage_all_enemies", "value": 1}},
-				{"name": "Storm Sprite", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+				{"name": "Storm Sprite", "atk": 2, "hp": 2, "kw": ["piercing"]},
 				{"name": "Shadow Sprite", "atk": 3, "hp": 2,
 					"on_enter": {"type": "damage_random_player", "value": 2}},
 				{"name": "Shadow Sprite", "atk": 3, "hp": 2,
@@ -2013,7 +2160,7 @@ const ENCOUNTERS: Dictionary = {
 		"passive_desc": "Each round: the highest-ATK enemy also deals its ATK as face damage.",
 		"deck": [
 			{"name": "Jailer", "atk": 2, "hp": 3, "kw": ["piercing"]},
-			{"name": "Crossbow Guard", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Crossbow Guard", "atk": 2, "hp": 2, "kw": ["piercing"]},
 			{"name": "Tormentor", "atk": 4, "hp": 3, "kw": ["swift", "piercing"],
 				"on_enter": {"type": "damage_face", "value": 2}},
 			{"name": "Iron Maiden", "atk": 1, "hp": 6, "kw": ["thorns", "armored"]},
@@ -2042,7 +2189,7 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement": {"name": "Whipman", "atk": 2, "hp": 3},
 		"reinforcement_pool": [
 			{"name": "Jailer", "atk": 2, "hp": 3},
-			{"name": "Crossbow Guard", "atk": 2, "hp": 2, "kw": ["ranged"]},
+			{"name": "Crossbow Guard", "atk": 2, "hp": 2, "kw": []},
 		],
 	},
 
@@ -2057,7 +2204,7 @@ const ENCOUNTERS: Dictionary = {
 		"passive_desc": "Start of each round (from round 2): deal 1 damage to each of your creatures, +1 more for every creature beyond the second.",
 		"deck": [
 			{"name": "Hatchling", "atk": 2, "hp": 2, "kw": ["swift", "piercing"]},
-			{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": ["ranged"]},
+			{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": []},
 			{"name": "Hoard Guardian", "atk": 1, "hp": 7, "kw": ["armored", "thorns"]},
 			{"name": "Egg Mother", "atk": 1, "hp": 4, "kw": ["armored"],
 				"on_death": {"type": "summon", "atk": 3, "hp": 3}},
@@ -2075,7 +2222,7 @@ const ENCOUNTERS: Dictionary = {
 					"on_death": {"type": "summon", "atk": 3, "hp": 3}},
 				{"name": "Egg Mother", "atk": 1, "hp": 4,
 					"on_death": {"type": "summon", "atk": 3, "hp": 3}},
-				{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": ["ranged"]},
+				{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": []},
 				{"name": "Lava Drake", "atk": 3, "hp": 4, "kw": ["regenerate"],
 					"on_death": {"type": "damage_all_enemies", "value": 2}},
 				{"name": "Ancient Wyrm", "atk": 5, "hp": 6, "kw": ["piercing"], "wither": 1},
@@ -2084,7 +2231,7 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement": {"name": "Whelp", "atk": 2, "hp": 3, "kw": ["piercing"]},
 		"reinforcement_pool": [
 			{"name": "Hatchling", "atk": 2, "hp": 2, "kw": ["swift"]},
-			{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": ["ranged"]},
+			{"name": "Kobold Hurler", "atk": 2, "hp": 2, "kw": []},
 		],
 	},
 
@@ -2099,7 +2246,7 @@ const ENCOUNTERS: Dictionary = {
 		"passive_desc": "When an enemy creature dies: deal 1 damage to the opposing creature and 1 face damage.",
 		"deck": [
 			{"name": "Cinder Whelp", "atk": 1, "hp": 2, "kw": ["swift", "piercing"]},
-			{"name": "Ember Mystic", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Ember Mystic", "atk": 2, "hp": 2, "kw": ["piercing"]},
 			{"name": "Coal Hulk", "atk": 2, "hp": 5, "kw": ["thorns", "armored"]},
 			{"name": "Kindler", "atk": 3, "hp": 3, "kw": ["piercing"],
 				"on_enter": {"type": "damage_face", "value": 2}},
@@ -2114,7 +2261,7 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement_pool": [
 			{"name": "Burning Martyr", "atk": 3, "hp": 3,
 				"on_death": {"type": "damage_all_enemies", "value": 2}},
-			{"name": "Ember Mystic", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Ember Mystic", "atk": 2, "hp": 2, "kw": ["piercing"]},
 		],
 	},
 
@@ -2131,7 +2278,7 @@ const ENCOUNTERS: Dictionary = {
 		"deck": [
 			{"name": "Court Jester", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_enter": {"type": "discard_random"}},
-			{"name": "Crossbow Lady", "atk": 2, "hp": 3, "kw": ["ranged"]},
+			{"name": "Crossbow Lady", "atk": 2, "hp": 3, "kw": []},
 			{"name": "Court Hexer", "atk": 2, "hp": 3, "kw": ["thorns"],
 				"on_enter": {"type": "debuff_opposing_atk", "value": 2}},
 			{"name": "Pale Handmaid", "atk": 1, "hp": 5, "kw": ["thorns"],
@@ -2163,22 +2310,22 @@ const ENCOUNTERS: Dictionary = {
 		"passive_id": "hollow_king_snipe",
 		"passive_desc": "Start of each round: deal 3 damage to your highest-ATK creature.",
 		"deck": [
-			{"name": "Echo Twin", "atk": 3, "hp": 2, "kw": ["swift", "ranged"]},
-			{"name": "Soprano", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
-			{"name": "Tenor", "atk": 3, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Echo Twin", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Soprano", "atk": 2, "hp": 2, "kw": ["piercing"]},
+			{"name": "Tenor", "atk": 3, "hp": 2, "kw": ["piercing"]},
 			{"name": "Hymn Bearer", "atk": 1, "hp": 5,
 				"adj_buff": {"atk": 1, "hp": 0}},
-			{"name": "Conductor", "atk": 2, "hp": 3, "kw": ["ranged"],
+			{"name": "Conductor", "atk": 2, "hp": 3, "kw": [],
 				"adj_buff": {"atk": 1, "hp": 0}},
-			{"name": "Cantor", "atk": 2, "hp": 4, "kw": ["ranged"],
+			{"name": "Cantor", "atk": 2, "hp": 4, "kw": [],
 				"on_death": {"type": "damage_all_enemies", "value": 2}},
-			{"name": "Maestro", "atk": 3, "hp": 5, "kw": ["ranged"],
+			{"name": "Maestro", "atk": 3, "hp": 5, "kw": [],
 				"on_death": {"type": "summon", "atk": 3, "hp": 3}},
 		],
-		"reinforcement": {"name": "Hummer", "atk": 2, "hp": 2, "kw": ["ranged"]},
+		"reinforcement": {"name": "Hummer", "atk": 2, "hp": 2, "kw": []},
 		"reinforcement_pool": [
-			{"name": "Echo Twin", "atk": 3, "hp": 2, "kw": ["swift", "ranged"]},
-			{"name": "Soprano", "atk": 2, "hp": 2, "kw": ["ranged", "piercing"]},
+			{"name": "Echo Twin", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Soprano", "atk": 2, "hp": 2, "kw": ["piercing"]},
 		],
 	},
 
@@ -2290,8 +2437,8 @@ const ENCOUNTERS: Dictionary = {
 		"passive_id": "glass_refract",
 		"passive_desc": "Start of each round (from round 2): a 3/1 Swift glass shard forms in an empty enemy lane.",
 		"deck": [
-			{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["ranged", "piercing"]},
-			{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["ranged", "piercing"]},
+			{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["piercing"], "sniper": true},
+			{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["piercing"], "sniper": true},
 			{"name": "Mirror Wisp", "atk": 3, "hp": 2, "kw": ["swift"]},
 			{"name": "Shattered Twin", "atk": 4, "hp": 2, "kw": ["swift", "piercing"],
 				"on_death": {"type": "summon", "atk": 2, "hp": 1}},
@@ -2305,7 +2452,7 @@ const ENCOUNTERS: Dictionary = {
 			# Variant: house of mirrors — copycats stack, so a buffed player deck
 			# gets its own keywords flung back across the glass.
 			[
-				{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["ranged", "piercing"]},
+				{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["piercing"], "sniper": true},
 				{"name": "Reflection", "atk": 3, "hp": 2, "kw": ["swift"],
 					"on_enter": {"type": "copy_opposing_keywords"}},
 				{"name": "Doppel", "atk": 3, "hp": 3, "kw": ["swift"],
@@ -2319,7 +2466,7 @@ const ENCOUNTERS: Dictionary = {
 		],
 		"reinforcement": {"name": "Glass Shard", "atk": 3, "hp": 1, "kw": ["swift"]},
 		"reinforcement_pool": [
-			{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["ranged", "piercing"]},
+			{"name": "Glass Sniper", "atk": 4, "hp": 1, "kw": ["piercing"], "sniper": true},
 			{"name": "Mirror Wisp", "atk": 3, "hp": 2, "kw": ["swift"]},
 		],
 	},

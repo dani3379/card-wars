@@ -19,14 +19,12 @@ func _ready() -> void:
 
 func _load() -> void:
 	decks = []
-	if not FileAccess.file_exists(PATH):
+	var txt := SaveIO.read_text(PATH)
+	if txt == "":
 		return
-	var f := FileAccess.open(PATH, FileAccess.READ)
-	if f == null:
-		return
-	var txt := f.get_as_text()
-	f.close()
 	var parsed = JSON.parse_string(txt)
+	if not (parsed is Dictionary):
+		parsed = JSON.parse_string(SaveIO.read_backup_text(PATH))
 	if not (parsed is Dictionary):
 		return
 	for d in parsed.get("decks", []):
@@ -45,12 +43,8 @@ func _load() -> void:
 
 
 func _save_file() -> void:
-	var f := FileAccess.open(PATH, FileAccess.WRITE)
-	if f == null:
+	if not SaveIO.write_text(PATH, JSON.stringify({"decks": decks}, "\t")):
 		push_warning("SavedDecks: could not write %s" % PATH)
-		return
-	f.store_string(JSON.stringify({"decks": decks}, "\t"))
-	f.close()
 
 
 ## All saved decks (newest first as stored). Each entry: {name, cards, saved_at}.

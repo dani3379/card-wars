@@ -28,8 +28,9 @@ const SECTIONS: Array = [
 	{
 		"heading": "FONTS",
 		"lines": [
-			"Cinzel — Natanael Gama — SIL Open Font License",
-			"Lilita One — Juan Montoreano — SIL Open Font License",
+			"Kreon — Julia Petretta — SIL Open Font License",
+			"Inter — Rasmus Andersson — SIL Open Font License",
+			"Marcellus — Astigmatic — SIL Open Font License",
 			"Nunito — Vernon Adams — SIL Open Font License",
 		],
 	},
@@ -55,27 +56,23 @@ const SECTIONS: Array = [
 	{
 		"heading": "MUSIC",
 		"lines": [
-			"main_menu — \"Tragic Ambient Main Menu\" by yd (CC0)",
-			"map — \"Loopable Dungeon Ambience\" by Spring (CC0)",
-			"combat (Act 1) — random pick from:",
-			"     \"Battle Theme A\" by cynicmusic (CC0)",
-			"     \"Out Of Time\" by Jonathan Shaw (CC-BY 3.0)",
-			"combat (Act 2) — random pick from:",
-			"     \"A Fight in the Fields\" by Jonathan Shaw (CC-BY 3.0)",
-			"     \"JRPG Epic Rock Battle Theme #1\" by HydroGene (CC0)",
-			"combat (Act 3) — random pick from:",
-			"     \"The Tread of War\" by Jonathan Shaw, Johan Brodd & cynicmusic (CC-BY 3.0)",
-			"     \"Boss Battle #6 Metal\" by nene (CC0)",
-			"combat_elite — \"Fierce Battle!\" by remaxim (CC0)",
-			"combat_boss — \"Battle RPG Theme\" by CleytonRX (CC0)",
-			"boss (Act 3) — \"Boss Battle #2: Symphonic Metal\" by nene (CC0)",
-			"shop — \"Medieval: Market Day\" by RandomMind (CC0)",
-			"rest — \"Ambient Relaxing Loop\" by isaiah658 (CC0)",
-			"event — \"Dark Cavern Ambient\" by remaxim (CC0)",
-			"victory — \"Victory Theme for RPG\" by cynicmusic (CC0)",
-			"defeat — \"The Fallen\" by Jonathan Shaw (CC-BY 3.0)",
-			"Jonathan Shaw — www.jshaw.co.uk",
-			"CC0 + CC-BY 3.0 tracks from OpenGameArt.org",
+			"Alexander Nakarada (CreatorChords) — CC-BY 4.0 — creatorchords.com",
+			"     Battle of the Creek · Valhalla · Medieval Metal",
+			"     Prepare for War · Medieval Loop One · Medieval Chateau",
+			"Scott Buckley — CC-BY 4.0 — scottbuckley.com.au",
+			"     Song of the Forge · Simulacra · Eyes in the Void",
+			"     Penumbra · Memories of Stone",
+			"Matthew Pablo — CC-BY 3.0 — matthewpablo.com",
+			"     Heroic Demise · The Dark Amulet",
+			"Jonathan Shaw — CC-BY 3.0 — www.jshaw.co.uk",
+			"     Out of Time · A Fight in the Fields · The Fallen",
+			"     The Tread of War (with Johan Brodd & cynicmusic)",
+			"RandomMind — CC0 — the Medieval series:",
+			"     Market Day · Battle · Exploration · The Old Tower Inn",
+			"     The Bard's Tale · Minstrel Dance",
+			"cynicmusic — CC0 — Battle Theme A · Victory Theme for RPG",
+			"yd · Spring · HydroGene · nene · remaxim · CleytonRX · isaiah658",
+			"     — CC0 tracks from OpenGameArt.org",
 		],
 	},
 ]
@@ -84,6 +81,14 @@ const SECTIONS: Array = [
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "main_menu")
 	_build_ui()
+	GameTheme.make_settings_gear(self)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	# Esc = the BACK button: return to the main menu.
+	if event.is_action_pressed("ui_cancel"):
+		GameTheme.fade_out_then_change_scene(self, MENU_SCENE, 0.30)
+		get_viewport().set_input_as_handled()
 
 
 func _build_ui() -> void:
@@ -196,7 +201,7 @@ func _make_ornament_row(width: float) -> Control:
 	left.color = Color(GILT.r, GILT.g, GILT.b, 0.55)
 	row.add_child(left)
 
-	var diamond_tex := load("res://assets/icons/diamond.png") as Texture2D
+	var diamond_tex := GameTheme.tex_icon_diamond
 	if diamond_tex != null:
 		var diamond := TextureRect.new()
 		diamond.texture = diamond_tex

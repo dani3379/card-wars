@@ -1,19 +1,20 @@
 ﻿extends Node
 
 # ── Fonts ──
-var font_display: Font = null   # Lilita One — card names, type, FLOOP
-var font_stat: Font = null      # Lilita One — cost, ATK, HP numerals
-var font_body: Font = null      # Nunito Regular + embolden 0.55 — description text (Bold)
-var font_body_bold: Font = null # Nunito Regular + embolden 0.85 — keyword [b] tags (ExtraBold)
-var font_title: Font = null       # Cinzel SemiBold — combat HUD headers/captions (NOT cards)
-var font_title_black: Font = null # Cinzel Black — combat HUD numerals (HP/mana/counts)
-var font_card_body: Font = null      # Alegreya 500 — card rules text (the writ's book hand)
-var font_card_body_bold: Font = null # Alegreya ~760 — keyword [b] tags on the card page
+var font_display: Font = null   # Kreon Bold — card names, type, FLOOP, buttons/titles
+var font_stat: Font = null      # Kreon 700 — cost, ATK, HP numerals
+var font_body: Font = null      # Inter 850 — UI/menu/HUD/tooltip body
+var font_body_bold: Font = null # Inter 900 — keyword [b] tags in UI body
+var font_title: Font = null       # Kreon Bold — combat HUD headers/captions (NOT cards)
+var font_title_black: Font = null # Kreon 700 — combat HUD numerals (HP/mana/counts)
+var font_card_body: Font = null      # Kreon 500 — card rules text (the writ's book hand)
+var font_card_body_bold: Font = null # Kreon 700 — keyword [b] tags on the card page
 
 # ── Textures ──
 var tex_card_frame_ornate: Texture2D = null
 var tex_icon_sword: Texture2D = null
 var tex_icon_heart: Texture2D = null
+var tex_icon_diamond: Texture2D = null
 
 # ── Slay-the-Spire-style silhouette map node icons (Kenney CC0 board-game-icons). ──
 var tex_node_combat: Texture2D = null
@@ -86,175 +87,164 @@ var _keyword_icons: Dictionary = {}
 
 func _ready() -> void:
 	_load_assets()
+	_apply_root_theme()
+
+
+func _apply_root_theme() -> void:
+	# Native tooltips (every plain `tooltip_text` — relic chips, seals, shop
+	# wares) rendered with the engine's stock theme: thin grey default font on
+	# a light panel, the smallest and most off-brand text in the game. Restyle
+	# them at the window root so they speak the house voice. The theme defines
+	# ONLY tooltip entries + a default font — every control with explicit
+	# overrides (i.e. all GameTheme-built UI) is untouched.
+	var th := Theme.new()
+	if font_body != null:
+		th.default_font = font_body
+		th.set_font("font", "TooltipLabel", font_body)
+	th.set_font_size("font_size", "TooltipLabel", 18)
+	th.set_color("font_color", "TooltipLabel", IVORY)
+	var panel := make_panel_style(Color(0.07, 0.056, 0.046, 0.98),
+		Color(0.60, 0.51, 0.34, 0.95), 1, 4, true)
+	panel.content_margin_left = 12
+	panel.content_margin_right = 12
+	panel.content_margin_top = 8
+	panel.content_margin_bottom = 8
+	th.set_stylebox("panel", "TooltipPanel", panel)
+	var win := get_window()
+	if win != null:
+		win.theme = th
 
 func _load_assets() -> void:
-	# Display fonts: Cinzel Variable (Google Fonts, OFL). Classical Roman-engraved
-	# capitals — pairs with the ornate frame's gold scrollwork. Replaces Pirata
-	# One, which is more cartoony and fights with the painterly art.
-	#
-	# Two variants, both wrapped in FontVariations:
-	#   - font_display: Cinzel SemiBold (wght 600) for card names, type, FLOOP.
-	#     Slightly heavier than default 400 so caps read clearly at 9-10pt.
-	#   - font_stat: Cinzel Black (wght 800) for cost/ATK/HP numerals. AAA card
-	#     games (Hearthstone, MtG Arena, Playfair Display per typography guides)
-	#     use heavy bold serif numerals for stat orbs — visual weight matches
-	#     the gravity of those numbers. Cinzel at 400 weight rendered the orbs
-	#     "thin and sus"; 800 gives the chunky stat-orb look players expect.
-	#
-	# Each variation also sets spacing_bottom < 0 to fix Godot's known
-	# vertical_alignment=CENTER bug: Godot centers on font ascent+descent, but
-	# all-caps / numeric text doesn't use the descender region, so glyphs appear
-	# in the upper half. Negative spacing_bottom shrinks the line box's bottom,
-	# pulling centered glyphs to their optical center.
-	# Ref: https://forum.godotengine.org/t/correcting-vertical-alignment-center-for-a-label/2992
-	# Display font: Lilita One (Google Fonts, OFL). Rounded heavy display
-	# typeface — Wildfrost-adjacent, fits the storybook fantasy multi-register
-	# tone better than Cinzel's formal Roman inscriptions.
-	#
-	# CRITICAL: setting `FontFile.data = bytes` directly is BROKEN — that path
-	# is for `.tres` serialization, NOT runtime font initialization. The font
-	# silently fails to render through that route. The correct runtime API is
-	# `FontFile.load_dynamic_font(path)` which sets up the glyph cache atlas.
-	# Alternative: `load("res://...")` works if Godot has imported the .ttf
-	# (an .import file exists), but on first scan that .import won't exist
-	# yet — load_dynamic_font sidesteps that entirely.
-	var lilita: FontFile = null
-	var lilita_path = "res://assets/fonts/LilitaOne-Regular.ttf"
-	# Use CACHE_MODE_IGNORE to skip Godot's Resource cache — there's a known
-	# bug (godotengine/godot#92778) where the cache returns stale fonts after
-	# a .ttf is re-imported. Without this, "Lilita One loaded" prints success
-	# but the rendered glyphs are from the previous import.
-	lilita = ResourceLoader.load(lilita_path, "FontFile",
-		ResourceLoader.CACHE_MODE_IGNORE) as FontFile
-	if lilita != null:
-		if OS.is_debug_build():
-			print("[GameTheme] Lilita One loaded via ResourceLoader (cache ignored)")
-	else:
-		# Fallback: load_dynamic_font (the runtime API for un-imported files).
-		var ff := FontFile.new()
-		var err := ff.load_dynamic_font(lilita_path)
-		if err == OK:
-			ff.resource_path = lilita_path  # theme cache key
-			lilita = ff
-			if OS.is_debug_build():
-				print("[GameTheme] Lilita One loaded via load_dynamic_font()")
-		else:
-			push_warning("[GameTheme] Lilita One failed both load paths, err=", err)
-
-	# Body font loads first so we can use it as the fallback for the display
-	# font's missing glyphs (Lilita One's character set is narrow — no arrow,
-	# star, geometric-shape codepoints — so symbol characters tofu'd as boxes
-	# until we wired this fallback up).
-	# CACHE_MODE_IGNORE — same stale-MSDF-cache workaround (#92778) as Lilita/Cinzel
-	# below; plain load() can return the pre-MSDF Nunito (body + menu text, and the
-	# glyph fallback for the other fonts).
+	# Font roster (the "Chronicle" pass, 2026-06-29) is loaded below. The eight
+	# font_* slots map onto three OFL faces — Marcellus (display), Kreon (cards +
+	# numerals), Inter (UI) — see the block comment at the loads for the full mapping
+	# and rationale. Two load gotchas worth keeping:
+	#   - CACHE_MODE_IGNORE on every ResourceLoader.load: bug godotengine/godot#92778
+	#     hands back a stale pre-MSDF FontFile from the resource cache after a reimport.
+	#   - If a face ever fails to load from an un-imported .ttf, FontFile.new() +
+	#     load_dynamic_font(path) is the runtime fallback (NOT FontFile.data = bytes,
+	#     which is .tres-only and silently renders nothing).
+	# === FONT ROSTER — "Chronicle" pass (2026-06-29) ===
+	# Kreon     → EVERYTHING but UI body: display (titles/banners/card names/buttons),
+	#             card rules text, and every stat numeral. Replaced Marcellus as the
+	#             display face 2026-06-29 — Marcellus's inscriptional hairlines stayed
+	#             thin at any weight; Kreon's low-contrast slab reads reliably fat.
+	#             (Marcellus is still loaded below only as a vestigial fallback.)
+	# Inter     → UI / menu / HUD / tooltip body.
+	# Supersedes Lilita One (cute/rounded, clogged counters at small sizes), Cinzel
+	# (thin all-caps, hard small), Nunito (soft/casual) and Alegreya (hairline serifs
+	# thinned on the parchment). All three are OFL. MSDF is ON for the Control-scaled
+	# card faces (Marcellus/Kreon, msdf_size 64); Inter stays RASTER (UI is drawn at
+	# viewport scale, which Godot oversampling already covers) to dodge the
+	# see-through-small-text MSDF failure that pushed Nunito back to raster.
+	# CACHE_MODE_IGNORE on every load — bug godotengine/godot#92778 hands back stale
+	# pre-MSDF FontFiles from the resource cache after a reimport.
+	var inter := ResourceLoader.load("res://assets/fonts/Inter-Variable.ttf",
+		"FontFile", ResourceLoader.CACHE_MODE_IGNORE) as FontFile
+	var marcellus := ResourceLoader.load("res://assets/fonts/Marcellus-Regular.ttf",
+		"FontFile", ResourceLoader.CACHE_MODE_IGNORE) as FontFile
+	var kreon := ResourceLoader.load("res://assets/fonts/Kreon-Variable.ttf",
+		"FontFile", ResourceLoader.CACHE_MODE_IGNORE) as FontFile
+	# Nunito stays loaded ONLY as the universal last-resort glyph fallback (arrows,
+	# stars, geometric shapes the text faces lack — these tofu'd as boxes before).
 	var nunito := ResourceLoader.load("res://assets/fonts/Nunito-Regular.ttf",
 		"FontFile", ResourceLoader.CACHE_MODE_IGNORE) as Font
+	# Glyph fallback chain: text faces fall through to Inter, then Nunito.
+	var _font_fallbacks: Array[Font] = []
+	if inter != null:
+		_font_fallbacks.append(inter)
+	if nunito != null:
+		_font_fallbacks.append(nunito)
+	if marcellus != null:
+		marcellus.fallbacks = _font_fallbacks
+	if kreon != null:
+		kreon.fallbacks = _font_fallbacks
+	if inter != null and nunito != null:
+		inter.fallbacks = [nunito]
 
-	if lilita != null:
-		# Lilita One is the display weight we want; attach Nunito as a glyph
-		# fallback so anything Lilita doesn't have falls through to Nunito
-		# instead of rendering as a tofu rectangle.
-		if nunito != null:
-			lilita.fallbacks = [nunito]
-		font_display = lilita
-		# Stat numerals use the raw Lilita font — font-level spacing_bottom
-		# wasn't reliable for centering caps across orb sizes (the natural
-		# Lilita line metrics put caps in the upper portion of the line box,
-		# AND the SphereOrb's drop shadow shifts the painted "visual center"
-		# below the container's geometric center, so any single spacing
-		# value either over- or under-corrects). Instead, the orb labels in
-		# Card2D (_build_full_layout_v3 / _build_orb_number_label) apply an
-		# explicit Y offset on the label rect — pixel-deterministic, per
-		# call site. See ORB_NUMERAL_Y_OFFSET in Card2D.gd.
-		font_stat = lilita
+	# Display = Kreon Bold (replaced Marcellus 2026-06-29). Marcellus is a
+	# high-contrast inscriptional face — its hairlines stay thin at ANY weight, and
+	# heavy embolden only roughened it on MSDF. Kreon is a low-contrast slab: uniform
+	# strokes read reliably FAT at every size, AND it unifies the display with the
+	# card rules + numerals (all Kreon now; only the UI body stays Inter). wght 700
+	# (axis max) + a little embolden for extra heft (msdf_pixel_range 16 gives room).
+	if kreon != null:
+		var disp := FontVariation.new()
+		disp.base_font = kreon
+		disp.variation_opentype = {"wght": 700}
+		disp.variation_embolden = 0.25
+		font_display = disp
 		if OS.is_debug_build():
-			print("[GameTheme] font_display and font_stat set to Lilita One")
+			print("[GameTheme] font_display set to Kreon Bold")
 	else:
-		# Final fallback to Cinzel.
-		push_warning("[GameTheme] Lilita One unavailable — using Cinzel fallback")
-		var cinzel_fallback := load("res://assets/fonts/Cinzel-Variable.ttf") as Font
-		if cinzel_fallback is FontFile and nunito != null:
-			(cinzel_fallback as FontFile).fallbacks = [nunito]
-		font_display = cinzel_fallback
-		# Same approach as the Lilita branch — explicit per-label Y offset
-		# in Card2D handles centering; the font itself stays unmodified.
-		font_stat = cinzel_fallback
-
-	# Body text: Nunito Regular with HEAVIER embolden to pair with Lilita One's
-	# weight. Was 0.35 (SemiBold) when paired with Cinzel; Lilita's chunky
-	# display weight wants a true Bold body to balance — bumped to 0.55.
-	# At 11pt this reads firmly against the dark text well and survives anti-
-	# aliasing, while still being a CLEAN body font (not a display font used
-	# as body text, which would be illegible).
-	var nunito_body := FontVariation.new()
-	nunito_body.base_font = nunito
-	nunito_body.variation_embolden = 0.55
-	font_body = nunito_body
-	# Heavier embolden for [b] tags so keyword highlighting actually changes
-	# weight, not just colour. 0.85 reads as a true ExtraBold against the 0.55
-	# Bold body — the weight jump is the AAA convention (MtG uses bold alone
-	# for keywords; StS and Hearthstone pair bold with a colour shift).
-	var nunito_bold := FontVariation.new()
-	nunito_bold.base_font = nunito
-	nunito_bold.variation_embolden = 0.85
-	font_body_bold = nunito_bold
-
-	# Combat HUD chrome uses Cinzel (engraved Roman serif) for AAA dark-fantasy
-	# gravitas. Kept SEPARATE from font_display/font_stat (Lilita One) on purpose:
-	# Card2D's orb numerals carry per-label pixel Y-offsets tuned to Lilita's
-	# metrics, so swapping the global card font would misalign every card face.
-	# The HUD has no per-label Y-offset tuning (it centers numerals via containers),
-	# so it can carry any font freely. font_title = Cinzel SemiBold (640) for header
-	# / caption text — its engraved serif reads beautifully at large title sizes.
-	# CACHE_MODE_IGNORE — same workaround as Lilita above. Plain load() hits Godot's
-	# resource cache, which after Cinzel was re-imported as MSDF can hand back the
-	# STALE pre-MSDF FontFile (bug godotengine/godot#92778) — load fresh for MSDF.
-	var cinzel := ResourceLoader.load("res://assets/fonts/Cinzel-Variable.ttf",
-		"FontFile", ResourceLoader.CACHE_MODE_IGNORE) as FontFile
-	if cinzel != null:
-		if nunito != null:
-			cinzel.fallbacks = [nunito]
-		var title := FontVariation.new()
-		title.base_font = cinzel
-		title.variation_opentype = {"wght": 640}
-		font_title = title
-		# HUD NUMERALS (HP / Command / counts) use the chunky Lilita stat font
-		# (font_stat), NOT a thin-serif Cinzel weight. Readability research: thick,
-		# high-x-height strokes read cleaner AND render far crisper at small HUD
-		# sizes — thin serifs alias/pixelate worst there (the pixelated-numbers
-		# complaint). Cinzel stays for TITLES via font_title above.
-		font_title_black = font_stat
-		if OS.is_debug_build():
-			print("[GameTheme] font_title=Cinzel; font_title_black=stat font (Lilita)")
+		push_warning("[GameTheme] Kreon unavailable — display falls back to Inter")
+		font_display = inter
+	# Stat numerals = Kreon Bold (lining figures, sturdy slab on the wax seals).
+	# NOTE: Card2D's orb numerals carry explicit per-label Y offsets
+	# (ORB_NUMERAL_Y_OFFSET) tuned to the old Lilita metrics — re-verify the seal
+	# centering after this swap and nudge that constant if numerals sit high/low.
+	if kreon != null:
+		var statf := FontVariation.new()
+		statf.base_font = kreon
+		statf.variation_opentype = {"wght": 700}
+		statf.variation_embolden = 0.45  # push numerals past Kreon's 700 axis max
+		font_stat = statf
 	else:
-		push_warning("[GameTheme] Cinzel unavailable — HUD falls back to display/stat font")
+		font_stat = font_display
+
+	# UI / menu / HUD / tooltip body = Inter (modern screen-legibility standard).
+	# wght 680 (2026-07-06, down from 850): Black-weight Inter at 16-18px CLOGS —
+	# counters and apertures close up and the text reads smaller and muddier than
+	# its point size ("feels small, hard to read"). Just-under-Bold keeps couch
+	# presence with open letterforms; [b] keyword tags at 900 still read heavier.
+	if inter != null:
+		var body := FontVariation.new()
+		body.base_font = inter
+		body.variation_opentype = {"wght": 680}
+		font_body = body
+		var body_bold := FontVariation.new()
+		body_bold.base_font = inter
+		body_bold.variation_opentype = {"wght": 900}
+		font_body_bold = body_bold
+	else:
+		font_body = font_display
+		font_body_bold = font_display
+
+	# Combat HUD chrome = Marcellus (titles / captions). Titles render large, where
+	# Marcellus's engraved Roman caps are elegant and readable — no FontVariation
+	# needed. HUD numerals (HP / Command / counts) reuse the Kreon stat font
+	# (font_stat): a sturdy slab reads cleaner and crisper at small HUD sizes than a
+	# thin serif weight would.
+	if kreon != null:
+		var titlef := FontVariation.new()
+		titlef.base_font = kreon
+		titlef.variation_opentype = {"wght": 700}
+		titlef.variation_embolden = 0.30  # big HUD headers / banners — extra heft
+		font_title = titlef
+	else:
 		font_title = font_display
-		font_title_black = font_stat
+	font_title_black = font_stat
+	if OS.is_debug_build():
+		print("[GameTheme] font_title=Kreon Bold; font_title_black=Kreon stat font")
 
-	# Card rules text: Alegreya — an OFL book serif designed for literature,
-	# sturdy at small sizes. The card page is diegetic paper, so it gets a
-	# diegetic book hand; HUD/menus keep Nunito (clean UI voice). SCOPED TO
-	# CARDS on purpose. wght 500 (not 400): hairline serifs at 10-12px need
-	# the half-step of weight to survive AA against the parchment fill.
-	# CACHE_MODE_IGNORE — same stale-MSDF-cache workaround (#92778) as the other fonts.
-	var alegreya := ResourceLoader.load("res://assets/fonts/Alegreya-Variable.ttf",
-		"FontFile", ResourceLoader.CACHE_MODE_IGNORE) as FontFile
-	if alegreya != null:
-		if nunito != null:
-			alegreya.fallbacks = [nunito]
+	# Card rules text = Kreon (Slay the Spire's card hand). A low-contrast slab that
+	# stays solid at 10-13px on the parchment where Alegreya's hairlines thinned out;
+	# its lining numerals also fix Alegreya's lumpy old-style figures. SCOPED TO CARDS
+	# (HUD/menus use Inter). wght 500 body / 700 bold for [b] keyword tags.
+	if kreon != null:
 		var writ_body := FontVariation.new()
-		writ_body.base_font = alegreya
-		writ_body.variation_opentype = {"wght": 500}
+		writ_body.base_font = kreon
+		writ_body.variation_opentype = {"wght": 700}  # Kreon Bold (axis max) — real weight
+		writ_body.variation_embolden = 0.30  # extra heft now that msdf_pixel_range has room
 		font_card_body = writ_body
 		var writ_bold := FontVariation.new()
-		writ_bold.base_font = alegreya
-		writ_bold.variation_opentype = {"wght": 760}
+		writ_bold.base_font = kreon
+		writ_bold.variation_opentype = {"wght": 700}
+		writ_bold.variation_embolden = 0.22  # keyword [b] tags read clearly heavier
 		font_card_body_bold = writ_bold
 		if OS.is_debug_build():
-			print("[GameTheme] font_card_body set to Alegreya")
+			print("[GameTheme] font_card_body set to Kreon")
 	else:
-		push_warning("[GameTheme] Alegreya unavailable — card body falls back to Nunito")
 		font_card_body = font_body
 		font_card_body_bold = font_body_bold
 	# Flip USE_NEW_FRAME below to false to revert to the old card_frame_ornate.png.
@@ -271,6 +261,7 @@ func _load_assets() -> void:
 			"  USE_NEW_FRAME=", USE_NEW_FRAME)
 	tex_icon_sword = load("res://assets/icons/sword.png")
 	tex_icon_heart = load("res://assets/icons/heart.png")
+	tex_icon_diamond = load("res://assets/icons/diamond.png")
 
 	# Map node icons — hand-drawn fantasy line-art from game-icons.net
 	# (CC-BY 3.0 by lorc & delapouite — credited in CREDITS.md). These look
@@ -540,8 +531,16 @@ const FRAME_TRIM_RARE     := Color(0.961, 0.784, 0.259, 1.0)  # #F5C842 bright g
 # text inherits it. Keep it at the legibility floor, never below.
 const FONT_HEADER := 28
 const FONT_SUBHEADER := 20
-const FONT_BODY := 16
+# 18, not 16 (2026-07-06): make_label already clamped 16 up to MIN_LABEL_SIZE,
+# so the constant was lying — and every non-clamped path that trusted it
+# rendered below the floor. Constant now IS the floor.
+const FONT_BODY := 18
 const FONT_TITLE := 34
+# Hard readability floor: no label/button text renders below this, no matter what
+# size a caller asks for. Couch-distance legibility — small 13–15px helper text
+# was unreadable. Enforced in make_label / make_themed_button / make_back_button;
+# bump this ONE number to make all small UI text bigger.
+const MIN_LABEL_SIZE := 18
 
 
 # ═══════════════════════════════════════════
@@ -567,57 +566,176 @@ func make_panel_textured(tint: Color = Color(0.18, 0.14, 0.10),
 	return s
 
 
-# The praised chart look (see make_choice_banner): dark ink body + a thin
-# tan/gilt rule + small ~4px corners + a deep drop shadow. Every "UI-kit" panel
-# in the game routes through here, so this is THE place the document aesthetic
-# is enforced. `parchment = true` adds the extra paper character — a faint warm
-# grain wash baked into bg_color and a second-tone inner keyline via a brighter
-# top/left bias — for tiles that should read as a torn document, not a button.
+# ═══════════════════════════════════════════════════════════════════════════
+#  CHART PANEL STYLE — the drawn "document furniture" panel (2026-07-06).
+#  Replaces the flat rounded-rectangle StyleBoxFlat every UI panel used to
+#  bottom out in. A StyleBox subclass draws the whole assembly per panel:
+#    · chamfered corners — the sheet is CUT like a plate mount, not CSS-rounded
+#    · a metal rule (caller's border color) over an inner ink keyline (the
+#      double-rule convention the card frames and map cartouches already use)
+#    · corner tacks on the chamfer diagonals (war-table corner-tack echo);
+#      auto-hidden on small chips so chrome never clutters a 30px pill
+#    · a lit-from-above field gradient so the panel reads as a physical leaf
+#    · a soft layered drop shadow sinking it into the painted scene
+#  Extends StyleBox directly, so every add_theme_stylebox_override caller and
+#  every content_margin_* mutation keeps working unchanged.
+# ═══════════════════════════════════════════════════════════════════════════
+class ChartPanelStyle extends StyleBox:
+	# bg/border emit `changed` on mutation (StyleBoxFlat parity) — HUD chips
+	# recolor their border at runtime and the panel must repaint.
+	var bg_color := Color(0.06, 0.05, 0.042, 0.96):
+		set(v):
+			bg_color = v
+			emit_changed()
+	var border_color := Color(0.60, 0.51, 0.34, 0.90):
+		set(v):
+			border_color = v
+			emit_changed()
+	var rule_width := 1.0
+	var chamfer := 12.0
+	var shadow := true
+	var parchment := false
+	var corner_tacks := true
+	# StyleBoxFlat-parity shadow knobs (some callers retint the shadow into a
+	# hover glow): color tints the layered shadow, size scales its spread
+	# (8 = the kit default).
+	var shadow_color := Color(0, 0, 0, 1.0):
+		set(v):
+			shadow_color = v
+			emit_changed()
+	var shadow_size := 8.0:
+		set(v):
+			shadow_size = v
+			emit_changed()
+
+	func _get_draw_rect(rect: Rect2) -> Rect2:
+		return rect.grow(6.0 + shadow_size * 1.2) if shadow else rect
+
+	static func _oct(r: Rect2, inset: float, ch: float) -> PackedVector2Array:
+		var l := r.position.x + inset
+		var t := r.position.y + inset
+		var rr := r.position.x + r.size.x - inset
+		var b := r.position.y + r.size.y - inset
+		var c: float = maxf(ch - inset * 0.5, 2.0)
+		return PackedVector2Array([
+			Vector2(l + c, t), Vector2(rr - c, t), Vector2(rr, t + c),
+			Vector2(rr, b - c), Vector2(rr - c, b), Vector2(l + c, b),
+			Vector2(l, b - c), Vector2(l, t + c)])
+
+	static func _closed(pts: PackedVector2Array) -> PackedVector2Array:
+		var out := pts.duplicate()
+		out.append(pts[0])
+		out.append(pts[1])  # overshoot one segment so the closing joint has no notch
+		return out
+
+	func _draw(ci: RID, rect: Rect2) -> void:
+		var ch := clampf(chamfer, 4.0, minf(rect.size.x, rect.size.y) * 0.26)
+		var small: bool = minf(rect.size.x, rect.size.y) < 70.0
+
+		# 1. Drop shadow — three soft octagon layers, offset down, so the panel
+		#    sinks into the painted scene instead of floating as a flat cutout.
+		#    shadow_color/shadow_size let hover states retint it into a glow.
+		if shadow:
+			var spread := shadow_size / 8.0
+			var glow := not shadow_color.is_equal_approx(Color(0, 0, 0, 1.0))
+			var sh_a := [0.30, 0.15, 0.07]
+			for i in range(3):
+				var grow := (1.0 + float(i) * 2.6) * spread
+				var pts := _oct(rect.grow(grow), 0.0, ch + grow)
+				for j in pts.size():
+					pts[j] += Vector2(0.0, 0.0 if glow else 3.0)
+				RenderingServer.canvas_item_add_polygon(ci, pts,
+					PackedColorArray([Color(shadow_color.r, shadow_color.g,
+						shadow_color.b, sh_a[i] * shadow_color.a)]))
+
+		# 2. Field — lit from above. Parchment mode warms the ink toward aged
+		#    paper (matching the old parchment=true wash) before the gradient.
+		var base := bg_color
+		if parchment:
+			base = bg_color.lerp(Color(0.16, 0.12, 0.08, bg_color.a), 0.35)
+		var top_c := base.lerp(Color(0.30, 0.24, 0.16, base.a), 0.22)
+		var bot_c := base.lerp(Color(0.0, 0.0, 0.0, base.a), 0.30)
+		var body := _oct(rect, rule_width * 0.5, ch)
+		var cols := PackedColorArray()
+		for p in body:
+			var f := clampf((p.y - rect.position.y) / maxf(rect.size.y, 1.0), 0.0, 1.0)
+			cols.append(top_c.lerp(bot_c, f))
+		RenderingServer.canvas_item_add_polygon(ci, body, cols)
+
+		# 3. Inner rule — the card frames' metal DOUBLE-rule convention: the same
+		#    metal as the outer rule, fainter, one mat-width in. (A black keyline
+		#    here was invisible on the dark field.) Skipped on chips too small.
+		if not small:
+			var key := _oct(rect, rule_width + 4.0, ch)
+			var key_c := Color(border_color.r, border_color.g, border_color.b,
+				border_color.a * 0.34)
+			RenderingServer.canvas_item_add_polyline(ci, _closed(key),
+				PackedColorArray([key_c]), 1.0, true)
+
+		# 4. Outer metal rule — the caller's accent lives here.
+		var frame := _oct(rect, rule_width * 0.5, ch)
+		RenderingServer.canvas_item_add_polyline(ci, _closed(frame),
+			PackedColorArray([border_color]), rule_width, true)
+
+		# 5. Parchment top sheen — a faint gilt catch-light along the top edge.
+		if parchment and not small:
+			var sheen_c := Color(0.95, 0.82, 0.52, 0.28 * border_color.a)
+			RenderingServer.canvas_item_add_polyline(ci,
+				PackedVector2Array([frame[0] + Vector2(1, 1.2), frame[1] + Vector2(-1, 1.2)]),
+				PackedColorArray([sheen_c]), 1.0, true)
+
+		# 6. Corner tacks — small metal diamonds pinned on the chamfer cuts,
+		#    echoing the map plate's corner tacks. Auto-hidden on small chips.
+		if corner_tacks and not small and ch >= 7.0:
+			var s := clampf(ch * 0.30, 2.5, 4.5)
+			var fill := Color(border_color.r * 0.55, border_color.g * 0.55,
+				border_color.b * 0.55, border_color.a)
+			var glint := Color(minf(border_color.r * 1.25, 1.0),
+				minf(border_color.g * 1.25, 1.0),
+				minf(border_color.b * 1.25, 1.0), border_color.a)
+			for pair in [[7, 0], [1, 2], [3, 4], [5, 6]]:
+				var m: Vector2 = (frame[pair[0]] + frame[pair[1]]) * 0.5
+				var quad := PackedVector2Array([
+					m + Vector2(0, -s), m + Vector2(s, 0),
+					m + Vector2(0, s), m + Vector2(-s, 0)])
+				RenderingServer.canvas_item_add_polygon(ci, quad,
+					PackedColorArray([fill]))
+				RenderingServer.canvas_item_add_polyline(ci, _closed(quad),
+					PackedColorArray([glint]), 1.0, true)
+
+
+# The praised chart look (see make_choice_banner), now drawn as real document
+# furniture (ChartPanelStyle above): chamfered corners, metal rule over an ink
+# keyline, corner tacks, lit field, layered shadow. Every "UI-kit" panel in the
+# game routes through here, so this is THE place the document aesthetic is
+# enforced. `parchment = true` warms the field toward aged paper and adds the
+# gilt top sheen — for tiles that should read as a torn document, not a button.
 static func make_panel_style(bg: Color = Color(0.06, 0.05, 0.042, 0.96),
 		border: Color = Color(0.60, 0.51, 0.34, 0.90),
 		border_w: int = 1, corner: int = 4, shadow: bool = true,
-		parchment: bool = false) -> StyleBoxFlat:
-	var s := StyleBoxFlat.new()
+		parchment: bool = false) -> StyleBox:
+	var s := ChartPanelStyle.new()
 	s.bg_color = bg
 	s.border_color = border
-	s.border_width_top = border_w
-	s.border_width_bottom = border_w
-	s.border_width_left = border_w
-	s.border_width_right = border_w
-	s.corner_radius_top_left = corner
-	s.corner_radius_top_right = corner
-	s.corner_radius_bottom_left = corner
-	s.corner_radius_bottom_right = corner
-	if shadow:
-		s.shadow_color = Color(0, 0, 0, 0.65)
-		s.shadow_size = 8
-		s.shadow_offset = Vector2(0, 4)
-	if parchment:
-		# Warm the ink body a hair so it reads as aged paper rather than flat
-		# black, and lift the top edge — a subtle "lit from above" cue that
-		# makes the tile look like a physical leaf catching light, matching the
-		# card-surface convention in _build_card_surface_textures.
-		s.bg_color = bg.lerp(Color(0.16, 0.12, 0.08), 0.35)
-		s.border_color = border.lightened(0.05)
-		s.border_width_top = max(border_w, 1)
-		# A faint gilt sheen along the very top edge sells the document feel.
-		s.shadow_color = Color(0, 0, 0, 0.72)
-		s.shadow_size = 10
+	s.rule_width = float(maxi(border_w, 1))
+	s.chamfer = 7.0 + float(corner) * 1.5
+	s.shadow = shadow
+	s.parchment = parchment
+	# StyleBoxFlat used the border width as the implicit content margin —
+	# replicate exactly so no layout shifts.
+	s.set_content_margin_all(float(maxi(border_w, 1)))
 	return s
 
 
-static func make_btn_style(bg: Color, border: Color = GILT, corner: int = 4) -> StyleBoxFlat:
-	var s := StyleBoxFlat.new()
+static func make_btn_style(bg: Color, border: Color = GILT, corner: int = 4) -> StyleBox:
+	var s := ChartPanelStyle.new()
 	s.bg_color = bg
 	s.border_color = border
-	s.border_width_top = 2
-	s.border_width_bottom = 2
-	s.border_width_left = 2
-	s.border_width_right = 2
-	s.corner_radius_top_left = corner
-	s.corner_radius_top_right = corner
-	s.corner_radius_bottom_left = corner
-	s.corner_radius_bottom_right = corner
+	s.rule_width = 2.0
+	s.chamfer = 5.0 + float(corner)
+	s.shadow = false
+	s.corner_tacks = false
+	s.set_content_margin_all(2.0)  # StyleBoxFlat's implicit border-width margin
 	return s
 
 
@@ -630,16 +748,15 @@ static func make_btn_style(bg: Color, border: Color = GILT, corner: int = 4) -> 
 ## so a button reads as an aged plaque in the wax / cartouche kit instead of a
 ## flat colour rectangle laid over the painted scenes. `accent_strength` 0..1
 ## scales how much the accent shows (dim for disabled, full on hover).
-func _plaque_style(fill: Color, accent: Color, accent_strength: float) -> StyleBoxFlat:
-	var s := StyleBoxFlat.new()
+func _plaque_style(fill: Color, accent: Color, accent_strength: float) -> StyleBox:
+	var s := ChartPanelStyle.new()
 	s.bg_color = fill.lerp(accent, 0.08 * accent_strength)
 	var key := GILT.lerp(accent, 0.55 * accent_strength)
 	s.border_color = Color(key.r, key.g, key.b, 0.92)
-	s.set_border_width_all(2)
-	s.set_corner_radius_all(5)
-	s.shadow_color = Color(0, 0, 0, 0.42)
-	s.shadow_size = 4
-	s.shadow_offset = Vector2(0, 2)
+	s.rule_width = 2.0
+	s.chamfer = 9.0
+	s.shadow = true
+	s.corner_tacks = false
 	s.content_margin_left = 14
 	s.content_margin_right = 14
 	s.content_margin_top = 7
@@ -654,7 +771,7 @@ func make_themed_button(text: String, bg: Color, min_size: Vector2 = Vector2(160
 	btn.tooltip_text = tooltip
 	btn.custom_minimum_size = min_size
 	btn.focus_mode = Control.FOCUS_NONE  # drop the default Godot focus rectangle
-	btn.add_theme_font_size_override("font_size", font_size)
+	btn.add_theme_font_size_override("font_size", maxi(font_size, MIN_LABEL_SIZE))
 	# Apply the display font so buttons inherit the game's typography instead
 	# of falling back to Godot's default sans-serif. Guarded for the case where
 	# font_display hasn't loaded yet (very early scene init).
@@ -705,25 +822,14 @@ func make_choice_banner(title: String, desc: String, accent: Color,
 	root.mouse_filter = Control.MOUSE_FILTER_STOP
 	var disabled: bool = (disabled_reason != "")
 
-	# Chart-language panel: dark ink body with a tan rule (the map screen's
-	# tooltip/cartouche kit). The accent survives as a small rule under the
-	# title and the hotspot glow behind the banner, so choices still read
-	# related-but-distinct without becoming colored rectangles.
-	var s := StyleBoxFlat.new()
-	s.bg_color = Color(0.055, 0.048, 0.040, 0.96 if not disabled else 0.60)
-	s.border_color = Color(0.60, 0.51, 0.34,
-		0.90 if not disabled else 0.35)
-	s.border_width_top = 1
-	s.border_width_bottom = 1
-	s.border_width_left = 1
-	s.border_width_right = 1
-	s.corner_radius_top_left = 3
-	s.corner_radius_top_right = 3
-	s.corner_radius_bottom_left = 3
-	s.corner_radius_bottom_right = 3
-	s.shadow_color = Color(0, 0, 0, 0.65)
-	s.shadow_size = 8
-	s.shadow_offset = Vector2(0, 4)
+	# Chart-language panel: the drawn document-furniture kit (ChartPanelStyle).
+	# The accent survives as a small rule under the title and the hotspot glow
+	# behind the banner, so choices still read related-but-distinct without
+	# becoming colored rectangles.
+	var s := make_panel_style(
+		Color(0.055, 0.048, 0.040, 0.96 if not disabled else 0.60),
+		Color(0.60, 0.51, 0.34, 0.90 if not disabled else 0.35),
+		1, 4, true, true)
 	s.content_margin_left = 14
 	s.content_margin_right = 14
 	s.content_margin_top = 12
@@ -736,11 +842,17 @@ func make_choice_banner(title: String, desc: String, accent: Color,
 	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(hbox)
 
-	# Icon column — TextureRect if a path was provided, else a big colored
-	# glyph from the title's first character. Sized so it visually anchors
-	# the banner without dominating it.
+	# Icon column — a FIXED-size sigil that anchors the banner without dominating
+	# it. Hard-pinned: SHRINK_CENTER stops the HBox stretching the column, and
+	# clip_contents guarantees the glyph can never bleed under the body text (an
+	# earlier FIT_WIDTH_PROPORTIONAL + FULL_RECT setup ballooned to ~130px and
+	# the copy rendered on top of it — the "gold blob behind the words" bug).
+	const ICON_PX := 46.0
 	var icon_box := Control.new()
-	icon_box.custom_minimum_size = Vector2(56, 56)
+	icon_box.custom_minimum_size = Vector2(ICON_PX, ICON_PX)
+	icon_box.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	icon_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	icon_box.clip_contents = true
 	icon_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(icon_box)
 	if icon_path != "" and ResourceLoader.exists(icon_path):
@@ -751,8 +863,9 @@ func make_choice_banner(title: String, desc: String, accent: Color,
 		for layer in range(2):
 			var tex := TextureRect.new()
 			tex.texture = icon_tex
-			tex.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+			tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 			tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			tex.custom_minimum_size = Vector2(ICON_PX, ICON_PX)
 			tex.set_anchors_preset(Control.PRESET_FULL_RECT)
 			if layer == 0:
 				for prop in ["offset_left", "offset_top",
@@ -760,7 +873,9 @@ func make_choice_banner(title: String, desc: String, accent: Color,
 					tex.set(prop, 2.0)
 				tex.modulate = Color(0, 0, 0, 0.55 if not disabled else 0.30)
 			else:
-				tex.modulate = Color(0.82, 0.74, 0.56) if not disabled \
+				# Quieter parchment tint — the icon is a supporting sigil, not
+				# a bright gold focal point competing with the title.
+				tex.modulate = Color(0.74, 0.67, 0.52) if not disabled \
 					else Color(0.50, 0.48, 0.44, 0.55)
 			tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			icon_box.add_child(tex)
@@ -814,7 +929,7 @@ func make_choice_banner(title: String, desc: String, accent: Color,
 	var body_lbl := Label.new()
 	body_lbl.text = body_text
 	body_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	body_lbl.add_theme_font_size_override("font_size", 17)
+	body_lbl.add_theme_font_size_override("font_size", 18)
 	body_lbl.add_theme_color_override("font_color",
 		Color(0.88, 0.84, 0.72, 0.95) if not disabled else Color(0.82, 0.72, 0.60, 0.92))
 	body_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.5))
@@ -1049,6 +1164,167 @@ func _open_settings_overlay_from_anywhere() -> void:
 			return
 
 
+func open_settings_overlay() -> void:
+	# Public entry point so any screen can open the shared pause/settings overlay
+	# from an Esc handler (or a button) — mirrors the top-left gear. The overlay
+	# owns its own Esc-to-close, so a second Esc closes it again.
+	_open_settings_overlay_from_anywhere()
+
+
+# ═══════════════════════════════════════════
+#  RICH HOVER (StS-style pop-out + anchored tooltip)
+# ═══════════════════════════════════════════
+# Replaces the engine tooltip on treasure chips (relics, potions): hovering
+# pops the chip out (scale-up around its center, raised above its neighbors)
+# and shows an ink-board tooltip with the item's name + rules text INSTANTLY
+# beside it — no native-tooltip delay, no mouse-chasing. One system so every
+# chip in the game (combat HUD, shop, menu relic list) behaves identically.
+
+# Player-facing tier line on relic tooltips. "Elite" stays code-only; these
+# words already appear in shop/reward copy.
+const RELIC_TIER_TAGS := {
+	"starting": "Signature Relic",
+	"combat":   "Combat Relic",
+	"utility":  "Utility Relic",
+	"boss":     "Boss Relic",
+	"event":    "Event Relic",
+}
+
+
+func attach_rich_hover(chip: Control, title: String, body: String,
+		tag: String = "", accent: Color = GILT, pop_scale: float = 1.3) -> void:
+	# The chip must not be MOUSE_FILTER_IGNORE or it will never see the hover.
+	chip.mouse_entered.connect(_rich_hover_enter.bind(chip, title, body, tag, accent, pop_scale))
+	chip.mouse_exited.connect(_rich_hover_exit.bind(chip))
+	# Chips are rebuilt wholesale (relic strip / potion bar refreshes) — never
+	# leave an orphaned tooltip behind when the hovered chip is freed.
+	chip.tree_exiting.connect(_rich_hover_clear_tip.bind(chip))
+
+
+func _rich_hover_enter(chip: Control, title: String, body: String, tag: String,
+		accent: Color, pop_scale: float) -> void:
+	if not chip.has_meta("_rh_base_z"):
+		chip.set_meta("_rh_base_z", chip.z_index)
+	chip.pivot_offset = chip.size * 0.5
+	chip.z_index = 100
+	_rich_hover_scale(chip, Vector2(pop_scale, pop_scale), 0.14, Tween.TRANS_BACK)
+	_rich_hover_clear_tip(chip)
+	var tip := _build_rich_tip(title, body, tag, accent)
+	# Host the tip in the chip's own canvas so coordinates line up 1:1: the
+	# nearest CanvasLayer ancestor (combat HUD rides layer 12 — a viewport-root
+	# tip would render UNDER it), else the chip's viewport root. Never a child
+	# of the chip itself: ancestor clip_contents (scroll lists) would crop it.
+	var host: Node = null
+	var walk: Node = chip.get_parent()
+	while walk != null:
+		if walk is CanvasLayer:
+			host = walk
+			break
+		walk = walk.get_parent()
+	if host == null:
+		host = chip.get_viewport()
+	if host == null:
+		tip.free()
+		return
+	host.add_child(tip)
+	# Beside the chip's popped silhouette, right by default, flipped left when
+	# the right edge can't fit it (enemy-rail side), clamped on screen.
+	var r := chip.get_global_rect()
+	var vp := chip.get_viewport_rect().size
+	var grow_x := r.size.x * 0.5 * maxf(pop_scale - 1.0, 0.0)
+	var tx := r.position.x + r.size.x + grow_x + 12.0
+	if tx + tip.size.x > vp.x - 8.0:
+		tx = r.position.x - grow_x - 12.0 - tip.size.x
+	var ty := clampf(r.position.y + r.size.y * 0.5 - tip.size.y * 0.5,
+		8.0, maxf(8.0, vp.y - tip.size.y - 8.0))
+	tip.position = Vector2(maxf(8.0, tx), ty)
+	chip.set_meta("_rh_tip", tip)
+	tip.modulate.a = 0.0
+	var tw := tip.create_tween()
+	tw.tween_property(tip, "modulate:a", 1.0, 0.10)
+
+
+func _rich_hover_exit(chip: Control) -> void:
+	chip.z_index = int(chip.get_meta("_rh_base_z", 0))
+	_rich_hover_scale(chip, Vector2.ONE, 0.10, Tween.TRANS_QUAD)
+	_rich_hover_clear_tip(chip)
+
+
+func _rich_hover_scale(chip: Control, target: Vector2, dur: float,
+		trans: Tween.TransitionType) -> void:
+	# has_meta guard: get_meta with a null default still raises an error.
+	var old = chip.get_meta("_rh_tween") if chip.has_meta("_rh_tween") else null
+	if old is Tween and (old as Tween).is_valid():
+		(old as Tween).kill()
+	var tw := chip.create_tween()
+	tw.tween_property(chip, "scale", target, dur) \
+		.set_trans(trans).set_ease(Tween.EASE_OUT)
+	chip.set_meta("_rh_tween", tw)
+
+
+func _rich_hover_clear_tip(chip: Control) -> void:
+	if not chip.has_meta("_rh_tip"):
+		return
+	var tip = chip.get_meta("_rh_tip")
+	if tip != null and is_instance_valid(tip):
+		(tip as Node).queue_free()
+	chip.remove_meta("_rh_tip")
+
+
+func _build_rich_tip(title: String, body: String, tag: String, accent: Color) -> Control:
+	# Fixed-width ink-board plaque, sized by FONT METRICS up front — autowrap
+	# Labels report garbage minimum heights until layout settles (same trap
+	# fit_tile_height documents), and a hover tip can't wait a frame to size.
+	const TIP_W := 320.0
+	const PAD := 14.0
+	var wrap_w := TIP_W - PAD * 2.0
+	var tip := Panel.new()
+	tip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tip.z_index = 101
+	tip.add_theme_stylebox_override("panel", make_panel_style(
+		Color(0.088, 0.064, 0.048, 0.97), Color(0.55, 0.44, 0.24, 1.0), 1, 5, true))
+	var f_title: Font = font_title if font_title != null else ThemeDB.fallback_font
+	var f_body: Font = font_body if font_body != null else ThemeDB.fallback_font
+	var y := PAD - 2.0
+	y += _tip_add_line(tip, title, f_title, 21, accent, PAD, y, wrap_w)
+	if tag != "":
+		y += 1.0
+		# Caption register (16px, deliberate): a type tag, not reading text.
+		y += _tip_add_line(tip, tag, f_body, 16, Color(0.62, 0.55, 0.42, 1.0), PAD, y, wrap_w)
+	y += 7.0
+	var rule := ColorRect.new()
+	rule.color = Color(GILT.r, GILT.g, GILT.b, 0.30)
+	rule.position = Vector2(PAD, y)
+	rule.size = Vector2(wrap_w, 1)
+	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tip.add_child(rule)
+	y += 8.0
+	y += _tip_add_line(tip, body, f_body, 18, IVORY, PAD, y, wrap_w)
+	tip.size = Vector2(TIP_W, y + PAD - 2.0)
+	return tip
+
+
+func _tip_add_line(tip: Control, text: String, f: Font, fs: int, color: Color,
+		x: float, y: float, wrap_w: float) -> float:
+	# One manually-placed wrapped label; returns its measured height. Wrap flags
+	# must match the label's AUTOWRAP_WORD or the measurement undershoots.
+	var brk := TextServer.BREAK_MANDATORY | TextServer.BREAK_WORD_BOUND
+	var ms := f.get_multiline_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, wrap_w, fs, -1, brk)
+	var lines := maxi(1, int(round(ms.y / f.get_height(fs))))
+	var h := ms.y + float(lines) * 3.0
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.add_theme_font_override("font", f)
+	lbl.add_theme_font_size_override("font_size", fs)
+	lbl.add_theme_color_override("font_color", color)
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lbl.position = Vector2(x, y)
+	lbl.size = Vector2(wrap_w, h)
+	tip.add_child(lbl)
+	return h
+
+
 func make_relic_chip(rid: String, size: int = 40) -> Panel:
 	# Ornate framed chip for a relic icon — used by the HUD strip, shop cards,
 	# the starting-relic-pick tiles, and the main-menu relic list. The frame is
@@ -1058,10 +1334,15 @@ func make_relic_chip(rid: String, size: int = 40) -> Panel:
 	# they were designed for; painted PNGs render at full color.
 	var chip := Panel.new()
 	chip.custom_minimum_size = Vector2(size, size)
-	chip.mouse_filter = Control.MOUSE_FILTER_STOP
+	# PASS, not STOP: the chip still sees hover (rich tip below) but no longer
+	# eats clicks meant for a parent tile (shop relic cards had a dead click
+	# zone exactly over the icon).
+	chip.mouse_filter = Control.MOUSE_FILTER_PASS
 
 	var r := RelicDB.get_relic(rid)
-	chip.tooltip_text = "%s — %s" % [r.get("name", rid), r.get("desc", "")]
+	# StS-style hover: pop the chip out + show name/tier/rules beside it.
+	attach_rich_hover(chip, r.get("name", rid), r.get("desc", ""),
+		RELIC_TIER_TAGS.get(str(r.get("tier", "")), ""), RelicDB.get_tier_color(rid))
 
 	var tier_color: Color = RelicDB.get_tier_color(rid)
 	var radius: int = max(4, int(round(size * 0.14)))
@@ -1156,6 +1437,101 @@ func make_relic_chip(rid: String, size: int = 40) -> Panel:
 	return chip
 
 
+func make_potion_chip(pid: String, size: int = 40) -> Panel:
+	# Potion sibling of make_relic_chip. The painted potion art is a full-bleed
+	# square painting, so it MUST sit behind the gilt frame — otherwise the
+	# painting's own warm background swallows the rim and the picture reads as
+	# sitting on top of the frame (reported 2026-07-08). Layering back → front:
+	#   1. dark well + accent glow halo (base panel)
+	#   2. the clipped art (no overscan — the old 16% zoom is what spilled it out)
+	#   3. the metal frame + inner keyline, drawn LAST so the border mats the art.
+	var chip := Panel.new()
+	chip.custom_minimum_size = Vector2(size, size)
+	chip.mouse_filter = Control.MOUSE_FILTER_PASS
+
+	var p := PotionDB.get_potion(pid)
+	var accent: Color = p.get("color", GILT)
+	attach_rich_hover(chip, p.get("name", pid), p.get("desc", ""), "POTION", accent)
+
+	var radius: int = max(4, int(round(size * 0.14)))
+	# A frame you can actually see: scale the gilt band with the chip instead of a
+	# fixed hairline (a 3px rim on a 96px tile vanishes under a full-bleed
+	# painting). Small chips still floor at 3px.
+	var rim: int = max(3, int(round(size * 0.055)))
+
+	# 1. Back — dark well + accent halo. No border here; the frame overlay owns
+	# the metal edge so it can be drawn on TOP of the art.
+	var base := StyleBoxFlat.new()
+	base.bg_color = Color(0.06, 0.05, 0.04, 0.95)
+	for k in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		base.set(k, radius)
+	base.shadow_color = Color(accent.r, accent.g, accent.b, 0.30)
+	base.shadow_size = max(3, int(round(size * 0.12)))
+	chip.add_theme_stylebox_override("panel", base)
+
+	# 2. Middle — the painted art, clipped inside the frame footprint (inset by
+	# the rim so its edge tucks under the metal). Square art in a square clip
+	# fills exactly under STRETCH_KEEP_ASPECT_COVERED, no overscan needed.
+	var icon: Texture2D = PotionDB.icon_for(pid)
+	if icon != null:
+		var icon_clip := Control.new()
+		icon_clip.clip_contents = true
+		icon_clip.set_anchors_preset(Control.PRESET_FULL_RECT)
+		icon_clip.offset_left = rim
+		icon_clip.offset_right = -rim
+		icon_clip.offset_top = rim
+		icon_clip.offset_bottom = -rim
+		icon_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		chip.add_child(icon_clip)
+		var tex := TextureRect.new()
+		tex.texture = icon
+		tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+		if not PotionDB.is_painted_icon(pid):
+			tex.modulate = accent          # tint the white game-icons silhouette
+		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		icon_clip.add_child(tex)
+
+	# 3. Front — the metal frame, drawn last so the gilt band sits over the
+	# picture's edge, plus the dark inner keyline (two-tone metal look).
+	var frame := Panel.new()
+	frame.set_anchors_preset(Control.PRESET_FULL_RECT)
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var fstyle := StyleBoxFlat.new()
+	fstyle.bg_color = Color(0, 0, 0, 0)
+	fstyle.border_color = GILT
+	for k in ["border_width_top", "border_width_bottom",
+			"border_width_left", "border_width_right"]:
+		fstyle.set(k, rim)
+	for k in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		fstyle.set(k, radius)
+	frame.add_theme_stylebox_override("panel", fstyle)
+	chip.add_child(frame)
+
+	var inner_ring := Panel.new()
+	inner_ring.set_anchors_preset(Control.PRESET_FULL_RECT)
+	inner_ring.offset_left = rim
+	inner_ring.offset_right = -rim
+	inner_ring.offset_top = rim
+	inner_ring.offset_bottom = -rim
+	inner_ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var inner_style := StyleBoxFlat.new()
+	inner_style.bg_color = Color(0, 0, 0, 0)
+	inner_style.border_color = Color(0.0, 0.0, 0.0, 0.55)
+	for k in ["border_width_top", "border_width_bottom",
+			"border_width_left", "border_width_right"]:
+		inner_style.set(k, 1)
+	for k in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		inner_style.set(k, max(2, radius - 1))
+	inner_ring.add_theme_stylebox_override("panel", inner_style)
+	chip.add_child(inner_ring)
+	return chip
+
+
 # ── Shared stacked-tile skeleton ─────────────────────────────────────────────
 # Both relic cards (make_relic_card, used on Shop/Reward/Treasure) and Shop's
 # service slots (potion/removal) are the same shape: an empty Button so the whole
@@ -1180,6 +1556,53 @@ func make_tile_skeleton(min_size: Vector2, separation: int = 4) -> Dictionary:
 	return {"button": btn, "col": col}
 
 
+func fit_tile_height(btn: Button, col: VBoxContainer) -> void:
+	# The tile skeleton's inner VBox is anchored FULL_RECT, so the Button's min
+	# size never grows with content — a long autowrapped body printed straight
+	# through the bottom border (the shop's potion tile clipped its price line).
+	# Measure the stacked content at the tile's known wrap width and grow the
+	# button min-height to fit. Synchronous + explicit (font metrics, not
+	# container minimums): autowrap Labels report garbage minimum heights until
+	# layout settles their width, so signal-driven growth mis-fires.
+	var wrap_w: float = btn.custom_minimum_size.x - 20.0  # col side insets
+	var sep: float = col.get_theme_constant("separation")
+	var need := 16.0  # col top+bottom insets
+	var first := true
+	for ch in col.get_children():
+		if not (ch is Control) or not (ch as Control).visible:
+			continue
+		var h: float
+		if ch is Label and (ch as Label).autowrap_mode != TextServer.AUTOWRAP_OFF:
+			var l := ch as Label
+			var f: Font = l.get_theme_font("font")
+			var fs: int = l.get_theme_font_size("font_size")
+			# Mirror the label's own break flags: WORD_SMART balances lines
+			# (BREAK_ADAPTIVE), which wraps EARLIER than plain word-bound —
+			# measuring without it undershoots by a whole line on long bodies.
+			var brk := TextServer.BREAK_MANDATORY | TextServer.BREAK_WORD_BOUND
+			if l.autowrap_mode == TextServer.AUTOWRAP_WORD_SMART:
+				brk |= TextServer.BREAK_ADAPTIVE
+			var ms := f.get_multiline_string_size(l.text,
+				HORIZONTAL_ALIGNMENT_LEFT, wrap_w, fs, -1, brk)
+			var lines := maxi(1, int(round(ms.y / f.get_height(fs))))
+			# Per-line slack: the Label's real line boxes run a few px taller
+			# than raw font metrics (spacing + fractional rounding). Slight
+			# overshoot is invisible on a centered tile; undershoot clips.
+			h = ms.y + float(lines) * (float(l.get_theme_constant("line_spacing")) + 3.0) + 6.0
+		else:
+			h = (ch as Control).get_combined_minimum_size().y
+		if not first:
+			need += sep
+		first = false
+		need += h
+	if need > btn.custom_minimum_size.y:
+		btn.custom_minimum_size = Vector2(btn.custom_minimum_size.x, need)
+	# NOTE: do NOT try to refine this with a col.resized/get_combined_minimum_size
+	# hook — autowrapped Labels report garbage minimum heights until their own
+	# width settles (a frame after the col's), and a grow-only hook that reads
+	# one bogus pass balloons the tile permanently (seen: 2000px-tall tiles).
+
+
 func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 172),
 		price: int = -1) -> Button:
 	# A relic "card" button: gilt-trimmed panel with the relic's icon stacked
@@ -1195,21 +1618,27 @@ func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 17
 	btn.tooltip_text = "%s — %s" % [r.get("name", rid), r.get("desc", "")]
 	var normal := make_btn_style(bg, GILT, 10)
 	btn.add_theme_stylebox_override("normal", normal)
-	var hover := normal.duplicate() as StyleBoxFlat
+	var hover := normal.duplicate() as ChartPanelStyle
 	hover.bg_color = bg.lightened(0.15)
 	hover.border_color = GILT_BRIGHT
 	btn.add_theme_stylebox_override("hover", hover)
-	var pressed := normal.duplicate() as StyleBoxFlat
+	var pressed := normal.duplicate() as ChartPanelStyle
 	pressed.bg_color = bg.darkened(0.20)
 	btn.add_theme_stylebox_override("pressed", pressed)
-	var disabled := normal.duplicate() as StyleBoxFlat
+	var disabled := normal.duplicate() as ChartPanelStyle
 	disabled.bg_color = bg.darkened(0.40)
 	disabled.border_color = Color(0.40, 0.30, 0.15, 0.55)
 	btn.add_theme_stylebox_override("disabled", disabled)
 
 	var col: VBoxContainer = skel.col
 
-	var chip := make_relic_chip(rid, 56)
+	# The relic is the hero of its tile: the icon scales with the tile
+	# instead of sitting at a fixed 56px — on the Reward screen's 340×300
+	# choice tiles that's ~114px of painted relic, on the Shop's shorter
+	# tiles proportionally less. Growing the BOX without growing the object
+	# just made the tiles emptier (the 220×172 → 340×300 bump proved it).
+	var icon_px := clampi(int(min_size.y * 0.38), 56, 128)
+	var chip := make_relic_chip(rid, icon_px)
 	chip.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	col.add_child(chip)
 
@@ -1224,6 +1653,7 @@ func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 17
 		var price_lbl := make_label("— %dg —" % price, FONT_BODY, GILT)
 		price_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		col.add_child(price_lbl)
+	fit_tile_height(btn, col)
 	return btn
 
 
@@ -1232,9 +1662,12 @@ func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 17
 # screens used to build their own near-identical copies, which drifted ("Play"
 # vs "Place creatures", different combat wording). Now both call this.
 const HOW_TO_PLAY_PRIMER := [
+	["The goal", "Three acts, each held by a rival lord. Fight across the map, break open the lord's keep, and bring it down — then march on to the next act. Run out of health and the run ends; you begin again from the start, a little wiser."],
+	["A turn, step by step", "Gain 3 Command and top your hand back up. Drag creatures onto your lanes and cast spells, spending Command as you go. Forecast chips show incoming enemy strikes. End the turn — both armies strike at once, then a new round begins."],
 	["Command", "Your turn resource — you start with 3 each turn and spend it to play creatures and spells. Up to 2 unspent Command banks into next turn."],
+	["Your hand", "Unplayed cards stay in your hand between turns; each turn tops it back up to 5. Right-click cards to mark them for discard — as many as you like. Marked cards are thrown out when your turn ends, and the next top-up deals fresh ones."],
 	["The board", "Four lanes, two ranks per side. The front rank fights; the back rank is reserve. Place creatures into either rank."],
-	["Combat", "Both sides strike at once. In each lane the front rank trades first and is hit first; the back waits behind it. Swift creatures strike in a pre-phase."],
+	["Combat", "Both armies strike at once. In each lane the front rank trades first and is hit first; the back waits behind it. Swift creatures strike before the clash."],
 	["The Forge", "At a rest, Forge a card for a permanent \"+\" upgrade. You pick the card and see exactly what it becomes — no rolls."],
 	["Recruit camps", "A free draft — take 1 of 3 cards to join your deck. The main way your deck grows between fights."],
 	["The boss gate", "Each lord's keep starts barred. Break enough holds to open the road, then march on the keep. The map tracks how many remain."],
@@ -1259,7 +1692,22 @@ func make_how_to_play_overlay() -> Control:
 			scrim.queue_free())
 
 	var panel := PanelContainer.new()
-	panel.set_anchors_preset(Control.PRESET_CENTER)
+	# Manual anchors+offsets center a 1180×740 rect. set_anchors_preset(PRESET_CENTER)
+	# leaves the offsets at 0, so the min-size panel grew down-and-right off the
+	# bottom-right corner ("mostly off screen") — the same trap documented in
+	# GameOver.gd. Half-extents: 1180/2 = 590, 740/2 = 370.
+	panel.anchor_left = 0.5
+	panel.anchor_right = 0.5
+	panel.anchor_top = 0.5
+	panel.anchor_bottom = 0.5
+	panel.offset_left = -590
+	panel.offset_right = 590
+	panel.offset_top = -370
+	panel.offset_bottom = 370
+	# Grow from the center so if content min-size exceeds the offset rect the
+	# panel stays centered instead of drifting toward the bottom-right.
+	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
 	panel.custom_minimum_size = Vector2(1180, 740)
 	panel.add_theme_stylebox_override("panel", make_panel_style(
 		Color(0.06, 0.05, 0.045, 0.99),
@@ -1398,6 +1846,8 @@ static func format_keywords(data: Dictionary) -> String:
 
 func make_label(text: String, font_size: int = FONT_BODY, color: Color = IVORY,
 		outline: bool = false) -> Label:
+	# Enforce the readability floor — callers asking for 13–15px get bumped to it.
+	font_size = maxi(font_size, MIN_LABEL_SIZE)
 	var lbl := Label.new()
 	lbl.text = text
 	lbl.add_theme_font_size_override("font_size", font_size)
@@ -1411,8 +1861,20 @@ func make_label(text: String, font_size: int = FONT_BODY, color: Color = IVORY,
 		lbl.add_theme_font_override("font", font_body)
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	if outline:
+		# Explicit, stronger outline for text over busy art / photo backgrounds.
 		lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.7))
 		lbl.add_theme_constant_override("outline_size", 3)
+	elif font_size < 22:
+		# Default legibility for body-sized text: at 13–18px a thin stroke is mostly
+		# partial-alpha anti-alias pixels, so with NO edge it dissolves into a dark
+		# panel and reads as semi-transparent (the "see-through small text" bug, e.g.
+		# the net-lobby hint). A tight near-black outline wraps each glyph in opaque
+		# pixels. 2px stays under the size where an MSDF outline floods letter
+		# counters. Display-size text (≥22, thick Lilita) is already solid, so it's
+		# left clean to preserve the title look. Callers that truly want no edge can
+		# override outline_size back to 0.
+		lbl.add_theme_color_override("font_outline_color", Color(0.04, 0.03, 0.02, 0.85))
+		lbl.add_theme_constant_override("outline_size", 2)
 	return lbl
 
 
@@ -1511,12 +1973,15 @@ func _load_keyword_icons() -> void:
 	# Game-icons.net SVGs, CC-BY 3.0 (credited in CREDITS.md), plus the
 	# hand-authored redesign-keyword devices in the same white-silhouette kit.
 	var keywords = [
-		"armored", "swift", "ranged", "thorns", "regenerate", "summon",
+		"armored", "swift", "thorns", "regenerate", "summon",
 		"last_stand", "piercing", "sacrifice", "exhaust", "retain",
 		"wither", "on_enter", "on_death", "adj_buff",
 		# Redesign keywords — were silently icon-less (no bottom-margin device).
 		"shield", "poison", "guardian", "doom", "rampage", "lifelink",
-		"overrun", "formation", "structure",
+		"overrun", "formation", "structure", "sniper",
+		# Transient statuses (not card keywords) — the battlefield tokens' live
+		# status rail renders these while the effect holds.
+		"frozen", "stunned",
 	]
 	for k in keywords:
 		var p = "res://assets/icons/keywords/%s.svg" % k
@@ -1939,7 +2404,7 @@ func make_screen_title(text: String, color: Color = GILT_BRIGHT,
 	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	sep.add_child(left)
 
-	var diamond_tex := load("res://assets/icons/diamond.png") as Texture2D
+	var diamond_tex := tex_icon_diamond
 	if diamond_tex != null:
 		var diamond := TextureRect.new()
 		diamond.texture = diamond_tex
@@ -1996,7 +2461,7 @@ func make_section_divider(text: String, color: Color = GILT,
 	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(left)
 
-	var diamond_tex := load("res://assets/icons/diamond.png") as Texture2D
+	var diamond_tex := tex_icon_diamond
 	if diamond_tex != null:
 		var dl := TextureRect.new()
 		dl.texture = diamond_tex
@@ -2142,21 +2607,165 @@ func pulse_label(lbl: Label, flash_color: Color = Color(1.0, 0.85, 0.30)) -> voi
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 
-# Fade-to-black scene transition. Returns the overlay so the caller can chain
-# additional setup; the overlay auto-frees once the fade-in completes. Calling
+# ── The reroll flourish ────────────────────────────────────────────────
+# One expanding ring (a horn-blast / arcane pulse), drawn from a circular
+# StyleBox so it needs no texture or shader: a square Panel whose corner
+# radius ≥ half its size renders as a ring outline; scaling the Panel grows
+# the whole ring. Parented onto the caller-supplied overlay and self-frees.
+func _spawn_ring(overlay: Control, center: Vector2, color: Color,
+		start_d: float, end_d: float, dur: float, delay: float = 0.0) -> void:
+	if overlay == null or not is_instance_valid(overlay):
+		return
+	var ring := Panel.new()
+	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var st := StyleBoxFlat.new()
+	st.bg_color = Color(0, 0, 0, 0)
+	st.border_color = color
+	st.set_border_width_all(5)
+	st.set_corner_radius_all(600)
+	ring.add_theme_stylebox_override("panel", st)
+	ring.size = Vector2(start_d, start_d)
+	ring.pivot_offset = ring.size * 0.5
+	ring.position = center - ring.size * 0.5
+	ring.modulate.a = 0.0
+	overlay.add_child(ring)
+	var grow: float = end_d / maxf(start_d, 1.0)
+	var tw := ring.create_tween()
+	tw.tween_interval(delay)
+	tw.set_parallel(true)
+	tw.tween_property(ring, "modulate:a", 1.0, 0.08)
+	tw.chain().set_parallel(true)
+	tw.tween_property(ring, "scale", Vector2(grow, grow), dur) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.tween_property(ring, "modulate:a", 0.0, dur).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(ring.queue_free)
+
+
+## The reroll flourish: a double call-ring pulse plus the current choice cards
+## scattering off the table (blown outward from screen-centre, spinning and
+## fading), so a reroll READS as "sweep these away, call new ones." Reparents
+## `cards` onto a temporary top overlay so they animate free of their layout
+## containers; the overlay self-frees after the sweep. Returns the seconds the
+## caller should wait before dealing the fresh slate in (a short beat gives a
+## snappy old-out / new-in overlap). `accent` colours the rings so callers can
+## flavour it (gold horn-blast vs. cool arcane pulse).
+func reroll_sweep(host: Control, cards: Array,
+		accent: Color = Color(1.0, 0.82, 0.36)) -> float:
+	if host == null or not is_instance_valid(host):
+		return 0.0
+	var center: Vector2 = host.get_viewport_rect().size * 0.5
+	var overlay := Control.new()
+	overlay.name = "RerollSweepFX"
+	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	overlay.z_index = 180
+	host.add_child(overlay)
+
+	_spawn_ring(overlay, center, Color(accent.r, accent.g, accent.b, 0.95),
+		96.0, 580.0, 0.52)
+	_spawn_ring(overlay, center, Color(1, 1, 1, 0.75), 54.0, 320.0, 0.42, 0.06)
+
+	var longest := 0.30
+	for i in cards.size():
+		var card = cards[i]
+		if card == null or not is_instance_valid(card) or not (card is Control):
+			continue
+		var gpos: Vector2 = card.global_position
+		var par: Node = card.get_parent()
+		if par != null:
+			par.remove_child(card)
+		overlay.add_child(card)
+		card.position = gpos
+		card.pivot_offset = card.size * 0.5
+		var cc: Vector2 = gpos + card.size * 0.5
+		var dir: Vector2 = cc - center
+		if dir.length() < 1.0:
+			dir = Vector2(0, -1)
+		dir = dir.normalized()
+		var away: Vector2 = dir * 260.0 + Vector2(0, -70.0)
+		var d := float(i) * 0.05
+		var tw: Tween = card.create_tween()
+		tw.set_parallel(true)
+		tw.tween_property(card, "position", card.position + away, 0.34) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN).set_delay(d)
+		tw.tween_property(card, "rotation", randf_range(-0.6, 0.6), 0.34).set_delay(d)
+		tw.tween_property(card, "scale", card.scale * 0.5, 0.34).set_delay(d)
+		tw.tween_property(card, "modulate:a", 0.0, 0.30).set_delay(d)
+		longest = maxf(longest, d + 0.34)
+
+	var kill := overlay.create_tween()
+	kill.tween_interval(longest + 0.08)
+	kill.tween_callback(overlay.queue_free)
+	return longest
+
+
+# ── The signature transition: an ink-bleed wipe ────────────────────────
+# Every scene change routes through here, so this one function is where the
+# game's whole shell gets its "campaign ledger" hand: instead of a flat
+# alpha fade, dark ink pours in from the page's top-left corner, its
+# frontier roughened by paper-grain noise and rimmed with a faint ember —
+# the world chars away, then the next page opens. Degrades safely: if the
+# shader ever fails to compile the overlay is simply invisible and the
+# change still happens on schedule.
+const _INK_WIPE_CODE := "
+shader_type canvas_item;
+uniform float progress : hint_range(0.0, 1.0) = 0.0;
+uniform vec3 ember : source_color = vec3(0.95, 0.45, 0.14);
+
+float hash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+float vnoise(vec2 p) {
+	vec2 i = floor(p); vec2 f = fract(p);
+	vec2 u = f * f * (3.0 - 2.0 * f);
+	return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+		mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+void fragment() {
+	float n = vnoise(UV * 7.0) * 0.55 + vnoise(UV * 19.0) * 0.30
+		+ vnoise(UV * 43.0) * 0.15;
+	float field = distance(UV, vec2(0.08, 0.10)) / 1.35;
+	float f = field * 0.72 + n * 0.28;
+	float t = progress * 1.12;
+	float a = 1.0 - smoothstep(t - 0.035, t, f);
+	// A THIN charring line at the very frontier — an accent, not a fire wall.
+	float rim = smoothstep(t - 0.030, t - 0.014, f)
+		* (1.0 - smoothstep(t - 0.014, t, f));
+	COLOR = vec4(COLOR.rgb + ember * rim * 0.30, a);
+}
+"
+var _ink_wipe_shader: Shader = null
+
+
+func _get_ink_wipe_shader() -> Shader:
+	if _ink_wipe_shader == null:
+		_ink_wipe_shader = Shader.new()
+		_ink_wipe_shader.code = _INK_WIPE_CODE
+	return _ink_wipe_shader
+
+
+# Ink-wipe scene transition (see the shader block above). The overlay covers
+# input immediately and auto-frees right after the scene switch. Calling
 # fade_in() at scene _ready time is the matched bookend.
 func fade_out_then_change_scene(host: Node, target_scene: String,
-		duration: float = 0.28) -> void:
+		duration: float = 0.34) -> void:
 	if host == null or not is_instance_valid(host) or host.get_tree() == null:
 		return
 	var overlay := ColorRect.new()
 	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	overlay.color = Color(0, 0, 0, 0)
+	# Near-black sepia ink, not pure black — matches the shell's murk.
+	overlay.color = Color(0.043, 0.031, 0.024, 1.0)
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	overlay.z_index = 1000
+	var mat := ShaderMaterial.new()
+	mat.shader = _get_ink_wipe_shader()
+	mat.set_shader_parameter("progress", 0.0)
+	overlay.material = mat
 	host.get_tree().root.add_child(overlay)
 	var tw := overlay.create_tween()
-	tw.tween_property(overlay, "color:a", 1.0, duration).set_ease(Tween.EASE_IN)
+	tw.tween_method(func(p: float):
+		mat.set_shader_parameter("progress", p),
+		0.0, 1.0, duration).set_ease(Tween.EASE_IN)
 	tw.tween_callback(func():
 		if host.get_tree() != null:
 			host.get_tree().change_scene_to_file(target_scene)
@@ -2181,7 +2790,7 @@ func make_back_button(label: String = "BACK", min_size: Vector2 = Vector2(140, 4
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	if font_display:
 		btn.add_theme_font_override("font", font_display)
-	btn.add_theme_font_size_override("font_size", font_size)
+	btn.add_theme_font_size_override("font_size", maxi(font_size, MIN_LABEL_SIZE))
 	btn.add_theme_color_override("font_color", rest_color)
 	btn.add_theme_color_override("font_hover_color", GILT_BRIGHT)
 	btn.add_theme_color_override("font_pressed_color", Color(0.92, 0.85, 0.65))
@@ -2334,7 +2943,7 @@ func show_confirm_dialog(host: Node, title: String, message: String,
 
 	var msg_lbl := Label.new()
 	msg_lbl.text = message
-	msg_lbl.add_theme_font_size_override("font_size", 16)
+	msg_lbl.add_theme_font_size_override("font_size", 18)
 	msg_lbl.add_theme_color_override("font_color", IVORY)
 	msg_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	msg_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -2528,6 +3137,8 @@ func show_deck_picker(host: Node, title: String, type_filter: String = "",
 			card.card_id = data.get("id", "")
 			card.is_on_battlefield = true
 			card.static_display = true
+			card.live_baked_mode = true
+			CardTextureCache.bake(data)
 			slot.add_child(card)
 			var btn := Button.new()
 			btn.flat = true

@@ -62,10 +62,11 @@
 > UI clicks) — the code under it is verified; that pass is the designer's to run.
 >
 > **v1 RULES TUNING 2026-06-16** (fairness pass, all in `Combat.gd`, all probe-covered):
-> (1) **Turn-1 is place-only** — the opener can't attack into an empty board for
-> free face damage; `_net_run_attack` skips the strike pass when `_net_turn_round == 1`
-> and the ATTACK button reads "END TURN" that turn. The second player gets the
-> first contested attack on turn 2. (2) **Going-second compensation** — the client
+> (1) **Turn-1 is place-only** — *(OBSOLETE since the 2026-07-01 §2 revision: combat is
+> now place-then-simultaneous-clash, so BOTH sides place before any clash and round 1
+> clashes contested like every round — no opener strike pass to skip. The DONE button
+> replaced ATTACK.)* Originally: the opener couldn't attack into an empty board.
+> (2) **Going-second compensation** — the client
 > (always the second turn) has its opening hand PRE-DEALT at match start
 > (`_net_begin_combat`) at `HAND_REFILL_TARGET + 1` (= 6) so it's visible/plannable
 > during the host's turn 1 AND carries the extra card; a `_net_skip_draw_this_round`
@@ -216,15 +217,27 @@ then player 1"), like Hearthstone/MTGA, rather than the secret-plan/simultaneous
 reveal model. There are two ways to honor that, and **this choice is foundational —
 it changes a large fraction of the build.**
 
-> **DECISION (2026-06-16): the user chose FULL ALTERNATING (Hearthstone-style)** —
-> the second option below. On your turn you place AND your creatures attack the
-> opponent's board/face, then pass; there is **no** end-of-round simultaneous
-> clash. Therefore §12.4 and §13 (written around the simultaneous-clash default)
-> are SUPERSEDED by §13.5 (full-alternating round loop & resolver). Everything
-> else in the doc — transport, entity ids, draft, intents/events, deck injection,
-> Phase 2 plumbing — is model-agnostic and stands as written.
+> **DECISION (2026-06-16): the user chose FULL ALTERNATING (Hearthstone-style).**
+>
+> **REVISED (2026-07-01): switched to Option A — ALTERNATING PLACEMENT + SIMULTANEOUS
+> CLASH.** Full-alternating gave every attacker a de-facto Swift: on your turn your
+> creatures struck the opponent's board with **no retaliation** (attacks were "one
+> direction only"), so whoever attacked killed for free and the second player got the
+> first uncontested swing. The player rejected this — it abandons the simultaneous lane
+> clash that IS the game. The live model is now: each round BOTH players take a
+> placement turn (first placer alternates each round to blunt the board-read edge),
+> then the host runs ONE **simultaneous** clash over both boards, reusing the campaign
+> `_do_combat` resolvers. Combat now matches single-player. Implementation:
+> `Combat._net_begin_round` / `_net_open_placement` / `_net_finish_placement` /
+> `_net_run_clash`; the DONE button finishes placement (it no longer attacks). The
+> simultaneity itself (a creature slain by the first striker still retaliates) is the
+> shared `Card2D.defer_deaths` clash contract used by BOTH `_do_combat` and
+> `_net_run_clash`. §13.5 (full-alternating resolver) is now SUPERSEDED by §13.5-R
+> below. Everything else — transport, entity ids, draft, intents/events, deck
+> injection, Phase 2 plumbing — is model-agnostic and stands as written.
+> Verify: `tools/_probe_net_clash.gd`, `tools/_probe_simul.gd`.
 
-### Option A (NOT chosen): **Alternating placement + simultaneous clash**
+### Option A (NOW CHOSEN, 2026-07-01): **Alternating placement + simultaneous clash**
 Per round:
 1. Both players draw and gain Command (automatic, no input).
 2. **Player A's placement turn:** A plays creatures/spells, repositions, toggles
@@ -771,9 +784,18 @@ but document it.)
 
 ---
 
-### 13.5 Full-alternating model (CHOSEN — supersedes §12.4 / §13.1-13.2)
+### 13.5 Full-alternating model (SUPERSEDED 2026-07-01 — see §2 revision)
 
-Per the §2 decision. There is **one active player** at a time; no simultaneous
+> **SUPERSEDED.** This was the 2026-06-16 model; it made every attacker a de-facto
+> Swift (one-directional attacks, no retaliation). Replaced 2026-07-01 by the
+> **place-then-simultaneous-clash** model (§2 "Option A (NOW CHOSEN)"). The live host
+> loop is `_net_begin_round → _net_open_placement ×2 → _net_run_clash` (both boards
+> clash at once, deaths held via `Card2D.defer_deaths` so mutual kills drop both). The
+> per-creature resolvers and message vocabulary below still apply; only the ORCHESTRATION
+> changed (both sides now strike in one pass instead of the active side only). Kept for
+> history.
+
+Per the (old) §2 decision. There is **one active player** at a time; no simultaneous
 clash. The host drives the whole sequence; the client renders via events.
 
 **A turn (active player = the one whose turn it is):**
@@ -1019,3 +1041,59 @@ new `SkirmishState` autoload through a thin `_ctx_*` accessor layer; replace the
 opponent (`_enemy_place_creatures`/`_assign_intents`/`_resolve_intents`) with the
 remote player's committed plays. Phase the work: transport → draft → combat plumbing
 → clash → card coverage. Confirm the combat-model fork (§2) before Phase 3.
+
+---
+
+# §16 — BATTLE STYLES (2026-07-07): ALTERNATING (one-directional) + SEALED ORDERS
+
+Two battle styles, picked by the host in the lobby (rides `NetMatch.set_match_config`
+like Best-of-N; works with every deck mode). `NetMatch.battle_style`:
+`STYLE_ALTERNATING = 0` (default) / `STYLE_SEALED = 1`.
+
+## 16.1 ALTERNATING is now ONE-DIRECTIONAL (built + probe-covered)
+Ending YOUR placement turn sends YOUR line across the board (`_net_run_clash(side)`);
+the defender does not swing back — it answers on its own turn. Round 1 is place-only
+for BOTH sides (opener can't free-hit; second player keeps the Coin and gets the
+first contested strike on round 2). `_net_run_clash(attacking_side := -1)`:
+-1 = both-sides simultaneous pass (kept for SEALED + legacy tests); 0/1 = that side
+only. Side-filter details: premark + swift/main/back/ranged passes gated per side;
+defender's armed Doubled Hour is STASHED around the shared helpers (swings on its own
+turn); Twinblade/Berserker self-filter via has_attacked_this_turn; decay + Assassin
+(dies_end_of_turn) fire for the STRIKING side only — a Frost Bolt freeze survives
+the foe's pass and denies the victim's own next swing. Round/flow control moved OUT
+of _net_run_clash to the caller (_net_finish_placement drives alternating; sealed
+drives its own). Clash events ship `"atk"` so the client banner names the striker.
+Probe: `_test_net_one_directional` in _probe_skirmish_combat.gd.
+
+## 16.2 SEALED ORDERS (new style — spec)
+Round = ORDERS → REVEAL → SORCERY → CLASH. Perfect symmetry: no opener, no Coin.
+- **ORDERS**: both machines run `_start_round` locally (draw + Command) and place
+  creatures SIMULTANEOUSLY IN PRIVATE. A committed play deducts Command locally,
+  goes into `_sealed_pending` (data/uid/lane/row + a display-only stand-in Card2D
+  flagged `sealed_pending`, seated in the row array so slot-occupancy checks work),
+  and pings the foe a face-down GHOST at that lane/row (IN_ORDER_GHOST client→host,
+  EV_ORDER_GHOST host→client; card-back TextureRect over the enemy slot). No recall,
+  no repositions in v1. Button = "SEAL ORDERS [E]" → client ships IN_ORDERS
+  {list, mana}; host stores both bundles; button shows "AWAITING THE FOE".
+- **REVEAL** (host, once both bundles held): EV_REVEAL → both machines free their
+  pending stand-ins + ghosts (row arrays nulled), banner "THE ORDERS BREAK OPEN";
+  host seats every order via the EXISTING `_net_spawn_creature(run_on_enter=true)`
+  — initiative side's whole bundle first, then the other's (deterministic on-enter
+  order); `_net_cards_played[side]` maintained; client's unspent Command rides the
+  bundle for Condottiere. Trailing `_net_sync_board()` seats the client's real
+  creatures (its stand-ins are gone — the landing pops read as the flip).
+- **SORCERY**: two sequential spell steps, initiative side first (NOT strict
+  alternation in v1 — caster-local spells never reach the host, so a per-cast turn
+  flip can't be driven; a step ends only on the explicit PASS). Active side casts
+  freely (existing IN_PLAY_SPELL / caster-local paths untouched); button = "PASS
+  [E]" (IN_SORCERY_PASS client→host). Second pass → CLASH.
+- **CLASH**: `_net_run_clash(-1)` — the verified simultaneous pass + replay. Then
+  `_sealed_begin_round(n+1)`; initiative flips each round (round 1 = seed coin,
+  `_net_first_player()` reused).
+- **Initiative**: reveal order + sorcery opener only. Shown in the orders banner.
+- **vs BOT**: host collects the bot's decide_turn creature intents as a bundle
+  (ghost pings as it commits), seals after a short pause, and PASSES its sorcery
+  step instantly (v1 bot casts no spells in sealed).
+- **Not in v1** (deliberate): orders recall/feints, reposition drags, an orders
+  timer, per-cast sorcery alternation, initiative token UI (text line only).
+Verify: `tools/_probe_sealed.gd` (fake-peer, mirrors _probe_skirmish_combat).

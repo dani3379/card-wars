@@ -11,8 +11,8 @@ extends Control
 ##                      alignment to painted regions)
 ##   4. Hero silhouette (decorative, near the fire — falls back gracefully
 ##                      if the per-hero silhouette art isn't in assets/ yet)
-##   5. Parchment banners (REST / UPGRADE / REMOVE plus REFORGE when the
-##                      Whetstone relic is owned and unused this act)
+##   5. Parchment banners (REST / FORGE — swapped for FORGE TWO while the
+##                      Whetstone is live — plus HOLD A WAKE with fallen)
 ##   6. Title + HP subtitle
 ##   7. Settings gear + (in pick-card mode only) cancel button
 ##
@@ -54,12 +54,14 @@ const HERO_SILHOUETTE_FALLBACK := "res://assets/portraits/player_knight.png"
 const ICON_REST := "res://assets/icons/game-icons/campfire.svg"
 const ICON_UPGRADE := "res://assets/icons/sword.png"
 const ICON_REFORGE := "res://assets/icons/diamond.png"
+const ICON_WAKE := "res://assets/icons/game-icons/scroll-unfurled.svg"
 
 # Banner accent colors. Pulled from GameTheme palette where possible so the
 # rest screen sits in the same color world as combat HUD parchment.
 var _accent_rest: Color
 var _accent_upgrade: Color
 var _accent_reforge: Color
+var _accent_wake: Color
 
 # Per-hero flavor strings keyed by [hero_id][choice_id] → 2 lines that swap
 # between the desc text on hover. Choice IDs: rest / upgrade / remove / reforge.
@@ -69,27 +71,38 @@ const HERO_FLAVOR := {
 		"rest":    "The road weighs heavy. Even goblins sleep.",
 		"upgrade": "Sharpen the edge. The next fight comes fast.",
 		"reforge": "Two strikes ready. Twice the heat.",
+		"wake":    "Fast ones first over the wall. Say the name.",
 	},
 	"stalwart": {
 		"rest":    "Plant the shield. Tend the wounds.",
 		"upgrade": "A better tool outlasts a sharper one.",
 		"reforge": "Forge both blade and breastplate. Endure twice.",
+		"wake":    "The line holds because the dead still stand in it.",
 	},
 	"acolyte": {
 		"rest":    "The fire remembers names. Mine. Yours.",
 		"upgrade": "Sigils deepen by firelight. Trace another.",
 		"reforge": "Twin rites. Twin promises. Twin debts.",
+		"wake":    "Death is a door. Tonight we knock from this side.",
 	},
 	"pyromancer": {
 		"rest":    "Even fire needs ash to be born from.",
 		"upgrade": "Boil the spell down. Less smoke, more burn.",
 		"reforge": "Stoke twice. Two spells, two suns.",
+		"wake":    "Nothing burns twice. Almost nothing.",
+	},
+	"kindler": {
+		"rest":    "Bank the coals. Even a fire-tender sleeps.",
+		"upgrade": "Feed the forge something that remembers being bright.",
+		"reforge": "Two irons in the fire. Tend both.",
+		"wake":    "Every fire I've fed is still burning somewhere.",
 	},
 }
 const FLAVOR_FALLBACK := {
 	"rest":    "Rest by the fire. Heal what hurt today.",
 	"upgrade": "Tend the blade. Tomorrow asks more.",
 	"reforge": "Twice-forged. The Whetstone hums.",
+	"wake":    "Read a name off the roll. The column remembers.",
 }
 
 enum Mode { CHOOSE, PICK_CARD, CONFIRM_UPGRADE }
@@ -109,14 +122,30 @@ func _ready() -> void:
 	_accent_rest = GameTheme.HEALTH_GREEN
 	_accent_upgrade = GameTheme.KEYWORD_GOLD
 	_accent_reforge = GameTheme.FLOOP_BLUE
+	_accent_wake = Color(0.64, 0.72, 0.88)   # spectral bone-blue
 	_swap_background_for_act()
 	GameTheme.add_atmosphere(self, "rest", true, _time_of_day_mood_override())
-	AudioBank.play_music("rest")
+	AudioBank.play_music_random(["rest", "rest_b", "rest_c"])
 	# Looping fire crackle — silently no-ops if assets/audio/sfx/fire_crackle/
 	# is empty (player will hear only the music until the asset ships).
 	AudioBank.play_ambience("fire_crackle")
 	_build_choice_ui()
 	GameTheme.make_settings_gear(self)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if not event.is_action_pressed("ui_cancel"):
+		return
+	# In the upgrade sub-flow (PICK_CARD / CONFIRM_UPGRADE) Esc backs out one
+	# level to the banner picker — same as the Cancel button, Whetstone-safe.
+	# From the top (CHOOSE) it opens the pause/Settings overlay.
+	if _mode != Mode.CHOOSE:
+		_reforge_remaining = 0
+		_selected_card_index = -1
+		_build_choice_ui()
+	else:
+		GameTheme.open_settings_overlay()
+	get_viewport().set_input_as_handled()
 
 
 # Per-act background swap. The .tscn ships an Act 1 texture; this rebinds the
@@ -196,8 +225,15 @@ func _build_choice_ui() -> void:
 	add_child(row)
 
 	_add_choice_rest(row)
-	_add_choice_upgrade(row)
+	# The Whetstone UPGRADES the forge (CLAUDE.md: "forge two instead of one"),
+	# it doesn't compete with it: an act has exactly one camp, so a live FORGE
+	# TWO makes the single FORGE strictly dominated — showing both just adds a
+	# banner nobody should click. Plain FORGE returns whenever the double is
+	# spent/blocked (used this act, Cracked Anvil, <2 unforged cards).
+	if not _reforge_is_live():
+		_add_choice_upgrade(row)
 	_add_choice_reforge_if_available(row)
+	_add_choice_wake_if_available(row)
 
 
 func _add_hero_silhouette() -> void:
@@ -218,13 +254,34 @@ func _add_hero_silhouette() -> void:
 	# figure. Slight modulate so the painted background reads through.
 	sil.position = Vector2(420, 460)
 	sil.size = Vector2(220, 280)
-	# Low alpha so the placeholder portrait ghosts onto the painted scene
-	# instead of reading as a foreign rectangle. Once a per-hero silhouette
-	# PNG is generated (transparent background, side-on seated pose), this can
-	# be bumped to ~0.85 and the fallback path drops out of use.
+	# The vignette paintings are full rectangles with their own night-black
+	# ground — composited raw they read as a foreign box over the scene.
+	# Feather the edges with a shader so the painting melts into the camp
+	# instead of sitting on it (transparent-cutout art would pass unchanged).
+	var feather := ShaderMaterial.new()
+	feather.shader = _silhouette_feather_shader()
+	sil.material = feather
 	var has_specific := ResourceLoader.exists(specific_path)
 	sil.modulate = Color(0.95, 0.88, 0.78, 0.85 if has_specific else 0.45)
 	add_child(sil)
+
+
+func _silhouette_feather_shader() -> Shader:
+	var sh := Shader.new()
+	sh.code = """
+shader_type canvas_item;
+// Rounded feather: alpha fades to 0 toward every edge of the rect, so a
+// rectangular painting composites as a soft vignette. 0.22 = fade band as a
+// fraction of the rect on each axis.
+void fragment() {
+	vec4 c = texture(TEXTURE, UV);
+	vec2 d = min(UV, vec2(1.0) - UV);
+	float m = smoothstep(0.0, 0.22, d.x) * smoothstep(0.0, 0.22, d.y);
+	c.a *= m;
+	COLOR = c;
+}
+"""
+	return sh
 
 
 func _add_choice_rest(row: HBoxContainer) -> void:
@@ -237,7 +294,7 @@ func _add_choice_rest(row: HBoxContainer) -> void:
 	# need the number ("Heal to 25") at a glance; flavor is the personality
 	# layer on top. Banner panel is generous enough to wrap both lines cleanly.
 	var desc := "%s\n♥ Heal to %d / %d" % [
-		_flavor_for("rest", ""), RunState.hero_max_hp, RunState.hero_max_hp]
+		_flavor_for("rest", ""), _rest_heal_target(), RunState.hero_max_hp]
 	var banner = GameTheme.make_choice_banner("REST", desc, _accent_rest,
 		ICON_REST, Vector2(340, 160), disabled_reason)
 	_wire_banner(banner, row, _accent_rest, _do_heal)
@@ -264,8 +321,27 @@ func _add_choice_upgrade(row: HBoxContainer) -> void:
 	_wire_banner(banner, row, _accent_upgrade, _start_upgrade_mode)
 
 
-# Whetstone-gated 4th banner. Shows only when the relic is owned and the
-# per-act payoff hasn't been spent yet. Lets the player pick TWO cards in
+# True when FORGE TWO is actually clickable — owned, unspent, forging allowed,
+# and two picks can land. This is the gate that swaps the plain FORGE banner
+# out for the Whetstone version (see the banner build in _ready).
+func _reforge_is_live() -> bool:
+	if not RunState.has_relic("whetstone"):
+		return false
+	if RunState.whetstone_used_this_act or RunState.has_downside("no_upgrade"):
+		return false
+	var upgradeable_count := 0
+	for i in range(RunState.deck.size()):
+		if RunState.has_upgrade_path(i, "plus"):
+			continue
+		if not CardDB.is_upgradeable(RunState.deck[i]):
+			continue
+		upgradeable_count += 1
+	return upgradeable_count >= 2
+
+
+# Whetstone-gated forge banner. Shows whenever the relic is owned; REPLACES the
+# plain FORGE banner while live (disabled states show beside FORGE instead, so
+# the player reads why the double is off). Lets the player pick TWO cards in
 # sequence to upgrade — see _start_reforge_mode for the flow.
 func _add_choice_reforge_if_available(row: HBoxContainer) -> void:
 	if not RunState.has_relic("whetstone"):
@@ -289,6 +365,144 @@ func _add_choice_reforge_if_available(row: HBoxContainer) -> void:
 	var banner = GameTheme.make_choice_banner("FORGE TWO", desc, _accent_reforge,
 		ICON_REFORGE, Vector2(340, 160), disabled_reason)
 	_wire_banner(banner, row, _accent_reforge, _start_reforge_mode)
+
+
+# Hold a Wake — campaign-memory banner. Read one name off the Roll of the
+# Fallen; its shade stands in your front line for the NEXT fight (the camp
+# sits right before the keep, so the wake usually arms the boss fight). The
+# banner is HIDDEN with an empty roll (no dead options), and disabled when an
+# event has already promised the next fight's opening slot.
+func _add_choice_wake_if_available(row: HBoxContainer) -> void:
+	if RunState.fallen.is_empty():
+		return
+	var disabled_reason := ""
+	if not RunState.next_combat_gift_creature.is_empty():
+		disabled_reason = "The next fight is already spoken for."
+	var desc := "%s\n◈ A fallen soldier's shade joins the next fight" % _flavor_for("wake", "")
+	var banner = GameTheme.make_choice_banner("HOLD A WAKE", desc, _accent_wake,
+		ICON_WAKE, Vector2(340, 160), disabled_reason)
+	_wire_banner(banner, row, _accent_wake, _start_wake_mode)
+
+
+## The Roll, deduped by soldier: one tile per uid, keeping the LAST fall (the
+## most decorated name worn). Shades rise at the soldier's CURRENT folded
+## stats while the card still marches (drills and forges honored); a soldier
+## since mustered out rises at the printed stats of the card it was.
+func _wake_candidates() -> Array:
+	var by_uid: Dictionary = {}
+	var order: Array = []
+	for entry in RunState.fallen:
+		var uid: int = int(entry.get("uid", -1))
+		if not by_uid.has(uid):
+			order.append(uid)
+		by_uid[uid] = entry
+	var out: Array = []
+	for uid in order:
+		var entry: Dictionary = by_uid[uid]
+		var atk := 1
+		var hp := 1
+		var idx: int = RunState.deck_uids.find(int(uid))
+		var data: Dictionary = {}
+		if idx >= 0:
+			data = RunState.get_upgraded_card_data(idx)
+		else:
+			data = CardDB.get_card_data(String(entry.get("id", "")))
+		if not data.is_empty():
+			atk = maxi(0, int(data.get("atk", 1)))
+			hp = maxi(1, int(data.get("hp", 1)))
+		out.append({"entry": entry, "atk": atk, "hp": hp})
+	return out
+
+
+func _start_wake_mode() -> void:
+	_clear_ui()
+
+	var title = GameTheme.make_label("THE ROLL OF THE FALLEN",
+		GameTheme.FONT_HEADER, GameTheme.GILT_BRIGHT)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.position = Vector2(500, 30)
+	title.size = Vector2(600, 40)
+	add_child(title)
+
+	var sub = GameTheme.make_label(
+		"Speak one name over the fire. The shade stands in your line next fight.",
+		16, GameTheme.IVORY)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.position = Vector2(400, 74)
+	sub.size = Vector2(800, 28)
+	sub.modulate = Color(1, 1, 1, 0.85)
+	add_child(sub)
+
+	var scroll = ScrollContainer.new()
+	scroll.position = Vector2(430, 120)
+	scroll.size = Vector2(740, 660)
+	add_child(scroll)
+
+	var list := VBoxContainer.new()
+	list.add_theme_constant_override("separation", 14)
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(list)
+
+	for cand in _wake_candidates():
+		list.add_child(_make_wake_tile(cand))
+
+	_add_cancel_btn()
+
+
+func _make_wake_tile(cand: Dictionary) -> Button:
+	# A parchment panel row: name (spectral) · where it fell · the stats it
+	# rises with. Same panel-button pattern as the event relic tiles.
+	var entry: Dictionary = cand.entry
+	var btn := Button.new()
+	btn.flat = false
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.custom_minimum_size = Vector2(700, 96)
+	btn.add_theme_stylebox_override("normal", GameTheme.make_panel_style())
+	btn.add_theme_stylebox_override("hover",
+		GameTheme.make_panel_style(GameTheme.PARCHMENT, GameTheme.GILT_BRIGHT))
+	btn.add_theme_stylebox_override("pressed", GameTheme.make_panel_style())
+	btn.pressed.connect(_do_wake.bind(cand))
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 18
+	vbox.offset_right = -18
+	vbox.offset_top = 10
+	vbox.offset_bottom = -10
+	vbox.add_theme_constant_override("separation", 4)
+	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(vbox)
+
+	var name_lbl := GameTheme.make_label(String(entry.get("name", "the nameless")),
+		21, _accent_wake)
+	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(name_lbl)
+
+	var where := "Fell at %s — Act %d, round %d" % [
+		String(entry.get("enc", "an unnamed field")),
+		int(entry.get("act", 1)), int(entry.get("round", 1))]
+	var where_lbl := GameTheme.make_label(where, 15, GameTheme.DESC_DIM)
+	where_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(where_lbl)
+
+	var rise_lbl := GameTheme.make_label("Rises at %d/%d" % [int(cand.atk), int(cand.hp)],
+		15, GameTheme.KEYWORD_GOLD)
+	rise_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(rise_lbl)
+
+	return btn
+
+
+func _do_wake(cand: Dictionary) -> void:
+	var entry: Dictionary = cand.entry
+	RunState.next_combat_gift_creature = {
+		"name": "Shade of %s" % String(entry.get("name", "the nameless")),
+		"atk": int(cand.atk),
+		"hp": int(cand.hp),
+		"kw": [],
+	}
+	RunState.register_rest_visit()
+	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 
 
 # Shared banner wiring: adds the hotspot glow behind the banner's eventual
@@ -316,21 +530,24 @@ func _wire_banner(banner: Control, row: HBoxContainer, accent: Color, on_click: 
 	# Subtle infinite pulse — slow enough not to distract, just enough to
 	# read as living firelight reflected on the parchment.
 	if UserSettings.reduce_motion:
-		glow.modulate.a = 0.7   # steady firelight, no pulse
+		glow.modulate.a = 0.42   # steady firelight, no pulse
 	else:
 		var tw := create_tween()
 		tw.set_loops()
-		tw.tween_property(glow, "modulate:a", 0.55, 1.8) \
+		tw.tween_property(glow, "modulate:a", 0.34, 1.8) \
 			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-		tw.tween_property(glow, "modulate:a", 0.85, 1.8) \
+		tw.tween_property(glow, "modulate:a", 0.52, 1.8) \
 			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 
 
 func _make_hotspot_glow(accent: Color) -> TextureRect:
 	# Procedural radial gradient — opaque accent at center, fading to fully
 	# transparent at the edges. Built once per banner; cheap.
+	# Center alpha kept low: this sits behind the tile's body text, so a strong
+	# amber center washed the warm-white copy into poor contrast. A faint halo
+	# reads as firelight without fighting legibility.
 	var grad := Gradient.new()
-	grad.set_color(0, Color(accent.r, accent.g, accent.b, 0.55))
+	grad.set_color(0, Color(accent.r, accent.g, accent.b, 0.26))
 	grad.set_color(1, Color(accent.r, accent.g, accent.b, 0.0))
 	var grad_tex := GradientTexture2D.new()
 	grad_tex.gradient = grad
@@ -362,8 +579,18 @@ func _flavor_for(choice_id: String, fallback_desc: String) -> String:
 
 # ─── Choice handlers ───────────────────────────────────────────────────────
 
+func _rest_heal_target() -> int:
+	# A2 "Short rations" — camp rest heals 60% of what's missing (round up)
+	# instead of to full. Below A2 the target is always full HP. The banner
+	# readout and _do_heal both go through this so the promise matches the heal.
+	if not RunState.asc_active(2):
+		return RunState.hero_max_hp
+	var missing: int = RunState.hero_max_hp - RunState.hero_hp
+	return RunState.hero_hp + int(ceil(missing * 0.6))
+
+
 func _do_heal() -> void:
-	RunState.hero_hp = RunState.hero_max_hp
+	RunState.hero_hp = _rest_heal_target()
 	RunState.register_rest_visit()
 	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 
@@ -396,7 +623,7 @@ func _begin_pick_card_for_upgrade() -> void:
 	title.size = Vector2(600, 40)
 	add_child(title)
 
-	var sub = GameTheme.make_label("Click a card to preview its + version", 16, GameTheme.IVORY)
+	var sub = GameTheme.make_label("Click a card to see the exact + version before you forge it", 16, GameTheme.IVORY)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	sub.position = Vector2(500, 74)
 	sub.size = Vector2(600, 28)
@@ -429,6 +656,8 @@ func _begin_pick_card_for_upgrade() -> void:
 		var card_node = CARD_SCENE.instantiate()
 		card_node.static_display = true
 		card_node.card_data = data
+		card_node.live_baked_mode = true
+		CardTextureCache.bake(data)
 		wrapper.add_child(card_node)
 		var click_btn := Button.new()
 		click_btn.flat = true
@@ -579,6 +808,8 @@ func _add_preview_card(parent: Container, data: Dictionary, is_upgraded_preview:
 	var card_node = CARD_SCENE.instantiate()
 	card_node.static_display = true
 	card_node.card_data = data
+	card_node.live_baked_mode = true
+	CardTextureCache.bake(data)
 	wrap.add_child(card_node)
 	parent.add_child(wrap)
 

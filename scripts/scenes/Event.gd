@@ -1,21 +1,32 @@
 extends Control
-## Event.gd — Random choice encounters (~39). The pool is FORMAT-diverse on
-## purpose (2026-06-12 remake — "the structure of the old ones was all the
-## same"): besides the classic 2-3-trade screens, events run on reusable
-## interaction engines:
-##   risk_loop   — push-your-luck "do it again?" (spring sips, choir verses,
-##                 orchard harvest, woodcutter swings)
+## Event.gd — Random choice encounters (28: 23 from the 2026-07-03 remake +
+## 5 added 2026-07-04). The old pool was mostly currency menus (±gold/±HP/
+## Curse in different prose); the remake's bar is ONE concept per event, and
+## the payoff should touch the BUILD or the FIGHTING, not just re-price
+## currencies. The pool runs on reusable engines:
+##   risk_loop   — push-your-luck "do it again?" (choir verses)
 ##   dice_run    — pot-based wager runs (Bone Pit add-mode, Coin That Won't
 ##                 Land double-or-nothing)
-##   roll_table  — committed-action mystery outcomes (fork roads, drowned
-##                 bell, forcing the bridge)
-##   pawn_appraisal / stranger_hand / sacrifice / transform / copy / remove
+##   roll_table  — committed-action mystery outcomes (forcing the bridge,
+##                 marching blind, the King's Measure)
+##   pawn_appraisal / stranger_hand / transform / remove / copy / sacrifice
 ##                 — card-tactile pickers
-##   hidden+tell — Three Warm Handles, Rotting Carnival (the tell is the game)
-##   follow_up   — multi-stage branches (lantern, calf, answering well)
-## Some are state-gated (low HP, has-curse, deck size, act, prior visits).
-## Quick ONE-DECISION roadside stops are NOT events — they're the Wayside
-## scene's verbs (scripts/scenes/Wayside.gd).
+##   grant_keyword_pick — a chosen creature PERMANENTLY learns a keyword
+##                 (the Pensioned Master; rides the wayside grant_kw mod)
+##   veteran_swap — remove every copy of one starter, gain that many
+##                 uncommons (the Free Company's one-for-one muster)
+##   purge_curses — remove ALL Curses at a max-HP price (the Scapegoat)
+##   hidden+tell — Rotting Carnival (reading the tell IS the game)
+## Some are state-gated (low HP, has-curse, starters, fallen, act, at_war,
+## prior visits, deck_count/pawned/veteran-kills). Quick ONE-DECISION roadside
+## stops are NOT events — they're the Wayside scene's verbs (Wayside.gd).
+##
+## 2026-07-04 presentation pass: stakes ledger (top-right HP/gold/potion/deck
+## readout, live on every sub-screen), result screens stand gained cards and
+## relics up as objects, gambles get a suspense beat + pot props + bust shake,
+## card pickers keep the event art behind a mood scrim, outcome lines open
+## with scannable glyphs, blue options wear a diamond (shape, not just ink),
+## and events can name a `mood` (title/scrim tint) + `ambience` (loop name).
 
 const MAP_SCENE = "res://scenes/map.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
@@ -25,7 +36,7 @@ const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 # the art via _set_event_art_visible() so deck cards stay readable.
 const PRESERVE_NODES := [
 	"Background", "Atmosphere", "EventArt",
-	"EventOverlayLeft",
+	"EventOverlayLeft", "StakesLedger",
 ]
 
 var _event_id: String = ""
@@ -40,11 +51,33 @@ func _ready() -> void:
 	if not RunState.run_active:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
-	GameTheme.add_atmosphere(self, "event")
-	AudioBank.play_music("event")
+	# No decorative corner frame here — over the fullscreen illustration the
+	# purple hairline box reads as a stray line, not furniture. The vignette
+	# and brightness layers still apply.
+	GameTheme.add_atmosphere(self, "event", false)
+	AudioBank.play_music_random(["event", "event_b", "event_c"])
 	_pick_event()
+	# Per-event ambience loop ("river", "carnival", "fire_crackle", ...).
+	# AudioBank no-ops gracefully when the asset dir doesn't exist yet, and an
+	# event WITHOUT the field stops whatever loop the previous scene left
+	# running — either way the soundscape is this event's own.
+	AudioBank.play_ambience(String(_event_data.get("ambience", "")))
+	_ensure_stakes_ledger()
 	_build_ui()
 	GameTheme.make_settings_gear(self)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	# An event forces a decision, so Esc opens the pause/Settings overlay rather
+	# than resolving a choice for the player.
+	if event.is_action_pressed("ui_cancel"):
+		GameTheme.open_settings_overlay()
+		get_viewport().set_input_as_handled()
+
+
+func _exit_tree() -> void:
+	# The road's sounds stay on the road — never bleed a river loop into the map.
+	AudioBank.stop_ambience()
 
 
 func _pick_event() -> void:
@@ -144,14 +177,191 @@ func _event_gate_passes_dict(gate: Dictionary) -> bool:
 			return n >= int(gate.get("value", 1))
 		"potions_full":
 			return not RunState.can_add_potion()
+		"fallen_at_least":
+			# Campaign memory: at least N names on the Roll of the Fallen. Gates
+			# the events that pay the player's actual dead (Bell of Names) and
+			# blue options that let {fallen} act (White Road walks point).
+			return RunState.fallen.size() >= int(gate.get("value", 1))
+		"at_war":
+			# A Successor Wars rival deal is live. The war events gate on this
+			# so legacy runs with no faction never see a room that names one.
+			return RunState.get_act_faction() != ""
+		"marching_on":
+			# The act's kingdom is a specific faction — for blue options that
+			# recognize WHOSE country the army is walking through.
+			return RunState.get_act_faction() == String(gate.get("value", ""))
+		"pawned_at_least":
+			# Campaign memory: the Pawnbroker's shelf still holds N+ cards the
+			# player sold through her appraisal counter.
+			return RunState.pawned_cards.size() >= int(gate.get("value", 1))
+		"veteran_kills_at_least":
+			# Campaign memory: some soldier still marching carries N+ kills on
+			# the writ — gates the blues that greet the player's famous veteran.
+			for uid in RunState.deck_uids:
+				if RunState.get_kills(uid) >= int(gate.get("value", 1)):
+					return true
+			return false
+		"deck_count_at_least":
+			# Build-reading gate on the same counters "scaled" pays out on
+			# (spells / creatures / curses / deathrattle / onecost) — keeps a
+			# per-spell payoff from rolling for a spell-less deck (no dead
+			# rewards, ever).
+			return _deck_count(String(gate.get("kind", "deck_size"))) \
+				>= int(gate.get("value", 1))
 		"all":
-			# Compound — every sub-gate must pass. Used by Beekeeper Again /
-			# Beekeeper Returns to combine act + seen_all checks.
+			# Compound — every sub-gate must pass. Used by the Fattened
+			# Sin-Eater to combine act + seen_all checks.
 			for sub in gate.get("gates", []):
 				if not _event_gate_passes_dict(sub):
 					return false
 			return true
 	return true
+
+
+# ── Event moods ───────────────────────────────────────────────────────────
+# A one-word `mood` field on an event tints its title ink and the scrim's
+# shadow color, so the Rotting Carnival and the Wedding at the Ford read as
+# different rooms before a single word is read. Absent field = the default
+# arcane purple the screen has always worn.
+#   title — the event title's ink
+#   ink   — the scrim shader's shadow color (warm/cool variants of near-black)
+const MOODS: Dictionary = {
+	"bone":      {"title": Color(0.80, 0.78, 0.70), "ink": Color(0.022, 0.026, 0.030)},
+	"ember":     {"title": Color(0.87, 0.54, 0.30), "ink": Color(0.050, 0.020, 0.008)},
+	"gilt":      {"title": Color(0.91, 0.71, 0.28), "ink": Color(0.045, 0.032, 0.012)},
+	"verdigris": {"title": Color(0.55, 0.78, 0.70), "ink": Color(0.014, 0.032, 0.028)},
+}
+
+
+func _mood_title_ink() -> Color:
+	var mood: Dictionary = MOODS.get(String(_event_data.get("mood", "")), {})
+	return mood.get("title", GameTheme.SPELL_PURPLE)
+
+
+func _mood_shadow_ink() -> Color:
+	var mood: Dictionary = MOODS.get(String(_event_data.get("mood", "")), {})
+	return mood.get("ink", Color(0.035, 0.022, 0.016))
+
+
+# ── The stakes ledger ─────────────────────────────────────────────────────
+# Top-right readout of everything an event choice spends: HP, gold, potions,
+# deck size. The screen constantly asks "pay 8 HP?" / "-75 gold" — the ledger
+# means the player never has to remember the totals from the map. It survives
+# every sub-screen rebuild (PRESERVE_NODES) and _refresh_ledger() re-reads
+# RunState at each screen build: changed values flash their ink (gold counts
+# up/down like coins hitting a table) so the receipt is visible even before
+# the result text says it.
+
+var _ledger_values: Dictionary = {}   # row key -> Label
+var _ledger_prev: Dictionary = {}     # row key -> last shown int (for flash/count)
+
+const LEDGER_ROWS := [
+	{"key": "hp", "icon": "hud_heart"},
+	{"key": "gold", "icon": "hud_gold"},
+	{"key": "potions", "icon": "hud_potion"},
+	{"key": "deck", "icon": "hud_deck"},
+]
+
+
+func _ensure_stakes_ledger() -> void:
+	if has_node("StakesLedger"):
+		return
+	var box := VBoxContainer.new()
+	box.name = "StakesLedger"
+	box.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	box.offset_left = -230
+	box.offset_right = -40
+	box.offset_top = 40
+	box.offset_bottom = 40 + LEDGER_ROWS.size() * 34
+	box.add_theme_constant_override("separation", 6)
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(box)
+	for row in LEDGER_ROWS:
+		var h := HBoxContainer.new()
+		h.alignment = BoxContainer.ALIGNMENT_END
+		h.add_theme_constant_override("separation", 10)
+		h.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		box.add_child(h)
+		var val := Label.new()
+		val.add_theme_font_size_override("font_size", 20)
+		val.add_theme_color_override("font_color", GameTheme.IVORY)
+		val.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+		val.add_theme_constant_override("outline_size", 3)
+		val.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.70))
+		val.add_theme_constant_override("shadow_offset_y", 1)
+		val.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		val.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		if GameTheme.font_display:
+			val.add_theme_font_override("font", GameTheme.font_display)
+		val.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		h.add_child(val)
+		var icon := TextureRect.new()
+		match String(row.icon):
+			"hud_heart": icon.texture = GameTheme.tex_hud_heart
+			"hud_gold": icon.texture = GameTheme.tex_hud_gold
+			"hud_potion": icon.texture = GameTheme.tex_hud_potion
+			"hud_deck": icon.texture = GameTheme.tex_hud_deck
+		icon.custom_minimum_size = Vector2(26, 26)
+		icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		h.add_child(icon)
+		_ledger_values[row.key] = val
+	_refresh_ledger(false)
+
+
+func _ledger_current() -> Dictionary:
+	return {
+		"hp": RunState.hero_hp,
+		"gold": RunState.gold,
+		"potions": RunState.potions.size(),
+		"deck": RunState.deck.size(),
+	}
+
+
+func _ledger_text(key: String, v: int) -> String:
+	match key:
+		"hp":
+			return "%d/%d" % [v, RunState.hero_max_hp]
+		"potions":
+			return "%d/%d" % [v, RunState.MAX_POTIONS]
+	return str(v)
+
+
+func _refresh_ledger(animate: bool = true) -> void:
+	var ledger = get_node_or_null("StakesLedger")
+	if ledger == null:
+		return
+	# The ledger reads over everything — sub-screens add their own scrims after
+	# the preserved nodes, so re-raise it each build.
+	ledger.move_to_front()
+	var now := _ledger_current()
+	for key in _ledger_values:
+		var lbl: Label = _ledger_values[key]
+		if not is_instance_valid(lbl):
+			continue
+		var v: int = int(now[key])
+		var prev: int = int(_ledger_prev.get(key, v))
+		if not animate or prev == v or UserSettings.reduce_motion:
+			lbl.text = _ledger_text(key, v)
+		elif key == "gold":
+			# Coins count onto the table one by one.
+			var tw := create_tween()
+			tw.tween_method(func(x): lbl.text = _ledger_text(key, int(round(x))),
+				float(prev), float(v), clampf(absf(v - prev) * 0.012, 0.25, 0.9))
+		else:
+			lbl.text = _ledger_text(key, v)
+		if animate and prev != v and not UserSettings.reduce_motion:
+			var flash: Color = GameTheme.GILT_BRIGHT
+			if key == "hp":
+				flash = Color(0.55, 0.88, 0.55) if v > prev else Color(0.88, 0.40, 0.32)
+			lbl.add_theme_color_override("font_color", flash)
+			var back := create_tween()
+			back.tween_interval(0.55)
+			back.tween_callback(func():
+				if is_instance_valid(lbl):
+					lbl.add_theme_color_override("font_color", GameTheme.IVORY))
+		_ledger_prev[key] = v
 
 
 func _clear_ui() -> void:
@@ -169,6 +379,17 @@ func _build_ui() -> void:
 		_ensure_fullscreen_art(img_tex)
 	_set_event_art_visible(true)
 
+	# Single-verb rooms: an event with an `auto_effect` IS its picker (the Wet
+	# Cards). Apply the modal effect directly — it owns the screen and its own
+	# leave path — instead of building a choice screen whose only real option
+	# is "open the picker". Art is ensured above so the result screen still
+	# shows the plate.
+	if _current_node.has("auto_effect"):
+		PlayLog.log_event("event_choice", {"event": _event_id, "choice": "auto",
+			"effects": [String(_current_node.auto_effect.get("type", ""))]})
+		_apply_effect(_current_node.auto_effect)
+		return
+
 	# Left-column layout: title → body → choices stack down a fixed-width
 	# column anchored to the left edge. The horizontal scrim behind
 	# (EventOverlayLeft) pools the column in a darker region; the right
@@ -177,56 +398,144 @@ func _build_ui() -> void:
 	const COLUMN_LEFT := 80
 	const COLUMN_WIDTH := 720
 
-	var title := _make_event_title(_event_data.name)
+	var title := _make_event_title(_sub_campaign_tokens(_event_data.name))
 	title.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	title.offset_left = COLUMN_LEFT
 	title.offset_top = 64
 	title.offset_right = COLUMN_LEFT + COLUMN_WIDTH
 	title.offset_bottom = 132
 	add_child(title)
+	if not UserSettings.reduce_motion:
+		title.modulate.a = 0.0
+		create_tween().tween_property(title, "modulate:a", 1.0, 0.22)
 
-	# Body text comes from _current_node — at event start that's _event_data,
-	# but a branching `follow_up` choice replaces it with a sub-dict so the
-	# same _build_ui() call paints whichever stage we're on.
-	var desc = _make_event_desc(_current_node.desc)
-	add_child(desc)
+	# Title setting — a gilt hairline with a diamond finial: the cartouche
+	# rule that stakes the page before the ink starts.
+	var rule := ColorRect.new()
+	rule.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.55)
+	rule.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	rule.offset_left = COLUMN_LEFT + 4
+	rule.offset_right = COLUMN_LEFT + 252
+	rule.offset_top = 128
+	rule.offset_bottom = 130
+	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(rule)
+	var finial := ColorRect.new()
+	finial.color = Color(GameTheme.GILT_BRIGHT.r, GameTheme.GILT_BRIGHT.g,
+		GameTheme.GILT_BRIGHT.b, 0.9)
+	finial.size = Vector2(7, 7)
+	finial.position = Vector2(COLUMN_LEFT - 1, 125.0)
+	finial.rotation = PI / 4.0
+	finial.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(finial)
 
 	# Blue options (per-choice "blue" gate) only exist while the event
-	# recognizes something about the player — filter before sizing the stack.
+	# recognizes something about the player — filter before building the stack.
 	var visible_choices: Array = []
 	for choice in _current_node.choices:
 		if choice.has("blue") and not _event_gate_passes_dict(choice.blue):
 			continue
 		visible_choices.append(choice)
 
-	# Choice column anchored bottom-left. Frameless gem-prefixed entries
-	# (Hades / StS dialogue beat-by-beat) — only the column anchor changed
-	# from center to left, the cinematic style is preserved.
-	var num_choices: int = visible_choices.size()
-	# Tall enough for three stacked lines: headline + gold outcome + dim flavor,
-	# now sized for the larger 30/24/19 text. The desc box ends higher (340) so a
-	# 3-choice stack at 128 (stack_h 408, top y≈398) still clears it with a hair
-	# of air, while a 1-2 choice event simply sits lower with more breathing room.
-	var choice_h: int = 128
-	var stack_h: int = num_choices * choice_h + (num_choices - 1) * 14
-	var choices_vbox := VBoxContainer.new()
-	choices_vbox.name = "ChoicesBox"
-	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	choices_vbox.offset_left = COLUMN_LEFT
-	choices_vbox.offset_right = COLUMN_LEFT + COLUMN_WIDTH
-	choices_vbox.offset_top = -(stack_h + 96)
-	choices_vbox.offset_bottom = -96
-	choices_vbox.add_theme_constant_override("separation", 14)
-	choices_vbox.alignment = BoxContainer.ALIGNMENT_BEGIN
-	add_child(choices_vbox)
+	# THE READING BLOCK (restructured 2026-07-04): body text and choices are
+	# ONE bottom-anchored column, not a paragraph floating at the top with the
+	# ladder pinned at the bottom — the old split made every event read as two
+	# separate text walls with a dead gap between them. Now the page has three
+	# zones: identity top-left (title), art breathing in the middle, and a
+	# single reading zone bottom-left. The column is pinned at the bottom and
+	# GROWS UPWARD (entries content-fit themselves a frame after ready), so
+	# the choices never move once shown.
+	var column := VBoxContainer.new()
+	column.name = "ChoicesBox"
+	column.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	column.offset_left = COLUMN_LEFT
+	column.offset_right = COLUMN_LEFT + COLUMN_WIDTH
+	column.offset_top = -110
+	column.offset_bottom = -110
+	column.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	# Inter-entry gap (20) deliberately wider than the intra-entry line gap so
+	# the ladder chunks into countable options instead of a run-on of lines.
+	column.add_theme_constant_override("separation", 20)
+	column.alignment = BoxContainer.ALIGNMENT_BEGIN
+	add_child(column)
 
+	# Body text comes from _current_node — at event start that's _event_data,
+	# but a branching `follow_up` choice replaces it with a sub-dict so the
+	# same _build_ui() call paints whichever stage we're on. The opening
+	# letter is illuminated (gilt raised cap) — this is a writ, after all,
+	# and it writes itself in (quick typewriter; reduce_motion shows it whole).
+	var desc = _make_event_desc(_illuminate_desc(_sub_campaign_tokens(_current_node.desc)))
+	column.add_child(desc)
+	if not UserSettings.reduce_motion:
+		desc.visible_ratio = 0.0
+		var reveal := clampf(desc.get_total_character_count() * 0.0032, 0.25, 0.85)
+		create_tween().tween_property(desc, "visible_ratio", 1.0, reveal) \
+			.set_delay(0.12)
+
+	# A breath between the prose and the first option — the paragraph should
+	# sit close enough to read as one document, far enough to end cleanly.
+	var breath := Control.new()
+	breath.custom_minimum_size = Vector2(0, 8)
+	breath.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	column.add_child(breath)
+
+	# Numerals count only the plain entries — blue options wear the diamond,
+	# so giving them a numeral slot left gaps in the count (I, ◆, III, IV).
+	var next_numeral := 1
 	for choice in visible_choices:
-		choices_vbox.add_child(_make_event_choice(choice, choice_h))
+		var ordinal := -1
+		if not choice.has("blue"):
+			ordinal = next_numeral
+			next_numeral += 1
+		column.add_child(_make_event_choice(choice, 84, ordinal))
 
-	var skip_btn = GameTheme.make_back_button("LEAVE", Vector2(160, 46), 18)
-	skip_btn.position = Vector2(40, 824)
+	# The ledger margin — one hairline between the numeral column and the
+	# entries' text, running the CHOICES' height (the desc above it sits flush
+	# on the page, unruled). It's what makes the stack read as a written
+	# column instead of floating lines (and the hover slide visibly carries
+	# the entry's text away from it). Aligned once content-fit has settled.
+	var margin_line := ColorRect.new()
+	margin_line.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.26)
+	margin_line.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	margin_line.offset_left = COLUMN_LEFT + 68
+	margin_line.offset_right = COLUMN_LEFT + 69
+	margin_line.offset_top = -110
+	margin_line.offset_bottom = -102
+	margin_line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(margin_line)
+	_align_margin_line(margin_line, column)
+
+	_add_hover_whisper()
+
+	# Always-available exit, bottom-RIGHT so it never overlaps the ladder —
+	# frameless like everything else on the page (the old parchment-box LEAVE
+	# was the last rectangle on the screen).
+	var skip_btn := _make_walk_on_button()
 	skip_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
 	add_child(skip_btn)
+
+	_refresh_ledger()
+
+
+## Pin the margin hairline to the CHOICE ENTRIES' real rect (the reading
+## column also holds the desc — the rule belongs to the options only). Two
+## frames: one for the entries' content-fit growth (each waits a frame to
+## measure wrapped text), one for the auto-growing VBox to re-lay out.
+func _align_margin_line(line: ColorRect, ladder: VBoxContainer) -> void:
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if not (is_instance_valid(line) and is_instance_valid(ladder)):
+		return
+	var top_y: float = ladder.get_global_rect().position.y
+	for c in ladder.get_children():
+		if c is Button:
+			top_y = (c as Control).get_global_rect().position.y
+			break
+	line.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	line.offset_left = ladder.get_global_rect().position.x + 68
+	line.offset_right = ladder.get_global_rect().position.x + 69
+	line.offset_top = top_y - 6
+	line.offset_bottom = ladder.get_global_rect().end.y + 8
 
 
 # ── Fullscreen event illustration + readability gradients ────────────────
@@ -248,6 +557,16 @@ func _ensure_fullscreen_art(tex: Texture2D) -> void:
 		art.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		add_child(art)
 		move_child(art, 1)  # behind Atmosphere so the vignette still tints corners
+		# The plate breathes — a 16s Ken Burns drift (scale only, from center,
+		# COVERED keeps every edge bled). Started once; the art node survives
+		# result-screen rebuilds via PRESERVE_NODES so the drift never resets.
+		if not UserSettings.reduce_motion:
+			art.pivot_offset = Vector2(800, 450)  # 1600x900 canvas center
+			var kb := create_tween().set_loops()
+			kb.tween_property(art, "scale", Vector2(1.035, 1.035), 16.0) \
+				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+			kb.tween_property(art, "scale", Vector2.ONE, 16.0) \
+				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 
 	# Left-column scrim: deep dark wash on the left, fading to clear across
 	# the middle. Pools the text column in a quiet region while the right
@@ -255,11 +574,47 @@ func _ensure_fullscreen_art(tex: Texture2D) -> void:
 	# vertical pair — that one darkened bands the text rarely sat in (the
 	# 3-choice stack landed mid-screen, in fully un-darkened art).
 	if not has_node("EventOverlayLeft"):
-		var scrim := _make_horizontal_gradient_overlay(0.78, 0.0)
+		# Adaptive depth: a flat wash tuned for midnight paintings loses the
+		# text on bright daylight art, and a wash tuned for daylight murders
+		# the dark pieces. Sample THIS painting's text column and ink to suit.
+		var scrim := _make_horizontal_gradient_overlay(_art_scrim_darkness(tex), 0.0)
 		scrim.name = "EventOverlayLeft"
 		scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
 		add_child(scrim)
 		_move_after_atmosphere(scrim)
+
+
+## How deep the left text scrim must run for THIS painting. Reads the art's
+## text column (left ~55%, where title / body / choices sit): mean luminance
+## sets the base need, local contrast (busy art fights letterforms even at
+## mid brightness) adds a smaller kick. Dark calm art keeps the classic 0.62;
+## bright or busy art deepens toward 0.85. Any read failure = the old flat wash.
+func _art_scrim_darkness(tex: Texture2D) -> float:
+	const BASE := 0.62
+	if tex == null:
+		return BASE
+	var img: Image = tex.get_image()
+	if img == null or img.is_empty():
+		return BASE
+	if img.is_compressed():
+		if img.decompress() != OK:
+			return BASE
+	# Tiny working copy — 48×27 keeps the scan effectively free.
+	img.resize(48, 27, Image.INTERPOLATE_BILINEAR)
+	var w := 26  # left 55% of 48
+	var sum := 0.0
+	var sum_sq := 0.0
+	var n := 0
+	for y in 27:
+		for x in w:
+			var c := img.get_pixel(x, y)
+			var lum := 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+			sum += lum
+			sum_sq += lum * lum
+			n += 1
+	var mean := sum / float(n)
+	var sdev := sqrt(maxf(sum_sq / float(n) - mean * mean, 0.0))
+	return clampf(BASE + (mean - 0.18) * 0.9 + sdev * 0.35, 0.55, 0.85)
 
 
 func _move_after_atmosphere(node: Node) -> void:
@@ -287,15 +642,25 @@ func _make_horizontal_gradient_overlay(darkness_left: float,
 shader_type canvas_item;
 uniform float darkness_left : hint_range(0.0, 1.0) = 0.0;
 uniform float darkness_right : hint_range(0.0, 1.0) = 0.0;
+uniform vec3 shadow_ink = vec3(0.035, 0.022, 0.016);
 void fragment() {
 	float t = smoothstep(0.30, 0.62, UV.x);
 	float a = mix(darkness_left, darkness_right, t);
-	COLOR = vec4(0.0, 0.0, 0.0, a);
+	// Corner weighting: the ladder's bottom-left pools deepest, the title's
+	// top-left gets a lighter wash, and the mid-left stays airiest so the
+	// painting breathes between the two text zones.
+	a += (1.0 - smoothstep(0.0, 0.55, UV.x)) * 0.18 * smoothstep(0.40, 1.0, UV.y);
+	a += (1.0 - smoothstep(0.0, 0.50, UV.x)) * 0.08 * (1.0 - smoothstep(0.0, 0.30, UV.y));
+	a = clamp(a, 0.0, 0.92);
+	// Warm ink shadow, not black glass — the exact warmth is the event's mood.
+	COLOR = vec4(shadow_ink, a);
 }
 """
 	mat.shader = shader
 	mat.set_shader_parameter("darkness_left", darkness_left)
 	mat.set_shader_parameter("darkness_right", darkness_right)
+	var ink := _mood_shadow_ink()
+	mat.set_shader_parameter("shadow_ink", Vector3(ink.r, ink.g, ink.b))
 	rect.material = mat
 	return rect
 
@@ -320,13 +685,15 @@ func _make_event_title(text: String) -> RichTextLabel:
 	rt.scroll_active = false
 	rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	rt.text = text
-	rt.add_theme_font_size_override("normal_font_size", 34)
-	rt.add_theme_font_size_override("bold_font_size", 34)
-	rt.add_theme_font_size_override("italics_font_size", 34)
-	rt.add_theme_color_override("default_color", GameTheme.SPELL_PURPLE)
+	rt.add_theme_font_size_override("normal_font_size", 44)
+	rt.add_theme_font_size_override("bold_font_size", 44)
+	rt.add_theme_font_size_override("italics_font_size", 44)
+	# The mood field picks the title's ink (bone/ember/gilt/verdigris);
+	# unmooded events keep the arcane purple.
+	var title_ink := _mood_title_ink()
+	rt.add_theme_color_override("default_color", title_ink)
 	rt.add_theme_color_override("font_outline_color",
-		Color(GameTheme.SPELL_PURPLE.r, GameTheme.SPELL_PURPLE.g,
-			GameTheme.SPELL_PURPLE.b, 0.25))
+		Color(title_ink.r, title_ink.g, title_ink.b, 0.25))
 	rt.add_theme_constant_override("outline_size", 6)
 	rt.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.85))
 	rt.add_theme_constant_override("shadow_offset_x", 0)
@@ -349,9 +716,11 @@ func _make_event_desc(text: String) -> RichTextLabel:
 	rt.scroll_active = false
 	rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	rt.text = text
-	rt.add_theme_font_size_override("normal_font_size", 22)
-	rt.add_theme_font_size_override("bold_font_size", 22)
-	rt.add_theme_font_size_override("italics_font_size", 22)
+	rt.add_theme_font_size_override("normal_font_size", 21)
+	rt.add_theme_font_size_override("bold_font_size", 21)
+	rt.add_theme_font_size_override("italics_font_size", 21)
+	# A touch of air between lines — dense paragraphs over art read as a slab.
+	rt.add_theme_constant_override("line_separation", 6)
 	rt.add_theme_color_override("default_color", GameTheme.IVORY)
 	rt.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.75))
 	rt.add_theme_constant_override("outline_size", 3)
@@ -362,18 +731,16 @@ func _make_event_desc(text: String) -> RichTextLabel:
 	if GameTheme.font_body:
 		rt.add_theme_font_override("normal_font", GameTheme.font_body)
 		rt.add_theme_font_override("bold_font", GameTheme.font_body)
-	rt.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	rt.offset_left = 80
-	rt.offset_right = 700
-	rt.offset_top = 160
-	rt.offset_bottom = 400
+	# Container-ready (2026-07-04): the desc now lives INSIDE the reading
+	# column above the choices, not floating at a fixed top-left rect — the
+	# caller's VBox owns position and width.
 	rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return rt
 
 
 # ── Frameless cinematic choice ───────────────────────────────────────────
 
-func _make_event_choice(choice: Dictionary, height: int) -> Button:
+func _make_event_choice(choice: Dictionary, height: int, ordinal: int = -1) -> Button:
 	# choice.label is "Headline\n\nBody text wrapped\nover several lines."
 	# The body's hard line breaks were sized for the old rectangle buttons —
 	# rejoin into a single paragraph and let autowrap reflow at the new width.
@@ -396,7 +763,7 @@ func _make_event_choice(choice: Dictionary, height: int) -> Button:
 		# empty and show only the flavor beat — the payoff is the next screen.
 		effect_text = String(choice.get("desc", ""))
 	return _make_frameless_choice(headline_text, effect_text, body_text, height,
-			_resolve_choice.bind(choice), choice.has("blue"))
+			_resolve_choice.bind(choice), choice.has("blue"), ordinal)
 
 
 # Verdigris ink for blue options — the color is the tell that the event SEES
@@ -405,21 +772,237 @@ const BLUE_INK := Color(0.47, 0.83, 0.75, 1.0)
 const BLUE_INK_BRIGHT := Color(0.66, 0.97, 0.88, 1.0)
 
 
+# The hover whisper — one shared dim line under the choice stack where a
+# hovered choice's flavor beat fades in. Moving the third text line here
+# (2026-07-04) halved the resting screen's text mass; the writing survives,
+# it just waits for the cursor. Rebuilt per screen (not in PRESERVE_NODES).
+var _whisper: Label = null
+
+
+func _add_hover_whisper(bottom: int = -56) -> void:
+	var w := Label.new()
+	w.name = "HoverWhisper"
+	w.text = ""
+	w.add_theme_font_size_override("font_size", 18)
+	w.add_theme_color_override("font_color", Color(0.78, 0.74, 0.66, 0.92))
+	w.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.75))
+	w.add_theme_constant_override("outline_size", 3)
+	w.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.65))
+	w.add_theme_constant_override("shadow_offset_y", 1)
+	w.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	if GameTheme.font_body:
+		w.add_theme_font_override("font", GameTheme.font_body)
+	w.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	w.offset_left = 104
+	w.offset_right = 700
+	w.offset_top = bottom - 44
+	w.offset_bottom = bottom
+	w.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(w)
+	_whisper = w
+
+
+func _set_whisper(text: String) -> void:
+	if _whisper != null and is_instance_valid(_whisper):
+		_whisper.text = text
+
+
+## The frameless exit: dim ivory "WALK ON —", gold when the cursor asks.
+## Anchored bottom-right, clear of the ladder at any resolution.
+func _make_walk_on_button() -> Button:
+	var btn := Button.new()
+	btn.flat = true
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	var transparent := StyleBoxFlat.new()
+	transparent.bg_color = Color(0, 0, 0, 0)
+	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
+		btn.add_theme_stylebox_override(state, transparent)
+	btn.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	btn.offset_left = -240
+	btn.offset_right = -40
+	btn.offset_top = -84
+	btn.offset_bottom = -40
+	var lbl := Label.new()
+	lbl.text = "WALK ON  —"
+	lbl.add_theme_font_size_override("font_size", 20)
+	var rest := Color(GameTheme.IVORY.r, GameTheme.IVORY.g, GameTheme.IVORY.b, 0.66)
+	lbl.add_theme_color_override("font_color", rest)
+	lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.80))
+	lbl.add_theme_constant_override("outline_size", 3)
+	lbl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.70))
+	lbl.add_theme_constant_override("shadow_offset_y", 2)
+	if GameTheme.font_display:
+		lbl.add_theme_font_override("font", GameTheme.font_display)
+	lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(lbl)
+	btn.mouse_entered.connect(func() -> void:
+		lbl.add_theme_color_override("font_color", GameTheme.KEYWORD_GOLD))
+	btn.mouse_exited.connect(func() -> void:
+		lbl.add_theme_color_override("font_color", rest))
+	return btn
+
+
+# ── Outcome ink (contrast pass, 2026-07-04) ───────────────────────────────
+# Costs burn ember-red inside the gold outcome line, so "+55 gold, +1 Curse"
+# reads as a gain AND a wound at a glance. Segment-level (split on ";" and
+# ","): a segment is a cost when it opens with "-"/"Lose"/"Pay", or when it
+# HANDS you a Curse-family card ("+1 Curse", "gain a Wound") — but never when
+# it removes one (eating a Curse is the payoff). Hand-authored BBCode
+# segments pass through untouched.
+const COST_INK := "#e06550"
+
+# Inline devices for the outcome lines — one small glyph opens each segment so
+# the ladder scans by SHAPE ("which of these costs blood?") before it's read.
+# Painted HUD icons where they exist; the skull is the white silhouette kit.
+const GLYPH_GOLD := "[img=16]res://assets/icons/map/hud_gold_painted.png[/img] "
+const GLYPH_HP := "[img=16]res://assets/icons/map/hud_heart_painted.png[/img] "
+const GLYPH_CURSE := "[img=15]res://assets/icons/skull.png[/img] "
+const GLYPH_POTION := "[img=16]res://assets/icons/map/hud_potion_painted.png[/img] "
+const GLYPH_RELIC := "[img=16]res://assets/icons/map/hud_relic.png[/img] "
+const GLYPH_CARD := "[img=16]res://assets/icons/map/hud_deck.png[/img] "
+const GLYPH_COMMAND := "[img=16]res://assets/icons/stats/cost_runestone.png[/img] "
+
+
+func _ink_outcome(text: String) -> String:
+	if text.find("[") >= 0:
+		return text
+	var big_parts: Array = []
+	for half in text.split("; "):
+		var parts: Array = []
+		for seg in String(half).split(", "):
+			parts.append(_ink_segment(String(seg)))
+		big_parts.append(", ".join(parts))
+	return "; ".join(big_parts)
+
+
+func _segment_glyph(lower: String, curse_family: bool) -> String:
+	if curse_family:
+		return GLYPH_CURSE
+	if lower.find("gold") >= 0:
+		return GLYPH_GOLD
+	if lower.find("hp") >= 0 or lower.find("heal") >= 0:
+		return GLYPH_HP
+	if lower.find("potion") >= 0:
+		return GLYPH_POTION
+	if lower.find("relic") >= 0:
+		return GLYPH_RELIC
+	if lower.find("command") >= 0:
+		return GLYPH_COMMAND
+	if lower.find("card") >= 0 or lower.find("upgrade") >= 0 \
+			or lower.find("transform") >= 0 or lower.find("creature") >= 0:
+		return GLYPH_CARD
+	return ""
+
+
+func _ink_segment(seg: String) -> String:
+	var lower := seg.strip_edges().to_lower()
+	var curse_family: bool = lower.find("curse") >= 0 or lower.find("wound") >= 0 \
+		or lower.find("debt") >= 0 or lower.find("deserter") >= 0
+	var sheds_it: bool = lower.find("remove") >= 0 or lower.find("eat") >= 0 \
+		or lower.find("bury") >= 0 or lower.find("purge") >= 0
+	var is_cost: bool = lower.begins_with("-") or lower.begins_with("lose ") \
+		or lower.begins_with("pay ") or (curse_family and not sheds_it)
+	var glyph := _segment_glyph(lower, curse_family and not sheds_it)
+	if is_cost:
+		return glyph + "[color=%s]%s[/color]" % [COST_INK, seg]
+	return glyph + seg
+
+
+## Illuminate the intro: the first letter becomes a gilt raised capital — the
+## writ language's drop cap. Skipped when the text opens with BBCode, a digit
+## or punctuation (a quote keeps its own drama).
+func _illuminate_desc(text: String) -> String:
+	if text.is_empty():
+		return text
+	var c := text.substr(0, 1)
+	if not ((c >= "A" and c <= "Z") or (c >= "a" and c <= "z")):
+		return text
+	# 29px, not 32 — the inline size jump widens the cap's advance, and past
+	# ~30px the first word visibly splits ("T he river").
+	return "[font_size=29][color=#e8b547]%s[/color][/font_size]%s" % [c, text.substr(1)]
+
+
+## Campaign text tokens, applied wherever event prose renders:
+##   {fallen}  → the most recent name on the Roll of the Fallen
+##                ("the nameless" when the ledger is empty)
+##   {kingdom} → the current act's faction display name ("the kingdom" on
+##                legacy runs with no rival deal)
+##   {lord}    → the current act's rival lord ("the lord" likewise)
+## One war event serves all five rivals through these; any event can also
+## sing the player's actual dead.
+func _sub_campaign_tokens(text: String) -> String:
+	if text.find("{") < 0:
+		return text
+	if text.find("{fallen}") >= 0:
+		var fname := "the nameless"
+		if not RunState.fallen.is_empty():
+			fname = String(RunState.fallen.back().get("name", "the nameless"))
+		text = text.replace("{fallen}", fname)
+	if text.find("{kingdom}") >= 0:
+		var kname := "the kingdom"
+		var fac: String = RunState.get_act_faction()
+		if fac != "":
+			kname = String(HeroDB.faction_info(fac).get("name", "the kingdom"))
+		text = text.replace("{kingdom}", kname)
+	if text.find("{lord}") >= 0:
+		var lname := "the lord"
+		var rival: String = RunState.get_act_rival()
+		if rival != "":
+			lname = String(HeroDB.get_hero(rival).get("name", "the lord"))
+		text = text.replace("{lord}", lname)
+	if text.find("{pawned}") >= 0:
+		# The oldest card on the Pawnbroker's shelf — the one her buy-back offers.
+		var pname := "something of yours"
+		if not RunState.pawned_cards.is_empty():
+			var pdata = CardDB.get_card_data(String(RunState.pawned_cards[0]))
+			if not pdata.is_empty():
+				pname = String(pdata.name)
+		text = text.replace("{pawned}", pname)
+	if text.find("{veteran}") >= 0:
+		text = text.replace("{veteran}", _veteran_display_name())
+	return text
+
+
+## The most-killed soldier still marching, worn name and all ("Pikeman the
+## Grim") — the folded card data carries the epithet from 3 kills up.
+func _veteran_display_name() -> String:
+	var best_i := -1
+	var best_k := 0
+	for i in range(mini(RunState.deck.size(), RunState.deck_uids.size())):
+		var k: int = RunState.get_kills(RunState.deck_uids[i])
+		if k > best_k:
+			best_k = k
+			best_i = i
+	if best_i < 0:
+		return "your best soldier"
+	return String(RunState.get_upgraded_card_data(best_i).get("name", "your best soldier"))
+
+
 func _make_frameless_choice(headline_text: String, effect_text: String,
 		body_text: String, height: int, on_press: Callable,
-		is_blue: bool = false) -> Button:
-	# Returns a transparent Button containing layered visuals — gem ornament
-	# on the left, then a stacked column: headline, the mechanical OUTCOME line
-	# (gold — what the player actually gets), then a dim flavor beat. The whole
-	# strip is the click target; hover shifts the headline to gold and brightens
-	# the gem. effect_text is empty for narrative branch picks (follow_up) and
-	# for plain Continue/Leave buttons, which then show no outcome line.
+		is_blue: bool = false, ordinal: int = -1) -> Button:
+	headline_text = _sub_campaign_tokens(headline_text)
+	effect_text = _sub_campaign_tokens(effect_text)
+	body_text = _sub_campaign_tokens(body_text)
+	# Returns a transparent Button containing layered visuals — a gilt roman
+	# numeral (main choice screens; engine screens without an ordinal keep the
+	# gem) on the left, then TWO lines: the verb headline and the mechanical
+	# OUTCOME line (gold — what the player actually gets). The flavor beat is
+	# NOT stacked as a third line: it plays through the shared hover whisper,
+	# so the resting screen stays lean. Choices WITHOUT an outcome line
+	# (hidden tells, Continue/Walk-on buttons) keep their body inline — for
+	# the carnival's tells that line IS the game. Hover slides the entry a
+	# few pixels right (reduce_motion honored) so the focused option answers.
 	var btn := Button.new()
 	btn.flat = true
 	btn.custom_minimum_size = Vector2(560, height)
 	btn.focus_mode = Control.FOCUS_NONE
 	# SIZE_FILL so the button stretches to the column width (used to be
-	# SHRINK_CENTER for the old centered VBox); the gem stays glued to
+	# SHRINK_CENTER for the old centered VBox); the marker stays glued to
 	# the column's left edge instead of floating with the headline.
 	btn.size_flags_horizontal = Control.SIZE_FILL
 
@@ -431,26 +1014,73 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 	if on_press.is_valid():
 		btn.pressed.connect(on_press)
 
+	# Hover pool — a soft gradient of the entry's own ink that pools under the
+	# hovered option and fades out rightward. Light, not a box: the frameless
+	# rule holds, but the focused entry visibly OWNS its strip of the screen.
+	var pool_ink: Color = BLUE_INK if is_blue else GameTheme.GILT
+	var pool_grad := Gradient.new()
+	pool_grad.set_color(0, Color(pool_ink.r, pool_ink.g, pool_ink.b, 0.15))
+	pool_grad.set_color(1, Color(pool_ink.r, pool_ink.g, pool_ink.b, 0.0))
+	var pool_tex := GradientTexture2D.new()
+	pool_tex.gradient = pool_grad
+	pool_tex.fill_from = Vector2(0.0, 0.5)
+	pool_tex.fill_to = Vector2(0.9, 0.5)
+	var glow := TextureRect.new()
+	glow.texture = pool_tex
+	glow.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	glow.stretch_mode = TextureRect.STRETCH_SCALE
+	glow.set_anchors_preset(Control.PRESET_FULL_RECT)
+	glow.modulate.a = 0.0
+	glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(glow)
+
 	var hbox := HBoxContainer.new()
 	hbox.set_anchors_preset(Control.PRESET_FULL_RECT)
 	hbox.offset_left = 24
 	hbox.offset_right = -24
-	hbox.add_theme_constant_override("separation", 20)
+	hbox.add_theme_constant_override("separation", 18)
 	hbox.alignment = BoxContainer.ALIGNMENT_BEGIN
 	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	btn.add_child(hbox)
 
-	var gem := TextureRect.new()
-	var diamond_tex := load("res://assets/icons/diamond.png") as Texture2D
-	if diamond_tex:
-		gem.texture = diamond_tex
-	gem.custom_minimum_size = Vector2(18, 18)
-	gem.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	gem.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	var gem_rest := Color(BLUE_INK.r, BLUE_INK.g, BLUE_INK.b, 0.95) if is_blue \
-		else Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.85)
+		else Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.92)
 	var gem_hot := Color(BLUE_INK_BRIGHT.r, BLUE_INK_BRIGHT.g, BLUE_INK_BRIGHT.b, 1.0) if is_blue \
 		else Color(GameTheme.GILT_BRIGHT.r, GameTheme.GILT_BRIGHT.g, GameTheme.GILT_BRIGHT.b, 1.0)
+
+	# Entry marker: a gilt roman numeral chunks the ladder into countable
+	# options at a glance (I. II. III. — writ furniture, not UI chrome). The
+	# engine screens (dice/risk/appraisal, ordinal -1) keep the diamond gem.
+	# BLUE options always wear the diamond, never a numeral — the shape (not
+	# just the verdigris ink) marks "the event sees you", so the tell survives
+	# color-blindness and dim monitors.
+	var gem: Control
+	if ordinal >= 1 and not is_blue:
+		var num := Label.new()
+		const ROMAN := ["I", "II", "III", "IV", "V", "VI", "VII"]
+		num.text = ROMAN[mini(ordinal, ROMAN.size()) - 1] + "."
+		num.add_theme_font_size_override("font_size", 25)
+		num.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+		num.add_theme_constant_override("outline_size", 3)
+		num.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.70))
+		num.add_theme_constant_override("shadow_offset_y", 1)
+		if GameTheme.font_display:
+			num.add_theme_font_override("font", GameTheme.font_display)
+		num.custom_minimum_size = Vector2(36, 0)
+		num.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		gem = num
+	else:
+		var tex_gem := TextureRect.new()
+		var diamond_tex := GameTheme.tex_icon_diamond
+		if diamond_tex:
+			tex_gem.texture = diamond_tex
+		# Same 36px gutter the numerals reserve — otherwise diamond entries'
+		# headlines start 18px left of the numbered ones and the ladder's text
+		# edge zigzags.
+		tex_gem.custom_minimum_size = Vector2(36, 18)
+		tex_gem.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex_gem.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		gem = tex_gem
 	gem.modulate = gem_rest
 	gem.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	gem.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -465,7 +1095,7 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 
 	var headline := Label.new()
 	headline.text = headline_text
-	headline.add_theme_font_size_override("font_size", 26)
+	headline.add_theme_font_size_override("font_size", 24)
 	var head_rest: Color = BLUE_INK if is_blue else GameTheme.IVORY
 	var head_hot: Color = BLUE_INK_BRIGHT if is_blue else GameTheme.KEYWORD_GOLD
 	headline.add_theme_color_override("font_color", head_rest)
@@ -479,20 +1109,28 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 	headline.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vbox.add_child(headline)
 
+	# Underline sweep — a hairline that draws itself beneath the hovered verb.
+	var underline := ColorRect.new()
+	underline.color = Color(gem_hot.r, gem_hot.g, gem_hot.b, 0.55)
+	underline.custom_minimum_size = Vector2(0, 2)
+	underline.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	underline.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(underline)
+
 	# Outcome line — the mechanical payload, rendered in gold so it reads as
-	# "this is what happens" distinct from the ivory headline and dim flavor.
-	# RichTextLabel so a desc can tint gains/costs inline ([color] tags) when a
-	# choice wants to; plain text falls back to the gold default color.
+	# "this is what happens" distinct from the ivory headline. RichTextLabel
+	# so a desc can tint gains/costs inline ([color] tags) when a choice
+	# wants to; plain text falls back to the gold default color.
 	if not effect_text.is_empty():
 		var fx := RichTextLabel.new()
 		fx.bbcode_enabled = true
 		fx.fit_content = true
 		fx.scroll_active = false
 		fx.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		fx.text = effect_text
+		fx.text = _ink_outcome(effect_text)
 		fx.custom_minimum_size = Vector2(500, 0)
-		fx.add_theme_font_size_override("normal_font_size", 22)
-		fx.add_theme_font_size_override("bold_font_size", 22)
+		fx.add_theme_font_size_override("normal_font_size", 19)
+		fx.add_theme_font_size_override("bold_font_size", 19)
 		fx.add_theme_color_override("default_color", GameTheme.KEYWORD_GOLD)
 		fx.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
 		fx.add_theme_constant_override("outline_size", 3)
@@ -503,11 +1141,12 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 			fx.add_theme_font_override("bold_font", GameTheme.font_body)
 		fx.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		vbox.add_child(fx)
-
-	if not body_text.is_empty():
+	elif not body_text.is_empty():
+		# No outcome line to show (hidden tells, Continue buttons): the body
+		# stays inline — it's the only content the entry has.
 		var body := Label.new()
 		body.text = body_text
-		body.add_theme_font_size_override("font_size", 17)
+		body.add_theme_font_size_override("font_size", 18)
 		body.add_theme_color_override("font_color", GameTheme.DESC_DIM)
 		body.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.70))
 		body.add_theme_constant_override("outline_size", 2)
@@ -521,13 +1160,72 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 		body.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		vbox.add_child(body)
 
+	# The flavor beat rides the hover: whisper it under the stack while the
+	# cursor rests here (only when an outcome line displaced it from the entry).
+	# The focused entry also slides a few pixels right — the physical answer
+	# that separates "reading the ladder" from "aiming at an option".
+	var whisper_text: String = body_text if not effect_text.is_empty() else ""
+	var slide := {"tw": null}
+	var slide_to := func(left: float, right: float, pool_a: float, line_w: float) -> void:
+		if slide.tw != null:
+			slide.tw.kill()
+		if UserSettings.reduce_motion:
+			hbox.offset_left = left
+			hbox.offset_right = right
+			glow.modulate.a = pool_a
+			underline.custom_minimum_size.x = line_w
+			return
+		slide.tw = btn.create_tween()
+		slide.tw.set_parallel(true)
+		slide.tw.tween_property(hbox, "offset_left", left, 0.12) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		slide.tw.tween_property(hbox, "offset_right", right, 0.12) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		slide.tw.tween_property(glow, "modulate:a", pool_a, 0.15)
+		slide.tw.tween_property(underline, "custom_minimum_size:x", line_w, 0.16) \
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	btn.mouse_entered.connect(func() -> void:
 		gem.modulate = gem_hot
 		headline.add_theme_color_override("font_color", head_hot)
+		if whisper_text != "":
+			_set_whisper(whisper_text)
+		slide_to.call(36.0, -12.0, 1.0, 168.0)
 	)
 	btn.mouse_exited.connect(func() -> void:
 		gem.modulate = gem_rest
 		headline.add_theme_color_override("font_color", head_rest)
+		if whisper_text != "":
+			_set_whisper("")
+		slide_to.call(24.0, -24.0, 0.0, 0.0)
+	)
+
+	# Content-fit (2026-07-04): a wrapped outcome line used to overflow the
+	# fixed-height rect and bleed into the next entry — the inner hbox is
+	# ANCHORED (for the hover slide), so the Button never grew with it.
+	# Measure the real text height once autowrap has a width (one frame after
+	# ready) and grow the button's minimum to fit; the auto-growing ladder
+	# VBox then re-lays out around it.
+	btn.ready.connect(func() -> void:
+		await btn.get_tree().process_frame
+		if not (is_instance_valid(btn) and is_instance_valid(vbox)):
+			return
+		var need: float = vbox.get_combined_minimum_size().y + 22.0
+		if need > btn.custom_minimum_size.y:
+			btn.custom_minimum_size = Vector2(btn.custom_minimum_size.x, need)
+	)
+
+	# Deal the ladder in: entries fade in top-to-bottom with a small stagger
+	# whenever they land in a choices column (any VBox — the main screen and
+	# the engine screens both). Result-screen buttons parented straight to the
+	# root appear instantly. Fade only — position stays container-owned, so
+	# the entrance can never fight the hover slide.
+	btn.ready.connect(func() -> void:
+		if UserSettings.reduce_motion or not (btn.get_parent() is VBoxContainer):
+			return
+		btn.modulate.a = 0.0
+		var tw := btn.create_tween()
+		tw.tween_interval(0.05 + btn.get_index() * 0.07)
+		tw.tween_property(btn, "modulate:a", 1.0, 0.24)
 	)
 
 	return btn
@@ -561,10 +1259,10 @@ func _load_event_image() -> Texture2D:
 const MODAL_EFFECTS := [
 	"copy_card", "remove_choice", "remove_choice_multi", "remove_choice_filtered",
 	"remove_choice_all_copies",
-	"butcher_buff", "mirror_twin_buff",
 	"upgrade_choice", "upgrade_choice_multi",
 	"stranger_hand_pick", "relic_sacrifice_pick", "sacrifice_pick",
 	"transform_choice", "dice_run", "risk_loop", "pawn_appraisal",
+	"grant_keyword_pick", "veteran_swap",
 ]
 
 
@@ -641,22 +1339,29 @@ func _apply_effect(effect: Dictionary) -> String:
 	match effect.type:
 		"heal_full":
 			RunState.hero_hp = RunState.hero_max_hp
+			_sting("heal")
 			return "Healed to full HP!"
 		"heal":
 			RunState.heal_hero(effect.value)
+			_sting("heal")
 			return "Healed %d HP." % effect.value
 		"damage":
 			RunState.damage_hero(effect.value)
+			_sting("hit_hero")
 			return "Took %d damage." % effect.value
 		"gold":
 			if effect.value > 0:
 				RunState.gain_gold(effect.value)
-			else:
-				RunState.gold += effect.value  # losses bypass ectoplasm
-			if effect.value > 0:
+				_sting("coin")
 				return "Gained %d gold." % effect.value
 			else:
-				return "Lost %d gold." % abs(effect.value)
+				# Floor at 0 — a flat gold cost must never push the player into
+				# negative gold (which soft-bricks every later price check). Only
+				# charge what they actually have, like lose_gold_partial.
+				var lost: int = mini(-effect.value, RunState.gold)
+				RunState.gold -= lost  # losses bypass ectoplasm
+				_sting("coin", -6.0)
+				return "Lost %d gold." % lost
 		"remove_cards":
 			var count = effect.value
 			for i in range(count):
@@ -670,16 +1375,35 @@ func _apply_effect(effect: Dictionary) -> String:
 				rares.shuffle()
 				RunState.add_card(rares[0])
 				var data = CardDB.get_card_data(rares[0])
+				_result_cards.append(data)
+				_sting("card_play")
 				return "Added %s to deck!" % data.name
 			return ""
 		"add_curse":
-			RunState.add_card(CardDB.random_curse_id())
+			var rolled_curse := CardDB.random_curse_id()
+			RunState.add_card(rolled_curse)
+			_result_cards.append(CardDB.get_card_data(rolled_curse))
+			_sting("spell_cast", -4.0)
 			return "A Curse was added to your deck."
+		"add_curse_id":
+			# Branded curse — the event names WHICH mark it leaves (a deserter
+			# leaves a Deserter's Mark, the ledger leaves a War-Debt). Falls
+			# back to the random roll if the id ever goes stale.
+			var curse_id := String(effect.get("id", ""))
+			if not CardDB.is_curse(curse_id):
+				curse_id = CardDB.random_curse_id()
+			RunState.add_card(curse_id)
+			var curse_data = CardDB.get_card_data(curse_id)
+			_result_cards.append(curse_data)
+			_sting("spell_cast", -4.0)
+			return "%s was added to your deck." % curse_data.name
 		"random_relic":
 			var choices = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
 			if choices.size() > 0:
 				RunState.add_relic(choices[0])
 				var relic = RelicDB.get_relic(choices[0])
+				_result_relics.append(choices[0])
+				_sting("card_play")
 				return "Gained relic: %s" % relic.name
 			return "No relics available."
 		"specific_relic":
@@ -688,8 +1412,11 @@ func _apply_effect(effect: Dictionary) -> String:
 			var rid := String(effect.get("id", ""))
 			if rid != "" and not RunState.relics.has(rid):
 				RunState.add_relic(rid)
+				_result_relics.append(rid)
+				_sting("card_play")
 				return "Gained relic: %s" % RelicDB.get_relic(rid).name
 			RunState.gain_gold(30)
+			_sting("coin")
 			return "Gained 30 gold."
 		"upgrade_random":
 			var upgradeable: Array = []
@@ -702,6 +1429,10 @@ func _apply_effect(effect: Dictionary) -> String:
 			if upgradeable.size() > 0:
 				var idx = upgradeable[randi() % upgradeable.size()]
 				RunState.upgrade_card(idx, "plus")
+				# Show the card the tent sharpened — the folded data carries
+				# the " +" name and the bumped numbers.
+				_result_cards.append(RunState.get_upgraded_card_data(idx))
+				_sting("card_play")
 				return "Upgraded a card!"
 			return "No cards to upgrade."
 		"copy_card":
@@ -735,43 +1466,33 @@ func _apply_effect(effect: Dictionary) -> String:
 			if RunState.gold < stake:
 				return "You haven't the coin to cover that bet."
 			RunState.gold -= stake
+			_result_suspense = true
 			if randi() % 2 == 0:
 				RunState.gain_gold(payout)
+				_sting("coin")
 				return "The dice land true — won %d gold!" % payout
+			_sting("hit_hero", -6.0)
 			return "The dice turn on you. Lost %d gold." % stake
 		"wager_relic_or_curse":
 			# The face-down red card: a pure coin flip, no stake. Heads is a
 			# relic; tails is `curses` curses. EV ~ neutral — the draw is the
 			# whole point.
 			var n_curse: int = int(effect.get("curses", 2))
+			_result_suspense = true
 			if randi() % 2 == 0:
 				var won = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
 				if won.size() > 0:
 					RunState.add_relic(won[0])
+					_result_relics.append(won[0])
+					_sting("card_play")
 					return "The card turns up a blessing: %s." % RelicDB.get_relic(won[0]).name
 				return "The card turns up blank. Nothing answers."
 			for _i in range(n_curse):
-				RunState.add_card(CardDB.random_curse_id())
+				var flip_curse := CardDB.random_curse_id()
+				RunState.add_card(flip_curse)
+				_result_cards.append(CardDB.get_card_data(flip_curse))
+			_sting("spell_cast", -4.0)
 			return "The card turns up a wound. %d Curse(s) settle into your deck." % n_curse
-		"debuff_starters":
-			# Hero-agnostic: weaken every starter-rarity CREATURE in the deck by
-			# 1 HP. The old version hardcoded troll/sprite/naga, so the "downside"
-			# silently did nothing for 3 of 4 heroes. Now it reads actual rarity,
-			# so the cost lands on whatever starting creatures you brought.
-			var weakened := 0
-			for i in range(RunState.deck.size()):
-				var data = CardDB.get_card_data(RunState.deck[i])
-				if data.get("type", "creature") != "creature":
-					continue
-				if data.get("rarity", "") != "starter":
-					continue
-				if RunState.has_upgrade_path(i, "fortify_neg"):
-					continue
-				RunState.upgrade_card(i, "fortify_neg")
-				weakened += 1
-			if weakened == 0:
-				return "Nothing green enough is left to wither."
-			return "%d starting creature(s) lose 1 HP." % weakened
 		"gain_potion":
 			if RunState.add_potion("healing"):
 				return "Gained a Healing Potion."
@@ -793,13 +1514,74 @@ func _apply_effect(effect: Dictionary) -> String:
 				return ""
 			pool.shuffle()
 			RunState.add_card(pool[0])
+			_result_cards.append(CardDB.get_card_data(pool[0]))
+			_sting("card_play")
 			return "Added %s to your deck." % CardDB.get_card_data(pool[0]).name
-		"butcher_buff":
-			_start_butcher_mode()
-			return ""
-		"mirror_twin_buff":
-			_start_mirror_twin_mode()
-			return ""
+		"add_card_id":
+			# Add a SPECIFIC card by id — story payoffs (the Last Garrison hands
+			# you Old Bones by name). Falls back to a random rare if the id ever
+			# goes stale, so the event never pays nothing.
+			var want_id := String(effect.get("id", ""))
+			if CardDB.get_card_data(want_id).is_empty():
+				return _apply_effect({"type": "add_rare"})
+			RunState.add_card(want_id)
+			_result_cards.append(CardDB.get_card_data(want_id))
+			_sting("card_play")
+			return "%s joins your deck." % CardDB.get_card_data(want_id).name
+		"pawn_buyback":
+			# The shelf behind the glass (campaign memory): the FIRST card the
+			# player ever sold through the appraisal counter comes back — at her
+			# keeping fee, and forged, because she kept it better than you did.
+			# The blue gate (pawned_at_least + gold_at_least) keeps this branch
+			# affordable-only, but guard anyway for direct calls.
+			if RunState.pawned_cards.is_empty():
+				return "The shelf holds nothing of yours."
+			var back_price: int = int(effect.get("price", 60))
+			if RunState.gold < back_price:
+				return "Your coin does not reach the shelf. She does not haggle."
+			var back_id := String(RunState.pawned_cards[0])
+			RunState.pawned_cards.remove_at(0)
+			if CardDB.get_card_data(back_id).is_empty():
+				return "The shelf holds nothing of yours."
+			RunState.gold -= back_price
+			RunState.add_card(back_id)
+			var back_idx: int = RunState.deck.size() - 1
+			if CardDB.is_upgradeable(back_id):
+				RunState.upgrade_card(back_idx, "plus")
+			_result_cards.append(RunState.get_upgraded_card_data(back_idx))
+			_sting("coin")
+			return "%s comes back across the counter wrapped in the same cloth you sold it in — keener than you left it. She kept it better than you did." \
+				% CardDB.get_card_data(back_id).name
+		"gain_potion_random":
+			# Any potion from the live PotionDB pool (gain_potion is always the
+			# plain healing draught; this is the interesting-bottle variant).
+			if not RunState.can_add_potion():
+				return "Your potion belt is already full."
+			var pid: String = PotionDB.roll_random_potion()
+			RunState.add_potion(pid)
+			return "Gained %s." % PotionDB.get_potion(pid).get("name", "a potion")
+		"purge_curses":
+			# The Scapegoat: remove EVERY Curse in one rite, priced per head in
+			# max HP. Count first, then charge, then remove — floor max HP at 1
+			# and never empty the deck (both mirror the other removal paths).
+			var curse_idx: Array = []
+			for ci in range(RunState.deck.size()):
+				if CardDB.is_curse(RunState.deck[ci]):
+					curse_idx.append(ci)
+			if curse_idx.is_empty():
+				return "You carry nothing the goat would recognize."
+			var purged := 0
+			for ci in range(curse_idx.size() - 1, -1, -1):
+				if RunState.deck.size() <= 1:
+					break
+				RunState.remove_card_at(curse_idx[ci])
+				purged += 1
+			var hp_price: int = purged * int(effect.get("max_hp_per", 2))
+			var new_cap: int = maxi(1, RunState.hero_max_hp - hp_price)
+			var paid: int = RunState.hero_max_hp - new_cap
+			RunState.hero_max_hp = new_cap
+			RunState.hero_hp = mini(RunState.hero_hp, RunState.hero_max_hp)
+			return "The goat carries %d Curse(s) over the boundary stone. Lost %d max HP." % [purged, paid]
 		"upgrade_choice":
 			_start_upgrade_mode(1)
 			return ""
@@ -809,6 +1591,7 @@ func _apply_effect(effect: Dictionary) -> String:
 		"gain_max_hp":
 			RunState.hero_max_hp += effect.value
 			RunState.hero_hp += effect.value
+			_sting("heal")
 			return "Gained %d max HP." % effect.value
 		"lose_max_hp":
 			# Floor at 1 so an unlucky chain of events can't kill you outright.
@@ -816,32 +1599,25 @@ func _apply_effect(effect: Dictionary) -> String:
 			var actually_lost: int = RunState.hero_max_hp - new_max
 			RunState.hero_max_hp = new_max
 			RunState.hero_hp = mini(RunState.hero_hp, RunState.hero_max_hp)
+			_sting("hit_hero")
 			return "Lost %d max HP." % actually_lost
 		"lose_gold_partial":
 			# Lose min(value, current gold) — never goes negative. Used by tax
 			# events where the cap should hit rich players but the broke player
-			# pays only what they have.
+			# pays only what they have. value 99999 = "ALL your gold" (the
+			# Reliquary Cart's all-in).
 			var to_lose: int = mini(effect.value, RunState.gold)
 			RunState.gold -= to_lose
+			_sting("coin", -6.0)
 			return "Lost %d gold." % to_lose
-		"add_rare_n":
-			# Add N random rare cards (Beekeeper Returns "+THREE rare cards").
-			var rares = CardDB.cards_of_rarity("rare")
-			if rares.is_empty():
-				return ""
-			var n: int = effect.value
-			var names: Array = []
-			for _i in range(n):
-				rares.shuffle()
-				RunState.add_card(rares[0])
-				names.append(CardDB.get_card_data(rares[0]).name)
-			return "Added: %s." % ", ".join(names)
 		"add_boss_relic":
 			# Boss-tier (rare) relic pool. Used by Three Doors and Old Forge.
 			var choices = RelicDB.roll_relic_reward("boss", RunState.relics, RunState.current_hero_id)
 			if choices.size() > 0:
 				RunState.add_relic(choices[0])
 				var relic = RelicDB.get_relic(choices[0])
+				_result_relics.append(choices[0])
+				_sting("card_play")
 				return "Gained relic: %s" % relic.name
 			# Pool exhausted — fall back to a combat-tier relic so the player
 			# never gets nothing from a "guaranteed rare" payoff.
@@ -849,6 +1625,8 @@ func _apply_effect(effect: Dictionary) -> String:
 			if fallback.size() > 0:
 				RunState.add_relic(fallback[0])
 				var relic = RelicDB.get_relic(fallback[0])
+				_result_relics.append(fallback[0])
+				_sting("card_play")
 				return "Gained relic: %s" % relic.name
 			return "No relics available."
 		"relic_sacrifice_pick":
@@ -858,16 +1636,6 @@ func _apply_effect(effect: Dictionary) -> String:
 			# a coin flip was the worst feel-bad in the event pool.
 			_start_relic_sacrifice_mode()
 			return ""
-		"mark_hand":
-			# Marked One: next combat starts with a 2/3 Vanguard in front-left.
-			RunState.next_combat_gift_creature = {
-				"name": "Marked Vanguard", "atk": 2, "hp": 3, "kw": [],
-			}
-			return "The mark settles on your hand."
-		"mark_heart":
-			# Marked One: next combat grants +1 max mana the whole fight.
-			RunState.next_combat_mana_bonus = 1
-			return "The mark settles over your heart."
 		"stranger_hand_pick":
 			_start_stranger_hand_mode()
 			return ""
@@ -884,6 +1652,7 @@ func _apply_effect(effect: Dictionary) -> String:
 				"gold":
 					if amt > 0:
 						RunState.gain_gold(amt)
+						_sting("coin")
 					return "Gained %d gold." % amt
 				"lose_gold":
 					# Build-scaled COST. Charge min(amt, gold) so a
@@ -891,28 +1660,42 @@ func _apply_effect(effect: Dictionary) -> String:
 					# mirroring lose_gold_partial's floor.
 					var to_lose_scaled: int = mini(amt, RunState.gold)
 					RunState.gold -= to_lose_scaled
+					_sting("coin", -6.0)
 					return "Lost %d gold." % to_lose_scaled
 				"heal":
 					RunState.heal_hero(amt)
+					_sting("heal")
 					return "Healed %d HP." % amt
 				"max_hp":
 					RunState.hero_max_hp += amt
 					RunState.hero_hp += amt
+					_sting("heal")
 					return "Gained %d max HP." % amt
 				"damage":
 					RunState.damage_hero(amt)
+					_sting("hit_hero")
 					return "Took %d damage." % amt
 			return ""
 		"gift_creature":
 			# General next-combat payoff: start the next fight with a creature in
-			# front-left. Reuses the Marked-One hook (Combat reads atk/hp only —
-			# kw is stored for save symmetry but not yet honored in combat).
+			# front-left. Combat honors name AND keywords (2026-07-04) — the
+			# Patent Ladder really is Armored. The result page stands the gift up
+			# as a card so the player meets their new soldier before the fight.
 			RunState.next_combat_gift_creature = {
 				"name": effect.get("name", "Gift"),
 				"atk": int(effect.get("atk", 1)),
 				"hp": int(effect.get("hp", 1)),
 				"kw": effect.get("kw", []),
 			}
+			_result_cards.append({
+				"id": "event_gift", "name": effect.get("name", "Gift"),
+				"type": "creature", "cost": 0,
+				"atk": int(effect.get("atk", 1)), "hp": int(effect.get("hp", 1)),
+				"keywords": effect.get("kw", []), "rarity": "enemy",
+				"desc": "Stands in your front line when the next fight opens.",
+				"is_token": true,
+			})
+			_sting("card_play")
 			return effect.get("text", "Something will fight beside you.")
 		"combat_mana":
 			# General next-combat payoff: +N max mana for the whole next fight.
@@ -923,6 +1706,12 @@ func _apply_effect(effect: Dictionary) -> String:
 			return ""
 		"transform_choice":
 			_start_transform_mode(int(effect.get("value", 1)))
+			return ""
+		"grant_keyword_pick":
+			_start_grant_keyword_mode(effect)
+			return ""
+		"veteran_swap":
+			_start_veteran_swap_mode()
 			return ""
 		"dice_run":
 			_start_dice_run(effect)
@@ -939,6 +1728,7 @@ func _apply_effect(effect: Dictionary) -> String:
 			# {"weight": int, "text": String, "effects": [non-modal effects]}.
 			# Keeps one-shot choices from being a printed menu: the player
 			# commits to an action, not a price list.
+			_result_suspense = true
 			var outcomes: Array = effect.get("outcomes", [])
 			var total := 0
 			for o in outcomes:
@@ -983,6 +1773,9 @@ func _deck_count(kind: String) -> int:
 			return RunState.deck.size()
 		"relics":
 			return RunState.relics.size()
+		"fallen":
+			# Names on the Roll of the Fallen (the Bell of Names pays them out).
+			return RunState.fallen.size()
 	var n := 0
 	for cid in RunState.deck:
 		var data := CardDB.get_card_data(cid)
@@ -1007,6 +1800,21 @@ func _deck_count(kind: String) -> int:
 	return n
 
 
+# ── Result payoffs as objects ─────────────────────────────────────────────
+# Effect handlers stage what they granted here; the result screen then shows
+# the actual things — gained cards stand on the page as real Card2Ds, gained
+# relics print as writ plates. StS shows you the card; so do we.
+var _result_cards: Array = []    # card DATA dicts (folded where relevant)
+var _result_relics: Array = []   # relic ids
+# Set by gamble effects (roll_table, coin calls): the result page holds blank
+# for a breath before the ink lands — the pause IS the dice rolling.
+var _result_suspense: bool = false
+
+
+func _sting(sound: String, volume_db: float = 0.0) -> void:
+	AudioBank.play_sfx(sound, 0.06, volume_db)
+
+
 func _show_result(text: String) -> void:
 	# Merge any stashed co-effect receipt (set when a modal picker was launched
 	# alongside non-modal effects) ahead of the picker's own result line.
@@ -1014,54 +1822,156 @@ func _show_result(text: String) -> void:
 	if _pending_pre_text != "":
 		full = (_pending_pre_text + "\n" + full).strip_edges()
 		_pending_pre_text = ""
-	if full.is_empty():
+	if full.is_empty() and _result_cards.is_empty() and _result_relics.is_empty():
+		# Never strand the player on a dead screen with nothing to click — if a
+		# result resolves to no text, just walk back to the map.
+		GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 		return
 	_clear_ui()
-	# Result keeps the event art behind it — same scene, same beat.
+	# Result keeps the event art behind it — same scene, same beat. The receipt
+	# is written on the same page as the event (left column, drop cap, ivory
+	# ink) instead of the old centered slab that broke the writ metaphor.
 	_set_event_art_visible(true)
 
-	var result_label := Label.new()
-	result_label.text = full
-	result_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	result_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	result_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	result_label.add_theme_font_size_override("font_size", 24)
-	result_label.add_theme_color_override("font_color", GameTheme.IVORY)
-	result_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.80))
-	result_label.add_theme_constant_override("outline_size", 3)
-	result_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.75))
-	result_label.add_theme_constant_override("shadow_offset_x", 0)
-	result_label.add_theme_constant_override("shadow_offset_y", 2)
-	if GameTheme.font_display:
-		result_label.add_theme_font_override("font", GameTheme.font_display)
-	result_label.set_anchors_preset(Control.PRESET_CENTER)
-	result_label.offset_left = -420
-	result_label.offset_right = 420
-	result_label.offset_top = -140
-	result_label.offset_bottom = 60
-	result_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(result_label)
+	# Same reading block as the choice screens: receipt text and the Continue
+	# action grouped in one bottom-anchored column, gained objects on the right.
+	var column := VBoxContainer.new()
+	column.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	column.offset_left = 80
+	column.offset_right = 800
+	column.offset_top = -110
+	column.offset_bottom = -110
+	column.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	column.add_theme_constant_override("separation", 22)
+	add_child(column)
 
-	var continue_btn := _make_frameless_choice("Continue", "", "Walk on.", 88,
-			func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
-	continue_btn.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	continue_btn.offset_left = -280
-	continue_btn.offset_right = 280
-	continue_btn.offset_top = -180
-	continue_btn.offset_bottom = -92
-	add_child(continue_btn)
+	var desc := _make_event_desc(_illuminate_desc(_sub_campaign_tokens(full)))
+	column.add_child(desc)
+
+	var delay := 0.0
+	if _result_suspense and not UserSettings.reduce_motion:
+		delay = 0.7
+	_result_suspense = false
+	if not UserSettings.reduce_motion:
+		desc.visible_ratio = 0.0
+		var reveal := clampf(desc.get_total_character_count() * 0.0032, 0.25, 0.9)
+		create_tween().tween_property(desc, "visible_ratio", 1.0, reveal) \
+			.set_delay(0.10 + delay)
+
+	_show_result_objects(delay)
+
+	column.add_child(_make_frameless_choice("Continue", "", "Walk on.", 88,
+			func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE)))
+
+	_refresh_ledger()
+
+
+## Stand the staged payoffs on the art half of the result page: up to 3 gained
+## cards as real Card2Ds (dealt in with a small stagger), relic writs beneath.
+func _show_result_objects(delay: float = 0.0) -> void:
+	var shown: Array = _result_cards.slice(0, mini(3, _result_cards.size()))
+	var extra: int = _result_cards.size() - shown.size()
+	var n: int = shown.size()
+	if n > 0:
+		var card_w := 225
+		var sep := 26
+		var total_w: int = n * card_w + (n - 1) * sep
+		var start_x: float = 1160.0 - total_w / 2.0
+		for i in range(n):
+			var wrapper := Control.new()
+			wrapper.custom_minimum_size = Vector2(225, 300)
+			wrapper.position = Vector2(start_x + i * (card_w + sep), 170)
+			wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			var card_node = CARD_SCENE.instantiate()
+			card_node.static_display = true
+			card_node.card_data = shown[i]
+			card_node.live_baked_mode = true
+			CardTextureCache.bake(shown[i])
+			wrapper.add_child(card_node)
+			add_child(wrapper)
+			if not UserSettings.reduce_motion:
+				wrapper.modulate.a = 0.0
+				wrapper.pivot_offset = Vector2(112, 150)
+				wrapper.scale = Vector2(0.92, 0.92)
+				var tw := create_tween().set_parallel(true)
+				var d := delay + 0.16 + i * 0.10
+				tw.tween_property(wrapper, "modulate:a", 1.0, 0.28).set_delay(d)
+				tw.tween_property(wrapper, "scale", Vector2.ONE, 0.30).set_delay(d) \
+					.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		if extra > 0:
+			var more := Label.new()
+			more.text = "…and %d more march behind." % extra
+			more.add_theme_font_size_override("font_size", 18)
+			more.add_theme_color_override("font_color", GameTheme.DESC_DIM)
+			more.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.75))
+			more.add_theme_constant_override("outline_size", 3)
+			more.position = Vector2(start_x, 482)
+			more.size = Vector2(total_w, 28)
+			more.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			more.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			add_child(more)
+	# Relic writs — name in gold over the rules line, printed on the page below
+	# (or in place of) the cards.
+	var ry: float = 520.0 if n > 0 else 260.0
+	for rid in _result_relics:
+		var relic = RelicDB.get_relic(String(rid))
+		if relic.is_empty():
+			continue
+		var v := VBoxContainer.new()
+		v.position = Vector2(940, ry)
+		v.size = Vector2(460, 90)
+		v.add_theme_constant_override("separation", 4)
+		v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var nm := Label.new()
+		nm.text = relic.get("name", "Relic")
+		nm.add_theme_font_size_override("font_size", 23)
+		nm.add_theme_color_override("font_color", GameTheme.KEYWORD_GOLD)
+		nm.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+		nm.add_theme_constant_override("outline_size", 3)
+		nm.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		if GameTheme.font_display:
+			nm.add_theme_font_override("font", GameTheme.font_display)
+		v.add_child(nm)
+		var dl := Label.new()
+		dl.text = relic.get("desc", "")
+		dl.add_theme_font_size_override("font_size", GameTheme.MIN_LABEL_SIZE)
+		dl.add_theme_color_override("font_color", GameTheme.IVORY)
+		dl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.75))
+		dl.add_theme_constant_override("outline_size", 3)
+		dl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		dl.custom_minimum_size = Vector2(460, 0)
+		dl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		if GameTheme.font_body:
+			dl.add_theme_font_override("font", GameTheme.font_body)
+		v.add_child(dl)
+		add_child(v)
+		if not UserSettings.reduce_motion:
+			v.modulate.a = 0.0
+			create_tween().tween_property(v, "modulate:a", 1.0, 0.3) \
+				.set_delay(delay + 0.3)
+		ry += 96.0
+	_result_cards = []
+	_result_relics = []
 
 
 func _make_card_picker_grid(title_text: String, title_color: Color) -> GridContainer:
 	# Shared helper for card-picker screens (remove, copy, butcher).
 	# Returns the GridContainer so callers can add card wrappers to it.
+	# The event's painting stays under the picker (2026-07-04) — a deep scrim
+	# keeps the cards readable, but the Sin-Eater's table and the Remount Fair
+	# no longer collapse into the same black room the moment a picker opens.
 	_clear_ui()
-	_set_event_art_visible(false)
+	_set_event_art_visible(true)
+	add_child(_make_picker_scrim())
 
 	var title = GameTheme.make_label(title_text, 26, title_color)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.position = Vector2(300, 28)
 	title.size = Vector2(1000, 44)
+	title.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	title.add_theme_constant_override("outline_size", 4)
+	title.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.75))
+	title.add_theme_constant_override("shadow_offset_y", 2)
 	add_child(title)
 
 	var scroll = ScrollContainer.new()
@@ -1074,16 +1984,34 @@ func _make_card_picker_grid(title_text: String, title_color: Color) -> GridConta
 	grid.add_theme_constant_override("h_separation", 16)
 	grid.add_theme_constant_override("v_separation", 16)
 	scroll.add_child(grid)
+	_refresh_ledger()
 	return grid
 
 
+## A near-opaque wash in the event's mood ink, laid over the art for the
+## card-picker screens — atmosphere without sacrificing card readability.
+func _make_picker_scrim() -> ColorRect:
+	var scrim := ColorRect.new()
+	scrim.name = "PickerScrim"
+	var ink := _mood_shadow_ink()
+	scrim.color = Color(ink.r, ink.g, ink.b, 0.84)
+	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scrim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return scrim
+
+
 func _add_card_to_grid(grid: GridContainer, data: Dictionary, callback: Callable) -> void:
-	# Add a Card2D wrapper with click overlay to a picker grid.
+	# Add a Card2D wrapper with click overlay to a picker grid. The hovered
+	# tile lifts slightly toward the cursor — the same "this one answers"
+	# physicality the choice ladder's slide gives.
 	var wrapper := Control.new()
 	wrapper.custom_minimum_size = Vector2(210, 280)
+	wrapper.pivot_offset = Vector2(105, 140)
 	var card_node = CARD_SCENE.instantiate()
 	card_node.static_display = true
 	card_node.card_data = data
+	card_node.live_baked_mode = true
+	CardTextureCache.bake(data)
 	wrapper.add_child(card_node)
 	var click_btn := Button.new()
 	click_btn.flat = true
@@ -1094,6 +2022,17 @@ func _add_card_to_grid(grid: GridContainer, data: Dictionary, callback: Callable
 	click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 	click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
 	click_btn.pressed.connect(callback)
+	if not UserSettings.reduce_motion:
+		click_btn.mouse_entered.connect(func() -> void:
+			wrapper.z_index = 1
+			var tw := wrapper.create_tween()
+			tw.tween_property(wrapper, "scale", Vector2(1.05, 1.05), 0.10) \
+				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT))
+		click_btn.mouse_exited.connect(func() -> void:
+			wrapper.z_index = 0
+			var tw := wrapper.create_tween()
+			tw.tween_property(wrapper, "scale", Vector2.ONE, 0.10) \
+				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT))
 	wrapper.add_child(click_btn)
 	grid.add_child(wrapper)
 
@@ -1275,6 +2214,8 @@ func _on_copy_pick(deck_index: int) -> void:
 	var card_id = RunState.deck[deck_index]
 	var data = CardDB.get_card_data(card_id)
 	RunState.add_card(card_id)
+	_result_cards.append(data)
+	_sting("card_play")
 	_copy_names.append(data.name)
 	_copy_remaining -= 1
 	if _copy_remaining <= 0:
@@ -1288,55 +2229,102 @@ func _on_copy_pick(deck_index: int) -> void:
 		_start_copy_mode(_copy_remaining)
 
 
-func _start_butcher_mode() -> void:
-	# A creature-less deck would build an empty picker with no way out (the grid
-	# helper has no leave button) — so report it gracefully, like the sacrifice
-	# / transform / upgrade pickers do when nothing qualifies.
-	var eligible: Array = []
-	for i in range(RunState.deck.size()):
-		if CardDB.get_card_data(RunState.deck[i]).get("type", "creature") == "creature":
-			eligible.append(i)
-	if eligible.is_empty():
-		_show_result("The Butcher turns his cleaver over and finds nothing in your pack worth the block.")
+# ── Keyword lesson picker (the Pensioned Master) ─────────────────────────
+# Pick a creature; it PERMANENTLY gains the effect's keyword via the same
+# grant_kw mod entry the Standard-Bearer wayside writes — mods compose, so a
+# drilled or forged creature can still take the lesson. Creatures already
+# carrying the keyword (from any source) don't show up.
+
+var _grant_kw_effect: Dictionary = {}
+
+func _start_grant_keyword_mode(effect: Dictionary) -> void:
+	_grant_kw_effect = effect
+	var kw := String(effect.get("keyword", ""))
+	if kw == "":
+		_show_result("The lesson dissolves into shop-talk. Nothing sticks.")
 		return
-	var grid = _make_card_picker_grid("Choose a creature for the Butcher (+2 ATK, Wither 1)", GameTheme.KEYWORD_GOLD)
-
-	# Same closure-capture fix as _start_remove_mode: bind the deck index by
-	# value so each tile knows which card it represents at click-time.
-	for i in eligible:
-		var data = CardDB.get_card_data(RunState.deck[i])
-		_add_card_to_grid(grid, data, _on_butcher_pick.bind(i))
-
-
-func _on_butcher_pick(deck_index: int) -> void:
-	var data = CardDB.get_card_data(RunState.deck[deck_index])
-	RunState.upgrade_card(deck_index, "butcher")
-	_show_result("The Butcher returns %s with +2 ATK and Wither 1." % data.name)
-
-
-func _start_mirror_twin_mode() -> void:
-	# No eligible creature → empty picker with no way out. Report it instead
-	# (mirrors the sacrifice / transform / upgrade empty-state handling).
 	var eligible: Array = []
 	for i in range(RunState.deck.size()):
-		if CardDB.get_card_data(RunState.deck[i]).get("type", "creature") != "creature":
+		var data: Dictionary = RunState.get_upgraded_card_data(i)
+		if data.get("type", "") != "creature":
 			continue
-		if RunState.has_upgrade_path(i, "mirror_twin"):
+		if (data.get("keywords", []) as Array).has(kw):
 			continue
 		eligible.append(i)
 	if eligible.is_empty():
-		_show_result("The pool shows you nothing it wants. The reflection folds its arms and waits.")
+		_show_result("He looks your soldiers over twice and shakes his head. Nobody here can take that lesson.")
 		return
-	var grid = _make_card_picker_grid("Push a creature through (HP → 1, +4 ATK)", GameTheme.SPELL_PURPLE)
+	var disp := String(KeywordEffects.KEYWORDS.get(kw, {}).get("display", kw.capitalize()))
+	var grid = _make_card_picker_grid(
+		String(effect.get("prompt", "Who takes the lesson? (gains %s)" % disp)),
+		GameTheme.KEYWORD_GOLD)
 	for i in eligible:
-		var data = CardDB.get_card_data(RunState.deck[i])
-		_add_card_to_grid(grid, data, _on_mirror_twin_pick.bind(i))
+		_add_card_to_grid(grid, RunState.get_upgraded_card_data(i),
+			_on_grant_keyword_pick.bind(i))
 
 
-func _on_mirror_twin_pick(deck_index: int) -> void:
-	var data = CardDB.get_card_data(RunState.deck[deck_index])
-	RunState.upgrade_card(deck_index, "mirror_twin")
-	_show_result("The reflection keeps %s. What returns has 1 HP and is hungrier." % data.name)
+func _on_grant_keyword_pick(deck_index: int) -> void:
+	var kw := String(_grant_kw_effect.get("keyword", ""))
+	var data: Dictionary = RunState.get_upgraded_card_data(deck_index)
+	RunState.apply_wayside_upgrade(deck_index, {"path": "grant_kw", "keyword": kw})
+	var disp := String(KeywordEffects.KEYWORDS.get(kw, {}).get("display", kw.capitalize()))
+	# Show the soldier as they leave the lesson — folded data now carries the
+	# new keyword chip.
+	_result_cards.append(RunState.get_upgraded_card_data(deck_index))
+	_sting("card_play")
+	_show_result("%s takes the lesson and keeps it: %s, permanently." \
+		% [data.get("name", "The soldier"), disp])
+
+
+# ── The Free Company's one-for-one muster (veteran_swap) ─────────────────
+# Picker over unique STARTER card ids; choosing one removes every copy and
+# enlists the same count of random uncommons — the deck keeps its size but
+# sheds its greenest identity in one stroke. Replacements are dealt from a
+# shuffled pool without repeats ("no two alike") while the pool lasts.
+
+func _start_veteran_swap_mode() -> void:
+	var unique_ids: Array = []
+	for i in range(RunState.deck.size()):
+		var cid: String = RunState.deck[i]
+		if CardDB.is_curse(cid):
+			continue
+		if CardDB.get_card_data(cid).get("rarity", "") != "starter":
+			continue
+		if not unique_ids.has(cid):
+			unique_ids.append(cid)
+	if unique_ids.is_empty():
+		_show_result("He chalks your column again and comes up empty. \"No levies left. You HAVE been busy.\"")
+		return
+	var grid = _make_card_picker_grid(
+		"Muster out which levy? He takes EVERY copy and matches the count.",
+		GameTheme.KEYWORD_GOLD)
+	for cid in unique_ids:
+		_add_card_to_grid(grid, CardDB.get_card_data(cid),
+			_on_veteran_swap_pick.bind(String(cid)))
+
+
+func _on_veteran_swap_pick(card_id: String) -> void:
+	var nm: String = CardDB.get_card_data(card_id).name
+	var removed := 0
+	for i in range(RunState.deck.size() - 1, -1, -1):
+		if RunState.deck.size() <= 1:
+			break
+		if RunState.deck[i] == card_id:
+			RunState.remove_card_at(i)
+			removed += 1
+	if removed == 0:
+		_show_result("That is the last thing you carry. The recruiter waves it off.")
+		return
+	var pool: Array = CardDB.cards_of_rarity("uncommon")
+	pool.shuffle()
+	var names: Array = []
+	for i in range(mini(removed, pool.size())):
+		RunState.add_card(pool[i])
+		names.append(CardDB.get_card_data(pool[i]).name)
+		_result_cards.append(CardDB.get_card_data(pool[i]))
+	_sting("card_play")
+	_show_result("%d × %s muster out. In their place march: %s." \
+		% [removed, nm, ", ".join(names)])
 
 
 # Pick N cards from the deck and apply the standard "sharpen" upgrade. For
@@ -1380,6 +2368,8 @@ func _start_upgrade_mode(count: int) -> void:
 func _on_upgrade_choice_pick(deck_index: int) -> void:
 	var data = CardDB.get_card_data(RunState.deck[deck_index])
 	RunState.upgrade_card(deck_index, "plus")
+	_result_cards.append(RunState.get_upgraded_card_data(deck_index))
+	_sting("card_play")
 	_upgrade_choice_names.append(data.name)
 	_upgrade_choice_remaining -= 1
 	if _upgrade_choice_remaining <= 0:
@@ -1412,7 +2402,8 @@ func _start_stranger_hand_mode() -> void:
 	var offered: Array = pool.slice(0, mini(3, pool.size()))
 
 	_clear_ui()
-	_set_event_art_visible(false)
+	_set_event_art_visible(true)
+	add_child(_make_picker_scrim())
 
 	var title = GameTheme.make_label(
 		"Three cards lie face-up on the stone. Each is owed.",
@@ -1420,6 +2411,8 @@ func _start_stranger_hand_mode() -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.position = Vector2(300, 60)
 	title.size = Vector2(1000, 40)
+	title.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	title.add_theme_constant_override("outline_size", 4)
 	add_child(title)
 
 	# Fixed per-slot costs. Index aligns with `offered` so the leftmost card
@@ -1465,6 +2458,8 @@ func _start_stranger_hand_mode() -> void:
 		var card_node = CARD_SCENE.instantiate()
 		card_node.static_display = true
 		card_node.card_data = data
+		card_node.live_baked_mode = true
+		CardTextureCache.bake(data)
 		wrapper.add_child(card_node)
 		var click_btn := Button.new()
 		click_btn.flat = true
@@ -1504,6 +2499,7 @@ func _start_stranger_hand_mode() -> void:
 	leave_btn.offset_top = -160
 	leave_btn.offset_bottom = -72
 	add_child(leave_btn)
+	_refresh_ledger()
 
 
 func _on_stranger_hand_pick(card_id: String, cost: Dictionary) -> void:
@@ -1523,9 +2519,13 @@ func _on_stranger_hand_pick(card_id: String, cost: Dictionary) -> void:
 			RunState.gold -= to_lose_g
 			msg = "Paid %d gold. " % to_lose_g
 		"curse":
-			RunState.add_card(CardDB.random_curse_id())
+			var owed := CardDB.random_curse_id()
+			RunState.add_card(owed)
+			_result_cards.append(CardDB.get_card_data(owed))
 			msg = "A Curse settles into your deck. "
 	RunState.add_card(card_id)
+	_result_cards.append(data)
+	_sting("card_play")
 	msg += "Gained %s." % data.name
 	_show_result(msg)
 
@@ -1549,83 +2549,45 @@ func _start_relic_sacrifice_mode() -> void:
 		_show_result("The smith waves you off — nothing of his make in your bag.")
 		return
 
-	_clear_ui()
-	_set_event_art_visible(false)
+	# Same reading block as every other screen (restyled 2026-07-04 after the
+	# defect hunt: the old scrim+scroll version left one entry floating top-left
+	# and the decline stranded bottom-center over near-black art). Frameless
+	# writ entries — relic name as the verb line, its rules text as the gold
+	# outcome (what you're giving up IS the stake) — and "Keep them all" closes
+	# the same column. The list scrolls only when the bag is truly heavy.
+	var choices_vbox := _build_event_screen(
+		"The anvil is patient",
+		"Lay one on the anvil. He makes heavy things from light ones — and the trade is final.",
+		mini(non_starting.size(), 5) + 1)
 
-	var title = GameTheme.make_label(
-		"Lay one on the anvil. He makes heavy things from light ones.",
-		22, GameTheme.KEYWORD_GOLD)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.position = Vector2(300, 34)
-	title.size = Vector2(1000, 40)
-	add_child(title)
+	# 96px per entry — the content-fit pass grows a name+rules entry to ~85px,
+	# so a tighter estimate leaves the viewport a few pixels short: the last
+	# line's descenders clip and a 1-entry-tall scrollbar appears mid-art.
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(0, mini(non_starting.size() * 96, 440))
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	choices_vbox.add_child(scroll)
 
-	var scroll = ScrollContainer.new()
-	scroll.position = Vector2(120, 96)
-	scroll.size = Vector2(1360, 660)
-	add_child(scroll)
-
-	var grid = GridContainer.new()
-	grid.columns = 3
-	grid.add_theme_constant_override("h_separation", 24)
-	grid.add_theme_constant_override("v_separation", 24)
-	scroll.add_child(grid)
+	var lst := VBoxContainer.new()
+	lst.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lst.add_theme_constant_override("separation", 10)
+	scroll.add_child(lst)
 
 	for rid in non_starting:
-		grid.add_child(_make_relic_tile(rid, _on_relic_sacrifice_pick.bind(rid)))
+		var relic = RelicDB.get_relic(rid)
+		lst.add_child(_make_frameless_choice(
+			String(relic.get("name", "Relic")),
+			String(relic.get("desc", "")),
+			"It goes on the anvil.", 66,
+			_on_relic_sacrifice_pick.bind(String(rid))))
 
 	# The player may inspect their relics and decline — backing out leaves the
 	# whole event (same as the Stranger's Hand picker).
-	var leave_btn := _make_frameless_choice(
+	choices_vbox.add_child(_make_frameless_choice(
 		"Keep them all", "",
 		"The forge has no fire. Your hands stop hurting anyway.",
-		88, _on_stranger_hand_leave)
-	leave_btn.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	leave_btn.offset_left = -280
-	leave_btn.offset_right = 280
-	leave_btn.offset_top = -150
-	leave_btn.offset_bottom = -62
-	add_child(leave_btn)
-
-
-func _make_relic_tile(relic_id: String, on_press: Callable) -> Button:
-	# A parchment panel button showing the relic's name (gold) and rules text.
-	# Same click semantics as the card tiles, sized for a 3-wide grid.
-	var relic = RelicDB.get_relic(relic_id)
-	var btn := Button.new()
-	# NOT flat — a flat Button skips drawing its normal StyleBox even when
-	# overridden, which left these tiles as floating text with no parchment
-	# panel behind them. Keep it non-flat so make_panel_style() actually paints.
-	btn.flat = false
-	btn.focus_mode = Control.FOCUS_NONE
-	btn.custom_minimum_size = Vector2(420, 120)
-	btn.add_theme_stylebox_override("normal", GameTheme.make_panel_style())
-	btn.add_theme_stylebox_override("hover",
-		GameTheme.make_panel_style(GameTheme.PARCHMENT, GameTheme.GILT_BRIGHT))
-	btn.add_theme_stylebox_override("pressed", GameTheme.make_panel_style())
-	btn.pressed.connect(on_press)
-
-	var vbox := VBoxContainer.new()
-	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
-	vbox.offset_left = 18
-	vbox.offset_right = -18
-	vbox.offset_top = 12
-	vbox.offset_bottom = -12
-	vbox.add_theme_constant_override("separation", 8)
-	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	btn.add_child(vbox)
-
-	var name_lbl := GameTheme.make_label(relic.get("name", "Relic"), 21, GameTheme.KEYWORD_GOLD)
-	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(name_lbl)
-
-	var desc_lbl := GameTheme.make_label(relic.get("desc", ""), 15, GameTheme.DESC_DIM)
-	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_lbl.custom_minimum_size = Vector2(384, 0)
-	desc_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(desc_lbl)
-
-	return btn
+		72, _on_stranger_hand_leave))
 
 
 func _on_relic_sacrifice_pick(relic_id: String) -> void:
@@ -1638,6 +2600,8 @@ func _on_relic_sacrifice_pick(relic_id: String) -> void:
 		_show_result("Lost %s. The smith finds nothing worthy to give back." % lost_name)
 		return
 	RunState.add_relic(choices[0])
+	_result_relics.append(choices[0])
+	_sting("card_play")
 	var gained_name = RelicDB.get_relic(choices[0]).name
 	_show_result("You lay down %s. He returns %s, heavier." % [lost_name, gained_name])
 
@@ -1694,6 +2658,8 @@ func _on_sacrifice_pick(deck_index: int) -> void:
 				_show_result("You lay down %s. The altar gives nothing back." % nm)
 				return
 			RunState.add_relic(choices[0])
+			_result_relics.append(choices[0])
+			_sting("card_play")
 			var rname = RelicDB.get_relic(choices[0]).name
 			_show_result("You lay down %s. The altar yields %s." % [nm, rname])
 		_:
@@ -1747,6 +2713,8 @@ func _on_transform_pick(deck_index: int) -> void:
 	RunState.remove_card_at(deck_index)
 	var new_id: String = pool[randi() % pool.size()]
 	RunState.add_card(new_id)
+	_result_cards.append(CardDB.get_card_data(new_id))
+	_sting("card_play")
 	_transform_results.append("%s became %s" \
 		% [old_data.get("name", "it"), CardDB.get_card_data(new_id).name])
 	_transform_remaining -= 1
@@ -1775,6 +2743,7 @@ func _dice_text(key: String, fallback: String, gain: int = 0) -> String:
 func _start_dice_run(effect: Dictionary) -> void:
 	_dice_cfg = effect
 	_dice_pot = int(effect.get("start", 25))
+	_dice_prev_pot = -1
 	var stake: int = int(effect.get("stake", 0))
 	if stake > 0:
 		if RunState.gold < stake:
@@ -1788,16 +2757,16 @@ func _start_dice_run(effect: Dictionary) -> void:
 # Shared scaffold for the interactive push-your-luck / appraisal event screens
 # (dice run, risk loop, appraisal). Clears the page, shows the art, pins the
 # standard top-left title + description, and returns an empty bottom-left VBox
-# sized for `n_choices` frameless 118px choice cards. The choices column defaults
+# sized for `n_choices` frameless 84px choice cards. The choices column defaults
 # to the 80–700 gutter; appraisal widens its left inset to clear the card it
 # stands beside. The interactions stay bespoke — callers fill the returned VBox
 # with their own choices.
-func _build_event_screen(title_text: String, beat: String, n_choices: int,
+func _build_event_screen(title_text: String, beat: String, _n_choices: int,
 		choices_left: int = 80, choices_right: int = 700) -> VBoxContainer:
 	_clear_ui()
 	_set_event_art_visible(true)
 
-	var title := _make_event_title(title_text)
+	var title := _make_event_title(_sub_campaign_tokens(title_text))
 	title.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	title.offset_left = 80
 	title.offset_top = 72
@@ -1805,41 +2774,204 @@ func _build_event_screen(title_text: String, beat: String, n_choices: int,
 	title.offset_bottom = 132
 	add_child(title)
 
-	var desc = _make_event_desc(beat)
-	add_child(desc)
-
+	# One reading block, same as the main screen: the beat text rides INSIDE
+	# the bottom-pinned column, directly above the actions. The column grows
+	# UPWARD and the actions are its last children, so "Cast the bones" never
+	# moves between presses no matter how long the beat runs.
 	var choices_vbox := VBoxContainer.new()
 	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	choices_vbox.offset_left = choices_left
 	choices_vbox.offset_right = choices_right
-	choices_vbox.offset_top = -(n_choices * 118 + (n_choices - 1) * 12 + 110)
+	choices_vbox.offset_top = -110
 	choices_vbox.offset_bottom = -110
+	choices_vbox.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	choices_vbox.add_theme_constant_override("separation", 12)
 	add_child(choices_vbox)
+
+	var desc = _make_event_desc(beat)
+	choices_vbox.add_child(desc)
+	var breath := Control.new()
+	breath.custom_minimum_size = Vector2(0, 10)
+	breath.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	choices_vbox.add_child(breath)
+
+	_add_hover_whisper()
+	_refresh_ledger()
 	return choices_vbox
+
+
+# The pot's last on-screen value, so a rebuilt dice screen knows whether to
+# pulse (the pot just grew) or sit still (first deal of the screen).
+var _dice_prev_pot: int = -1
 
 
 func _build_dice_screen(beat: String) -> void:
 	var choices_vbox := _build_event_screen(
 		"The pot: [color=#e8b547]%d gold[/color]" % _dice_pot, beat, 2)
 
+	_add_pot_display(_dice_pot > _dice_prev_pot and _dice_prev_pot >= 0)
+	_dice_prev_pot = _dice_pot
+
 	choices_vbox.add_child(_make_frameless_choice(
 		_dice_text("roll_label", "Cast the bones"),
 		_dice_text("roll_sub", "2 in 3 the pot grows. Skulls lose it all."),
 		_dice_text("roll_body", "The knuckles rattle like teeth in a cup."),
-		118, _on_dice_roll))
+		84, _on_dice_roll))
 	choices_vbox.add_child(_make_frameless_choice(
 		_dice_text("bank_label", "Bank the pot"),
 		_dice_text("bank_sub", "Take {pot} gold and leave the circle."),
 		_dice_text("bank_body", "The dead nod. Walking away is also a move."),
-		118, _on_dice_bank))
+		84, _on_dice_bank))
+
+
+## The pot as a physical object on the art half of the page: a heap of coin
+## icons (the heap grows with the pot) under a big gilt figure. `pulse` scales
+## it up-and-settle when the pot just grew. The coin variant ("prop": "coin")
+## stands one big coin spinning in place of the heap.
+func _add_pot_display(pulse: bool) -> void:
+	var root := Control.new()
+	root.name = "PotDisplay"
+	root.position = Vector2(1020, 300)
+	root.size = Vector2(360, 220)
+	root.pivot_offset = Vector2(180, 130)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+
+	var is_coin: bool = String(_dice_cfg.get("prop", "bones")) == "coin"
+	if is_coin:
+		# One patient silver-gold piece, spinning on its edge forever.
+		var spin := TextureRect.new()
+		spin.texture = GameTheme.tex_hud_gold
+		spin.custom_minimum_size = Vector2(84, 84)
+		spin.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		spin.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		spin.position = Vector2(138, 30)
+		spin.pivot_offset = Vector2(42, 42)
+		spin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(spin)
+		if not UserSettings.reduce_motion:
+			var tw := spin.create_tween().set_loops()
+			tw.tween_property(spin, "scale:x", 0.08, 0.5) \
+				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+			tw.tween_property(spin, "scale:x", 1.0, 0.5) \
+				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	else:
+		# The heap: a compact pyramid pile just above the figure — coins are
+		# ADDED row by row as the pot grows, overlapping like a real stack
+		# (the old index-hash scatter read as random dots floating on the art).
+		var n_coins: int = clampi(3 + _dice_pot / 40, 3, 9)
+		const PILE_ROWS := [4, 3, 2]
+		var placed := 0
+		for row in range(PILE_ROWS.size()):
+			var count: int = PILE_ROWS[row]
+			for i in range(count):
+				if placed >= n_coins:
+					break
+				var c := TextureRect.new()
+				c.texture = GameTheme.tex_hud_gold
+				c.custom_minimum_size = Vector2(32, 32)
+				c.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				c.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				# Row r sits 18px higher, its coins centered and half-lapped.
+				var cx: float = 180.0 - (count - 1) * 13.0 + i * 26.0 - 16.0
+				var cy: float = 88.0 - row * 18.0
+				c.position = Vector2(cx + fmod(float(placed) * 7.3, 5.0) - 2.5, cy)
+				c.rotation = fmod(float(placed) * 1.1, 0.5) - 0.25
+				c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				root.add_child(c)
+				placed += 1
+
+	var figure := Label.new()
+	figure.text = "%d" % _dice_pot
+	figure.add_theme_font_size_override("font_size", 44)
+	figure.add_theme_color_override("font_color", GameTheme.KEYWORD_GOLD)
+	figure.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	figure.add_theme_constant_override("outline_size", 5)
+	figure.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
+	figure.add_theme_constant_override("shadow_offset_y", 2)
+	if GameTheme.font_display:
+		figure.add_theme_font_override("font", GameTheme.font_display)
+	figure.position = Vector2(0, 128)
+	figure.size = Vector2(360, 56)
+	figure.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	figure.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(figure)
+
+	if pulse and not UserSettings.reduce_motion:
+		root.scale = Vector2(1.14, 1.14)
+		root.create_tween().tween_property(root, "scale", Vector2.ONE, 0.30) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+## The cast itself: a few props tumble across the pot area and fade — ivory
+## knucklebone chips for the pit, coins for the spinner. Pure tween theater;
+## fires on the press, before the result is known, because that IS the throw.
+func _toss_props() -> void:
+	if UserSettings.reduce_motion:
+		return
+	var is_coin: bool = String(_dice_cfg.get("prop", "bones")) == "coin"
+	for i in range(3):
+		var prop: Control
+		if is_coin:
+			var c := TextureRect.new()
+			c.texture = GameTheme.tex_hud_gold
+			c.custom_minimum_size = Vector2(26, 26)
+			c.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			c.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			prop = c
+		else:
+			var p := Panel.new()
+			var sb := StyleBoxFlat.new()
+			sb.bg_color = Color(0.88, 0.85, 0.76)
+			sb.border_color = Color(0.25, 0.20, 0.14)
+			sb.set_border_width_all(2)
+			sb.set_corner_radius_all(4)
+			p.add_theme_stylebox_override("panel", sb)
+			p.custom_minimum_size = Vector2(16, 16)
+			prop = p
+		prop.position = Vector2(1080 + i * 30, 250)
+		prop.pivot_offset = Vector2(8, 8)
+		prop.rotation = randf_range(-0.5, 0.5)
+		prop.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(prop)
+		var dest := prop.position + Vector2(randf_range(-70, 70), randf_range(90, 150))
+		var tw := prop.create_tween().set_parallel(true)
+		tw.tween_property(prop, "position", dest, 0.45) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		tw.tween_property(prop, "rotation", prop.rotation + randf_range(-3.0, 3.0), 0.45)
+		tw.tween_property(prop, "modulate:a", 0.0, 0.30).set_delay(0.30)
+		tw.chain().tween_callback(prop.queue_free)
+
+
+## Losing everything should feel like it: a short table-shake, a red wash over
+## the page, and the hit sting. Called AFTER the result screen builds so the
+## wash lies over the bust text, not under a rebuild.
+func _bust_feedback() -> void:
+	_sting("hit_hero")
+	if UserSettings.reduce_motion:
+		return
+	var wash := ColorRect.new()
+	wash.color = Color(0.55, 0.10, 0.06, 0.24)
+	wash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	wash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(wash)
+	var wt := wash.create_tween()
+	wt.tween_property(wash, "color:a", 0.0, 0.55).set_delay(0.05)
+	wt.tween_callback(wash.queue_free)
+	var shake := create_tween()
+	for off in [Vector2(9, 0), Vector2(-7, 2), Vector2(5, -2), Vector2.ZERO]:
+		shake.tween_property(self, "position", off, 0.05)
 
 
 func _on_dice_roll() -> void:
+	_sting("card_play", -4.0)
+	_toss_props()
 	if randf() < float(_dice_cfg.get("bust_pct", 1.0 / 3.0)):
 		_dice_pot = 0
+		_dice_prev_pot = -1
 		_show_result(_dice_text("bust_text",
 			"Skulls. The pot drains back into the pit, coin by coin, and the circle closes over it. The dead do not gloat. Much."))
+		_bust_feedback()
 		return
 	var gain: int = 0
 	if String(_dice_cfg.get("mode", "add")) == "double":
@@ -1849,13 +2981,15 @@ func _on_dice_roll() -> void:
 		gain = randi_range(int(_dice_cfg.get("gain_min", 18)),
 			int(_dice_cfg.get("gain_max", 34)))
 		_dice_pot += gain
-	AudioBank.play_sfx("button_click")
+	_sting("coin")
 	_build_dice_screen(_dice_text("grow_text",
 		"The bones land clean — {gain} more into the pot. The oldest legionary clicks his jaw, which you have learned is applause.", gain))
 
 
 func _on_dice_bank() -> void:
 	RunState.gain_gold(_dice_pot)
+	_sting("coin")
+	_dice_prev_pot = -1
 	var line := _dice_text("bank_text",
 		"You bank {pot} gold and stand. A space stays open in the circle behind you. It is always open. That is the other rule.")
 	# Big-pot payoff: banking past the threshold carries the table's own
@@ -1864,6 +2998,7 @@ func _on_dice_bank() -> void:
 	if rid != "" and _dice_pot >= int(_dice_cfg.get("bank_relic_at", 0)) \
 			and not RunState.relics.has(rid):
 		RunState.add_relic(rid)
+		_result_relics.append(rid)
 		line += "\n\n" + _dice_text("bank_relic_text",
 			"Gained relic: %s." % RelicDB.get_relic(rid).name)
 	_show_result(line)
@@ -1904,6 +3039,7 @@ func _effects_hp_cost(effects: Array) -> int:
 
 
 func _build_risk_screen(beat: String) -> void:
+	beat = _sub_campaign_tokens(beat)
 	var steps: Array = _risk_cfg.get("steps", [])
 	var can_act: bool = _risk_step < steps.size()
 	if can_act:
@@ -1921,10 +3057,10 @@ func _build_risk_screen(beat: String) -> void:
 		choices_vbox.add_child(_make_frameless_choice(
 			String(_risk_cfg.get("action", "Press on")),
 			String(step.get("sub", "")),
-			String(_risk_cfg.get("action_body", "")), 118, _on_risk_action))
+			String(_risk_cfg.get("action_body", "")), 84, _on_risk_action))
 	choices_vbox.add_child(_make_frameless_choice(
 		String(_risk_cfg.get("leave", "Step away")), "",
-		String(_risk_cfg.get("leave_sub", "Keep what you have.")), 118,
+		String(_risk_cfg.get("leave_sub", "Keep what you have.")), 84,
 		_on_risk_leave))
 
 
@@ -1977,6 +3113,7 @@ func _on_risk_action() -> void:
 		var bust_receipt := _apply_effect_list(bust.get("effects", []))
 		_show_result(_combine_lines([String(bust.get("text", "The luck turns.")),
 			bust_receipt]))
+		_bust_feedback()
 
 
 func _on_risk_leave() -> void:
@@ -2055,19 +3192,21 @@ func _build_appraisal_screen() -> void:
 	var card_node = CARD_SCENE.instantiate()
 	card_node.static_display = true
 	card_node.card_data = data
+	card_node.live_baked_mode = true
+	CardTextureCache.bake(data)
 	wrapper.add_child(card_node)
 	add_child(wrapper)
 
 	choices_vbox.add_child(_make_frameless_choice("Sell it",
 		"Trade %s for %d gold." % [String(data.get("name", "the card")), price],
-		"Her hand is already open under the slot.", 118, _on_appraisal_sell))
+		"Her hand is already open under the slot.", 84, _on_appraisal_sell))
 	if can_another:
 		choices_vbox.add_child(_make_frameless_choice("Show her another",
 			"She pulls a different card — but her interest cools.",
-			"\"As you like. The figure was for THAT one.\"", 118,
+			"\"As you like. The figure was for THAT one.\"", 84,
 			_on_appraisal_another))
 	choices_vbox.add_child(_make_frameless_choice("Keep your things", "",
-		"She slides the card back without a word.", 118,
+		"She slides the card back without a word.", 84,
 		_on_stranger_hand_leave))
 
 
@@ -2078,9 +3217,12 @@ func _on_appraisal_sell() -> void:
 		return
 	var data = RunState.get_upgraded_card_data(_appr_index)
 	var price := _appraisal_price(_appr_index)
+	# Campaign memory: the shelf keeps what it buys. A later visit (act 2+)
+	# offers this card back through the pawn_buyback blue option.
+	RunState.pawned_cards.append(RunState.deck[_appr_index])
 	RunState.remove_card_at(_appr_index)
 	RunState.gain_gold(price)
-	AudioBank.play_sfx("button_click")
+	_sting("coin")
 	_show_result("%s goes behind the smoked glass with everything else that mattered to someone once. You count %d gold. She has already stopped looking at you." \
 		% [String(data.get("name", "The card")), price])
 
@@ -2111,96 +3253,34 @@ func _on_appraisal_another() -> void:
 # rendering. Single quotes and parentheses around tags are NOT required.
 
 const EVENTS: Dictionary = {
-	"butcher": {
-		"name": "The Butcher",
-		"desc": "A burly figure sharpens a cleaver. \"Give me a creature. I'll make it stronger... sort of.\"",
-		"choices": [
-			{
-				"label": "Lay one on the block\n\nIt comes back with +2 ATK\nand Wither 1. Use it soon.",
-				"desc": "Buff a creature: +2 ATK, Wither 1",
-				"effects": [
-					{"type": "butcher_buff"},
-				],
-			},
-			{
-				"label": "Sell him a creature\n\nHe pays by the pound — the heavier\nthe cut, the heavier the purse.",
-				"desc": "Sacrifice a creature for gold (scales with its ATK)",
-				"effects": [
-					{"type": "sacrifice_pick", "reward": "gold", "base": 20, "per_atk": 6,
-						"prompt": "Sell which creature? He pays by the pound."},
-				],
-			},
-			{
-				"label": "Buy a slab off the hook\n\nForty coins. It bleeds in your pack\nand stands in your line come the next fight.",
-				"desc": "-40 gold; next fight starts with a 3/5 Hooked Slab",
-				"effects": [
-					{"type": "gold", "value": -40},
-					{"type": "gift_creature", "name": "Hooked Slab", "atk": 3, "hp": 5, "kw": [],
-						"text": "The slab will stand in your line next fight."},
-				],
-			},
-		],
-	},
 
-	"thrice_blessed_spring": {
-		"name": "The Thrice-Blessed Spring",
-		"desc": "A spring boils with old miracles. The first sip is always free. After that, it starts counting.",
-		"gate": {"type": "hp_below_pct", "value": 0.75},
-		"choices": [
-			{
-				"label": "Kneel and drink\n\nSip by sip the miracle runs deeper.\nSomewhere past the third sip, so do the dregs.",
-				"desc": "Each sip heals more; press your luck and a miss adds a Curse",
-				"effects": [
-					{"type": "risk_loop", "mode": "bust",
-						"open_text": "The water is blood-warm and tastes of copper and church bells. The first sip is always free.",
-						"action": "Drink again",
-						"action_body": "The surface leans toward your mouth.",
-						"leave": "Step back from the water",
-						"leave_sub": "Keep what the water gave.",
-						"leave_text": "You wipe your mouth and stand. Behind you the spring keeps boiling, gently, for the next thirsty thing.",
-						"leave_text_early": "You kneel, and look, and do not drink. The spring files that away.",
-						"steps": [
-							{"chance": 1.0, "sub": "Heal 5 HP — the first sip is safe.",
-								"effects": [{"type": "heal", "value": 5}],
-								"text": "Warmth spreads through old aches. The spring hums, pleased with itself."},
-							{"chance": 0.75, "sub": "Heal 7 HP — but 1 in 4 the dregs rise.",
-								"effects": [{"type": "heal", "value": 7}],
-								"text": "Deeper. The miracle reaches bones you had given up on. Something at the bottom shifts its weight."},
-							{"chance": 0.55, "sub": "Heal 9 HP — the odds are barely yours now.",
-								"effects": [{"type": "heal", "value": 9}],
-								"text": "The water level does not drop. You understand, mid-swallow, that the spring is drinking too."},
-						],
-						"bust": {"effects": [{"type": "add_curse"}],
-							"text": "The dregs rise to meet your mouth — old, patient, and glad of the company. Something settles into your deck. The spring goes still, satisfied."},
-						"done_text": "The boiling quiets. The spring has no more miracles for you today; the surface films over like a closing eye."},
-				],
-			},
-			{
-				"label": "Bottle the overflow\n\nWhat spills past the rim is still a miracle.\nJust a portable, deniable one.",
-				"desc": "Gain a Healing Potion",
-				"effects": [
-					{"type": "gain_potion"},
-				],
-			},
-			{
-				"label": "Wash your wounds and move on\n\nNo sip, no debt. The water still helps,\nthe way water does.",
-				"desc": "Heal 4 HP",
-				"effects": [
-					{"type": "heal", "value": 4},
-				],
-			},
-		],
-	},
+	# ══════════════════ KEPT — distinct mechanic + distinct fiction ══════════════════
 
 	"pawnbrokers_window": {
 		"name": "The Pawnbroker's Window",
 		"desc": "Behind smoked glass, the pawnbroker fans her wares. She does not sell — she buys, but only what interests her, and her first figure is always her best.",
+		"mood": "gilt",
 		"choices": [
 			{
 				"label": "Slide your pack through the slot\n\nShe pulls out what interests HER.\nIt is never what you would have chosen to sell.",
-				"desc": "She appraises cards from your deck — sell, or ask for another (her offers cool)",
+				"desc": "She names prices for your cards — each refusal cools her offer",
 				"effects": [
 					{"type": "pawn_appraisal"},
+				],
+			},
+			{
+				# Campaign memory: the shelf kept what you sold her (recorded by
+				# the appraisal counter). Act 2+, and only when the fee is there —
+				# a blue option that can't pay would be a lie.
+				"blue": {"type": "all", "gates": [
+					{"type": "pawned_at_least", "value": 1},
+					{"type": "act_at_least", "value": 2},
+					{"type": "gold_at_least", "value": 60},
+				]},
+				"label": "Ask after the shelf behind the glass\n\n{pawned} sits displayed where she can watch it. \"I knew you'd\nbe back. They always come back. The keeping fee is not negotiable.\"",
+				"desc": "-60 gold; {pawned} returns to your deck, sharpened",
+				"effects": [
+					{"type": "pawn_buyback", "price": 60},
 				],
 			},
 			{
@@ -2212,60 +3292,11 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Trade Coin\n\nLeave 60 gold on the sill.\nUpgrade a card you choose.",
-				"desc": "-60 gold, upgrade a chosen card",
+				"label": "Buy the unclaimed pledge\n\nSomeone left it here against a debt and never came back.\nShe slides it through the slot without a word about them.",
+				"desc": "-75 gold, +random relic",
 				"effects": [
-					{"type": "gold", "value": -60},
-					{"type": "upgrade_choice"},
-				],
-			},
-			{
-				"label": "Trade Future\n\nGain a Curse.\nTake a rare card.",
-				"desc": "+1 Curse, +1 rare card",
-				"effects": [
-					{"type": "add_curse"},
-					{"type": "add_rare"},
-				],
-			},
-		],
-	},
-
-	"fork_in_the_long_road": {
-		"name": "The Fork in the Long Road",
-		"desc": "Two paths split the moor — one smells of woodsmoke, the other of iron. The smell is all the road tells you in advance.",
-		"choices": [
-			{
-				"label": "The Smoke Road\n\nWoodsmoke means people.\nUsually. You walk it and find out.",
-				"desc": "Comfort of some kind waits — the road decides which",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 3,
-							"text": "The smoke is an inn, and the inn is real: a hearth, a stew, a bed with one previous owner. You leave coin on the counter and stiffness on the mattress.",
-							"effects": [{"type": "gold", "value": -30}, {"type": "heal", "value": 9}]},
-						{"weight": 2,
-							"text": "The smoke is a tollman's brazier. He names a price for the warm road, and the warm road is worth it — you sleep deep and wake tougher than you've been in years.",
-							"effects": [{"type": "gold", "value": -40}, {"type": "gain_max_hp", "value": 4}]},
-						{"weight": 1,
-							"text": "The smoke is a cold campfire, hours dead, with a purse forgotten beside it. Whoever slept here left in a hurry, in the direction you are not going.",
-							"effects": [{"type": "gold", "value": 25}]},
-					]},
-				],
-			},
-			{
-				"label": "The Iron Road\n\nIron means a fight happened.\nOr is still happening. You walk it and find out.",
-				"desc": "Spoils of some kind wait — the road decides whose",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 3,
-							"text": "A skirmish, finished this morning by the look of the crows. The dead are nobody's now. Their purses come to you heavier than your conscience.",
-							"effects": [{"type": "damage", "value": 6}, {"type": "gold", "value": 75}]},
-						{"weight": 2,
-							"text": "Among the fallen, an officer — and on the officer, something fine that survived him. Pulling it free costs you a bad moment with something that wasn't quite done dying.",
-							"effects": [{"type": "damage", "value": 3}, {"type": "random_relic"}]},
-						{"weight": 1,
-							"text": "The field is quiet. Too quiet, too tidy — the dead are arranged. You take the coin laid on their eyes and feel the road remember you doing it.",
-							"effects": [{"type": "gold", "value": 50}, {"type": "add_curse"}]},
-					]},
+					{"type": "gold", "value": -75},
+					{"type": "random_relic"},
 				],
 			},
 		],
@@ -2280,6 +3311,8 @@ const EVENTS: Dictionary = {
 		"desc": "The river runs brown and fast under a bridge of black timber. Three men lean on a chain across the far end. The toll is whatever you look like you can pay.",
 		"gate": {"type": "at_bridge"},
 		"art": "tollkeeper_bridge",
+		"mood": "bone",
+		"ambience": "river",
 		"choices": [
 			{
 				"label": "Pay the toll\n\nThey count it twice.\nThe chain comes down.",
@@ -2318,98 +3351,13 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Ford the river downstream\n\nThe water is patient.\nIt takes something from everyone.",
-				"desc": "-3 HP, +1 Curse",
+				# The Tollkeeper's trophy shelf, folded in when her own event was
+				# retired — the chain post carries what the crossing has cost others.
+				"label": "Pay the other toll\n\nNailed to the chain post: a wedding ring, a fox skull, a child's\ndrawing, a long brown braid. The eldest points at your pack. Once.",
+				"desc": "+1 Curse, -1 random card",
 				"effects": [
-					{"type": "damage", "value": 3},
 					{"type": "add_curse"},
-				],
-			},
-		],
-	},
-
-	"beekeeper": {
-		"name": "The Beekeeper",
-		"desc": "She wears no veil — the bees have made a hood of her face, and they move when she speaks. 'I have honey,' she says. 'And other things. The hive remembers everything that ever stung.'",
-		"choices": [
-			{
-				"label": "Take the honey jar\n\nIt is warm.\nIt is moving.",
-				"desc": "+10 HP, +1 Curse",
-				"effects": [
-					{"type": "heal", "value": 10},
-					{"type": "add_curse"},
-				],
-			},
-			{
-				"label": "Let them sting you\n\nThe hive shudders.\nSomething is given back.",
-				"desc": "-4 HP, upgrade a chosen card",
-				"effects": [
-					{"type": "damage", "value": 4},
-					{"type": "upgrade_choice"},
-				],
-			},
-			{
-				"label": "Ask what the hive remembers\n\nShe smiles.\nThe bees do not.",
-				"desc": "Remove 1 chosen card",
-				"effects": [
-					{"type": "remove_choice"},
-				],
-			},
-		],
-	},
-
-	"woodcutter": {
-		"name": "The Woodcutter",
-		"desc": "He has chopped the same tree for thirty years. The tree hasn't gotten smaller. He has. 'Swing for me,' he says, 'and I'll teach you the trick. Most don't get it first swing.'",
-		"choices": [
-			{
-				"label": "Take the axe and swing\n\nEvery swing costs you something.\nSomewhere in there, the trick clicks.",
-				"desc": "Pay 2 HP per swing; within 3 swings it lands, then upgrade a chosen card",
-				"effects": [
-					{"type": "risk_loop", "mode": "jackpot",
-						"open_text": "The axe is heavier than it looks. He steps back into the shade to watch, arms folded, patient as the tree.",
-						"action": "Swing again",
-						"action_body": "Your shoulders already know this will hurt.",
-						"leave": "Hand back the axe",
-						"leave_sub": "Some tricks aren't worth the blisters.",
-						"leave_text": "He takes the axe without judgment. \"The tree will wait,\" he says. \"It's good at that.\"",
-						"leave_text_early": "You leave the axe where it leans. He nods, like that was also a kind of answer.",
-						"steps": [
-							{"chance": 0.34, "sub": "-2 HP — 1 in 3 the trick clicks.",
-								"effects": [{"type": "damage", "value": 2}],
-								"text": "The blade skips off the grain. \"Lower,\" he says. \"It's always lower than you think.\""},
-							{"chance": 0.5, "sub": "-2 HP — even odds now.",
-								"effects": [{"type": "damage", "value": 2}],
-								"text": "Closer. The tree rings like a bell, and the sound stays in your wrists. He leans forward, almost interested."},
-							{"chance": 1.0, "sub": "-2 HP — this one lands.",
-								"effects": [{"type": "damage", "value": 2}],
-								"text": ""},
-						],
-						"jackpot": {"modal": "upgrade_choice",
-							"text": "The trick clicks through your arms like a key turning. You see, suddenly, where everything you carry has been heavy in the wrong place."}},
-				],
-			},
-			{
-				"blue": {"type": "hero_is", "value": "raider"},
-				"label": "Take it on the first swing\n\nYou don't outlive trees; you outrun them. One swing,\nall your weight. The trick was never patience.",
-				"desc": "Upgrade a chosen card, free — speed is its own trick",
-				"effects": [
-					{"type": "upgrade_choice"},
-				],
-			},
-			{
-				"label": "Work the tree in his place\n\nHe sits in the shade and counts coins\nhe'd forgotten he owned. Your arms ache for days.",
-				"desc": "+40 gold, -3 HP",
-				"effects": [
-					{"type": "gold", "value": 40},
-					{"type": "damage", "value": 3},
-				],
-			},
-			{
-				"label": "Tell him the tree is winning\n\nHe nods, takes the dull blade from your\npack, and throws it on the pile. \"Travel lighter.\"",
-				"desc": "Remove a chosen card",
-				"effects": [
-					{"type": "remove_choice"},
+					{"type": "remove_cards", "value": 1},
 				],
 			},
 		],
@@ -2417,7 +3365,9 @@ const EVENTS: Dictionary = {
 
 	"gravesong_choir": {
 		"name": "The Gravesong Choir",
-		"desc": "Four hooded singers ring an open grave, humming a tune you almost know. One lifts a finger to her lips and beckons toward the empty fifth place in the circle.",
+		"desc": "Four hooded singers ring an open grave, humming a tune you almost know — then you do: the verse carries a name. {fallen}. The fifth place in the circle stands empty.",
+		"mood": "bone",
+		"ambience": "choir",
 		"choices": [
 			{
 				"label": "Take the fifth place and sing\n\nVerse by verse, the soil gives up its grave-gifts.\nVerse by verse, the song learns your voice.",
@@ -2466,295 +3416,13 @@ const EVENTS: Dictionary = {
 		],
 	},
 
-	"glass_familiar": {
-		"name": "The Glass Familiar",
-		"desc": "A small cat of spun glass watches you from a stone pedestal. It tilts its head. 'Make two of me,' it says, 'or one of anything else.'",
-		"choices": [
-			{
-				"label": "Pay 30 gold\n\nDuplicate a card in\nyour deck twice.",
-				"desc": "-30 gold, copy a card x2",
-				"effects": [
-					{"type": "gold", "value": -30},
-					{"type": "copy_card"},
-					{"type": "copy_card"},
-				],
-			},
-			{
-				"label": "Trade a memory\n\nLose 5 HP.\nGain a random relic.",
-				"desc": "-5 HP, +random relic",
-				"effects": [
-					{"type": "damage", "value": 5},
-					{"type": "random_relic"},
-				],
-			},
-			{
-				"label": "Crack off a shard\n\nNo coin, no blood — just a hairline\nfracture that follows you home.",
-				"desc": "Copy a card once, +1 Curse",
-				"effects": [
-					{"type": "copy_card"},
-					{"type": "add_curse"},
-				],
-			},
-			{
-				"blue": {"type": "has_curse"},
-				"label": "Let it study your cracks\n\nThe glass cat circles you twice. \"You're already fractured,\"\nit says, almost tender. \"I'll take the flaw, not add one.\"",
-				"desc": "Remove a chosen Curse, free",
-				"effects": [
-					{"type": "remove_choice_filtered", "filter": "curse"},
-				],
-			},
-		],
-	},
-
-	# ── Lighter beat (genuinely warm, no dread twist) ──
-	# The pool skews grim; this one is meant to be a clean exhale — a real
-	# village feast, no rot, no watching thing, no debt. The comedy is human
-	# (a tiny widow drinks you under the table). Mechanically simple: plain
-	# immediate effects only, so it can't go wrong.
-	"saints_day_feast": {
-		"name": "The Saint's Day Feast",
-		"desc": "You walk straight into a festival — bunting, a bonfire, three drunk fiddlers. \"You'll sit,\" says an old woman at your elbow. It is not a question.",
-		"choices": [
-			{
-				"label": "Sit and eat your fill\n\nThere is more food than the village can possibly\nmean, and they keep putting it in front of you anyway.",
-				"desc": "+12 HP",
-				"effects": [
-					{"type": "heal", "value": 12},
-				],
-			},
-			{
-				"label": "Take the old widow's drinking dare\n\nShe is eighty if she's a day and reaches your elbow.\nShe has also, you slowly realize, done this before.",
-				"desc": "Match her cup for cup — the wine decides how the morning goes",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 2,
-							"text": "You hold your own longer than anyone expected. The widow concedes at the eleventh cup, slaps a purse down, and declares you family. You wake under a cart with a headache and a friend for life.",
-							"effects": [{"type": "gold", "value": 45}, {"type": "heal", "value": 4}]},
-						{"weight": 2,
-							"text": "She drinks you flat into the straw by the ninth cup, to the village's delight. You wake at noon — mocked, thoroughly fed, and better rested than you've been in weeks.",
-							"effects": [{"type": "heal", "value": 8}]},
-						{"weight": 1,
-							"text": "Neither of you remembers who won. You wake holding a bottle of the good stuff someone pressed on you \"for the road,\" and a pounding head you have entirely earned.",
-							"effects": [{"type": "gain_potion"}, {"type": "damage", "value": 2}]},
-					]},
-				],
-			},
-			{
-				"label": "Dance until the fiddlers give out\n\nYou do not know the steps. Nobody minds.\nThe whole square is improvising and so, now, are you.",
-				"desc": "+25 gold, +4 HP",
-				"effects": [
-					{"type": "gold", "value": 25},
-					{"type": "heal", "value": 4},
-				],
-			},
-			{
-				"label": "Thank them and walk on\n\nThey send you off with bread for the road and\nwave until the hill takes you out of sight.",
-				"desc": "+6 HP",
-				"effects": [
-					{"type": "heal", "value": 6},
-				],
-			},
-		],
-	},
-
-	# ── Recurring NPC: The Beekeeper trilogy ──
-	# E1 is "beekeeper" above. E2 and E3 are gated on prior visits — the chain
-	# rewards players who engaged with her in the early act, and skipping her
-	# in Act 1 just means the later beats never fire.
-
-	"beekeeper_again": {
-		"name": "The Beekeeper Again",
-		"desc": "She is waiting for you at a bend in the road. Three bees ride her shoulder. Two ride her wrist. \"The hive remembers you,\" she says. \"It sang while you slept. Would you like to hear what it learned?\"",
-		"gate": {"type": "all", "gates": [
-			{"type": "act_at_least", "value": 2},
-			{"type": "seen_all", "events": ["beekeeper"]},
-		]},
-		"choices": [
-			{
-				"label": "Press your ear to the hive\n\nThe hum gets into your teeth.\nIt teaches you two things you did not want to know.",
-				"desc": "-9 HP, upgrade 2 chosen cards",
-				"effects": [
-					{"type": "damage", "value": 9},
-					{"type": "upgrade_choice_multi", "value": 2},
-				],
-			},
-			{
-				"label": "Bring her a card to feed the hive\n\nShe drops it in the honey.\nIt comes out heavier and gone.",
-				"desc": "Remove 1 chosen card, +70 gold",
-				"effects": [
-					{"type": "remove_choice"},
-					{"type": "gold", "value": 70},
-				],
-			},
-			{
-				"label": "Tell her you don't want to know\n\nShe nods. The hive does not.\nSomething small and heavy lands in your pocket.",
-				"desc": "+random relic, +1 Curse",
-				"effects": [
-					{"type": "random_relic"},
-					{"type": "add_curse"},
-				],
-			},
-		],
-	},
-
-	"beekeeper_returns": {
-		"name": "The Beekeeper Returns",
-		"desc": "She is at the path's end before you reach it. The bees are gone. She is wearing a veil now. \"I came to settle, child. You took our honey twice.\"",
-		"gate": {"type": "all", "gates": [
-			{"type": "act_at_least", "value": 3},
-			{"type": "seen_all", "events": ["beekeeper", "beekeeper_again"]},
-		]},
-		"choices": [
-			{
-				"label": "Pay the toll in gold\n\nShe counts each coin slowly,\nlike she counts the years.",
-				"desc": "Up to -200 gold, +1 rare card, +random relic",
-				"effects": [
-					{"type": "lose_gold_partial", "value": 200},
-					{"type": "add_rare"},
-					{"type": "random_relic"},
-				],
-			},
-			{
-				"label": "Pay the toll in blood\n\nShe takes the offering\nwith both hands.",
-				"desc": "-12 HP, +3 rare cards",
-				"effects": [
-					{"type": "damage", "value": 12},
-					{"type": "add_rare_n", "value": 3},
-				],
-			},
-			{
-				"label": "Pay the toll in years\n\nThe veil lifts. You do not look.",
-				"desc": "-5 max HP, +random relic",
-				"effects": [
-					{"type": "lose_max_hp", "value": 5},
-					{"type": "random_relic"},
-				],
-			},
-		],
-	},
-
-	# ── Multi-stage events (follow_up branches) ──
-
-	"hollow_lantern": {
-		"name": "The Hollow Lantern",
-		"desc": "A paper lantern hangs in midair. No string. No pole. Inside it, a moth the size of your palm thumps against the paper, again and again. It is trying to get out. Or in.",
-		"choices": [
-			{
-				"label": "Tear it open\n\nThe paper comes apart\nlike old skin.",
-				"follow_up": {
-					"desc": "The moth lands on your sleeve, heavier than it looks, and begins to whisper into the cloth at your wrist.",
-					"choices": [
-						{
-							"label": "Listen\n\nIt knows your name\nand uses it kindly.",
-							"desc": "+5 HP, upgrade a chosen card",
-							"effects": [
-								{"type": "heal", "value": 5},
-								{"type": "upgrade_choice"},
-							],
-						},
-						{
-							"label": "Crush it\n\nIt does not resist.\nIt leaves a smear of light.",
-							"desc": "+random relic, +1 Curse",
-							"effects": [
-								{"type": "random_relic"},
-								{"type": "add_curse"},
-							],
-						},
-					],
-				},
-			},
-			{
-				"label": "Hold the lantern and walk on\n\nIt comes with you\nlike it was waiting.",
-				"follow_up": {
-					"desc": "The moth quiets, the paper glows. By dawn the moth is gone and the lantern is dark — but warm in your hand, like something owed.",
-					"choices": [
-						{
-							"label": "Open it in the morning\n\nSomething small and bright\nfalls into your palm.",
-							"desc": "+random relic",
-							"effects": [
-								{"type": "random_relic"},
-							],
-						},
-						{
-							"label": "Throw it into the river\n\nIt floats a long way\nbefore it sinks.",
-							"desc": "+75 gold",
-							"effects": [
-								{"type": "gold", "value": 75},
-							],
-						},
-					],
-				},
-			},
-		],
-	},
-
-	"two_headed_calf": {
-		"name": "The Two-Headed Calf",
-		"desc": "A calf with two heads stands in the road. One head is asleep. The other watches you with the patience of something that has been told to watch. \"Pick a head,\" it says — though you cannot tell which spoke.",
-		"choices": [
-			{
-				"label": "The sleeping head\n\nIt does not stir at your hand.\nNot yet.",
-				"follow_up": {
-					"desc": "It opens its eyes — blue, shallow, nothing behind them. It nuzzles your hand the way a thing told to nuzzle hands nuzzles a hand.",
-					"choices": [
-						{
-							"label": "Take the warmth\n\nYou rest a while in the road.\nSome of its heat stays in your chest.",
-							"desc": "+10 HP, +2 max HP",
-							"effects": [
-								{"type": "heal", "value": 10},
-								{"type": "gain_max_hp", "value": 2},
-							],
-						},
-						{
-							"label": "Cut a lock of its hair\n\nIt does not flinch.\nNothing in this calf has ever flinched.",
-							"desc": "+random relic, +1 Curse",
-							"effects": [
-								{"type": "random_relic"},
-								{"type": "add_curse"},
-							],
-						},
-					],
-				},
-			},
-			{
-				"label": "The waking head\n\nIt watches you decide.",
-				"follow_up": {
-					"desc": "It asks: 'Which card do you regret most?'",
-					"choices": [
-						{
-							"label": "Show it\n\nIt swallows the card whole.\nThe other head is still asleep.",
-							"desc": "Remove a chosen card",
-							"effects": [
-								{"type": "remove_choice"},
-							],
-						},
-						{
-							"label": "Lie\n\nIt smiles the way a calf should not,\nand drops a small coin-purse in the road.",
-							"desc": "+50 gold, +1 Curse",
-							"effects": [
-								{"type": "gold", "value": 50},
-								{"type": "add_curse"},
-							],
-						},
-					],
-				},
-			},
-			{
-				"label": "Walk on. The calf bleats once.\n\nYou do not turn around.",
-				"desc": "+20 gold",
-				"effects": [
-					{"type": "gold", "value": 20},
-				],
-			},
-		],
-	},
-
-	# ── State-gated events ──
+	# ── Recurring NPC: the Sin-Eater pair ──
 
 	"sin_eater": {
 		"name": "The Sin-Eater",
-		"desc": "A man sits at a long table that should not be here, a single piece of bread and a knife before him. \"Lay your worst card here,\" he says, not looking up. \"I'll eat it. The price is meat.\"",
+		"desc": "A man sits at a long table that should not be here, bread and a knife before him. \"Lay your worst card here,\" he says, not looking up. \"I'll eat it. The price is meat.\"",
 		"gate": {"type": "has_curse"},
+		"mood": "verdigris",
 		"choices": [
 			{
 				"label": "Feed him a Curse\n\nHe swallows it without water.\nThe price, he said, is meat.",
@@ -2784,7 +3452,8 @@ const EVENTS: Dictionary = {
 
 	"fattened_sin_eater": {
 		"name": "The Fattened Sin-Eater",
-		"desc": "He is the man from the long table, except he is enormous now. The bread before him is gone. There is a feast in its place. He grins. \"You fed me well. Sit. I've saved you a seat.\"",
+		"desc": "The man from the long table, enormous now, a feast where the bread was. He grins. \"You fed me well. Sit — I've saved you a seat.\"",
+		"mood": "verdigris",
 		"gate": {"type": "all", "gates": [
 			{"type": "act_at_least", "value": 3},
 			{"type": "seen_all", "events": ["sin_eater"]},
@@ -2818,137 +3487,13 @@ const EVENTS: Dictionary = {
 		],
 	},
 
-	"tooth_witch": {
-		"name": "The Tooth-Witch",
-		"desc": "She has been waiting a long time and is not surprised by you. The road bends toward her chair, not away from it. \"You're bleeding, dear. Sit. I have a remedy. The fee is small — a single tooth.\"",
-		"gate": {"type": "hp_below_pct", "value": 0.5},
-		"choices": [
-			{
-				"label": "Sit and bare your jaw\n\nShe is gentler than expected.\nIt is still the worst hour of your day.",
-				"desc": "Heal to full, -2 max HP permanently",
-				"effects": [
-					{"type": "heal_full"},
-					{"type": "lose_max_hp", "value": 2},
-				],
-			},
-			{
-				"label": "Trade a memory instead\n\nShe takes it with the same forceps.",
-				"desc": "Heal to full, remove a random card",
-				"effects": [
-					{"type": "heal_full"},
-					{"type": "remove_cards", "value": 1},
-				],
-			},
-			{
-				"blue": {"type": "hero_is", "value": "acolyte"},
-				"label": "Recite the pain-psalm with her\n\nShe stops mid-reach. \"Clergy,\" she says, and the chair\nremembers being a pew. The rite asks nothing of the faithful.",
-				"desc": "Heal to full",
-				"effects": [
-					{"type": "heal_full"},
-				],
-			},
-			{
-				"label": "Limp on\n\nThe chair creaks. She watches you go.",
-				"desc": "No effect",
-				"effects": [],
-			},
-		],
-	},
-
-	# Keyed "hermit" (not "last_tinker") so it loads assets/events/hermit.png —
-	# the lone figure with a cart of other people's belongings. Display name is
-	# still "The Last Tinker"; the key only drives the art + events_seen lookup.
-	"hermit": {
-		"name": "The Last Tinker",
-		"desc": "A man with no shop sorts other people's belongings beside a loaded cart. He looks up as if he'd been waiting for this exact collection of mistakes. \"You brought too many,\" he says. \"I'll keep what's heaviest.\"",
-		"gate": {"type": "deck_at_least", "value": 18},
-		"choices": [
-			{
-				"label": "Set them in front of him\n\nHe weighs each one in his palm.\nHe does not give them back.",
-				"desc": "Remove up to 3 chosen cards",
-				"effects": [
-					{"type": "remove_choice_multi", "value": 3},
-				],
-			},
-			{
-				"label": "Let him pick the second\n\nHe always picks the one that hurts.",
-				"desc": "-1 chosen card, -1 random card, +random relic",
-				"effects": [
-					{"type": "remove_choice"},
-					{"type": "remove_cards", "value": 1},
-					{"type": "random_relic"},
-				],
-			},
-			{
-				"blue": {"type": "starters_at_least", "value": 4},
-				"label": "He points at the matched set\n\n\"Four the same. You walk like a man carrying\nfour of the same.\" He takes the lot or none.",
-				"desc": "Remove EVERY copy of one chosen starting card",
-				"effects": [
-					{"type": "remove_choice_all_copies", "filter": "starter"},
-				],
-			},
-			{
-				"label": "Walk on\n\nHe hands you a coin: \"for the burden.\"",
-				"desc": "+20 gold",
-				"effects": [
-					{"type": "gold", "value": 20},
-				],
-			},
-		],
-	},
-
-	# ── Atmospheric singles ──
-
-	"drowned_bell": {
-		"name": "The Drowned Bell",
-		"desc": "A bronze bell, half-sunk in mud, its tongue missing. Water beads on the metal though it hasn't rained in weeks.",
-		"choices": [
-			{
-				"label": "Strike it with your fist\n\nThe sound will carry.\nYou will not get to choose what hears it.",
-				"desc": "Something answers the bell — the river decides what",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 2,
-							"text": "The tone rolls out flat across the mud, wrong without its tongue, and something answers it: between one blink and the next there is a gift at your feet, and a bruise blooming on the arm that struck.",
-							"effects": [{"type": "damage", "value": 5}, {"type": "random_relic"}]},
-						{"weight": 2,
-							"text": "The bell coughs up river water that was never inside it — and coins with it, old ones, green with the deep, payment from whoever sank it.",
-							"effects": [{"type": "gold", "value": 55}]},
-						{"weight": 1,
-							"text": "Nothing answers. Nothing at all. The silence is the answer, and it follows you up the road and settles into your deck to wait with the patience of drowned things.",
-							"effects": [{"type": "add_curse"}, {"type": "gold", "value": 25}]},
-					]},
-				],
-			},
-			{
-				"label": "Pry it up and take it\n\nThe mud slides off cleaner than it should.\nSomeone has already paid the price for this.",
-				"desc": "+60 gold, +1 Curse",
-				"effects": [
-					{"type": "gold", "value": 60},
-					{"type": "add_curse"},
-				],
-			},
-			{
-				"blue": {"type": "hero_is", "value": "pyromancer"},
-				"label": "Heat the bronze until it sings\n\nA bell needs no tongue if you give it fire. It rings\ntrue, and the note shakes coin loose from the mud.",
-				"desc": "Gain gold for each spell in your deck",
-				"effects": [
-					{"type": "scaled", "count": "spells", "per": 8, "outcome": "gold", "cap": 120},
-				],
-			},
-			{
-				"label": "Kneel beside it\n\nWhatever you are listening for,\nyou hear something else. It teaches you.",
-				"desc": "Upgrade a chosen card",
-				"effects": [
-					{"type": "upgrade_choice"},
-				],
-			},
-		],
-	},
+	# ── Hidden-info: the tells are the game ──
 
 	"rotting_carnival": {
 		"name": "The Rotting Carnival",
-		"desc": "Three tents, a barker asleep or dead at his post. A sign: PICK ONE. WE ARE NOT RESPONSIBLE FOR WHAT THE TENTS REMEMBER. Listen at the flaps — they show nothing until you're inside.",
+		"desc": "Three tents, a barker asleep or dead at his post. A sign: PICK ONE. WE ARE NOT RESPONSIBLE FOR WHAT THE TENTS REMEMBER. Listen at the flaps.",
+		"mood": "verdigris",
+		"ambience": "carnival",
 		"choices": [
 			{
 				"hidden": true,
@@ -2980,354 +3525,29 @@ const EVENTS: Dictionary = {
 		],
 	},
 
-	# ── Ritual event (pick-a-card transformation) ──
-
-	"mirror_twin": {
-		"name": "The Mirror-Twin",
-		"desc": "A still pool. Your reflection is wrong — older, sharper, certain. It points at one of your cards. \"I want that one,\" it says. \"Push it through. I'll send something back.\"",
-		"choices": [
-			{
-				"label": "Push a creature through\n\nThe pool keeps it.\nWhat returns is hungrier.",
-				"desc": "Pick a creature: HP → 1, +4 ATK",
-				"effects": [
-					{"type": "mirror_twin_buff"},
-				],
-			},
-			{
-				"label": "Push thirty coins through\n\nThe water doesn't ripple.\nSomething heavier comes back out.",
-				"desc": "-30 gold, +random relic",
-				"effects": [
-					{"type": "gold", "value": -30},
-					{"type": "random_relic"},
-				],
-			},
-			{
-				"label": "Send a twin to fight\n\nThe surface bulges. Something with your\nshape steps out and walks the road beside you.",
-				"desc": "Next fight starts with a 3/3 Reflection",
-				"effects": [
-					{"type": "gift_creature", "name": "Reflection", "atk": 3, "hp": 3, "kw": [],
-						"text": "Your reflection will fight beside you next fight."},
-				],
-			},
-		],
-	},
-
-	# ── No-good-choice tax event ──
-
-	"tollkeeper_bridge": {
-		"name": "The Tollkeeper",
-		"desc": "The bridge is the only way forward, and the tollkeeper fills the chair at the far end. Behind her: a wedding ring, a fox skull, a child's drawing, a long brown braid. She does not speak. She does not need to.",
-		"choices": [
-			{
-				"label": "Empty your purse onto her palm\n\nShe counts it slowly.\nShe counts it slowly again.",
-				"desc": "-60 gold",
-				"effects": [
-					{"type": "gold", "value": -60},
-				],
-			},
-			{
-				"label": "Hold out your hand\n\nShe takes what she takes.\nShe is not gentle.",
-				"desc": "-8 HP",
-				"effects": [
-					{"type": "damage", "value": 8},
-				],
-			},
-			{
-				"label": "Tell her something true\n\nShe nods. You walk on.\nThere is a hole in your sentences now.",
-				"desc": "+1 Curse, -1 random card",
-				"effects": [
-					{"type": "add_curse"},
-					{"type": "remove_cards", "value": 1},
-				],
-			},
-		],
-	},
-
-	# ── Relic-keyed event ──
-
-	"old_forge": {
-		"name": "The Old Forge",
-		"desc": "Smoke rises from a forge that has no fire. The smith is bent at the anvil, polishing something old. He looks up. \"You collect. I make. Trade me one. I make heavy things from light ones.\"",
-		"gate": {"type": "has_nonstarting_relic"},
-		"choices": [
-			{
-				"label": "Lay one of your things on the anvil\n\nHe pries it open.\nThe pieces inside are not the pieces you'd have guessed.",
-				"desc": "Trade a chosen relic for a rare-tier relic",
-				"effects": [
-					{"type": "relic_sacrifice_pick"},
-				],
-			},
-			{
-				"label": "Pay him in coin\n\nHe slides a finished piece across the bench\nwithout looking up.",
-				"desc": "-100 gold, +random relic",
-				"effects": [
-					{"type": "gold", "value": -100},
-					{"type": "random_relic"},
-				],
-			},
-			{
-				"label": "Let him hammer your blade\n\nHe holds it in the cold coals until they\nremember heat. It comes out keener.",
-				"desc": "-3 HP, upgrade a chosen card",
-				"effects": [
-					{"type": "damage", "value": 3},
-					{"type": "upgrade_choice"},
-				],
-			},
-			{
-				"blue": {"type": "upgraded_at_least", "value": 3},
-				"label": "Let him study your edge-work\n\nHe turns your reworked steel over twice and almost\nsmiles. \"Somebody taught you. Sit — this one's for the craft.\"",
-				"desc": "Upgrade a chosen card, free",
-				"effects": [
-					{"type": "upgrade_choice"},
-				],
-			},
-		],
-	},
-
-	# ── Hidden-info event ──
-
-	"three_doors": {
-		"name": "The Three Warm Handles",
-		"desc": "Three doors stand in a clearing with nothing around them. The handles are warm. They are not warm the same. One pulses.",
-		"choices": [
-			{
-				"hidden": true,
-				"tell": "The left door smells faintly of iron.",
-				"desc": "Hidden",
-				"effects": [
-					{"type": "random_relic"},
-				],
-			},
-			{
-				"hidden": true,
-				"tell": "The middle door is warm to the touch.",
-				"desc": "Hidden",
-				"effects": [
-					{"type": "heal_full"},
-					{"type": "gain_max_hp", "value": 5},
-				],
-			},
-			{
-				"hidden": true,
-				"tell": "The right door hums, just at the edge of hearing.",
-				"desc": "Hidden",
-				"effects": [
-					{"type": "gold", "value": 150},
-					{"type": "add_curse"},
-					{"type": "add_curse"},
-				],
-			},
-		],
-	},
-
-	# ── Delayed-payoff event ──
-
-	"marked_one": {
-		"name": "The One With Your Face",
-		"desc": "Someone is standing in the road. They have your face. They hold out a thumb dark with charcoal. \"Take my mark. It comes due in the next fight. Pick where to wear it.\"",
-		"choices": [
-			{
-				"label": "On the hand\n\nThe smudge crawls under your fingernail.\nIt will be there when you raise your hand to fight.",
-				"desc": "Next fight: start with a 2/3 Vanguard in front-left",
-				"effects": [
-					{"type": "mark_hand"},
-				],
-			},
-			{
-				"label": "On the heart\n\nIt sinks in. There is a second heartbeat\nbehind your own, just for a while.",
-				"desc": "Next fight: +1 max Command the whole fight",
-				"effects": [
-					{"type": "mark_heart"},
-				],
-			},
-			{
-				"label": "On the blood\n\nThey press the thumb to an open cut. It costs\nyou now and stands huge beside you later.",
-				"desc": "-6 HP now; next fight starts with a 4/5 Effigy",
-				"effects": [
-					{"type": "damage", "value": 6},
-					{"type": "gift_creature", "name": "Charcoal Effigy", "atk": 4, "hp": 5, "kw": [],
-						"text": "The effigy will rise in your front line next fight."},
-				],
-			},
-		],
-	},
-
-	# ── Choose-from-curated-pool event ──
-	# StS's Designer In-Spire / Mind Bloom equivalent. Player sees three
-	# specific rare cards and picks which one (and which currency to spend).
-	# Fixed costs per slot: leftmost always HP, middle always gold, right
-	# always curse, so the row reads consistently across visits.
+	# ── Choose-from-curated-pool (fixed slot costs: HP / gold / Curse) ──
 
 	"strangers_hand": {
 		"name": "The Wet Cards",
 		"desc": "A stranger deals wet cards face-up onto a flat stone, and looks up only once. \"Each of these is owed to someone. Pay it off — and take what they leave behind.\"",
-		"choices": [
-			{
-				"label": "Step closer\n\nThe stone is warm.\nSo are the cards.",
-				"desc": "Pick from 3 random rares (cost varies)",
-				"effects": [
-					{"type": "stranger_hand_pick"},
-				],
-			},
-			{
-				"label": "Walk past\n\nThe stranger does not look up again.",
-				"desc": "No effect",
-				"effects": [],
-			},
-		],
+		"mood": "verdigris",
+		"auto_effect": {"type": "stranger_hand_pick"},
+		"choices": [],
 	},
 
-	# ── Blessing fountain (art-led, gated heal) ──
-	# Built around its illustration; trades flesh for flesh. Gated so a
-	# healthy player never sees a dead heal offer.
-	"blood_fountain": {
-		"name": "The Blood Fountain",
-		"desc": "Stone cherubs weep into a basin that is not water — [color=#8a1010]black[/color] by moonlight, up close red and warm and moving, as if something beneath it breathed. No voice says drink. The bowl simply waits.",
-		"gate": {"type": "hp_below_pct", "value": 0.75},
-		"choices": [
-			{
-				"label": "Drink deeply\n\nIt is thicker than wine and it knows your name.\nYou feel whole. You feel watched.",
-				"desc": "Heal to full, +1 Curse",
-				"effects": [
-					{"type": "heal_full"},
-					{"type": "add_curse"},
-				],
-			},
-			{
-				"label": "Open a vein and give\n\nThe basin drinks faster than you bleed.\nWhen it stops, something has been left on the rim for you.",
-				"desc": "-6 HP, gain a relic",
-				"effects": [
-					{"type": "damage", "value": 6},
-					{"type": "random_relic"},
-				],
-			},
-			{
-				"label": "Drink from your cupped hands\n\nA mouthful, no more. Enough to taste.\nNot enough to owe.",
-				"desc": "Heal 6 HP",
-				"effects": [
-					{"type": "heal", "value": 6},
-				],
-			},
-		],
-	},
+	# ── Pure gamble (absurd register) ──
 
-	# ── Sacrifice altar (Acolyte payoff) ──
-	# The big "feed a creature to the stone" event. Two routes turn a body into
-	# permanent value (relic / max HP, scaled to the offering's ATK); the third
-	# is a self-blood fallback so the event still pays off with no creature to
-	# give. Loads assets/events/dark_altar.png.
-	"dark_altar": {
-		"name": "The Dark Altar",
-		"desc": "A slab of black stone sweats in the dark, every groove running downhill to one drain. Something beneath it is patient, and hungry. It does not ask aloud — you already know the shape of what it wants.",
-		"choices": [
-			{
-				"label": "Offer a creature for power\n\nThe stone drinks it dry and leaves\nsomething hard and humming in the groove.",
-				"desc": "Sacrifice a creature; gain a relic",
-				"effects": [
-					{"type": "sacrifice_pick", "reward": "relic",
-						"prompt": "Lay which creature on the altar? The stone wants power."},
-				],
-			},
-			{
-				"label": "Offer a creature for life\n\nWhat it takes from the body it pays\nback into yours — the bigger the beast, the more.",
-				"desc": "Sacrifice a creature; gain max HP (scales with its ATK)",
-				"effects": [
-					{"type": "sacrifice_pick", "reward": "max_hp", "base": 3,
-						"prompt": "Lay which creature on the altar? The stone offers strength."},
-				],
-			},
-			{
-				"blue": {"type": "hero_is", "value": "kindler"},
-				"label": "Speak to it in its own tongue\n\nThe grooves know your hands. You feed fires for a living —\nyou know what it wants. It teaches you a word, freely.",
-				"desc": "+1 rare card, no blood owed",
-				"effects": [
-					{"type": "add_rare"},
-				],
-			},
-			{
-				"label": "Open your own wrist\n\nNo creature, no problem. The groove takes\nblood just as well, and teaches a dark word for it.",
-				"desc": "-8 HP, +1 rare card, +1 Curse",
-				"effects": [
-					{"type": "damage", "value": 8},
-					{"type": "add_rare"},
-					{"type": "add_curse"},
-				],
-			},
-		],
-	},
-
-	# ── Bleak / horror (face-fruit orchard) ──
-	# Trees grow fruit shaped like faces. Heal path gated behind hp_below_pct so a
-	# full-HP player never sees a dead "eat to heal" option; the harvest-for-gold
-	# path stays live at any HP and carries its own cost (a watching curse).
-	"the_weeping_orchard": {
-		"name": "The Weeping Orchard",
-		"desc": "Pale trees in dead air. The low, heavy fruit each wears a [color=#c98a3a]face[/color] — eyes shut, faintly familiar — and as you pass, a few begin to cry. The wet ground is not wet with rain.",
-		"gate": {"type": "hp_below_pct", "value": 0.6},
-		"choices": [
-			{
-				"label": "Eat until you're full\n\nIt is sweet and warm and tastes of someone you loved.\nIt knits you back together. You try not to chew.",
-				"desc": "Heal to full; -2 max HP",
-				"effects": [
-					{"type": "heal_full"},
-					{"type": "lose_max_hp", "value": 2},
-				],
-			},
-			{
-				"label": "Harvest for market\n\nFruit by fruit, the sack grows heavier.\nFruit by fruit, the orchard pays closer attention.",
-				"desc": "Each fruit earns more gold; press your luck or take 5 damage",
-				"effects": [
-					{"type": "risk_loop", "mode": "bust",
-						"open_text": "You spread your sack beneath the heaviest tree. The fruit watches you reach. The nearest one has stopped crying, which is somehow worse.",
-						"action": "Pick another",
-						"action_body": "The branch lowers itself, helpfully.",
-						"leave": "Tie the sack and go",
-						"leave_sub": "Keep what you've picked.",
-						"leave_text": "You shoulder the sack. Behind you the orchard weeps on, softer now, like it's already forgotten which ones you took.",
-						"leave_text_early": "You leave the sack empty. A few of the faces smile in their sleep.",
-						"steps": [
-							{"chance": 1.0, "sub": "Gain 20 gold — the low fruit comes easy.",
-								"effects": [{"type": "gold", "value": 20}],
-								"text": "It comes off the stem with a sigh. In the sack, it settles like something getting comfortable."},
-							{"chance": 0.8, "sub": "Gain 25 gold — 1 in 5 something notices.",
-								"effects": [{"type": "gold", "value": 25}],
-								"text": "The next one is warmer. Around you, very quietly, the weeping has begun to synchronize."},
-							{"chance": 0.6, "sub": "Gain 30 gold — the trees are counting now.",
-								"effects": [{"type": "gold", "value": 30}],
-								"text": "Heavier still. Somewhere behind you a branch creaks, in the way that floorboards creak under feet."},
-							{"chance": 0.4, "sub": "Gain 40 gold — you are pushing it.",
-								"effects": [{"type": "gold", "value": 40}],
-								"text": "The best fruit hangs highest, of course it does. The whole row is silent now, watching you climb."},
-						],
-						"bust": {"effects": [{"type": "damage", "value": 5}],
-							"text": "A branch closes on your wrist like a hand. The orchard stops weeping all at once, and in the silence you hear how many trees there are. You leave some skin getting loose."},
-						"done_text": "The sack will hold no more. The orchard lets you go — generous, the way things are generous when they know where you live."},
-				],
-			},
-			{
-				"label": "Bury the one that has your face\n\nYou dig with your hands. It does not struggle.\nThe orchard goes quiet, grateful, and leaves a gift in the dirt.",
-				"desc": "-5 HP, +random relic",
-				"effects": [
-					{"type": "damage", "value": 5},
-					{"type": "random_relic"},
-				],
-			},
-		],
-	},
-
-	# ── Pure gamble (absurd register) — uses the shared wager handlers ──
-	# A coin spinning on its edge that will not fall. Two independent bets plus a
-	# small consolation so leaving is never a fully dead option.
 	"coin_on_edge": {
 		"name": "The Coin That Won't Land",
-		"desc": "A silver coin spins on its edge in the path, and by the worn groove beneath it, it has spun a very long time. It does not wobble. It does not slow. A small sign reads: CALL IT.",
+		"desc": "A silver coin spins in a groove it has worn deep into the road. It does not wobble. It does not slow. A small sign reads: CALL IT.",
+		"mood": "gilt",
 		"choices": [
 			{
 				"label": "Put your stake down and call it\n\nDouble or nothing, as many times as your nerve holds.\nThe coin has all day. The coin has all century.",
-				"desc": "Stake 25 gold — the pot doubles on every call, even odds it all goes",
+				"desc": "Stake 25 gold — even odds each call: double the pot, or lose it",
 				"effects": [
 					{"type": "dice_run", "stake": 25, "start": 40,
-						"mode": "double", "bust_pct": 0.5,
+						"mode": "double", "bust_pct": 0.5, "prop": "coin",
 						"bank_relic": "coin_landed", "bank_relic_at": 160,
 						"bank_relic_text": "As you turn to go, the spinning stops. The coin lies flat in your open palm — heads, warm as a struck match — and the groove in the road is empty. Gained relic: The Coin, Landed.",
 						"broke_text": "You haven't 25 gold to stake. The coin spins on, unbothered. It has been refused by poorer.",
@@ -3368,114 +3588,16 @@ const EVENTS: Dictionary = {
 		],
 	},
 
-	# ── Two-stage branching (folk horror) — answering well ──
-	# A well that answers questions you haven't asked. Each branch swaps to a
-	# follow_up screen. Deliberately NOT heal-centered, so it stays ungated with
-	# no dead reward; every leaf carries a real cost or variance.
-	"the_answering_well": {
-		"name": "The Answering Well",
-		"desc": "An old stone well, its bucket long rotted away. As you lean over the lip, a voice rises from the dark — calm, patient, pitched exactly like your own. It answers a question you never asked aloud.",
-		"choices": [
-			{
-				"label": "Ask it something you've always feared to\n\nThe water far below shifts.\nThe voice draws a slow breath it does not have.",
-				"follow_up": {
-					"desc": "It tells you — worse than you guessed, and truer, and the knowing soaks in like cold water into cloth. \"Now you carry it too,\" it says. \"Keep what I've given, or pour it back?\"",
-					"choices": [
-						{
-							"label": "Keep the knowing\n\nIt sharpens something in you — a lesson\nyou will not be able to unlearn.",
-							"desc": "-6 HP, upgrade a chosen card",
-							"effects": [
-								{"type": "damage", "value": 6},
-								{"type": "upgrade_choice"},
-							],
-						},
-						{
-							"label": "Pour it back down the well\n\nYou let the answer go. It falls a long way.\nSomething heavy in your pack falls with it.",
-							"desc": "Remove a chosen card",
-							"effects": [
-								{"type": "remove_choice"},
-							],
-						},
-					],
-				},
-			},
-			{
-				"label": "Drop a coin and make a wish\n\nIt does not splash. You wait\nfor the sound. It never comes.",
-				"follow_up": {
-					"desc": "The voice laughs softly, the way you laugh when no one should hear. \"A wish. How quaint. The well grants — just never the part you wanted.\" Something rattles up and catches on the lip of the stone.",
-					"choices": [
-						{
-							"label": "Take what the well gives\n\nIt is not what you wished for.\nIt is, the voice insists, what you needed.",
-							"desc": "+random relic, +1 Curse",
-							"effects": [
-								{"type": "random_relic"},
-								{"type": "add_curse"},
-							],
-						},
-						{
-							"label": "Reach deeper for the rest\n\nYour arm goes in to the shoulder.\nThe stone is wet. Something down there is warm.",
-							"desc": "-7 HP, +80 gold",
-							"effects": [
-								{"type": "damage", "value": 7},
-								{"type": "gold", "value": 80},
-							],
-						},
-					],
-				},
-			},
-			{
-				"label": "Say nothing and walk away\n\nThe voice keeps talking behind you,\nanswering questions, for a long time.",
-				"desc": "No effect",
-				"effects": [],
-			},
-		],
-	},
+	# ── Push-your-luck pot game ──
 
-	# ── Transform shrine (new format: card metamorphosis) ──
-	# The deck-sculpting verb the pool lacked: not removal, not upgrade —
-	# CHANGE. Art borrows the lantern-moth plate until a bespoke cocoon
-	# image lands at assets/events/the_chrysalis.png.
-	"the_chrysalis": {
-		"name": "The Chrysalis Fence",
-		"desc": "Cocoons hang along a fence line, each the size of a saddlebag, gently steaming. A farmer's sign reads: ONE IN, ONE OUT. NO PROMISES. The nearest silk unseams a finger's width, politely.",
-		"choices": [
-			{
-				"label": "Feed it a card\n\nThe silk closes over it like a mouth\nthat has been waiting to be a mouth.",
-				"desc": "Transform a chosen card into a random card of the same rarity",
-				"effects": [
-					{"type": "transform_choice", "value": 1},
-				],
-			},
-			{
-				"label": "Feed it two, and your hand with them\n\nThe silk tastes you first.\nIt is a fair price for double the change.",
-				"desc": "-4 HP, transform 2 chosen cards",
-				"effects": [
-					{"type": "damage", "value": 4},
-					{"type": "transform_choice", "value": 2},
-				],
-			},
-			{
-				"label": "Cut one down and carry it off\n\nIt hatches in your pack before the next hill.\nBoth halves of it.",
-				"desc": "+1 rare card, +1 Curse",
-				"effects": [
-					{"type": "add_rare"},
-					{"type": "add_curse"},
-				],
-			},
-		],
-		"art": "hollow_lantern",
-	},
-
-	# ── Push-your-luck game (new format: a mini-game that loops) ──
-	# dice_run is a real multi-round run, not a one-shot wager — the pot
-	# grows 2-in-3 per cast and busts 1-in-3, bank any time.
 	"the_bone_pit": {
 		"name": "The Bone Pit",
-		"desc": "Four legionaries, dead three hundred years, cast knucklebones cut from their own hands — still playing for wages the empire never paid. A space opens in the circle. The rules are short: roll, or bank.",
+		"desc": "Four dead legionaries cast knucklebones cut from their own hands, still playing for wages the empire never paid. A space opens in the circle.",
+		"mood": "bone",
 		"choices": [
 			{
 				"label": "Take the open seat\n\nThe bones are warm.\nThey should not be warm.",
-				"desc": "The pot opens at 25 gold — grow it cast by cast, bank any time, skulls lose it all",
+				"desc": "Pot opens at 25 gold — bank any time; skulls take all",
 				"effects": [
 					{"type": "dice_run", "start": 25,
 						"bank_relic": "warm_knucklebone", "bank_relic_at": 75,
@@ -3485,7 +3607,7 @@ const EVENTS: Dictionary = {
 			{
 				"blue": {"type": "seen_all", "events": ["coin_on_edge"]},
 				"label": "Tell them about the coin\n\nFour dead faces turn at once. \"The spinner,\" one clicks.\n\"It owes this table a pot. Sit — your stake is already in.\"",
-				"desc": "The pot opens at 50 gold — the dead respect a fellow gambler",
+				"desc": "Pot opens at 50 gold — the dead respect a gambler",
 				"effects": [
 					{"type": "dice_run", "start": 50,
 						"bank_relic": "warm_knucklebone", "bank_relic_at": 75,
@@ -3505,6 +3627,927 @@ const EVENTS: Dictionary = {
 				"desc": "+5 gold",
 				"effects": [
 					{"type": "gold", "value": 5},
+				],
+			},
+		],
+	},
+
+	# ── War events (gate: at_war; speak through {kingdom}/{lord}) ──
+
+	"the_siege_kitchen": {
+		"name": "The Siege Kitchen",
+		"desc": "{lord}'s army retreated faster than its field kitchen could pack; the cooks shrugged and kept cooking. In the queue: deserters, farmers, two of your scouts, one bear. Nobody fights in sight of the pot.",
+		"gate": {"type": "at_war"},
+		"art": "butcher",
+		"mood": "ember",
+		"ambience": "fire_crackle",
+		"choices": [
+			{
+				"label": "Join the queue\n\nThe stew has been going since the siege of something-or-other\nand has only improved. The bear waits its turn. So do you.",
+				"desc": "Heal 9 HP",
+				"effects": [
+					{"type": "heal", "value": 9},
+				],
+			},
+			{
+				"label": "Hire the head cook\n\n\"I feed whoever holds the pot,\" she says, and hands you\nthe pot. It is heavier than a shield and has opinions.",
+				"desc": "The Camp Cook (1/5) joins your next fight",
+				"effects": [
+					{"type": "gift_creature", "name": "Camp Cook", "atk": 1, "hp": 5, "kw": [],
+						"text": "The Camp Cook marches with you, ladle shouldered like a poleaxe."},
+				],
+			},
+			{
+				"label": "Requisition the salt and the wine\n\nThe cooks let you take it. They also, in full view\nof the queue, write your name in the grease-book.",
+				"desc": "+55 gold, +1 Curse",
+				"effects": [
+					{"type": "gold", "value": 55},
+					{"type": "add_curse"},
+				],
+			},
+			{
+				"blue": {"type": "hero_is", "value": "kindler"},
+				"label": "Tend their fires properly\n\nYou bank the coals the way your trade banks them. The head\ncook watches, nods once, and teaches you the thing with the lid.",
+				"desc": "Upgrade a chosen card, free",
+				"effects": [
+					{"type": "upgrade_choice"},
+				],
+			},
+		],
+	},
+
+	# ══════════════════ NEW — 2026-07-03 pool remake ══════════════════
+	# Design bar: one concept per event, and the payoff should touch the BUILD
+	# or the FIGHTING (keywords, whole-deck swaps, specific cards, max-HP
+	# stakes, next-fight boons) — not just re-price gold/HP/Curse.
+
+	# ── The keyword teacher (pick a school, pick a soldier) ──
+
+	"the_lame_master": {
+		"name": "The Pensioned Master",
+		"desc": "An old master-at-arms drills scarecrows on half pay. She reads your soldiers the way a clerk reads a bad ledger. \"One of them. One lesson. My knee decides how long.\"",
+		"art": "beekeeper_returns",
+		"mood": "ember",
+		"choices": [
+			{
+				"label": "The low guard\n\nShe breaks the stance down to nothing and builds\nit back with the shield on the inside of the bone.",
+				"desc": "-4 HP; a chosen creature gains Armored, permanently",
+				"effects": [
+					{"type": "damage", "value": 4},
+					{"type": "grant_keyword_pick", "keyword": "armored",
+						"prompt": "Who takes the lesson? (gains Armored)"},
+				],
+			},
+			{
+				"label": "The first step\n\n\"Wars are lost standing still.\" She teaches the step\nthat lands before the other side has drawn breath.",
+				"desc": "-4 HP; a chosen creature gains Swift, permanently",
+				"effects": [
+					{"type": "damage", "value": 4},
+					{"type": "grant_keyword_pick", "keyword": "swift",
+						"prompt": "Who takes the lesson? (gains Swift)"},
+				],
+			},
+			{
+				"label": "The answered blow\n\n\"Make them pay to touch you.\" This lesson\nleaves marks on everyone involved. That is the lesson.",
+				"desc": "-4 HP; a chosen creature gains Thorns, permanently",
+				"effects": [
+					{"type": "damage", "value": 4},
+					{"type": "grant_keyword_pick", "keyword": "thorns",
+						"prompt": "Who takes the lesson? (gains Thorns)"},
+				],
+			},
+			{
+				"blue": {"type": "hero_is", "value": "stalwart"},
+				"label": "Salute her by her old rank\n\nShe straightens an inch past what the knee allows.\nFor one of her own, the bruises are waived.",
+				"desc": "A chosen creature gains Armored, free",
+				"effects": [
+					{"type": "grant_keyword_pick", "keyword": "armored",
+						"prompt": "Who takes the lesson? (gains Armored)"},
+				],
+			},
+		],
+	},
+
+	# ── The whole-deck swap (levies out, veterans in) ──
+
+	"the_free_company": {
+		"name": "The Free Company",
+		"desc": "Mercenaries at a cold camp, professionally unimpressed. \"Farmhands,\" the recruiter says. \"I'll trade you soldier for soldier — every copy of a kind, if you can part with them.\"",
+		"gate": {"type": "starters_at_least", "value": 2},
+		"art": "fork_in_the_long_road",
+		"mood": "gilt",
+		"choices": [
+			{
+				# Campaign memory: word of a 6-kill veteran travels between camps.
+				"blue": {"type": "veteran_kills_at_least", "value": 6},
+				"label": "He asks after {veteran} by name\n\nWord of the notches travels between camps. He does not insult\nyou with an offer — he pays tribute rates for a look at the technique.",
+				"desc": "+35 gold",
+				"effects": [
+					{"type": "gold", "value": 35},
+				],
+			},
+			{
+				"label": "Muster out a levy\n\nHe takes every copy of the same green face and sends\nback the same count in scarred ones. No two alike.",
+				"desc": "Remove every copy of one starter; gain that many uncommon cards",
+				"effects": [
+					{"type": "veteran_swap"},
+				],
+			},
+			{
+				"label": "Buy one veteran outright\n\nShe names her own price, and it is not negotiable,\nand by the look of her kit she is worth it.",
+				"desc": "-65 gold, +1 uncommon card",
+				"effects": [
+					{"type": "gold", "value": -65},
+					{"type": "add_card", "rarity": "uncommon"},
+				],
+			},
+			{
+				"label": "Steal their muster-book\n\nEvery name in it is owed by somebody.\nNow the book rides with you. So does the owing.",
+				"desc": "+45 gold, +1 Curse",
+				"effects": [
+					{"type": "gold", "value": 45},
+					{"type": "add_curse"},
+				],
+			},
+		],
+	},
+
+	# ── The Curse outlet with scale (mass purge, priced in flesh) ──
+
+	"the_scapegoat": {
+		"name": "The Scapegoat",
+		"desc": "A goat stands tethered at the boundary stone, wearing the village's sins on little paper collars. It regards you with professional calm. There is room on its back.",
+		"gate": {"type": "has_curse"},
+		"art": "two_headed_calf",
+		"mood": "verdigris",
+		"choices": [
+			{
+				"label": "Load every sin you carry\n\nThe goat holds your gaze while the paper goes on.\nWhat leaves on its back still leaves through you.",
+				"desc": "Remove ALL Curses from your deck; lose 2 max HP for each",
+				"effects": [
+					{"type": "purge_curses", "max_hp_per": 2},
+				],
+			},
+			{
+				"label": "Pay the parish rate\n\nThe priest weighs one sin in his palm, names a figure,\nand ties it on with a little bow. Very professional.",
+				"desc": "-25 gold, remove a chosen Curse",
+				"effects": [
+					{"type": "gold", "value": -25},
+					{"type": "remove_choice_filtered", "filter": "curse"},
+				],
+			},
+			{
+				"label": "Untie it and take it with you\n\nThe parish is horrified. The goat is delighted.\nIts current load, of course, transfers.",
+				"desc": "The Scapegoat (1/4) joins your next fight; +1 Curse",
+				"effects": [
+					{"type": "gift_creature", "name": "The Scapegoat", "atk": 1, "hp": 4, "kw": [],
+						"text": "The goat falls in beside the baggage cart as if promoted."},
+					{"type": "add_curse"},
+				],
+			},
+		],
+	},
+
+	# ── The all-in gamble (poverty for power) ──
+
+	"the_reliquary_cart": {
+		"name": "The Reliquary Cart",
+		"desc": "A chapel on wagon wheels: saints' shin-bones in glass, a coin slot worn smooth. The friar does not preach — he opens the ledger of miracles to the page that matches your purse.",
+		"art": "the_answering_well",
+		"mood": "gilt",
+		"choices": [
+			{
+				"blue": {"type": "hero_is", "value": "pyromancer"},
+				"label": "Let him see your hands\n\nThe friar has read the file on your fires — there IS a file.\nHe blesses your banner unasked, at speed, to stay on your good side.",
+				"desc": "+1 max Command next fight, free",
+				"effects": [
+					{"type": "combat_mana", "value": 1,
+						"text": "The blessing is genuine. The hurry in it is also genuine."},
+				],
+			},
+			{
+				"blue": {"type": "gold_at_least", "value": 120},
+				"label": "Empty the war chest into the slot\n\nThe friar counts by ear. Somewhere past the hundredth coin\nhe stops a saint mid-sentence and takes something down.",
+				"desc": "Lose ALL your gold; gain a boss-tier relic",
+				"effects": [
+					{"type": "lose_gold_partial", "value": 99999},
+					{"type": "add_boss_relic"},
+				],
+			},
+			{
+				"label": "A soldier's tithe\n\nOne coin for the box, one prayer for the column.\nThe friar blesses your banner at the going rate.",
+				"desc": "-25 gold; +1 max Command next fight",
+				"effects": [
+					{"type": "gold", "value": -25},
+					{"type": "combat_mana", "value": 1,
+						"text": "The blessing sits on your banner like weather about to break."},
+				],
+			},
+			{
+				"label": "Rob the poor-box\n\nIt is nailed, chained, and blessed.\nSo were you, once.",
+				"desc": "The box decides — friars fight like mule-drivers",
+				"effects": [
+					{"type": "roll_table", "outcomes": [
+						{"weight": 2,
+							"text": "The chain gives before the friar finishes crossing himself. You leave heavier in coin and lighter in standing — somewhere, a saint has opened a file.",
+							"effects": [{"type": "gold", "value": 85}, {"type": "add_curse"}]},
+						{"weight": 1,
+							"text": "The friar breaks a shin-bone over your head — a RELIC, technically, so it hardly counts as violence. You get a fistful of coins and a week of headaches.",
+							"effects": [{"type": "damage", "value": 7}, {"type": "gold", "value": 35}]},
+					]},
+				],
+			},
+		],
+	},
+
+	# ── The fallen paid forward (campaign-memory payoff) ──
+
+	"the_bell_of_names": {
+		"name": "The Bell of Names",
+		"desc": "A traveling foundry pours bells from battle-scrap. Names cast into the rim ring longest. The master reads your column once. \"Give me the roll. All of it.\"",
+		"gate": {"type": "fallen_at_least", "value": 2},
+		"art": "drowned_bell",
+		"mood": "ember",
+		"choices": [
+			{
+				"label": "Cast the roll into the rim\n\nName by name — {fallen} last of all — the mould takes them.\nWhat rings for the dead rings a little in the living.",
+				"desc": "+1 max HP for each name on your Roll of the Fallen (max +6)",
+				"effects": [
+					{"type": "scaled", "count": "fallen", "per": 1, "cap": 6, "outcome": "max_hp"},
+				],
+			},
+			{
+				"label": "Sell him your battle-scrap\n\nDented, dulled, or done — he pays foundry rates\nand asks nothing the metal wouldn't answer.",
+				"desc": "+40 gold",
+				"effects": [
+					{"type": "gold", "value": 40},
+				],
+			},
+			{
+				"label": "Ring the finished bell\n\nThe peal rolls out over the next three fields. Everything\nin them now knows a paid-up army is coming.",
+				"desc": "+1 max Command next fight",
+				"effects": [
+					{"type": "combat_mana", "value": 1,
+						"text": "The peal marches ahead of the column and holds the ground for you."},
+				],
+			},
+		],
+	},
+
+	# ── The hp-gated heal, with teeth (enemy mercy) ──
+
+	"the_chirurgeon": {
+		"name": "The Chirurgeon",
+		"desc": "An enemy field hospital, no patients left to lose. The chirurgeon sharpens instruments nobody needs, and brightens at your limp in a way you do not love. \"Sit. Please.\"",
+		"gate": {"type": "hp_below_pct", "value": 0.5},
+		"art": "tooth_witch",
+		"mood": "verdigris",
+		"choices": [
+			{
+				"label": "Lie down on his table\n\nHe is excellent. He is also thorough,\nand he has been bored for a very long time.",
+				"desc": "Heal to full, gain a Wound",
+				"effects": [
+					{"type": "heal_full"},
+					{"type": "add_curse_id", "id": "wound"},
+				],
+			},
+			{
+				"label": "Buy his kit instead\n\nHe parts with it the way soldiers part with rations —\ngrieving, and counting the coin twice.",
+				"desc": "-35 gold, gain 2 random potions",
+				"effects": [
+					{"type": "gold", "value": -35},
+					{"type": "gain_potion_random"},
+					{"type": "gain_potion_random"},
+				],
+			},
+			{
+				"blue": {"type": "hero_is", "value": "acolyte"},
+				"label": "Talk shop\n\nYou dressed wounds through a worse war than his. He listens,\ntakes notes, and treats you as a colleague — carefully.",
+				"desc": "Heal 9 HP, free",
+				"effects": [
+					{"type": "heal", "value": 9},
+				],
+			},
+			{
+				"label": "Limp on\n\nHe deflates. The cots stay empty. You hear\nthe whetstone resume behind you.",
+				"desc": "No effect",
+				"effects": [],
+			},
+		],
+	},
+
+	# ── The clean exhale (life insists, mid-war) ──
+
+	"the_wedding_at_the_ford": {
+		"name": "The Wedding at the Ford",
+		"desc": "Two half-burned villages are marrying their heirs at the river, mid-war, so SOMEONE owns the mill lawfully by winter. You are the only armed guest — which makes you the guest of honor.",
+		"art": "thrice_blessed_spring",
+		"mood": "ember",
+		"choices": [
+			{
+				"label": "Stand as witness\n\nYou sign the register under 'sword'. Both mothers\nfeed you personally, in shifts, as a compliment.",
+				"desc": "Heal 8 HP, +15 gold",
+				"effects": [
+					{"type": "heal", "value": 8},
+					{"type": "gold", "value": 15},
+				],
+			},
+			{
+				"label": "Dance the sword-dance\n\nYou half remember it. The fiddler slows down for you.\nThe river is RIGHT there, and everyone knows it.",
+				"desc": "The dance decides — glory or the river",
+				"effects": [
+					{"type": "roll_table", "outcomes": [
+						{"weight": 2,
+							"text": "You are, briefly, magnificent. The villages pass the hat, the fiddler takes a bow on your behalf, and two separate grandmothers propose.",
+							"effects": [{"type": "gold", "value": 35}]},
+						{"weight": 1,
+							"text": "Into the river, to a standing ovation. The bride fishes you out herself, still in her wedding crown, and presses a bottle on you for your dignity. There is no saving your dignity.",
+							"effects": [{"type": "damage", "value": 2}, {"type": "gain_potion"}]},
+					]},
+				],
+			},
+			{
+				"label": "Leave a soldier's gift\n\nYour second-best knife, laid on the gift table between\nthe butter churn and somebody's heirloom spoons.",
+				"desc": "-30 gold; the blessing of two villages: +4 max HP",
+				"effects": [
+					{"type": "gold", "value": -30},
+					{"type": "gain_max_hp", "value": 4},
+				],
+			},
+		],
+	},
+
+	# ── War comedy: the arms dealer (gate: at_war) ──
+
+	"the_ladder_merchant": {
+		"name": "The Ladder-Merchant",
+		"desc": "A cart of siege ladders, parked exactly between the armies. \"Patent escalade,\" he says, slapping a rung. \"{lord} bought 6. Between us — I sold him the SHORT ones.\"",
+		"gate": {"type": "at_war"},
+		# Stand-in: the forge cart — the closest fit for an arms dealer's rig.
+		"art": "old_forge",
+		"mood": "gilt",
+		"choices": [
+			{
+				"label": "Buy the ladder\n\nIt is, in fairness, an excellent ladder.\nIt takes 2 men to carry and fears nothing.",
+				"desc": "-30 gold; the Patent Ladder (0/7, Armored) joins your next fight",
+				"effects": [
+					{"type": "gold", "value": -30},
+					{"type": "gift_creature", "name": "Patent Ladder", "atk": 0, "hp": 7,
+						"kw": ["armored"],
+						"text": "The ladder is lashed to the baggage cart. It will stand in your line next fight, fearing nothing."},
+				],
+			},
+			{
+				"label": "Buy the patent itself\n\nFor the right sum he retires on the spot, hands you\nthe bracket, the stamp, and the ledger of who owes what.",
+				"desc": "-70 gold, +random relic",
+				"effects": [
+					{"type": "gold", "value": -70},
+					{"type": "random_relic"},
+				],
+			},
+			{
+				"label": "Tip him your route\n\nHe pays for marching schedules in good coin\nand sells them onward in better.",
+				"desc": "+50 gold, +1 Curse",
+				"effects": [
+					{"type": "gold", "value": 50},
+					{"type": "add_curse"},
+				],
+			},
+		],
+	},
+
+	# ── The named-card payoff (grim; pays Old Bones by name) ──
+
+	"the_last_garrison": {
+		"name": "The Last Garrison",
+		"desc": "Five dead men hold a fort for a war that ended before your grandmother. They know. But your banner, if they squint, could be authority.",
+		"gate": {"type": "act_at_least", "value": 2},
+		"art": "plague_bell",
+		"mood": "bone",
+		"choices": [
+			{
+				"label": "Read them the relief order\n\nYou improvise it with full honors. 4 of them march into\nthe hill, at rest. The sergeant, out of habit, falls in with you.",
+				"desc": "Gain Old Bones (rare); his long watch follows: +1 Grave-Debt",
+				"effects": [
+					{"type": "add_card_id", "id": "old_bones"},
+					{"type": "add_curse_id", "id": "grave_debt"},
+				],
+			},
+			{
+				"label": "Requisition the armory\n\n90 years of stores, and the dead sign the chit\nwithout reading it. Old habits.",
+				"desc": "+55 gold, -5 HP",
+				"effects": [
+					{"type": "gold", "value": 55},
+					{"type": "damage", "value": 5},
+				],
+			},
+			{
+				"label": "Post them to your keep\n\nYou cannot relieve them. You CAN redeploy them.\nThe paperwork is dubious. The dead don't check.",
+				"desc": "A Garrison Shade (2/5, Last Stand) joins your next fight",
+				"effects": [
+					{"type": "gift_creature", "name": "Garrison Shade", "atk": 2, "hp": 5,
+						"kw": ["last_stand"],
+						"text": "One of the watch shoulders his pike and falls in, still on duty. He has died before. It didn't take."},
+				],
+			},
+		],
+	},
+
+	# ── The transform verb's home (funny livestock register) ──
+
+	"the_remount_fair": {
+		"name": "The Remount Fair",
+		"desc": "Horse-traders behind the lines, dealing in everything a war sheds — remounts, mules, stranger stock under blankets. A painted board gives the rule: ONE IN, ONE OUT. NO REFUNDS. SOME BITE.",
+		"art": "hermit",
+		"mood": "ember",
+		"choices": [
+			{
+				"blue": {"type": "hero_is", "value": "raider"},
+				"label": "Read the brands\n\nHalf this stock was lifted from somebody, and you can name the\nroads it was lifted on. The dealer drops his price mid-sentence.",
+				"desc": "-20 gold, +1 random uncommon card",
+				"effects": [
+					{"type": "gold", "value": -20},
+					{"type": "add_card", "rarity": "uncommon"},
+				],
+			},
+			{
+				"label": "Trade one in\n\nYours goes behind the canvas.\nSomething the same weight comes back out.",
+				"desc": "Transform a chosen card into a random card of the same rarity",
+				"effects": [
+					{"type": "transform_choice", "value": 1},
+				],
+			},
+			{
+				"label": "Trade a matched pair\n\nThe dealer's eyes light up — pairs move fast.\nOne of the replacements bites you on the way out.",
+				"desc": "-4 HP, transform 2 chosen cards",
+				"effects": [
+					{"type": "damage", "value": 4},
+					{"type": "transform_choice", "value": 2},
+				],
+			},
+			{
+				"label": "Buy from under the blanket\n\nSight unseen, cage included.\nThe blanket moves in a way you elect to ignore.",
+				"desc": "-45 gold, +1 random uncommon card",
+				"effects": [
+					{"type": "gold", "value": -45},
+					{"type": "add_card", "rarity": "uncommon"},
+				],
+			},
+		],
+	},
+
+	# ── The eerie max-HP wager ──
+
+	"the_kings_measure": {
+		"name": "The King's Measure",
+		"desc": "A royal surveyor works the dead road, keeping a ledger sealed by a king 4 wars gone. He measures the road. He measures the ruts. He turns, and measures YOU.",
+		"art": "marked_one",
+		"mood": "bone",
+		"choices": [
+			{
+				"label": "Stand for the measure\n\nThe chain is cold and the entries are binding.\nYou will be exactly as much as the ledger says.",
+				"desc": "The ledger decides your size — it is not always flattering",
+				"effects": [
+					{"type": "roll_table", "outcomes": [
+						{"weight": 3,
+							"text": "\"Taller than recorded,\" he says, annoyed at the road, and corrects the entry. You feel the correction take. The extra inch is yours to keep.",
+							"effects": [{"type": "gain_max_hp", "value": 4}]},
+						{"weight": 2,
+							"text": "He measures twice, which is somehow worse. \"The ledger,\" he says, gently, \"is never wrong.\" You are less than you were told, and now it is official.",
+							"effects": [{"type": "lose_max_hp", "value": 2}]},
+					]},
+				],
+			},
+			{
+				"label": "Carry his chain a mile\n\nHonest work for a mad office. He pays in coin\nstruck by a mint that no longer exists.",
+				"desc": "-3 HP, +45 gold",
+				"effects": [
+					{"type": "damage", "value": 3},
+					{"type": "gold", "value": 45},
+				],
+			},
+			{
+				"label": "Ask what he is measuring FOR\n\nHe shows you the ledger's last page.\nYou wish you had not seen the total.",
+				"desc": "+1 Curse; the knowing sharpens you: upgrade a chosen card",
+				"effects": [
+					{"type": "add_curse"},
+					{"type": "upgrade_choice"},
+				],
+			},
+		],
+	},
+
+	# ══════════════════ NEW — 2026-07-04 additions ══════════════════
+	# One build-reader (the scaled engine pays spells, gated so a deck
+	# without the material never rolls it), two act-3 heavyweights (the
+	# road before the last keep), and a second hidden+tell room so
+	# tell-reading stays a skill past act 1.
+
+	# ── The build-reader: he pays for what your magic did (scaled: spells) ──
+
+	"the_war_poet": {
+		"name": "The War-Poet",
+		"desc": "A poet follows the war at a professional distance, setting it in rhyme royal. \"Spells,\" he says, pen already moving. \"Nobody pays to hear about pike-drill. Tell me about the [color=#d97a3a]fire[/color].\"",
+		"gate": {"type": "deck_count_at_least", "kind": "spells", "value": 2},
+		"art": "woodcutter",
+		"mood": "gilt",
+		"choices": [
+			{
+				"label": "Sell him the true accounts\n\nEvery working you carry becomes a stanza.\nHe pays by the verse, and verses need material.",
+				"desc": "+6 gold per spell in your deck (max 60)",
+				"effects": [
+					{"type": "scaled", "count": "spells", "per": 6, "cap": 60,
+						"outcome": "gold"},
+				],
+			},
+			{
+				"label": "Embellish\n\nThe fireball becomes a firestorm. The trick with the rope\nbecomes a hanging. His rates improve. His ear, unfortunately, is good.",
+				"desc": "His ear decides — better rates, or a mocking verse",
+				"effects": [
+					{"type": "roll_table", "outcomes": [
+						{"weight": 2,
+							"text": "He believes every word, or pays as if he does — art is not sworn testimony. The purse he hands over is embarrassingly heavy.",
+							"effects": [{"type": "gold", "value": 70}]},
+						{"weight": 1,
+							"text": "He stops writing mid-line and looks at you with terrible kindness. The verse he composes instead is short, accurate, and about you. By the next camp, everyone knows the chorus.",
+							"effects": [{"type": "add_curse_id", "id": "craven"}]},
+					]},
+				],
+			},
+			{
+				"blue": {"type": "fallen_at_least", "value": 1},
+				"label": "Give him {fallen}\n\nNot the dying — the marching. The bad jokes, the borrowed boots,\nthe name said right. He writes it down like it matters. It does.",
+				"desc": "+25 gold, heal 6 HP",
+				"effects": [
+					{"type": "gold", "value": 25},
+					{"type": "heal", "value": 6},
+				],
+			},
+		],
+	},
+
+	# ── Act 3: the army lightens for the last climb ──
+
+	"the_ninth_milestone": {
+		"name": "The Ninth Milestone",
+		"desc": "The ninth milestone from the keep, where armies lighten themselves for the last march — the verge is a hundred years deep in what could not be carried. Whatever you leave here stays left.",
+		"gate": {"type": "act_at_least", "value": 3},
+		"art": "the_weeping_orchard",
+		"mood": "bone",
+		"choices": [
+			{
+				"label": "Bury what you cannot carry\n\nThe verge takes it without comment.\nThe column walks lighter. The hill notices.",
+				"desc": "Remove 2 chosen cards",
+				"effects": [
+					{"type": "remove_choice_multi", "value": 2},
+				],
+			},
+			{
+				"label": "Take up what the dead set down\n\nA fine thing, half-buried, still warm somehow.\nWhoever left it left the owing with it.",
+				"desc": "+1 random relic, +1 Grave-Debt",
+				"effects": [
+					{"type": "random_relic"},
+					{"type": "add_curse_id", "id": "grave_debt"},
+				],
+			},
+			{
+				"label": "Read the milestone\n\nNine miles. After everything, nine miles.\nThe column stands a little straighter for knowing the number.",
+				"desc": "+1 max Command next fight",
+				"effects": [
+					{"type": "combat_mana", "value": 1,
+						"text": "Nine miles. The number marches with you, and it weighs nothing."},
+				],
+			},
+		],
+	},
+
+	# ── Act 3, at war: one of the five sees the ending coming ──
+
+	"the_turncoat_general": {
+		"name": "The Turncoat General",
+		"desc": "A man waits at the roadside in {kingdom}'s colors, the insignia unpicked — one of {lord}'s own five. \"You are going to win,\" he says, like weather. \"I would like to be somewhere accounted for when you do.\"",
+		"gate": {"type": "all", "gates": [
+			{"type": "at_war"},
+			{"type": "act_at_least", "value": 3},
+		]},
+		"art": "mirror_twin",
+		"mood": "ember",
+		"choices": [
+			{
+				"label": "Take his sword and his service\n\nHe is very good. That was never the question.\nThe question is what he cost the last army he was good for.",
+				"desc": "The Turncoat General (3/6) joins your next fight; +1 War-Debt",
+				"effects": [
+					{"type": "gift_creature", "name": "Turncoat General", "atk": 3, "hp": 6,
+						"kw": [],
+						"text": "He falls in at the column's head as if the position had been holding itself for him."},
+					{"type": "add_curse_id", "id": "war_debt"},
+				],
+			},
+			{
+				"label": "Buy the keep's watchword\n\nHe sells it flat, no ceremony — a word for a purse.\n\"The door opens easier,\" he says, \"when it knows you.\"",
+				"desc": "-45 gold; +1 max Command next fight",
+				"effects": [
+					{"type": "gold", "value": -45},
+					{"type": "combat_mana", "value": 1,
+						"text": "The watchword sits under your tongue like a key."},
+				],
+			},
+			{
+				"label": "Strip him and send him walking\n\nNo sword, no colors, no accounting. What's in his boots\nis yours. What you just made of him follows you instead.",
+				"desc": "+50 gold, +1 Deserter's Mark",
+				"effects": [
+					{"type": "gold", "value": 50},
+					{"type": "add_curse_id", "id": "deserters_mark"},
+				],
+			},
+		],
+	},
+
+	# ── Hidden-info #2 (act 2+): the tells stay a skill past the carnival ──
+
+	"the_drowned_ferry": {
+		"name": "The Drowned Ferry",
+		"desc": "A lake where the map insists on a meadow. Three ferrymen wait at three landings, and none names a fare — on this water, you learn the price when you land. Choose your boat.",
+		"gate": {"type": "act_at_least", "value": 2},
+		"art": "hollow_lantern",
+		"mood": "verdigris",
+		"choices": [
+			{
+				"hidden": true,
+				"tell": "The first boat rides low, patched with coffin-wood, and the ferryman's hands are raw from bailing something that is not water.",
+				"desc": "Hidden",
+				"effects": [
+					{"type": "add_rare"},
+					{"type": "add_curse_id", "id": "grave_debt"},
+				],
+			},
+			{
+				"hidden": true,
+				"tell": "The second boat is dry as a pulpit and full of birdcages, every door open. The ferryman hums while he waits, and looks extremely well fed.",
+				"desc": "Hidden",
+				"effects": [
+					{"type": "lose_gold_partial", "value": 25},
+					{"type": "transform_choice", "value": 1},
+				],
+			},
+			{
+				"hidden": true,
+				"tell": "The third boat does not sit in the water so much as slightly above it, and the ferryman's pole comes up dry. He is looking at you as if you are late.",
+				"desc": "Hidden",
+				"effects": [
+					{"type": "random_relic"},
+					{"type": "damage", "value": 5},
+				],
+			},
+		],
+	},
+
+	# ══════════════════ NEW — 2026-07-07 visual-diversity pass ══════════════════
+	# These five are designed AROUND the strongest unused paintings (the art is
+	# the brief, per the art-sourcing standard): the pool's only golden-daylight
+	# canvas, the burning apiary, the blood basin, the cocoon barn, and the
+	# glass cat. One concept per event, payoffs touch the build or the fighting.
+
+	# ── The bee-wife (part 1 of 2): the road's one warm afternoon ──
+
+	"the_bee_wife": {
+		"name": "The Bee-Wife",
+		"desc": "An old woman wheels her hives AWAY from the war, unhurried, through the year's last golden afternoon. She stops beside your column. \"The bees want telling,\" she says. \"News for news. That is the custom.\"",
+		"art": "beekeeper_again",
+		"mood": "gilt",
+		"ambience": "bees",
+		"choices": [
+			{
+				"label": "Buy a wintering skep\n\n\"Mind the lid,\" she says, strapping it shut.\nWhatever knocks it over will wish it had not.",
+				"desc": "-25 gold; the Hive Skep (0/5, Thorns) joins your next fight",
+				"effects": [
+					{"type": "gold", "value": -25},
+					{"type": "gift_creature", "name": "Hive Skep", "atk": 0, "hp": 5,
+						"kw": ["thorns"],
+						"text": "The skep rides the baggage cart, humming to itself in a minor key."},
+				],
+			},
+			{
+				# Campaign memory: the old custom — deaths must be told to the bees.
+				"blue": {"type": "fallen_at_least", "value": 1},
+				"label": "Tell the bees your dead\n\nYou say {fallen}'s name into the hive-mouth, the old way.\nThe hum drops for a breath. She waits until it climbs again.",
+				"desc": "The custom, paid in full: heal 8 HP, +1 Healing Potion",
+				"effects": [
+					{"type": "heal", "value": 8},
+					{"type": "gain_potion"},
+				],
+			},
+			{
+				"label": "Trade her the road's news\n\nWhich bridges stand. Which towns burn. She listens the way\nclerks count, and pays in comb the weight of what you know.",
+				"desc": "Heal 7 HP",
+				"effects": [
+					{"type": "heal", "value": 7},
+				],
+			},
+			{
+				"label": "Make off with a comb rack\n\nShe does not chase you. She does not need to.\nEvery bee on this road now files you under WASP.",
+				"desc": "+40 gold, +1 Curse",
+				"effects": [
+					{"type": "gold", "value": 40},
+					{"type": "add_curse"},
+				],
+			},
+		],
+	},
+
+	# ── The bee-wife (part 2 of 2): the war reached her anyway ──
+
+	"the_burned_apiary": {
+		"name": "The Burned Apiary",
+		"desc": "The bee-wife's yard, black to the fence line — the war came through on its way to somewhere else. She rakes ash without looking up. Above the plot hangs a homeless roar, waiting to be aimed.",
+		"gate": {"type": "all", "gates": [
+			{"type": "act_at_least", "value": 2},
+			{"type": "seen_all", "events": ["the_bee_wife"]},
+		]},
+		"art": "beekeeper",
+		"mood": "ember",
+		"ambience": "fire_crackle",
+		"choices": [
+			{
+				"label": "Take up the swarm\n\n\"They won't winter wild,\" she says. \"They'll war, though.\"\nShe hands you the veil. The roar falls in behind the column.",
+				"desc": "The Swarm (3/1, Swift) joins your next fight",
+				"effects": [
+					{"type": "gift_creature", "name": "The Swarm", "atk": 3, "hp": 1,
+						"kw": ["swift"],
+						"text": "The Swarm travels above the column like weather with a grudge."},
+				],
+			},
+			{
+				"label": "Rake for the queen\n\nOn your knees in the warm ash, parting cinders\nwith the flat of a knife. She works the other end of the row.",
+				"desc": "The ash decides what's left",
+				"effects": [
+					{"type": "roll_table", "outcomes": [
+						{"weight": 2,
+							"text": "The queen turns up alive in a hollow fence post, furious. The bee-wife laughs like a girl and presses the whole cellar's honey on you — no hives left to feed, she says. Eat it marching.",
+							"effects": [{"type": "heal", "value": 8}, {"type": "gain_potion"}]},
+						{"weight": 1,
+							"text": "Wax and char, row after row. She pays you for the hour of your knees anyway, at a lord's rate, out of a jar the fire never found. It matters to her that the work is paid.",
+							"effects": [{"type": "gold", "value": 25}]},
+					]},
+				],
+			},
+			{
+				"label": "Put her name in the column's book\n\nShe cannot hold a pike. She can cook, stitch wounds, and hate\naccurately. The quartermaster's ledger gains a line.",
+				"desc": "-30 gold (her wage); +3 max HP",
+				"effects": [
+					{"type": "gold", "value": -30},
+					{"type": "gain_max_hp", "value": 3},
+				],
+			},
+			{
+				"blue": {"type": "hero_is", "value": "kindler"},
+				"label": "Read the burn\n\nYou bank fires for a living. This one was walked in a line,\nwith intent. You say nothing. But you will know their banners.",
+				"desc": "+1 max Command next fight",
+				"effects": [
+					{"type": "combat_mana", "value": 1,
+						"text": "You know which company burns like this. The knowing marches with you."},
+				],
+			},
+		],
+	},
+
+	# ── The flesh-priced forge (the well converts between flesh and steel) ──
+
+	"the_red_tithe": {
+		"name": "The Red Tithe",
+		"desc": "A round basin brims red under a red moon, and the overflow runs uphill. The kneeling-stone before it is worn to a polish. The tariff board is blank — the well already knows what you came for.",
+		"art": "blood_fountain",
+		"mood": "ember",
+		"choices": [
+			{
+				"label": "Dip your blades\n\nEdge by edge, the red takes the years off the steel.\nWhat it takes off you, it keeps.",
+				"desc": "-3 max HP; upgrade 2 chosen cards",
+				"effects": [
+					{"type": "lose_max_hp", "value": 3},
+					{"type": "upgrade_choice_multi", "value": 2},
+				],
+			},
+			{
+				"label": "Tithe a name from the rolls\n\nThe well takes the name off your muster and pays in vessel.\nSomewhere tonight, a soldier wakes up as somebody else.",
+				"desc": "Remove a chosen card; +3 max HP",
+				"effects": [
+					{"type": "gain_max_hp", "value": 3},
+					{"type": "remove_choice"},
+				],
+			},
+			{
+				"label": "Fill your flask\n\nThe basin only pours what you pour first.\nIt is strict about the order.",
+				"desc": "-4 HP, gain a random potion",
+				"effects": [
+					{"type": "damage", "value": 4},
+					{"type": "gain_potion_random"},
+				],
+			},
+			{
+				"blue": {"type": "hero_is", "value": "acolyte"},
+				"label": "Name the rite\n\nYou know this well's church, and it is not a church.\nSpoken to properly, it waives the tithe. Once.",
+				"desc": "Upgrade a chosen card, free",
+				"effects": [
+					{"type": "upgrade_choice"},
+				],
+			},
+		],
+	},
+
+	# ── The cocoon barn (act 2+; the gamble is what hatches, never whether) ──
+
+	"the_chrysalis": {
+		"name": "The Chrysalis",
+		"desc": "A tithe barn hung floor to rafter with pale bundles, each the size of a man and gently creaking. The silk is worth money. The waiting is worth more. One of them is warm.",
+		"gate": {"type": "act_at_least", "value": 2},
+		"mood": "verdigris",
+		"choices": [
+			{
+				"label": "Cut the warm one down\n\nYou carry it lashed to the cart like a rolled tent.\nBy the next field, something inside has turned to face front.",
+				"desc": "It hatches where you fight next — the silk decides what",
+				"effects": [
+					{"type": "roll_table", "outcomes": [
+						{"weight": 3,
+							"text": "It splits at the first horn-call, hungry and on your side. What climbs out folds its wet wings the way a veteran squares a cloak.",
+							"effects": [{"type": "gift_creature", "name": "The Hatched",
+								"atk": 4, "hp": 2, "kw": ["swift"],
+								"text": "The Hatched keeps pace with the column, drying in the wind."}]},
+						{"weight": 2,
+							"text": "It hatches early, on the road, into something that clearly stopped becoming halfway through. It follows you anyway. It is trying.",
+							"effects": [{"type": "gift_creature", "name": "The Half-Made",
+								"atk": 1, "hp": 4, "kw": [],
+								"text": "The Half-Made carries its own silk like a soldier carries a bedroll."}]},
+					]},
+				],
+			},
+			{
+				# Campaign memory, at its least comfortable.
+				"blue": {"type": "fallen_at_least", "value": 1},
+				"label": "One of them says {fallen}'s name\n\nNot loudly. The way a sleeper says a name.\nYou could cut it down. You should not cut it down.",
+				"desc": "The Almost (2/4) joins your next fight; +1 Curse",
+				"effects": [
+					{"type": "gift_creature", "name": "The Almost", "atk": 2, "hp": 4,
+						"kw": [],
+						"text": "It marches where they used to march. It has the walk almost right."},
+					{"type": "add_curse"},
+				],
+			},
+			{
+				"label": "Strip the silk\n\nThe empty ones give freely. The full ones give too,\nif you are quick and do not listen.",
+				"desc": "+40 gold",
+				"effects": [
+					{"type": "gold", "value": 40},
+				],
+			},
+		],
+	},
+
+	# ── The glass cat (perfect memory sold by the copy) ──
+
+	"the_glass_familiar": {
+		"name": "The Glass Familiar",
+		"desc": "A cat of clear glass sits on a chapel shelf, grooming a paw it does not need to groom. Where its gaze rests, things double — two candles where one burns. It looks at your deck. It purrs like a finger on a wet glass rim.",
+		"art": "glass_familiar",
+		"mood": "verdigris",
+		"choices": [
+			{
+				"label": "Let it study a soldier\n\nIt circles the card twice and sits, satisfied.\nSomewhere inside the glass, a second one opens its eyes.",
+				"desc": "-45 gold; add a copy of a chosen card to your deck",
+				"effects": [
+					{"type": "gold", "value": -45},
+					{"type": "copy_card"},
+				],
+			},
+			{
+				# Campaign memory: it has been watching the column, the way cats do.
+				"blue": {"type": "veteran_kills_at_least", "value": 6},
+				"label": "It already knows {veteran}\n\nIt has watched the column for miles, the way cats watch.\nThe copy was finished yesterday. It was waiting for you to ask.",
+				"desc": "Add a copy of a chosen card, free",
+				"effects": [
+					{"type": "copy_card"},
+				],
+			},
+			{
+				"label": "Tap the glass\n\nYou should not tap the glass.\nEveryone knows you should not tap the glass.",
+				"desc": "The glass decides",
+				"effects": [
+					{"type": "roll_table", "outcomes": [
+						{"weight": 2,
+							"text": "It rings one pure note, flows off the shelf, and threads between your ankles all the way back to the column. Apparently you are furniture now. Its favorite furniture.",
+							"effects": [{"type": "gift_creature", "name": "Glass Cat",
+								"atk": 1, "hp": 1, "kw": ["thorns"],
+								"text": "The Glass Cat rides the baggage cart, refracting."}]},
+						{"weight": 1,
+							"text": "A hairline crack climbs one ear. The note it makes now is wrong in a way that follows you out the door and learns your route.",
+							"effects": [{"type": "add_curse"}]},
+					]},
+				],
+			},
+			{
+				"label": "Leave it be\n\nIt was sitting on a coin, the way cats sit on exactly\nwhat you need. It lifts, briefly, so you can take it.",
+				"desc": "+15 gold",
+				"effects": [
+					{"type": "gold", "value": 15},
 				],
 			},
 		],

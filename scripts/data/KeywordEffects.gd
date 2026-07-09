@@ -1,16 +1,16 @@
 extends Node
-## KeywordEffects.gd — the 26 keywords.
+## KeywordEffects.gd — the 27 keywords.
 ## Combat.gd calls dispatch_* hooks. Display helpers used by Card2D.
 
 const KEYWORDS: Dictionary = {
 	"armored":    {"display": "Armored",     "desc": "Takes 1 less damage from each hit (minimum 1)."},
 	"swift":      {"display": "Swift",       "desc": "Attacks first each round, before enemies can strike back."},
-	"ranged":     {"display": "Sniper",      "desc": "Attacks the lowest-HP enemy instead of the one across. If the shot kills, it fires again."},
 	"thorns":     {"display": "Thorns",      "desc": "Deals 1 damage back to each creature that attacks this."},
 	"regenerate": {"display": "Regenerate",  "desc": "Heals 1 HP at the start of each round."},
 	"summon":     {"display": "Summon",      "desc": "When played, also summons a 1/1 token in an adjacent empty lane."},
 	"last_stand": {"display": "Last Stand",  "desc": "Survives the first killing blow at 1 HP. Once per fight."},
 	"piercing":   {"display": "Piercing",    "desc": "When this kills its target, leftover damage carries to the creature behind it, then to enemy face."},
+	"sniper":     {"display": "Sniper",      "desc": "After the clash, hits the lowest-HP enemy creature. If it kills, it shoots again."},
 	"sacrifice":  {"display": "Sacrifice",   "desc": "Cost: destroy one of your own creatures to play this card."},
 	"exhaust":    {"display": "Exhaust",     "desc": "Once played, this card is gone for the rest of the fight."},
 	"retain":     {"display": "Retain",      "desc": "Stays in your hand at end of turn instead of being discarded."},
@@ -25,7 +25,7 @@ const KEYWORDS: Dictionary = {
 	"slay":       {"display": "Slay",        "desc": "An effect that fires when this kills the creature it's fighting."},
 	"adjacent":   {"display": "Adjacent",    "desc": "The creatures directly to its left and right."},
 	"doom":       {"display": "Doom N",      "desc": "Counts down 1 per round. At 0, deals its ATK to enemy face, then dies."},
-	"rampage":    {"display": "Rampage",     "desc": "Gains +1 ATK this fight each time it kills an enemy creature."},
+	"rampage":    {"display": "Rampage",     "desc": "Gains +1 ATK this fight each time it kills an enemy creature (more if a number is shown)."},
 	"lifelink":   {"display": "Lifelink",    "desc": "You heal 1 HP whenever this deals damage in battle."},
 	"overrun":    {"display": "Overrun",     "desc": "Start of each round: +1 ATK this round if no enemy stands directly across."},
 	"formation":  {"display": "Formation",   "desc": "Start of each round: +1/+1 this fight if a friendly stands beside it."},
@@ -104,7 +104,7 @@ static func dispatch_on_enter(card, lane_idx: int, is_enemy: bool, ctx) -> void:
 	# (copy_friendly / copy_last_dead) graft the source's keywords onto this
 	# card mid-dispatch, and a grafted Summon must not fire as a play trigger
 	# — copies skip enter-triggers by design (see _copy_creature_onto).
-	# Keyword-only carriers (Squire Captain, Summoner) have no on_enter dict,
+	# Keyword-only carriers (Mule) have no on_enter dict,
 	# so Summon dispatches independently of it. Combat.gd has no separate
 	# summon pass — this is the single dispatch point for both sides.
 	var summon_on_play: bool = data.has("keywords") and data.keywords.has("summon")
@@ -120,7 +120,7 @@ static func dispatch_on_enter(card, lane_idx: int, is_enemy: bool, ctx) -> void:
 			ctx._dispatch_reactive("ON_PLAYER_SUMMON", card, lane_idx)
 
 
-static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx) -> void:
+static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx, row: int = -1) -> void:
 	if card == null:
 		return
 	var data = card.card_data if card is Control else {}
@@ -135,8 +135,26 @@ static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx) -> void
 		death_anchor = card.global_position + Vector2(
 			card.size.x * card.scale.x * 0.5, card.size.y * card.scale.y * 0.06)
 		have_anchor = true
+	# Griffin (return_to_hand_once): identity- and once-based — resolve it HERE while
+	# the dying `card` (and its deck uid) is still in scope, never via the value-based
+	# _run_on_death doubling loop (returning to hand twice is nonsense, and the shared
+	# _last_dead_creature_* trackers aren't set until after this dispatch). Net routes
+	# to the caster's hand; solo floats it to the player's, once per fight.
+	if String(effect.get("type", "")) == "return_to_hand_once":
+		if ctx._is_net():
+			ctx._net_return_dead_to_caster(was_enemy)
+		elif not was_enemy:
+			ctx._griffin_return_to_hand(card)
+		if have_anchor and ctx.has_method("spawn_trigger_callout"):
+			ctx.spawn_trigger_callout(death_anchor,
+				_effect_label(effect, true, was_enemy), true)
+		return
 	var times = 1
 	if not was_enemy and ctx._has_passive_on_field("double_on_death"):
+		times = 2
+	# Net: the CLIENT's Warden of Graves doubles the CLIENT's on-deaths too (the
+	# player-side check above only ever sees the host's board over the wire).
+	if was_enemy and ctx._is_net() and ctx._has_passive_on_side("double_on_death", true):
 		times = 2
 	# Lich's Bargain (boss): friendly on-deaths fire twice run-wide. The post-
 	# combat HP cost is paid in Combat's _post_combat_cleanup (max 3 per fight).
@@ -148,7 +166,7 @@ static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx) -> void
 			and ctx.mutator_doubles_enemy_on_death():
 		times = 2
 	for i in times:
-		_run_on_death(effect, lane_idx, was_enemy, ctx)
+		_run_on_death(effect, lane_idx, was_enemy, ctx, row)
 	if have_anchor and ctx.has_method("spawn_trigger_callout"):
 		ctx.spawn_trigger_callout(death_anchor,
 			_effect_label(effect, true, was_enemy), true)
@@ -241,7 +259,7 @@ static func dispatch_start_of_round(ctx) -> void:
 									"FORMATION +%d/+%d" % [fm, fm], Color(0.62, 0.78, 0.95), false)
 
 
-const COMBAT_KEYWORDS := ["armored", "swift", "ranged", "thorns", "regenerate", "last_stand", "piercing", "poison", "shield", "guardian"]
+const COMBAT_KEYWORDS := ["armored", "swift", "thorns", "regenerate", "last_stand", "piercing", "sniper", "poison", "shield", "guardian"]
 
 
 static func _copy_abilities_partial(card, src: Dictionary) -> void:
@@ -300,7 +318,10 @@ static func _trigger_callout(card, ctx, text: String, is_death: bool) -> void:
 		return
 	var anchor: Vector2 = card.global_position + Vector2(
 		card.size.x * card.scale.x * 0.5, card.size.y * card.scale.y * 0.06)
-	ctx.spawn_trigger_callout(anchor, text, is_death)
+	# Pass the firing creature's entity_id so the host can replay this label on the
+	# client (it never runs the dispatcher). -1 in solo / for an unsynced card = no replay.
+	var eid: int = int(card.entity_id) if "entity_id" in card else -1
+	ctx.spawn_trigger_callout(anchor, text, is_death, eid)
 
 
 ## Map an on-enter / on-death effect dict to a short callout label. Returns ""
@@ -320,6 +341,7 @@ static func _effect_label(effect: Dictionary, is_death: bool, side_is_enemy: boo
 			"damage_face":           return "TO FACE %d" % v
 			"debuff_all_player_atk": return ("WEAKEN ALL %d" % v) if side_is_enemy else ""
 			"damage_adjacent":       return "BACKLASH %d" % v
+			"grant_shield_adjacent": return "SHIELDS UP"
 		return ""
 	match t:
 		"damage_opposing", "damage_opposing_draw", "damage_random_player":
@@ -340,13 +362,11 @@ static func _effect_label(effect: Dictionary, is_death: bool, side_is_enemy: boo
 
 
 static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: bool, ctx) -> void:
-	# Vanguard's Cry relic: "On-enter damage effects deal +1." Only applies to
-	# the player's own on-enters — enemy on-enters keep their base values so the
-	# relic is a one-sided buff like Briar Amulet / Swift Boots. Previously
-	# this relic existed in RelicDB (as war_drum) but nothing read the value, so
-	# picking it up did literally nothing. Renamed during the Round 3 relic pass
-	# so the "war_drum" slot could host a new combat-start spawn effect.
-	var on_enter_bonus: int = 1 if (not is_enemy and ctx._has_relic("vanguards_cry")) else 0
+	# (Vanguard's Cry used to add +1 here to every player On-Enter damage —
+	# redesigned 2026-07-03 into the first-creature war-cry in
+	# Combat._play_creature. The bonus var stays so the arithmetic below is
+	# untouched; it is now always 0.)
+	var on_enter_bonus: int = 0
 	match effect.get("type", ""):
 		"damage_opposing":
 			var target = ctx.get_opposing_card(lane_idx, is_enemy)
@@ -356,8 +376,8 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 			var target = ctx.get_opposing_card(lane_idx, is_enemy)
 			if target != null:
 				target.take_damage(effect.value + on_enter_bonus)
-			if not is_enemy:
-				ctx.draw_one()
+			# Draw goes to the creature's OWNER (the client over the wire in skirmish).
+			ctx._battlecry_draw(is_enemy, 1)
 		"damage_random_player":
 			# "From the placer's perspective, hit a random opposing creature." 4x4: both rows.
 			var opponents = ctx._all_friendly(not is_enemy)
@@ -367,14 +387,14 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 			for c in ctx._all_friendly(not is_enemy):
 				c.take_damage(effect.value + on_enter_bonus)
 		"draw":
-			if not is_enemy:
-				for i in effect.value:
-					ctx.draw_one()
+			ctx._battlecry_draw(is_enemy, int(effect.value))
 		"gain_gold":
 			if not is_enemy:
 				RunState.gain_gold(effect.value)
-		"atk_per_cards_played":
-			pass  # handled in Combat.gd
+		"atk_hp_per_own_kills":
+			pass  # Old Campaigner — handled in Combat.gd (_apply_play_time_passives)
+		"atk_hp_per_unspent_mana":
+			pass  # Condottiere — handled in Combat.gd (_apply_play_time_passives)
 		"damage_face":
 			if is_enemy:
 				ctx.damage_player_hero(effect.value)
@@ -393,13 +413,23 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 				ctx._player_discard_pile.append(ctx._pile_entry(c.card_id, c.deck_uid))
 				ctx._hand_container.remove_child(c)
 				c.queue_free()
+				if AudioBank != null:
+					# The stolen card leaves the hand with a paper-slip, slightly
+					# louder than a chosen pitch — it wasn't the player's idea.
+					AudioBank.play_sfx("card_discard", 0.08, -4.0)
 		"copy_friendly":
-			# Copycat: take on the body of another friendly creature. Player picks
-			# via the friendly-creature picker (fires-and-forgets like discover so
-			# the on_enter dispatcher itself doesn't have to be awaitable); enemy
-			# uses random (no UI for enemy decisions).
+			# Copycat: take on the body of another friendly creature. The OWNER picks.
+			# Solo: player picks via the friendly-creature picker (fire-and-forget like
+			# discover so on_enter stays sync); a solo enemy uses random (no AI UI).
+			# Net: the host owns the picker for its OWN creature; for the CLIENT's
+			# creature it asks the client to pick (EV_CHOICE → IN_CHOICE round-trip).
 			if card != null:
-				if is_enemy:
+				if ctx._is_net():
+					if is_enemy:
+						ctx._net_request_client_choice(card, "copy_friendly")
+					else:
+						ctx._show_copy_friendly_picker(card)
+				elif is_enemy:
 					var pool := []
 					for c in ctx._all_friendly(is_enemy):
 						if c != card:
@@ -419,9 +449,12 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 				if opp != null:
 					_copy_abilities_partial(card, opp.card_data)
 		"copy_last_dead":
-			# Doppelganger: become a copy of the last creature that died.
+			# Doppelganger: become a copy of the last creature that died. Net uses the
+			# CASTER's per-side grave (a client doppelganger copies the CLIENT's last
+			# corpse, not the host's); solo uses the global last-dead. Host-resolved
+			# either way, so the copied body rides the trailing board-sync to the client.
 			if card != null:
-				var src = ctx._last_dead_copy_data()
+				var src = ctx._net_last_dead_copy_data(is_enemy) if ctx._is_net() else ctx._last_dead_copy_data()
 				if not src.is_empty():
 					_copy_creature_onto(card, src)
 		"look_top":
@@ -429,8 +462,12 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 			if not is_enemy:
 				ctx._look_top_pick(int(effect.get("value", 3)))
 		"cast_random_spell":
-			# Chaos Imp: cast a random non-custom spell for free, auto-targeted.
-			if not is_enemy:
+			# Chaos Imp: cast a random spell for free, auto-targeted. Net resolves a
+			# random NET-PLAYABLE spell host-side with the caster's perspective so a
+			# CLIENT chaos imp actually casts (the old `if not is_enemy` no-op'd it).
+			if ctx._is_net():
+				ctx._net_cast_random_spell_free(is_enemy)
+			elif not is_enemy:
 				ctx.cast_random_spell_free()
 		"discover":
 			# Discover: player-only — opens the 3-card pick overlay filtered
@@ -448,25 +485,40 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 				var rf: String = effect.get("rarity_filter", "")
 				ctx._show_discover_linked(tf, rf, card)
 		"choose_keyword":
-			# Adaptable: player picks one of Swift/Piercing/Armored/Thorns to
-			# add to this creature. The choice resolves via a modal overlay.
-			if not is_enemy:
+			# Adaptable: the OWNER picks one of Swift/Piercing/Armored/Thorns to add to
+			# this creature. Solo: player's modal. Net: the host's own creature uses the
+			# local modal; the CLIENT's creature is asked to pick (EV_CHOICE → IN_CHOICE).
+			if ctx._is_net():
+				if is_enemy:
+					ctx._net_request_client_choice(card, "keyword")
+				else:
+					ctx._show_keyword_choice(card)
+			elif not is_enemy:
 				ctx._show_keyword_choice(card)
 		"glutton_devour":
 			# The Glutton (Marvel Snap Carnage port) — destroy adjacent friendlies
-			# in the same row, gain +2/+2 for each. Routing through take_damage(999)
-			# fires their on_death effects (Soul Lantern mana, Necromancer summon,
-			# Husk grow, Corpse Eater grow), so Glutton synergizes with the rest
-			# of the death-payoff bucket.
+			# in the same row, gain +2/+2 (+3/+3 upgraded) AND their keywords for
+			# each. Routing through take_damage(999) fires their on_death effects
+			# (Soul Lantern mana, Husk grow, Corpse Eater grow), so Glutton
+			# synergizes with the rest of the death-payoff bucket.
 			if card != null:
 				var my_row: int = card.current_row
 				var field = ctx._row_array(is_enemy, my_row)
 				var devoured: int = 0
+				var eaten_keywords: Array = []
 				for adj_lane in [lane_idx - 1, lane_idx + 1]:
 					if adj_lane < 0 or adj_lane >= 4:
 						continue
 					var victim = field[adj_lane]
 					if victim != null and victim != card:
+						# "You are what you eat": digest the meal's keywords BEFORE the
+						# kill frees it. Drawback keywords (doom / wither) are digested
+						# away; value-carrying rampage/lifelink default to 1 on the
+						# Glutton, which is exactly what the base keywords mean.
+						for kw in victim.card_data.get("keywords", []):
+							if (kw in COMBAT_KEYWORDS or kw in ["rampage", "lifelink"]) \
+									and kw not in eaten_keywords:
+								eaten_keywords.append(kw)
 						# Eating your own creature IS a sacrifice — route it through
 						# the sacrifice hook so Bone Pile, Butcher's Cleaver, Reaper's
 						# Scythe and the ON_PLAYER_SACRIFICE reactive fire, the same as
@@ -477,19 +529,32 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 						victim.take_damage(999)
 						devoured += 1
 				if devoured > 0:
-					card.current_atk += 2 * devoured
-					card.card_data.hp += 2 * devoured
-					card.current_hp += 2 * devoured
+					var g_gain: int = 3 if bool(card.card_data.get("is_upgraded", false)) else 2
+					card.current_atk += g_gain * devoured
+					card.card_data.hp += g_gain * devoured
+					card.current_hp += g_gain * devoured
+					for kw in eaten_keywords:
+						if not card.card_data.keywords.has(kw):
+							card.card_data.keywords.append(kw)
+					# A digested Shield keyword must also arm the live shield state —
+					# has_shield is snapshotted from keywords at spawn, not re-derived.
+					if eaten_keywords.has("shield") and not card.state.has_shield:
+						card.state.has_shield = true
 					card.update_stat_display()
 		_:
 			pass
 
 
-static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ctx) -> void:
-	# Bone Ring relic: "On-death effects deal +1 damage." Only applies when
-	# one of the player's own creatures dies — enemy on-deaths keep their
-	# base values. Previously the relic was defined but nothing read it.
+static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ctx, row: int = -1) -> void:
+	# Bone Ring relic: "On-death damage effects deal +1 damage and chip the
+	# enemy face for 1." Only applies when one of the player's own creatures
+	# dies — enemy on-deaths keep their base values. The face chip fires up
+	# front (before the match) so every damage-type case gets it exactly once.
 	var on_death_bonus: int = 1 if (not was_enemy and ctx._has_relic("bone_ring")) else 0
+	if on_death_bonus > 0 and String(effect.get("type", "")) in [
+			"damage_opposing_lane", "damage_opposing", "damage_all_enemies",
+			"damage_face", "damage_adjacent"]:
+		ctx.damage_enemy_hero(1)
 	match effect.get("type", ""):
 		"damage_opposing_lane":
 			var target = ctx.get_opposing_card(lane_idx, was_enemy)
@@ -508,13 +573,36 @@ static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ct
 			for c in ctx._all_friendly(not was_enemy):
 				c.take_damage(effect.value + on_death_bonus)
 		"summon":
-			ctx.summon_token(effect.atk, effect.hp, lane_idx, was_enemy)
+			# Old Bones (diminish): the token inherits a smaller summon of its
+			# own, chaining down one size per death until the 1/1 stays dead.
+			var bequest := {}
+			if bool(effect.get("diminish", false)) and int(effect.atk) > 1:
+				bequest = {"type": "summon", "atk": int(effect.atk) - 1,
+					"hp": maxi(1, int(effect.hp) - 1), "diminish": true}
+			ctx.summon_token(effect.atk, effect.hp, lane_idx, was_enemy, 0, bequest)
+			# Necromancer (both_rows): a second token rises in the lane's OTHER
+			# row — the grave fills the whole column when both slots are free.
+			# (The death path nulls the dying card's slot before dispatch, so
+			# the front call above lands in the vacated seat, not the back.)
+			if bool(effect.get("both_rows", false)):
+				ctx.summon_token(effect.atk, effect.hp, lane_idx, was_enemy, 1, bequest)
+		"detonate_dooms":
+			# Powder Cart: the wagon goes up — every OTHER friendly Doom creature
+			# on its side detonates immediately (each with its own blast and
+			# on-death). The cart itself is already dying (hp <= 0), so the
+			# hp > 0 guard keeps it — and anything else mid-death — out of
+			# the chain; two carts can't re-detonate each other.
+			for c in ctx._all_friendly(was_enemy):
+				if c != null and is_instance_valid(c) and c.current_hp > 0 \
+						and c.has_keyword("doom"):
+					ctx._detonate_doom(c)
 		"bonus_mana":
-			if not was_enemy:
-				ctx._bonus_mana_next_turn += effect.value
-		"return_to_hand_once":
-			if not was_enemy:
-				ctx._return_dead_to_hand(lane_idx)
+			# Mourner: +value max Command on the OWNER's next turn. Routed through
+			# the battlecry channel so a client-owned death in net pays the CLIENT —
+			# the bare `if not was_enemy` bump this replaced was host-only.
+			ctx._battlecry_bonus_mana_next_turn(was_enemy, effect.value)
+			# (return_to_hand_once / Griffin is resolved in dispatch_on_death, above —
+			# it needs the dying card's identity, which this value-based path lacks.)
 		"damage_face":
 			if was_enemy:
 				ctx.damage_player_hero(effect.value)
@@ -526,13 +614,31 @@ static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ct
 					c.current_atk = maxi(0, c.current_atk - effect.value)
 					c.update_stat_display()
 		"damage_adjacent":
-			# 4x4: hit same-row adjacency on the dead creature's side.
-			# Without a row reference we hit both rows' adjacencies.
-			for row in [0, 1]:
-				var field = ctx._row_array(was_enemy, row)
+			# 4x4: hit the same-row left/right neighbours of the dead creature
+			# ("creatures directly to its left and right"). When the caller knows
+			# the dead card's row (the normal death path threads it), restrict to
+			# that one row; the legacy -1 fallback (e.g. the necromancer_tower
+			# reactive, which only has lane) still hits both rows' adjacencies.
+			var rows_to_hit := [row] if row >= 0 else [0, 1]
+			for r in rows_to_hit:
+				var field = ctx._row_array(was_enemy, r)
 				for adj in [lane_idx - 1, lane_idx + 1]:
 					if adj >= 0 and adj < 4 and field[adj] != null:
 						field[adj].take_damage(effect.value + on_death_bonus)
+		"grant_shield_adjacent":
+			# Shieldmaiden — she falls so others stand: same-row neighbours of the
+			# dead creature gain Shield. Mirrors the on-play grant (Crystal Sentry)
+			# but keyed off the death slot.
+			var sm_rows := [row] if row >= 0 else [0, 1]
+			for r in sm_rows:
+				var field = ctx._row_array(was_enemy, r)
+				for adj in [lane_idx - 1, lane_idx + 1]:
+					if adj >= 0 and adj < 4 and field[adj] != null:
+						var ally = field[adj]
+						if is_instance_valid(ally) and ally.current_hp > 0 and not ally.state.has_shield:
+							ally.state.has_shield = true
+							if ally.has_method("_spawn_keyword_chip"):
+								ally._spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
 		_:
 			pass
 

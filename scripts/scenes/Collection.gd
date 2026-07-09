@@ -28,6 +28,11 @@ const RELIC_TIERS = [
 	{"label": "Combat Relics", "tier": "combat"},
 	{"label": "Utility Relics", "tier": "utility"},
 	{"label": "Boss Relics", "tier": "boss"},
+	# Event relics are never rolled into reward pools — they're granted by
+	# name from specific events. Without this section they were invisible in
+	# the compendium (The Coin, Landed / A Verse of You / Warm Knucklebone /
+	# The Sin-Eater's Crust).
+	{"label": "Event Relics", "tier": "event"},
 ]
 
 const TABS = [
@@ -110,6 +115,13 @@ func _ready() -> void:
 	show_tab("cards")
 
 
+func _unhandled_input(event: InputEvent) -> void:
+	# Esc = the BACK button: return to the main menu.
+	if event.is_action_pressed("ui_cancel"):
+		GameTheme.fade_out_then_change_scene(self, MENU_SCENE)
+		get_viewport().set_input_as_handled()
+
+
 func show_tab(tab: String) -> void:
 	if tab == _current_tab:
 		return
@@ -127,7 +139,7 @@ func show_tab(tab: String) -> void:
 		"cards":
 			_build_cards(_view_gen)
 		"relics":
-			_build_relics()
+			_build_relics(_view_gen)
 		"potions":
 			_build_potions()
 
@@ -191,7 +203,15 @@ func _build_cards(gen: int) -> void:
 
 # ── RELICS ───────────────────────────────────────────────────────────────────
 
-func _build_relics() -> void:
+func _build_relics(gen: int) -> void:
+	# Built incrementally, like the cards tab. ~135 relic plaques — each one loads
+	# an icon (PNG decode / SVG rasterize) and a shadowed frame — froze the whole
+	# screen for the better part of a second when built in a single frame (long
+	# enough that the OS flagged the window "not responding"). Yield to the UI
+	# every few tiles so input stays live and the list fills in top-down; bail out
+	# if the player switches tabs or hits Back mid-build (the _view_gen guard, same
+	# contract as _build_cards).
+	var since_yield := 0
 	for sec in RELIC_TIERS:
 		var ids: Array[String] = RelicDB.get_relics_by_tier(sec.tier)
 		if ids.is_empty():
@@ -209,6 +229,12 @@ func _build_relics() -> void:
 				GameTheme.make_relic_chip(rid, 56),
 				String(r.get("name", rid)), String(r.get("desc", "")),
 				RelicDB.get_tier_color(rid)))
+			since_yield += 1
+			if since_yield >= 8:
+				since_yield = 0
+				await get_tree().process_frame
+				if gen != _view_gen or not is_inside_tree():
+					return  # user switched tabs / left mid-build
 
 
 # ── POTIONS ──────────────────────────────────────────────────────────────────
@@ -228,9 +254,9 @@ func _build_potions() -> void:
 		icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		icon.texture = PotionDB.icon_for(pid)
-		# The generic HUD bottle is a neutral painting — the per-potion color
-		# is the identity, same tinting the run HUD applies.
-		if icon.texture == GameTheme.tex_hud_potion:
+		# Silhouette icons carry identity via the potion colour (same tinting
+		# the run HUD applies); painted per-potion art renders untinted.
+		if not PotionDB.is_painted_icon(pid):
 			icon.modulate = tint
 		grid.add_child(_make_plaque(icon,
 			String(p.get("name", pid)), String(p.get("desc", "")), tint))
@@ -244,13 +270,9 @@ func _make_plaque(icon_node: Control, name_text: String, desc_text: String,
 	# language): icon, gilt name, dim effect text — readable without hovering.
 	var tile := PanelContainer.new()
 	tile.custom_minimum_size = Vector2(478, 86)
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.065, 0.052, 0.042, 0.80)
-	sb.border_color = Color(accent.r, accent.g, accent.b, 0.55)
-	sb.set("border_width_left", 3)
-	for k in ["corner_radius_top_left", "corner_radius_top_right",
-			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
-		sb.set(k, 10)
+	var sb := GameTheme.make_panel_style(
+		Color(0.065, 0.052, 0.042, 0.80),
+		Color(accent.r, accent.g, accent.b, 0.55), 1, 4, false)
 	sb.content_margin_left = 12
 	sb.content_margin_right = 12
 	sb.content_margin_top = 8
@@ -274,7 +296,7 @@ func _make_plaque(icon_node: Control, name_text: String, desc_text: String,
 	name_lbl.text = name_text
 	if GameTheme.font_display:
 		name_lbl.add_theme_font_override("font", GameTheme.font_display)
-	name_lbl.add_theme_font_size_override("font_size", 17)
+	name_lbl.add_theme_font_size_override("font_size", 18)
 	name_lbl.add_theme_color_override("font_color", GameTheme.GILT_BRIGHT)
 	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	col.add_child(name_lbl)
@@ -284,7 +306,7 @@ func _make_plaque(icon_node: Control, name_text: String, desc_text: String,
 	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	if GameTheme.font_body:
 		desc_lbl.add_theme_font_override("font", GameTheme.font_body)
-	desc_lbl.add_theme_font_size_override("font_size", 16)
+	desc_lbl.add_theme_font_size_override("font_size", GameTheme.MIN_LABEL_SIZE)
 	desc_lbl.add_theme_color_override("font_color", Color(0.90, 0.84, 0.73, 1.0))
 	desc_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	desc_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE

@@ -7,6 +7,15 @@ extends Node
 ##   of card ids — always 10 cards), relic (id of a tier:"starting" relic from
 ##   RelicDB), faction (id into FACTIONS — the kingdom this hero rules as a
 ##   rival lord), portrait (optional res:// path).
+##
+## Cross-run muster unlocks (2026-07-04 — progression options, never stats):
+##   relic_alt — a second tier:"starting" relic; the run-setup pane offers the
+##     CHOICE once the hero has won a march (MetaState wins >= 1).
+##   deck_alt — {name, tagline, deck}: an alternate 10-card start, a 2-3 card
+##     swap on the default that pushes the hero's secondary theme; offered
+##     after a victory at Ascension 4+ (MetaState best_asc >= 4). Both are
+##     consumed by RunState.start_new_run via pending_signature_relic /
+##     pending_deck_variant.
 
 const HEROES: Dictionary = {
 	"raider": {
@@ -14,15 +23,26 @@ const HEROES: Dictionary = {
 		"name": "Raider",
 		"tagline": "Burn them out fast.",
 		"lore": "You don't outlive the road; you outrun it.",
-		"desc": "Aggressive Swift rush. Lookouts and Ratlings strike in the pre-phase, before the wall goes up.",
+		"desc": "Aggressive Swift rush. Outriders and Ratlings strike in the pre-phase, before the wall goes up.",
 		"deck": [
 			"goblin", "goblin",
-			"lookout", "lookout",
+			"levy_rider", "levy_rider",
 			"ratling", "ratling",
 			"brute", "brute",
 			"fireball", "fireball",
 		],
 		"relic": "veterans_medal",
+		"relic_alt": "couriers_bag",
+		"deck_alt": {
+			"name": "The Grass Levies",
+			"tagline": "More riders, lighter gear.",
+			"deck": [
+				"goblin", "goblin",
+				"levy_rider", "levy_rider", "levy_rider", "levy_rider",
+				"ratling", "ratling",
+				"fireball", "fireball",
+			],
+		},
 		"faction": "grasswake",
 	},
 	"stalwart": {
@@ -30,15 +50,26 @@ const HEROES: Dictionary = {
 		"name": "Stalwart",
 		"tagline": "Outlast everything.",
 		"lore": "Everything here ends eventually. You intend to be the exception.",
-		"desc": "A wall that only grows. Iron Bastion and Royal Guard hold the line in Formation while Trolls heal, Naga punishes the front, and Strike clears the rest.",
+		"desc": "A wall that outlasts. Palisades soak the line while Trolls heal, Naga punishes the front, and Strike clears the rest.",
 		"deck": [
 			"troll", "troll",
 			"brute", "brute",
 			"naga", "naga",
-			"iron_bastion", "royal_guard",
+			"palisade", "palisade",
 			"strike", "strike",
 		],
 		"relic": "iron_buckler",
+		"relic_alt": "coin_purse",
+		"deck_alt": {
+			"name": "The Old Legion",
+			"tagline": "All wall, no haste.",
+			"deck": [
+				"troll", "troll",
+				"naga", "naga",
+				"palisade", "palisade", "palisade", "palisade",
+				"strike", "strike",
+			],
+		},
 		"faction": "last_wall",
 	},
 	"acolyte": {
@@ -46,15 +77,26 @@ const HEROES: Dictionary = {
 		"name": "Acolyte",
 		"tagline": "Death pays the bill.",
 		"lore": "Something underneath is always owed. You pay in others.",
-		"desc": "Spend cheap creatures freely — Ratlings, the Pyre, and the Gravedigger turn every death into draws and Command. Each funeral feeds the next turn.",
+		"desc": "Spend cheap creatures freely — Ratlings sting on the way out and Mourners pay Command from the grave. Each funeral feeds the next turn.",
 		"deck": [
 			"ratling", "ratling", "ratling",
 			"brute",
 			"goblin", "goblin",
-			"gravedigger", "blood_pyre",
+			"mourner", "mourner",
 			"strike", "strike",
 		],
 		"relic": "soul_lantern",
+		"relic_alt": "scouts_emblem",
+		"deck_alt": {
+			"name": "The Second Funeral",
+			"tagline": "More graves, deeper debts.",
+			"deck": [
+				"ratling", "ratling", "ratling", "ratling",
+				"goblin", "goblin",
+				"mourner", "mourner",
+				"strike", "strike",
+			],
+		},
 		"faction": "owed",
 	},
 	"pyromancer": {
@@ -62,14 +104,25 @@ const HEROES: Dictionary = {
 		"name": "Pyromancer",
 		"tagline": "The spells do the work.",
 		"lore": "You started this with fire. You see no reason to stop now.",
-		"desc": "Half the deck is burn. Sniper Hexblades and Ravens snipe from the back row — Hexblade grows with every spell — while Fireball and Strike close it out.",
+		"desc": "Most of the deck is burn — Fireball, Strike, and Spark do the work while hired Trolls hold the door.",
 		"deck": [
 			"fireball", "fireball", "fireball",
 			"strike", "strike", "strike",
-			"raven", "raven",
-			"hexblade", "hexblade",
+			"spark", "spark",
+			"troll", "troll",
 		],
 		"relic": "worn_spellbook",
+		"relic_alt": "ember_crown",
+		"deck_alt": {
+			"name": "The Mirror Line",
+			"tagline": "More sparks than steel.",
+			"deck": [
+				"fireball", "fireball", "fireball",
+				"strike", "strike",
+				"spark", "spark", "spark", "spark",
+				"troll",
+			],
+		},
 		"faction": "lanternhall",
 	},
 	"kindler": {
@@ -77,17 +130,26 @@ const HEROES: Dictionary = {
 		"name": "The Kindler",
 		"tagline": "Everything burns on a timer.",
 		"lore": "You feed the fire because you remember what happens when it gets hungry.",
-		"desc": "Throw cheap bombs that detonate into their face, snowball with Rampage, and drink a little life back with Lifelink. Spend creatures freely — they were always meant to go up.",
+		"desc": "Throw cheap bombs that detonate into their face and snowball with Rampage. Spend creatures freely — they were always meant to go up.",
 		"deck": [
 			"cinder_pup", "cinder_pup",
 			"kindling", "kindling",
-			"ash_hound",
-			"bloodsworn", "bloodsworn",
-			"burning_martyr",
-			"hellfire_imp",
-			"concentrate",
+			"ash_hound", "ash_hound",
+			"burning_martyr", "burning_martyr",
+			"fireball", "strike",
 		],
 		"relic": "ember_censer",
+		"relic_alt": "couriers_bag",
+		"deck_alt": {
+			"name": "The Powder Cart",
+			"tagline": "More timers, shorter fuses.",
+			"deck": [
+				"cinder_pup", "cinder_pup", "cinder_pup",
+				"kindling", "kindling", "kindling", "kindling",
+				"burning_martyr", "burning_martyr",
+				"fireball",
+			],
+		},
 		"faction": "everflame",
 	},
 }

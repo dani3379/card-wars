@@ -44,6 +44,7 @@ var _pool_gen: int = 0
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "reward")
+	AudioBank.play_music_random(["map_c", "map_d", "rest_c"])  # muster pool
 
 	if not NetMatch.is_connected_to_peer():
 		get_tree().change_scene_to_file(MENU_SCENE)
@@ -66,6 +67,7 @@ func _ready() -> void:
 	_regenerate_pool()
 	_rebuild_pool_ui()
 	_refresh_all()
+	_install_net_chrome()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -84,14 +86,21 @@ func _effective_seed() -> int:
 func _regenerate_pool() -> void:
 	_rng.seed = _effective_seed()
 	_avail.clear()
-	var rolled := 0
+
+	var opened: Array[String] = SkirmishState.deal_unique_cards(
+		_legal, mini(SEALED_POOL_SIZE, _legal.size()), _rng)
+	for opened_id in opened:
+		_avail[opened_id] = 1
+
+	var rolled := opened.size()
 	var guard := 0
+	# Tiny-pool fallback: duplicate only after the unique bag is exhausted.
 	while rolled < SEALED_POOL_SIZE and guard < 6000 and not _legal.is_empty():
 		guard += 1
-		var id: String = _legal[_rng.randi() % _legal.size()]
-		var c: int = int(_avail.get(id, 0))
+		var roll_id: String = _legal[_rng.randi() % _legal.size()]
+		var c: int = int(_avail.get(roll_id, 0))
 		if c < SEALED_MAX_PER_ID:
-			_avail[id] = c + 1
+			_avail[roll_id] = c + 1
 			rolled += 1
 	# The pool changed underneath the builder — start the deck fresh.
 	_deck.clear()
@@ -220,6 +229,7 @@ func _build_scaffold() -> void:
 func _rebuild_pool_ui() -> void:
 	if _pool_grid == null:
 		return
+	_clear_hover_preview_under(_pool_grid)   # reopen/mirror frees the opened-pool tiles
 	# Bake-then-build (Collection pattern): warm each card's texture before its
 	# thumbnail so the Card2D builds the cheap baked overlay, not the heavy live
 	# layout. Cards stream in; a warm cache returns instantly. The gen guard lets a
@@ -321,6 +331,7 @@ func _refresh_pool_counts() -> void:
 
 
 func _refresh_deck_panel() -> void:
+	_clear_hover_preview_under(_deck_box)   # a previewed deck tile may be freed below
 	for c in _deck_box.get_children():
 		c.queue_free()
 	for id in _sorted_avail_ids():
@@ -334,6 +345,7 @@ func _refresh_deck_panel() -> void:
 		badge.visible = n > 1
 		var btn := thumb["button"] as Button
 		btn.tooltip_text = "%s — click to remove" % String(d.get("name", id))
+		_attach_hover_preview(btn, id)
 		if _local_finished:
 			btn.disabled = true
 		else:
@@ -380,7 +392,7 @@ func _on_toggle_mirror() -> void:
 func _on_reroll() -> void:
 	if not NetMatch.is_host:
 		return
-	_sub_seed = randi()
+	_sub_seed = NetMatch.fresh_seed()
 	_regenerate_pool()
 	_rebuild_pool_ui()
 	_refresh_all()
@@ -403,6 +415,8 @@ func _on_ready_pressed() -> void:
 		SkirmishState.add_card_to(SkirmishState.local_index, id)
 	NetMatch.send_draft_event({"t": "finished",
 		"cards": SkirmishState.local_slot().deck.duplicate()})
+	# Bake the sealed warband's textures behind the waiting screen (idle time).
+	ScenePreload.warm_card_ids(_deck)
 	if _ready_btn != null:
 		_ready_btn.text = "READY ✓"
 	_refresh_all()

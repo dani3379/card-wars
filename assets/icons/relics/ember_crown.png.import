@@ -2,7 +2,7 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://cr3qy3a0d14wh"
+uid="uid://fsu08cytprpu"
 path="res://.godot/imported/ember_crown.png-6fae018d386998890ffdf6d598451f97.ctex"
 metadata={
 "vram_texture": false
@@ -23,7 +23,7 @@ compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=true
+mipmaps/generate=false
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""

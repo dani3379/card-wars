@@ -48,7 +48,7 @@ const ENCOUNTERS_FAST := ["goblin_scouts", "orc_warband", "dragon_lord", "cultis
 
 # Suspects (underpowered / bland end of the efficiency analyzer) + controls.
 const SUSPECTS := ["warchief", "copycat", "cinder_pup", "necromancer", "witch",
-	"mule", "blood_pyre", "hound", "pikeman", "mana_sprite", "leyline_conduit",
+	"mule", "blood_pyre", "hound", "pikeman", "leyline_conduit",
 	"battle_drummer", "bloodhound", "torchbearer", "crystal_sentry",
 	"shieldbearer", "lancer", "summoner", "plague_rat",
 	# known-good controls to calibrate the harness's signal:
@@ -61,7 +61,7 @@ const CONTROLS := ["paladin", "troll", "harpy"]
 # not its effect) — flagged in the report.
 const MODAL_BLOCKLIST := ["familiar", "scholar", "treasure_hunter", "adaptable",
 	"copycat", "doppelganger", "lost_tome", "war_council", "chaos_imp",
-	"war_chant", "scrap", "gambit", "censer_light", "recycle"]
+	"war_chant", "gambit", "censer_light", "recycle"]
 
 const SEED := 4242
 const MAX_ROUNDS := 40

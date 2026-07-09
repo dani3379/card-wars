@@ -97,15 +97,33 @@ const IN_PLAY_CREATURE := "play_creature"
 const IN_PLAY_SPELL := "play_spell"
 const IN_TOGGLE_FLOOP := "toggle_floop"
 const IN_REPOSITION := "reposition"
+const IN_USE_POTION := "use_potion"  # client → host: I drank a host-authoritative potion (heal) — {effect,value}
 const IN_END_ACTIONS := "end_actions"
 const IN_REMATCH := "rematch"        # client → host: I want to play again
+const IN_CHOICE := "choice"          # client → host: my pick for an EV_CHOICE prompt (Copycat / Adaptable)
+# SEALED ORDERS battle style (plan §16.2)
+const IN_ORDERS := "orders"          # client → host: my sealed creature bundle {list,mana}
+const IN_ORDER_GHOST := "order_ghost"   # client → host: I committed an order at {lane,row} (position only)
+const IN_SORCERY_PASS := "sorcery_pass" # client → host: I pass my spell step
 # Host → client events (event.t)
 const EV_MATCH_BEGIN := "match_begin"
 const EV_TURN_BEGIN := "turn_begin"
 const EV_HAND_SET := "hand_set"
 const EV_HAND_COUNT := "hand_count"
+# Both directions (host→event, client→intent, like EV_HAND_COUNT): "I discarded
+# N cards at my turn commit" — count only, so the foe can show the beat.
+const EV_DISCARD_FX := "discard_fx"
+# Both directions: "I drank potion <pid>" — the foe shows a drink beat (never
+# affects their state; the potion's own effect resolves caster-side or, for the
+# host-authoritative heal, via IN_USE_POTION below).
+const EV_POTION_FX := "potion_fx"
+# Both directions: "I sent emote #idx" — a Hearthstone-style canned phrase the
+# opponent sees as a speech bubble over our portrait. Presentation only; never
+# touches game state. Rides the generic event/intent envelopes (no relay change).
+const EV_EMOTE := "emote"
 const EV_MANA := "mana_change"
 const EV_DRAW := "draw"               # host → client: draw N from your own pile (caster-side spell draw)
+const EV_GIVE_CARD := "give_card"     # host → client: add card {id,uid} to your hand (Grave Robbery / Grave Pact)
 const EV_CARD_ENTERED := "card_entered"
 const EV_CARD_LEFT := "card_left"
 const EV_TAG := "tag_change"
@@ -120,6 +138,15 @@ const EV_REMATCH := "rematch"        # host → client: I want to play again
 # client reconciles to it (plan §13.2 strategy A, taken to its simplest form).
 # The fine-grained EV_* above stay reserved for a later per-strike replay upgrade.
 const EV_BOARD_SYNC := "board_sync"
+# Host → the owning client: "your creature needs you to pick an option" (Copycat /
+# Adaptable). The client shows the picker and answers with IN_CHOICE; the host (still
+# authoritative) applies the pick + board-syncs. Rides the normal event/intent channels.
+const EV_CHOICE := "choice_req"
+# SEALED ORDERS battle style (plan §16.2): host → client phase drivers.
+const EV_ORDERS_PHASE := "orders_phase"   # {round, init} — both sides give orders now
+const EV_ORDER_GHOST := "order_ghost_ev"  # {lane, row} — the host committed an order there
+const EV_REVEAL := "orders_reveal"        # clear pendings/ghosts; the snapshot seats the real lines
+const EV_SORCERY := "sorcery_turn"        # {who} — whose open spell step it is
 
 # ── Connection state ──
 var is_host: bool = false
@@ -134,6 +161,13 @@ var match_seed: int = 0
 ## combat code reads best_of. Both ride the start RPC so the client always has them.
 var match_mode: int = 0
 var best_of: int = 1
+## Battle style (host-chosen, synced like best_of). ALTERNATING = the classic
+## turn game (one-directional strikes at each turn's end); SEALED = both sides
+## place simultaneously in secret, reveal together, then one simultaneous clash
+## per round (plan §16). Orthogonal to match_mode — any deck mode, either style.
+const STYLE_ALTERNATING := 0
+const STYLE_SEALED := 1
+var battle_style: int = STYLE_ALTERNATING
 ## True for a local practice match against SkirmishBot — no real peer. The host
 ## path runs normally; this just makes is_connected_to_peer() pass, makes the deck
 ## "finished" handoff answer with a bot deck, and keeps launch_combat off the wire.
@@ -143,6 +177,18 @@ var _connected: bool = false
 ## Host-side: the connected client's ENet peer id (0 = no client). Set when the
 ## client connects; used by send_to_client to target the one client directly.
 var client_peer_id: int = 0
+
+## ── Combat-message buffering (startup-race guard) ──
+## Combat events/intents arrive over the wire as soon as the peer sends them, but
+## the combat scene only subscribes to combat_event_received / combat_intent_received
+## partway through its _ready (after a texture prebake). A message that lands in
+## that gap would emit to ZERO listeners and be lost forever — Godot signals don't
+## buffer. That dropped the very first EV_TURN_BEGIN when the going-first client was
+## slow to boot, so its turn never opened and BOTH players deadlocked at round 1.
+## We buffer while detached and replay in arrival order once the scene calls
+## attach_combat(), so no opening message is ever lost to the boot race.
+var _combat_attached: bool = false
+var _combat_msg_buffer: Array = []
 
 # ── Relay transport state ──
 ## Which transport this session uses. DIRECT keeps the verified peer-1-is-host
@@ -305,6 +351,7 @@ func leave() -> void:
 	best_of = 1
 	entities.clear()
 	_next_entity_id = 1
+	detach_combat()   # drop any buffered combat messages from the torn-down session
 	# Relay state (player + server fields). is_relay is left for run_as_relay to set
 	# AFTER its own leave() call, so a relay process clearing on startup is harmless.
 	transport = Transport.DIRECT
@@ -323,6 +370,14 @@ func is_connected_to_peer() -> bool:
 	return vs_bot or (_connected and remote_present)
 
 
+## Fresh session entropy, kept separate from the global randi stream so repeated
+## app launches do not accidentally replay the same skirmish seeds.
+func fresh_seed() -> int:
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	return int(rng.randi())
+
+
 ## Begin a local practice match against SkirmishBot. No networking: we synthesize
 ## the connection state a finished host handshake leaves behind (host, slot 0,
 ## chosen mode/format, fresh seed) so the deck-acquisition scenes and combat run
@@ -337,7 +392,7 @@ func start_vs_bot(mode: int, bo: int) -> void:
 	remote_present = false
 	match_mode = mode
 	best_of = bo
-	match_seed = randi()
+	match_seed = fresh_seed()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -454,52 +509,58 @@ func _can_send() -> bool:
 func start_match() -> void:
 	if not is_host or not both_ready():
 		return
-	match_seed = randi()
+	match_seed = fresh_seed()
 	# Carry the match config in the start message too, so the client definitely has
-	# the chosen mode / best-of even if it missed an earlier set_match_config send.
+	# the chosen mode / best-of / battle style even if it missed an earlier
+	# set_match_config send.
 	if transport == Transport.RELAY:
-		_relay_ship({"t": _RK_MATCH_START, "seed": match_seed, "mode": match_mode, "bo": best_of})
+		_relay_ship({"t": _RK_MATCH_START, "seed": match_seed, "mode": match_mode,
+			"bo": best_of, "style": battle_style})
 	else:
-		_rpc_match_start.rpc(match_seed, match_mode, best_of)   # tell the client
+		_rpc_match_start.rpc(match_seed, match_mode, best_of, battle_style)   # tell the client
 	match_starting.emit(match_seed)    # tell ourselves (remote-only path)
 
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_match_start(seed: int, mode: int, bo: int) -> void:
-	_apply_match_start(seed, mode, bo)
+func _rpc_match_start(seed: int, mode: int, bo: int, style: int = STYLE_ALTERNATING) -> void:
+	_apply_match_start(seed, mode, bo, style)
 
 
-func _apply_match_start(seed: int, mode: int, bo: int) -> void:
+func _apply_match_start(seed: int, mode: int, bo: int, style: int = STYLE_ALTERNATING) -> void:
 	match_seed = seed
 	match_mode = mode
 	best_of = bo
+	battle_style = style
 	match_starting.emit(seed)
 
 
 ## Host-only: choose the deck-acquisition mode + best-of and push the choice to the
 ## client so its lobby can display it. Safe to call before a client is present (the
 ## broadcast is skipped until one connects; start_match re-sends it regardless).
-func set_match_config(mode: int, bo: int) -> void:
+func set_match_config(mode: int, bo: int, style: int = -1) -> void:
 	if not is_host:
 		return
 	match_mode = mode
 	best_of = bo
+	if style >= 0:
+		battle_style = style
 	if remote_present:
 		if transport == Transport.RELAY:
-			_relay_ship({"t": _RK_MATCH_CONFIG, "mode": mode, "bo": bo})
+			_relay_ship({"t": _RK_MATCH_CONFIG, "mode": mode, "bo": bo, "style": battle_style})
 		else:
-			_rpc_match_config.rpc(mode, bo)
+			_rpc_match_config.rpc(mode, bo, battle_style)
 	match_config_changed.emit()
 
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_match_config(mode: int, bo: int) -> void:
-	_apply_match_config(mode, bo)
+func _rpc_match_config(mode: int, bo: int, style: int = STYLE_ALTERNATING) -> void:
+	_apply_match_config(mode, bo, style)
 
 
-func _apply_match_config(mode: int, bo: int) -> void:
+func _apply_match_config(mode: int, bo: int, style: int = STYLE_ALTERNATING) -> void:
 	match_mode = mode
 	best_of = bo
+	battle_style = style
 	match_config_changed.emit()
 
 
@@ -582,6 +643,9 @@ func _rpc_combat_intent(intent: Dictionary) -> void:
 
 
 func _apply_combat_intent(sender_id: int, intent: Dictionary) -> void:
+	if not _combat_attached:
+		_combat_msg_buffer.append({"k": "intent", "sender": sender_id, "intent": intent})
+		return
 	combat_intent_received.emit(sender_id, intent)
 
 ## HOST → CLIENT(S): broadcast an authoritative event. The host applies its own
@@ -600,7 +664,37 @@ func _rpc_combat_event(event: Dictionary) -> void:
 
 
 func _apply_combat_event(event: Dictionary) -> void:
+	if not _combat_attached:
+		_combat_msg_buffer.append({"k": "event", "event": event})
+		return
 	combat_event_received.emit(event)
+
+
+## The combat scene calls this ONCE, at the end of its net-combat setup, after it
+## has wired the combat_event_received / combat_intent_received listeners AND
+## finished its own opening (foe seal, going-second pre-deal, etc.). Any messages
+## that arrived during the scene transition + texture prebake were buffered; we
+## replay them here in arrival order so the opening EV_TURN_BEGIN / EV_ORDERS_PHASE
+## / board sync is delivered to a fully-built scene instead of being lost. Idempotent.
+func attach_combat() -> void:
+	_combat_attached = true
+	if _combat_msg_buffer.is_empty():
+		return
+	var pending: Array = _combat_msg_buffer
+	_combat_msg_buffer = []
+	for m in pending:
+		if String(m.get("k", "")) == "event":
+			combat_event_received.emit(m.get("event", {}))
+		else:
+			combat_intent_received.emit(int(m.get("sender", 0)), m.get("intent", {}))
+
+
+## Re-arm buffering for the NEXT combat scene: called when we LEAVE combat (scene
+## change / rematch / teardown) so messages that land before the new scene wires
+## its listeners are captured again rather than emitted to the dead old scene.
+func detach_combat() -> void:
+	_combat_attached = false
+	_combat_msg_buffer.clear()
 
 ## HOST → THE ONE CLIENT: send an authoritative event to the client only. This is
 ## the redaction path — the host chooses which events to forward, so a private
@@ -655,6 +749,10 @@ func _enter_combat_local() -> void:
 	SkirmishState.refresh_heroes()
 	entities.clear()
 	_next_entity_id = 1
+	# Re-arm the message buffer BEFORE the scene swaps: the peer may send the
+	# opening turn-begin before the new combat scene finishes booting and calls
+	# attach_combat(). Anything that lands in that gap is captured, not dropped.
+	detach_combat()
 	get_tree().change_scene_to_file("res://scenes/combat.tscn")
 
 
@@ -694,8 +792,8 @@ func _rpc_relay_forward(env: Dictionary) -> void:
 func _rpc_relay_deliver(env: Dictionary) -> void:
 	match String(env.get("t", "")):
 		_RK_READY:        _apply_remote_ready(bool(env.get("v", false)))
-		_RK_MATCH_START:  _apply_match_start(int(env.get("seed", 0)), int(env.get("mode", 0)), int(env.get("bo", 1)))
-		_RK_MATCH_CONFIG: _apply_match_config(int(env.get("mode", 0)), int(env.get("bo", 1)))
+		_RK_MATCH_START:  _apply_match_start(int(env.get("seed", 0)), int(env.get("mode", 0)), int(env.get("bo", 1)), int(env.get("style", STYLE_ALTERNATING)))
+		_RK_MATCH_CONFIG: _apply_match_config(int(env.get("mode", 0)), int(env.get("bo", 1)), int(env.get("style", STYLE_ALTERNATING)))
 		_RK_DRAFT:        _apply_draft_event(env.get("event", {}))
 		_RK_INTENT:       _apply_combat_intent(relay_partner_id, env.get("intent", {}))
 		_RK_EVENT:        _apply_combat_event(env.get("event", {}))

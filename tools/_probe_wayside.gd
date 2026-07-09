@@ -1,13 +1,13 @@
 extends SceneTree
-## Throwaway probe for the road-to-the-keep slice 2: the 12-row skeleton
-## (two wayside stops between every fight), wayside verb assignment, the
-## treasure/recruit/shop guarantees, and the wayside card-upgrade paths
-## (drill / strip_kw / grant_kw). Run:
+## Throwaway probe for the road-to-the-keep slice 2: the 18-row skeleton
+## (lengthened 2026-07-07; two wayside stops between every fight), wayside verb
+## assignment, the treasure/recruit/shop guarantees, and the wayside
+## card-upgrade paths (drill / strip_kw / grant_kw). Run:
 ##   Godot.exe --headless --path . --script res://tools/_probe_wayside.gd
 
-const FIGHT_ROWS := [0, 3, 9]
-const ELITE_ROW := 6
-const WAYSIDE_ROWS := [1, 2, 4, 5, 7, 8]
+const FIGHT_ROWS := [0, 3, 9, 15]
+const ELITE_ROWS := [6, 12]
+const WAYSIDE_ROWS := [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
 const VERBS := ["drill_yard", "muster_scale", "standard_bearer", "supply_cache"]
 
 var _fails := 0
@@ -40,6 +40,7 @@ func _process(_delta: float) -> bool:
 			var ok_rows := true
 			var ok_verbs := true
 			var elites := 0
+			var extra_elites := 0
 			var counts: Dictionary = {}
 			var n_sites := 0
 			for row in rs.map_data[act]:
@@ -48,9 +49,14 @@ func _process(_delta: float) -> bool:
 					var t := String(n.type)
 					counts[t] = int(counts.get(t, 0)) + 1
 					var r := int(n.row)
-					if r in FIGHT_ROWS and t != "combat":
-						ok_rows = false
-					if r == ELITE_ROW:
+					if r in FIGHT_ROWS:
+						# One fight row per act hides the optional war-road
+						# General (2026-07-07) — anything else is a break.
+						if t == "elite":
+							extra_elites += 1
+						elif t != "combat":
+							ok_rows = false
+					if r in ELITE_ROWS:
 						if t == "elite":
 							elites += 1
 						elif t != "combat":
@@ -61,11 +67,12 @@ func _process(_delta: float) -> bool:
 						ok_verbs = false
 			var tag := "seed %d act %d" % [s, act + 1]
 			_check(ok_rows, tag + ": fight/wayside rows hold their beat")
-			_check(elites == 1, tag + ": exactly 1 elite in the band")
+			_check(elites == 2, tag + ": exactly 2 band Generals (one per band)")
+			_check(extra_elites == 1, tag + ": one war-road General on a fight row")
 			_check(ok_verbs, tag + ": every wayside halt carries a verb")
-			_check(n_sites >= 16 and n_sites <= 23, tag + ": %d sites in window" % n_sites)
-			_check(int(counts.get("treasure", 0)) >= 1, tag + ": treasure placed")
-			_check(int(counts.get("recruit", 0)) >= 1, tag + ": muster placed")
+			_check(n_sites >= 24 and n_sites <= 36, tag + ": %d sites in window" % n_sites)
+			_check(int(counts.get("treasure", 0)) >= 2, tag + ": two treasures placed")
+			_check(int(counts.get("recruit", 0)) >= 2, tag + ": two musters placed")
 			_check(int(counts.get("shop", 0)) >= 1, tag + ": shop placed")
 
 	print("— wayside upgrade paths")

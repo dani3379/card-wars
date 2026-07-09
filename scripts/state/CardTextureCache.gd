@@ -35,6 +35,11 @@ const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 
 var _cache: Dictionary = {}  # String → ImageTexture
 var _bake_viewport: SubViewport = null
+# Serializes concurrent bakers. Two bake() calls interleaving their awaits would
+# both parent a card into the shared viewport and capture each other's overlap —
+# possible since the idle deck warm (ScenePreload.warm_run_deck, running behind
+# the map) can still be in flight when Combat's _prebake_hand_textures starts.
+var _bake_busy := false
 
 
 func _ready() -> void:
@@ -97,6 +102,13 @@ func bake(card_data: Dictionary) -> Texture2D:
 	var key := cache_key(card_data)
 	if _cache.has(key):
 		return _cache[key]
+	# One card in the viewport at a time. While waiting, the other baker may
+	# finish this very key — re-check before claiming the viewport.
+	while _bake_busy:
+		await get_tree().process_frame
+		if _cache.has(key):
+			return _cache[key]
+	_bake_busy = true
 
 	var card = CARD_SCENE.instantiate()
 	card.card_data = card_data.duplicate(true)
@@ -136,6 +148,7 @@ func bake(card_data: Dictionary) -> Texture2D:
 	await RenderingServer.frame_post_draw
 	if _bake_viewport == null or not is_instance_valid(_bake_viewport):
 		# Scene shut down mid-bake (player exited combat etc.) — give up.
+		_bake_busy = false
 		return null
 	var image: Image = _bake_viewport.get_texture().get_image()
 	# Image captured — put the viewport back to sleep until the next bake.
@@ -150,6 +163,7 @@ func bake(card_data: Dictionary) -> Texture2D:
 	_bake_viewport.remove_child(card)
 	card.queue_free()
 	_cache[key] = tex
+	_bake_busy = false
 	return tex
 
 

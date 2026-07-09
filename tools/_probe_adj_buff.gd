@@ -91,22 +91,24 @@ func _run_test() -> void:
 		return
 	var before: int = neighbour.effective_atk()
 
-	# Drop a Battle Drummer in the adjacent lane 2.
-	var drummer_data = CDB.get_card_data("battle_drummer").duplicate(true)
-	var buff: int = int(drummer_data.get("adj_buff", {}).get("atk", 0))
-	_check(buff > 0, "battle_drummer carries adj_buff.atk (=%d)" % buff)
-	combat._place_enemy_card(drummer_data, 2, FRONT)
+	# Drop a Torchbearer in the adjacent lane 2. (Battle Drummer used to be the
+	# adj_buff carrier here — it now grants adjacent Swift instead, so the
+	# torchbearer is the canonical +ATK aura for this test.)
+	var torch_data = CDB.get_card_data("torchbearer").duplicate(true)
+	var buff: int = int(torch_data.get("adj_buff", {}).get("atk", 0))
+	_check(buff > 0, "torchbearer carries adj_buff.atk (=%d)" % buff)
+	combat._place_enemy_card(torch_data, 2, FRONT)
 	var after: int = neighbour.effective_atk()
 	_check(after - before == buff,
 		"ENEMY adjacency now APPLIES: neighbour ATK %d -> %d (+%d expected)" % [before, after, buff])
 	_check(neighbour.adj_atk_buff == buff,
 		"buff is STORED on the card (adj_atk_buff=%d) so it shows on the numeral + nets to the client" % neighbour.adj_atk_buff)
 
-	# The drummer's OTHER flank (lane 3) must also be buffed.
+	# The torchbearer's OTHER flank (lane 3) must also be buffed.
 	combat._place_enemy_card(CDB.get_card_data("brute").duplicate(true), 3, FRONT)
 	var other = combat._row_array(true, FRONT)[3]
 	_check(other != null and other.adj_atk_buff == buff,
-		"the drummer's other neighbour (lane 3) is buffed too (adj_atk_buff=%d)" % (other.adj_atk_buff if other != null else -1))
+		"the torchbearer's other neighbour (lane 3) is buffed too (adj_atk_buff=%d)" % (other.adj_atk_buff if other != null else -1))
 
 	# Kill the drummer → its neighbours lose the buff immediately.
 	var drummer = combat._row_array(true, FRONT)[2]

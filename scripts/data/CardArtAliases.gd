@@ -10,12 +10,12 @@ class_name CardArtAliases
 const ALIASES: Dictionary = {
 	# ── Player-side near-duplicates ──────────────────────────────────────
 	"bloodhound":           "hound",
-	"warding_stone":        "iron_bastion",
-	"crystal_sentry":       "shieldbearer",
+	"warding_stone":        "stone_sentinel",  # own stone-golem art, not shared iron_bastion
+	"crystal_sentry":       "sentinel",         # armored sentry fits better than a novice
 	"glass_knight":         "duelist",
 	"plague_rat":           "ratling",
 	"basilisk":             "hydra",
-	"cleave_hound":         "hound",
+	"cleave_hound":         "wolf_c",  # distinct wolf, not the shared hound face
 	"revenant":             "vengeful_spirit",
 	"riteforge":            "siege_golem",
 	"hexblade":             "naga",
@@ -23,18 +23,32 @@ const ALIASES: Dictionary = {
 	"warchief":             "iron_bastion",
 	"mana_sprite":          "sprite",
 	"stone_wall":           "iron_bastion",
-	"ironclad_veteran":     "iron_bastion",
+	"ironclad_veteran":     "pikeman",  # Old Campaigner — a soldier with a record
 	"familiar":             "stray_cat",
 	"vengeance":            "vengeful_spirit",
-	"adaptable":            "mirror_knight",
+	"adaptable":            "sellsword",  # Sellsword — the on-the-nose merc painting
 	"tallow_doll":          "copycat",
 	"the_glutton":          "corpse_eater",
 	"lancer":               "duelist",
 	"shieldmaiden":         "royal_guard",
 	"the_leveler":          "siege_golem",
-	"the_apothecary":       "witch",
-	"emberwright":          "e_archer",
+	"the_apothecary":       "archmage",     # robed scholar-mage, not a generic witch
+	"emberwright":          "ember_mystic",  # fire-mage, not a bow-archer
 	"ember_warden":         "torchbearer",
+	"old_bones":            "e_bone_knight",
+	# Levy starters (2026-07-06) — plain bodies borrow their betters' faces.
+	"levy_rider":           "ranger",  # Outrider — a hooded scout, not sharing Lookout's face
+	"palisade":             "iron_bastion",
+	"mourner":              "the_crone",  # grieving hooded figure, not sharing Gravedigger
+	"sin_eater":            "e_dark_priest",
+	# 2026-07-07 fun slate — orphaned paintings put back to work.
+	# (trebuchet.png exists outright, so Trebuchet needs no alias.)
+	"volunteer":            "militia",
+	"rat_piper":            "whisper_king",
+	# Placeholder rescues — these had NO alias and rendered a blank gradient.
+	"carrion_priest":       "risen_lich",   # Carrion Priest — undead death-priest
+	"gravecaller":          "hall_watcher",  # Oathkeeper — armored oath-knight (own art, not Paladin's)
+	"e_devil_champ":        "doom_knight",  # Devil's Champion — stopgap; wants bespoke devil art
 
 	# ── Wolves / hounds ──────────────────────────────────────────────────
 	"wolf":                 "hound",
@@ -74,7 +88,7 @@ const ALIASES: Dictionary = {
 	"saboteur":             "assassin",
 	"flanker":              "assassin",
 	"stalker":              "assassin",
-	"ember_stalker":        "assassin",
+	"ember_stalker":        "blood_pyre",  # Powder Cart — a pyre about to blow
 	"archer":               "e_archer",
 	"sharpshooter":         "e_archer",
 	"crossbowman":          "e_archer",
@@ -94,7 +108,7 @@ const ALIASES: Dictionary = {
 	"squire":               "shieldbearer",
 	"veteran":              "pikeman",
 	"lieutenant":           "squire_captain",
-	"standard_bearer":      "royal_guard",
+	"standard_bearer":      "bannerman",  # the actual standard-bearer painting
 	"banner-bearer":        "royal_guard",
 	"hall-watcher":         "royal_guard",
 	"fallen_knight":        "e_bone_knight",
@@ -404,6 +418,28 @@ static func try_load_creature_art(card_id: String) -> Texture2D:
 	return tex
 
 
+# Spell-art stand-ins, same idea as the creature ALIASES above: a spell id
+# with no bespoke painting borrows a cousin's until its own art lands. The
+# bespoke file auto-wins once it exists (direct path is tried first).
+const SPELL_ALIASES: Dictionary = {
+	"craven": "curse",
+	"deserters_mark": "curse",
+	"war_debt": "curse",
+	"grave_debt": "wound",
+	# Penance (card id reckless_charge) — the old cavalry-charge painting moved
+	# to assets/_unused; Offering's somber art fits the sin-burning.
+	"reckless_charge": "offering",
+	"mark_of_ash": "hex",
+	# Spark (levy starter) — the orphaned lightning painting (its spell id
+	# died in the 2026-07-02 overhaul) is exactly a small zap.
+	"spark": "lightning",
+	# 2026-07-07 fun slate.
+	"petard": "ricochet",
+	"slow_match": "flame_bolt",
+	"muster_fallen": "reanimate",
+}
+
+
 static func try_load_spell_art(card_id: String) -> Texture2D:
 	if _spell_art_cache.has(card_id):
 		return _spell_art_cache[card_id]
@@ -411,5 +447,9 @@ static func try_load_spell_art(card_id: String) -> Texture2D:
 	var path = "res://assets/spells/%s.png" % card_id
 	if ResourceLoader.exists(path):
 		tex = load(path)
+	if tex == null and SPELL_ALIASES.has(card_id):
+		var alias_path = "res://assets/spells/%s.png" % SPELL_ALIASES[card_id]
+		if ResourceLoader.exists(alias_path):
+			tex = load(alias_path)
 	_spell_art_cache[card_id] = tex
 	return tex

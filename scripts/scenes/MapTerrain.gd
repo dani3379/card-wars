@@ -118,6 +118,9 @@ var _poly_calabria: PackedVector2Array = PackedVector2Array()
 var _isles: Array = []        # {pos: Vector2, r: float}
 var _etna_peak := Vector2.ZERO
 var _sicily_centroid := Vector2.ZERO
+# SIMPLE_BACKDROP staging: the deckled paper sheet the chart is drawn on
+# (built per act in _build_simple_coast; empty in the full painted mode).
+var _sheet_poly: PackedVector2Array = PackedVector2Array()
 
 enum { B_DEEP, B_SHALLOW, B_BEACH, B_GRASS, B_FOREST, B_HILLS, B_ROCK,
 	B_SNOW, B_SCORCH }
@@ -185,6 +188,8 @@ var _last_dress_mix := -1.0
 # pixel-identical plates.
 const PLATE_BAKE_SCALE := 2.5
 var _plate_item = null   # untyped: typed Control fails on script-only members
+var _paper_item = null   # live paper-fiber multiply layer (war-table mode)
+var _vignette_tex: GradientTexture2D = null   # lazy lamplight vignette
 var _geo_tex: ImageTexture = null     # per act, cached in RunState
 var _march_tex: ImageTexture = null   # per open — the clean march dress
 var _plate_tex: ImageTexture = null   # campaign dress; stale copy cache-seeded
@@ -289,6 +294,9 @@ func _set_view(z: float, pan: Vector2) -> void:
 	if _plate_item != null:
 		_plate_item.position = _view_pan
 		_plate_item.scale = Vector2(_view_zoom, _view_zoom)
+		if _paper_item != null:
+			_paper_item.position = _view_pan
+			_paper_item.scale = Vector2(_view_zoom, _view_zoom)
 		var mix := _campaign_mix()
 		if not is_equal_approx(mix, _last_dress_mix):
 			_last_dress_mix = mix
@@ -350,6 +358,38 @@ func build_map() -> void:
 		# doesn't) — give it the real plate rect.
 		_plate_item.size = size
 		add_child(_plate_item)
+	if _paper_item == null and bake_mode == "" and SIMPLE_BACKDROP:
+		# Real paper fiber multiplied LIVE over the baked plate — texture is
+		# the one material cue vector fills can't fake. Live only: a full-
+		# rect alpha layer bakes OPAQUE in the clone path (the 2026-06-29
+		# gotcha), and riding the view transform means the grain scales like
+		# real fiber when the player leans in. Canvas MUL blend is a raw
+		# SRC·DST (modulate can only darken it further), so strength comes
+		# from a shader lerping the fiber toward white.
+		var ptex: Texture2D = load("res://assets/backgrounds/map_parchment.jpg")
+		if ptex != null:
+			var paper := TextureRect.new()
+			paper.texture = ptex
+			paper.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			paper.stretch_mode = TextureRect.STRETCH_SCALE
+			paper.size = size
+			paper.show_behind_parent = true
+			paper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			var pshader := Shader.new()
+			pshader.code = """
+shader_type canvas_item;
+render_mode blend_mul;
+uniform float strength : hint_range(0.0, 1.0) = 0.45;
+void fragment() {
+	vec4 t = texture(TEXTURE, UV);
+	COLOR = vec4(mix(vec3(1.0), t.rgb, strength), 1.0);
+}
+"""
+			var pmat := ShaderMaterial.new()
+			pmat.shader = pshader
+			paper.material = pmat
+			add_child(paper)
+			_paper_item = paper
 	# Per-act cache: every open after the first restores the mesh + baked
 	# geography in one frame; only run state (vis/avail/player) is re-read.
 	var cache: Dictionary = RunState.map_plate_cache.get(_act, {})
@@ -491,7 +531,12 @@ func _bake_via_clone(mode: String) -> ImageTexture:
 	var sub := SubViewport.new()
 	sub.size = Vector2i(size * PLATE_BAKE_SCALE)
 	sub.disable_3d = true
-	sub.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	# DISABLED while the clone builds and records its canvas (CanvasItem _draw
+	# is CPU-side and runs regardless of target update mode), then flipped to
+	# UPDATE_ONCE below for a single GPU render right before readback. The old
+	# UPDATE_ALWAYS re-rendered this (size × 2.5) target on every one of the
+	# wait frames — ~5 full-res GPU passes per bake, ×3 bakes per map open.
+	sub.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	var clone: Control = (load("res://scripts/scenes/MapTerrain.gd")
 		as GDScript).new()
 	clone.bake_mode = mode
@@ -516,6 +561,8 @@ func _bake_via_clone(mode: String) -> ImageTexture:
 		# freed — stop before the next get_tree() errors on a freed node.
 		if not is_inside_tree():
 			return null
+	# The clone's canvas is fully recorded by now — render it exactly once.
+	sub.render_target_update_mode = SubViewport.UPDATE_ONCE
 	await RenderingServer.frame_post_draw
 	if not is_inside_tree() or not is_instance_valid(sub):
 		return null
@@ -617,6 +664,9 @@ func _geo(lon: float, lat: float) -> Vector2:
 
 
 func _build_geo() -> void:
+	_poly_sicily = PackedVector2Array()   # append-built — see _build_mesh
+	_poly_calabria = PackedVector2Array()
+	_isles = []
 	for v in SICILY_LL:
 		_poly_sicily.append(_geo(v.x, v.y))
 	for v2 in CALABRIA_LL:
@@ -641,6 +691,24 @@ func _inside_island(p: Vector2, inset: float = 0.0) -> bool:
 		var ang := TAU * float(k) / 8.0
 		if not Geometry2D.is_point_in_polygon(
 				p + Vector2(cos(ang), sin(ang)) * inset, _poly_sicily):
+			return false
+	return true
+
+
+## Inside the pinned sheet, with an approximate inward inset (4 compass
+## probes — the sheet is near-rectangular, so 4 suffice where the ragged
+## island needs 8). Always true when no sheet exists (full painted mode).
+func _inside_sheet(p: Vector2, inset: float = 0.0) -> bool:
+	if _sheet_poly.size() < 3:
+		return true
+	if not Geometry2D.is_point_in_polygon(p, _sheet_poly):
+		return false
+	if inset <= 0.0:
+		return true
+	for k in range(4):
+		var ang := TAU * float(k) / 4.0
+		if not Geometry2D.is_point_in_polygon(
+				p + Vector2(cos(ang), sin(ang)) * inset, _sheet_poly):
 			return false
 	return true
 
@@ -735,24 +803,33 @@ func _read_run_map() -> void:
 		# are a FIXED vertical lane grid (col 3 = the centre line). No winding
 		# spine, no min-spacing relaxation, no coast clamp — so the graph's
 		# own no-crossing guarantee carries straight to the screen, untangled.
-		var cy: float = size.y * 0.49
+		# cy sits below the canvas midline and the lane pitch is trimmed so the
+		# top lane clears the act cartouche + standing-order chip and the bottom
+		# lane clears the legend band — at the old 0.49/0.118 the outer lanes
+		# ran straight through both.
+		var cy: float = size.y * 0.535
 		camp = Vector2(size.x * 0.075, cy)
-		keep = Vector2(size.x * 0.80, cy)   # clear of the right destination panel
-		# Etna looms above the gate as a faint landmark (geography is abstracted
-		# in this mode, so the peak is placed relative to the keep, not at its
-		# real lon/lat where the HUD would hide it).
-		_etna_peak = keep + Vector2(-size.x * 0.02, -size.y * 0.30)
-		var lane_h: float = size.y * 0.118
+		keep = Vector2(size.x * 0.80, cy)
+		# Etna looms EAST of the keep, out past the last row — geography is
+		# abstracted in this mode, and the story reads west→east: you land on
+		# the western shore and march inland toward the volcano country. Beside
+		# the keep it also can never collide with a top-lane stop (its old
+		# above-the-gate seat sat right on lane 0).
+		_etna_peak = Vector2(size.x * 0.905, size.y * 0.315)
+		var lane_h: float = size.y * 0.100
 		for ri in range(total_rows):
 			for nd in act_map[ri]:
 				var gt: float = float(nd.row) / float(maxi(total_rows - 1, 1))
 				var gp := Vector2(lerpf(size.x * 0.17, keep.x, gt),
 					cy + (float(nd.col) - 3.0) * lane_h)
-				# Deterministic micro-jitter: unstiffens the grid, far too
-				# small (≤5px vs ~97px lane pitch) to reorder or cross a lane.
+				# Deterministic scatter: unstiffens the grid the way StS
+				# staggers its floors — ±8px x / ±7px y is ~10% of the
+				# ~84/100px pitches, organic to the eye but far too small to
+				# reorder or cross a lane. (Was ±5/±3 — the tighter jitter
+				# still read as a drafting board once the roads straightened.)
 				var gh: int = nd.row * 31 + nd.col * 47
-				gp += Vector2(fmod(float(gh * 13 + 5), 10.0) - 5.0,
-					fmod(float(gh * 7 + 3), 6.0) - 3.0)
+				gp += Vector2(fmod(float(gh * 13 + 5), 16.0) - 8.0,
+					fmod(float(gh * 7 + 3), 14.0) - 7.0)
 				if String(nd.type) == "boss":
 					gp = keep
 				entries.append({"pos": gp, "nd": nd})
@@ -863,11 +940,149 @@ func _read_run_map() -> void:
 	hi = hi.max(_camp_pos)
 	_island_center = (lo + hi) * 0.5
 	_island_rad = (hi - lo) * 0.5 + Vector2(120.0, 105.0)
+	if SIMPLE_BACKDROP:
+		_build_simple_coast()
+
+
+## SIMPLE_BACKDROP coastline — the island is drawn AROUND the campaign, not
+## the campaign squeezed onto real geography. A convex hull over every stop
+## (plus the camp and Etna's foot) is inflated into a rounded landmass and its
+## outline re-sampled with seeded noise into a hand-drawn, deckled coast — so
+## every stop stands on land BY CONSTRUCTION (the old fixed grid dropped whole
+## lanes into the sea) and each act's chart is its own stretch of country.
+## Deterministic per act (hash-free of open state): the mesh cache re-derives
+## an identical coast on every open and every bake clone.
+func _build_simple_coast() -> void:
+	if _nodes.is_empty():
+		return
+	var anchors := PackedVector2Array()
+	for nd in _nodes:
+		anchors.append(nd.pos)
+	anchors.append(_camp_pos)
+	# Etna's footprint — the volcano must stand on the same landmass.
+	anchors.append(_etna_peak + Vector2(-118.0, 62.0))
+	anchors.append(_etna_peak + Vector2(120.0, 68.0))
+	anchors.append(_etna_peak + Vector2(6.0, -44.0))
+	var hull := Geometry2D.convex_hull(anchors)
+	# +96 not +86: the smoothing passes below sag inward ~12px at the
+	# tightest rounded corners; the margin covers it so no stop ever sits
+	# closer than ~48px to the surf.
+	var grown: Array = Geometry2D.offset_polygon(hull, 96.0,
+		Geometry2D.JOIN_ROUND)
+	if grown.is_empty():
+		return   # degenerate field — keep the traced island
+	var base: PackedVector2Array = grown[0]
+	# Arc-length resample first.
+	var cum := PackedFloat32Array()
+	cum.append(0.0)
+	var total := 0.0
+	for i in range(1, base.size()):
+		total += base[i - 1].distance_to(base[i])
+		cum.append(total)
+	total += base[base.size() - 1].distance_to(base[0])
+	var closed := base.duplicate()
+	closed.append(base[0])
+	var ccum := cum.duplicate()
+	ccum.append(total)
+	var n_pts := maxi(int(total / 22.0), 32)
+	var pts := PackedVector2Array()
+	for k in range(n_pts):
+		pts.append(_route_arc_point(closed, ccum,
+			total * float(k) / float(n_pts)))
+	# Heavy smoothing: the inflated hull's corner arcs become LONG CONFIDENT
+	# CURVES — a drawn line, not a computed one. (Uniform-frequency wobble was
+	# the loudest "procedural" tell on the old coast.)
+	for _pass in range(3):
+		var sm := PackedVector2Array()
+		sm.resize(n_pts)
+		for i2 in range(n_pts):
+			sm[i2] = (pts[(i2 - 1 + n_pts) % n_pts] + pts[i2] * 2.0
+				+ pts[(i2 + 1) % n_pts]) / 4.0
+		pts = sm
+	# Then displacement the way a hand lays a coast: 3-5 broad headlands and
+	# bays (low-frequency swell) over a barely-there waviness. Noise sampled
+	# on a circle, so the loop closes with no seam-step.
+	var noise := FastNoiseLite.new()
+	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	noise.seed = 5207 + _act * 131
+	noise.frequency = 1.0
+	var cen := Vector2.ZERO
+	for v in pts:
+		cen += v
+	cen /= float(n_pts)
+	var out := PackedVector2Array()
+	for k2 in range(n_pts):
+		var th := TAU * float(k2) / float(n_pts)
+		var p := pts[k2]
+		var outward := (p - cen).normalized()
+		var swell: float = noise.get_noise_2d(cos(th) * 1.35 + 7.0,
+			sin(th) * 1.35) * 42.0
+		var wave: float = noise.get_noise_2d(cos(th) * 11.0 + 53.0,
+			sin(th) * 11.0) * 4.5
+		var d := maxf(swell + wave, -34.0)
+		var q := p + outward * d
+		# Clamped WELL inside the canvas: the island must stay on the pinned
+		# SHEET (inset 28 + deckle) with room for the waterline rings (+25).
+		out.append(Vector2(clampf(q.x, 60.0, size.x - 60.0),
+			clampf(q.y, 58.0, size.y - 58.0)))
+	_poly_sicily = out
+	# The sheet itself — the deckled paper rectangle the chart is drawn on,
+	# pinned to the war table. Rect inset 28, edges wobbled a hair (paper
+	# deckle, far quieter than the coastline's).
+	_sheet_poly = PackedVector2Array()
+	var ins := 28.0
+	var c0 := Vector2(ins, ins)
+	var c1 := Vector2(size.x - ins, ins)
+	var c2 := Vector2(size.x - ins, size.y - ins)
+	var c3 := Vector2(ins, size.y - ins)
+	var edges: Array = [[c0, c1], [c1, c2], [c2, c3], [c3, c0]]
+	var s_run := 0.0
+	for ed in edges:
+		var ea: Vector2 = ed[0]
+		var eb: Vector2 = ed[1]
+		var elen := ea.distance_to(eb)
+		var en := int(elen / 30.0)
+		var nrm := (eb - ea).normalized().orthogonal()
+		for kk in range(en):
+			var t := float(kk) / float(en)
+			var sp := ea.lerp(eb, t)
+			var wob: float = noise.get_noise_1d((s_run + t * elen) * 0.05
+				+ 731.0) * 4.5
+			_sheet_poly.append(sp + nrm * wob)
+		s_run += elen
+	_poly_calabria = PackedVector2Array()
+	# Two quiet decorative islets west of the landing — chart interest, never
+	# gameplay. The coast is generated, so each candidate is kept only when it
+	# clears the deckled outline with real water around it.
+	_isles = []
+	for cand in [[Vector2(size.x * 0.036, size.y * 0.150), 11.0],
+			[Vector2(size.x * 0.033, size.y * 0.800), 14.0]]:
+		var ip: Vector2 = cand[0]
+		var ir: float = cand[1]
+		if Geometry2D.is_point_in_polygon(ip, _poly_sicily):
+			continue
+		var clear := true
+		for pv2 in _poly_sicily:
+			if pv2.distance_to(ip) < ir + 34.0:
+				clear = false
+				break
+		if clear:
+			_isles.append({"pos": ip, "r": ir})
+	cen = Vector2.ZERO
+	for pv in _poly_sicily:
+		cen += pv
+	_sicily_centroid = cen / float(_poly_sicily.size())
 
 
 # ═══════════════════ MESH ═══════════════════
 
 func _build_mesh() -> void:
+	# Rebuild from empty: these are append-built, and a second cold build on
+	# a live instance (nothing does this today, but probes have) would double
+	# the mesh and desync every index-paired array after it.
+	_seed_pts = PackedVector2Array()
+	_polys = []
+	_nbrs = []
 	var w: float = size.x
 	var h: float = size.y
 	_gx = int(ceil(w / CELL)) + 2
@@ -1109,8 +1324,27 @@ func _dist_to_seg(p: Vector2, a: Vector2, b: Vector2) -> float:
 	return p.distance_to(a + ab * t)
 
 
+## Chaikin corner-cutting — turns a raw mesh-walk polyline into a confident
+## drawn stroke (endpoints pinned). Used for the river INK only; gameplay
+## reads (bridge detection, moisture) stay on the raw points.
+func _chaikin(pts: PackedVector2Array, passes: int) -> PackedVector2Array:
+	var cur := pts
+	for _p in range(passes):
+		if cur.size() < 3:
+			return cur
+		var out := PackedVector2Array()
+		out.append(cur[0])
+		for i in range(cur.size() - 1):
+			out.append(cur[i].lerp(cur[i + 1], 0.25))
+			out.append(cur[i].lerp(cur[i + 1], 0.75))
+		out.append(cur[cur.size() - 1])
+		cur = out
+	return cur
+
+
 func _carve_rivers() -> void:
 	# Two springs on high ground, each descending to the sea.
+	_rivers.clear()   # append-built — see _build_mesh
 	var count := _seed_pts.size()
 	var springs: Array[int] = []
 	var tries := 0
@@ -1139,13 +1373,25 @@ func _carve_rivers() -> void:
 			seen[cur] = true
 			# Lowest unvisited neighbour — allowed to climb out of local
 			# pits (the standard escape hack), the visited set stops loops.
+			# CORRIDOR REPULSION (2026-07-07): the journey carve makes the
+			# march corridor the island's lowland, so raw lowest-neighbour
+			# descent SNAKED RIVERS ALONG THE ROADS — at the 18-row density
+			# that read as scribble all over the chart. Descending on the
+			# DE-CARVED elevation (invert the 0.30+0.78·t carve factor from
+			# _assign_elevation) routes water as if the valley system never
+			# existed: it shoulders around the march country and crosses it
+			# briskly, transversally — which is exactly where bridges live.
 			var lowest := -1
 			var low_e := INF
 			for j in _nbrs[cur]:
 				if seen.has(j):
 					continue
-				if _elev[j] < low_e:
-					low_e = _elev[j]
+				var t_r := 1.0
+				if j < _road_d.size():
+					t_r = clampf(_road_d[j] / 95.0, 0.0, 1.0)
+				var cand_e: float = _elev[j] / (0.30 + 0.78 * t_r)
+				if cand_e < low_e:
+					low_e = cand_e
 					lowest = j
 			if lowest == -1:
 				break
@@ -1163,6 +1409,14 @@ func _carve_rivers() -> void:
 			continue
 		var ji: int = rv2.size() / 3
 		var join: Vector2 = rv2[ji]
+		# No tributaries in the march corridor — they're pure cosmetics, and
+		# at chart density a cosmetic squiggle beside the road reads as a
+		# broken road (2026-07-07).
+		var jd := INF
+		for ed2 in _edges:
+			jd = minf(jd, _dist_to_seg(join, ed2.a, ed2.b))
+		if jd < 110.0:
+			continue
 		var flow: Vector2 = (rv2[mini(ji + 1, rv2.size() - 1)]
 			- rv2[maxi(ji - 1, 0)]).normalized()
 		var perp: Vector2 = flow.orthogonal()
@@ -1307,18 +1561,93 @@ func _compute_hillshade() -> void:
 		_shade[i] = 1.0 + lit * strength * 0.50 + _elev[i] * 0.12
 
 
+## Stable dictionary key for a road station position (node/camp/keep) —
+## endpoint positions are exact floats shared by every leg touching the
+## station, so rounding to the pixel is collision-safe.
+func _station_key(p: Vector2) -> String:
+	return "%d_%d" % [int(round(p.x)), int(round(p.y))]
+
+
 func _build_roads() -> void:
 	# Roads bend toward low ground: of three candidate midpoints, take the
 	# lowest-elevation one, so paths visibly skirt hills instead of crossing.
+	_edge_curves.clear()   # append-built, index-paired with _edges
+	_bridges = []
 	if SIMPLE_BACKDROP:
-		# Clean chart: dead-straight links between grid stations — the whole
-		# point of the untangle. Sampled to 9 pts so the dash-stamp + march
-		# chevron walk the line exactly as they do the curved roads.
+		# Roads FLOW THROUGH the stations instead of elbowing at them — the
+		# single biggest "looks like other games" lever (StS trails, HoMM
+		# roads). Each station gets an average through-tangent (mean flow
+		# direction of every leg touching it); each leg is then a cubic
+		# Bezier whose handles leave/enter along those tangents, blended 35%
+		# toward the leg's own direction so wide fans (the camp spray) can't
+		# loop. A route running straight stays straight; a route turning at a
+		# stop takes a smooth S — the old polyline X-weave at merge/split
+		# stations read as tangled wire. A small seeded half-sine wobble
+		# (pure endpoint sin-hash, so every bake/cache re-derivation lays the
+		# identical curve) keeps flat runs hand-drawn. Dashes, bridges,
+		# glints, and the march all follow _edge_curves and inherit the
+		# shape for free. Bridge detection still runs (rivers are painted in
+		# this mode too): without it the whole bridge layer — planks, tooltip
+		# warnings, The Crossing event — silently never fired on the chart.
+		var tang := {}   # "x_y" station key → summed leg flow directions
+		for e0 in _edges:
+			var d0 := ((e0.b as Vector2) - (e0.a as Vector2)).normalized()
+			for ke in [e0.a, e0.b]:
+				var kk := _station_key(ke)
+				tang[kk] = (tang.get(kk, Vector2.ZERO) as Vector2) + d0
 		for e in _edges:
+			var a: Vector2 = e.a
+			var b: Vector2 = e.b
+			var seg_l := a.distance_to(b)
+			var dirn := (b - a).normalized()
+			var ta := (tang.get(_station_key(a), dirn) as Vector2).normalized()
+			var tb := (tang.get(_station_key(b), dirn) as Vector2).normalized()
+			ta = ta.lerp(dirn, 0.35).normalized()
+			tb = tb.lerp(dirn, 0.35).normalized()
+			# The camp fan (2026-07-07): three trails diverge from ONE point,
+			# so the summed station tangent is their average — every trail
+			# hooked sideways out of camp before bending back, and the dashed
+			# chains read as broken. Camp legs leave along their own chord,
+			# dead straight-tangented and wobble-free.
+			var is_camp_leg := a.distance_to(_camp_pos) < 1.0
+			if is_camp_leg:
+				ta = dirn
+				tb = dirn
+			var hl := minf(seg_l * 0.34, 70.0)
+			var p1 := a + ta * hl
+			var p2 := b - tb * hl
+			var hv := sin(a.x * 12.9898 + a.y * 78.233
+				+ b.x * 3.7 + b.y * 24.11) * 43758.5453
+			hv = hv - floor(hv)
+			var amp := 0.0
+			if seg_l > 90.0 and not is_camp_leg:
+				amp = clampf(seg_l * 0.022, 2.0, 6.0) * (1.0 if hv < 0.5 else -1.0)
+			var perp := dirn.orthogonal()
 			var sp := PackedVector2Array()
-			for i in range(9):
-				sp.append((e.a as Vector2).lerp(e.b as Vector2, float(i) / 8.0))
+			# Sample count follows leg length — the fixed 15 left ~23px facets
+			# on the long steep legs, and the dash stamping showed the corners.
+			var ns := clampi(int(seg_l / 16.0) + 1, 15, 27)
+			for i in range(ns):
+				var t := float(i) / float(ns - 1)
+				var omt := 1.0 - t
+				var bez: Vector2 = a * (omt * omt * omt) \
+					+ p1 * (3.0 * omt * omt * t) + p2 * (3.0 * omt * t * t) \
+					+ b * (t * t * t)
+				sp.append(bez + perp * amp * sin(PI * t))
 			_edge_curves.append(sp)
+			for k in range(1, sp.size() - 1):
+				var hit := false
+				for rv in _rivers:
+					for r in range(rv.size()):
+						if sp[k].distance_to(rv[r]) < 10.0:
+							hit = true
+							break
+					if hit:
+						break
+				if hit:
+					_bridges.append({"pos": sp[k],
+						"dirv": (sp[k + 1] - sp[k - 1]).normalized()})
+					break
 		return
 	for e in _edges:
 		var a: Vector2 = e.a
@@ -1502,6 +1831,7 @@ func _dodge_corridor(p: Vector2, clearance: float = 96.0) -> Vector2:
 
 
 func _place_labels() -> void:
+	_labels = []   # append-built — see _build_mesh
 	# Landmark names on the biggest terrain features — map furniture is half
 	# of what makes a game map read as a place. Descriptive common-noun names
 	# only (the lore bible forbids proper nouns for the world itself).
@@ -1658,10 +1988,13 @@ class PlateItem extends Control:
 		if map.bake_mode == "geo":
 			return   # geography-bake clone: no ink in the cached texture
 		if map.SIMPLE_BACKDROP:
-			# War-table chart: the parchment + inked coast are already down.
-			# Stamp ONLY Etna, the straight roads, the site chips and the
-			# camp/keep — no political dye, kingdom names, site labels or
-			# chart furniture (the "no clutter" read).
+			# War-table chart: the lit parchment + inked coast are already
+			# down. Stamp the quiet sea furniture, the claimed-land warmth,
+			# Etna, the straight roads, the site chips and the camp/keep —
+			# no political dye, kingdom names or site labels (the "no
+			# clutter" read).
+			map._draw_simple_furniture(self)
+			map._draw_claimed_glow(self)
 			map._draw_etna(self)
 			map._draw_routes(self)
 			map._draw_sites(self)
@@ -1684,42 +2017,301 @@ class PlateItem extends Control:
 		map._draw_furniture(self)
 
 
-## SIMPLE_BACKDROP geography — the calm war-table sheet. Flat parchment land
-## on a flat calm sea, a warm centre light pool, and a hairline inked coast.
-## No biome cells, no hillshade, no graticule, no rivers, no decorations — the
-## "no hex tiles / no clutter" read. Baked into _geo_tex exactly like the full
-## geography, so it costs nothing per frame; Etna + the route ink stamp over
-## it in PlateItem._draw.
-func _paint_simple_backdrop(tgt: CanvasItem) -> void:
-	# Muted slate sea (NOT near-black) — the enamel medallions are dark, so a
-	# void sea swallowed any stop that landed off the island; a light-slate sea
-	# keeps figure/ground with the warm land while letting dark tokens read.
-	var sea := Color(0.470, 0.492, 0.498)
-	var land := Color(0.742, 0.632, 0.440)
-	tgt.draw_rect(Rect2(Vector2.ZERO, size), sea)
-	if _poly_sicily.size() >= 3:
-		tgt.draw_colored_polygon(_poly_sicily, land)
-	if _poly_calabria.size() >= 3:
-		tgt.draw_colored_polygon(_poly_calabria, land)
+## SIMPLE_BACKDROP geography — the war-table sheet as a LIT PHYSICAL OBJECT,
+## not a flat fill: a dark sea frame falling off to the corners, the island a
+## warm parchment plate floating on it (cast shadow + waterline rings, the
+## antique-chart cut-paper read), per-cell tonal mottle + a lamplight pool at
+## the heart of the chart, and quiet engraved terrain marks (pines, peaks,
+## furrows) keyed to the SAME biome mesh the terrain tooltips read — the
+## country the intel names is the country the eye sees. Baked into _geo_tex
+## once per act, so all of it costs nothing per frame.
+func _paint_simple_backdrop(tgt: CanvasItem, count: int) -> void:
+	# STAGING: the chart is a physical object — a deckled parchment sheet
+	# pinned to the same dark war table Combat plays on, under the same lamp.
+	# One material world: wood beneath, paper above, ink on the paper. The
+	# water is PAPER (antique charts indicate sea with rings and ruling, not
+	# a colour) — the old saturated-teal sea was the last element living
+	# outside the sepia register.
+	var wood := Color(0.118, 0.088, 0.062)          # Combat's table brown
+	var paper_sea := Color(0.560, 0.482, 0.352)     # the wash the sea wears
+	var land := Color(0.752, 0.642, 0.452)
+	var ink_wash := Color(0.36, 0.28, 0.185)        # rings/graticule/furniture
+	var pool_c := Vector2(0.46, 0.50)   # lamplight centre, uv
+	# 1 — the table: seeded plank seams + long faint grain strokes. Only the
+	# margin shows at chart zoom, but that margin is what stages the object.
+	tgt.draw_rect(Rect2(Vector2.ZERO, size), wood)
+	var wrng := RandomNumberGenerator.new()
+	wrng.seed = 77 + _act
+	for sy in [0.18, 0.44, 0.68, 0.90]:
+		var yy: float = size.y * float(sy) + wrng.randf_range(-16.0, 16.0)
+		tgt.draw_line(Vector2(0, yy), Vector2(size.x, yy),
+			Color(0, 0, 0, 0.32), 1.6, true)
+		tgt.draw_line(Vector2(0, yy + 1.6), Vector2(size.x, yy + 1.6),
+			Color(0.36, 0.27, 0.18, 0.16), 1.0, true)
+	for _g in range(46):
+		var gy0 := wrng.randf_range(0.0, size.y)
+		var gx0 := wrng.randf_range(-80.0, size.x)
+		var gl := wrng.randf_range(90.0, 320.0)
+		tgt.draw_line(Vector2(gx0, gy0),
+			Vector2(gx0 + gl, gy0 + wrng.randf_range(-2.5, 2.5)),
+			Color(0, 0, 0, 0.055) if wrng.randf() < 0.6
+			else Color(0.42, 0.31, 0.20, 0.05), 1.0, true)
+	# 2 — the sheet: cast shadow onto the wood, then the paper. The shadow is
+	# what makes it an OBJECT and not a background.
+	if _sheet_poly.size() >= 3:
+		for shd in [[Vector2(9.0, 12.0), 0.26], [Vector2(4.0, 6.0), 0.28]]:
+			var sp0 := PackedVector2Array()
+			for v0 in _sheet_poly:
+				sp0.append(v0 + (shd[0] as Vector2))
+			tgt.draw_colored_polygon(sp0, Color(0, 0, 0, float(shd[1])))
+		tgt.draw_colored_polygon(_sheet_poly, paper_sea)
+	else:
+		tgt.draw_rect(Rect2(Vector2.ZERO, size), paper_sea)
+	var mottle := FastNoiseLite.new()
+	mottle.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	mottle.frequency = 0.010
+	mottle.fractal_octaves = 3
+	mottle.seed = 1771 + _act
+	# 3 — sea-wash cells: gentle mottle + vignette on the paper water, kept
+	# clear of the sheet edge so no ragged cell ever pokes onto the wood.
+	for i in range(count):
+		if _land[i] or _polys[i].size() < 3:
+			continue
+		if not _inside_sheet(_seed_pts[i], 17.0):
+			continue
+		var uv := _seed_pts[i] / size
+		# Anisotropic pool: x compressed / y stretched — the light is a BAND
+		# along the march corridor, serving the decision structure.
+		var dv := uv - pool_c
+		var d := Vector2(dv.x * 0.80, dv.y * 1.18).length()
+		var vg := 1.0 - smoothstep(0.28, 0.86, d) * 0.30
+		var mf := 1.0 + mottle.get_noise_2d(_seed_pts[i].x, _seed_pts[i].y) * 0.075
+		var sc := Color(paper_sea.r * vg * mf, paper_sea.g * vg * mf,
+			paper_sea.b * vg * mf)
+		var lift := (1.0 - smoothstep(0.0, 0.44, d)) * 0.06
+		if lift > 0.0:
+			sc = sc.lerp(Color(0.97, 0.88, 0.66), lift)
+		tgt.draw_colored_polygon(_polys[i], sc)
+	if _poly_sicily.size() < 3:
+		return
+	# 4 — graticule ruled over open water (charts rule the sea, not the land).
+	var grat := Color(ink_wash.r, ink_wash.g, ink_wash.b, 0.14)
+	var gx := 90.0
+	while gx < size.x:
+		_draw_sea_segments(tgt, Vector2(gx, 0), Vector2(gx, size.y), grat)
+		gx += 176.0
+	var gy := 70.0
+	while gy < size.y:
+		_draw_sea_segments(tgt, Vector2(0, gy), Vector2(size.x, gy), grat)
+		gy += 176.0
+	# 5 — a tight pigment pool at the coast (paint settling at the line), not
+	# an object shadow — the island is INK ON the sheet, not a separate cut.
+	var csp := PackedVector2Array()
+	for v in _poly_sicily:
+		csp.append(v + Vector2(2.5, 3.5))
+	tgt.draw_colored_polygon(csp, Color(0.22, 0.15, 0.08, 0.16))
+	# 6 — waterline rings fading seaward, the signature of engraved charts.
+	for ring_def in [[8.0, 0.34, 1.3], [16.0, 0.20, 1.1], [25.0, 0.11, 1.0]]:
+		var rings: Array = Geometry2D.offset_polygon(_poly_sicily,
+			float(ring_def[0]), Geometry2D.JOIN_ROUND)
+		for ring in rings:
+			var rl := (ring as PackedVector2Array).duplicate()
+			if rl.size() < 3:
+				continue
+			rl.append(rl[0])
+			tgt.draw_polyline(rl, Color(ink_wash.r, ink_wash.g, ink_wash.b,
+				float(ring_def[1])), float(ring_def[2]), true)
+	# 5 — the land plate: flat fill first (so ragged cell edges never show at
+	# the coast), then per-cell parchment mottle + the baked lamplight pool on
+	# cells comfortably inside the outline. Biomes tint the paper a whisper —
+	# enough that the woods read greener and the burn reads charred, never so
+	# much that it turns back into painted terrain.
+	# Pale shore rim first, then the interior tone — the outer ~14px of land
+	# reads as sand shelf under the coast ink (the classic engraved-chart
+	# beach rim; also hides any ragged cell edge at the coast).
+	tgt.draw_colored_polygon(_poly_sicily, Color(0.786, 0.682, 0.502))
+	var core: Array = Geometry2D.offset_polygon(_poly_sicily, -14.0,
+		Geometry2D.JOIN_ROUND)
+	for cpoly in core:
+		if (cpoly as PackedVector2Array).size() >= 3:
+			tgt.draw_colored_polygon(cpoly, land)
+	for i2 in range(count):
+		if not _land[i2] or _polys[i2].size() < 3:
+			continue
+		if not _inside_island(_seed_pts[i2], 13.0):
+			continue
+		var col := land
+		match _biome[i2]:
+			B_FOREST:
+				col = col.lerp(Color(0.560, 0.565, 0.360), 0.16)
+			B_SCORCH:
+				col = col.lerp(Color(0.340, 0.235, 0.165), 0.34)
+			B_ROCK, B_SNOW:
+				col = col.lerp(Color(0.585, 0.545, 0.470), 0.16)
+			B_HILLS:
+				col = col.lerp(Color(0.660, 0.520, 0.330), 0.10)
+		var mf2 := 1.0 + mottle.get_noise_2d(_seed_pts[i2].x,
+			_seed_pts[i2].y) * 0.075
+		col = Color(col.r * mf2, col.g * mf2, col.b * mf2)
+		# Settled road-country: the corridor lifts a touch toward pale packed
+		# earth, so the campaign's band reads warmer than the wilds.
+		if i2 < _road_d.size() and _road_d[i2] < 110.0:
+			col = col.lerp(Color(0.790, 0.690, 0.500),
+				(1.0 - _road_d[i2] / 110.0) * 0.30)
+		var uv2 := _seed_pts[i2] / size
+		var dv2 := uv2 - pool_c
+		var d2 := Vector2(dv2.x * 0.80, dv2.y * 1.18).length()
+		var vg2 := 1.0 - smoothstep(0.34, 0.80, d2) * 0.18
+		col = Color(col.r * vg2, col.g * vg2, col.b * vg2)
+		var lift2 := (1.0 - smoothstep(0.0, 0.50, d2)) * 0.15
+		if lift2 > 0.0:
+			col = col.lerp(Color(1.0, 0.94, 0.74), lift2)
+		tgt.draw_colored_polygon(_polys[i2], col)
+	# 5.5 — foxing: a few broad, faint age-stains soaked into the sheet.
+	# Rejection-sampled well inside the coast with a seeded rng, so every
+	# bake lays the same stains. Stacked discs keep the edges soft.
+	var frng := RandomNumberGenerator.new()
+	frng.seed = 3121 + _act * 41
+	var placed := 0
+	var attempts := 0
+	while placed < 5 and attempts < 60:
+		attempts += 1
+		var fp := Vector2(frng.randf_range(size.x * 0.08, size.x * 0.92),
+			frng.randf_range(size.y * 0.12, size.y * 0.88))
+		if not _inside_island(fp, 46.0):
+			continue
+		placed += 1
+		var fr := frng.randf_range(34.0, 78.0)
+		for fk in range(3):
+			tgt.draw_circle(fp + Vector2(frng.randf_range(-9.0, 9.0),
+				frng.randf_range(-7.0, 7.0)),
+				fr * (1.0 - float(fk) * 0.28),
+				Color(0.42, 0.30, 0.16, 0.028))
+	# 6 — rivers: thin engraved threads, widening downstream.
+	var rcol := Color(0.235, 0.350, 0.360, 0.72)
+	for rv in _rivers:
+		var wmax := minf(2.6, float(rv.size()) * 0.20)
+		for k in range(rv.size() - 1):
+			var t := float(k) / float(maxi(rv.size() - 1, 1))
+			tgt.draw_line(rv[k], rv[k + 1], rcol, 0.9 + t * wmax, true)
+	# 7 — engraved terrain marks off the biome mesh.
+	_draw_simple_marks(tgt, count)
+	# 8 — islets: painted in miniature with a single waterline ring.
+	var coast := Color(0.115, 0.085, 0.055, 0.82)
 	for isle in _isles:
-		tgt.draw_circle(isle.pos, float(isle.r), land)
-	# Warm centre lift — stacked translucent discs (cheap, baked once) so the
-	# heart of the chart glows and the rim falls to dark: the lit-sheet read
-	# without any per-cell shading.
-	var c := size * 0.47
-	for k in range(8):
-		var rr: float = lerpf(size.x * 0.55, size.x * 0.12, float(k) / 7.0)
-		tgt.draw_circle(c, rr, Color(0.92, 0.82, 0.60, 0.040))
-	# Hairline ink coast — a single quiet rule (no waterline rings/hachures).
-	var coast := Color(0.10, 0.075, 0.05, 0.70)
-	if _poly_sicily.size() >= 2:
-		var loop := _poly_sicily.duplicate()
-		loop.append(_poly_sicily[0])
-		tgt.draw_polyline(loop, coast, 2.4, true)
-	if _poly_calabria.size() >= 2:
-		tgt.draw_polyline(_poly_calabria, coast, 2.0, true)
-	for isle2 in _isles:
-		tgt.draw_arc(isle2.pos, float(isle2.r), 0, TAU, 18, coast, 1.5, true)
+		var ip: Vector2 = isle.pos
+		var ir := float(isle.r)
+		tgt.draw_circle(ip + Vector2(1.5, 2.2), ir, Color(0.22, 0.15, 0.08, 0.16))
+		tgt.draw_circle(ip, ir, land.darkened(0.06))
+		tgt.draw_arc(ip, ir + 6.0, 0, TAU, 22,
+			Color(ink_wash.r, ink_wash.g, ink_wash.b, 0.26), 1.1, true)
+		tgt.draw_arc(ip, ir, 0, TAU, 22, coast, 1.5, true)
+	# 9 — the coast ink: a firm engraved rule on the deckled outline, with a
+	# thin inner hairline (the double-ruled coast of old charts).
+	var loop := _poly_sicily.duplicate()
+	loop.append(_poly_sicily[0])
+	tgt.draw_polyline(loop, coast, 2.6, true)
+	var inner: Array = Geometry2D.offset_polygon(_poly_sicily, -5.0,
+		Geometry2D.JOIN_ROUND)
+	for ip2 in inner:
+		var il := (ip2 as PackedVector2Array).duplicate()
+		if il.size() < 3:
+			continue
+		il.append(il[0])
+		tgt.draw_polyline(il, Color(0.115, 0.085, 0.055, 0.30), 1.0, true)
+	# 10 — the sheet's own edge: a paper-thickness highlight up-left, a quiet
+	# ink rule, and four iron tacks pinning the chart to the table (the same
+	# aged-metal vocabulary as the medallion bezels).
+	if _sheet_poly.size() >= 3:
+		var srim := _sheet_poly.duplicate()
+		srim.append(_sheet_poly[0])
+		var srim_hi := PackedVector2Array()
+		for v2 in srim:
+			srim_hi.append(v2 + Vector2(-1.0, -1.0))
+		tgt.draw_polyline(srim_hi, Color(1.0, 0.96, 0.86, 0.20), 1.2, true)
+		tgt.draw_polyline(srim, Color(0.20, 0.14, 0.085, 0.55), 1.3, true)
+		for tc in [Vector2(46.0, 46.0), Vector2(size.x - 46.0, 46.0),
+				Vector2(46.0, size.y - 46.0),
+				Vector2(size.x - 46.0, size.y - 46.0)]:
+			tgt.draw_circle(tc + Vector2(1.6, 2.4), 5.2, Color(0, 0, 0, 0.35))
+			tgt.draw_circle(tc, 4.6, Color(0.09, 0.07, 0.05))
+			tgt.draw_circle(tc, 3.4, Color(0.46, 0.41, 0.34))
+			tgt.draw_arc(tc, 2.6, PI * 1.05, PI * 1.6, 8,
+				Color(0.82, 0.78, 0.68, 0.9), 1.3, true)
+
+
+## Engraved terrain symbols on the parchment — sparse, stroke-only, sepia ink:
+## pine stands in the woods, peak strokes on the high ground, hill humps,
+## furrowed fields along the settled road, ash flecks in the burn. Densities
+## run far below the painted-campaign mode — these are an engraver's marks on
+## a chart, not terrain art — and every mark keeps a cleared verge off the
+## roads and the surf so the campaign ink stays the loudest thing on the land.
+func _draw_simple_marks(tgt: CanvasItem, count: int) -> void:
+	var drng := RandomNumberGenerator.new()
+	drng.seed = 909 + _act * 17
+	var ink := Color(0.30, 0.235, 0.155, 0.55)
+	for i in range(count):
+		if not _land[i]:
+			continue
+		var p := _seed_pts[i]
+		if _road_d[i] < 46.0 or not _inside_island(p, 30.0):
+			continue
+		match _biome[i]:
+			B_FOREST:
+				if drng.randf() < 0.34:
+					for _t in range(1 if drng.randf() < 0.62 else 2):
+						var tp := p + Vector2(drng.randf_range(-8.0, 8.0),
+							drng.randf_range(-7.0, 7.0))
+						var s := drng.randf_range(3.2, 4.6)
+						# Engraved pine: trunk + two chevron tiers.
+						tgt.draw_line(tp + Vector2(0, s * 0.7),
+							tp + Vector2(0, s * 1.3), ink, 1.1, true)
+						tgt.draw_polyline(PackedVector2Array([
+							tp + Vector2(-s, s * 0.7), tp + Vector2(0, -s * 0.5),
+							tp + Vector2(s, s * 0.7)]), ink, 1.2, true)
+						tgt.draw_polyline(PackedVector2Array([
+							tp + Vector2(-s * 0.62, 0), tp + Vector2(0, -s * 1.3),
+							tp + Vector2(s * 0.62, 0)]), ink, 1.2, true)
+			B_ROCK, B_SNOW:
+				if drng.randf() < 0.26:
+					var pc := p + Vector2(drng.randf_range(-6.0, 6.0),
+						drng.randf_range(-5.0, 5.0))
+					var s2 := drng.randf_range(4.2, 6.8)
+					tgt.draw_polyline(PackedVector2Array([
+						pc + Vector2(-s2, s2 * 0.6), pc + Vector2(0, -s2),
+						pc + Vector2(s2, s2 * 0.6)]), ink, 1.3, true)
+					# Shade stroke down the east face.
+					tgt.draw_line(pc + Vector2(0, -s2),
+						pc + Vector2(s2 * 0.45, -s2 * 0.1),
+						Color(ink.r, ink.g, ink.b, 0.38), 1.1, true)
+			B_HILLS:
+				if drng.randf() < 0.13:
+					tgt.draw_arc(p, drng.randf_range(3.8, 5.6), PI + 0.15,
+						TAU - 0.15, 10, ink, 1.2, true)
+			B_SCORCH:
+				if drng.randf() < 0.16:
+					var ca := drng.randf_range(0.0, TAU)
+					var cv := Vector2(cos(ca), sin(ca))
+					var cp2 := p + Vector2(drng.randf_range(-6.0, 6.0),
+						drng.randf_range(-6.0, 6.0))
+					tgt.draw_line(cp2 - cv * drng.randf_range(2.5, 5.0),
+						cp2 + cv * drng.randf_range(2.5, 5.0),
+						Color(0.10, 0.055, 0.035, 0.50), 1.2, true)
+			B_GRASS:
+				if _road_d[i] > 60.0 and _road_d[i] < 185.0 \
+						and drng.randf() < 0.15:
+					# Furrowed fields along the settled road.
+					var fa := float((i * 7) % 4) * PI * 0.25
+					var ax := Vector2(cos(fa), sin(fa))
+					for fk in range(3):
+						var fp := p + ax.orthogonal() * (float(fk) - 1.0) * 3.8
+						tgt.draw_line(fp - ax * 5.0, fp + ax * 5.0,
+							Color(0.26, 0.20, 0.11, 0.13), 1.0, true)
+				elif drng.randf() < 0.05:
+					tgt.draw_circle(p + Vector2(drng.randf_range(-6.0, 6.0),
+						drng.randf_range(-5.0, 5.0)),
+						drng.randf_range(0.8, 1.3),
+						Color(0.24, 0.20, 0.11, 0.30))
 
 
 ## Geography — every layer that is constant for the act, baked once per act
@@ -1728,7 +2320,7 @@ func _paint_simple_backdrop(tgt: CanvasItem) -> void:
 ## which reads as a coherent realm rather than stickers over the wash.
 func _paint_geo(tgt: CanvasItem, count: int) -> void:
 	if SIMPLE_BACKDROP:
-		_paint_simple_backdrop(tgt)
+		_paint_simple_backdrop(tgt, count)
 		return
 	# 1 — ocean base (rect, then shallow/deep cells refine it).
 	tgt.draw_rect(Rect2(Vector2.ZERO, size), OCEAN_DEEP)
@@ -1832,13 +2424,18 @@ func _paint_geo(tgt: CanvasItem, count: int) -> void:
 				wrng.randf_range(-7.0, 7.0))
 			tgt.draw_arc(wp, wrng.randf_range(4.5, 7.5), PI + 0.45, TAU - 0.45,
 				8, Color(FOAM.r, FOAM.g, FOAM.b, 0.15), 1.1, true)
-	# 4 — rivers (smoothed, widening downstream; width scales with length
-	# so tributaries stay thin where they join).
+	# 4 — rivers (widening downstream; width scales with length so
+	# tributaries stay thin where they join). Two Chaikin passes turn the
+	# raw ~20px mesh-walk segments into one confident drawn stroke — the
+	# jagged cell-hop elbows were the loudest "broken chart" tell at the
+	# 18-row density (2026-07-07). Detection layers (bridges, moisture)
+	# keep reading the RAW _rivers points; only the ink smooths.
 	for rv in _rivers:
+		var sm := _chaikin(rv, 2)
 		var wmax := minf(3.4, float(rv.size()) * 0.22)
-		for k in range(rv.size() - 1):
-			var t := float(k) / float(maxi(rv.size() - 1, 1))
-			tgt.draw_line(rv[k], rv[k + 1], RIVER_COL, 1.2 + t * wmax, true)
+		for k in range(sm.size() - 1):
+			var t := float(k) / float(maxi(sm.size() - 1, 1))
+			tgt.draw_line(sm[k], sm[k + 1], RIVER_COL, 1.2 + t * wmax, true)
 	# 5 — terrain decorations (part of the geography bake).
 	_draw_decorations(tgt, count)
 	# 6 — the realms: all unclaimed Sicilian land wears its kingdom's dye,
@@ -2158,13 +2755,50 @@ func _draw_routes(tgt: CanvasItem) -> void:
 	# structure didn't read. Dark iron-gall casings under the dashes keep
 	# the ink alive on any biome (cartographic route casing).
 	var lightv := Vector2(-0.707, -0.707)
-	for pts in _edge_curves:
+	# Road hierarchy — quartermaster grammar: legs whose BOTH ends sit on the
+	# centre lane are the trunk road (the 3× merge bias parks most of the act
+	# there) and get a wider groove with a cased DOUBLE floor thread; branch
+	# legs keep the single thread. The act's structure — one main road, side
+	# loops — now reads in a single look. Endpoint test, not edge metadata:
+	# curve ends ARE the station positions (the bow only moves the middle).
+	# Tolerance 12px: node scatter is ±7 vertical, lane pitch ~100 — still
+	# unambiguous, only true centre-lane stops land inside it.
+	var lane_cy := size.y * 0.535
+	for ei in range(_edge_curves.size()):
+		var pts: PackedVector2Array = _edge_curves[ei]
+		var trunk: bool = pts.size() >= 2 \
+			and absf(pts[0].y - lane_cy) < 12.0 \
+			and absf(pts[pts.size() - 1].y - lane_cy) < 12.0
+		var wmul := 1.22 if trunk else 1.0
+		var network_alpha := 1.0
+		if ei < _edges.size():
+			var edge_state: Dictionary = _edges[ei]
+			var active: bool = bool(edge_state.to_avail) \
+				or (bool(edge_state.from_vis) and bool(edge_state.get("to_vis", false)))
+			if not active:
+				network_alpha = 0.58
+				wmul *= 0.90
 		tgt.draw_polyline(_offset_pts(pts, lightv * 1.9),
-			Color(0.020, 0.015, 0.010, 0.42), 5.2, true)
+			Color(0.020, 0.015, 0.010, 0.42 * network_alpha),
+			5.2 * wmul, true)
 		tgt.draw_polyline(_offset_pts(pts, lightv * -1.9),
-			Color(0.88, 0.80, 0.60, 0.22), 4.6, true)
-		tgt.draw_polyline(pts, Color(0.055, 0.045, 0.032, 0.72), 4.0, true)
-		tgt.draw_polyline(pts, Color(0.47, 0.395, 0.262, 0.80), 1.9, true)
+			Color(0.88, 0.80, 0.60, 0.22 * network_alpha),
+			4.6 * wmul, true)
+		tgt.draw_polyline(pts,
+			Color(0.055, 0.045, 0.032, 0.72 * network_alpha),
+			4.0 * wmul, true)
+		if trunk:
+			var pv := Vector2(0, 1.5)
+			tgt.draw_polyline(_offset_pts(pts, pv),
+				Color(0.47, 0.395, 0.262, 0.80 * network_alpha),
+				1.5, true)
+			tgt.draw_polyline(_offset_pts(pts, -pv),
+				Color(0.47, 0.395, 0.262, 0.80 * network_alpha),
+				1.5, true)
+		else:
+			tgt.draw_polyline(pts,
+				Color(0.47, 0.395, 0.262, 0.80 * network_alpha),
+				1.9, true)
 	# Campaign ink in a second pass so no groove ever carves through a
 	# neighbouring leg's dashes.
 	for ei in range(_edge_curves.size()):
@@ -2304,13 +2938,14 @@ func _route_arc_point(pts: PackedVector2Array, cum: PackedFloat32Array,
 
 func _draw_sea_segments(tgt: CanvasItem, a: Vector2, b: Vector2, col: Color) -> void:
 	# Rule a line in short dashes, skipping every dash whose midpoint falls
-	# on land — cheap clipping for the graticule.
+	# on land (or off the pinned sheet) — cheap clipping for the graticule.
 	var n := maxi(int(a.distance_to(b) / 22.0), 1)
 	for k in range(n):
 		var p0 := a.lerp(b, float(k) / float(n))
 		var p1 := a.lerp(b, (float(k) + 0.8) / float(n))
-		var ci := _cell_at((p0 + p1) * 0.5)
-		if ci >= 0 and not _land[ci]:
+		var mid := (p0 + p1) * 0.5
+		var ci := _cell_at(mid)
+		if ci >= 0 and not _land[ci] and _inside_sheet(mid, 12.0):
 			tgt.draw_line(p0, p1, col, 1.0, true)
 
 
@@ -2347,16 +2982,57 @@ const SITE_STYLE := {
 # tan=wayside. Shop was gold like treasure — split to green so they never
 # confuse.
 const SITE_MAT := {
+	# FIGHT (the commonest stop) and wayside stay quiet; the DECISION stops
+	# (rest/shop/event/treasure/recruit) wear brighter enamel — at chart zoom
+	# the old dark faces all collapsed into identical dark coins, and it's
+	# the rare stops popping that makes route-planning read at a glance.
 	"combat":   {"face": Color(0.46, 0.16, 0.12), "bezel": Color(0.37, 0.33, 0.30), "ink": Color(0.97, 0.92, 0.82)},
 	"elite":    {"face": Color(0.34, 0.10, 0.10), "bezel": Color(0.66, 0.49, 0.22), "ink": Color(1.00, 0.90, 0.58)},
-	"rest":     {"face": Color(0.47, 0.23, 0.10), "bezel": Color(0.70, 0.48, 0.25), "ink": Color(1.00, 0.80, 0.46)},
-	"shop":     {"face": Color(0.14, 0.31, 0.22), "bezel": Color(0.76, 0.59, 0.25), "ink": Color(0.84, 0.96, 0.80)},
-	"event":    {"face": Color(0.33, 0.19, 0.48), "bezel": Color(0.49, 0.45, 0.55), "ink": Color(0.95, 0.88, 1.00)},
-	"treasure": {"face": Color(0.36, 0.27, 0.09), "bezel": Color(0.88, 0.68, 0.28), "ink": Color(1.00, 0.92, 0.56)},
-	"recruit":  {"face": Color(0.13, 0.25, 0.38), "bezel": Color(0.53, 0.60, 0.68), "ink": Color(0.90, 0.95, 1.00)},
+	"rest":     {"face": Color(0.60, 0.31, 0.12), "bezel": Color(0.70, 0.48, 0.25), "ink": Color(1.00, 0.80, 0.46)},
+	"shop":     {"face": Color(0.16, 0.42, 0.27), "bezel": Color(0.76, 0.59, 0.25), "ink": Color(0.84, 0.96, 0.80)},
+	"event":    {"face": Color(0.42, 0.24, 0.60), "bezel": Color(0.49, 0.45, 0.55), "ink": Color(0.95, 0.88, 1.00)},
+	"treasure": {"face": Color(0.50, 0.38, 0.11), "bezel": Color(0.88, 0.68, 0.28), "ink": Color(1.00, 0.92, 0.56)},
+	"recruit":  {"face": Color(0.17, 0.33, 0.50), "bezel": Color(0.53, 0.60, 0.68), "ink": Color(0.90, 0.95, 1.00)},
 	"wayside":  {"face": Color(0.34, 0.30, 0.22), "bezel": Color(0.59, 0.51, 0.38), "ink": Color(0.96, 0.91, 0.78)},
 	"boss":     {"face": Color(0.35, 0.09, 0.08), "bezel": Color(0.64, 0.22, 0.15), "ink": Color(1.00, 0.86, 0.60)},
 }
+
+# Engraved site names printed at the tokens (antique charts label their own
+# symbols). These REPLACED the bottom legend band (2026-07-07 — the band was
+# one HUD too many): the key now sits at every unstruck stop, and the hover
+# tooltip carries the deeper intel (encounter, mutator, terrain, bridge).
+# "General" is the player-facing word for elite; waysides print their verb so
+# a Drill Yard reads different from a Cache without a key.
+const SITE_LABEL := {
+	"combat": "FIGHT", "elite": "GENERAL", "rest": "REST", "shop": "SHOP",
+	"event": "EVENT", "treasure": "TREASURE", "recruit": "RECRUIT",
+}
+const WAYSIDE_LABEL := {
+	"drill_yard": "DRILL YARD", "standard_bearer": "BANNER",
+	"supply_cache": "CACHE", "muster_scale": "SCALES",
+}
+
+
+func _site_label_text(typ: String, nd: Dictionary) -> String:
+	if typ == "wayside":
+		return String(WAYSIDE_LABEL.get(String(nd.get("wayside_id", "")),
+			"WAYSIDE"))
+	return String(SITE_LABEL.get(typ, ""))
+
+
+func _site_label_visible(typ: String, nd: Dictionary, open_now: bool) -> bool:
+	# The icons now carry most site identity, so labels become emphasis:
+	# reachable choices, high-value route planning stops, and named waysides.
+	# Hiding locked ordinary FIGHT/EVENT/RECRUIT text removes the map's worst
+	# clutter while the hover tooltip keeps the deep intel.
+	if open_now:
+		return true
+	if typ in ["elite", "rest", "shop", "treasure"]:
+		return true
+	if typ == "wayside":
+		var wid := String(nd.get("wayside_id", ""))
+		return wid in ["supply_cache", "drill_yard"]
+	return false
 
 
 func _draw_sites(tgt: CanvasItem) -> void:
@@ -2413,7 +3089,9 @@ func _draw_sites(tgt: CanvasItem) -> void:
 		elif open_now:
 			tgt.draw_arc(p, r + 0.6, 0, TAU, 36, PLAYER_AMBER, 2.8, true)
 		# Colour-blind-safe reachability cue (shape, not just colour): an open
-		# stop wears a "march here" chevron under it; a locked one an ink padlock.
+		# stop wears a "march here" chevron under it. Locked stops carry NO
+		# stamp — the old per-node padlock repeated 15-20× per act was pure
+		# noise; dimming + the missing ring/chevron already say "not yet".
 		if open_now:
 			var cy := p + Vector2(0, r + 11.0)
 			for dy in [0.0, 4.0]:
@@ -2421,28 +3099,23 @@ func _draw_sites(tgt: CanvasItem) -> void:
 					cy + Vector2(-6.2, 3.6 + dy), cy + Vector2(0, -1.8 + dy),
 					cy + Vector2(6.2, 3.6 + dy)]),
 					Color(0.10, 0.07, 0.05, 0.95), 2.1, true)
-		else:
-			var kp := p + Vector2(0, r + 9.0)
-			tgt.draw_rect(Rect2(kp + Vector2(-3.6, -0.6), Vector2(7.2, 5.6)),
-				Color(0.13, 0.10, 0.07, 0.85))
-			tgt.draw_arc(kp + Vector2(0, -0.6), 2.6, PI, TAU, 12,
-				Color(0.13, 0.10, 0.07, 0.85), 1.4, true)
 		# Type glyph as a bold outlined sticker, sized off the ACTUAL radius so
 		# reachable (bigger) stops also get a bigger, more legible symbol. The
 		# icon is the HERO — big and near-white so the SHAPE, not the frame,
 		# is what the eye lands on.
-		var ipx := r * 1.46
+		var ipx := r * 1.58
 		var gink: Color = (mat.ink as Color).lerp(Color(1.0, 1.0, 1.0), 0.34)
 		if not open_now:
 			gink = gink.darkened(0.06)
 			gink.a = 0.95
-		var drew_glyph := false
+		var drew_glyph := _draw_core_site_glyph(tgt, p, ipx * 0.52, gink, typ)
 		if typ == "wayside":
 			# Per-verb glyph, embossed by a dark underdraw then the light ink.
-			_draw_wayside_glyph(tgt, p + Vector2(1.0, 1.2), ipx * 0.5,
-				Color(0, 0, 0, 0.40), String(nd.get("wayside_id", "")))
-			drew_glyph = _draw_wayside_glyph(tgt, p, ipx * 0.5, gink,
-				String(nd.get("wayside_id", "")))
+			if not drew_glyph:
+				_draw_wayside_glyph(tgt, p + Vector2(1.0, 1.2), ipx * 0.5,
+					Color(0, 0, 0, 0.40), String(nd.get("wayside_id", "")))
+				drew_glyph = _draw_wayside_glyph(tgt, p, ipx * 0.5, gink,
+					String(nd.get("wayside_id", "")))
 		elif typ == "recruit":
 			# A "draft a card" glyph reads as a free draft far better than the
 			# old flag (a flag says nothing about taking a card).
@@ -2472,6 +3145,42 @@ func _draw_sites(tgt: CanvasItem) -> void:
 				fp + Vector2(0, -11.0), fp + Vector2(-8.5, -8.2),
 				fp + Vector2(0, -5.6)]),
 				Color(0.85, 0.25, 0.18, 0.95))
+		# The engraved site name under the token (see SITE_LABEL). Struck
+		# stops stay quiet (skipped above) and the keep has its own plaque.
+		# Deterministic — bakes into the plate ink like everything else here.
+		var ltxt: String = _site_label_text(typ, nd)
+		if ltxt != "" and _site_label_visible(typ, nd, open_now) \
+				and GameTheme.font_display != null:
+			var lsz := 11 if open_now else 10
+			var lcol := Color(0.94, 0.86, 0.66, 1.0) if open_now \
+				else Color(0.76, 0.68, 0.52, 0.92)
+			# Below the token by default; lane scatter can pull the next lane's
+			# stop within ~76px, so a crowded slot sets the name ABOVE instead
+			# (the mutator star and pursuit pennant hug the rim — a baseline at
+			# -(r+12) clears both).
+			var crowd := false
+			for qn in _nodes:
+				var q: Vector2 = qn.pos
+				# Window covers the 90px lane pitch + full scatter — a stack
+				# that misses by a hair leaves two labels piled in the same
+				# inter-node gap (the EVENT-over-CACHE read).
+				if q != p and absf(q.x - p.x) < 48.0 \
+						and q.y - p.y > 8.0 and q.y - p.y < 118.0:
+					crowd = true
+					break
+			var lbase: Vector2
+			if crowd:
+				lbase = p + Vector2(0.0, -(r + 12.0))
+			else:
+				lbase = p + Vector2(0.0, r + (30.0 if open_now else 20.0))
+			var lw := GameTheme.font_display.get_string_size(ltxt,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, lsz).x
+			var lpos := Vector2(lbase.x - lw * 0.5, lbase.y)
+			tgt.draw_string_outline(GameTheme.font_display, lpos, ltxt,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, lsz, 4,
+				Color(0.03, 0.025, 0.02, 0.88))
+			tgt.draw_string(GameTheme.font_display, lpos, ltxt,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, lsz, lcol)
 
 
 ## A site marker as an enamel-and-metal medallion pressed into the chart: soft
@@ -2482,6 +3191,12 @@ func _draw_medallion(tgt: CanvasItem, p: Vector2, r: float, mat: Dictionary,
 		open_now: bool) -> void:
 	var bezel: Color = mat.bezel
 	var face: Color = mat.face
+	# Pull the enamel chroma down a step so the tokens sit IN the sepia
+	# chart world — hue keeps the type coding, the drop stops them reading
+	# as candy stickers on the paper.
+	var fg := (face.r + face.g + face.b) / 3.0
+	face = Color(lerpf(face.r, fg, 0.16), lerpf(face.g, fg, 0.16),
+		lerpf(face.b, fg, 0.16))
 	if not open_now:
 		bezel = bezel.darkened(0.28)
 		face = face.darkened(0.20)
@@ -2490,15 +3205,17 @@ func _draw_medallion(tgt: CanvasItem, p: Vector2, r: float, mat: Dictionary,
 	tgt.draw_circle(p + Vector2(1.8, 2.8), r + 0.4, Color(0, 0, 0, 0.22))
 	# Dark keyline so the medallion crisps off the parchment.
 	tgt.draw_circle(p, r + 1.3, Color(0.06, 0.05, 0.04, 0.88))
-	# Bezel base, then the recessed enamel face.
+	# Bezel base, then the recessed enamel face. Bezel share thinned 0.19 →
+	# 0.14: at node radii the fat rim ate the enamel and every token read as
+	# a dark ring — the face (the type colour) is the payload, not the metal.
 	tgt.draw_circle(p, r, bezel)
-	var rf: float = r - maxf(2.6, r * 0.19)
+	var rf: float = r - maxf(2.2, r * 0.14)
 	tgt.draw_circle(p, rf, face)
 	# Ambient occlusion just inside the bezel (the face sits below the rim).
 	tgt.draw_arc(p, rf - 0.8, 0, TAU, 32, face.darkened(0.52), 2.2, true)
 	# Beveled rim: a bright lit arc top-left, a deep shadow arc bottom-right —
 	# the bevel is what sells "struck metal" over "flat ring".
-	var bw: float = maxf(2.4, r * 0.19)
+	var bw: float = maxf(2.0, r * 0.14)
 	var rb: float = r - bw * 0.5
 	tgt.draw_arc(p, rb, PI * 1.00, PI * 1.66, 24, bezel.lightened(0.58), bw, true)
 	tgt.draw_arc(p, rb, PI * 0.00, PI * 0.60, 24, bezel.darkened(0.50), bw, true)
@@ -2527,6 +3244,99 @@ func _draw_emboss_icon(tgt: CanvasItem, tex: Texture2D, p: Vector2,
 	tgt.draw_texture_rect(tex, Rect2(base, sz), false, ink)
 	tgt.draw_texture_rect(tex, Rect2(base + Vector2(-0.9, -1.0), sz), false,
 		Color(1.0, 1.0, 0.96, 0.16))
+
+
+func _draw_core_site_glyph(tgt: CanvasItem, c: Vector2, s: float,
+		ink: Color, typ: String) -> bool:
+	if typ not in ["combat", "elite", "rest", "shop", "treasure"]:
+		return false
+	var shadow := Color(0.05, 0.04, 0.03, 0.92)
+	_draw_core_site_glyph_shape(tgt, c + Vector2(1.2, 1.4), s, shadow, typ)
+	_draw_core_site_glyph_shape(tgt, c, s, ink, typ)
+	return true
+
+
+func _draw_core_site_glyph_shape(tgt: CanvasItem, c: Vector2, s: float,
+		ink: Color, typ: String) -> void:
+	var lw: float = maxf(2.0, s * 0.18)
+	match typ:
+		"combat":
+			# Crossed blades: one glance = fight, and much cleaner at 40px than
+			# the old detailed SVG pair.
+			for side in [-1.0, 1.0]:
+				var a := c + Vector2(-s * 0.56 * side, s * 0.58)
+				var b := c + Vector2(s * 0.54 * side, -s * 0.58)
+				tgt.draw_line(a, b, ink, lw, true)
+				var dir := (b - a).normalized()
+				var n := dir.orthogonal()
+				tgt.draw_line(a + dir * s * 0.30 - n * s * 0.20,
+					a + dir * s * 0.30 + n * s * 0.20, ink, lw * 0.72, true)
+				tgt.draw_circle(a - dir * s * 0.08, lw * 0.75, ink)
+		"elite":
+			# Crested war helm, not just another crossed-sword marker. Generals
+			# now read as command figures before the label is parsed.
+			var bowl := PackedVector2Array([
+				c + Vector2(-s * 0.68, s * 0.05),
+				c + Vector2(-s * 0.48, -s * 0.46),
+				c + Vector2(0, -s * 0.66),
+				c + Vector2(s * 0.48, -s * 0.46),
+				c + Vector2(s * 0.68, s * 0.05),
+				c + Vector2(s * 0.36, s * 0.50),
+				c + Vector2(-s * 0.36, s * 0.50),
+			])
+			tgt.draw_colored_polygon(bowl, ink)
+			tgt.draw_line(c + Vector2(0, -s * 0.74),
+				c + Vector2(0, s * 0.42), ink.darkened(0.35), lw * 0.60, true)
+			tgt.draw_line(c + Vector2(-s * 0.44, s * 0.03),
+				c + Vector2(s * 0.44, s * 0.03), ink.darkened(0.35), lw * 0.60, true)
+			tgt.draw_colored_polygon(PackedVector2Array([
+				c + Vector2(0, -s * 0.96), c + Vector2(s * 0.18, -s * 0.60),
+				c + Vector2(0, -s * 0.70), c + Vector2(-s * 0.18, -s * 0.60),
+			]), ink)
+		"rest":
+			# Fire over crossed logs.
+			tgt.draw_line(c + Vector2(-s * 0.64, s * 0.56),
+				c + Vector2(s * 0.58, s * 0.22), ink, lw, true)
+			tgt.draw_line(c + Vector2(s * 0.64, s * 0.56),
+				c + Vector2(-s * 0.58, s * 0.22), ink, lw, true)
+			tgt.draw_colored_polygon(PackedVector2Array([
+				c + Vector2(0, -s * 0.78), c + Vector2(s * 0.44, -s * 0.05),
+				c + Vector2(s * 0.20, s * 0.42), c + Vector2(0, s * 0.60),
+				c + Vector2(-s * 0.22, s * 0.34), c + Vector2(-s * 0.38, -s * 0.08),
+			]), ink)
+			tgt.draw_colored_polygon(PackedVector2Array([
+				c + Vector2(s * 0.04, -s * 0.38), c + Vector2(s * 0.19, s * 0.04),
+				c + Vector2(0, s * 0.34), c + Vector2(-s * 0.13, s * 0.04),
+			]), ink.darkened(0.30))
+		"shop":
+			# Market awning + counter.
+			var top := c + Vector2(0, -s * 0.42)
+			tgt.draw_rect(Rect2(c + Vector2(-s * 0.60, -s * 0.10),
+				Vector2(s * 1.20, s * 0.62)), ink, false, lw * 0.82)
+			tgt.draw_line(c + Vector2(-s * 0.64, s * 0.22),
+				c + Vector2(s * 0.64, s * 0.22), ink, lw * 0.82, true)
+			for i in range(3):
+				var x0 := -s * 0.60 + float(i) * s * 0.40
+				var strip := PackedVector2Array([
+					c + Vector2(x0, -s * 0.18), c + Vector2(x0 + s * 0.40, -s * 0.18),
+					c + Vector2(x0 + s * 0.32, top.y - c.y),
+					c + Vector2(x0 + s * 0.08, top.y - c.y),
+				])
+				tgt.draw_colored_polygon(strip, ink if i != 1 else ink.darkened(0.26))
+			tgt.draw_circle(c + Vector2(0, s * 0.10), s * 0.12, ink)
+		"treasure":
+			# Chest with a crown of coins.
+			var box := Rect2(c + Vector2(-s * 0.62, -s * 0.08),
+				Vector2(s * 1.24, s * 0.66))
+			tgt.draw_rect(box, ink, false, lw)
+			tgt.draw_arc(c + Vector2(0, -s * 0.08), s * 0.62,
+				PI, TAU, 18, ink, lw, true)
+			tgt.draw_line(c + Vector2(0, -s * 0.58),
+				c + Vector2(0, s * 0.58), ink, lw * 0.72, true)
+			tgt.draw_rect(Rect2(c + Vector2(-s * 0.12, s * 0.08),
+				Vector2(s * 0.24, s * 0.20)), ink)
+			for dx in [-0.42, 0.0, 0.42]:
+				tgt.draw_circle(c + Vector2(s * dx, -s * 0.66), s * 0.12, ink)
 
 
 ## A "draft a card" glyph for recruit stops — a small fan of two cards with a
@@ -2558,49 +3368,153 @@ func _draw_card_glyph(tgt: CanvasItem, c: Vector2, s: float, ink: Color) -> void
 ## meeting at a spine, dark-outlined with a few text lines; bolder and clearer
 ## at node size than the busy scroll silhouette. c centre, s half-extent.
 func _draw_event_glyph(tgt: CanvasItem, c: Vector2, s: float, ink: Color) -> void:
-	var oc := Color(0.05, 0.04, 0.03, 0.92)
-	var ow: float = maxf(1.6, s * 0.12)
-	var lp := PackedVector2Array([
-		c + Vector2(-s * 0.84, -s * 0.30), c + Vector2(-s * 0.04, -s * 0.44),
-		c + Vector2(-s * 0.04, s * 0.46), c + Vector2(-s * 0.84, s * 0.32)])
-	var rp := PackedVector2Array([
-		c + Vector2(s * 0.84, -s * 0.30), c + Vector2(s * 0.04, -s * 0.44),
-		c + Vector2(s * 0.04, s * 0.46), c + Vector2(s * 0.84, s * 0.32)])
-	tgt.draw_colored_polygon(lp, ink)
-	tgt.draw_colored_polygon(rp, (ink as Color).darkened(0.10))
-	var lpc := lp.duplicate(); lpc.append(lp[0])
-	var rpc := rp.duplicate(); rpc.append(rp[0])
-	tgt.draw_polyline(lpc, oc, ow, true)
-	tgt.draw_polyline(rpc, oc, ow, true)
-	tgt.draw_line(c + Vector2(0, -s * 0.44), c + Vector2(0, s * 0.46), oc, ow, true)
-	var tw: float = maxf(1.1, s * 0.07)
-	for yy in [-0.10, 0.10, 0.28]:
-		tgt.draw_line(c + Vector2(-s * 0.66, s * yy), c + Vector2(-s * 0.20, s * yy),
-			oc, tw, true)
-		tgt.draw_line(c + Vector2(s * 0.20, s * yy), c + Vector2(s * 0.66, s * yy),
-			oc, tw, true)
+	# A bold "?" — the genre signal every deckbuilder player already reads as
+	# "unknown story here". The old open-book silhouette smeared into a blob
+	# at node size; a single fat font glyph stays crisp. Dark outline first
+	# so the shape pops on any enamel, same contract as the sticker icons.
+	if GameTheme.font_display == null:
+		return
+	var fsz := int(round(s * 2.5))
+	var sw := GameTheme.font_display.get_string_size(
+		"?", HORIZONTAL_ALIGNMENT_CENTER, -1, fsz)
+	var pos := c + Vector2(-sw.x * 0.5, sw.y * 0.34)
+	tgt.draw_string_outline(GameTheme.font_display, pos, "?",
+		HORIZONTAL_ALIGNMENT_LEFT, -1, fsz, int(maxf(3.0, s * 0.30)),
+		Color(0.05, 0.04, 0.03, 0.92))
+	tgt.draw_string(GameTheme.font_display, pos, "?",
+		HORIZONTAL_ALIGNMENT_LEFT, -1, fsz, ink)
+
+
+## The conquest, visible as light: every claimed stop (and the landing camp)
+## holds a soft pool of your amber on the parchment, so the marched road
+## reads as country brought into the lamplight — territory without a single
+## political border. Ink-layer (per open): it follows the run, not the act.
+func _draw_claimed_glow(tgt: CanvasItem) -> void:
+	var pts: Array[Vector2] = [_camp_pos]
+	for nd in _nodes:
+		if bool(nd.vis):
+			pts.append(nd.pos as Vector2)
+	for p in pts:
+		tgt.draw_circle(p, 64.0, Color(PLAYER_AMBER.r, PLAYER_AMBER.g,
+			PLAYER_AMBER.b, 0.045))
+		tgt.draw_circle(p, 36.0, Color(PLAYER_AMBER.r, PLAYER_AMBER.g,
+			PLAYER_AMBER.b, 0.055))
+
+
+## Quiet chart furniture for the war-table mode — a compass rose and a tiny
+## fleet mark in the south-east sea (guaranteed open water: the coast hull
+## can never reach past the last row's SE diagonal). Enough to say "chart",
+## never enough to fight the campaign.
+func _draw_simple_furniture(tgt: CanvasItem) -> void:
+	var cp := Vector2(size.x * 0.945, size.y * 0.735)
+	var fcol := Color(0.36, 0.28, 0.185, 0.55)
+	tgt.draw_arc(cp, 24.0, 0, TAU, 40, fcol, 1.4, true)
+	tgt.draw_arc(cp, 18.5, 0, TAU, 40,
+		Color(fcol.r, fcol.g, fcol.b, 0.30), 1.0, true)
+	for k in range(8):
+		var ang := TAU * float(k) / 8.0
+		var lng: float = 22.0 if k % 2 == 0 else 11.0
+		tgt.draw_line(cp, cp + Vector2(cos(ang), sin(ang)) * lng,
+			Color(fcol.r, fcol.g, fcol.b, 0.58 if k % 2 == 0 else 0.32),
+			1.5 if k % 2 == 0 else 1.0, true)
+	tgt.draw_colored_polygon(PackedVector2Array([cp + Vector2(0, -24),
+		cp + Vector2(3.6, -7), cp + Vector2(-3.6, -7)]),
+		Color(0.55, 0.20, 0.12, 0.70))
+	if GameTheme.font_display != null:
+		tgt.draw_string(GameTheme.font_display, cp + Vector2(-7, -29), "N",
+			HORIZONTAL_ALIGNMENT_CENTER, 14, 12,
+			Color(0.36, 0.28, 0.185, 0.70))
+	# The landing fleet — two little inked sails riding the graticule.
+	var scol := Color(0.36, 0.28, 0.185, 0.60)
+	for sd in [[Vector2(size.x * 0.912, size.y * 0.880), 1.0],
+			[Vector2(size.x * 0.958, size.y * 0.905), 0.78]]:
+		var sp2: Vector2 = sd[0]
+		var sc: float = sd[1]
+		tgt.draw_arc(sp2, 9.0 * sc, 0.25, PI - 0.25, 12, scol, 1.6 * sc, true)
+		tgt.draw_line(sp2 + Vector2(0, 2.0 * sc), sp2 + Vector2(0, -11.0 * sc),
+			scol, 1.3 * sc, true)
+		tgt.draw_colored_polygon(PackedVector2Array([
+			sp2 + Vector2(0.8 * sc, -11.0 * sc),
+			sp2 + Vector2(7.5 * sc, -2.5 * sc),
+			sp2 + Vector2(0.8 * sc, -2.5 * sc)]),
+			Color(scol.r, scol.g, scol.b, 0.42))
 
 
 func _draw_etna(tgt: CanvasItem) -> void:
 	# The volcano — the act's villain rendered as geography. A cone with lit
 	# and shadowed faces, a glowing caldera, lava threads, and a smoke plume
-	# drifting north-east on the strait wind.
-	var apex := _etna_peak + Vector2(0, -34.0)
-	var bw := 96.0
-	var bh := 86.0
+	# drifting north-east on the strait wind. Sized to LOOM — it is the
+	# campaign's destination and the largest landform on the chart.
+	var apex := _etna_peak + Vector2(0, -42.0)
+	var bw := 112.0
+	var bh := 98.0
 	var bl := _etna_peak + Vector2(-bw, bh * 0.52)
 	var br_ := _etna_peak + Vector2(bw, bh * 0.58)
-	var bm := _etna_peak + Vector2(10.0, bh * 0.62)
-	tgt.draw_colored_polygon(PackedVector2Array([apex + Vector2(4, 5),
-		bl + Vector2(7, 8), br_ + Vector2(9, 8)]), Color(0, 0, 0, 0.30))
-	tgt.draw_colored_polygon(PackedVector2Array([apex, bl, bm]),
-		Color(0.245, 0.180, 0.140))            # lit west face
-	tgt.draw_colored_polygon(PackedVector2Array([apex, bm, br_]),
-		Color(0.108, 0.078, 0.066))            # shadowed east face
+	# Ash skirt — scorched ground fanning out from the foot, so the mountain
+	# grows out of burnt country instead of standing on clean parchment.
+	# Many faint steps: three strong discs printed as concentric rings.
+	for ai in range(7):
+		var ar := lerpf(86.0, 22.0, float(ai) / 6.0)
+		tgt.draw_circle(_etna_peak + Vector2(4.0, bh * 0.52), ar,
+			Color(0.16, 0.10, 0.07, 0.032))
+	var ink := Color(0.09, 0.065, 0.045, 0.92)
+	# Concave flanks — a volcano's slope eases out at the foot and steepens
+	# to the crater; the straight twin-triangle silhouette was the loudest
+	# "programmer art" tell on the plate. Both flanks sampled off the same
+	# power curve so the profile reads as one drawn line.
+	var prof := PackedVector2Array()
+	var steps := 8
+	for si in range(steps + 1):
+		var t := float(si) / float(steps)
+		prof.append(Vector2(apex.x - pow(1.0 - t, 1.42) * bw,
+			lerpf(bl.y, apex.y, t)))
+	for si2 in range(1, steps + 1):
+		var t2 := float(si2) / float(steps)
+		prof.append(Vector2(apex.x + pow(t2, 1.42) * bw,
+			lerpf(apex.y, br_.y, t2)))
+	# Cast shadow (SE, matching the medallions), then the lit body.
+	var shadow := PackedVector2Array()
+	for v in prof:
+		shadow.append(v + Vector2(6.0, 7.0))
+	tgt.draw_colored_polygon(shadow, Color(0, 0, 0, 0.20))
+	tgt.draw_colored_polygon(prof, Color(0.295, 0.225, 0.175))
+	# Shadow face: the east half, split down from the crater to a point ON
+	# the base chord (a free-floating split vertex poked below the outline).
+	var base_mid := bl.lerp(br_, 0.55)
+	var east := PackedVector2Array()
+	east.append(apex)
+	for si3 in range(1, steps + 1):
+		var t3 := float(si3) / float(steps)
+		east.append(Vector2(apex.x + pow(t3, 1.42) * bw,
+			lerpf(apex.y, br_.y, t3)))
+	east.append(base_mid)
+	tgt.draw_colored_polygon(east, Color(0.165, 0.120, 0.098))
+	# Engraved hatching down the shadow face — the chart's relief language.
+	for hk in range(4):
+		var ht := 0.22 + 0.19 * float(hk)
+		var top := Vector2(apex.x + pow(ht, 1.42) * bw * 0.30,
+			lerpf(apex.y, br_.y, ht) + 4.0)
+		var bot := Vector2(apex.x + pow(minf(ht + 0.30, 1.0), 1.42) * bw * 0.92,
+			lerpf(apex.y, br_.y, minf(ht + 0.34, 1.0)))
+		tgt.draw_line(top, bot, Color(ink.r, ink.g, ink.b, 0.45), 1.2, true)
+	# Ink outline over everything — the one line weight that makes the
+	# landform sit in the same engraving as the coast and the medallions.
+	var outline := prof.duplicate()
+	outline.append(prof[0])
+	tgt.draw_polyline(outline, ink, 2.2, true)
+	# Foot contours easing the cone into the land.
+	for fc in [[bw * 0.66, 0.30], [bw * 0.84, 0.18]]:
+		tgt.draw_arc(_etna_peak + Vector2(4.0, bh * 0.54), float(fc[0]),
+			PI + 0.5, TAU - 0.5, 20,
+			Color(ink.r, ink.g, ink.b, float(fc[1])), 1.1, true)
+	# Caldera: dark crater mouth ringed in ink, ember glow stacked soft.
 	tgt.draw_circle(apex + Vector2(0, 3), 26.0, Color(1.0, 0.42, 0.10, 0.10))
 	tgt.draw_circle(apex + Vector2(0, 2), 15.0, Color(1.0, 0.45, 0.12, 0.22))
 	tgt.draw_circle(apex, 6.5, Color(0.07, 0.04, 0.03))
+	tgt.draw_arc(apex, 6.5, 0, TAU, 20, ink, 1.4, true)
 	tgt.draw_circle(apex, 4.0, Color(1.0, 0.52, 0.14, 0.95))
+	# Lava threads in the route ink's casing convention: dark under, bright
+	# over — the same stroke grammar as the campaign dashes.
 	var lrng := RandomNumberGenerator.new()
 	lrng.seed = 666
 	for k in range(4):
@@ -2612,13 +3526,19 @@ func _draw_etna(tgt: CanvasItem) -> void:
 			lp += Vector2(dirx * lrng.randf_range(4.0, 9.0),
 				lrng.randf_range(7.0, 12.0))
 			run.append(lp)
-		tgt.draw_polyline(run, Color(0.95, 0.36, 0.10,
-			0.75 - float(k) * 0.12), 1.5, true)
-	var puffs := [[10.0, -18.0, 6.0, 0.40], [22.0, -34.0, 9.0, 0.32],
-		[37.0, -52.0, 12.5, 0.24], [55.0, -71.0, 16.5, 0.15]]
+		var la := 0.80 - float(k) * 0.12
+		tgt.draw_polyline(run, Color(0.06, 0.03, 0.02, la * 0.8), 2.8, true)
+		tgt.draw_polyline(run, Color(0.98, 0.40, 0.11, la), 1.4, true)
+	# Smoke: outlined puffs drifting NE — drawn objects, not soft sprites.
+	var puffs := [[10.0, -18.0, 6.0, 0.50], [22.0, -34.0, 9.0, 0.42],
+		[37.0, -52.0, 12.5, 0.32], [55.0, -71.0, 16.5, 0.20]]
 	for pf in puffs:
-		tgt.draw_circle(apex + Vector2(float(pf[0]), float(pf[1])),
-			float(pf[2]), Color(0.58, 0.55, 0.54, float(pf[3])))
+		var pc := apex + Vector2(float(pf[0]), float(pf[1]))
+		var pr := float(pf[2])
+		var pa := float(pf[3])
+		tgt.draw_circle(pc, pr, Color(0.62, 0.58, 0.55, pa))
+		tgt.draw_arc(pc, pr, PI * 0.55, PI * 2.35, 18,
+			Color(ink.r, ink.g, ink.b, pa * 0.55), 1.2, true)
 
 
 func _draw_keep(tgt: CanvasItem) -> void:
@@ -2629,70 +3549,143 @@ func _draw_keep(tgt: CanvasItem) -> void:
 	var kw := 70.0
 	var kh := 44.0
 	var base_y := kp.y + kh * 0.5
-	tgt.draw_circle(kp + Vector2(4, kh * 0.5), kw * 0.62, Color(0, 0, 0, 0.4))
+	# Kit materials: lit stone / shaded stone / the engraving ink — the keep
+	# is drawn with the same light and line as the medallions (its old flat
+	# near-black rectangles sat a fidelity tier below them).
+	var lit := Color(0.335, 0.290, 0.245)
+	var shade := Color(0.200, 0.165, 0.140)
+	var ink := Color(0.08, 0.06, 0.045)
+	tgt.draw_circle(kp + Vector2(5, kh * 0.55), kw * 0.60, Color(0, 0, 0, 0.20))
+	tgt.draw_circle(kp + Vector2(3, kh * 0.5), kw * 0.52, Color(0, 0, 0, 0.22))
+	# Central tower first (tallest, behind the wall), then the flankers.
+	for tdef in [[0.0, 1.45, 22.0], [-0.42, 0.92, 19.0], [0.42, 0.92, 19.0]]:
+		var toff: float = tdef[0]
+		var th: float = kh * float(tdef[1])
+		var tw: float = tdef[2]
+		var tower := Rect2(kp.x + kw * toff - tw * 0.5, base_y - th, tw, th)
+		tgt.draw_rect(tower, lit)
+		tgt.draw_rect(Rect2(tower.position.x + tower.size.x * 0.55,
+			tower.position.y, tower.size.x * 0.45, tower.size.y), shade)
+		# Tower cap crenellations.
+		for ck in range(3):
+			tgt.draw_rect(Rect2(tower.position.x + 1.0
+				+ float(ck) * (tw - 2.0) / 3.0, tower.position.y - 5.0,
+				(tw - 2.0) / 3.0 * 0.58, 5.0), lit if ck < 2 else shade)
+		tgt.draw_rect(tower, ink, false, 1.8)
+		# Arrow slit.
+		tgt.draw_rect(Rect2(tower.position.x + tw * 0.42,
+			tower.position.y + th * 0.30, 2.4, 7.0), ink)
+	# Curtain wall in front, lit face west and shaded return east.
 	var wall := Rect2(kp.x - kw * 0.5, base_y - kh * 0.62, kw, kh * 0.62)
-	tgt.draw_rect(wall, Color(0.16, 0.12, 0.10, 0.97))
-	tgt.draw_rect(wall, Color(0.04, 0.03, 0.03), false, 2.0)
+	tgt.draw_rect(wall, lit)
+	tgt.draw_rect(Rect2(wall.position.x + wall.size.x * 0.60, wall.position.y,
+		wall.size.x * 0.40, wall.size.y), shade)
 	var teeth := 6
 	for i in range(teeth):
 		var tx := wall.position.x + wall.size.x * float(i) / float(teeth)
-		tgt.draw_rect(Rect2(tx, wall.position.y - 6,
-			wall.size.x / float(teeth) * 0.55, 6),
-			Color(0.16, 0.12, 0.10, 0.97))
-	for tdef in [[-0.42, 0.9], [0.42, 0.9], [0.0, 1.45]]:
-		var toff: float = tdef[0]
-		var tscale: float = tdef[1]
-		var tw := 21.0
-		var th := kh * tscale
-		var tower := Rect2(kp.x + kw * toff - tw * 0.5, base_y - th, tw, th)
-		tgt.draw_rect(tower, Color(0.13, 0.10, 0.09, 0.98))
-		tgt.draw_rect(tower, Color(0.04, 0.03, 0.03), false, 2.0)
+		tgt.draw_rect(Rect2(tx, wall.position.y - 5.0,
+			wall.size.x / float(teeth) * 0.55, 5.0),
+			lit if i < 4 else shade)
+	tgt.draw_rect(wall, ink, false, 2.0)
+	tgt.draw_line(wall.position + Vector2(0, -5.0),
+		wall.position + Vector2(wall.size.x, -5.0),
+		Color(ink.r, ink.g, ink.b, 0.55), 1.0, true)
+	# The gate — a barred arch dead centre; this is the door the campaign
+	# marches to, so the keep should visibly HAVE one.
+	var gx := kp.x
+	var gw := 12.0
+	var gb := base_y
+	tgt.draw_rect(Rect2(gx - gw * 0.5, gb - 14.0, gw, 14.0),
+		Color(0.055, 0.04, 0.03))
+	tgt.draw_arc(Vector2(gx, gb - 14.0), gw * 0.5, PI, TAU, 12,
+		Color(0.055, 0.04, 0.03), 4.5, false)
+	tgt.draw_line(Vector2(gx, gb - 12.0), Vector2(gx, gb - 2.0),
+		Color(0.30, 0.24, 0.16, 0.8), 1.2, true)
 	# The pennant over the keep flies the rival lord's banner — the one spot
 	# on the plate where his color shows at full cloth strength (the political
 	# wash below is the same dye thinned). Crimson on legacy runs.
 	var banner := _banner_color()
-	var pole_top := Vector2(kp.x, base_y - kh * 1.45 - 24.0)
-	tgt.draw_line(Vector2(kp.x, base_y - kh * 1.45), pole_top,
-		Color(0.04, 0.03, 0.03), 2.0, true)
-	tgt.draw_colored_polygon(PackedVector2Array([pole_top,
-		pole_top + Vector2(28, 6), pole_top + Vector2(0, 13)]), banner)
-	tgt.draw_circle(Vector2(kp.x, base_y - 7), 4.5, Color(1.0, 0.55, 0.20, 0.9))
+	var pole_top := Vector2(kp.x, base_y - kh * 1.45 - 26.0)
+	tgt.draw_line(Vector2(kp.x, base_y - kh * 1.45), pole_top, ink, 2.0, true)
+	tgt.draw_circle(pole_top, 1.6, Color(0.92, 0.78, 0.42))
+	var flag := PackedVector2Array([pole_top,
+		pole_top + Vector2(30, 3.5), pole_top + Vector2(20, 8.5),
+		pole_top + Vector2(30, 13.5), pole_top + Vector2(0, 15)])
+	tgt.draw_colored_polygon(flag, banner)
+	var fol := flag.duplicate()
+	fol.append(flag[0])
+	tgt.draw_polyline(fol, Color(ink.r, ink.g, ink.b, 0.85), 1.2, true)
+	tgt.draw_circle(Vector2(kp.x - kw * 0.34, base_y - 4.0), 3.2,
+		Color(1.0, 0.55, 0.20, 0.85))
 	if _boss_name != "" and GameTheme.font_display != null:
 		# Each act's keep is a place before it is a fight: name the seat,
 		# then the holder. Common-noun names only (lore rule), one per leg —
 		# the passes, the grain country, the lava country.
 		var keep_names := ["THE PASS GATE", "THE GRANARY KEEP",
 			"THE CINDER SEAT"]
-		# Plaque bumped to 17px lines + a taller, slightly wider box so the keep
-		# name (and the lord beneath it) read as the act's destination.
-		var plaque := Rect2(kp.x - 108.0, base_y + 12.0, 216.0, 44.0)
+		# Plaque 17px lines; anchored slightly RIGHT of the keep so the rest-row
+		# stops (which approach from the west) never land under it — but no
+		# further east than the map's OPEN view can show. Both bounds are
+		# tight: the row-10 chips reach x ≈ .743·w + jitter8 + r23, and at the
+		# open zoom (1.10, MapView) the screen cuts the plate at size.x/1.10.
+		var plaque := Rect2(kp.x - 54.0, base_y + 16.0, 224.0, 44.0)
 		tgt.draw_rect(plaque, Color(0.05, 0.04, 0.035, 0.88))
 		tgt.draw_rect(plaque, Color(banner.r, banner.g, banner.b, 0.85),
 			false, 1.5)
 		var keep_lbl: String = keep_names[clampi(_act - 1, 0, 2)]
 		tgt.draw_string_outline(GameTheme.font_display,
-			Vector2(kp.x - 120.0, base_y + 29.0), keep_lbl,
-			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 17, 5, Color(0, 0, 0, 0.9))
+			Vector2(plaque.position.x, base_y + 33.0), keep_lbl,
+			HORIZONTAL_ALIGNMENT_CENTER, plaque.size.x, 17, 5,
+			Color(0, 0, 0, 0.9))
 		tgt.draw_string(GameTheme.font_display,
-			Vector2(kp.x - 120.0, base_y + 29.0), keep_lbl,
-			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 17,
+			Vector2(plaque.position.x, base_y + 33.0), keep_lbl,
+			HORIZONTAL_ALIGNMENT_CENTER, plaque.size.x, 17,
 			Color(0.83, 0.74, 0.58, 1.0))
 		tgt.draw_string_outline(GameTheme.font_display,
-			Vector2(kp.x - 120.0, base_y + 50.0), _boss_name,
-			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 17, 5, Color(0, 0, 0, 0.9))
+			Vector2(plaque.position.x, base_y + 54.0), _boss_name,
+			HORIZONTAL_ALIGNMENT_CENTER, plaque.size.x, 17, 5,
+			Color(0, 0, 0, 0.9))
 		tgt.draw_string(GameTheme.font_display,
-			Vector2(kp.x - 120.0, base_y + 50.0), _boss_name,
-			HORIZONTAL_ALIGNMENT_CENTER, 240.0, 17, Color(0.95, 0.84, 0.66))
+			Vector2(plaque.position.x, base_y + 54.0), _boss_name,
+			HORIZONTAL_ALIGNMENT_CENTER, plaque.size.x, 17,
+			Color(0.95, 0.84, 0.66))
 
 
 func _draw_camp(tgt: CanvasItem) -> void:
+	# The landing camp: a main tent flanked by a smaller one and a cookfire —
+	# a place the army lives in, not a bare survey triangle.
 	var camp := _camp_pos
-	tgt.draw_colored_polygon(PackedVector2Array([camp + Vector2(-18, 11),
-		camp + Vector2(0, -14), camp + Vector2(18, 11)]),
-		Color(0.30, 0.24, 0.16, 0.96))
-	tgt.draw_polyline(PackedVector2Array([camp + Vector2(-18, 11),
-		camp + Vector2(0, -14), camp + Vector2(18, 11),
-		camp + Vector2(-18, 11)]), Color(0.05, 0.04, 0.03), 1.8, true)
+	var canvas_c := Color(0.38, 0.31, 0.21, 0.96)
+	var ink := Color(0.05, 0.04, 0.03)
+	# Ground shadow.
+	tgt.draw_circle(camp + Vector2(2, 9), 20.0, Color(0, 0, 0, 0.14))
+	# Main tent (lit face west, shaded face east — the plate's NW light).
+	var apex := camp + Vector2(0, -15)
+	tgt.draw_colored_polygon(PackedVector2Array([apex,
+		camp + Vector2(-16, 10), camp + Vector2(2, 10)]), canvas_c)
+	tgt.draw_colored_polygon(PackedVector2Array([apex,
+		camp + Vector2(2, 10), camp + Vector2(16, 10)]),
+		canvas_c.darkened(0.30))
+	tgt.draw_polyline(PackedVector2Array([camp + Vector2(-16, 10), apex,
+		camp + Vector2(16, 10), camp + Vector2(-16, 10)]), ink, 1.6, true)
+	tgt.draw_line(apex, camp + Vector2(2, 10), ink, 1.0, true)
+	# Door flap.
+	tgt.draw_colored_polygon(PackedVector2Array([camp + Vector2(-4, 10),
+		camp + Vector2(0, -1), camp + Vector2(4, 10)]),
+		Color(0.10, 0.075, 0.05, 0.9))
+	# Small tent behind-left.
+	var s_apex := camp + Vector2(-22, -2)
+	tgt.draw_colored_polygon(PackedVector2Array([s_apex,
+		camp + Vector2(-31, 9), camp + Vector2(-13, 9)]),
+		canvas_c.darkened(0.14))
+	tgt.draw_polyline(PackedVector2Array([camp + Vector2(-31, 9), s_apex,
+		camp + Vector2(-13, 9), camp + Vector2(-31, 9)]), ink, 1.3, true)
+	# Cookfire east of the door — a warm ember the pulse overlay echoes.
+	var fp := camp + Vector2(14, 3)
+	tgt.draw_circle(fp, 5.0, Color(1.0, 0.55, 0.18, 0.22))
+	tgt.draw_circle(fp, 2.2, Color(1.0, 0.62, 0.22, 0.85))
+	tgt.draw_line(fp + Vector2(-3.4, 2.6), fp + Vector2(3.4, 1.4), ink, 1.2, true)
+	tgt.draw_line(fp + Vector2(-3.0, 1.2), fp + Vector2(3.0, 2.8), ink, 1.2, true)
 	if GameTheme.font_display != null:
 		tgt.draw_string_outline(GameTheme.font_display, camp + Vector2(-75, 35),
 			"YOUR CAMP", HORIZONTAL_ALIGNMENT_CENTER, 150, 17, 5,
@@ -2747,184 +3740,109 @@ func _draw_ui() -> void:
 		if GameTheme.font_title != null else GameTheme.font_display
 	if title_font == null:
 		return
+	# Lamplight vignette — a LIVE full-rect radial falling to dark at the
+	# corners (the bake path flattens alpha; the live path composites fine).
+	# This is the Inscryption move: the table is lit by one lamp, and the
+	# screen's value structure is designed around it. Drawn under the HUD
+	# bands, over the plate + paper layers.
+	if _vignette_tex == null:
+		var vgrad := Gradient.new()
+		vgrad.set_color(0, Color(0, 0, 0, 0.0))
+		vgrad.set_color(1, Color(0, 0, 0, 0.30))
+		vgrad.add_point(0.62, Color(0, 0, 0, 0.0))
+		_vignette_tex = GradientTexture2D.new()
+		_vignette_tex.gradient = vgrad
+		_vignette_tex.width = 512
+		_vignette_tex.height = 288
+		_vignette_tex.fill = GradientTexture2D.FILL_RADIAL
+		_vignette_tex.fill_from = Vector2(0.5, 0.47)
+		_vignette_tex.fill_to = Vector2(1.04, 0.47)
+	draw_texture_rect(_vignette_tex, Rect2(Vector2.ZERO, size), false)
 	var numerals := ["I", "II", "III"]
 	var act_n: String = numerals[clampi(RunState.get_act() - 1, 0, 2)]
-	var band_w := 560.0
-	var band := Rect2(w * 0.5 - band_w * 0.5, 34, band_w, 54)
+	if GameTheme.font_display == null:
+		return
+	# THE TITLE CARTOUCHE — docked in the NW sea corner, the way real charts
+	# set their title box IN the water, not floated over the geography. The
+	# old top-center stack (title band + sub-line + MapView's standing-order
+	# chip + tally = four lines of floating text) pushed the top lane down
+	# and read as clutter; one left-aligned corner panel now carries all of
+	# it: act title, march line, and the standing order + province tally as
+	# a single line. MapView's separate gate chip is retired.
+	# The march label ("THE FIRST MARCH") duplicates the act line above it, so
+	# when a rival faction is named the enemy IS the informative sub-line — drop
+	# the redundant march prefix and just name who the army marches against.
+	var marches := ["THE FIRST MARCH", "THE SECOND MARCH", "THE LAST MARCH"]
+	var sub: String
+	if _faction_name != "":
+		sub = "AGAINST " + _faction_name
+	else:
+		sub = marches[clampi(RunState.get_act() - 1, 0, 2)]
+	var sub_col := Color(0.92, 0.80, 0.58, 1.0)
+	if _faction_name != "":
+		var bn := _banner_color()
+		sub_col = Color(bn.r, bn.g, bn.b, 1.0).lerp(sub_col, 0.40)
+	# Standing order + tally, one line, urgency-tinted like the old chip.
+	var holds_left: int = maxi(
+		RunState.HOLDS_TO_OPEN_LORD - RunState.holds_broken_in_act, 0)
+	var owned := 0
+	for nd0 in _nodes:
+		if bool(nd0.vis):
+			owned += 1
+	var order_txt: String
+	var order_col: Color
+	if RunState.is_lord_gate_open():
+		order_txt = "The keep road is open — march on the lord"
+		order_col = Color(0.96, 0.84, 0.46)
+	else:
+		order_txt = "Break %d more %s to open the keep road" % [holds_left,
+			"hold" if holds_left == 1 else "holds"]
+		order_col = Color(0.92, 0.55, 0.42)
+	order_txt += "  ·  %d / %d provinces" % [owned, _nodes.size()]
+	var title_txt := "ACT %s  ·  THE BURNING ISLE" % act_n
+	var title_sz := 22
+	var sub_sz := 13
+	var order_sz := 15
+	var sub_txt := _letterspace(sub)
+	if GameTheme.font_display.get_string_size(sub_txt,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, sub_sz).x > 452.0:
+		sub_txt = sub   # longest kingdom names drop the letterspacing
+	var line_ws := [
+		title_font.get_string_size(title_txt,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, title_sz).x,
+		GameTheme.font_display.get_string_size(sub_txt,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, sub_sz).x,
+		GameTheme.font_display.get_string_size(order_txt,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, order_sz).x]
+	var inner_w := 0.0
+	for lw in line_ws:
+		inner_w = maxf(inner_w, float(lw))
+	# x=118 docks the cartouche to the same left rail as MapView's resource
+	# band above it (one aligned column in the corner); y=73 leaves the same
+	# 8px breath under the band (bottom y=65) that spaces the row's elements.
+	var band := Rect2(118.0, 73.0, clampf(inner_w + 32.0, 300.0, 520.0), 96.0)
 	draw_rect(band, Color(0.045, 0.04, 0.035, 0.86))
 	draw_rect(band, Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b,
 		0.55), false, 1.5)
-	# Cartouche: double rule + diamond finials, like a real chart title box.
 	draw_rect(band.grow(-4.0), Color(PLAYER_AMBER.r, PLAYER_AMBER.g,
-		PLAYER_AMBER.b, 0.26), false, 1.0)
-	for fs in [-1.0, 1.0]:
-		var fc := Vector2(w * 0.5 + fs * (band_w * 0.5 + 13.0),
-			band.position.y + band.size.y * 0.5)
-		draw_colored_polygon(PackedVector2Array([fc + Vector2(0, -5),
-			fc + Vector2(5, 0), fc + Vector2(0, 5), fc + Vector2(-5, 0)]),
-			Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b, 0.55))
-	draw_string(title_font, Vector2(band.position.x, band.position.y + 36),
-		"ACT %s  ·  THE BURNING ISLE" % act_n,
-		HORIZONTAL_ALIGNMENT_CENTER, band_w, 25, Color(0.90, 0.80, 0.60))
-	var owned := 0
-	for nd in _nodes:
-		if bool(nd.vis):
-			owned += 1
-	if GameTheme.font_display != null:
-		# Per-act campaign name — three sieges, three campaigns. On conquest
-		# runs the line also names the kingdom marched against, set in a hint
-		# of the rival's banner dye: THE FIRST MARCH · AGAINST THE LAST WALL.
-		var marches := ["THE FIRST MARCH", "THE SECOND MARCH",
-			"THE LAST MARCH"]
-		var sub: String = marches[clampi(RunState.get_act() - 1, 0, 2)]
-		if _faction_name != "":
-			sub += " · AGAINST " + _faction_name
-		# Sub-line + tally bumped to 20px with a real dark outline: they sit
-		# BELOW the cartouche band, over open terrain, where the old un-outlined
-		# 18px tan washed out (the "still too small" report).
-		var sub_sz := 20
-		var sub_txt := _letterspace(sub)
-		if GameTheme.font_display.get_string_size(sub_txt,
-				HORIZONTAL_ALIGNMENT_CENTER, -1, sub_sz).x > band_w - 20.0:
-			sub_txt = sub   # longest kingdom names drop the letterspacing
-		var sub_col := Color(0.92, 0.80, 0.58, 1.0)
-		if _faction_name != "":
-			var bn := _banner_color()
-			sub_col = Color(bn.r, bn.g, bn.b, 1.0).lerp(sub_col, 0.40)
-		draw_string_outline(GameTheme.font_display,
-			Vector2(band.position.x, band.position.y + 74),
-			sub_txt, HORIZONTAL_ALIGNMENT_CENTER, band_w, sub_sz, 5,
-			Color(0, 0, 0, 0.9))
-		draw_string(GameTheme.font_display,
-			Vector2(band.position.x, band.position.y + 74),
-			sub_txt, HORIZONTAL_ALIGNMENT_CENTER, band_w, sub_sz, sub_col)
-		# Province tally — a quiet "how much of the chart is yours" read. The
-		# gate objective (break holds → open the road) is NOT repeated here: it
-		# lives in MapView's standing-order banner just below, so the plate and
-		# the HUD never echo the same fact.
-		draw_string_outline(GameTheme.font_display,
-			Vector2(band.position.x, band.position.y + 96),
-			"PROVINCES CLAIMED  %d / %d" % [owned, _nodes.size()],
-			HORIZONTAL_ALIGNMENT_CENTER, band_w, 20, 5, Color(0, 0, 0, 0.9))
-		draw_string(GameTheme.font_display,
-			Vector2(band.position.x, band.position.y + 96),
-			"PROVINCES CLAIMED  %d / %d" % [owned, _nodes.size()],
-			HORIZONTAL_ALIGNMENT_CENTER, band_w, 20, Color(0.90, 0.80, 0.60, 1.0))
-	if GameTheme.font_display == null:
-		return
-	# Legend lists only the site types actually on this act's map (treasure
-	# is a 5% roll — most acts shouldn't advertise it). Each entry is
-	# [type, LABEL, wayside_id] — wayside_id is "" except for the four
-	# roadside verbs, which now print their own glyph + name so the player
-	# can tell a Drill Yard from a Supply Cache at a glance. The qualifier
-	# clauses (Recruit "free draft" vs Shop "spend gold") settle the most
-	# confused pair from the clarity audit.
-	var present := {}
-	var waysides_present := {}
-	for nd2 in _nodes:
-		present[String(nd2.type)] = true
-		if String(nd2.type) == "wayside":
-			waysides_present[String(nd2.get("wayside_id", ""))] = true
-	var items: Array = []
-	for it0 in [["combat", "FIGHT", ""], ["elite", "GENERAL", ""],
-			["boss", "THE KEEP", ""],
-			["rest", "REST", ""], ["shop", "SHOP · spend gold", ""],
-			["event", "EVENT", ""], ["treasure", "TREASURE", ""],
-			["recruit", "RECRUIT · free draft", ""]]:
-		if present.has(it0[0]):
-			items.append(it0)
-	# The four roadside verbs, each with its own glyph + short name.
-	for wv in [["drill_yard", "DRILL YARD"], ["muster_scale", "SCALES"],
-			["standard_bearer", "BANNER"], ["supply_cache", "CACHE"]]:
-		if waysides_present.has(wv[0]):
-			items.append(["wayside", wv[1], wv[0]])
-	# Legend sizing bumped for the "still too small" report: 18px labels, 12px
-	# chip discs, 16px glyphs. Variable label widths (the qualified Recruit/Shop
-	# entries need more room than a bare "REST"); pack each item to its own
-	# measured stride so nothing collides, then wrap to a second row on overflow.
-	var leg_sz := 18
-	var chip_r := 12.0
-	var chip_col := 34.0   # horizontal space the chip + its padding owns
-	var strides: Array = []
-	for it in items:
-		var tw := GameTheme.font_display.get_string_size(
-			String(it[1]), HORIZONTAL_ALIGNMENT_LEFT, -1, leg_sz).x
-		var stride := chip_col + tw + 26.0   # chip + label + gap
-		strides.append(stride)
-	# Choose a row split so neither row exceeds the canvas; the legend lives
-	# on the sea, so keep a comfortable margin.
-	var max_row_w := w - 80.0
-	var rows: Array = [[]]            # each row = Array of item indices
-	var row_w: Array = [0.0]
-	for i in range(items.size()):
-		var sd: float = strides[i]
-		if row_w[row_w.size() - 1] + sd > max_row_w and not rows[rows.size() - 1].is_empty():
-			rows.append([])
-			row_w.append(0.0)
-		rows[rows.size() - 1].append(i)
-		row_w[row_w.size() - 1] += sd
-	var row_h := 34.0
-	var base_y := h - 26.0 - float(rows.size()) * row_h
-	# A stronger ink band seats the legend on the sea and keeps the labels
-	# legible — the old 0.45 wash let the busy coastline bleed through them.
-	var band_w2 := 0.0
-	for rw0 in row_w:
-		band_w2 = maxf(band_w2, float(rw0))
-	var band_x := w * 0.5 - band_w2 * 0.5
-	draw_rect(Rect2(band_x - 22, base_y - 18, band_w2 + 44,
-		float(rows.size()) * row_h + 14), Color(0.03, 0.03, 0.035, 0.74))
-	draw_rect(Rect2(band_x - 22, base_y - 18, band_w2 + 44,
-		float(rows.size()) * row_h + 14),
-		Color(0.55, 0.48, 0.36, 0.30), false, 1.0)
-	for ri in range(rows.size()):
-		var lx := w * 0.5 - float(row_w[ri]) * 0.5
-		var ly := base_y + float(ri) * row_h + row_h * 0.5
-		for idx in rows[ri]:
-			var it: Array = items[idx]
-			# Miniature of the real site medallion — the legend previews
-			# exactly the struck token the player meets on the road.
-			var mat: Dictionary = SITE_MAT.get(it[0], SITE_MAT["wayside"])
-			var lc := Vector2(lx + chip_r, ly)
-			_draw_medallion(self, lc, chip_r, mat, true)
-			if it[0] == "elite":
-				draw_arc(lc, chip_r + 0.5, 0, TAU, 28,
-					Color(CRIMSON.r, CRIMSON.g, CRIMSON.b, 0.95), 2.0, true)
-			var glyph_ink: Color = (mat.ink as Color).lerp(Color(1.0, 1.0, 1.0), 0.34)
-			var drew := false
-			if it[0] == "wayside":
-				_draw_wayside_glyph(self, lc + Vector2(0.7, 0.9), chip_r * 0.86,
-					Color(0, 0, 0, 0.40), String(it[2]))
-				drew = _draw_wayside_glyph(self, lc, chip_r * 0.86, glyph_ink,
-					String(it[2]))
-			elif it[0] == "recruit":
-				_draw_card_glyph(self, lc, chip_r * 0.86, glyph_ink)
-				drew = true
-			elif it[0] == "event":
-				_draw_event_glyph(self, lc, chip_r * 0.86, glyph_ink)
-				drew = true
-			if not drew:
-				var tex: Texture2D = _node_icon(it[0])
-				if tex != null:
-					_draw_emboss_icon(self, tex, lc, chip_r * 1.55, glyph_ink)
-			draw_string_outline(GameTheme.font_display,
-				Vector2(lx + chip_col, ly + leg_sz * 0.36),
-				String(it[1]), HORIZONTAL_ALIGNMENT_LEFT,
-				strides[idx] - chip_col, leg_sz, 4, Color(0, 0, 0, 0.85))
-			draw_string(GameTheme.font_display,
-				Vector2(lx + chip_col, ly + leg_sz * 0.36),
-				String(it[1]), HORIZONTAL_ALIGNMENT_LEFT,
-				strides[idx] - chip_col, leg_sz, Color(0.90, 0.81, 0.62, 1.0))
-			lx += strides[idx]
-	# "Reading the chart" primer — the non-chip signals (route colour, the
-	# mutator star, the pursuit pennant) that the site icons don't carry.
-	var primer := "amber ring = open road      ★ = changed rules      red pennant = pursuit"
-	draw_string_outline(GameTheme.font_display,
-		Vector2(w * 0.5 - 560.0, base_y - 28.0), primer,
-		HORIZONTAL_ALIGNMENT_CENTER, 1120, 17, 4, Color(0, 0, 0, 0.85))
-	draw_string(GameTheme.font_display,
-		Vector2(w * 0.5 - 560.0, base_y - 28.0), primer,
-		HORIZONTAL_ALIGNMENT_CENTER, 1120, 17,
-		Color(0.86, 0.77, 0.60, 1.0))
+		PLAYER_AMBER.b, 0.22), false, 1.0)
+	var tx := band.position.x + 16.0
+	draw_string(title_font, Vector2(tx, band.position.y + 30), title_txt,
+		HORIZONTAL_ALIGNMENT_LEFT, band.size.x - 32.0, title_sz,
+		Color(0.90, 0.80, 0.60))
+	draw_string(GameTheme.font_display, Vector2(tx, band.position.y + 51),
+		sub_txt, HORIZONTAL_ALIGNMENT_LEFT, band.size.x - 32.0, sub_sz, sub_col)
+	# Hairline rule between the title block and the standing order.
+	draw_line(Vector2(tx, band.position.y + 63),
+		Vector2(band.position.x + band.size.x - 16.0, band.position.y + 63),
+		Color(0.60, 0.51, 0.34, 0.40), 1.0, true)
+	draw_string(GameTheme.font_display, Vector2(tx, band.position.y + 84),
+		order_txt, HORIZONTAL_ALIGNMENT_LEFT, band.size.x - 32.0, order_sz,
+		order_col)
+	# The bottom legend band is GONE (2026-07-07): every unstruck token now
+	# prints its own engraved name (SITE_LABEL in _draw_sites), hover carries
+	# the deep intel, and the full key lives behind the "?" primer. One less
+	# HUD band competing with the chart.
 
 
 ## "THE FIRST MARCH" → "T H E   F I R S T   M A R C H" — the chart's

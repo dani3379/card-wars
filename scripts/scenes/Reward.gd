@@ -7,9 +7,16 @@ extends Control
 
 const MAP_SCENE = "res://scenes/map.tscn"
 const COMBAT_SCENE = "res://scenes/combat.tscn"
+const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 
 var _relic_choices: Array[String] = []
 var _is_elite_reward: bool = false
+# The General's Forge (2026-07-06 progression pass): every fallen General
+# lets the player temper ONE card — a chosen "+" forge, same path as the
+# rest site. Elite risk pays deck power, not just relic luck. (Olympian's
+# Mark still upgrades a random extra card on top — additive, still honest.)
+var _relic_taken: bool = false
+var _forge_done: bool = false
 
 
 func _ready() -> void:
@@ -53,6 +60,14 @@ func _ready() -> void:
 	GameTheme.make_settings_gear(self)
 
 
+func _unhandled_input(event: InputEvent) -> void:
+	# Esc opens the pause/Settings overlay instead of skipping the reward on a
+	# stray keypress — the "Skip" button is the deliberate way past it.
+	if event.is_action_pressed("ui_cancel"):
+		GameTheme.open_settings_overlay()
+		get_viewport().set_input_as_handled()
+
+
 func _build_ui() -> void:
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere":
@@ -72,12 +87,12 @@ func _build_ui() -> void:
 
 	# Title
 	var title = GameTheme.make_screen_title(
-		"VICTORY  —  Floor %d" % RunState.current_floor, GameTheme.GILT_BRIGHT,
+		"VICTORY  —  Province %d" % RunState.current_floor, GameTheme.GILT_BRIGHT,
 		GameTheme.FONT_TITLE)
 	outer.add_child(title)
 
 	# Relic choices
-	if _is_elite_reward and _relic_choices.size() > 0:
+	if _is_elite_reward and _relic_choices.size() > 0 and not _relic_taken:
 		# Ruled cartouche subheader (matches Treasure / Event / Recruit).
 		outer.add_child(_make_section_header("Choose a Relic"))
 
@@ -101,19 +116,172 @@ func _build_ui() -> void:
 			btn.pressed.connect(_pick_relic.bind(id))
 			relic_row.add_child(btn)
 
+	# The General's Forge — Generals only (bosses hand out the boss tier and
+	# an act transition; the forge is the elite ladder's own rung).
+	if RunState.current_node_type == "elite" and not _forge_done \
+			and _forge_candidates().size() > 0:
+		outer.add_child(_make_section_header(
+			"The General's Forge — temper one card"))
+		var scroll := ScrollContainer.new()
+		scroll.custom_minimum_size = Vector2(0, 240)
+		scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		outer.add_child(scroll)
+		var grid := HBoxContainer.new()
+		grid.add_theme_constant_override("separation", 14)
+		grid.alignment = BoxContainer.ALIGNMENT_CENTER
+		grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		scroll.add_child(grid)
+		for i in _forge_candidates():
+			var data: Dictionary = RunState.get_upgraded_card_data(i)
+			var wrapper := Control.new()
+			# 0.72-scale writ: full 225×300 cards overflow the reward column.
+			wrapper.custom_minimum_size = Vector2(162, 216)
+			var card_node = CARD_SCENE.instantiate()
+			card_node.static_display = true
+			card_node.card_data = data
+			card_node.live_baked_mode = true
+			CardTextureCache.bake(data)
+			card_node.scale = Vector2(0.72, 0.72)
+			wrapper.add_child(card_node)
+			var click_btn := Button.new()
+			click_btn.flat = true
+			click_btn.focus_mode = Control.FOCUS_NONE
+			click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+			click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
+			click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+			click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
+			click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
+			click_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+			click_btn.pressed.connect(_show_forge_confirm.bind(i))
+			wrapper.add_child(click_btn)
+			grid.add_child(wrapper)
+
 	var skip_btn = GameTheme.make_back_button("Continue", Vector2(200, 52), 20)
 	skip_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	skip_btn.pressed.connect(_skip)
 	outer.add_child(skip_btn)
 
 
+## Deck indices eligible for the General's Forge — same filter as the rest
+## site and Olympian's Mark: unforged, upgradeable, a real creature/spell.
+func _forge_candidates() -> Array[int]:
+	var out: Array[int] = []
+	for i in RunState.deck.size():
+		if RunState.has_upgrade_path(i, "plus"):
+			continue
+		if not CardDB.is_upgradeable(RunState.deck[i]):
+			continue
+		var d: Dictionary = CardDB.get_card_data(RunState.deck[i])
+		if d.get("type", "") in ["creature", "spell"]:
+			out.append(i)
+	return out
+
+
+## Before/after confirm — the same clean forge moment the rest site sells:
+## current writ, arrow, "+" writ, and a one-line diff. Commit or back out.
+func _show_forge_confirm(deck_index: int) -> void:
+	var base_data: Dictionary = RunState.get_upgraded_card_data(deck_index)
+	var upgraded_data: Dictionary = RunState.preview_plus_upgrade(base_data)
+
+	var dim := ColorRect.new()
+	dim.name = "ForgeDim"
+	dim.color = Color(0, 0, 0, 0.72)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(dim)
+
+	var col := VBoxContainer.new()
+	col.set_anchors_preset(Control.PRESET_CENTER)
+	col.offset_left = -400
+	col.offset_right = 400
+	col.offset_top = -260
+	col.offset_bottom = 260
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.add_theme_constant_override("separation", 16)
+	dim.add_child(col)
+
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 40)
+	col.add_child(row)
+	for pair in [[base_data, false], [upgraded_data, true]]:
+		var wrapper := Control.new()
+		wrapper.custom_minimum_size = Vector2(225, 300)
+		var card_node = CARD_SCENE.instantiate()
+		card_node.static_display = true
+		card_node.card_data = pair[0]
+		card_node.live_baked_mode = true
+		CardTextureCache.bake(pair[0])
+		if pair[1]:
+			card_node.modulate = Color(1.06, 1.03, 0.94)
+		wrapper.add_child(card_node)
+		row.add_child(wrapper)
+		if not pair[1]:
+			var arrow = GameTheme.make_label("→", 44, GameTheme.GILT_BRIGHT)
+			arrow.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			row.add_child(arrow)
+
+	var diff = GameTheme.make_label(
+		_forge_change_summary(base_data, upgraded_data), 17, GameTheme.IVORY)
+	diff.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(diff)
+
+	var btns := HBoxContainer.new()
+	btns.alignment = BoxContainer.ALIGNMENT_CENTER
+	btns.add_theme_constant_override("separation", 24)
+	col.add_child(btns)
+	var go = GameTheme.make_themed_button("FORGE IT", Color(0.14, 0.10, 0.05),
+		Vector2(180, 48), 19)
+	go.pressed.connect(func():
+		RunState.upgrade_card(deck_index, "plus")
+		AudioBank.play_sfx("upgrade_confirm")
+		_forge_done = true
+		dim.queue_free()
+		_after_spoil_taken()
+	)
+	btns.add_child(go)
+	var back = GameTheme.make_back_button("Back", Vector2(140, 48), 18)
+	back.pressed.connect(func(): dim.queue_free())
+	btns.add_child(back)
+
+
+func _forge_change_summary(base: Dictionary, upgraded: Dictionary) -> String:
+	var parts: Array[String] = []
+	if base.get("type", "") == "creature":
+		if int(upgraded.get("atk", 0)) != int(base.get("atk", 0)):
+			parts.append("ATK %d → %d" % [int(base.get("atk", 0)), int(upgraded.get("atk", 0))])
+		if int(upgraded.get("hp", 0)) != int(base.get("hp", 0)):
+			parts.append("HP %d → %d" % [int(base.get("hp", 0)), int(upgraded.get("hp", 0))])
+	if int(upgraded.get("cost", 0)) != int(base.get("cost", 0)):
+		parts.append("Cost %d → %d" % [int(base.get("cost", 0)), int(upgraded.get("cost", 0))])
+	if parts.is_empty():
+		return "Effect improved — see the upgraded card."
+	return "   ·   ".join(parts)
+
+
+## After a spoil (relic or forge) is consumed: leave if nothing actionable
+## remains, otherwise rebuild with the remaining offers.
+func _after_spoil_taken() -> void:
+	var relic_pending: bool = _is_elite_reward \
+		and _relic_choices.size() > 0 and not _relic_taken
+	var forge_pending: bool = RunState.current_node_type == "elite" \
+		and not _forge_done and _forge_candidates().size() > 0
+	if relic_pending or forge_pending:
+		_build_ui()
+	else:
+		_proceed()
+
+
 func _pick_relic(id: String) -> void:
 	RunState.add_relic(id)
+	_relic_taken = true
 	if AudioBank != null:
 		AudioBank.play_sfx("coin")
 	if id == "bottled_talisman":
 		await GameTheme.bind_bottled_talisman(self)
-	_proceed()
+	# Don't march off with the General's Forge still hot — the screen stays
+	# until every spoil is taken or the player chooses Continue.
+	_after_spoil_taken()
 
 
 func _skip() -> void:
@@ -157,22 +325,115 @@ func _show_march_choice(next_idx: int) -> void:
 	outer.add_child(_make_section_header("Choose whose kingdom burns next."))
 
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 32)
+	row.add_theme_constant_override("separation", 36)
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	outer.add_child(row)
 
+	# Lord tiles (2026-07-02): the campaign's biggest narrative decision used
+	# to be two generic text banners — now each remaining rival stands as a
+	# portrait plaque in his faction's color: face, name, title, kingdom, and
+	# how his army fights.
 	for i in range(next_idx, RunState.rival_lords.size()):
 		var lord: String = RunState.rival_lords[i]
-		var info: Dictionary = HeroDB.faction_info(HeroDB.get_faction(lord))
-		var lord_name := String(HeroDB.get_hero(lord).get("name", lord)).to_upper()
-		var desc := "%s — %s\n%s" % [String(info.get("name", "")),
-			String(info.get("engine", "")), String(info.get("engine_line", ""))]
-		var banner = GameTheme.make_choice_banner(lord_name, desc,
-			info.get("color", Color(0.60, 0.51, 0.34)), "", Vector2(440, 210))
-		var click := banner.get_node_or_null("ClickButton") as Button
-		if click != null:
-			click.pressed.connect(_pick_march.bind(lord))
-		row.add_child(banner)
+		var tile := _make_lord_tile(lord)
+		tile.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		row.add_child(tile)
+
+
+func _make_lord_tile(lord: String) -> Button:
+	var faction: String = HeroDB.get_faction(lord)
+	var info: Dictionary = HeroDB.faction_info(faction)
+	var fcolor: Color = info.get("color", Color(0.60, 0.51, 0.34))
+	var hero: Dictionary = HeroDB.get_hero(lord)
+
+	var btn := Button.new()
+	btn.flat = false
+	btn.focus_mode = Control.FOCUS_NONE
+	# Fixed footprint — the VBox child is anchored (not size-driving), so the
+	# tile must claim its own height: portrait 250 + four text rows + margins.
+	btn.custom_minimum_size = Vector2(316, 470)
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	var normal := GameTheme.make_panel_style(Color(0.055, 0.048, 0.040, 0.96),
+		fcolor.lerp(GameTheme.GILT, 0.35), 1, 4, true, true)
+	btn.add_theme_stylebox_override("normal", normal)
+	var hover := GameTheme.make_panel_style(Color(0.085, 0.070, 0.052, 0.97),
+		GameTheme.GILT_BRIGHT, 1, 4, true, true)
+	btn.add_theme_stylebox_override("hover", hover)
+	btn.add_theme_stylebox_override("pressed", normal)
+	btn.pressed.connect(_pick_march.bind(lord))
+
+	var col := VBoxContainer.new()
+	col.set_anchors_preset(Control.PRESET_FULL_RECT)
+	col.offset_left = 18
+	col.offset_right = -18
+	col.offset_top = 16
+	col.offset_bottom = -16
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.add_theme_constant_override("separation", 7)
+	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(col)
+
+	# Portrait — the rival lords ARE the five heroes, so their painted
+	# portraits serve double duty. Monogram plate fallback if one is missing.
+	var port_path := "res://assets/portraits/hero_portrait_%s.png" % lord
+	if ResourceLoader.exists(port_path):
+		var portrait := TextureRect.new()
+		portrait.texture = load(port_path)
+		portrait.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		portrait.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		portrait.custom_minimum_size = Vector2(200, 250)
+		portrait.clip_contents = true
+		portrait.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		portrait.modulate = Color(0.94, 0.91, 0.88)
+		portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		col.add_child(portrait)
+	else:
+		var mono = GameTheme.make_label(
+			String(hero.get("name", lord)).strip_edges().left(1).to_upper(),
+			84, Color(fcolor.r, fcolor.g, fcolor.b, 0.85))
+		mono.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		mono.custom_minimum_size = Vector2(200, 250)
+		mono.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		mono.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		col.add_child(mono)
+
+	var name_lbl = GameTheme.make_label(
+		String(hero.get("name", lord)).to_upper(), 23, GameTheme.GILT_BRIGHT, true)
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(name_lbl)
+
+	var title_lbl = GameTheme.make_label(String(info.get("lord_title", "")), 15,
+		GameTheme.IVORY)
+	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(title_lbl)
+
+	# Faction rule in the kingdom's dye — the tile's heraldry line.
+	var rule := ColorRect.new()
+	rule.color = Color(fcolor.r, fcolor.g, fcolor.b, 0.85)
+	rule.custom_minimum_size = Vector2(120, 2)
+	rule.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(rule)
+
+	var kingdom_lbl = GameTheme.make_label("%s  ·  %s" % [
+		String(info.get("name", "")), String(info.get("engine", ""))], 15,
+		fcolor.lerp(Color(0.95, 0.92, 0.84), 0.45))
+	kingdom_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	kingdom_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(kingdom_lbl)
+
+	var engine_lbl = GameTheme.make_label(String(info.get("engine_line", "")), 14,
+		GameTheme.DESC_DIM)
+	engine_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	engine_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	engine_lbl.custom_minimum_size = Vector2(260, 0)
+	engine_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(engine_lbl)
+
+	return btn
 
 
 func _make_section_header(text: String) -> HBoxContainer:
@@ -190,7 +451,9 @@ func _make_section_header(text: String) -> HBoxContainer:
 	left.color = rule_col
 	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(left)
-	var lbl := GameTheme.make_label(text, 24, GameTheme.KEYWORD_GOLD)
+	# Quiet parchment caption, not gold: this is a document subheading, and gold
+	# here competes with the screen title. Hierarchy = gold title → dim heading.
+	var lbl := GameTheme.make_label(text, 24, GameTheme.DESC_DIM)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(lbl)

@@ -1,11 +1,14 @@
 extends Control
 ## Wayside.gd — the roadside halts between holds (slice 2 of the road to
-## the keep). Four verbs, one per stop, dealt at map gen (node.wayside_id →
+## the keep). Three verbs, one per stop, dealt at map gen (node.wayside_id →
 ## RunState.current_wayside_id):
 ##   drill_yard      — push-your-luck creature training: +1/+1 per pass
-##   muster_scale    — the quartermaster's scales: one trade, by weight
 ##   standard_bearer — pass one banner keyword from one creature to another
-##   supply_cache    — crack the cache open: pick 1 of 3 rolled spoils
+##   supply_cache    — crack the cache open: pick 1 of 3 war-material spoils
+## (muster_scale — the quartermaster's scales — was RETIRED from the deal
+## 2026-07-02: it was a shop-lite vending stop. Card-selling moved to the
+## sutler's buy-back at shops; the handler below stays only so a legacy save
+## holding a muster_scale node still resolves.)
 ## All four are ONE-DECISION stops (the Inscryption cadence: walk in, one
 ## verb, walk out) — the long-form prose rooms stay in Event.gd. Permanent
 ## card changes ride the card_upgrades mod STACK via
@@ -21,8 +24,8 @@ const MAP_SCENE = "res://scenes/map.tscn"
 # (Wither N, Doom N, On-Enter/On-Death payloads, Adj. Buff) or that is a COST
 # (Sacrifice) stays where it was printed.
 const TRANSFERABLE_KW: Array = [
-	"swift", "armored", "thorns", "ranged", "piercing", "regenerate",
-	"last_stand", "lifelink", "overrun", "formation", "rampage",
+	"swift", "armored", "thorns", "piercing", "regenerate",
+	"last_stand", "sniper", "lifelink", "overrun", "formation", "rampage",
 	"guardian", "shield",
 ]
 
@@ -56,7 +59,7 @@ func _ready() -> void:
 		"grad_inner": Color(0.08, 0.05, 0.12, 0.16),
 		"grad_outer": Color(0.02, 0.01, 0.05, 0.46),
 	})
-	AudioBank.play_music("event")
+	AudioBank.play_music_random(["event", "event_b", "event_c"])
 	_verb = RunState.current_wayside_id
 	if _verb == "":
 		# Legacy node or direct scene open — the cache is the verb that always
@@ -64,6 +67,14 @@ func _ready() -> void:
 		_verb = "supply_cache"
 	_build()
 	GameTheme.make_settings_gear(self)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	# A wayside halt asks for one decision, so Esc opens the pause/Settings
+	# overlay rather than resolving the verb for the player.
+	if event.is_action_pressed("ui_cancel"):
+		GameTheme.open_settings_overlay()
+		get_viewport().set_input_as_handled()
 
 
 func _build() -> void:
@@ -307,6 +318,8 @@ func _add_card_to_grid(grid: GridContainer, data: Dictionary,
 	var card_node = CARD_SCENE.instantiate()
 	card_node.static_display = true
 	card_node.card_data = data
+	card_node.live_baked_mode = true
+	CardTextureCache.bake(data)
 	wrapper.add_child(card_node)
 	var click_btn := Button.new()
 	click_btn.flat = true
@@ -407,6 +420,8 @@ func _build_drill_push() -> void:
 	var card_node = CARD_SCENE.instantiate()
 	card_node.static_display = true
 	card_node.card_data = data
+	card_node.live_baked_mode = true
+	CardTextureCache.bake(data)
 	wrapper.add_child(card_node)
 	add_child(wrapper)
 
@@ -695,28 +710,28 @@ func _on_banner_receiver_pick(deck_index: int) -> void:
 
 # ═══════════════════ SUPPLY CACHE ═══════════════════
 # A buried strongpoint from a war nobody finished. Three spoils surface,
-# you carry one away. Dead rewards are filtered before the roll (no rations
-# at full HP, no draught with a full belt) per the no-dead-rewards rule.
+# you carry one away. WAR-MATERIAL ONLY (2026-07-02): gold, heals, and
+# potions are sold at every other stop on the road — what a cache pays is
+# the war itself: bodies in your line, Command, and paper that turns into
+# soldiers. Nothing in this pool is ever a dead reward, so the old
+# situational gating went with the rations.
 
 func _build_cache() -> void:
 	_clear_ui()
 	_add_header("THE SUPPLY CACHE",
-		"A buried chest, long forgotten. Carry one thing away.")
+		"A buried strongpoint from a war nobody finished. Carry one thing away.")
 	var pool: Array = [
-		{"id": "purse", "head": "A buried pay-chest", "note": "Gain 45 gold."},
 		{"id": "levy", "head": "A levy's kit",
-			"note": "Start next fight with a 2/4 Levy Spearman in front."},
+			"note": "Next fight: start with a 2/4 Levy Spearman in front."},
+		{"id": "free_lance", "head": "A freelance's arms",
+			"note": "Next fight: start with a 3/2 Free Lance in front."},
 		{"id": "dispatches", "head": "A captain's dispatches",
-			"note": "+1 max Command next fight."},
+			"note": "Next fight: +1 max Command."},
 		{"id": "banner_case", "head": "A banner case",
-			"note": "Add a random common card to your deck."},
+			"note": "Add 1 random common card to your deck."},
+		{"id": "commission", "head": "A sealed commission",
+			"note": "Add 1 random uncommon card to your deck."},
 	]
-	# No dead rewards: situational spoils only enter the roll when usable.
-	if RunState.can_add_potion():
-		pool.append({"id": "draught", "head": "A healer's draught",
-			"note": "Gain a Healing Potion."})
-	if RunState.hero_hp < RunState.hero_max_hp:
-		pool.append({"id": "rations", "head": "Field rations", "note": "Heal 8 HP."})
 	pool.shuffle()
 	var offered: Array = pool.slice(0, mini(3, pool.size()))
 	var tiles: Array = []
@@ -730,15 +745,20 @@ func _build_cache() -> void:
 func _on_cache_take(id: String) -> void:
 	AudioBank.play_sfx("button_click")
 	match id:
-		"purse":
-			RunState.gain_gold(45)
-			_show_result("Old, forgotten coin. Gained 45 gold.")
-		"draught":
-			RunState.add_potion("healing")
-			_show_result("The wax seal is unbroken. Gained a Healing Potion.")
-		"rations":
-			RunState.heal_hero(8)
-			_show_result("Hard bread and hoarded wine. Healed 8 HP.")
+		"free_lance":
+			RunState.next_combat_gift_creature = {
+				"name": "Free Lance", "atk": 3, "hp": 2, "kw": [],
+			}
+			_show_result("A lance, oiled mail, and no questions kept. A Free Lance rides in your next fight.")
+		"commission":
+			var pool_u = CardDB.cards_of_rarity("uncommon")
+			if pool_u.is_empty():
+				_show_result("The seal is cracked and the page is blank. Some commissions outlive their ink.")
+				return
+			pool_u.shuffle()
+			RunState.add_card(pool_u[0])
+			_show_result("An officer's commission, never delivered. %s answers it." \
+				% CardDB.get_card_data(pool_u[0]).name)
 		"levy":
 			RunState.next_combat_gift_creature = {
 				"name": "Levy Spearman", "atk": 2, "hp": 4, "kw": [],

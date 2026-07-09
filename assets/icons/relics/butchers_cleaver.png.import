@@ -2,7 +2,7 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://ceu8c06j3so58"
+uid="uid://c5bb1ivtd0ay1"
 path="res://.godot/imported/butchers_cleaver.png-35ec11ea55ad6c96740f9199f277ae22.ctex"
 metadata={
 "vram_texture": false
@@ -23,7 +23,7 @@ compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=true
+mipmaps/generate=false
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""

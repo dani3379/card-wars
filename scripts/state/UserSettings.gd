@@ -96,6 +96,8 @@ var pile_tutorial_seen: bool = false
 # most counter-intuitive rule (both sides strike at once; front rank fights and
 # is struck first; the back rank waits in reserve).
 var combat_model_tutorial_seen: bool = false
+# Taught once on the first turn that holds cards over: right-click dismissal.
+var dismiss_tutorial_seen: bool = false
 
 
 func mark_floop_tutorial_seen() -> void:
@@ -116,6 +118,13 @@ func mark_banking_tutorial_seen() -> void:
 	if banking_tutorial_seen:
 		return
 	banking_tutorial_seen = true
+	save()
+
+
+func mark_dismiss_tutorial_seen() -> void:
+	if dismiss_tutorial_seen:
+		return
+	dismiss_tutorial_seen = true
 	save()
 
 
@@ -248,6 +257,12 @@ func _apply_ui_scale() -> void:
 	# _ready can race the autoload setup.
 	if get_window() != null:
 		get_window().content_scale_factor = clampf(ui_scale, 0.6, 1.8)
+	# When supersampling is active its SubViewport must re-derive from the new
+	# content_scale_factor — otherwise UI Scale is ignored under SSAA and clicks
+	# land offset. Harmless no-op when SSAA is off.
+	var ss = get_node_or_null("/root/Supersample")
+	if ss != null and ss.has_method("refresh"):
+		ss.refresh()
 
 
 func _apply_display_mode() -> void:
@@ -589,19 +604,18 @@ func save() -> void:
 		"intents_tutorial_seen": intents_tutorial_seen,
 		"pile_tutorial_seen": pile_tutorial_seen,
 		"combat_model_tutorial_seen": combat_model_tutorial_seen,
+		"dismiss_tutorial_seen": dismiss_tutorial_seen,
 	}
-	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
-	if f:
-		f.store_string(JSON.stringify(data))
+	SaveIO.write_text(SAVE_PATH, JSON.stringify(data))
 
 
 func load_settings() -> void:
-	if not FileAccess.file_exists(SAVE_PATH):
+	var raw := SaveIO.read_text(SAVE_PATH)
+	if raw == "":
 		return
-	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
-	if not f:
-		return
-	var parsed = JSON.parse_string(f.get_as_text())
+	var parsed = JSON.parse_string(raw)
+	if not (parsed is Dictionary):
+		parsed = JSON.parse_string(SaveIO.read_backup_text(SAVE_PATH))
 	if parsed is Dictionary:
 		master_volume = parsed.get("master_volume", 1.0)
 		music_volume = parsed.get("music_volume", 0.7)
@@ -635,3 +649,4 @@ func load_settings() -> void:
 		intents_tutorial_seen = parsed.get("intents_tutorial_seen", false)
 		pile_tutorial_seen = parsed.get("pile_tutorial_seen", false)
 		combat_model_tutorial_seen = parsed.get("combat_model_tutorial_seen", false)
+		dismiss_tutorial_seen = parsed.get("dismiss_tutorial_seen", false)

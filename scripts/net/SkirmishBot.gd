@@ -39,15 +39,23 @@ func build_deck(seed_val: int = 0) -> Array:
 
 	var deck: Array = []
 	var counts: Dictionary = {}
+	var available_creatures: Array = creatures.duplicate()
+	var available_spells: Array = spells.duplicate()
 	var spell_cap := 5
 	var spells_added := 0
 	var guard := 0
 	while deck.size() < SkirmishState.DECK_TARGET and guard < 8000:
 		guard += 1
-		var take_spell := (not spells.is_empty()) and spells_added < spell_cap and rng.randf() < 0.22
-		var src: Array = spells if take_spell else creatures
+		var take_spell := (not available_spells.is_empty()) \
+			and spells_added < spell_cap and rng.randf() < 0.22
+		var src: Array = available_spells if take_spell else available_creatures
 		if src.is_empty():
-			src = creatures if not creatures.is_empty() else spells
+			if not available_creatures.is_empty():
+				src = available_creatures
+				take_spell = false
+			else:
+				src = available_spells
+				take_spell = true
 		if src.is_empty():
 			break
 		var id: String = _pick_cheap(src)
@@ -55,11 +63,19 @@ func build_deck(seed_val: int = 0) -> Array:
 			continue
 		counts[id] = int(counts.get(id, 0)) + 1
 		deck.append(id)
+		src.erase(id)
 		if take_spell:
 			spells_added += 1
-	# Degenerate tiny-pool guard: pad with whatever creatures exist (copies allowed).
-	while deck.size() < SkirmishState.DECK_TARGET and not creatures.is_empty():
-		deck.append(creatures[rng.randi() % creatures.size()])
+	# Degenerate tiny-pool guard: only now allow second copies.
+	var pad_guard := 0
+	while deck.size() < SkirmishState.DECK_TARGET and pad_guard < 4000 \
+			and not creatures.is_empty():
+		pad_guard += 1
+		var pad_id: String = creatures[rng.randi() % creatures.size()]
+		if int(counts.get(pad_id, 0)) >= 2:
+			continue
+		counts[pad_id] = int(counts.get(pad_id, 0)) + 1
+		deck.append(pad_id)
 	_shuffle(deck)
 	return deck
 
