@@ -48,6 +48,11 @@ var _bg_base_scale: float = 1.15           # oversize so drift never reveals edg
 var _parallax_mouse: Vector2 = Vector2.ZERO  # smoothed cursor offset, each axis [-1, 1]
 var _kb_time: float = 0.0                   # Ken Burns clock
 var _title_shimmer_tween: Tween = null
+const MENU_MOTION_STEP := 1.0 / 30.0
+var _menu_motion_accumulator := 0.0
+var _menu_motion_suspended := false
+var _subscreen_obscures_motion := false
+var _how_to_play_overlay: Control = null
 
 # Hero-select (cast lineup + shared detail pane). The row brightens the focused
 # hero; the pane below shows only that hero's loadout — so each card stays down
@@ -56,6 +61,10 @@ var _hero_detail: VBoxContainer = null
 var _hero_cards: Dictionary = {}       # hid -> Button (for selected-state styling)
 var _hero_portraits: Dictionary = {}   # hid -> Control (for focus brighten/dim)
 var _selected_hero: String = ""
+var _hero_detail_reveal_seq := 0
+var _run_commit_locked := false
+var _blessing_commit_locked := false
+var _picker_commit_locked := false
 # Full-size readable copy of a hovered deck mini (the NetDraft ledger-preview
 # behaviour). Child of the menu root; freed on unhover / pane rebuild.
 var _deck_preview: Control = null
@@ -96,6 +105,7 @@ func _start_rematch() -> void:
 
 
 func _rebuild_menu() -> void:
+	_set_subscreen_motion_obscured(false)
 	# Wipe the placeholder children from the .tscn so we can build the menu
 	# entirely from code with consistent fonts/styles. The Background atmosphere
 	# is preserved (it was added by add_atmosphere()).
@@ -289,6 +299,42 @@ func _rebuild_menu() -> void:
 	# Re-arm the title's idle shimmer on every rebuild (the title node is recreated
 	# here; ascension changes rebuild without replaying the intro).
 	_start_title_shimmer()
+
+	# Boot entrance: the column writes itself in top-to-bottom, once per visit
+	# to the menu (rebuilds from the ascension stepper skip it).
+	_play_entrance(col)
+
+
+## One-shot entrance cascade for the menu column: each row fades in and slides
+## the last 16px to its resting x, staggered down the column. Runs once —
+## _rebuild_menu calls back in here on every ascension change and the cascade
+## would read as flicker on the second pass. Reduce Motion skips it whole.
+var _entrance_played := false
+
+func _play_entrance(col: Control) -> void:
+	if _entrance_played:
+		return
+	_entrance_played = true
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	# One frame so the VBox has laid the children out and rest positions exist.
+	await get_tree().process_frame
+	if not is_instance_valid(col):
+		return
+	var i := 0
+	for child in col.get_children():
+		if not (child is Control):
+			continue
+		var c := child as Control
+		var rest_x := c.position.x
+		c.modulate.a = 0.0
+		c.position.x = rest_x - 16.0
+		var tw := c.create_tween()
+		tw.tween_interval(0.05 + i * 0.045)
+		tw.tween_property(c, "modulate:a", 1.0, 0.26).set_ease(Tween.EASE_OUT)
+		tw.parallel().tween_property(c, "position:x", rest_x, 0.30) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		i += 1
 
 
 # ---------------------------------------------------------------------------
@@ -860,6 +906,7 @@ func _center_menu_for_subscreen(width: float = 620.0, height: float = 640.0) -> 
 
 
 func _show_load_screen(overwrite_mode: bool) -> void:
+	_set_subscreen_motion_obscured(true)
 	# Standalone screen showing all 3 slots with full continue/delete (normal
 	# mode) or "begin new run here" (overwrite mode) actions. Replaces the
 	# main menu column in place so the background atmosphere persists.
@@ -901,6 +948,7 @@ func _show_load_screen(overwrite_mode: bool) -> void:
 
 
 func _show_hero_select() -> void:
+	_set_subscreen_motion_obscured(true)
 	# Cast-lineup hero pick (StS/Hades pattern): a row of frameless portrait cards
 	# over the burning-meadow background. Each card stays down to portrait + name +
 	# tagline; hovering a hero spotlights it and fills the shared detail pane below
@@ -923,6 +971,7 @@ func _show_hero_select() -> void:
 	_daily_btn = null
 	_seed_edit = null
 	_asc_label = null
+	_run_commit_locked = false
 	# Master-detail split (StS/Hades pattern): a left roster of the five lords —
 	# hover/click to FOCUS, never to commit — beside a war-dossier pane that
 	# showcases the focused hero at size: portrait, pitch, the opening deck as
@@ -948,8 +997,13 @@ func _show_hero_select() -> void:
 	tgap.custom_minimum_size = Vector2(0, 4)
 	roster.add_child(tgap)
 
+	var hero_i := 0
 	for hid in HeroDB.HERO_ORDER:
-		roster.add_child(_make_roster_row(hid))
+		var row := _make_roster_row(hid)
+		roster.add_child(row)
+		GameTheme.deal_in(row, 0.08 + hero_i * 0.045)
+		GameTheme.hover_lift(row, 1.018)
+		hero_i += 1
 
 	var rstretch := Control.new()
 	rstretch.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -958,6 +1012,7 @@ func _show_hero_select() -> void:
 	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 20, 44)
 	back.pressed.connect(_rebuild_menu)
 	roster.add_child(back)
+	GameTheme.hover_lift(back, 1.02)
 
 	# ── Right: the dossier ──
 	# Chart kit at whisper volume: soft translucent scrim + faint bronze
@@ -972,6 +1027,7 @@ func _show_hero_select() -> void:
 	detail_frame.add_theme_stylebox_override("panel", detail_bg)
 	detail_frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	main_row.add_child(detail_frame)
+	GameTheme.deal_in(detail_frame, 0.16)
 
 	var dossier := VBoxContainer.new()
 	dossier.add_theme_constant_override("separation", 10)
@@ -1177,10 +1233,20 @@ func _make_begin_button() -> Control:
 			tw.tween_property(f, "modulate:a", 0.0, 0.18)
 		tw.tween_property(rule, "modulate:a", 0.7, 0.18)
 		tw.tween_property(inner, "position:x", 0.0, 0.18))
-	btn.pressed.connect(func() -> void:
-		if _selected_hero != "":
-			_begin_run_with(_selected_hero))
+	btn.pressed.connect(_on_take_field_pressed.bind(btn))
 	return btn
+
+
+func _on_take_field_pressed(btn: Control) -> void:
+	if _run_commit_locked or _selected_hero == "":
+		return
+	_run_commit_locked = true
+	GameTheme.claim_pop(btn)
+	if UserSettings == null or not UserSettings.reduce_motion:
+		await get_tree().create_timer(0.12).timeout
+	if not is_inside_tree():
+		return
+	_begin_run_with(_selected_hero)
 
 
 func _make_roster_row(hid: String) -> Button:
@@ -1629,8 +1695,39 @@ func _build_hero_detail(hid: String) -> void:
 		var ledger := _make_display_label(ledger_text, 16, Color(0.76, 0.70, 0.56))
 		ledger.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		_hero_detail.add_child(ledger)
+	_animate_hero_detail_reveal()
 	# (No "click a hero to begin" hint here anymore — the commit is the explicit
 	# TAKE THE FIELD button in the persistent dossier footer below.)
+
+
+func _animate_hero_detail_reveal() -> void:
+	if _hero_detail == null or not is_instance_valid(_hero_detail):
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	_hero_detail_reveal_seq += 1
+	var seq := _hero_detail_reveal_seq
+	await get_tree().process_frame
+	if seq != _hero_detail_reveal_seq \
+			or _hero_detail == null or not is_instance_valid(_hero_detail):
+		return
+	var i := 0
+	for child in _hero_detail.get_children():
+		if not (child is Control):
+			continue
+		var c := child as Control
+		if not is_instance_valid(c):
+			continue
+		var rest_x := c.position.x
+		c.modulate.a = 0.0
+		c.position.x = rest_x + 12.0
+		var tw := c.create_tween()
+		tw.set_parallel(true)
+		tw.tween_interval(0.015 + i * 0.025)
+		tw.tween_property(c, "modulate:a", 1.0, 0.18).set_ease(Tween.EASE_OUT)
+		tw.tween_property(c, "position:x", rest_x, 0.22) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		i += 1
 
 
 # A selectable single-line option in the hero detail pane (muster picks).
@@ -1652,6 +1749,7 @@ func _make_muster_row(text: String, selected: bool, on_pick: Callable) -> Button
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	btn.add_child(lbl)
 	btn.pressed.connect(on_pick)
+	GameTheme.hover_lift(btn, 1.01)
 	return btn
 
 
@@ -1842,9 +1940,11 @@ func _on_open_settings() -> void:
 	for child in UserSettings.get_children():
 		if child.has_method("_open"):
 			child._open()
+			_refresh_menu_motion_state()
 			return
 		elif child.has_method("open"):
 			child.open()
+			_refresh_menu_motion_state()
 			return
 
 
@@ -1867,7 +1967,9 @@ func _show_how_to_play() -> void:
 	var existing := get_node_or_null("HowToPlayOverlay")
 	if existing != null:
 		existing.queue_free()
-	add_child(GameTheme.make_how_to_play_overlay())
+	_how_to_play_overlay = GameTheme.make_how_to_play_overlay()
+	add_child(_how_to_play_overlay)
+	_refresh_menu_motion_state()
 
 
 # (The HowToPlayOverlay class was removed — both this screen and MapView now call
@@ -1885,6 +1987,8 @@ func _animate_intro() -> void:
 	# popping in fully formed.
 	var menu := get_node_or_null("Menu")
 	if menu == null:
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
 		return
 	for child in menu.get_children():
 		child.modulate.a = 0.0
@@ -1908,6 +2012,8 @@ func _animate_intro() -> void:
 
 func _animate_subscreen_reveal(menu: Control) -> void:
 	if menu == null:
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
 		return
 	for child in menu.get_children():
 		child.modulate.a = 0.0
@@ -1933,20 +2039,37 @@ func _setup_bg_parallax() -> void:
 	var vp := get_viewport_rect().size
 	_bg_node.pivot_offset = vp * 0.5
 	_bg_node.scale = Vector2(_bg_base_scale, _bg_base_scale)
+	# Stay process-enabled so a live Reduce Motion toggle, the persistent settings
+	# overlay, and menu-local sub-screens can pause/resume the cosmetics without
+	# requiring the scene to be rebuilt. Transform work itself is capped at 30 Hz.
 	set_process(true)
+	_refresh_menu_motion_state(true)
 
 
 func _process(delta: float) -> void:
+	_refresh_menu_motion_state()
+	if _menu_motion_suspended:
+		return
 	if _bg_node == null or not is_instance_valid(_bg_node):
 		return
-	_kb_time += delta
+	_menu_motion_accumulator += maxf(delta, 0.0)
+	var elapsed_steps := floori(_menu_motion_accumulator / MENU_MOTION_STEP)
+	if elapsed_steps <= 0:
+		return
+	# Advance in exact 30 Hz quanta and retain the sub-step remainder. This keeps
+	# the animation clock honest at arbitrary frame rates while doing transforms
+	# at most about thirty times per second.
+	var motion_delta := float(elapsed_steps) * MENU_MOTION_STEP
+	_menu_motion_accumulator -= motion_delta
+	_kb_time += motion_delta
 	# Smooth the cursor toward its target so parallax glides instead of snapping.
 	var vp := get_viewport_rect().size
 	var m := get_viewport().get_mouse_position()
 	var target := Vector2(
 		clampf((m.x / maxf(vp.x, 1.0)) * 2.0 - 1.0, -1.0, 1.0),
 		clampf((m.y / maxf(vp.y, 1.0)) * 2.0 - 1.0, -1.0, 1.0))
-	_parallax_mouse = _parallax_mouse.lerp(target, clampf(delta * 4.0, 0.0, 1.0))
+	_parallax_mouse = _parallax_mouse.lerp(
+		target, clampf(motion_delta * 4.0, 0.0, 1.0))
 	# Ken Burns: a slow looping breath of position + zoom. Parallax: drift opposite
 	# the cursor. Both stay well inside the oversize slack so no edge shows.
 	var kb := Vector2(sin(_kb_time * 0.13) * 12.0, cos(_kb_time * 0.10) * 9.0)
@@ -1956,9 +2079,62 @@ func _process(delta: float) -> void:
 	_bg_node.scale = Vector2(zoom, zoom)
 
 
+func _set_subscreen_motion_obscured(obscured: bool) -> void:
+	_subscreen_obscures_motion = obscured
+	_refresh_menu_motion_state()
+
+
+func _refresh_menu_motion_state(force: bool = false) -> void:
+	var suspended := _should_suspend_menu_motion()
+	if not force and suspended == _menu_motion_suspended:
+		return
+	_menu_motion_suspended = suspended
+	# Never carry hidden elapsed time into the first visible update: resuming uses
+	# one fresh 30 Hz quantum and continues from the exact pose that was frozen.
+	_menu_motion_accumulator = 0.0
+	if _title_shimmer_tween != null and _title_shimmer_tween.is_valid():
+		if suspended:
+			_title_shimmer_tween.pause()
+		else:
+			_title_shimmer_tween.play()
+	_apply_menu_particle_motion_state(suspended)
+
+
+func _should_suspend_menu_motion() -> bool:
+	if UserSettings != null and UserSettings.reduce_motion:
+		return true
+	if _subscreen_obscures_motion:
+		return true
+	if _how_to_play_overlay != null and is_instance_valid(_how_to_play_overlay) \
+			and _how_to_play_overlay.visible:
+		return true
+	# SettingsOverlay is persistent under UserSettings. Check the panel's actual
+	# visibility rather than only `_is_open`, so its short close fade remains
+	# covered and motion resumes only once the menu is unobscured.
+	if UserSettings != null:
+		for child in UserSettings.get_children():
+			if not child.has_method("_open") or not child.has_method("_close"):
+				continue
+			var panel = child.get("_panel_root")
+			if panel is CanvasItem and (panel as CanvasItem).visible:
+				return true
+	return false
+
+
+func _apply_menu_particle_motion_state(suspended: bool) -> void:
+	for path in ["Atmosphere/AmbientMotes", "Atmosphere/MenuEmbers"]:
+		var emitter := get_node_or_null(path) as CPUParticles2D
+		if emitter == null:
+			continue
+		emitter.process_mode = Node.PROCESS_MODE_DISABLED if suspended \
+			else Node.PROCESS_MODE_INHERIT
+
+
 func _add_menu_embers() -> void:
 	# Warm embers rising up the burning meadow. Parented to the preserved
 	# "Atmosphere" node so menu rebuilds (e.g. ascension changes) don't wipe them.
+	if UserSettings != null and (not UserSettings.particles or UserSettings.reduce_motion):
+		return
 	var host: Node = get_node_or_null("Atmosphere")
 	if host == null:
 		host = self
@@ -1967,6 +2143,7 @@ func _add_menu_embers() -> void:
 	var vp := get_viewport_rect().size
 	var embers := CPUParticles2D.new()
 	embers.name = "MenuEmbers"
+	embers.add_to_group("ambient_particles")
 	embers.position = Vector2(vp.x * 0.5, vp.y + 16.0)
 	embers.z_index = 6
 	embers.amount = 40
@@ -1991,6 +2168,7 @@ func _add_menu_embers() -> void:
 	embers.color_ramp = ramp
 	embers.emitting = true
 	host.add_child(embers)
+	_apply_menu_particle_motion_state(_menu_motion_suspended)
 
 
 func _start_title_shimmer() -> void:
@@ -2017,6 +2195,8 @@ func _start_title_shimmer() -> void:
 	_title_shimmer_tween.parallel().tween_property(title, "scale", Vector2(1.025, 1.025), 2.2)
 	_title_shimmer_tween.tween_property(title, "modulate", base, 2.2)
 	_title_shimmer_tween.parallel().tween_property(title, "scale", Vector2.ONE, 2.2)
+	if _should_suspend_menu_motion():
+		_title_shimmer_tween.pause()
 
 
 # ---------------------------------------------------------------------------
@@ -2040,7 +2220,10 @@ func _start_title_shimmer() -> void:
 # pick sub-screen pattern (replace the Menu VBox in place, no scene change).
 
 func _show_blessing_select() -> void:
+	_set_subscreen_motion_obscured(true)
 	_remove_command_dossier()
+	_blessing_commit_locked = false
+	_picker_commit_locked = false
 	var menu := get_node_or_null("Menu")
 	if menu == null:
 		# If the menu node somehow vanished, never block the run from starting.
@@ -2075,6 +2258,7 @@ func _show_blessing_select() -> void:
 	title.add_theme_constant_override("shadow_offset_x", 0)
 	title.add_theme_constant_override("shadow_offset_y", 2)
 	add_child(title)
+	GameTheme.deal_in(title, 0.02)
 
 	var ornament := _make_ornament_row(220.0, true)
 	ornament.name = "BlessingOrnament"
@@ -2084,6 +2268,7 @@ func _show_blessing_select() -> void:
 	ornament.offset_right = COLUMN_LEFT + 260
 	ornament.offset_bottom = 174
 	add_child(ornament)
+	GameTheme.deal_in(ornament, 0.06)
 
 	var hint := _make_display_label(
 		"Every march is provisioned before it moves. Three gifts are honest — one asks a price.",
@@ -2101,6 +2286,7 @@ func _show_blessing_select() -> void:
 	hint.add_theme_constant_override("shadow_offset_x", 0)
 	hint.add_theme_constant_override("shadow_offset_y", 2)
 	add_child(hint)
+	GameTheme.deal_in(hint, 0.10)
 
 	# Frameless gem-prefixed choices, stacked bottom-left like the in-run event
 	# screen. Same composition as Event.gd: the choice ladder is the focal point,
@@ -2119,19 +2305,26 @@ func _show_blessing_select() -> void:
 	add_child(choices_vbox)
 
 	var blessings := _roll_blessings()
+	var choice_i := 0
 	for entry in blessings:
-		choices_vbox.add_child(_make_blessing_choice(entry, choice_h))
+		var choice := _make_blessing_choice(entry, choice_h)
+		choices_vbox.add_child(choice)
+		GameTheme.deal_in(choice, 0.16 + choice_i * 0.055)
+		GameTheme.hover_lift(choice, 1.014)
+		choice_i += 1
 
 	var skip := _make_menu_button("SKIP — MARCH UNPROVISIONED",
 		Color(0.22, 0.16, 0.14), 16, 40)
 	skip.name = "BlessingSkip"
-	skip.pressed.connect(_skip_blessing)
+	skip.pressed.connect(_on_skip_blessing_pressed.bind(skip))
 	skip.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	skip.offset_left = COLUMN_LEFT
 	skip.offset_right = COLUMN_LEFT + 360
 	skip.offset_top = -82
 	skip.offset_bottom = -36
 	add_child(skip)
+	GameTheme.deal_in(skip, 0.40)
+	GameTheme.hover_lift(skip, 1.02)
 
 
 # Roll the displayed tiles: 3 distinct honest entries + 1 priced entry.
@@ -2233,7 +2426,7 @@ func _make_blessing_choice(entry: Dictionary, height: int) -> Button:
 	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
 		btn.add_theme_stylebox_override(state, transparent)
 
-	btn.pressed.connect(_pick_blessing.bind(entry))
+	btn.pressed.connect(_on_blessing_choice_pressed.bind(btn, entry))
 
 	var hbox := HBoxContainer.new()
 	hbox.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -2329,6 +2522,18 @@ func _make_blessing_choice(entry: Dictionary, height: int) -> Button:
 	)
 
 	return btn
+
+
+func _on_blessing_choice_pressed(btn: Control, entry: Dictionary) -> void:
+	if _blessing_commit_locked:
+		return
+	_blessing_commit_locked = true
+	GameTheme.claim_pop(btn)
+	if UserSettings == null or not UserSettings.reduce_motion:
+		await get_tree().create_timer(0.11).timeout
+	if not is_inside_tree():
+		return
+	_pick_blessing(entry)
 
 
 func _pick_blessing(entry: Dictionary) -> void:
@@ -2436,6 +2641,18 @@ func _skip_blessing() -> void:
 	GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 
 
+func _on_skip_blessing_pressed(btn: Control) -> void:
+	if _blessing_commit_locked:
+		return
+	_blessing_commit_locked = true
+	GameTheme.claim_pop(btn)
+	if UserSettings == null or not UserSettings.reduce_motion:
+		await get_tree().create_timer(0.11).timeout
+	if not is_inside_tree():
+		return
+	_skip_blessing()
+
+
 func _blessing_upgrade_candidates() -> Array:
 	var out: Array = []
 	for i in RunState.deck.size():
@@ -2458,6 +2675,7 @@ const CARD_SCENE_PICKER = preload("res://scenes/card_2d.tscn")
 
 func _show_blessing_card_picker(title_text: String, indices: Array,
 		on_pick: Callable) -> void:
+	_set_subscreen_motion_obscured(true)
 	# Full-screen card grid over the menu background — the run-start deck is
 	# 10 cards, so this is two rows of five. Same wrapper-plus-transparent-
 	# button pattern as the in-run pickers (Event/Rest), so click semantics
@@ -2467,6 +2685,7 @@ func _show_blessing_card_picker(title_text: String, indices: Array,
 		if cname in ["Background", "Atmosphere", "Menu"]:
 			continue
 		child.queue_free()
+	_picker_commit_locked = false
 
 	var title := _make_display_label(title_text, 30, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -2476,6 +2695,7 @@ func _show_blessing_card_picker(title_text: String, indices: Array,
 	title.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
 	title.add_theme_constant_override("outline_size", 5)
 	add_child(title)
+	GameTheme.deal_in(title, 0.02)
 
 	var scroll := ScrollContainer.new()
 	scroll.set_anchors_preset(Control.PRESET_TOP_WIDE)
@@ -2491,6 +2711,7 @@ func _show_blessing_card_picker(title_text: String, indices: Array,
 	grid.add_theme_constant_override("v_separation", 20)
 	scroll.add_child(grid)
 
+	var pick_i := 0
 	for i in indices:
 		var data: Dictionary = RunState.get_upgraded_card_data(i)
 		var wrapper := Control.new()
@@ -2510,9 +2731,26 @@ func _show_blessing_card_picker(title_text: String, indices: Array,
 		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-		click_btn.pressed.connect(on_pick.bind(int(i)))
+		click_btn.pressed.connect(_on_blessing_card_pick_pressed.bind(
+			wrapper, on_pick, int(i)))
 		wrapper.add_child(click_btn)
 		grid.add_child(wrapper)
+		GameTheme.deal_in(wrapper, 0.08 + pick_i * 0.035)
+		GameTheme.hover_lift(wrapper, 1.025)
+		pick_i += 1
+
+
+func _on_blessing_card_pick_pressed(target: Control, on_pick: Callable,
+		picked) -> void:
+	if _picker_commit_locked:
+		return
+	_picker_commit_locked = true
+	GameTheme.claim_pop(target)
+	if UserSettings == null or not UserSettings.reduce_motion:
+		await get_tree().create_timer(0.11).timeout
+	if not is_inside_tree():
+		return
+	on_pick.call(picked)
 
 
 # The Muster Tent variant: pick from OFFERED card ids (cards not yet in the
@@ -2520,11 +2758,13 @@ func _show_blessing_card_picker(title_text: String, indices: Array,
 # grid, same click semantics; the callback receives the card id string.
 func _show_blessing_offer_picker(title_text: String, ids: Array,
 		on_pick: Callable) -> void:
+	_set_subscreen_motion_obscured(true)
 	for child in get_children():
 		var cname: String = child.name
 		if cname in ["Background", "Atmosphere", "Menu"]:
 			continue
 		child.queue_free()
+	_picker_commit_locked = false
 
 	var title := _make_display_label(title_text, 30, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -2534,6 +2774,7 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 	title.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
 	title.add_theme_constant_override("outline_size", 5)
 	add_child(title)
+	GameTheme.deal_in(title, 0.02)
 
 	var row := HBoxContainer.new()
 	row.set_anchors_preset(Control.PRESET_CENTER)
@@ -2545,6 +2786,7 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 	row.add_theme_constant_override("separation", 40)
 	add_child(row)
 
+	var pick_i := 0
 	for cid in ids:
 		var data: Dictionary = CardDB.get_card_data(String(cid))
 		var wrapper := Control.new()
@@ -2564,9 +2806,13 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-		click_btn.pressed.connect(on_pick.bind(String(cid)))
+		click_btn.pressed.connect(_on_blessing_card_pick_pressed.bind(
+			wrapper, on_pick, String(cid)))
 		wrapper.add_child(click_btn)
 		row.add_child(wrapper)
+		GameTheme.deal_in(wrapper, 0.08 + pick_i * 0.055)
+		GameTheme.hover_lift(wrapper, 1.025)
+		pick_i += 1
 
 
 # Applies the picked blessing's mutation to RunState. Effects sample from the

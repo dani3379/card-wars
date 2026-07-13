@@ -53,8 +53,12 @@ func _ready() -> void:
 		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 		return
 	GameTheme.add_atmosphere(self, "reward")
+	GameTheme.fade_in(self, 0.22)
 	_choices = _roll_offer()
 	_assign_choice_roles(_choices)
+	# Build visible Card2Ds only after their one-quad textures exist. Previously
+	# each cold offer built the full ornate tree while a second hidden card baked.
+	await ScenePreload.warm_card_ids(_choices)
 	_build_ui()
 	GameTheme.make_settings_gear(self)
 
@@ -193,6 +197,7 @@ func _build_ui() -> void:
 	var title = GameTheme.make_screen_title("THE MUSTER",
 		GameTheme.GILT_BRIGHT, GameTheme.FONT_HEADER)
 	outer.add_child(title)
+	GameTheme.deal_in(title, 0.02)
 
 	# The kingdom line sells the conquest fantasy: these are the invaded
 	# land's people changing banners, not a shop shelf.
@@ -205,6 +210,7 @@ func _build_ui() -> void:
 	var sub = GameTheme.make_label(flavor, GameTheme.FONT_SUBHEADER, GameTheme.IVORY)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	outer.add_child(sub)
+	GameTheme.deal_in(sub, 0.06)
 
 	if _choices.size() > 0:
 		var stage := PanelContainer.new()
@@ -221,6 +227,7 @@ func _build_ui() -> void:
 		st.content_margin_bottom = 18
 		stage.add_theme_stylebox_override("panel", st)
 		outer.add_child(stage)
+		GameTheme.deal_in(stage, 0.10)
 
 		var stage_margin := MarginContainer.new()
 		stage_margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -270,7 +277,7 @@ func _build_ui() -> void:
 			card_wrap.add_child(card)
 			_card_nodes.append(card_wrap)
 
-			_animate_card_reveal(card_wrap, slot_idx)
+			_animate_card_reveal(card_wrap, slot_idx, String(data.get("rarity", "")))
 			slot_idx += 1
 
 	# Recruiter's Horn: spend a charge to call up a fresh slate of recruits.
@@ -285,11 +292,15 @@ func _build_ui() -> void:
 		reroll_btn.tooltip_text = "Recruiter's Horn — reroll this muster's recruits."
 		reroll_btn.pressed.connect(_reroll_muster)
 		outer.add_child(reroll_btn)
+		GameTheme.deal_in(reroll_btn, 0.38)
+		GameTheme.hover_lift(reroll_btn, 1.03)
 
 	var leave_btn = GameTheme.make_back_button("Turn Them Away", Vector2(200, 42))
 	leave_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	leave_btn.pressed.connect(_go_to_map)
+	leave_btn.pressed.connect(_on_leave_pressed.bind(leave_btn))
 	outer.add_child(leave_btn)
+	GameTheme.deal_in(leave_btn, 0.42)
+	GameTheme.hover_lift(leave_btn, 1.03)
 
 
 func _muster_accent() -> Color:
@@ -302,7 +313,7 @@ func _muster_accent() -> Color:
 	return GameTheme.GILT
 
 
-func _animate_card_reveal(card: Control, idx: int) -> void:
+func _animate_card_reveal(card: Control, idx: int, rarity: String = "") -> void:
 	# Staggered fan-in, same beat as the Reward screen's reveal.
 	card.modulate.a = 0.0
 	card.scale = Vector2(0.6, 0.6)
@@ -312,6 +323,10 @@ func _animate_card_reveal(card: Control, idx: int) -> void:
 	tw.tween_property(card, "modulate:a", 1.0, 0.28).set_delay(delay)
 	tw.tween_property(card, "scale", Vector2.ONE, 0.36) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(delay)
+	# A lucky pull should feel lucky before the text is read: uncommons glint
+	# silver, rares erupt in gilt (no-ops for commons + Reduce Motion). Fires
+	# just after the fan-in settles so it never fights the entrance tween.
+	GameTheme.rarity_reveal(card, rarity, delay + 0.34)
 
 
 func _on_recruit_card_input(event: InputEvent, id: String,
@@ -328,7 +343,7 @@ func _on_recruit_card_input(event: InputEvent, id: String,
 		_set_recruit_card_pick_pose(card_wrap, true)
 	else:
 		_set_recruit_card_pick_pose(card_wrap, false)
-		_enlist(id)
+		_enlist(id, card_wrap)
 
 
 func _on_recruit_card_hover(card_wrap: Control, hovered: bool) -> void:
@@ -375,13 +390,28 @@ func _reroll_muster() -> void:
 	_rerolling = false
 
 
-func _enlist(id: String) -> void:
+func _enlist(id: String, card_wrap: Control = null) -> void:
 	if _rerolling or _enlist_committing:
 		return
 	_enlist_committing = true
 	RunState.add_card(id)
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play")
+	# The signing beat: the chosen banner flares and the passed-over recruits
+	# bow out before the screen moves on — the pick lands as an event, matching
+	# the Reward/Treasure claim language.
+	if card_wrap != null and is_instance_valid(card_wrap) \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		GameTheme.claim_pop(card_wrap)
+		for other in _card_nodes:
+			if other != card_wrap and other is Control and is_instance_valid(other):
+				var host: Control = other.get_parent() as Control
+				if host == null:
+					host = other
+				var stw := host.create_tween()
+				stw.tween_property(host, "modulate:a", 0.0, 0.22) \
+					.set_ease(Tween.EASE_IN)
+		await get_tree().create_timer(0.36).timeout
 	# Collector's Tome: a second banner may join from the same muster.
 	if RunState.has_relic("collectors_tome") and _tome_picks < 1 \
 			and _choices.size() > 1:
@@ -390,6 +420,16 @@ func _enlist(id: String) -> void:
 		_assign_choice_roles(_choices)
 		_enlist_committing = false
 		_build_ui()
+		return
+	_go_to_map()
+
+
+func _on_leave_pressed(btn: Control) -> void:
+	if btn != null and is_instance_valid(btn) \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		GameTheme.claim_pop(btn)
+		await get_tree().create_timer(0.16).timeout
+	if not is_inside_tree():
 		return
 	_go_to_map()
 

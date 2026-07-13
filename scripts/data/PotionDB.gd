@@ -63,7 +63,7 @@ const POTIONS: Dictionary = {
 		"effect": "grant_rampage", "color": Color(0.85, 0.30, 0.18)},
 	"vampiric_draught": {
 		"id": "vampiric_draught", "name": "Vampiric Draught",
-		"desc": "A friendly creature heals you 2 whenever it deals battle damage this fight. Heal 4 HP now.",
+		"desc": "A friendly creature heals you for the damage it deals in battle this fight. Heal 4 HP now.",
 		"usable_in": "combat", "targeting": "friendly_creature",
 		"effect": "grant_lifelink", "color": Color(0.82, 0.24, 0.32)},
 	"chain_flask": {
@@ -105,6 +105,10 @@ const POTIONS: Dictionary = {
 
 static var _icon_cache: Dictionary = {}
 static var _painted_icon_cache: Dictionary = {}
+
+
+static func clear_icon_cache() -> void:
+	_icon_cache.clear()
 
 
 static func get_potion(id: String) -> Dictionary:

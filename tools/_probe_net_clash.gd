@@ -1,16 +1,20 @@
 extends SceneTree
-## Net clash probe — verifies the reworked Online Skirmish combat model:
-## PLACE-then-SIMULTANEOUS-CLASH (docs/MULTIPLAYER_SKIRMISH_PLAN.md §2 Option A).
-##
-## Each round BOTH players take a placement turn, then the host runs ONE simultaneous
-## clash over both boards. A creature slain by the first striker still retaliates, so
-## a mutual kill drops BOTH — no side gets a de-facto Swift for attacking.
+## Net clash probe — verifies the CURRENT Online Skirmish combat model
+## (ALTERNATING one-directional strikes + Cross-Blitz mutual trade,
+## 2026-07-11 second-player opening strike):
+##   · Only the OPENER's first turn is place-only (empty opposing board = free
+##     face hits). The second player's first turn faces a standing line — it is
+##     de facto turn 2 — so its commit STRIKES like any other turn.
+##   · Every strike is one-directional, and every struck LIVE defender counters
+##     its attacker for its ATK in the same beat (_net_mutual_retaliation) — so
+##     evenly-matched creatures trade and BOTH fall, matching solo's simultaneity.
 ##
 ## Boots the REAL combat.tscn as NET_HOST (no sockets), forces host-first, and drives:
-##   1. host places a 3/2 in lane 0, finishes placing → turn passes to the client
-##      WITHOUT any clash (round stays 1, no face damage).
-##   2. client places a 3/2 in the SAME lane, finishes placing → the clash fires:
-##      both 3/2s trade 3 and BOTH die (simultaneous), round advances to 2.
+##   1. host (opener) places a 3/2 in lane 0, finishes → turn passes, round
+##      stays 1, no clash, no damage.
+##   2. client places a 3/2 in the SAME lane, finishes → its opening STRIKE
+##      fires: the defender counters, BOTH 3/2s die, no face damage, and the
+##      round advances to 2 for the opener.
 ##
 ## Run: Godot.exe --headless --path "D:\Godot" --script res://tools/_probe_net_clash.gd
 
@@ -112,8 +116,11 @@ func _run() -> void:
 	_check(int(combat.player_hp) == hp_host_hero and int(combat.enemy_hp) == hp_client_hero,
 		"no face damage during placement (heroes untouched: %d / %d)" % [int(combat.player_hp), int(combat.enemy_hp)])
 
-	# ── 2. Client places a 3/2 in the SAME lane, then finishes → CLASH. ──
-	print("\n[net-clash] === client places same lane + finishes → clash ===")
+	# ── 2. Client (second player) places a 3/2 in the SAME lane, then commits.
+	# Its opening turn faces a standing line — de facto turn 2 — so the commit
+	# STRIKES: the client's 3/2 swings, the host's defender counters in the same
+	# beat (Cross-Blitz mutual trade), and BOTH die in round 1. ──
+	print("\n[net-clash] === client places same lane + commits → OPENING STRIKE ===")
 	combat._net_spawn_creature(_c32("client"), SS.UID_SLOT_STRIDE + 0, 0, combat.ROW_FRONT, true, false)
 	await create_timer(0.1).timeout
 	var host_creature = combat._row_array(false, combat.ROW_FRONT)[0]
@@ -121,7 +128,6 @@ func _run() -> void:
 	_check(is_instance_valid(host_creature) and is_instance_valid(client_creature),
 		"both 3/2 creatures seated opposite each other in lane 0")
 	await combat._net_finish_placement(1)
-	# The clash awaits internally; give it room to finish + advance the round.
 	for _i in 12:
 		await create_timer(0.2).timeout
 		if not is_instance_valid(combat) or int(combat._net_turn_round) >= 2:
@@ -132,13 +138,12 @@ func _run() -> void:
 	var host_dead: bool = not is_instance_valid(host_creature) or int(host_creature.current_hp) <= 0
 	var client_dead: bool = not is_instance_valid(client_creature) or int(client_creature.current_hp) <= 0
 	_check(host_dead and client_dead,
-		">>> SIMULTANEOUS: both 3/2 creatures traded 3 and BOTH died (host_dead=%s client_dead=%s)" % [str(host_dead), str(client_dead)])
-	_check(int(combat._net_turn_round) == 2, "clash resolved and round advanced to 2")
+		">>> OPENING STRIKE: second player's first commit struck, defender countered — BOTH died (host_dead=%s client_dead=%s)" % [str(host_dead), str(client_dead)])
 	_check(not combat._net_match_over, "match still live after the mutual trade")
-	# Turns strictly alternate now: the coin-flip winner (host/0) opens EVERY round,
-	# so round 2 opens for the host again — no back-to-back "extra turn".
+	_check(int(combat._net_turn_round) == 2, "round advanced to 2 after the opening strike")
+	# Strict alternation: the fixed opener (host/0) opens every round.
 	_check(int(combat._net_active_index) == 0, "round 2 opens with the fixed opener (active=0, strict alternation)")
-	# Neither hero should have taken face damage — both lanes were blocked at clash start.
+	# Neither hero should have taken face damage — the lane was blocked at clash start.
 	_check(int(combat.player_hp) == hp_host_hero and int(combat.enemy_hp) == hp_client_hero,
 		"no face leaked through the mutual trade (heroes still %d / %d)" % [int(combat.player_hp), int(combat.enemy_hp)])
 

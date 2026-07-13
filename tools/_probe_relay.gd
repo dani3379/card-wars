@@ -131,6 +131,9 @@ func _run_logic() -> void:
 	NM._relay_rooms.clear()
 
 	# 3. The relay-deliver dispatch table — each kind hits the right _apply_* body.
+	# Combat events/intents are BUFFERED until a combat scene attaches (the
+	# startup-race guard) — attach first so they emit instead of queueing.
+	NM.attach_combat()
 	NM.relay_partner_id = 4242
 	var got := {"event": {}, "intent": {}, "sid": -1, "draft": {}, "ready": false, "seed": -1, "cfg": false}
 	NM.combat_event_received.connect(func(e): got["event"] = e)
@@ -153,13 +156,20 @@ func _run_logic() -> void:
 	NM._rpc_relay_deliver({"t": NM._RK_READY, "v": true})
 	_check(got["ready"] and NM.remote_ready, "deliver READY → remote_ready set")
 
-	NM._rpc_relay_deliver({"t": NM._RK_MATCH_START, "seed": 9988, "mode": 0, "bo": 3})
+	NM._rpc_relay_deliver({"t": NM._RK_HERO, "h": "pyromancer"})
+	_check(NM.remote_hero == "pyromancer", "deliver HERO → remote_hero set")
+
+	NM._rpc_relay_deliver({"t": NM._RK_MATCH_START, "seed": 9988, "mode": 0, "bo": 3,
+		"h0": "raider", "h1": "kindler"})
 	_check(got["seed"] == 9988 and NM.best_of == 3, "deliver MATCH_START → seed + best_of")
+	_check(NM.remote_hero == "raider" and NM.local_hero == "kindler",
+		"MATCH_START seats the canonical lord pair")
 
 	NM._rpc_relay_deliver({"t": NM._RK_MATCH_CONFIG, "mode": 1, "bo": 1})
 	_check(got["cfg"] and NM.match_mode == 1, "deliver MATCH_CONFIG → match_mode")
 
 	NM.leave()   # reset the shared autoload after poking it
+	NM.local_hero = ""   # leave() keeps the lord pick sticky by design — clear it here
 
 
 # ── SOCKET: the relay process (stays up for the test window) ──

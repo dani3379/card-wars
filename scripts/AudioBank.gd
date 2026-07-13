@@ -14,6 +14,7 @@ const SFX_DIR := "res://assets/audio/sfx/"
 const MUSIC_DIR := "res://assets/audio/music/"
 const SFX_POOL_SIZE := 12  # how many overlapping SFX can play at once
 const FADE_QUIET_DB := -40.0  # "silent" level for crossfade ends
+const MAX_MUSIC_STREAM_ENTRIES := 6
 
 # Interim cue aliases: when a cue's own event dir is missing or empty, play_sfx
 # falls back to the mapped event so the moment is never silent (five wired cues
@@ -26,6 +27,7 @@ const SFX_FALLBACKS := {
 	"creature_death": "death",
 	"hit_creature": "hit",
 	"relic_get": "coin",
+	"relic_trigger": "coin",
 	"potion_use": "heal",
 	"upgrade_confirm": "coin",
 	"doom_tick": "button_click",
@@ -228,8 +230,10 @@ var _music_positions: Dictionary = {}
 # Session cache: track_name -> AudioStream. The library's files run up to
 # ~18 MB; a synchronous load() at scene entry was a visible main-thread hitch
 # (every screen rotates music, so it fired on transition after transition).
-# Each track now loads ONCE per session, on ResourceLoader's worker threads.
+# Load on ResourceLoader's worker threads and retain a six-track working set;
+# older tracks can leave memory and reload asynchronously if revisited later.
 var _music_streams: Dictionary = {}
+var _music_stream_lru: Array[String] = []
 # The track the game currently WANTS playing. play_music sets it immediately;
 # the async loader only starts a track if it still matches when the load lands
 # (a rapid scene skip or stop_music may have superseded the request).
@@ -240,12 +244,56 @@ var _pending_music_fade: float = 1.0
 # request — a second getter would read an invalid handle).
 var _music_inflight: Dictionary = {}
 
+
+func _touch_music_stream(track_name: String) -> void:
+	_music_stream_lru.erase(track_name)
+	_music_stream_lru.append(track_name)
+
+
+func _remember_music_stream(track_name: String, stream: AudioStream) -> void:
+	_music_streams[track_name] = stream
+	_touch_music_stream(track_name)
+	_trim_music_stream_cache()
+
+
+func _music_stream_is_protected(track_name: String) -> bool:
+	# Pending/current names protect the hand-off around an async load. Values in
+	# _music_inflight are track names (keys remain ResourceLoader paths).
+	if track_name == _current_music_track or track_name == _pending_music_track:
+		return true
+	for loading_track in _music_inflight.values():
+		if String(loading_track) == track_name:
+			return true
+	var stream := _music_streams.get(track_name) as AudioStream
+	if stream == null:
+		return false
+	# Both players matter during a crossfade. Dropping our dictionary reference
+	# would already be safe (the player owns one), but retaining it avoids a
+	# needless reload if the outgoing track is requested before the fade ends.
+	return (_music_a != null and _music_a.stream == stream) \
+		or (_music_b != null and _music_b.stream == stream)
+
+
+func _trim_music_stream_cache() -> void:
+	var remaining := _music_stream_lru.size()
+	while _music_streams.size() > MAX_MUSIC_STREAM_ENTRIES \
+			and remaining > 0 and not _music_stream_lru.is_empty():
+		var oldest: String = _music_stream_lru.pop_front()
+		if _music_stream_is_protected(oldest):
+			_music_stream_lru.append(oldest)
+			remaining -= 1
+			continue
+		_music_streams.erase(oldest)
+		remaining = _music_stream_lru.size()
+
 func play_music(track_name: String, fade_seconds: float = 1.0) -> void:
 	## Crossfades into the named music track. If the same track is already
 	## playing, this is a no-op. Looks for assets/audio/music/<name>.ogg or .wav.
 	## First play of a track loads it on a background thread — the crossfade
 	## starts a few frames later instead of freezing the scene transition.
 	if _current_music_track == track_name:
+		if _music_streams.has(track_name):
+			_touch_music_stream(track_name)
 		return
 	var path := _resolve_music_path(track_name)
 	if path == "":
@@ -253,7 +301,9 @@ func play_music(track_name: String, fade_seconds: float = 1.0) -> void:
 	_pending_music_track = track_name
 	_pending_music_fade = fade_seconds
 	if _music_streams.has(track_name):
-		_start_music_stream(_music_streams[track_name], track_name, fade_seconds)
+		_touch_music_stream(track_name)
+		_start_music_stream(_music_streams[track_name] as AudioStream,
+			track_name, fade_seconds)
 		return
 	if _music_inflight.has(path):
 		return  # already loading — the in-flight coroutine will honor _pending
@@ -266,11 +316,11 @@ func _load_music_async(track_name: String, path: String) -> void:
 	if ResourceLoader.load_threaded_request(path) != OK:
 		var res = load(path)  # fallback: the old synchronous path
 		if res is AudioStream:
-			_music_streams[track_name] = res
+			_remember_music_stream(track_name, res)
 			if _pending_music_track == track_name:
 				_start_music_stream(res, track_name, _pending_music_fade)
 		return
-	_music_inflight[path] = true
+	_music_inflight[path] = track_name
 	while true:
 		var st := ResourceLoader.load_threaded_get_status(path)
 		if st == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
@@ -286,7 +336,7 @@ func _load_music_async(track_name: String, path: String) -> void:
 	var stream = ResourceLoader.load_threaded_get(path)
 	if not (stream is AudioStream):
 		return
-	_music_streams[track_name] = stream
+	_remember_music_stream(track_name, stream)
 	if _pending_music_track == track_name and _current_music_track != track_name:
 		_start_music_stream(stream, track_name, _pending_music_fade)
 

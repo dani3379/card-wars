@@ -626,6 +626,20 @@ func _append_upgrade(uid: int, entry: Dictionary) -> void:
 	card_upgrades[uid].append(entry)
 
 
+## The Undying: every death writes a permanent +1/+1 against the card's uid.
+## Same replace-in-place shape as the drill entry — one "undying" entry whose
+## stacks counter grows, so the mod stack never floods with duplicates.
+func grow_undying(uid: int) -> void:
+	if uid < 0:
+		return
+	var stack: Array = card_upgrades.get(uid, [])
+	for i in range(stack.size()):
+		if String(stack[i].get("path", "")) == "undying":
+			stack[i]["stacks"] = int(stack[i].get("stacks", 1)) + 1
+			return
+	_append_upgrade(uid, {"path": "undying", "stacks": 1})
+
+
 ## True if the card carries ANY mod. Callers that used this to mean
 ## "already forged" now ask has_upgrade_path(i, "plus") instead.
 func is_card_upgraded(deck_index: int) -> bool:
@@ -744,6 +758,13 @@ func _apply_upgrade(d: Dictionary, upgrade: Dictionary) -> Dictionary:
 				var st: int = int(upgrade.get("stacks", 1))
 				d.atk += st
 				d.hp += st
+		"undying":
+			# The Undying: +1/+1 per recorded death (grow_undying writes the
+			# stacks; combat's on-death dispatch is the only author).
+			if d.type == "creature":
+				var ust: int = int(upgrade.get("stacks", 1))
+				d.atk += ust
+				d.hp += ust
 		"grant_kw":
 			# Standard-Bearer wayside, receiving end: the banner passes on.
 			if d.type == "creature" and String(upgrade.get("keyword", "")) != "" \

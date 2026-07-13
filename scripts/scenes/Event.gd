@@ -41,6 +41,49 @@ const PRESERVE_NODES := [
 
 var _event_id: String = ""
 var _event_data: Dictionary = {}
+var _event_image: Texture2D = null
+var _event_image_path: String = ""
+var _event_art_request_serial: int = 0
+var _event_art_loading: bool = false
+var _event_art_visible: bool = true
+# Offline 48x27 luminance scan of the current event plates. Keeping this tiny
+# table avoids a full-texture GPU readback/decompress/resize on the first frame
+# of every event; new art safely falls back to the house scrim until calibrated.
+const ART_SCRIM_DARKNESS := {
+	"res://assets/events/beekeeper.png": 0.6662,
+	"res://assets/events/beekeeper_again.png": 0.8500,
+	"res://assets/events/beekeeper_returns.png": 0.6793,
+	"res://assets/events/blood_fountain.png": 0.7034,
+	"res://assets/events/butcher.png": 0.5891,
+	"res://assets/events/coin_on_edge.png": 0.7067,
+	"res://assets/events/dark_altar.png": 0.7694,
+	"res://assets/events/drowned_bell.png": 0.6833,
+	"res://assets/events/fattened_sin_eater.png": 0.7229,
+	"res://assets/events/fork_in_the_long_road.png": 0.8500,
+	"res://assets/events/glass_familiar.png": 0.6618,
+	"res://assets/events/gravesong_choir.png": 0.8500,
+	"res://assets/events/hermit.png": 0.7038,
+	"res://assets/events/hollow_lantern.png": 0.7177,
+	"res://assets/events/marked_one.png": 0.7176,
+	"res://assets/events/mirror_twin.png": 0.7469,
+	"res://assets/events/old_forge.png": 0.6842,
+	"res://assets/events/pawnbrokers_window.png": 0.6173,
+	"res://assets/events/plague_bell.png": 0.8500,
+	"res://assets/events/rotting_carnival.png": 0.7541,
+	"res://assets/events/sin_eater.png": 0.6963,
+	"res://assets/events/strangers_hand.png": 0.7110,
+	"res://assets/events/the_answering_well.png": 0.6257,
+	"res://assets/events/the_bone_pit.png": 0.6719,
+	"res://assets/events/the_chrysalis.png": 0.6847,
+	"res://assets/events/the_crossing.png": 0.6605,
+	"res://assets/events/the_weeping_orchard.png": 0.6891,
+	"res://assets/events/three_doors.png": 0.6914,
+	"res://assets/events/thrice_blessed_spring.png": 0.7413,
+	"res://assets/events/tollkeeper_bridge.png": 0.6513,
+	"res://assets/events/tooth_witch.png": 0.7214,
+	"res://assets/events/two_headed_calf.png": 0.6802,
+	"res://assets/events/woodcutter.png": 0.7055,
+}
 # Current screen's body: starts as _event_data and gets swapped to a follow_up
 # sub-dict when the player picks a branching choice. Multi-stage events read
 # desc + choices from this; the top-level event title stays on _event_data.
@@ -65,6 +108,10 @@ func _ready() -> void:
 	_ensure_stakes_ledger()
 	_build_ui()
 	GameTheme.make_settings_gear(self)
+	# The decision is usable over the scene's lightweight forest plate before
+	# the event painting is even requested. The async hydrator hot-swaps only
+	# the background layers; it never rebuilds or disables the choice controls.
+	_begin_event_art_hydration()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -76,8 +123,16 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _exit_tree() -> void:
+	# Invalidate any coroutine still polling the worker request before releasing
+	# our strong reference. A completed late request is ignored by its serial.
+	_event_art_request_serial += 1
+	_event_art_loading = false
 	# The road's sounds stay on the road — never bleed a river loop into the map.
 	AudioBank.stop_ambience()
+	# Event paintings are fullscreen one-scene assets. Do not let the shared
+	# threaded loader pin every visited event for the rest of the app session.
+	CardArtAliases.release_texture_path(_event_image_path)
+	_event_image = null
 
 
 func _pick_event() -> void:
@@ -373,10 +428,11 @@ func _clear_ui() -> void:
 func _build_ui() -> void:
 	_clear_ui()
 
-	var img_tex := _load_event_image()
-	var has_img: bool = img_tex != null
-	if has_img:
-		_ensure_fullscreen_art(img_tex)
+	# Always provide the left readability pool immediately. Until hydration
+	# lands, the event.tscn forest plate remains visible beneath this layer.
+	_ensure_event_overlay(_art_scrim_darkness_for_path(_event_image_path))
+	if _event_image != null:
+		_ensure_fullscreen_art(_event_image)
 	_set_event_art_visible(true)
 
 	# Single-verb rooms: an event with an `auto_effect` IS its picker (the Wet
@@ -540,15 +596,12 @@ func _align_margin_line(line: ColorRect, ladder: VBoxContainer) -> void:
 
 # ── Fullscreen event illustration + readability gradients ────────────────
 
-func _ensure_fullscreen_art(tex: Texture2D) -> void:
-	var bg = get_node_or_null("Background")
-	if bg:
-		bg.visible = false
-
-	if not has_node("EventArt"):
-		var art := TextureRect.new()
+func _ensure_fullscreen_art(tex: Texture2D, fade_from_placeholder: bool = false) -> void:
+	var bg := get_node_or_null("Background") as CanvasItem
+	var art := get_node_or_null("EventArt") as TextureRect
+	if art == null:
+		art = TextureRect.new()
 		art.name = "EventArt"
-		art.texture = tex
 		art.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		# COVERED fills the viewport, cropping overflow so the art bleeds to
 		# every edge — no letterboxing on widescreens.
@@ -567,54 +620,64 @@ func _ensure_fullscreen_art(tex: Texture2D) -> void:
 				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 			kb.tween_property(art, "scale", Vector2.ONE, 16.0) \
 				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	art.texture = tex
+
+	# The fallback remains underneath during the short hot-swap, avoiding a
+	# black frame even when the painting finishes between rendered frames.
+	if fade_from_placeholder and not UserSettings.reduce_motion and _event_art_visible:
+		art.modulate.a = 0.0
+		art.visible = true
+		if bg:
+			bg.visible = true
+		var reveal := create_tween()
+		reveal.tween_property(art, "modulate:a", 1.0, 0.22) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		reveal.tween_callback(func() -> void:
+			if is_instance_valid(bg):
+				bg.visible = false)
+	else:
+		art.modulate.a = 1.0
+		art.visible = _event_art_visible
+		if bg:
+			bg.visible = false
 
 	# Left-column scrim: deep dark wash on the left, fading to clear across
 	# the middle. Pools the text column in a quiet region while the right
 	# ~half of the art stays fully visible. Replaces the older top+bottom
 	# vertical pair — that one darkened bands the text rarely sat in (the
 	# 3-choice stack landed mid-screen, in fully un-darkened art).
-	if not has_node("EventOverlayLeft"):
-		# Adaptive depth: a flat wash tuned for midnight paintings loses the
-		# text on bright daylight art, and a wash tuned for daylight murders
-		# the dark pieces. Sample THIS painting's text column and ink to suit.
-		var scrim := _make_horizontal_gradient_overlay(_art_scrim_darkness(tex), 0.0)
+	_ensure_event_overlay(_art_scrim_darkness(tex))
+
+
+func _ensure_event_overlay(darkness_left: float) -> void:
+	var scrim := get_node_or_null("EventOverlayLeft") as ColorRect
+	if scrim == null:
+		scrim = _make_horizontal_gradient_overlay(darkness_left, 0.0)
 		scrim.name = "EventOverlayLeft"
 		scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
 		add_child(scrim)
 		_move_after_atmosphere(scrim)
+	else:
+		var mat := scrim.material as ShaderMaterial
+		if mat:
+			mat.set_shader_parameter("darkness_left", darkness_left)
+	scrim.visible = _event_art_visible
 
 
-## How deep the left text scrim must run for THIS painting. Reads the art's
-## text column (left ~55%, where title / body / choices sit): mean luminance
-## sets the base need, local contrast (busy art fights letterforms even at
-## mid brightness) adds a smaller kick. Dark calm art keeps the classic 0.62;
-## bright or busy art deepens toward 0.85. Any read failure = the old flat wash.
+## How deep the left text scrim must run for this painting. Values are scanned
+## offline into ART_SCRIM_DARKNESS so scene entry performs no texture readback.
 func _art_scrim_darkness(tex: Texture2D) -> float:
-	const BASE := 0.62
 	if tex == null:
-		return BASE
-	var img: Image = tex.get_image()
-	if img == null or img.is_empty():
-		return BASE
-	if img.is_compressed():
-		if img.decompress() != OK:
-			return BASE
-	# Tiny working copy — 48×27 keeps the scan effectively free.
-	img.resize(48, 27, Image.INTERPOLATE_BILINEAR)
-	var w := 26  # left 55% of 48
-	var sum := 0.0
-	var sum_sq := 0.0
-	var n := 0
-	for y in 27:
-		for x in w:
-			var c := img.get_pixel(x, y)
-			var lum := 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
-			sum += lum
-			sum_sq += lum * lum
-			n += 1
-	var mean := sum / float(n)
-	var sdev := sqrt(maxf(sum_sq / float(n) - mean * mean, 0.0))
-	return clampf(BASE + (mean - 0.18) * 0.9 + sdev * 0.35, 0.55, 0.85)
+		return _art_scrim_darkness_for_path(_event_image_path)
+	var path := tex.resource_path
+	if path == "":
+		path = _event_image_path
+	return _art_scrim_darkness_for_path(path)
+
+
+func _art_scrim_darkness_for_path(path: String) -> float:
+	const BASE := 0.62
+	return float(ART_SCRIM_DARKNESS.get(path, BASE))
 
 
 func _move_after_atmosphere(node: Node) -> void:
@@ -666,6 +729,7 @@ void fragment() {
 
 
 func _set_event_art_visible(v: bool) -> void:
+	_event_art_visible = v
 	for n in ["EventArt", "EventOverlayLeft"]:
 		var node = get_node_or_null(n)
 		if node:
@@ -1231,7 +1295,46 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 	return btn
 
 
-func _load_event_image() -> Texture2D:
+func _begin_event_art_hydration() -> void:
+	if _event_image != null or _event_art_loading:
+		return
+	_event_image_path = _resolve_event_image_path()
+	if _event_image_path == "":
+		return
+	# The calibrated wash can update from the path alone; no pixels need to be
+	# decoded or read back while the worker is still preparing the painting.
+	_ensure_event_overlay(_art_scrim_darkness_for_path(_event_image_path))
+	_event_art_request_serial += 1
+	var request_serial := _event_art_request_serial
+	_event_art_loading = true
+	_hydrate_event_art(_event_image_path, request_serial)
+
+
+func _hydrate_event_art(path: String, request_serial: int) -> void:
+	# Guarantee one interactive fallback frame even when ResourceLoader already
+	# has the imported texture warm from an earlier visit.
+	var tree := get_tree()
+	if tree == null:
+		_event_art_loading = false
+		return
+	await tree.process_frame
+	if request_serial != _event_art_request_serial or not is_inside_tree():
+		return
+	var tex := await _load_event_image_threaded(path, request_serial)
+	if request_serial != _event_art_request_serial or not is_inside_tree():
+		CardArtAliases.release_texture_path(path)
+		return
+	_event_art_loading = false
+	if tex == null:
+		return
+	_event_image = tex
+	# Install background layers only. The live title, choices, follow-up, or
+	# picker subtree is deliberately untouched. `_event_art_visible` is honored
+	# so a picker that hid the painting during the request stays hidden.
+	_ensure_fullscreen_art(tex, true)
+
+
+func _resolve_event_image_path() -> String:
 	# Bespoke art (keyed by event id) always wins; an optional "art" field
 	# names another event's image as a stand-in, so a new event ships with a
 	# fitting plate immediately and upgrades itself the moment a bespoke
@@ -1242,8 +1345,30 @@ func _load_event_image() -> Texture2D:
 		for ext in ["png", "jpg"]:
 			var p := "res://assets/events/%s.%s" % [key, ext]
 			if ResourceLoader.exists(p):
-				return load(p)
-	return null
+				return p
+	return ""
+
+
+func _load_event_image_threaded(path: String, request_serial: int) -> Texture2D:
+	# Strictly worker-backed: unlike the former helper path, a rejected request
+	# does not fall back to `load()` on the transition frame. The forest plate is
+	# a complete fallback, so a failed painting is harmless and can remain lazy.
+	var err := ResourceLoader.load_threaded_request(path, "Texture2D")
+	var status := ResourceLoader.load_threaded_get_status(path)
+	if err != OK and status != ResourceLoader.THREAD_LOAD_IN_PROGRESS \
+			and status != ResourceLoader.THREAD_LOAD_LOADED:
+		return null
+	while status == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
+		if request_serial != _event_art_request_serial or not is_inside_tree():
+			return null
+		var tree := get_tree()
+		if tree == null:
+			return null
+		await tree.process_frame
+		status = ResourceLoader.load_threaded_get_status(path)
+	if status != ResourceLoader.THREAD_LOAD_LOADED:
+		return null
+	return ResourceLoader.load_threaded_get(path) as Texture2D
 
 
 ## Effect types that own the screen — each one rebuilds the UI into a card
@@ -1827,6 +1952,7 @@ func _show_result(text: String) -> void:
 		# result resolves to no text, just walk back to the map.
 		GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 		return
+	var had_payoffs := not _result_cards.is_empty() or not _result_relics.is_empty()
 	_clear_ui()
 	# Result keeps the event art behind it — same scene, same beat. The receipt
 	# is written on the same page as the event (left column, drop cap, ivory
@@ -1858,12 +1984,61 @@ func _show_result(text: String) -> void:
 		create_tween().tween_property(desc, "visible_ratio", 1.0, reveal) \
 			.set_delay(0.10 + delay)
 
+	_spawn_result_seal(full, delay, had_payoffs)
 	_show_result_objects(delay)
 
 	column.add_child(_make_frameless_choice("Continue", "", "Walk on.", 88,
 			func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE)))
 
 	_refresh_ledger()
+
+
+func _result_is_bad(text: String) -> bool:
+	var lower := text.to_lower()
+	for token in ["lose", "lost", "wound", "curse", "damage", "bust", "nothing",
+			"empty", "dies", "dead"]:
+		if lower.find(token) >= 0:
+			return true
+	return false
+
+
+func _result_accent(text: String, had_payoffs: bool) -> Color:
+	if _result_is_bad(text):
+		return Color(1.0, 0.38, 0.24)
+	var lower := text.to_lower()
+	if had_payoffs or lower.find("gained") >= 0 or lower.find("gold") >= 0 \
+			or lower.find("healed") >= 0:
+		return GameTheme.KEYWORD_GOLD
+	if lower.find("max command") >= 0 or lower.find("upgraded") >= 0:
+		return Color(0.70, 0.86, 1.0)
+	return GameTheme.GILT_BRIGHT
+
+
+func _spawn_result_seal(text: String, delay: float, had_payoffs: bool) -> void:
+	if UserSettings.reduce_motion:
+		return
+	var accent := _result_accent(text, had_payoffs)
+	var center := Vector2(1160, 410 if had_payoffs else 360)
+	var ring := Panel.new()
+	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ring.z_index = 120
+	var st := StyleBoxFlat.new()
+	st.bg_color = Color(0, 0, 0, 0)
+	st.border_color = Color(accent.r, accent.g, accent.b, 0.58)
+	st.set_border_width_all(4)
+	st.set_corner_radius_all(600)
+	ring.add_theme_stylebox_override("panel", st)
+	ring.size = Vector2(50, 50)
+	ring.pivot_offset = ring.size * 0.5
+	ring.position = center - ring.size * 0.5
+	add_child(ring)
+	var tw := ring.create_tween()
+	tw.tween_interval(delay + 0.10)
+	tw.set_parallel(true)
+	tw.tween_property(ring, "scale", Vector2(5.4, 5.4), 0.48) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.tween_property(ring, "modulate:a", 0.0, 0.48).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(ring.queue_free)
 
 
 ## Stand the staged payoffs on the art half of the result page: up to 3 gained

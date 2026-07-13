@@ -17,16 +17,16 @@ const KEYWORDS: Dictionary = {
 	"wither":     {"display": "Wither N",    "desc": "Loses N ATK at the start of each round."},
 	"on_enter":   {"display": "On-Enter",    "desc": "Effect triggers the moment this creature is placed on the board."},
 	"on_death":   {"display": "On-Death",    "desc": "Effect triggers when this creature dies (HP reaches 0)."},
-	"adj_buff":   {"display": "Adj. Buff",   "desc": "Friendlies to its left and right get a stat bonus while this is in play."},
+	"adj_buff":   {"display": "Adj. Buff",   "desc": "Adjacent friendlies — left, right, and its column-mate in the other row — get a stat bonus while this is in play."},
 	"poison":     {"display": "Poison",      "desc": "Any creature it damages dies, no matter its remaining HP."},
 	"shield":     {"display": "Shield",      "desc": "Absorbs the first hit completely, then Shield is removed."},
 	"guardian":   {"display": "Guardian",    "desc": "Enemies to its left and right must attack this creature."},
 	"structure":  {"display": "Structure",   "desc": "Can't be attacked or targeted by spells."},
 	"slay":       {"display": "Slay",        "desc": "An effect that fires when this kills the creature it's fighting."},
-	"adjacent":   {"display": "Adjacent",    "desc": "The creatures directly to its left and right."},
+	"adjacent":   {"display": "Adjacent",    "desc": "The creatures beside it — to its left and right, and its column-mate in the other row."},
 	"doom":       {"display": "Doom N",      "desc": "Counts down 1 per round. At 0, deals its ATK to enemy face, then dies."},
 	"rampage":    {"display": "Rampage",     "desc": "Gains +1 ATK this fight each time it kills an enemy creature (more if a number is shown)."},
-	"lifelink":   {"display": "Lifelink",    "desc": "You heal 1 HP whenever this deals damage in battle."},
+	"lifelink":   {"display": "Lifesteal",   "desc": "You heal HP equal to the damage this deals in battle."},
 	"overrun":    {"display": "Overrun",     "desc": "Start of each round: +1 ATK this round if no enemy stands directly across."},
 	"formation":  {"display": "Formation",   "desc": "Start of each round: +1/+1 this fight if a friendly stands beside it."},
 }
@@ -96,6 +96,104 @@ static func _is_word_char(c: String) -> bool:
 	return c.length() > 0 and (c.to_lower() != c.to_upper() or (c >= "0" and c <= "9"))
 
 
+# ── Inline keyword stamps (2026-07-10 card-furniture pass) ──────────────────
+# decorate_keywords = colorize_keywords + an ink-stamp device inline before the
+# FIRST occurrence of each keyword, and the glossary tooltip moved onto the
+# word itself via [hint] (the bottom-margin roundel row used to carry it — the
+# roundels are retired on hand cards; battlefield tokens keep their live rail).
+# Everything is emitted in KEYWORD_GOLD, so the card faces' existing
+# .replace(KEYWORD_GOLD, "#7a4f10") re-inks word AND stamp together for paper.
+# Card faces are the ONLY intended callers — tooltips/log lines keep calling
+# colorize_keywords and never grow stamps.
+#
+# Structure differs from colorize_keywords on purpose: matches are claimed on
+# the ORIGINAL text first, then decorations are written in a single rebuild
+# pass — the injected [hint] payloads contain other keywords' display names
+# ("Shield is removed", "Adjacent"), and a rescan-style loop would gild inside
+# its own markup.
+
+# MASTER SWITCH for the inline device stamps (2026-07-10): OFF — the
+# game-icons silhouettes read as noise at 13px, not meaning ("quite
+# unintuitive"). The gilded word + [hint] glossary carry the teaching alone.
+# Flip to true when a bespoke icon set lands that stays legible at stamp size
+# (flat, bold, 2-3 shapes — painted icons mush below ~20px).
+const INLINE_KEYWORD_STAMPS := false
+
+# Keyword id -> device path, resolved once ("" = no device SVG registered;
+# the word still gilds + hints, it just gets no stamp).
+static var _stamp_paths: Dictionary = {}
+
+
+static func _stamp_path(kw_id: String) -> String:
+	if not _stamp_paths.has(kw_id):
+		var p := "res://assets/icons/keywords/%s.svg" % kw_id
+		_stamp_paths[kw_id] = p if ResourceLoader.exists(p) else ""
+	return _stamp_paths[kw_id]
+
+
+static func decorate_keywords(text: String, stamp_px: int) -> String:
+	if text.is_empty():
+		return ""
+	# Display name -> id, matching colorize_keywords' longest-first order so
+	# "Last Stand" claims its span before a shorter name could. "Doom N" /
+	# "Wither N" match their bare word — the printed text says "Doom 3".
+	var names: Array = []
+	for k in KEYWORDS.keys():
+		var disp := String(KEYWORDS[k].display).trim_suffix(" N")
+		names.append([disp, String(k)])
+	names.sort_custom(func(a, b): return a[0].length() > b[0].length())
+	var lowered := text.to_lower()
+	var claimed: Array = []  # [start, end, kw_id], non-overlapping
+	for pair in names:
+		var n_low: String = pair[0].to_lower()
+		var idx := 0
+		while idx < text.length():
+			var found := lowered.find(n_low, idx)
+			if found == -1:
+				break
+			var end := found + n_low.length()
+			var prev_ok := (found == 0) or not _is_word_char(text[found - 1])
+			var next_ok := (end >= text.length()) or not _is_word_char(text[end])
+			var overlaps := false
+			for span in claimed:
+				if found < int(span[1]) and end > int(span[0]):
+					overlaps = true
+					break
+			if prev_ok and next_ok and not overlaps:
+				claimed.append([found, end, pair[1]])
+				idx = end
+			else:
+				idx = found + 1
+	claimed.sort_custom(func(a, b): return int(a[0]) < int(b[0]))
+	var out := ""
+	var pos := 0
+	var stamped := {}
+	for span in claimed:
+		var start := int(span[0])
+		var end := int(span[1])
+		var kw_id := String(span[2])
+		out += text.substr(pos, start - pos)
+		var word := text.substr(start, end - start)
+		var deco := "[b][color=%s]%s[/color][/b]" % [KEYWORD_GOLD, word]
+		if INLINE_KEYWORD_STAMPS and stamp_px > 0 and not stamped.has(kw_id):
+			stamped[kw_id] = true
+			var icon := _stamp_path(kw_id)
+			if icon != "":
+				# NBSP, not a space: U+00A0 is break-prohibited on both sides
+				# (UAX #14 GL), so the stamp can never wrap away from its word.
+				deco = "[img width=%d height=%d color=%s]%s[/img] %s" % [
+					stamp_px, stamp_px, KEYWORD_GOLD, icon, deco]
+		# Hint payload can't carry brackets (they'd close the tag early) or
+		# ASCII quotes (the option parser treats ' and " as delimiters — a bare
+		# apostrophe like "it's" kills the whole tag). Curly quotes are safe.
+		var tip := String(KEYWORDS[kw_id].desc).replace("[", "(").replace("]", ")") \
+			.replace("'", "’").replace("\"", "”")
+		out += "[hint=%s]%s[/hint]" % [tip, deco]
+		pos = end
+	out += text.substr(pos)
+	return out
+
+
 static func dispatch_on_enter(card, lane_idx: int, is_enemy: bool, ctx) -> void:
 	var data = card.card_data if card is Control else CardDB.get_card_data(card)
 	if data.is_empty():
@@ -114,7 +212,8 @@ static func dispatch_on_enter(card, lane_idx: int, is_enemy: bool, ctx) -> void:
 		# (a card drawn, the foe's face ticking down) ties back to its cause.
 		_trigger_callout(card, ctx, _effect_label(data.on_enter, false, is_enemy), false)
 	if summon_on_play:
-		_do_summon(lane_idx, is_enemy, ctx)
+		var summon_row: int = card.current_row if card is Control else ctx.ROW_FRONT
+		_do_summon(lane_idx, is_enemy, ctx, summon_row)
 		_trigger_callout(card, ctx, "SUMMON", false)
 		if not is_enemy:
 			ctx._dispatch_reactive("ON_PLAYER_SUMMON", card, lane_idx)
@@ -148,6 +247,18 @@ static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx, row: in
 		if have_anchor and ctx.has_method("spawn_trigger_callout"):
 			ctx.spawn_trigger_callout(death_anchor,
 				_effect_label(effect, true, was_enemy), true)
+		return
+	# The Undying (undying_grow): identity-based like Griffin — writes a
+	# permanent +1/+1 mod against the dying card's deck uid (RunState mod
+	# stack), so every future draw of THIS copy — this fight and every fight
+	# after — comes back bigger. Tokens/net bodies (uid < 0) no-op; doubling
+	# a permanent ledger write is nonsense, so it resolves before the
+	# value-based loop.
+	if String(effect.get("type", "")) == "undying_grow":
+		if not was_enemy and card is Control and int(card.deck_uid) >= 0:
+			RunState.grow_undying(card.deck_uid)
+			if have_anchor and ctx.has_method("spawn_trigger_callout"):
+				ctx.spawn_trigger_callout(death_anchor, "RISES +1/+1", true)
 		return
 	var times = 1
 	if not was_enemy and ctx._has_passive_on_field("double_on_death"):
@@ -243,7 +354,9 @@ static func dispatch_start_of_round(ctx) -> void:
 								"OVERRUN +%d" % ov, Color(1.0, 0.78, 0.25), false)
 					# Formation: a friendly in the same row, adjacent column —
 					# the carrier grows +N/+N permanently (max HP rises and the
-					# body heals into it, mirroring formation_drill_tick).
+					# body heals into it, mirroring formation_drill_tick). This is
+					# fine-to-weak in practice: creatures rarely survive enough
+					# rounds to bank the growth, so it never actually snowballs.
 					if c.has_keyword("formation"):
 						var left = arr[i - 1] if i > 0 else null
 						var right = arr[i + 1] if i < arr.size() - 1 else null
@@ -338,6 +451,8 @@ static func _effect_label(effect: Dictionary, is_death: bool, side_is_enemy: boo
 			"summon":                return "SUMMON"
 			"bonus_mana":            return "" if side_is_enemy else "+%d COMMAND" % v
 			"return_to_hand_once":   return "" if side_is_enemy else "RETURN"
+			"heal_enemy_face":       return "" if side_is_enemy else "FOE HEALS %d" % v
+			"steal_opposing":        return "" if side_is_enemy else "DESERTION"
 			"damage_face":           return "TO FACE %d" % v
 			"debuff_all_player_atk": return ("WEAKEN ALL %d" % v) if side_is_enemy else ""
 			"damage_adjacent":       return "BACKLASH %d" % v
@@ -368,6 +483,36 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 	# untouched; it is now always 0.)
 	var on_enter_bonus: int = 0
 	match effect.get("type", ""):
+		"summon_flank":
+			# Warchief: a 1/1 Soldier musters in each lane beside him — a
+			# 3-Command turn that buys WIDTH (3 bodies), not one tall body.
+			# summon_token falls through occupied seats to the other row.
+			var sf_stat: int = maxi(1, int(effect.get("value", 1)))
+			for sf_lane in [lane_idx - 1, lane_idx + 1]:
+				if sf_lane >= 0 and sf_lane < 4:
+					ctx.summon_token(sf_stat, sf_stat, sf_lane, is_enemy,
+						0, {}, "Soldier")
+		"buff_ctype_keyword":
+			# Type-wide keyword grant (Siege Golem: your other Engines gain
+			# Armored). Fires host-side in net like every on-enter; the granted
+			# keyword joins the card's list for this fight and shows on the
+			# battlefield rail.
+			var g_kw := String(effect.get("kw", ""))
+			var g_ct := String(effect.get("ctype", ""))
+			var g_allies: Array = ctx._all_enemy_creatures() if is_enemy else ctx._all_player_creatures()
+			for ally in g_allies:
+				if ally == card or not is_instance_valid(ally):
+					continue
+				if String(ally.card_data.get("ctype", "")) != g_ct:
+					continue
+				var a_kws: Array = ally.card_data.get("keywords", [])
+				if not a_kws.has(g_kw):
+					a_kws.append(g_kw)
+					ally.card_data["keywords"] = a_kws
+					if ally.has_method("update_stat_display"):
+						ally.update_stat_display()
+					if ctx.has_method("log_status"):
+						ctx.log_status(ally, "gains %s" % g_kw.capitalize())
 		"damage_opposing":
 			var target = ctx.get_opposing_card(lane_idx, is_enemy)
 			if target != null:
@@ -497,24 +642,23 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 				ctx._show_keyword_choice(card)
 		"glutton_devour":
 			# The Glutton (Marvel Snap Carnage port) — destroy adjacent friendlies
-			# in the same row, gain +2/+2 (+3/+3 upgraded) AND their keywords for
-			# each. Routing through take_damage(999) fires their on_death effects
+			# (canonical: row ±1 + column-mate), gain +2/+2 (+3/+3 upgraded) AND their
+			# keywords for each. Routing through take_damage(999) fires their on_death effects
 			# (Soul Lantern mana, Husk grow, Corpse Eater grow), so Glutton
 			# synergizes with the rest of the death-payoff bucket.
 			if card != null:
 				var my_row: int = card.current_row
-				var field = ctx._row_array(is_enemy, my_row)
 				var devoured: int = 0
 				var eaten_keywords: Array = []
-				for adj_lane in [lane_idx - 1, lane_idx + 1]:
-					if adj_lane < 0 or adj_lane >= 4:
-						continue
-					var victim = field[adj_lane]
-					if victim != null and victim != card:
+				# Canonical adjacency (2026-07-10): same-row ±1 lanes AND the
+				# column-mate (Combat._adjacent_creatures) — "adjacent" means row
+				# and column game-wide now, so the Glutton eats behind it too.
+				for victim in ctx._adjacent_creatures(is_enemy, my_row, lane_idx):
+					if victim != null and is_instance_valid(victim) and victim != card:
 						# "You are what you eat": digest the meal's keywords BEFORE the
 						# kill frees it. Drawback keywords (doom / wither) are digested
-						# away; value-carrying rampage/lifelink default to 1 on the
-						# Glutton, which is exactly what the base keywords mean.
+						# away; value-carrying rampage defaults to 1 on the Glutton,
+						# and lifesteal needs no value (it heals for damage dealt).
 						for kw in victim.card_data.get("keywords", []):
 							if (kw in COMBAT_KEYWORDS or kw in ["rampage", "lifelink"]) \
 									and kw not in eaten_keywords:
@@ -587,11 +731,17 @@ static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ct
 			if bool(effect.get("both_rows", false)):
 				ctx.summon_token(effect.atk, effect.hp, lane_idx, was_enemy, 1, bequest)
 		"detonate_dooms":
-			# Powder Cart: the wagon goes up — every OTHER friendly Doom creature
-			# on its side detonates immediately (each with its own blast and
+			# Powder Cart: the wagon goes up. FLOOR (2026-07-13): a base blast of
+			# 2 (3 forged) hits every enemy even with no other Doom on the board,
+			# so the cart is never a dead 0/4 — then every OTHER friendly Doom
+			# creature detonates immediately (each with its own blast and
 			# on-death). The cart itself is already dying (hp <= 0), so the
 			# hp > 0 guard keeps it — and anything else mid-death — out of
 			# the chain; two carts can't re-detonate each other.
+			var cart_blast: int = int(effect.get("value", 2)) + on_death_bonus
+			for e in ctx._all_friendly(not was_enemy):
+				if e != null and is_instance_valid(e):
+					e.take_damage(cart_blast)
 			for c in ctx._all_friendly(was_enemy):
 				if c != null and is_instance_valid(c) and c.current_hp > 0 \
 						and c.has_keyword("doom"):
@@ -601,8 +751,23 @@ static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ct
 			# the battlecry channel so a client-owned death in net pays the CLIENT —
 			# the bare `if not was_enemy` bump this replaced was host-only.
 			ctx._battlecry_bonus_mana_next_turn(was_enemy, effect.value)
-			# (return_to_hand_once / Griffin is resolved in dispatch_on_death, above —
-			# it needs the dying card's identity, which this value-based path lacks.)
+			# (return_to_hand_once / Griffin and undying_grow / The Undying are
+			# resolved in dispatch_on_death, above — they need the dying card's
+			# identity, which this value-based path lacks.)
+		"heal_enemy_face":
+			# Pressed Man: the levy's death pays the foe back — the OTHER side's
+			# face heals. Solo-only by denylist; enemy decks never carry it.
+			if not was_enemy:
+				ctx.heal_enemy_hero(effect.value)
+		"steal_opposing":
+			# The Whisper-Widow: positional Sylvanas — the creature OPPOSING her
+			# lane deserts to the player's side as she dies (her own seat was
+			# just vacated, so the deserter always finds a camp berth). A warden
+			# doubling re-checks the lane: usually empty, no second steal.
+			if not was_enemy:
+				var ww_target = ctx.get_opposing_card(lane_idx, false)
+				if ww_target != null and is_instance_valid(ww_target):
+					ctx._desert_enemy_to_player(ww_target)
 		"damage_face":
 			if was_enemy:
 				ctx.damage_player_hero(effect.value)
@@ -614,46 +779,55 @@ static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ct
 					c.current_atk = maxi(0, c.current_atk - effect.value)
 					c.update_stat_display()
 		"damage_adjacent":
-			# 4x4: hit the same-row left/right neighbours of the dead creature
-			# ("creatures directly to its left and right"). When the caller knows
-			# the dead card's row (the normal death path threads it), restrict to
-			# that one row; the legacy -1 fallback (e.g. the necromancer_tower
-			# reactive, which only has lane) still hits both rows' adjacencies.
-			var rows_to_hit := [row] if row >= 0 else [0, 1]
-			for r in rows_to_hit:
-				var field = ctx._row_array(was_enemy, r)
-				for adj in [lane_idx - 1, lane_idx + 1]:
-					if adj >= 0 and adj < 4 and field[adj] != null:
-						field[adj].take_damage(effect.value + on_death_bonus)
+			# Canonical adjacency (2026-07-10): the dead creature's row ±1 lanes AND
+			# its column-mate. The normal death path threads the dead card's row; the
+			# legacy -1 fallback (the necromancer_tower reactive, lane-only) unions
+			# both rows' canonical sets, de-duped so a shared column-mate is hit once.
+			for adj in _canonical_adjacent_at(ctx, was_enemy, row, lane_idx):
+				if adj != null and is_instance_valid(adj):
+					adj.take_damage(effect.value + on_death_bonus)
 		"grant_shield_adjacent":
-			# Shieldmaiden — she falls so others stand: same-row neighbours of the
-			# dead creature gain Shield. Mirrors the on-play grant (Crystal Sentry)
-			# but keyed off the death slot.
-			var sm_rows := [row] if row >= 0 else [0, 1]
-			for r in sm_rows:
-				var field = ctx._row_array(was_enemy, r)
-				for adj in [lane_idx - 1, lane_idx + 1]:
-					if adj >= 0 and adj < 4 and field[adj] != null:
-						var ally = field[adj]
-						if is_instance_valid(ally) and ally.current_hp > 0 and not ally.state.has_shield:
-							ally.state.has_shield = true
-							if ally.has_method("_spawn_keyword_chip"):
-								ally._spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
+			# A fallen guardian shields those beside it. Canonical adjacency
+			# (2026-07-10): row ±1 + column-mate of the death slot.
+			for ally in _canonical_adjacent_at(ctx, was_enemy, row, lane_idx):
+				if is_instance_valid(ally) and ally.current_hp > 0 and not ally.state.has_shield:
+					ally.state.has_shield = true
+					if ally.has_method("_spawn_keyword_chip"):
+						ally._spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
 		_:
 			pass
 
 
-static func _do_summon(lane_idx: int, is_enemy: bool, ctx) -> void:
-	# 4x4: try same-row adjacent empties first (front), then fall through.
-	var adj_lanes: Array[int] = []
-	if lane_idx > 0:
-		adj_lanes.append(lane_idx - 1)
-	if lane_idx < 3:
-		adj_lanes.append(lane_idx + 1)
-	adj_lanes.shuffle()
-	for row in [0, 1]:
-		var field = ctx._row_array(is_enemy, row)
-		for l in adj_lanes:
-			if field[l] == null:
-				ctx.summon_token(1, 1, l, is_enemy, row)
-				return
+## Canonical-adjacent creatures at a board seat, routed through Combat's shared
+## helper so every "adjacent" verb resolves the SAME cells (row ±1 + column-mate).
+## `row >= 0` uses that row's set; the legacy -1 (lane-only reactive) unions both
+## rows' sets, de-duped so a shared column-mate is never returned twice.
+static func _canonical_adjacent_at(ctx, is_enemy: bool, row: int, lane_idx: int) -> Array:
+	if row >= 0:
+		return ctx._adjacent_creatures(is_enemy, row, lane_idx)
+	var out: Array = []
+	for r in [0, 1]:
+		for c in ctx._adjacent_creatures(is_enemy, r, lane_idx):
+			if c not in out:
+				out.append(c)
+	return out
+
+
+static func _do_summon(lane_idx: int, is_enemy: bool, ctx, row: int = 0) -> void:
+	# Summon keyword: a 1/1 token in an adjacent empty lane. Canonical adjacency
+	# (2026-07-10) — prefer same-row ±1 and the column-mate seat; only if all of
+	# those are full fall back to the other row's diagonal lanes, so a summon on a
+	# busy board still lands beside the summoner instead of whiffing.
+	var seats: Array = ctx._adjacent_empty_seats(is_enemy, row, lane_idx)
+	seats.shuffle()
+	if not seats.is_empty():
+		ctx.summon_token(1, 1, int(seats[0].lane), is_enemy, int(seats[0].row))
+		return
+	var other: int = 1 if row == 0 else 0
+	var diag: Array[int] = []
+	for adj in [lane_idx - 1, lane_idx + 1]:
+		if adj >= 0 and adj < 4 and ctx._row_array(is_enemy, other)[adj] == null:
+			diag.append(adj)
+	if not diag.is_empty():
+		diag.shuffle()
+		ctx.summon_token(1, 1, diag[0], is_enemy, other)

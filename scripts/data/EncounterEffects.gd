@@ -62,6 +62,69 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 	match ctx._encounter_passive:
 		"orc_random_buff":
 			ctx._buff_random_enemy_atk(1)
+		"sentinel_stone":
+			# The Tooth-Stones (A1 combat): they mean to HOLD. Every enemy enters
+			# Armored (granted in _place_enemy_card), and from round 2 the front
+			# rank digs in — +1 ATK PERMANENTLY each round it stands. Armored blunts
+			# your blows going in; the longer the wall holds, the harder it hits
+			# back. You have to break the line, not out-last it.
+			if ctx.round_number >= 2:
+				var dug_in := false
+				for c in ctx._row_array(true, ctx.ROW_FRONT):
+					if c != null and is_instance_valid(c) and c.current_hp > 0:
+						c.current_atk += 1
+						c.update_stat_display()
+						dug_in = true
+				if dug_in:
+					ctx._show_info("The Tooth-Stones dig in — enemy front rank gains +1 ATK.")
+			# From round 3 the ground itself turns against you: the ancient stones
+			# grind and the tremor deals 2 face damage a round. A defensive wall
+			# with no clock lets you race its face; the tremor makes STALLING lethal,
+			# so you must break the Armored line, not out-wait it.
+			if ctx.round_number >= 3:
+				ctx.damage_player_hero(2)
+				ctx._show_info("The ground shakes — the tremor deals 2.")
+		"bandit_reinforce":
+			# The Toll-Takers (A1 combat): the camp never runs out of men. A fresh
+			# 2/2 Swift raider joins from round 2, and from round 4 the camp empties
+			# out — TWO a round. A weak deck that can't close gets buried under the
+			# flood; a fast one ends the fight before it matters.
+			if ctx.round_number >= 2:
+				var reinforce_n: int = 2 if ctx.round_number >= 4 else 1
+				for _i in reinforce_n:
+					ctx._summon_enemy_token_with_keyword(2, 2, "swift")
+				ctx._show_info("%d raider%s join the road." % [reinforce_n, "s" if reinforce_n > 1 else ""])
+		"chieftain_rally":
+			if ctx.round_number >= 2:
+				var chieftain_alive := false
+				for c in ctx._all_enemy_creatures():
+					if c.card_data.get("name", "") == "Chieftain":
+						chieftain_alive = true
+						break
+				if chieftain_alive:
+					var rallied := false
+					for c in ctx._row_array(true, ctx.ROW_FRONT):
+						if c != null and is_instance_valid(c) and c.current_hp > 0:
+							c.temp_atk_buff += 1
+							c.update_stat_display()
+							rallied = true
+					if rallied:
+						ctx._show_info("The Chieftain rallies the front rank.")
+						ctx._log_event("The Chieftain rallies the front rank: enemy front row gains [color=#f2e6c8]+1 ATK[/color] this round.")
+		"stampede_charge":
+			if ctx.round_number <= 2:
+				var charged := false
+				for c in ctx._all_enemy_creatures():
+					c.temp_atk_buff += 1
+					c.update_stat_display()
+					charged = true
+				if charged:
+					ctx._show_info("The herd stampedes — enemies gain +1 ATK and Piercing this round.")
+					ctx._log_event("The herd stampedes: enemy creatures gain [color=#f2e6c8]+1 ATK[/color] and Piercing this round.")
+			elif ctx.round_number == 3 and not bool(ctx.get_meta("stampede_broken_logged", false)):
+				ctx.set_meta("stampede_broken_logged", true)
+				ctx._show_info("The stampede breaks.")
+				ctx._log_event("The stampede breaks.")
 		"formation_drill":
 			# THE STALWART phase 1 — the Last Wall's Formation engine.
 			# (Also the amalgam finale's wall phase.)
@@ -120,6 +183,8 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 				target.current_hp = mini(target.current_hp + 1, target.card_data.hp + 1)
 				target.card_data.hp += 1
 				target.update_stat_display()
+		"martyr_pact":
+			ctx._mark_martyr_chosen()
 		"forge_burn_all":
 			for c in ctx._all_creatures_both_sides():
 				c.take_damage(1)
@@ -255,6 +320,26 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 
 static func dispatch_passive_end_of_round(ctx) -> void:
 	match ctx._encounter_passive:
+		"spore_regrowth":
+			# The Spore-Cathedral (A1 combat): a vice. Every round the grove knits
+			# its wounded back up (+2 HP each) so chip damage is undone, AND while
+			# the congregation still breathes it chokes you for 2 face damage. The
+			# only way out is to BURST bodies down and END the fight fast — the heal
+			# undoes chipping, and the choke grinds a slow deck to death. The choke
+			# only fires while enemies live (a cleared board can't spore you).
+			var spore_enemies: Array = ctx._all_enemy_creatures()
+			if not spore_enemies.is_empty():
+				for c in spore_enemies:
+					var maxhp: int = int(c.card_data.get("hp", c.current_hp))
+					if c.current_hp < maxhp:
+						c.current_hp = mini(c.current_hp + 2, maxhp)
+						c.update_stat_display()
+				# The choke scales with the board you FAILED to clear — 1 face per
+				# living enemy (cap 4). Clearing bodies eases your own suffocation,
+				# so the burst-kill puzzle and your survival are the same problem.
+				var choke: int = mini(spore_enemies.size(), 4)
+				ctx.damage_player_hero(choke)
+				ctx._show_info("The spores knit the wounded (+2 HP) and choke you for %d." % choke)
 		"iron_warden_burn":
 			ctx.damage_player_hero(2)
 		"iron_warden_siege":
@@ -267,9 +352,20 @@ static func dispatch_passive_end_of_round(ctx) -> void:
 				c.current_hp = mini(c.current_hp + 1, c.card_data.hp)
 				c.update_stat_display()
 		"executioner_face":
-			var highest = ctx._highest_atk_enemy_creature()
-			if highest != null:
-				ctx.damage_player_hero(highest.effective_atk())
+			var axe = ctx._passive_threat_marked
+			if axe != null and is_instance_valid(axe) and axe.current_hp > 0 \
+					and bool(axe.is_opponent):
+				var axe_dmg: int = axe.effective_atk()
+				ctx._log_event("%s drops the axe for [color=#e06a50]%d[/color]." \
+					% [ctx._log_card_ref(axe), axe_dmg],
+					ctx._log_data(axe), ctx._log_side(axe))
+				ctx.damage_player_hero(axe_dmg)
+				if axe.has_method("set_danger_marked"):
+					axe.set_danger_marked(false)
+			else:
+				ctx._log_event("The raised axe finds no neck.")
+			ctx._passive_threat_marked = null
+			ctx._passive_threat_amount = 0
 		"crone_drip":
 			ctx._player_discard_pile.append(CardDB.random_curse_id())
 		"crone_lash":
@@ -300,23 +396,27 @@ static func dispatch_passive_end_of_round(ctx) -> void:
 				weakest.take_damage(3)
 
 
-static func dispatch_encounter_on_enemy_death(ctx, lane_idx: int, dead_card = null) -> void:
-	# 4x4: lane_idx is the column. Wolf-pack revenge buffs same-row neighbors
-	# in the front row, since that's where most fights take place; if you want
-	# back-row revenge too, also buff back-row adjacents.
+static func dispatch_encounter_on_enemy_death(ctx, lane_idx: int, dead_card = null,
+		row: int = -1) -> void:
+	# 4x4: lane_idx is the column; row is the dead creature's row when the
+	# death path knows it (-1 legacy fallback sweeps both rows' adjacencies).
 	match ctx._encounter_passive:
 		"wolf_pack_revenge":
-			for row in [ctx.ROW_FRONT, ctx.ROW_BACK]:
-				for adj_card in ctx._adjacent_in_row(true, row, lane_idx):
+			# "Adjacent enemies gain +1 ATK" — canonical adjacency of the fallen
+			# wolf (its row ±1 + its column-mate).
+			var wp_rows: Array = [row] if row >= 0 else [ctx.ROW_FRONT, ctx.ROW_BACK]
+			for r in wp_rows:
+				for adj_card in ctx._adjacent_creatures(true, r, lane_idx):
 					adj_card.temp_atk_buff += 1
 					adj_card.update_stat_display()
 		"flock_enrage":
 			# The Shepherd Who Lost His Sheep (A3): a death feeds the survivors beside
 			# it +1 ATK PERMANENTLY (current_atk, not temp), so kill order compounds.
-			# Replaces a shared wolf_pack_revenge with a louder, weightier version so
-			# the A1 wolves and the A3 shepherd no longer feel like the same fight.
-			for row in [ctx.ROW_FRONT, ctx.ROW_BACK]:
-				for adj_card in ctx._adjacent_in_row(true, row, lane_idx):
+			# "Beside" is the row-lateral word — the fallen sheep's own rank only,
+			# matching the passive's printed text (canonical "adjacent" is _adjacent_creatures).
+			var fe_rows: Array = [row] if row >= 0 else [ctx.ROW_FRONT, ctx.ROW_BACK]
+			for r in fe_rows:
+				for adj_card in ctx._adjacent_in_row(true, r, lane_idx):
 					adj_card.current_atk += 1
 					adj_card.update_stat_display()
 			ctx._show_info("The flock rages — survivors beside the fallen gain +1 ATK.")
@@ -333,6 +433,12 @@ static func dispatch_encounter_on_enemy_death(ctx, lane_idx: int, dead_card = nu
 		"necro_death_summon":
 			if dead_card == null or dead_card.card_data.get("name", "") != "Skeleton":
 				ctx._summon_enemy_token(1, 1)
+		"chieftain_rally":
+			if dead_card != null and dead_card.card_data.get("name", "") == "Chieftain":
+				ctx._show_info("The war drum falls silent.")
+				ctx._log_event("The war drum falls silent.")
+		"martyr_pact":
+			ctx._double_martyr_on_death(dead_card, lane_idx, row)
 		"crypt_ghost":
 			ctx._summon_enemy_token_with_keyword(1, 1, "swift")
 		"mirror_instant_place":
@@ -427,6 +533,9 @@ static func has_encounter_passive_keyword(ctx, card, keyword: String) -> bool:
 		"nexus_rotation":
 			if keyword == "thorns":
 				return (ctx.round_number - 1) % 3 == 2
+		"stampede_charge":
+			if keyword == "piercing":
+				return ctx.round_number <= 2
 	return false
 
 

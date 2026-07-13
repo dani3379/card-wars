@@ -81,20 +81,22 @@ func _run_test() -> void:
 	var FRONT = combat.ROW_FRONT
 	var BACK = combat.ROW_BACK
 
-	# ── 1. Drillmaster: +1 ATK to the OTHER creatures in its row ─────────────
+	# ── 1. Drillmaster: +1 ATK THIS ROUND to the OTHER creatures in its row ──
+	# (The buff moved to the this-round bucket — temp_atk_buff — in the
+	# this-round-vs-this-fight pass; read effective_atk, not current_atk.)
 	print("— Drillmaster (buff_row_atk)")
 	combat._place_enemy_card(CDB.get_card_data("brute").duplicate(true), 0, FRONT)
 	combat._place_enemy_card(CDB.get_card_data("goblin").duplicate(true), 3, FRONT)
 	var mate0 = combat._row_array(true, FRONT)[0]
 	var mate3 = combat._row_array(true, FRONT)[3]
-	var m0_before: int = mate0.current_atk
-	var m3_before: int = mate3.current_atk
+	var m0_before: int = mate0.effective_atk()
+	var m3_before: int = mate3.effective_atk()
 	combat._place_enemy_card(CDB.get_card_data("squire_captain").duplicate(true), 1, FRONT)
 	var dm = combat._row_array(true, FRONT)[1]
 	await create_timer(0.2).timeout
-	_check(mate0.current_atk == m0_before + 1, "row-mate lane 0 got +1 ATK (%d -> %d)" % [m0_before, mate0.current_atk])
-	_check(mate3.current_atk == m3_before + 1, "row-mate lane 3 got +1 ATK (non-adjacent, same row)")
-	_check(dm.current_atk == int(CDB.get_card_data("squire_captain").atk), "Drillmaster did not buff itself")
+	_check(mate0.effective_atk() == m0_before + 1, "row-mate lane 0 got +1 ATK this round (%d -> %d)" % [m0_before, mate0.effective_atk()])
+	_check(mate3.effective_atk() == m3_before + 1, "row-mate lane 3 got +1 ATK this round (non-adjacent, same row)")
+	_check(dm.effective_atk() == int(CDB.get_card_data("squire_captain").atk), "Drillmaster did not buff itself")
 
 	# (Plague Rat was reverted to plain "Poison." — simple commons are a
 	# feature, not a bug; no on-play test needed.)
@@ -126,27 +128,27 @@ func _run_test() -> void:
 	combat._refresh_adjacency_buffs()
 	_check(not bool(neigh.get_meta("drummer_swift", false)), "drum dies -> the Swift grant dies with it")
 
-	# ── 5. Siege Golem: ignores Guardian redirect and Thorns ─────────────────
-	print("— Siege Golem (unstoppable)")
-	var wall = combat._net_spawn_creature(CDB.get_card_data("stone_wall"), 93102, 1, FRONT, false, false)
-	var victim = combat._net_spawn_creature(CDB.get_card_data("goblin"), 93103, 0, FRONT, false, false)
-	await create_timer(0.15).timeout
+	# ── 5. Siege Golem: On-Enter — its fellow Engines gain Thorns ────────────
+	# (The old "unstoppable ram" design left in the 2026-07-10 rare rework; the
+	# golem is the engine-line armorer now — grant sharpened Armored→Thorns
+	# 2026-07-13, since half the engine line already prints Armored.)
+	print("— Siege Golem (engine armorer)")
+	var eng_ally = CDB.get_card_data("stone_wall").duplicate(true)
+	combat._place_enemy_card(eng_ally, 2, FRONT)
+	var eng_wall = combat._row_array(true, FRONT)[2]
+	var beast_ally = combat._row_array(true, FRONT)[0]   # the lane-0 brute from test 1
+	_check(eng_wall != null and not eng_wall.has_keyword("thorns"),
+		"the engine wall starts without Thorns")
 	var golem_data = CDB.get_card_data("siege_golem").duplicate(true)
 	combat._place_enemy_card(golem_data, 0, BACK)
 	var golem = combat._row_array(true, BACK)[0]
-	var redirected = combat._redirect_target(victim, false, 0, FRONT)
-	var unstopped = combat._redirect_target(victim, false, 0, FRONT, golem)
-	_check(redirected == wall, "a plain attack IS redirected to the adjacent Guardian")
-	_check(unstopped == victim, "Siege Golem's attack ignores the Guardian and hits its target")
-	var thorny = combat._net_spawn_creature(CDB.get_card_data("thornguard"), 93104, 3, FRONT, false, false)
 	await create_timer(0.15).timeout
-	var g_hp0: int = golem.current_hp
-	combat._apply_thorns(thorny, golem, true)
-	_check(golem.current_hp == g_hp0, "Thorns did not sting the unstoppable golem")
-	var soft = combat._row_array(true, FRONT)[0]   # the lane-0 brute from test 1
-	var s_hp0: int = soft.current_hp
-	combat._apply_thorns(thorny, soft, true)
-	_check(soft.current_hp == s_hp0 - 1, "a normal attacker still takes the Thorns sting")
+	_check(eng_wall != null and eng_wall.has_keyword("thorns"),
+		"Siege Golem armed its fellow Engine with Thorns")
+	_check(beast_ally == null or not beast_ally.has_keyword("thorns"),
+		"the beast row-mate got nothing — the grant is Engines-only")
+	_check(golem != null and not golem.has_keyword("thorns"),
+		"the golem arms the OTHERS, not itself")
 
 	# ── 6. Old Bones: dies into a 2/2, which dies into a 1/1, which stays dead ─
 	print("— Old Bones (diminishing rise)")

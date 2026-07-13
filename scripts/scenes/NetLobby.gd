@@ -60,6 +60,12 @@ var _vsbot_mode_buttons: Dictionary = {}
 var _vsbot_bo_buttons: Dictionary = {}
 var _vsbot_style_buttons: Dictionary = {}
 
+# ── Lord pick (your character — portrait + emote voice, both players see it) ──
+var _hero_buttons: Dictionary = {}        # hero id -> Button (ready panel)
+var _vsbot_hero_buttons: Dictionary = {}  # hero id -> Button (practice panel)
+var _opp_hero_label: Label = null         # "Their lord: …" readout (ready panel)
+var _selected_hero: String = ""
+
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "main_menu")
@@ -67,8 +73,11 @@ func _ready() -> void:
 	# prep screen (lobby, quick-match, draft, sealed, constructed).
 	AudioBank.play_music_random(["map_c", "map_d", "rest_c"])
 	_relay_host = NetMatch.get_relay_host()
-	# Fresh lobby: drop any stale connection from a previous visit.
+	# Fresh lobby: drop any stale connection from a previous visit. The lord pick
+	# survives leave() (sticky), so a rematch lobby reopens on your last lord.
 	NetMatch.leave()
+	_selected_hero = NetMatch.local_hero if NetMatch.local_hero != "" \
+		else HeroDB.DEFAULT_HERO
 	_build_ui()
 	_wire_net_signals()
 	_refresh_state()
@@ -169,6 +178,12 @@ func _build_ui() -> void:
 	_ready_panel.add_theme_constant_override("separation", 10)
 	_ready_panel.visible = false
 	col.add_child(_ready_panel)
+
+	# Lord pick — both players choose the character they march as; the picks are
+	# synced so each side sees the other's portrait in combat (built once; the
+	# highlight + "Their lord" line refresh via hero_state_changed).
+	_ready_panel.add_child(_build_hero_picker(_hero_buttons, true))
+	_ready_panel.add_child(GameTheme.make_separator(GILT_BRIGHT, 300.0))
 
 	# Mode / format picker — populated on connect (host gets buttons, client a
 	# read-only label) since is_host isn't known until host/join completes.
@@ -478,6 +493,106 @@ func _make_pick_chip(text: String, tooltip: String = "") -> Button:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+#  LORD PICKER — pick the character you march as. Cosmetic identity (your
+#  portrait on both screens + your emote voice); decks come from the mode.
+# ─────────────────────────────────────────────────────────────────────────
+
+## One row of the five lords as portrait chips. `buttons` is the caller's
+## dictionary to register into (the ready panel and the vs-bot panel each keep
+## their own — the vs-bot panel is rebuilt on every open). with_opp adds the
+## "you march as X · their lord: Y" readout under the row (net lobby only).
+func _build_hero_picker(buttons: Dictionary, with_opp: bool) -> Control:
+	buttons.clear()
+	var box := VBoxContainer.new()
+	box.alignment = BoxContainer.ALIGNMENT_CENTER
+	box.add_theme_constant_override("separation", 6)
+
+	# Title INLINE with the chips (not stacked) — the ready panel is the lobby's
+	# tallest state and a stacked heading pushed BACK off the 900px canvas.
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 10)
+	box.add_child(row)
+
+	var title := GameTheme.make_label("MARCH AS", 14, GILT_BRIGHT)
+	title.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(title)
+
+	for hid in HeroDB.HERO_ORDER:
+		var hero := HeroDB.get_hero(hid)
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(52, 68)
+		b.focus_mode = Control.FOCUS_NONE
+		b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		b.tooltip_text = "%s — %s" % [String(hero.get("name", hid)),
+			String(hero.get("tagline", ""))]
+		var normal := GameTheme.make_panel_style(
+			Color(0.055, 0.048, 0.040, 0.92), Color(0.60, 0.51, 0.34, 0.55), 1, 3, false)
+		var hover := normal.duplicate() as GameTheme.ChartPanelStyle
+		hover.border_color = GILT_BRIGHT
+		b.add_theme_stylebox_override("normal", normal)
+		b.add_theme_stylebox_override("focus", normal)
+		b.add_theme_stylebox_override("hover", hover)
+		b.add_theme_stylebox_override("pressed", hover)
+		var port_path := "res://assets/portraits/hero_portrait_%s.png" % hid
+		if ResourceLoader.exists(port_path):
+			var tex := TextureRect.new()
+			tex.texture = load(port_path)
+			tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+			tex.clip_contents = true
+			tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+			tex.offset_left = 3
+			tex.offset_top = 3
+			tex.offset_right = -3
+			tex.offset_bottom = -3
+			tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			b.add_child(tex)
+		else:
+			# No painted portrait — a monogram keeps the chip legible (MainMenu's
+			# graceful-degrade convention).
+			b.text = String(hero.get("name", hid)).strip_edges().left(1).to_upper()
+			if GameTheme.font_display:
+				b.add_theme_font_override("font", GameTheme.font_display)
+			b.add_theme_font_size_override("font_size", 30)
+			b.add_theme_color_override("font_color", GILT_BRIGHT)
+		b.pressed.connect(_on_hero_chosen.bind(hid))
+		row.add_child(b)
+		buttons[hid] = b
+
+	if with_opp:
+		_opp_hero_label = GameTheme.make_label("", 14, ASH)
+		_opp_hero_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		box.add_child(_opp_hero_label)
+
+	_refresh_hero_ui()
+	return box
+
+
+func _on_hero_chosen(hid: String) -> void:
+	_selected_hero = hid
+	NetMatch.set_local_hero(hid)   # stores locally + ships to the opponent
+	_refresh_hero_ui()
+
+
+## Highlight the picked chip in BOTH picker instances (only one is visible at a
+## time, but the selection is shared) and refresh the two-lords readout.
+func _refresh_hero_ui() -> void:
+	for d in [_hero_buttons, _vsbot_hero_buttons]:
+		for hid in d:
+			var b: Button = d[hid]
+			if is_instance_valid(b):
+				b.modulate = Color.WHITE if hid == _selected_hero \
+					else Color(0.45, 0.45, 0.45)
+	if _opp_hero_label != null and is_instance_valid(_opp_hero_label):
+		var mine := String(HeroDB.get_hero(_selected_hero).get("name", _selected_hero))
+		var theirs := "—"
+		if NetMatch.remote_hero != "":
+			theirs = String(HeroDB.get_hero(NetMatch.remote_hero).get("name", "—"))
+		_opp_hero_label.text = "You march as %s   ·   Their lord: %s" % [mine, theirs]
+
+
+# ─────────────────────────────────────────────────────────────────────────
 #  NET SIGNAL WIRING
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -488,6 +603,7 @@ func _wire_net_signals() -> void:
 	NetMatch.host_closed.connect(_on_host_closed)
 	NetMatch.peer_left.connect(_on_peer_left)
 	NetMatch.ready_state_changed.connect(_refresh_ready_labels)
+	NetMatch.hero_state_changed.connect(_refresh_hero_ui)
 	NetMatch.match_starting.connect(_on_match_starting)
 	NetMatch.match_config_changed.connect(_on_match_config_changed)
 	NetMatch.room_created.connect(_on_room_created)
@@ -692,8 +808,14 @@ func _show_ready_panel() -> void:
 	_ready_panel.visible = true
 	# START is host-only; the client never sees an enabled start button.
 	_start_btn.visible = NetMatch.is_host
+	# Make sure a lord is always on the wire — an untouched picker still commits
+	# the highlighted default (late-join catch-up re-sends it if the peer arrives
+	# after this).
+	if NetMatch.local_hero == "":
+		NetMatch.set_local_hero(_selected_hero)
 	_populate_mode_panel()
 	_refresh_ready_labels()
+	_refresh_hero_ui()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -830,6 +952,9 @@ func _populate_vs_bot_panel() -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_vs_bot_panel.add_child(title)
 
+	# Same lord picker as the net lobby (the bot rolls its own rival lord on BEGIN).
+	_vs_bot_panel.add_child(_build_hero_picker(_vsbot_hero_buttons, false))
+
 	var ml := GameTheme.make_label("MODE", 14, GILT_BRIGHT)
 	ml.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_vs_bot_panel.add_child(ml)
@@ -923,8 +1048,10 @@ func _on_vs_bot_back() -> void:
 
 
 func _on_vs_bot_begin() -> void:
-	# No peer to sync with — set the style directly before the local start.
+	# No peer to sync with — set the style + lord directly before the local start
+	# (start_vs_bot reads local_hero to roll a non-mirror bot lord).
 	NetMatch.battle_style = _vsbot_style
+	NetMatch.local_hero = _selected_hero
 	NetMatch.start_vs_bot(_vsbot_mode, _vsbot_bo)
 	var scene := SkirmishState.mode_scene(_vsbot_mode)
 	if not ResourceLoader.exists(scene):

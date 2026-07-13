@@ -97,6 +97,8 @@ func _run() -> void:
 	await _t_harpy()
 	await _t_hydra()
 	await _t_bulwark()
+	await _t_hex()
+	await _t_random_spell_autotarget()
 	await _t_carrion()
 	await _t_glutton()
 	await _t_fuel_the_pyre()
@@ -397,6 +399,56 @@ func _t_bulwark() -> void:
 	_ck("rage +2 ATK on the break", b.current_atk == 4, "atk=%d" % b.current_atk)
 
 
+func _t_hex() -> void:
+	print("\n[newcards] === Hex: strip keywords before damage ===")
+	_clear()
+	var ward = _seat_plain(true, 0, 0, 5, ["armored", "shield"])
+	await _cast("hex", ward)
+	var ward_detail := "gone"
+	if is_instance_valid(ward):
+		ward_detail = "hp=%d shield=%s kws=%s" % [ward.current_hp,
+			str(ward.state.has_shield), str(ward.card_data.get("keywords", []))]
+	_ck("shield/armored stripped before hit", is_instance_valid(ward) and ward.current_hp == 1,
+		ward_detail)
+	_ck("no shield or keywords remain", is_instance_valid(ward) and not ward.state.has_shield and ward.card_data.get("keywords", []).is_empty())
+	var oath = _seat_plain(true, 1, 0, 4, ["last_stand"])
+	await _cast("hex", oath)
+	_ck("last stand stripped before lethal hit", not is_instance_valid(oath) or oath.current_hp <= 0,
+		"hp=%d" % (oath.current_hp if is_instance_valid(oath) else -99))
+
+
+func _t_random_spell_autotarget() -> void:
+	print("\n[newcards] === Random spell casts: skip fizzles, find legal targets ===")
+	_clear()
+	var hex_data: Dictionary = CDB.get_card_data("hex")
+	var ctx: Dictionary = combat._random_spell_context_for(hex_data)
+	_ck("enemy-target spell is skipped when no enemy exists", not bool(ctx.get("ok", false)))
+	var enemy = _seat_plain(true, 0, 0, 5)
+	ctx = combat._random_spell_context_for(hex_data)
+	_ck("enemy-target spell finds an enemy", bool(ctx.get("ok", false)) and ctx.get("target", null) == enemy)
+
+	_clear()
+	var charge_data: Dictionary = CDB.get_card_data("charge_spell")
+	ctx = combat._random_spell_context_for(charge_data)
+	_ck("friendly-target spell is skipped when no friendly exists", not bool(ctx.get("ok", false)))
+	var friend = _seat_plain(false, 1, 2, 3)
+	ctx = combat._random_spell_context_for(charge_data)
+	_ck("friendly-target spell finds a friendly", bool(ctx.get("ok", false)) and ctx.get("target", null) == friend)
+
+	_clear()
+	var quick_data: Dictionary = CDB.get_card_data("quick_shot")
+	ctx = combat._random_spell_context_for(quick_data)
+	_ck("any-target spell can fall back to face", bool(ctx.get("ok", false)) and ctx.get("target", null) == null)
+
+	_clear()
+	var mass_data: Dictionary = CDB.get_card_data("mass_grave")
+	ctx = combat._random_spell_context_for(mass_data)
+	_ck("untargeted enemy-board spell skips empty enemy board", not bool(ctx.get("ok", false)))
+	_seat_plain(true, 2, 1, 4)
+	ctx = combat._random_spell_context_for(mass_data)
+	_ck("untargeted enemy-board spell enters pool with enemies", bool(ctx.get("ok", false)))
+
+
 func _t_carrion() -> void:
 	print("\n[newcards] === Carrion Priest: drain + heal per ally death ===")
 	_clear()
@@ -465,11 +517,15 @@ func _t_warchief() -> void:
 # -- 2026-07-07 fun slate ----------------------------------------------------
 
 func _t_petard() -> void:
-	print("\n[newcards] === The Petard: 6 to a random creature, any side ===")
+	print("\n[newcards] === The Petard: targeted blast + row splash ===")
 	_clear()
-	var e = _seat_plain(true, 0, 0, 9)
-	await _cast("petard", null)
-	_ck("the only creature on the board ate 6", e.current_hp == 3, "hp=%d" % e.current_hp)
+	var left = _seat_plain(true, 0, 0, 9)
+	var e = _seat_plain(true, 1, 0, 9)
+	var right = _seat_plain(true, 2, 0, 9)
+	await _cast("petard", e)
+	_ck("chosen creature ate 5", e.current_hp == 4, "hp=%d" % e.current_hp)
+	_ck("row neighbours ate 2 splash", left.current_hp == 7 and right.current_hp == 7,
+		"L=%d R=%d" % [left.current_hp, right.current_hp])
 
 
 func _t_slow_match() -> void:

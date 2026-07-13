@@ -19,13 +19,31 @@ extends Node
 ## is base × scale. Re-derives on every window resize.
 
 const MAX_SCALE := 2.0
+const ADAPTIVE_WARMUP := 4.0
+const ADAPTIVE_WINDOW := 1.0
+const ADAPTIVE_RESIZE_COOLDOWN := 3.0
+const ADAPTIVE_MAX_FRAME := 0.100
+const ADAPTIVE_SLOW_WINDOWS := 2
 
+signal effective_scale_changed(effective: float, requested: float)
+
+# Effective runtime scale. requested_scale is the player's saved quality ceiling.
 var render_scale: float = 1.0
+var requested_scale: float = 1.0
+var adaptive_enabled := true
 
 var _holder: CanvasLayer = null
 var _display: TextureRect = null
 var _svp: SubViewport = null
 var _scene_in_vp: Node = null
+var _adaptive_owner: WeakRef = null
+var _adaptive_warmup_left := 0.0
+var _adaptive_window_time := 0.0
+var _adaptive_frame_sum := 0.0
+var _adaptive_frame_count := 0
+var _adaptive_slow_count := 0
+var _adaptive_slow_windows := 0
+var _adaptive_change_cooldown := 0.0
 
 
 func _ready() -> void:
@@ -41,13 +59,68 @@ func _boot() -> void:
 
 ## Public API — called by UserSettings.set_render_scale().
 func apply_scale(s: float) -> void:
-	s = clampf(s, 1.0, MAX_SCALE)
+	# Fixed-scale compatibility path used by the existing SSAA probes.
+	requested_scale = clampf(s, 1.0, MAX_SCALE)
+	adaptive_enabled = false
+	_adaptive_owner = null
+	_set_effective_scale(requested_scale)
+
+
+func configure_scale(requested: float, adaptive: bool) -> void:
+	requested_scale = clampf(requested, 1.0, MAX_SCALE)
+	adaptive_enabled = adaptive
+	_set_effective_scale(requested_scale)
+	_reset_adaptive_sampling(2.0)
+
+
+func _set_effective_scale(s: float) -> void:
+	s = clampf(s, 1.0, requested_scale)
+	if is_equal_approx(render_scale, s) and (s <= 1.001) == (not is_active()):
+		return
 	render_scale = s
 	if render_scale <= 1.001:
 		_teardown()
 	else:
 		_build_rig()
 		_resize()
+	effective_scale_changed.emit(render_scale, requested_scale)
+
+
+func begin_adaptive_scope(owner: Node) -> void:
+	if owner == null or not is_instance_valid(owner):
+		return
+	_adaptive_owner = weakref(owner)
+	_set_effective_scale(requested_scale)
+	_reset_adaptive_sampling(ADAPTIVE_WARMUP)
+
+
+func end_adaptive_scope(owner: Node) -> void:
+	if _adaptive_owner == null:
+		return
+	var current = _adaptive_owner.get_ref()
+	if current != owner:
+		return
+	_adaptive_owner = null
+	_set_effective_scale(requested_scale)
+	_reset_adaptive_sampling(0.0)
+
+
+func get_effective_scale() -> float:
+	return render_scale
+
+
+func get_requested_scale() -> float:
+	return requested_scale
+
+
+func is_adaptively_reduced() -> bool:
+	return render_scale + 0.01 < requested_scale
+
+
+func get_active_scene() -> Node:
+	if _scene_in_vp != null and is_instance_valid(_scene_in_vp):
+		return _scene_in_vp
+	return get_tree().current_scene
 
 
 func is_active() -> bool:
@@ -60,6 +133,7 @@ func is_active() -> bool:
 func refresh() -> void:
 	if is_active():
 		_resize()
+		_reset_adaptive_sampling(2.0)
 
 
 func _build_rig() -> void:
@@ -98,19 +172,26 @@ func _build_rig() -> void:
 	_display.texture = _svp.get_texture()
 
 	_resize()
-	if not root.size_changed.is_connected(_resize):
-		root.size_changed.connect(_resize)
+	if not root.size_changed.is_connected(_on_root_size_changed):
+		root.size_changed.connect(_on_root_size_changed)
 	_pull_scene_in()
 
 
 func _teardown() -> void:
 	# Hand the scene back to the window root, then drop the rig.
-	if _scene_in_vp != null and is_instance_valid(_scene_in_vp) and _scene_in_vp.get_parent() == _svp:
-		_scene_in_vp.reparent(get_tree().root)
+	var restored_scene := _scene_in_vp
+	if restored_scene != null and is_instance_valid(restored_scene) \
+			and restored_scene.get_parent() == _svp:
+		restored_scene.reparent(get_tree().root)
+		# Reparenting the current scene into a SubViewport clears SceneTree's
+		# pointer. Restore it when SSAA is disabled live so the next scene change
+		# can free this outgoing screen normally.
+		if get_tree().current_scene == null:
+			get_tree().current_scene = restored_scene
 	_scene_in_vp = null
 	var root := get_tree().root
-	if root.size_changed.is_connected(_resize):
-		root.size_changed.disconnect(_resize)
+	if root.size_changed.is_connected(_on_root_size_changed):
+		root.size_changed.disconnect(_on_root_size_changed)
 	if _holder != null and is_instance_valid(_holder):
 		_holder.queue_free()
 	_holder = null
@@ -127,6 +208,11 @@ func _base_size() -> Vector2i:
 	return Vector2i(
 		int(ProjectSettings.get_setting("display/window/size/viewport_width", 1920)),
 		int(ProjectSettings.get_setting("display/window/size/viewport_height", 1080)))
+
+
+func _on_root_size_changed() -> void:
+	_resize()
+	_reset_adaptive_sampling(2.0)
 
 
 func _resize() -> void:
@@ -155,7 +241,7 @@ func _resize() -> void:
 	# window). No explicit size needed — setting it fights the anchors and warns.
 
 
-func _process(_dt: float) -> void:
+func _process(delta: float) -> void:
 	# change_scene_to_file() drops the new scene under the window root; pull it
 	# into the SubViewport so it renders supersampled. Cheap identity check.
 	if not is_active():
@@ -174,6 +260,89 @@ func _process(_dt: float) -> void:
 				stale.queue_free()
 		_scene_in_vp = cur
 		cur.reparent.call_deferred(_svp)
+	_adaptive_process(delta)
+
+
+func _reset_adaptive_sampling(warmup: float) -> void:
+	_adaptive_warmup_left = maxf(0.0, warmup)
+	_adaptive_change_cooldown = 0.0
+	_adaptive_window_time = 0.0
+	_adaptive_frame_sum = 0.0
+	_adaptive_frame_count = 0
+	_adaptive_slow_count = 0
+	_adaptive_slow_windows = 0
+
+
+func _adaptive_process(delta: float) -> void:
+	if not adaptive_enabled or requested_scale <= 1.251 \
+			or DisplayServer.get_name() == "headless":
+		return
+	if _adaptive_owner == null:
+		return
+	var owner = _adaptive_owner.get_ref()
+	if owner == null or not is_instance_valid(owner) or not owner.is_inside_tree():
+		_adaptive_owner = null
+		_set_effective_scale(requested_scale)
+		return
+	var win := get_window()
+	if get_tree().paused or (win != null and not win.has_focus()):
+		_reset_adaptive_sampling(1.0)
+		return
+	if _adaptive_change_cooldown > 0.0:
+		_adaptive_change_cooldown = maxf(0.0, _adaptive_change_cooldown - delta)
+	if _adaptive_warmup_left > 0.0:
+		_adaptive_warmup_left = maxf(0.0, _adaptive_warmup_left - delta)
+		return
+	if delta <= 0.0 or delta > ADAPTIVE_MAX_FRAME:
+		return
+	var target_fps := _adaptive_target_fps()
+	if target_fps < 50.0:
+		return
+	var budget := 1.0 / target_fps
+	_adaptive_window_time += delta
+	_adaptive_frame_sum += delta
+	_adaptive_frame_count += 1
+	if delta > budget * 1.08:
+		_adaptive_slow_count += 1
+	if _adaptive_window_time < ADAPTIVE_WINDOW:
+		return
+	var avg := _adaptive_frame_sum / float(maxi(_adaptive_frame_count, 1))
+	var slow_ratio := float(_adaptive_slow_count) \
+		/ float(maxi(_adaptive_frame_count, 1))
+	var slow := avg > budget * 1.07 and slow_ratio >= 0.35
+	_adaptive_slow_windows = _adaptive_slow_windows + 1 if slow else 0
+	_adaptive_window_time = 0.0
+	_adaptive_frame_sum = 0.0
+	_adaptive_frame_count = 0
+	_adaptive_slow_count = 0
+	if _adaptive_slow_windows < ADAPTIVE_SLOW_WINDOWS \
+			or _adaptive_change_cooldown > 0.0:
+		return
+	var lower := _next_adaptive_scale()
+	if lower + 0.01 < render_scale:
+		_set_effective_scale(lower)
+		_adaptive_change_cooldown = ADAPTIVE_RESIZE_COOLDOWN
+	_adaptive_slow_windows = 0
+
+
+func _adaptive_target_fps() -> float:
+	var target := 60.0
+	if UserSettings.fps_cap > 0:
+		target = minf(target, float(UserSettings.fps_cap))
+	elif UserSettings.vsync:
+		var screen := DisplayServer.window_get_current_screen()
+		var refresh := DisplayServer.screen_get_refresh_rate(screen)
+		if refresh > 1.0:
+			target = minf(target, refresh)
+	return target
+
+
+func _next_adaptive_scale() -> float:
+	if render_scale > 1.75:
+		return 1.5
+	if render_scale > 1.26:
+		return 1.25
+	return render_scale
 
 
 func _pull_scene_in() -> void:

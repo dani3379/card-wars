@@ -13,8 +13,10 @@ extends SceneTree
 const TURN_WAIT_TICKS := 80
 const TICK := 0.1
 # Spells whose resolver opens a discard/Discover/keyword picker (await input).
+# (censer_light left the list 2026-07-13 — its rework is an untargeted
+# all-Zealots grant, no picker.)
 const PICKER_BLOCKLIST := ["war_chant", "lost_tome", "war_council",
-	"gambit", "censer_light", "recycle"]
+	"gambit", "recycle"]
 
 var RS: Node
 var CDB: Node

@@ -455,10 +455,10 @@ const BOSS_PHASES: Dictionary = {
 const ENCOUNTER_SCRIPTS: Dictionary = {
 	# ── Act 1 ────────────────────────────────────────────────────────────
 	"goblin_scouts": [
+		{"round": 2, "msg": "The scouts break cover!",
+			"event": "grant_keyword_all", "keyword": "swift"},
 		{"round": 3, "msg": "The goblins call for backup!",
 			"event": "summon", "name": "Goblin", "atk": 2, "hp": 2},
-		{"round": 5, "msg": "GOBLIN AMBUSH!",
-			"event": "grant_keyword_all", "keyword": "swift"},
 	],
 	"wolf_pack": [
 		{"round": 2, "msg": "The wolves howl — pack frenzy!",
@@ -487,10 +487,6 @@ const ENCOUNTER_SCRIPTS: Dictionary = {
 			"event": "grant_keyword_all", "keyword": "swift"},
 		{"round": 4, "msg": "Mother Harpy descends!",
 			"event": "summon", "name": "Mother Harpy", "atk": 3, "hp": 5},
-	],
-	"boar_herd": [
-		{"round": 3, "msg": "The herd charges!",
-			"event": "buff_all_atk", "value": 1},
 	],
 	"scarecrow_field": [
 		{"round": 2, "msg": "The crows arrive!",
@@ -541,10 +537,6 @@ const ENCOUNTER_SCRIPTS: Dictionary = {
 			"event": "grant_keyword_all", "keyword": "piercing"},
 		{"round": 4, "msg": "A greater elemental manifests!",
 			"event": "summon", "name": "Storm Elemental", "atk": 4, "hp": 5},
-	],
-	"executioners_block": [
-		{"round": 3, "msg": "The Executioner raises his axe!",
-			"event": "face_damage", "value": 4},
 	],
 	"dragons_lair": [
 		{"round": 2, "msg": "Dragon-fire scorches the field!",
@@ -930,7 +922,8 @@ const ENCOUNTERS: Dictionary = {
 		# clear — but the first round HURTS if you didn't expect a wave.
 		"name": "The First Cut", "act": 1, "type": "combat", "faction": "grasswake", "hp": 11,
 		"preamble": "The smallest blade the war owns, sent ahead to see if you bleed like the last lot. First cuts take your measure.",
-		"passive_id": "", "passive_desc": "",
+		"passive_id": "",
+		"passive_desc": "",
 		"deck": [
 			{"name": "Runt", "atk": 1, "hp": 2, "kw": ["swift"],
 				"on_death": {"type": "summon", "atk": 1, "hp": 1}},
@@ -1045,18 +1038,19 @@ const ENCOUNTERS: Dictionary = {
 	},
 
 	"bandit_camp": {
-		"name": "The Toll-Takers", "act": 1, "type": "combat", "faction": "grasswake", "hp": 13,
+		"name": "The Toll-Takers", "act": 1, "type": "combat", "faction": "grasswake", "hp": 20,
 		"preamble": "Every road has a price, and these men appointed themselves to collect it — in coin, in teeth, in whatever comes loose.",
-		"passive_id": "bandit_mana_steal",
-		"passive_desc": "When the enemy places its first reinforcement each round: you lose 1 Command next turn.",
+		"passive_id": "bandit_reinforce",
+		"passive_desc": "Reinforced: a 2/2 Swift raider joins from round 2 — and TWO a round from round 4. Close the fight fast or drown under the flood.",
 		# Bandit Camp — mixed combat archetypes. Cutpurse (eco), Archer (range),
 		# Brawler (front), Hexer (debuff), Captain (lead), Saboteur (curse).
 		# Bandit Camp — STEAL AND STING. Every bandit chips at face on entry
 		# or carries Ranged for sniping. Brawler is the only real wall — kill
 		# him and you eat hits, kill the snipers first and you eat the wall.
 		"deck": [
-			{"name": "Cutpurse", "atk": 2, "hp": 2, "kw": ["swift"],
-				"on_enter": {"type": "damage_face", "value": 1}},
+			{"name": "Cutpurse", "atk": 2, "hp": 3, "kw": ["swift"],
+				"intents": ["ATK", "ABILITY", "ATK"],
+				"ability": {"type": "steal_command", "value": 1}},
 			{"name": "Brawler", "atk": 3, "hp": 3, "kw": ["armored"]},
 			{"name": "Archer", "atk": 2, "hp": 2, "kw": [],
 				"on_enter": {"type": "damage_random_player", "value": 1}},
@@ -1071,8 +1065,9 @@ const ENCOUNTERS: Dictionary = {
 		"deck_variants": [
 			# Variant: ranged outlaws — two archers + crossbow, fewer melee.
 			[
-				{"name": "Cutpurse", "atk": 2, "hp": 2,
-					"on_enter": {"type": "damage_face", "value": 1}},
+				{"name": "Cutpurse", "atk": 2, "hp": 3, "kw": ["swift"],
+					"intents": ["ATK", "ABILITY", "ATK"],
+					"ability": {"type": "steal_command", "value": 1}},
 				{"name": "Archer", "atk": 2, "hp": 2, "kw": [],
 					"on_enter": {"type": "damage_random_player", "value": 1}},
 				{"name": "Crossbowman", "atk": 2, "hp": 2, "kw": []},
@@ -1083,8 +1078,9 @@ const ENCOUNTERS: Dictionary = {
 			],
 			# Variant: curse-heavy crew — two saboteurs, no archer.
 			[
-				{"name": "Cutpurse", "atk": 2, "hp": 2,
-					"on_enter": {"type": "damage_face", "value": 1}},
+				{"name": "Cutpurse", "atk": 2, "hp": 3, "kw": ["swift"],
+					"intents": ["ATK", "ABILITY", "ATK"],
+					"ability": {"type": "steal_command", "value": 1}},
 				{"name": "Saboteur", "atk": 2, "hp": 2,
 					"intents": ["ATK", "ABILITY", "ATK", "ATK"],
 					"ability": {"type": "curse"}},
@@ -1102,16 +1098,17 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement": {"name": "Thug", "atk": 2, "hp": 2},
 		"reinforcement_pool": [
 			{"name": "Camp Mutt", "atk": 2, "hp": 2, "kw": ["swift"]},
-			{"name": "Cutpurse", "atk": 2, "hp": 2,
-				"on_enter": {"type": "damage_face", "value": 1}},
+			{"name": "Cutpurse", "atk": 2, "hp": 3, "kw": ["swift"],
+				"intents": ["ATK", "ABILITY", "ATK"],
+				"ability": {"type": "steal_command", "value": 1}},
 		],
 	},
 
 	"mushroom_grove": {
-		"name": "The Spore-Cathedral", "act": 1, "type": "combat", "faction": "owed", "hp": 9,
+		"name": "The Spore-Cathedral", "act": 1, "type": "combat", "faction": "owed", "hp": 16,
 		"preamble": "Something soft and patient has been preaching down here, and the dead make a devout congregation. Breathe shallow.",
-		"passive_id": "mushroom_heal",
-		"passive_desc": "End of each round: heal every enemy creature 1 HP.",
+		"passive_id": "spore_regrowth",
+		"passive_desc": "The vice: each round hurt enemies heal 2 AND the spores choke you for 1 face damage per living enemy (up to 4). Clear the board to breathe; chipping and stalling both suffocate you.",
 		# Mushroom Grove — IT JUST GROWS BACK. Almost every fungus regenerates
 		# or seeds another on death; the grove passive heals everything at
 		# round-end. The damage is low but trading is futile. AoE clears
@@ -1124,8 +1121,9 @@ const ENCOUNTERS: Dictionary = {
 				"on_death": {"type": "summon", "atk": 1, "hp": 2}},
 			{"name": "Thornveil", "atk": 1, "hp": 4, "kw": ["thorns", "regenerate"]},
 			{"name": "Cap Lasher", "atk": 3, "hp": 2, "kw": ["thorns"]},
-			{"name": "Bloom Husk", "atk": 2, "hp": 3, "kw": ["regenerate"],
-				"adj_buff": {"atk": 0, "hp": 1}},
+			{"name": "Heartcap", "atk": 0, "hp": 5, "kw": ["regenerate"],
+				"intents": ["ABILITY", "ATK", "ABILITY", "ATK"],
+				"ability": {"type": "heal_all", "value": 2}},
 			{"name": "Mycelium", "atk": 2, "hp": 5, "kw": ["regenerate"],
 				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
 		],
@@ -1135,8 +1133,9 @@ const ENCOUNTERS: Dictionary = {
 				{"name": "Sprout", "atk": 1, "hp": 3, "kw": ["regenerate"]},
 				{"name": "Thornveil", "atk": 1, "hp": 4, "kw": ["thorns"]},
 				{"name": "Thornveil", "atk": 1, "hp": 4, "kw": ["thorns"]},
-				{"name": "Bloom Husk", "atk": 2, "hp": 3,
-					"adj_buff": {"atk": 0, "hp": 1}},
+				{"name": "Heartcap", "atk": 0, "hp": 5, "kw": ["regenerate"],
+					"intents": ["ABILITY", "ATK", "ABILITY", "ATK"],
+					"ability": {"type": "heal_all", "value": 2}},
 				{"name": "Bloom Husk", "atk": 2, "hp": 3,
 					"adj_buff": {"atk": 0, "hp": 1}},
 				{"name": "Mycelium", "atk": 2, "hp": 5,
@@ -1154,6 +1153,9 @@ const ENCOUNTERS: Dictionary = {
 				{"name": "Spore Beast", "atk": 2, "hp": 4,
 					"on_death": {"type": "summon", "atk": 1, "hp": 2}},
 				{"name": "Cap Lasher", "atk": 3, "hp": 2},
+				{"name": "Heartcap", "atk": 0, "hp": 5, "kw": ["regenerate"],
+					"intents": ["ABILITY", "ATK", "ABILITY", "ATK"],
+					"ability": {"type": "heal_all", "value": 2}},
 				{"name": "Mycelium", "atk": 2, "hp": 5,
 					"on_death": {"type": "damage_all_enemies", "value": 1},
 					"intents": ["ATK", "HEAL", "ATK", "HEAL"]},
@@ -1168,10 +1170,10 @@ const ENCOUNTERS: Dictionary = {
 	},
 
 	"stone_sentinels": {
-		"name": "The Tooth-Stones", "act": 1, "type": "combat", "faction": "last_wall", "hp": 11,
+		"name": "The Tooth-Stones", "act": 1, "type": "combat", "faction": "last_wall", "hp": 24,
 		"preamble": "They were set in the ground to mark a border no living man remembers drawing. They still mean to hold it.",
-		"passive_id": "",
-		"passive_desc": "",
+		"passive_id": "sentinel_stone",
+		"passive_desc": "Living stone: every enemy is Armored, the front rank digs in +1 ATK from round 2, and from round 3 the tremor deals 2 face damage a round. Break the Armored line fast — you can't out-wait it.",
 		# Stone Sentinels — heavy fortress: walls, hurlers, breakers, an animator.
 		# Stone Sentinels — STONE THAT BITES BACK. Every sentinel is armored
 		# or thorns or both. Spells get through fine; weapon trades are
@@ -1228,7 +1230,8 @@ const ENCOUNTERS: Dictionary = {
 		# board.
 		"name": "The Trampling Hour", "act": 1, "type": "combat", "faction": "grasswake", "hp": 12,
 		"preamble": "There is an hour near dusk when the herd comes through and the ground belongs to it. You arrived at that hour.",
-		"passive_id": "", "passive_desc": "",
+		"passive_id": "stampede_charge",
+		"passive_desc": "Rounds 1-2: enemy creatures gain +1 ATK this round and Piercing. Then the charge breaks.",
 		"deck": [
 			{"name": "Piglet", "atk": 1, "hp": 2, "kw": ["swift"],
 				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
@@ -1331,8 +1334,8 @@ const ENCOUNTERS: Dictionary = {
 		# stall. Kill the Chieftain fast or the buffs land on the wrong guys.
 		"name": "The Long Drumming", "act": 1, "type": "elite", "faction": "grasswake", "hp": 18,
 		"preamble": "You hear them before the road bends — the drum that keeps a warband in step. It does not stop for parley.",
-		"passive_id": "orc_random_buff",
-		"passive_desc": "Start of each round: a random enemy creature gains +1 ATK for the rest of the fight.",
+		"passive_id": "chieftain_rally",
+		"passive_desc": "From round 2: if the Chieftain lives, enemy front-row creatures gain +1 ATK this round.",
 		"deck": [
 			{"name": "Warrior", "atk": 3, "hp": 3, "kw": ["swift"]},
 			{"name": "Warrior", "atk": 3, "hp": 3, "kw": ["swift"]},
@@ -1442,8 +1445,8 @@ const ENCOUNTERS: Dictionary = {
 		# triggers another beat. The easy kills hurt you the most.
 		"name": "The Bleeding-Heart Cell", "act": 2, "type": "combat", "faction": "owed", "hp": 16,
 		"preamble": "They love you, the way a knife loves the whetstone. Every wound they take is one they meant to give away.",
-		"passive_id": "cultist_buff",
-		"passive_desc": "Start of each round: a random Cultist gains +1/+1.",
+		"passive_id": "martyr_pact",
+		"passive_desc": "Start of each round: the weakest enemy with an on-death effect is Chosen. Its on-death fires twice.",
 		"deck": [
 			{"name": "Initiate", "atk": 2, "hp": 2, "kw": ["swift"],
 				"on_death": {"type": "damage_face", "value": 1}},
@@ -2157,7 +2160,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "The Executioner's Block", "act": 3, "type": "combat", "faction": "last_wall", "hp": 19,
 		"preamble": "The wood is dark and certain, and the man beside it never asks what you did. He only asks whether you will kneel.",
 		"passive_id": "executioner_face",
-		"passive_desc": "Each round: the highest-ATK enemy also deals its ATK as face damage.",
+		"passive_desc": "Each round: the marked highest-ATK enemy drops the axe for its ATK as face damage if it survives.",
 		"deck": [
 			{"name": "Jailer", "atk": 2, "hp": 3, "kw": ["piercing"]},
 			{"name": "Crossbow Guard", "atk": 2, "hp": 2, "kw": ["piercing"]},
@@ -2168,7 +2171,7 @@ const ENCOUNTERS: Dictionary = {
 				"on_enter": {"type": "debuff_opposing_atk", "value": 2}},
 			{"name": "Bound Prisoner", "atk": 0, "hp": 5,
 				"on_death": {"type": "damage_opposing", "value": 4}},
-			{"name": "Executioner", "atk": 5, "hp": 5, "kw": ["piercing"]},
+			{"name": "Executioner", "atk": 5, "hp": 6, "kw": ["piercing", "last_stand"]},
 		],
 		"deck_variants": [
 			# Variant: gallows trap — Bound Prisoners stack as living bombs.
@@ -2183,7 +2186,7 @@ const ENCOUNTERS: Dictionary = {
 				{"name": "Inquisitor", "atk": 2, "hp": 4,
 					"intents": ["ATK", "ABILITY", "ATK", "ABILITY"],
 					"ability": {"type": "mark"}},
-				{"name": "Executioner", "atk": 5, "hp": 5, "kw": ["piercing"]},
+				{"name": "Executioner", "atk": 5, "hp": 6, "kw": ["piercing", "last_stand"]},
 			],
 		],
 		"reinforcement": {"name": "Whipman", "atk": 2, "hp": 3},

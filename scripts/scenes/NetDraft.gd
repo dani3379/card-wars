@@ -118,7 +118,7 @@ func _roll_triplet() -> Array[String]:
 	# the whole draft), so a rarity's ids don't recur until its bag cycles. Uses
 	# the salted per-player _rng, so the slate stays reproducible from the seed.
 	return SkirmishState.deal_weighted_triplet(_buckets, _bags, _rng,
-		CardDB.act_rarity_weights(SkirmishState.DRAFT_ACT))
+		SkirmishState.SKIRMISH_DRAFT_WEIGHTS)
 
 
 ## 3 distinct battle relics off the net-safe pool. Rolled from the same salted
@@ -315,7 +315,7 @@ func _present_triplet() -> void:
 
 	var idx := 0
 	for id in _roll_triplet():
-		var data := CardDB.get_card_data(id)
+		var data := SkirmishState.skirmish_card_data(id)
 		var slot := VBoxContainer.new()
 		slot.add_theme_constant_override("separation", 8)
 		slot.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -534,7 +534,7 @@ func _rebuild_ledger() -> void:
 ## card's own painting bleeding in from the right, [cost gem] Name on the solid
 ## left, the ×N tally chipped over the art. Hovering still enlarges the full card.
 func _make_ledger_row(id: String, count: int) -> Control:
-	var d := CardDB.get_card_data(id)
+	var d := SkirmishState.skirmish_card_data(id)
 	var is_spell := String(d.get("type", "")) == "spell"
 
 	# PASS (not STOP): the row still emits hover signals, but mouse-wheel events
@@ -699,7 +699,7 @@ func _show_preview(id: String) -> void:
 	if _ledger_panel == null:
 		return
 	var card = CARD_SCENE.instantiate()
-	card.card_data = CardDB.get_card_data(id).duplicate(true)
+	card.card_data = SkirmishState.skirmish_card_data(id)
 	card.card_id = id
 	card.is_on_battlefield = true
 	card.live_baked_mode = true
@@ -745,7 +745,7 @@ func _finish_draft() -> void:
 	var my_deck: Array = SkirmishState.local_slot().deck.duplicate()
 	# Bake the sealed warband's card textures behind the waiting screen (idle
 	# time) so the fight's _prebake_hand_textures opens on cache hits.
-	ScenePreload.warm_card_ids(my_deck)
+	ScenePreload.warm_card_ids(my_deck, true)
 	# Auto-keep the drafted warband so it can be replayed later via Constructed →
 	# LOAD without drafting again (the player asked for exactly this). Timestamped
 	# name keeps each draft distinct; SavedDecks caps the list and drops the oldest.

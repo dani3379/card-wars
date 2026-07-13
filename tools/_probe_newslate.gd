@@ -1,6 +1,6 @@
 extends SceneTree
 ## Targeted probe for the 2026-07-05 card slate:
-##   Twinblade (breaker)          — attacks_twice second swing after the clash
+##   Twinblade (breaker)          — attacks_twice second swing hits an ADJACENT lane
 ##   Powder Cart (ember_stalker)  — detonate_dooms chains other Doom creatures
 ##   Standard Bearer              — token_lord: summoned tokens enter +1/+1
 ##   Penance (reckless_charge)    — burns a Curse from hand for 6 instead of 2
@@ -97,25 +97,34 @@ func _run_test() -> void:
 	_check(led_tok != null and led_tok.current_atk == 2 and led_tok.current_hp == 2,
 		"bearer on side: token musters as a 2/2")
 
-	# ── 2. Twinblade (attacks_twice): a second swing after the clash ─────────
-	print("— Twinblade (attacks_twice)")
+	# ── 2. Twinblade (attacks_twice): a second swing into an ADJACENT lane ────
+	# 2026-07-13 rework: the bonus strike lands on an adjacent opposing lane, not
+	# the Twinblade's own column. Enemy Twinblade at lane 3 flanks player lane 2
+	# (lane 4 is off-board); the same-lane defender must be untouched.
+	print("— Twinblade (attacks_twice, adjacent flank)")
 	var tb_data = CDB.get_card_data("breaker").duplicate(true)
 	combat._place_enemy_card(tb_data, 3, FRONT)
 	var tb = combat._row_array(true, FRONT)[3]
-	var punchbag = combat._net_spawn_creature(CDB.get_card_data("iron_bastion"), 93201, 3, FRONT, false, false)
+	var flankbag = combat._net_spawn_creature(CDB.get_card_data("iron_bastion"), 93201, 2, FRONT, false, false)
+	var samelane = combat._net_spawn_creature(CDB.get_card_data("iron_bastion"), 93202, 3, FRONT, false, false)
 	await create_timer(0.15).timeout
-	var pb_hp0: int = punchbag.current_hp
+	var fb_hp0: int = flankbag.current_hp
+	var sl_hp0: int = samelane.current_hp
 	# Simulate "already swung in the main clash" — the pass returns exactly one
-	# more attack to creatures with the passive.
+	# more attack (to the flank) to creatures with the passive.
 	tb.has_attacked_this_turn = true
 	var pfe: Array[bool] = [false, false, false, false]
 	var efe: Array[bool] = [false, false, false, false]
 	await combat._run_twinblade_swings(pfe, efe)
 	await create_timer(0.2).timeout
-	# iron_bastion is Armored (-1): twinblade ATK 2 lands for 1.
-	_check(punchbag.current_hp == pb_hp0 - 1,
-		"second swing landed once (%d -> %d, armored -1)" % [pb_hp0, punchbag.current_hp])
+	# iron_bastion is Armored (-1): twinblade ATK 2 lands for 1 on the FLANK.
+	_check(flankbag.current_hp == fb_hp0 - 1,
+		"flank swing landed on adjacent lane (%d -> %d, armored -1)" % [fb_hp0, flankbag.current_hp])
+	_check(samelane.current_hp == sl_hp0,
+		"same-lane defender untouched by the flank swing (%d)" % samelane.current_hp)
 	tb.take_damage(99)
+	flankbag.take_damage(99)
+	samelane.take_damage(99)
 	await create_timer(0.3).timeout
 
 	# ── 3. Powder Cart (detonate_dooms): the wagon takes the bombs with it ───
@@ -157,7 +166,11 @@ func _run_test() -> void:
 		if is_instance_valid(hc) and hc.card_id == "curse":
 			still_curse = true
 	_check(not still_curse, "the Curse left the hand")
-	_check(combat._exhaust_pile.has("curse"), "the Curse landed in the exhaust pile")
+	var curse_exhausted := false
+	for ex in combat._exhaust_pile:
+		if combat._entry_id(ex) == "curse":
+			curse_exhausted = true
+	_check(curse_exhausted, "the Curse landed in the exhaust pile")
 
 	# ── 5. Mark of Ash: Doom 2, spent blast ──────────────────────────────────
 	print("— Mark of Ash (branded Doom)")

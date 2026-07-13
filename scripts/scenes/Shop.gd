@@ -42,6 +42,13 @@ var _shop_potion_id: String = ""
 var _discount: float = 1.0
 var _sold_this_visit: bool = false
 var _bark: String = ""
+# Entrance choreography plays once per visit; purchase rebuilds re-lay the
+# shelves without re-dealing them. Gold label rolls between builds.
+var _entered: bool = false
+var _gold_shown: int = -1
+var _gold_label: Label = null
+var _transaction_busy: bool = false
+var _sell_card_nodes: Array[Control] = []
 
 
 func _ready() -> void:
@@ -63,7 +70,10 @@ func _ready() -> void:
 	_discount = 0.75 if RunState.has_relic("merchants_license") else 1.0
 	_bark = BARKS[randi() % BARKS.size()]
 	_roll_stock()
+	# Keep art decode + GPU card readbacks out of the shelf-construction frame.
+	await ScenePreload.warm_card_ids(_card_stock)
 	_build_ui()
+	GameTheme.fade_in(self, 0.22)
 	GameTheme.make_settings_gear(self)
 
 
@@ -109,6 +119,7 @@ func _price(base: int) -> int:
 
 
 func _build_ui() -> void:
+	_transaction_busy = false
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
@@ -118,13 +129,23 @@ func _build_ui() -> void:
 	title.offset_top = 18
 	title.offset_bottom = 74
 	add_child(title)
+	if not _entered:
+		GameTheme.deal_in(title, 0.02)
 
 	var gold_label = GameTheme.make_label("%d gold" % RunState.gold, 26, GameTheme.KEYWORD_GOLD, true)
+	_gold_label = gold_label
 	gold_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	gold_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	gold_label.offset_top = 78
 	gold_label.offset_bottom = 112
 	add_child(gold_label)
+	if not _entered:
+		GameTheme.deal_in(gold_label, 0.06)
+	# The purse rolls to its new figure instead of teleporting — the spend/gain
+	# reads even though the label itself is rebuilt with the screen.
+	if _gold_shown >= 0 and _gold_shown != RunState.gold:
+		GameTheme.tick_number(gold_label, _gold_shown, RunState.gold, "%d gold", 0.5)
+	_gold_shown = RunState.gold
 
 	# Card stock — real Card2D renders with a Buy button below (matches Reward).
 	# Shelf label gets the chart's ruled-heading furniture so it reads as a
@@ -134,6 +155,8 @@ func _build_ui() -> void:
 	cards_label.offset_top = 120
 	cards_label.offset_bottom = 152
 	add_child(cards_label)
+	if not _entered:
+		GameTheme.deal_in(cards_label, 0.10)
 
 	add_child(_make_stage_panel(Rect2(250, 148, 1100, 350),
 		Color(0.64, 0.42, 0.20, 0.95)))
@@ -164,10 +187,13 @@ func _build_ui() -> void:
 		slot.add_child(card)
 
 		var buy_btn = _make_buy_button("Buy — %dg" % price,
-			RunState.gold >= price, _buy_card.bind(id, price))
+			RunState.gold >= price, _buy_card.bind(id, price, slot),
+			"Need %d gold" % price)
 		buy_btn.tooltip_text = data.desc
 		buy_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		slot.add_child(buy_btn)
+		if not _entered:
+			GameTheme.deal_in(slot, 0.08 + card_row.get_child_count() * 0.06)
 
 	# Relic + Services — one centered row below the cards.
 	var svc_label = GameTheme.make_section_divider("Relics & Services", GameTheme.DESC_DIM, 22)
@@ -175,6 +201,8 @@ func _build_ui() -> void:
 	svc_label.offset_top = 516
 	svc_label.offset_bottom = 548
 	add_child(svc_label)
+	if not _entered:
+		GameTheme.deal_in(svc_label, 0.28)
 
 	add_child(_make_stage_panel(Rect2(350, 548, 900, 250),
 		Color(0.76, 0.50, 0.26, 0.95)))
@@ -193,9 +221,15 @@ func _build_ui() -> void:
 			var btn = GameTheme.make_relic_card(id, Color(0.55, 0.30, 0.20),
 				Vector2(264, 216), price)
 			btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-			btn.disabled = RunState.gold < price
-			btn.pressed.connect(_buy_relic.bind(id, price))
+			if RunState.gold >= price:
+				btn.pressed.connect(_buy_relic.bind(id, price, btn))
+			else:
+				_make_unavailable_tile(btn, "Need %d gold" % price)
 			svc_row.add_child(btn)
+			if not _entered:
+				GameTheme.deal_in(btn, 0.34)
+			if RunState.gold >= price:
+				GameTheme.hover_lift(btn)
 
 	# Potion service: shop sells a single random potion type (rolled at
 	# _roll_stock). Icon falls back to the generic potion sprite if no per-type
@@ -223,15 +257,21 @@ func _build_ui() -> void:
 		pcolor, picon_tint)
 	potion.button.tooltip_text = "%s — %s" % [pname, pdesc]
 	if RunState.has_downside("no_potions"):
-		potion.button.disabled = true
 		potion.label.text = "%s\nCan't buy potions (Temperance Vow)" % pname
+		_make_unavailable_tile(potion.button, "No potions")
 	elif RunState.gold < potion_price:
-		potion.button.disabled = true
+		_make_unavailable_tile(potion.button, "Need %d gold" % potion_price)
 	elif not RunState.can_add_potion():
-		potion.button.disabled = true
 		potion.label.text = "%s\nPotion slots full" % pname
-	potion.button.pressed.connect(_buy_potion.bind(potion_price))
+		_make_unavailable_tile(potion.button, "Slots full")
+	else:
+		potion.button.pressed.connect(_buy_potion.bind(potion_price, potion.slot))
 	svc_row.add_child(potion.slot)
+	if not _entered:
+		GameTheme.deal_in(potion.slot, 0.42)
+	if not RunState.has_downside("no_potions") and RunState.gold >= potion_price \
+			and RunState.can_add_potion():
+		GameTheme.hover_lift(potion.slot)
 
 	# The sutler's buy-back — sell ONE card per visit, paid by weight. This is
 	# the deck-thinning verb now (replaced "pay 50g to remove"): still bounded
@@ -244,13 +284,18 @@ func _build_ui() -> void:
 	if RunState.has_relic("scavengers_pouch"):
 		sell.button.tooltip_text += " Your Sutler's Marker doubles his rates."
 	if _sold_this_visit:
-		sell.button.disabled = true
 		sell.label.text = "The sutler buys\nOne a visit. He's bought his one."
+		_make_unavailable_tile(sell.button, "Already sold")
 	elif RunState.deck.size() <= 1:
-		sell.button.disabled = true
 		sell.label.text = "The sutler buys\nHe won't take your last card."
-	sell.button.pressed.connect(_start_sell_mode)
+		_make_unavailable_tile(sell.button, "Last card")
+	else:
+		sell.button.pressed.connect(_start_sell_mode)
 	svc_row.add_child(sell.slot)
+	if not _entered:
+		GameTheme.deal_in(sell.slot, 0.50)
+	if not _sold_this_visit and RunState.deck.size() > 1:
+		GameTheme.hover_lift(sell.slot)
 
 	# The sutler's patter — bottom-left, out of the wares' way.
 	var bark = GameTheme.make_label(_bark, 16, Color(0.72, 0.66, 0.55))
@@ -261,6 +306,8 @@ func _build_ui() -> void:
 	bark.offset_bottom = -34
 	bark.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(bark)
+	if not _entered:
+		GameTheme.deal_in(bark, 0.54)
 
 	# Leave button — gold pill with ← arrow, distinct from the buy buttons.
 	# Centered off size.x (the 1600×900 stretch canvas) rather than a hardcoded
@@ -272,8 +319,12 @@ func _build_ui() -> void:
 	leave_btn.offset_right = 110
 	leave_btn.offset_top = 822
 	leave_btn.offset_bottom = 872
-	leave_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
+	leave_btn.pressed.connect(_leave_shop)
 	add_child(leave_btn)
+	if not _entered:
+		GameTheme.deal_in(leave_btn, 0.58)
+		GameTheme.hover_lift(leave_btn, 1.04)
+	_entered = true
 
 
 func _make_stage_panel(rect: Rect2, accent: Color) -> Panel:
@@ -295,7 +346,8 @@ func _make_stage_panel(rect: Rect2, accent: Color) -> Panel:
 	return pan
 
 
-func _make_buy_button(text: String, enabled: bool, on_press: Callable) -> Button:
+func _make_buy_button(text: String, enabled: bool, on_press: Callable,
+		deny_text: String = "") -> Button:
 	# Frameless buy affordance (the menu/event language): a small gilt gem +
 	# gilt text that brightens on hover. No box — these replaced the last
 	# colored-slab rectangles on the screen. Disabled = dimmed, no hover.
@@ -349,10 +401,43 @@ func _make_buy_button(text: String, enabled: bool, on_press: Callable) -> Button
 			gem.modulate = Color(rest.r, rest.g, rest.b, 0.85))
 		btn.pressed.connect(on_press)
 	else:
-		btn.disabled = true
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 		lbl.add_theme_color_override("font_color", Color(0.52, 0.48, 0.42, 0.85))
 		gem.modulate = Color(0.45, 0.42, 0.36, 0.5)
+		btn.pressed.connect(_deny_transaction.bind(btn,
+			deny_text if deny_text != "" else "Can't buy"))
 	return btn
+
+
+func _make_unavailable_tile(ctrl: Control, message: String) -> void:
+	if ctrl == null or not is_instance_valid(ctrl):
+		return
+	ctrl.self_modulate = Color(0.66, 0.60, 0.52, 0.78)
+	ctrl.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	if ctrl is Button:
+		(ctrl as Button).pressed.connect(_deny_transaction.bind(ctrl, message))
+
+
+func _deny_transaction(ctrl: Control, message: String) -> void:
+	if _transaction_busy:
+		return
+	if AudioBank != null:
+		AudioBank.play_sfx("button_click", 0.02, -4.0, 0.72)
+	var pos := Vector2(get_viewport_rect().size.x * 0.5, 92.0)
+	if ctrl != null and is_instance_valid(ctrl):
+		pos = ctrl.global_position + ctrl.size * 0.5
+		if not (UserSettings != null and UserSettings.reduce_motion):
+			ctrl.pivot_offset = ctrl.size * 0.5
+			var tw := ctrl.create_tween()
+			tw.tween_property(ctrl, "rotation", 0.035, 0.045)
+			tw.tween_property(ctrl, "rotation", -0.035, 0.07)
+			tw.tween_property(ctrl, "rotation", 0.0, 0.06)
+			tw.parallel().tween_property(ctrl, "self_modulate",
+				Color(1.0, 0.55, 0.42, 0.92), 0.06)
+			tw.chain().tween_property(ctrl, "self_modulate",
+				Color(0.66, 0.60, 0.52, 0.78), 0.16)
+	GameTheme.spawn_floating_text(self, pos + Vector2(0, -18), message,
+		Color(1.0, 0.45, 0.30), false)
 
 
 func _make_service_slot(icon_path: String, text: String, color: Color,
@@ -412,45 +497,89 @@ func _make_service_slot(icon_path: String, text: String, color: Color,
 	return {"slot": btn, "button": btn, "label": lbl}
 
 
-func _buy_card(id: String, price: int) -> void:
-	if RunState.gold < price:
+func _buy_card(id: String, price: int, slot: Control = null) -> void:
+	if _transaction_busy or RunState.gold < price:
 		return
+	_transaction_busy = true
+	var old_gold := RunState.gold
 	RunState.gold -= price
+	_update_gold_display(old_gold, RunState.gold)
 	_spawn_gold_spend(price)
 	RunState.add_card(id)
 	_card_stock.erase(id)
+	# The bought ware dives into the player's pack (bottom-centre) before the
+	# shelves re-lay — the purchase reads as taking a thing, not a menu refresh.
+	if slot != null and is_instance_valid(slot):
+		GameTheme.claim_pop(slot)
+		await get_tree().create_timer(0.10).timeout
+	await GameTheme.pocket_away(slot, _pack_point())
 	_build_ui()
 
 
-func _buy_relic(id: String, price: int) -> void:
-	if RunState.gold < price:
+func _buy_relic(id: String, price: int, tile: Control = null) -> void:
+	if _transaction_busy or RunState.gold < price:
 		return
+	_transaction_busy = true
+	var old_gold := RunState.gold
 	RunState.gold -= price
+	_update_gold_display(old_gold, RunState.gold)
 	_spawn_gold_spend(price)
 	RunState.add_relic(id)
 	if id == "bottled_talisman":
 		await GameTheme.bind_bottled_talisman(self)
 	_relic_stock.erase(id)
+	if tile != null and is_instance_valid(tile):
+		GameTheme.claim_pop(tile)
+		await get_tree().create_timer(0.10).timeout
+	await GameTheme.pocket_away(tile, _pack_point())
 	_build_ui()
 
 
-func _buy_potion(price: int) -> void:
-	if RunState.gold < price:
+func _buy_potion(price: int, tile: Control = null) -> void:
+	if _transaction_busy or RunState.gold < price:
 		return
 	if not RunState.add_potion(_shop_potion_id):
 		return
+	_transaction_busy = true
+	var old_gold := RunState.gold
 	RunState.gold -= price
+	_update_gold_display(old_gold, RunState.gold)
 	_spawn_gold_spend(price)
 	# Roll a new random potion so the slot doesn't immediately repeat — keeps
 	# shop variety up if the player has gold for two potions.
 	_shop_potion_id = PotionDB.roll_random_potion()
+	if tile != null and is_instance_valid(tile):
+		GameTheme.claim_pop(tile)
+		await get_tree().create_timer(0.10).timeout
+	await GameTheme.pocket_away(tile, _pack_point())
 	_build_ui()
+
+
+func _pack_point() -> Vector2:
+	# Where bought wares dive to: the player's pack, just off the bottom edge.
+	var vp := get_viewport_rect().size
+	return Vector2(vp.x * 0.5, vp.y + 30.0)
+
+
+func _leave_shop() -> void:
+	if _transaction_busy:
+		return
+	_transaction_busy = true
+	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
+
+
+func _update_gold_display(from_gold: int, to_gold: int) -> void:
+	_gold_shown = to_gold
+	if _gold_label == null or not is_instance_valid(_gold_label):
+		return
+	GameTheme.tick_number(_gold_label, from_gold, to_gold, "%d gold", 0.42)
 
 
 func _spawn_gold_spend(price: int) -> void:
 	# Centered floating "-Ng" so the player gets a beat for every purchase, even
 	# though _build_ui() rebuilds the gold label below it.
 	var vp := get_viewport_rect().size
+	_spawn_coin_sparks(Vector2(vp.x * 0.5, 102.0), false)
 	GameTheme.spawn_floating_text(self,
 		Vector2(vp.x * 0.5, 90.0),
 		"-%d g" % price,
@@ -458,6 +587,46 @@ func _spawn_gold_spend(price: int) -> void:
 		true)
 	if AudioBank != null:
 		AudioBank.play_sfx("coin")
+
+
+func _spawn_gold_gain(price: int) -> void:
+	var vp := get_viewport_rect().size
+	_spawn_coin_sparks(Vector2(vp.x * 0.5, 102.0), true)
+	GameTheme.spawn_floating_text(self,
+		Vector2(vp.x * 0.5, 90.0),
+		"+%d g" % price,
+		Color(1.0, 0.85, 0.30),
+		false)
+	if AudioBank != null:
+		AudioBank.play_sfx("coin")
+
+
+func _spawn_coin_sparks(pos: Vector2, gain: bool) -> void:
+	if UserSettings != null and (not UserSettings.particles or UserSettings.reduce_motion):
+		return
+	if DisplayServer.get_name() == "headless":
+		return
+	var p := CPUParticles2D.new()
+	p.position = pos
+	p.z_index = 210
+	p.one_shot = true
+	p.explosiveness = 0.8
+	p.amount = 18 if gain else 12
+	p.lifetime = 0.62
+	p.direction = Vector2(0, -1)
+	p.spread = 70.0
+	p.gravity = Vector2(0, 430.0)
+	p.initial_velocity_min = 150.0 if gain else 90.0
+	p.initial_velocity_max = 300.0 if gain else 210.0
+	p.scale_amount_min = 1.5
+	p.scale_amount_max = 3.1
+	var ramp := Gradient.new()
+	ramp.set_color(0, Color(1.0, 0.90, 0.45, 1.0))
+	ramp.set_color(1, Color(0.95, 0.42, 0.12, 0.0))
+	p.color_ramp = ramp
+	add_child(p)
+	p.emitting = true
+	get_tree().create_timer(p.lifetime + 0.2).timeout.connect(p.queue_free)
 
 
 ## The sutler weighs a card by its Command cost. Curses fetch scrap-rate —
@@ -475,6 +644,10 @@ func _sell_price(card_id: String) -> int:
 
 
 func _start_sell_mode() -> void:
+	if _transaction_busy:
+		return
+	_transaction_busy = false
+	_sell_card_nodes.clear()
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
@@ -485,6 +658,15 @@ func _start_sell_mode() -> void:
 	title.position = Vector2(300, 26)
 	title.size = Vector2(1000, 48)
 	add_child(title)
+	GameTheme.deal_in(title, 0.02)
+
+	var purse = GameTheme.make_label("%d gold" % RunState.gold, 22, GameTheme.KEYWORD_GOLD, true)
+	_gold_label = purse
+	purse.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	purse.position = Vector2(680, 62)
+	purse.size = Vector2(240, 28)
+	add_child(purse)
+	GameTheme.deal_in(purse, 0.06)
 
 	var scroll = ScrollContainer.new()
 	scroll.position = Vector2(100, 80)
@@ -517,7 +699,7 @@ func _start_sell_mode() -> void:
 		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-		click_btn.pressed.connect(_confirm_sell.bind(i))
+		click_btn.pressed.connect(_confirm_sell.bind(i, slot))
 		wrapper.add_child(click_btn)
 		slot.add_child(wrapper)
 		# Price footer under each card — his figure, up front, like the scales.
@@ -527,29 +709,50 @@ func _start_sell_mode() -> void:
 		footer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		slot.add_child(footer)
 		grid.add_child(slot)
+		_sell_card_nodes.append(slot)
+		# Quick ripple across the laid-out pack — capped so a 30-card deck
+		# doesn't take seconds to appear.
+		GameTheme.deal_in(slot, 0.04 + minf(float(i), 12.0) * 0.025)
+		GameTheme.hover_lift(slot, 1.025)
 
 	var cancel_btn = GameTheme.make_back_button("Keep your pack", Vector2(180, 40))
 	cancel_btn.position = Vector2(720, 800)
-	cancel_btn.pressed.connect(func(): _build_ui())
+	cancel_btn.pressed.connect(func():
+		if not _transaction_busy:
+			_build_ui())
 	add_child(cancel_btn)
+	GameTheme.deal_in(cancel_btn, 0.18)
+	GameTheme.hover_lift(cancel_btn, 1.04)
 
 
-func _confirm_sell(deck_index: int) -> void:
+func _confirm_sell(deck_index: int, slot: Control = null) -> void:
 	# One a visit; never the last card. Both are also enforced on the tile,
 	# but guard the commit against a stale grid.
-	if _sold_this_visit or RunState.deck.size() <= 1:
+	if _transaction_busy:
+		return
+	if _sold_this_visit or RunState.deck.size() <= 1 \
+			or deck_index < 0 or deck_index >= RunState.deck.size():
 		_build_ui()
 		return
+	_transaction_busy = true
 	var price := _sell_price(RunState.deck[deck_index])
 	_sold_this_visit = true
+	var old_gold := RunState.gold
 	RunState.remove_card_at(deck_index)
 	RunState.gain_gold(price)
+	_update_gold_display(old_gold, RunState.gold)
+	_spawn_gold_gain(price)
+	if slot != null and is_instance_valid(slot) \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		GameTheme.claim_pop(slot)
+		for other in _sell_card_nodes:
+			if other != slot and other is Control and is_instance_valid(other):
+				var tw := (other as Control).create_tween()
+				tw.tween_property(other, "modulate:a", 0.0, 0.18) \
+					.set_ease(Tween.EASE_IN)
+		await get_tree().create_timer(0.16).timeout
 	var vp := get_viewport_rect().size
-	GameTheme.spawn_floating_text(self,
-		Vector2(vp.x * 0.5, 90.0),
-		"+%d g" % price,
-		Color(1.0, 0.85, 0.30),
-		false)
-	if AudioBank != null:
-		AudioBank.play_sfx("coin")
+	# The sold card slides up onto the sutler's counter and out of the pack —
+	# the trade has a direction (buys dive down to you, sales rise to him).
+	await GameTheme.pocket_away(slot, Vector2(vp.x * 0.5, 40.0))
 	_build_ui()

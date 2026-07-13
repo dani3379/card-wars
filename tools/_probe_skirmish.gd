@@ -45,12 +45,14 @@ func _process(_delta: float) -> bool:
 		return true
 
 	_test_legal_pool()
+	_test_skirmish_rarity_weights()
 	_test_denylist_real()
 	_test_uid_scheme()
 	_test_supported_spells_real()
 	_test_mode_flags_and_perspective()
 	_test_ctx_routing()
 	_test_series_format()
+	_test_hero_identity()
 
 	if _fails == 0:
 		print("[skirmish-probe] ALL PASS")
@@ -82,6 +84,46 @@ func _test_legal_pool() -> void:
 		elif CDB.is_curse(id):
 			bad.append(id)
 	_check(bad.is_empty(), "every pool entry is a real creature/spell, no curses (bad: %s)" % str(bad))
+
+
+func _test_skirmish_rarity_weights() -> void:
+	print("-- skirmish rarity weights")
+	var pool: Array = SS.skirmish_legal_pool()
+	var buckets: Dictionary = SS.rarity_buckets(pool)
+	var white_bucket: Array = buckets.get("white", [])
+	var bad_overrides: Array = []
+	var legal_overrides := 0
+	for raw_id in SS.SKIRMISH_RARITY_OVERRIDES.keys():
+		var id := String(raw_id)
+		if not pool.has(id):
+			bad_overrides.append("%s missing from legal pool" % id)
+			continue
+		legal_overrides += 1
+		var solo_rarity := String(CDB.get_card_data(id).get("rarity", ""))
+		var mp_data: Dictionary = SS.skirmish_card_data(id)
+		if solo_rarity == "white" or String(mp_data.get("rarity", "")) != "white" \
+				or String(mp_data.get("solo_rarity", "")) != solo_rarity:
+			bad_overrides.append(id)
+	_check(bad_overrides.is_empty(),
+		"white rarity is MP-only and every override is legal (bad: %s)" % str(bad_overrides))
+	_check(white_bucket.size() == legal_overrides and white_bucket.size() >= 1,
+		"white bucket is populated from overrides (bucket %d, overrides %d)" % [
+			white_bucket.size(), legal_overrides])
+	_check(int(SS.SKIRMISH_DRAFT_WEIGHTS[2]) <= 10 and int(SS.SKIRMISH_DRAFT_WEIGHTS[3]) <= 2,
+		"skirmish rare/white weights are lower than campaign act-3 (%s)" % str(SS.SKIRMISH_DRAFT_WEIGHTS))
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 777
+	var forced_white: Array = SS.deal_weighted_triplet({
+		"common": ["c1", "c2", "c3"],
+		"uncommon": ["u1", "u2", "u3"],
+		"rare": ["r1", "r2", "r3"],
+		"white": ["w1", "w2", "w3"],
+	}, {}, rng, [0, 0, 0, 100])
+	var all_white := forced_white.size() == 3
+	for id in forced_white:
+		all_white = all_white and String(id).begins_with("w")
+	_check(all_white, "weighted triplet can force the white tier (%s)" % str(forced_white))
 
 
 func _test_denylist_real() -> void:
@@ -247,3 +289,51 @@ func _test_series_format() -> void:
 	_check(SS.series_leader() == 1, "Bo1 clinches on the first win")
 	SS.best_of = 1
 	SS.reset_series()
+
+
+## Lord identity: lobby picks flow NetMatch → begin_session → per-index slots,
+## with a DEFAULT_HERO fallback, a full emote voice per lord (same slot count as
+## the generic EMOTES, so the wire index is always in range), and the match-start
+## envelope seating the canonical pair on the receiving side.
+func _test_hero_identity() -> void:
+	print("— lord identity (lobby pick → slots → emote voice)")
+	var HDB: Node = root.get_node_or_null("HeroDB")
+	if HDB == null:
+		_check(false, "HeroDB autoload found")
+		return
+	# begin_session seats both picks by slot index (client perspective here).
+	NM.vs_bot = false
+	NM.is_host = false
+	NM.local_player_index = 1
+	NM.match_seed = 777
+	NM.best_of = 1
+	NM.local_hero = "raider"
+	NM.remote_hero = "kindler"
+	SS.begin_session()
+	_check(SS.slots[1].hero_id == "raider" and SS.slots[0].hero_id == "kindler",
+		"begin_session seats local/remote lords by slot index")
+	_check(SS.hero_for(0) == "kindler" and SS.hero_for(1) == "raider",
+		"hero_for reads the seated lords")
+	# Fallback: an unpicked slot resolves to the default lord, never "".
+	SS.slots[0].hero_id = ""
+	_check(SS.hero_for(0) == HDB.DEFAULT_HERO, "hero_for falls back to DEFAULT_HERO")
+	# Every lord's emote table matches the generic EMOTES slot count.
+	var combat_script: GDScript = load("res://scripts/scenes/Combat.gd")
+	var generic: Array = combat_script.EMOTES
+	var tables: Dictionary = combat_script.HERO_EMOTES
+	var mismatched: Array = []
+	for hid in HDB.HERO_ORDER:
+		var t: Array = tables.get(hid, [])
+		if t.size() != generic.size():
+			mismatched.append(hid)
+	_check(mismatched.is_empty(),
+		"every lord has a full emote voice (%d lines; bad: %s)" % [generic.size(), str(mismatched)])
+	# Match-start canonical pair: the receiving side adopts h0 (foe) + h1 (own).
+	NM.local_hero = ""
+	NM.remote_hero = ""
+	NM._apply_match_start(123, 0, 1, 0, "stalwart", "acolyte")
+	_check(NM.remote_hero == "stalwart" and NM.local_hero == "acolyte",
+		"match-start envelope seats the canonical lord pair")
+	NM.leave()
+	NM.local_hero = ""   # leave() keeps the pick sticky by design — clear for later tests
+	SS.reset()

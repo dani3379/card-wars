@@ -38,6 +38,34 @@
 >   line (`EV_HAND_COUNT`). Mid-match disconnect (`peer_left` / `host_closed`)
 >   ends cleanly and returns both peers to the menu (plan §15).
 >
+> - **LORD PICK (2026-07-09)** — both players choose their character in the
+>   lobby ("MARCH AS" portrait chips, also on the Practice-vs-Bot panel; the
+>   pick is sticky per app session). Picks sync both directions (`_RK_HERO` /
+>   `_rpc_set_hero`, late-join resend on connect/pair, and the match-start
+>   envelope carries the canonical `h0`/`h1` pair) into
+>   `SkirmishState.slots[].hero_id` via `begin_session`. Net combat shows YOUR
+>   lord's portrait bottom-left and the OPPONENT'S top-right, titles the marquee
+>   "Name · Lord Title", names the foe hand-fan, and emotes speak in each lord's
+>   own six-line voice (`Combat.HERO_EMOTES`; the wire payload stays the line
+>   INDEX, rendered from the SENDER's table on both machines). The bot rolls a
+>   random non-mirror lord. Cosmetic only — decks/rules untouched.
+>
+> - **FOE'S ARSENAL + TRIGGER FX (2026-07-09)** — the opponent's drafted battle
+>   relic and potions are VISIBLE in net combat: a "FOE'S ARSENAL" chip rail
+>   under the foe's Command seal (`_net_build_foe_arsenal`; GameTheme chip kit,
+>   so rich hovers come free; declining both drafts builds no rail). HS-style
+>   beats: when the foe drinks, the rail chip drains to a husk and the bottle
+>   blooms center-board with "THE FOE DRINKS" + the potion's name
+>   (`EV_POTION_FX` → `_net_show_foe_potion_fx`; reduce-motion keeps a text
+>   line + the chip drain, which is state). Relic payouts pulse their chip
+>   (scale pop, flash, gilt burst ring) on whichever rail owns them and cross
+>   the wire as `EV_RELIC_FX`; foe triggers also float the relic's name for
+>   attribution. Wire new trigger sites through `_relic_fired` (local resource
+>   relics — each peer fires its own) or `_relic_fired_for_side`
+>   (host-authoritative board relics); both debounce per chip so multi-part
+>   payouts read as ONE beat. Solo reuses the same pulse on the player's own
+>   rail. Verify: `tools/_shot_foe_arsenal.tscn` (windowed, 31 frames).
+>
 > All Combat.gd net code is `_is_net()`-guarded; **solo campaign is untouched**
 > (the only shared-signature change is `_resolve_ranged_attacks(side_filter=-1)`,
 > whose default reproduces the old both-sides behavior). **DEFERRED:** combat-time
@@ -1052,9 +1080,19 @@ like Best-of-N; works with every deck mode). `NetMatch.battle_style`:
 
 ## 16.1 ALTERNATING is now ONE-DIRECTIONAL (built + probe-covered)
 Ending YOUR placement turn sends YOUR line across the board (`_net_run_clash(side)`);
-the defender does not swing back — it answers on its own turn. Round 1 is place-only
-for BOTH sides (opener can't free-hit; second player keeps the Coin and gets the
-first contested strike on round 2). `_net_run_clash(attacking_side := -1)`:
+the defender does not swing back — it answers on its own turn. Only the OPENER's
+first turn is place-only (an empty opposing board would mean free face hits);
+the second player's first turn faces a standing line — de facto turn 2 — so its
+commit STRIKES (2026-07-11; it used to be place-only for both sides). The second
+player also keeps the Coin. THE TOSS (2026-07-11): the seed coin flip now decides
+who CHOOSES the order — MARCH FIRST (act first every round) or HOLD BACK (see
+their line, keep the Coin, opening strike). The pick syncs as
+`_net_first_player_override` via `IN_ORDER_PICK` / `EV_ORDER_PICK`; probes
+pre-set the override and skip the toss, headless resolves to the raw flip, and
+the human always takes the toss vs the practice bot. Verify: `_probe_net_clash`
+(opening strike + mutual trade) and `tools/_shot_toss.tscn` (windowed modal →
+HOLD BACK → bot opens, human's first button reads STRIKE).
+`_net_run_clash(attacking_side := -1)`:
 -1 = both-sides simultaneous pass (kept for SEALED + legacy tests); 0/1 = that side
 only. Side-filter details: premark + swift/main/back/ranged passes gated per side;
 defender's armed Doubled Hour is STASHED around the shared helpers (swings on its own

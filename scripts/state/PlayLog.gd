@@ -36,6 +36,15 @@ var _session_id: String = ""
 var _path: String = ""
 var _t0: int = 0
 var _seq: int = 0
+var _pending_lines: PackedStringArray = PackedStringArray()
+# These can fire several times in one input/combat beat. Buffer them until a
+# durable checkpoint instead of forcing disk/antivirus latency onto that frame.
+const BUFFERED_ACTION_TYPES := {
+	"play_creature": true,
+	"play_spell": true,
+	"potion": true,
+	"sacrifice": true,
+}
 
 
 ## Opens a fresh session file. `meta` is merged into the header (hero, deck, etc.).
@@ -53,6 +62,7 @@ func start_session(meta: Dictionary = {}) -> void:
 		return
 	_t0 = Time.get_ticks_msec()
 	_seq = 0
+	_pending_lines.clear()
 	var header := {
 		"v": VERSION,
 		"session": _session_id,
@@ -77,8 +87,17 @@ func log_event(type: String, payload: Dictionary = {}) -> void:
 	rec["t_ms"] = Time.get_ticks_msec() - _t0
 	rec["type"] = type
 	_seq += 1
-	_f.store_line(JSON.stringify(rec))
-	_f.flush()  # turn-based pacing — flush so a crash never loses the last play
+	_pending_lines.append(JSON.stringify(rec))
+	if not BUFFERED_ACTION_TYPES.has(type):
+		_flush_pending()
+
+
+func _flush_pending() -> void:
+	if _f == null or _pending_lines.is_empty():
+		return
+	_f.store_string("\n".join(_pending_lines) + "\n")
+	_pending_lines.clear()
+	_f.flush()
 
 
 ## Closes the current session. Optional `final` is logged as a run_end event.
@@ -87,14 +106,25 @@ func end_session(final: Dictionary = {}) -> void:
 		return
 	if not final.is_empty():
 		log_event("run_end", final)
-	_f.flush()
+	_flush_pending()
 	_f.close()
 	_f = null
 	_path = ""
+	_pending_lines.clear()
 
 
 func is_active() -> bool:
 	return _f != null
+
+
+func _exit_tree() -> void:
+	# Normal mid-turn exits (Alt-F4, QUIT, editor stop) still pass through the
+	# tree teardown. Preserve the buffered action batch without putting a disk
+	# flush back onto the input frame that produced it.
+	if _f != null:
+		_flush_pending()
+		_f.close()
+		_f = null
 
 
 ## Absolute on-disk path of the current session file (for surfacing to the user).

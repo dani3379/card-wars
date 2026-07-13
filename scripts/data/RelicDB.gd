@@ -471,7 +471,7 @@ const RELICS: Dictionary = {
 		"desc": "Transform all your starting creatures into random rare creatures.",
 		"hooks": [], "effect": "pandoras_box", "value": 0},
 	"snecko_eye": {"id": "snecko_eye", "name": "Basilisk Eye", "tier": "boss",
-		"desc": "Draw 6 cards instead of 4, but every card's cost is randomized 0-3 each turn.",
+		"desc": "Draw 6 cards, but every card's cost is randomized 0-3 each turn.",
 		"hooks": ["turn_start"], "effect": "snecko_eye", "value": 6},
 	"calling_bell": {"id": "calling_bell", "name": "Calling Bell", "tier": "boss",
 		"desc": "Gain 3 boss relics. Add 3 Curses to your deck.",
@@ -607,6 +607,10 @@ static func get_relic_rarity(id: String) -> String:
 
 static var _icon_cache: Dictionary = {}
 static var _painted_icon_cache: Dictionary = {}
+
+
+static func clear_icon_cache() -> void:
+	_icon_cache.clear()
 
 
 static func get_relic(id: String) -> Dictionary:

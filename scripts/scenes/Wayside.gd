@@ -66,6 +66,7 @@ func _ready() -> void:
 		# pays regardless of deck state.
 		_verb = "supply_cache"
 	_build()
+	GameTheme.fade_in(self, 0.22)
 	GameTheme.make_settings_gear(self)
 
 
@@ -106,6 +107,7 @@ func _add_header(title_text: String, flavor: String) -> void:
 	title.offset_top = 36
 	title.offset_bottom = 96
 	add_child(title)
+	GameTheme.deal_in(title, 0.02)
 
 	var sub = GameTheme.make_label(flavor, GameTheme.FONT_SUBHEADER, GameTheme.IVORY)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -116,6 +118,7 @@ func _add_header(title_text: String, flavor: String) -> void:
 	sub.offset_top = 104
 	sub.offset_bottom = 170
 	add_child(sub)
+	GameTheme.deal_in(sub, 0.06)
 
 
 ## A parchment tile choice in the map screen's chart vocabulary — an inked
@@ -237,8 +240,15 @@ func _add_tile_stack(tiles: Array) -> void:
 	vbox.offset_top = -h / 2 + 40
 	vbox.offset_bottom = h / 2 + 40
 	add_child(vbox)
+	var i := 0
 	for t in tiles:
 		vbox.add_child(t)
+		# Every wayside verb routes through this stack, so all the road's
+		# one-decision stops share the entrance + hover language for free.
+		GameTheme.deal_in(t, 0.10 + i * 0.07)
+		if t is BaseButton and not (t as BaseButton).disabled:
+			GameTheme.hover_lift(t, 1.02)
+		i += 1
 
 
 func _add_leave_button(label: String = "March on") -> void:
@@ -250,6 +260,8 @@ func _add_leave_button(label: String = "March on") -> void:
 	btn.offset_bottom = -28
 	btn.pressed.connect(_go_to_map)
 	add_child(btn)
+	GameTheme.deal_in(btn, 0.12)
+	GameTheme.hover_lift(btn, 1.04)
 
 
 func _go_to_map() -> void:
@@ -266,15 +278,32 @@ func _leave() -> void:
 ## screen so the road's stops all end on the same breath.
 func _show_result(text: String) -> void:
 	_clear_ui()
+	var accent := _result_accent(text)
+	var title = GameTheme.make_screen_title(_result_title(), accent,
+		GameTheme.FONT_HEADER)
+	title.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	title.offset_top = 74
+	title.offset_bottom = 138
+	add_child(title)
+	GameTheme.deal_in(title, 0.02)
+	_spawn_result_seal(accent, _result_is_bad(text))
+
 	var lbl := GameTheme.make_label(text, 24, GameTheme.IVORY)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	lbl.set_anchors_preset(Control.PRESET_CENTER)
 	lbl.offset_left = -420
 	lbl.offset_right = 420
-	lbl.offset_top = -120
-	lbl.offset_bottom = 40
+	lbl.offset_top = -96
+	lbl.offset_bottom = 72
 	add_child(lbl)
+	if not (UserSettings != null and UserSettings.reduce_motion):
+		lbl.visible_ratio = 0.0
+		var reveal := clampf(lbl.get_total_character_count() * 0.004, 0.24, 0.72)
+		create_tween().tween_property(lbl, "visible_ratio", 1.0, reveal) \
+			.set_delay(0.10)
+	GameTheme.deal_in(lbl, 0.08)
+
 	var btn = GameTheme.make_back_button("Continue", Vector2(180, 42), 16,
 		GameTheme.KEYWORD_GOLD)
 	btn.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
@@ -284,6 +313,76 @@ func _show_result(text: String) -> void:
 	btn.offset_bottom = -108
 	btn.pressed.connect(_go_to_map)
 	add_child(btn)
+	GameTheme.deal_in(btn, 0.24)
+	GameTheme.hover_lift(btn, 1.04)
+
+
+func _result_title() -> String:
+	match _verb:
+		"drill_yard":
+			return "THE DRILL YARD"
+		"muster_scale":
+			return "THE SCALES"
+		"standard_bearer":
+			return "THE STANDARD"
+		"supply_cache":
+			return "THE CACHE"
+	return "THE ROAD"
+
+
+func _result_is_bad(text: String) -> bool:
+	var lower := text.to_lower()
+	for token in ["lose", "lost", "blade", "empty", "blank", "nothing", "won't"]:
+		if lower.find(token) >= 0:
+			return true
+	return false
+
+
+func _result_accent(text: String) -> Color:
+	if _result_is_bad(text):
+		return Color(1.0, 0.38, 0.24)
+	var lower := text.to_lower()
+	if lower.find("gold") >= 0 or lower.find("healed") >= 0:
+		return GameTheme.KEYWORD_GOLD
+	if lower.find("command") >= 0 or lower.find("pinned") >= 0 \
+			or lower.find("pins") >= 0:
+		return Color(0.70, 0.86, 1.0)
+	return GameTheme.GILT_BRIGHT
+
+
+func _spawn_result_seal(accent: Color, bad: bool = false) -> void:
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	var vp := get_viewport_rect().size
+	var center := Vector2(vp.x * 0.5, vp.y * 0.44)
+	var ring := Panel.new()
+	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ring.z_index = 90
+	var st := StyleBoxFlat.new()
+	st.bg_color = Color(0, 0, 0, 0)
+	st.border_color = Color(accent.r, accent.g, accent.b, 0.65)
+	st.set_border_width_all(4)
+	st.set_corner_radius_all(600)
+	ring.add_theme_stylebox_override("panel", st)
+	ring.size = Vector2(44, 44)
+	ring.pivot_offset = ring.size * 0.5
+	ring.position = center - ring.size * 0.5
+	add_child(ring)
+	var tw := ring.create_tween().set_parallel(true)
+	tw.tween_property(ring, "scale", Vector2(6.0, 6.0), 0.46) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.tween_property(ring, "modulate:a", 0.0, 0.46).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(ring.queue_free)
+	if bad:
+		var wash := ColorRect.new()
+		wash.color = Color(0.55, 0.08, 0.04, 0.20)
+		wash.set_anchors_preset(Control.PRESET_FULL_RECT)
+		wash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wash.z_index = 80
+		add_child(wash)
+		var wt := wash.create_tween()
+		wt.tween_property(wash, "color:a", 0.0, 0.44).set_delay(0.04)
+		wt.tween_callback(wash.queue_free)
 
 
 # ── Card picker grid (Event.gd's picker, compacted) ─────────────────────
@@ -329,7 +428,7 @@ func _add_card_to_grid(grid: GridContainer, data: Dictionary,
 	click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
 	click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 	click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-	click_btn.pressed.connect(callback)
+	click_btn.pressed.connect(_on_grid_card_pressed.bind(slot, callback))
 	wrapper.add_child(click_btn)
 	slot.add_child(wrapper)
 	if footer != "":
@@ -338,6 +437,17 @@ func _add_card_to_grid(grid: GridContainer, data: Dictionary,
 		f.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		slot.add_child(f)
 	grid.add_child(slot)
+	var idx := grid.get_child_count() - 1
+	GameTheme.deal_in(slot, 0.04 + minf(float(idx), 12.0) * 0.025)
+	GameTheme.hover_lift(slot, 1.025)
+
+
+func _on_grid_card_pressed(slot: Control, callback: Callable) -> void:
+	if slot != null and is_instance_valid(slot) \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		GameTheme.claim_pop(slot)
+		await get_tree().create_timer(0.10).timeout
+	callback.call()
 
 
 # ═══════════════════ DRILL YARD ═══════════════════
@@ -441,8 +551,13 @@ func _build_drill_push() -> void:
 	vbox.offset_top = -110
 	vbox.offset_bottom = 120
 	add_child(vbox)
+	var ti := 0
 	for t in tiles:
 		vbox.add_child(t)
+		GameTheme.deal_in(t, 0.10 + ti * 0.07)
+		if t is BaseButton and not (t as BaseButton).disabled:
+			GameTheme.hover_lift(t, 1.02)
+		ti += 1
 
 
 func _on_drill_again() -> void:

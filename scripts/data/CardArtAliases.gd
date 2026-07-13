@@ -45,6 +45,16 @@ const ALIASES: Dictionary = {
 	# (trebuchet.png exists outright, so Trebuchet needs no alias.)
 	"volunteer":            "militia",
 	"rat_piper":            "whisper_king",
+	# 2026-07-13 stolen-classics slate (creatures; the slate's spells ride
+	# SPELL_ALIASES below).
+	"grave_clutch":         "corpse_eater",
+	"pressed_man":          "militia",
+	"the_undying":          "vengeful_spirit",
+	"blood_kin":            "pikeman",       # rank-and-file kin
+	"pit_brawler":          "sellsword",     # a brawling merc
+	"farmers_son":          "wolf_c",        # the moon side of him
+	"whisper_widow":        "the_crone",     # hooded widow
+	"quartermaster":        "hall_watcher",  # the armored official
 	# Placeholder rescues — these had NO alias and rendered a blank gradient.
 	"carrion_priest":       "risen_lich",   # Carrion Priest — undead death-priest
 	"gravecaller":          "hall_watcher",  # Oathkeeper — armored oath-knight (own art, not Paladin's)
@@ -381,13 +391,237 @@ const ALIASES: Dictionary = {
 	"pyre_tender":          "torchbearer",
 }
 
+## These are strong-reference caches, so an entry keeps the decoded texture in
+## memory even after the card/scene that requested it is gone. Keep enough art
+## for a deck plus the current encounter, but do not let a Collection visit or
+## a long run pin the entire library. Eviction only removes these references;
+## Card2D/TextureRect nodes already using a Texture2D retain their own reference.
+const MAX_CREATURE_ART_ENTRIES := 48
+const MAX_SPELL_ART_ENTRIES := 32
+const MAX_THREADED_PATH_ENTRIES := 48
+
 static var _creature_art_cache: Dictionary = {}
+static var _creature_art_lru: Array[String] = []
 static var _spell_art_cache: Dictionary = {}
+static var _spell_art_lru: Array[String] = []
+# Shared threaded path loader used by transition/card warmers. Keeping the
+# resource reference here both de-duplicates alias requests and pins decoded
+# textures so the later synchronous Card2D lookup is a cheap cache hit.
+static var _threaded_path_cache: Dictionary = {}
+static var _threaded_path_lru: Array[String] = []
+static var _threaded_path_busy: Dictionary = {}
+
+
+static func _touch_lru(order: Array[String], key: String) -> void:
+	order.erase(key)
+	order.append(key)
+
+
+static func _remember_creature_art(card_id: String, tex: Texture2D) -> void:
+	_creature_art_cache[card_id] = tex
+	_touch_lru(_creature_art_lru, card_id)
+	while _creature_art_cache.size() > MAX_CREATURE_ART_ENTRIES \
+			and not _creature_art_lru.is_empty():
+		var oldest: String = _creature_art_lru.pop_front()
+		_creature_art_cache.erase(oldest)
+
+
+static func _remember_spell_art(card_id: String, tex: Texture2D) -> void:
+	_spell_art_cache[card_id] = tex
+	_touch_lru(_spell_art_lru, card_id)
+	while _spell_art_cache.size() > MAX_SPELL_ART_ENTRIES \
+			and not _spell_art_lru.is_empty():
+		var oldest: String = _spell_art_lru.pop_front()
+		_spell_art_cache.erase(oldest)
+
+
+static func _remember_texture_path(path: String, tex: Texture2D) -> void:
+	_threaded_path_cache[path] = tex
+	_touch_lru(_threaded_path_lru, path)
+	_trim_threaded_path_cache()
+
+
+static func _trim_threaded_path_cache() -> void:
+	# A path may briefly be both pinned and busy when another subsystem joined
+	# its ResourceLoader request. Never discard that rendezvous point mid-load.
+	var remaining := _threaded_path_lru.size()
+	while _threaded_path_cache.size() > MAX_THREADED_PATH_ENTRIES \
+			and remaining > 0 and not _threaded_path_lru.is_empty():
+		var oldest: String = _threaded_path_lru.pop_front()
+		if _threaded_path_busy.has(oldest):
+			_threaded_path_lru.append(oldest)
+			remaining -= 1
+			continue
+		_threaded_path_cache.erase(oldest)
+		remaining = _threaded_path_lru.size()
+
+
+static func clear_runtime_caches() -> void:
+	# Collection can touch nearly every painting in one visit. Once its card
+	# nodes are gone, release those strong references so the ResourceLoader is
+	# free to reclaim them; run/map warmers repopulate only what play needs.
+	_creature_art_cache.clear()
+	_creature_art_lru.clear()
+	_spell_art_cache.clear()
+	_spell_art_lru.clear()
+	_threaded_path_cache.clear()
+	_threaded_path_lru.clear()
+	# Do not cancel genuine in-flight requests. They erase themselves on land;
+	# clearing only completed resources is enough for the gallery-exit path.
+
+
+static func release_texture_path(path: String) -> void:
+	# ResourceLoader keeps its own weak cache; this dictionary is the strong pin
+	# owned by our warmers. Dropping it lets one-off event art leave with its scene.
+	if path != "" and not _threaded_path_busy.has(path):
+		_threaded_path_cache.erase(path)
+		_threaded_path_lru.erase(path)
+
+
+static func release_card_art(card_data: Dictionary) -> void:
+	# Gallery hydration only needs the source painting until its flattened card
+	# texture is captured. Release every lookup spelling used by prewarm_card_art
+	# so scrolling the full compendium does not retain the whole art library.
+	var cid := String(card_data.get("id", ""))
+	var name_id := String(card_data.get("name", "")).to_lower() \
+		.replace(" ", "_").replace("'", "")
+	if String(card_data.get("type", "creature")) == "spell":
+		_release_spell_art_key(cid)
+		_release_spell_art_key(name_id)
+	else:
+		_release_creature_art_key(cid)
+		_release_creature_art_key(name_id)
+		_release_creature_art_key("e_" + name_id if name_id != "" else "")
+
+
+static func _release_creature_art_key(card_id: String) -> void:
+	if card_id == "":
+		return
+	_creature_art_cache.erase(card_id)
+	_creature_art_lru.erase(card_id)
+	release_texture_path("res://assets/creatures/%s.png" % card_id)
+	release_texture_path("res://assets/creatures/%s.jpg" % card_id)
+	if ALIASES.has(card_id):
+		var alias_id := String(ALIASES[card_id])
+		release_texture_path("res://assets/creatures/%s.png" % alias_id)
+		release_texture_path("res://assets/creatures/%s.jpg" % alias_id)
+
+
+static func _release_spell_art_key(card_id: String) -> void:
+	if card_id == "":
+		return
+	_spell_art_cache.erase(card_id)
+	_spell_art_lru.erase(card_id)
+	release_texture_path("res://assets/spells/%s.png" % card_id)
+	if SPELL_ALIASES.has(card_id):
+		release_texture_path(
+			"res://assets/spells/%s.png" % String(SPELL_ALIASES[card_id]))
+
+
+static func prewarm_texture_path(path: String) -> Texture2D:
+	if path == "" or not ResourceLoader.exists(path):
+		return null
+	if _threaded_path_cache.has(path):
+		_touch_lru(_threaded_path_lru, path)
+		return _threaded_path_cache[path] as Texture2D
+	if ResourceLoader.has_cached(path):
+		var cached := load(path) as Texture2D
+		_remember_texture_path(path, cached)
+		return cached
+	while _threaded_path_busy.has(path):
+		var wait_tree := Engine.get_main_loop() as SceneTree
+		if wait_tree == null:
+			return null
+		await wait_tree.process_frame
+		if _threaded_path_cache.has(path):
+			_touch_lru(_threaded_path_lru, path)
+			return _threaded_path_cache[path] as Texture2D
+	_threaded_path_busy[path] = true
+	var tex: Texture2D = null
+	var err := ResourceLoader.load_threaded_request(path, "Texture2D")
+	# Another subsystem (notably ScenePreload) may already own the request. In
+	# that case load_threaded_request reports busy, but the shared loader status
+	# is still pollable; join that request instead of falling back to a blocking
+	# load on the transition frame.
+	var status := ResourceLoader.load_threaded_get_status(path)
+	if err == OK or status == ResourceLoader.THREAD_LOAD_IN_PROGRESS \
+			or status == ResourceLoader.THREAD_LOAD_LOADED:
+		var tree := Engine.get_main_loop() as SceneTree
+		while tree != null and status == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
+			await tree.process_frame
+			status = ResourceLoader.load_threaded_get_status(path)
+		if status == ResourceLoader.THREAD_LOAD_LOADED:
+			tex = ResourceLoader.load_threaded_get(path) as Texture2D
+	if tex == null and ResourceLoader.has_cached(path):
+		tex = load(path) as Texture2D
+	if tex == null:
+		# Rare loader rejection (unsupported importer/request state). Preserve the
+		# old graceful behavior rather than turning missing art into a hard error.
+		tex = load(path) as Texture2D
+	_threaded_path_busy.erase(path)
+	_remember_texture_path(path, tex)
+	return tex
+
+
+static func prewarm_creature_art(card_id: String) -> Texture2D:
+	if _creature_art_cache.has(card_id):
+		_touch_lru(_creature_art_lru, card_id)
+		return _creature_art_cache[card_id] as Texture2D
+	var paths: Array[String] = [
+		"res://assets/creatures/%s.png" % card_id,
+		"res://assets/creatures/%s.jpg" % card_id,
+	]
+	if ALIASES.has(card_id):
+		var alias_id: String = ALIASES[card_id]
+		paths.append("res://assets/creatures/%s.png" % alias_id)
+		paths.append("res://assets/creatures/%s.jpg" % alias_id)
+	var tex: Texture2D = null
+	for path in paths:
+		tex = await prewarm_texture_path(path)
+		if tex != null:
+			break
+	_remember_creature_art(card_id, tex)
+	return tex
+
+
+static func prewarm_spell_art(card_id: String) -> Texture2D:
+	if _spell_art_cache.has(card_id):
+		_touch_lru(_spell_art_lru, card_id)
+		return _spell_art_cache[card_id] as Texture2D
+	var paths: Array[String] = ["res://assets/spells/%s.png" % card_id]
+	if SPELL_ALIASES.has(card_id):
+		paths.append("res://assets/spells/%s.png" % SPELL_ALIASES[card_id])
+	var tex: Texture2D = null
+	for path in paths:
+		tex = await prewarm_texture_path(path)
+		if tex != null:
+			break
+	_remember_spell_art(card_id, tex)
+	return tex
+
+
+static func prewarm_card_art(card_data: Dictionary) -> Texture2D:
+	var cid := String(card_data.get("id", ""))
+	var name_id := String(card_data.get("name", "")).to_lower() \
+		.replace(" ", "_").replace("'", "")
+	var tex: Texture2D = null
+	if String(card_data.get("type", "creature")) == "spell":
+		tex = await prewarm_spell_art(cid)
+		if tex == null and name_id != "":
+			tex = await prewarm_spell_art(name_id)
+	else:
+		tex = await prewarm_creature_art(cid)
+		if tex == null and name_id != "":
+			tex = await prewarm_creature_art(name_id)
+		if tex == null and name_id != "":
+			tex = await prewarm_creature_art("e_" + name_id)
+	return tex
 
 
 static func try_load_creature_art(card_id: String) -> Texture2D:
 	if _creature_art_cache.has(card_id):
-		return _creature_art_cache[card_id]
+		_touch_lru(_creature_art_lru, card_id)
+		return _creature_art_cache[card_id] as Texture2D
 	var tex: Texture2D = null
 	# Direct PNG first.
 	var path = "res://assets/creatures/%s.png" % card_id
@@ -414,7 +648,7 @@ static func try_load_creature_art(card_id: String) -> Texture2D:
 			var alias_jpg := "res://assets/creatures/%s.jpg" % alias_target
 			if ResourceLoader.exists(alias_jpg):
 				tex = load(alias_jpg)
-	_creature_art_cache[card_id] = tex
+	_remember_creature_art(card_id, tex)
 	return tex
 
 
@@ -437,12 +671,26 @@ const SPELL_ALIASES: Dictionary = {
 	"petard": "ricochet",
 	"slow_match": "flame_bolt",
 	"muster_fallen": "reanimate",
+	# 2026-07-09 removal slate — all three borrow orphaned paintings (their card
+	# ids died in earlier overhauls, so no live card shares these faces).
+	"sappers_charge": "barricade",     # a powder magazine going up
+	"ballista_bolt": "reposition",     # a bolt of force slamming into a body
+	"scatter_line": "second_wind",     # the howling gale that scatters them
+	# 2026-07-13 stolen-classics slate.
+	"long_roll": "lost_tome",          # the roll of names, read as a book
+	"wolf_pits": "ambush",             # death waiting under cover
+	"informer": "inspire",             # Turncoat's bought-man painting, reshared
+	"forgefire": "scrap",              # orphaned smith-pile painting
+	"grand_melee": "charge_spell",     # the whole line surges
+	"giantfall": "smite_spell",        # one great blow from above
+	"great_bombard": "cataclysm",      # the field erupts
 }
 
 
 static func try_load_spell_art(card_id: String) -> Texture2D:
 	if _spell_art_cache.has(card_id):
-		return _spell_art_cache[card_id]
+		_touch_lru(_spell_art_lru, card_id)
+		return _spell_art_cache[card_id] as Texture2D
 	var tex: Texture2D = null
 	var path = "res://assets/spells/%s.png" % card_id
 	if ResourceLoader.exists(path):
@@ -451,5 +699,5 @@ static func try_load_spell_art(card_id: String) -> Texture2D:
 		var alias_path = "res://assets/spells/%s.png" % SPELL_ALIASES[card_id]
 		if ResourceLoader.exists(alias_path):
 			tex = load(alias_path)
-	_spell_art_cache[card_id] = tex
+	_remember_spell_art(card_id, tex)
 	return tex

@@ -28,6 +28,7 @@ signal room_error(reason: String)       # joiner: the relay rejected our code (b
 
 # ── Lobby / handshake signals ──
 signal ready_state_changed              # local_ready or remote_ready changed
+signal hero_state_changed               # local_hero or remote_hero changed
 signal match_starting(seed: int)        # host pressed start; both sides should advance
 signal match_config_changed             # host changed the mode / best-of selection
 
@@ -80,6 +81,7 @@ static func get_relay_host() -> String:
 # Relay envelope kinds (a partner→partner message forwarded by the relay). These
 # carry the SAME payloads the DIRECT @rpc functions send; only the routing differs.
 const _RK_READY := "ready"
+const _RK_HERO := "hero"
 const _RK_MATCH_START := "mstart"
 const _RK_MATCH_CONFIG := "mcfg"
 const _RK_DRAFT := "draft"
@@ -101,6 +103,7 @@ const IN_USE_POTION := "use_potion"  # client → host: I drank a host-authorita
 const IN_END_ACTIONS := "end_actions"
 const IN_REMATCH := "rematch"        # client → host: I want to play again
 const IN_CHOICE := "choice"          # client → host: my pick for an EV_CHOICE prompt (Copycat / Adaptable)
+const IN_ORDER_PICK := "order_pick"  # client → host (client won the toss): the settled opener {first}
 # SEALED ORDERS battle style (plan §16.2)
 const IN_ORDERS := "orders"          # client → host: my sealed creature bundle {list,mana}
 const IN_ORDER_GHOST := "order_ghost"   # client → host: I committed an order at {lane,row} (position only)
@@ -117,6 +120,12 @@ const EV_DISCARD_FX := "discard_fx"
 # affects their state; the potion's own effect resolves caster-side or, for the
 # host-authoritative heal, via IN_USE_POTION below).
 const EV_POTION_FX := "potion_fx"
+# Both directions: "my relic <rid> just triggered" — the receiver pulses that
+# chip on its foe-arsenal rail, Hearthstone-trinket-style. Presentation only,
+# like EV_POTION_FX. `mine` is from the SENDER's perspective; the host also
+# sends mine=false to tell the client "YOUR board relic fired host-side" (the
+# client then pulses its OWN rail chip instead).
+const EV_RELIC_FX := "relic_fx"
 # Both directions: "I sent emote #idx" — a Hearthstone-style canned phrase the
 # opponent sees as a speech bubble over our portrait. Presentation only; never
 # touches game state. Rides the generic event/intent envelopes (no relay change).
@@ -142,6 +151,9 @@ const EV_BOARD_SYNC := "board_sync"
 # Adaptable). The client shows the picker and answers with IN_CHOICE; the host (still
 # authoritative) applies the pick + board-syncs. Rides the normal event/intent channels.
 const EV_CHOICE := "choice_req"
+# Host → client: the settled opener {first} after the toss winner's pick (the
+# host either made the pick itself or is relaying its own applied choice).
+const EV_ORDER_PICK := "order_pick_ev"
 # SEALED ORDERS battle style (plan §16.2): host → client phase drivers.
 const EV_ORDERS_PHASE := "orders_phase"   # {round, init} — both sides give orders now
 const EV_ORDER_GHOST := "order_ghost_ev"  # {lane, row} — the host committed an order there
@@ -216,6 +228,13 @@ var _relay_partner: Dictionary = {}    # peer_id -> partner peer_id
 var local_ready: bool = false
 var remote_ready: bool = false
 var remote_present: bool = false   # the other peer is connected
+## Lord picks (HeroDB ids) — cosmetic identity only (portrait + emote voice),
+## never decks or rules. local_hero is STICKY across leave() so re-hosting after
+## a match keeps your lord; remote_hero clears with the connection. The pair is
+## exchanged on pick, re-sent on (re)connect, and carried in the match-start
+## envelope as the canonical final word (so a pick racing START can't desync).
+var local_hero: String = ""
+var remote_hero: String = ""
 
 # ── Entity registry (host-authoritative; populated in Phase 2) ──
 # entity_id (int) -> Card2D node. The cross-wire handle for board creatures.
@@ -347,6 +366,7 @@ func leave() -> void:
 	local_ready = false
 	remote_ready = false
 	remote_present = false
+	remote_hero = ""   # the pick leaves with the peer; local_hero stays (sticky)
 	match_mode = 0
 	best_of = 1
 	entities.clear()
@@ -393,6 +413,11 @@ func start_vs_bot(mode: int, bo: int) -> void:
 	match_mode = mode
 	best_of = bo
 	match_seed = fresh_seed()
+	# The bot marches as a random rival lord (never a mirror of your pick), so the
+	# foe plate and emote voice have an identity in practice matches too.
+	var pool: Array = HeroDB.HERO_ORDER.duplicate()
+	pool.erase(local_hero)
+	remote_hero = String(pool[randi() % pool.size()])
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -415,6 +440,8 @@ func _on_peer_connected(peer_id: int) -> void:
 	# still learns it. (No-op if we haven't toggled.)
 	if local_ready:
 		_send_ready(local_ready)
+	if local_hero != "":
+		_send_hero(local_hero)   # same late-join catch-up for the lord pick
 	if is_host:
 		# Remember the single client's peer id for targeted (redacted) sends.
 		client_peer_id = peer_id
@@ -498,6 +525,33 @@ func _apply_remote_ready(value: bool) -> void:
 	ready_state_changed.emit()
 
 
+## Pick the lord you march as (cosmetic: your portrait on both screens + your
+## emote voice). Safe to call any time in the lobby, connected or not.
+func set_local_hero(hid: String) -> void:
+	local_hero = hid
+	_send_hero(hid)
+	hero_state_changed.emit()
+
+
+func _send_hero(hid: String) -> void:
+	if not _can_send():
+		return
+	if transport == Transport.RELAY:
+		_relay_ship({"t": _RK_HERO, "h": hid})
+	else:
+		_rpc_set_hero.rpc(hid)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func _rpc_set_hero(hid: String) -> void:
+	_apply_remote_hero(hid)
+
+
+func _apply_remote_hero(hid: String) -> void:
+	remote_hero = hid
+	hero_state_changed.emit()
+
+
 ## True when there's a live link AND a present partner to receive a message —
 ## the shared guard for every player-side send (DIRECT and RELAY).
 func _can_send() -> bool:
@@ -512,25 +566,37 @@ func start_match() -> void:
 	match_seed = fresh_seed()
 	# Carry the match config in the start message too, so the client definitely has
 	# the chosen mode / best-of / battle style even if it missed an earlier
-	# set_match_config send.
+	# set_match_config send. The lord pair rides along as the canonical final word:
+	# picks were exchanged on click, but a pick racing the START press could leave
+	# the two machines disagreeing — the host's view wins at start.
 	if transport == Transport.RELAY:
 		_relay_ship({"t": _RK_MATCH_START, "seed": match_seed, "mode": match_mode,
-			"bo": best_of, "style": battle_style})
+			"bo": best_of, "style": battle_style, "h0": local_hero, "h1": remote_hero})
 	else:
-		_rpc_match_start.rpc(match_seed, match_mode, best_of, battle_style)   # tell the client
+		_rpc_match_start.rpc(match_seed, match_mode, best_of, battle_style,
+			local_hero, remote_hero)   # tell the client
 	match_starting.emit(match_seed)    # tell ourselves (remote-only path)
 
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_match_start(seed: int, mode: int, bo: int, style: int = STYLE_ALTERNATING) -> void:
-	_apply_match_start(seed, mode, bo, style)
+func _rpc_match_start(seed: int, mode: int, bo: int, style: int = STYLE_ALTERNATING,
+		h0: String = "", h1: String = "") -> void:
+	_apply_match_start(seed, mode, bo, style, h0, h1)
 
 
-func _apply_match_start(seed: int, mode: int, bo: int, style: int = STYLE_ALTERNATING) -> void:
+func _apply_match_start(seed: int, mode: int, bo: int, style: int = STYLE_ALTERNATING,
+		h0: String = "", h1: String = "") -> void:
 	match_seed = seed
 	match_mode = mode
 	best_of = bo
 	battle_style = style
+	# Runs on the CLIENT: h0 is the host's lord (our foe), h1 the host's view of
+	# OUR pick — adopt both so the two machines can't start disagreeing.
+	if h0 != "":
+		remote_hero = h0
+	if h1 != "":
+		local_hero = h1
+	hero_state_changed.emit()
 	match_starting.emit(seed)
 
 
@@ -792,7 +858,8 @@ func _rpc_relay_forward(env: Dictionary) -> void:
 func _rpc_relay_deliver(env: Dictionary) -> void:
 	match String(env.get("t", "")):
 		_RK_READY:        _apply_remote_ready(bool(env.get("v", false)))
-		_RK_MATCH_START:  _apply_match_start(int(env.get("seed", 0)), int(env.get("mode", 0)), int(env.get("bo", 1)), int(env.get("style", STYLE_ALTERNATING)))
+		_RK_HERO:         _apply_remote_hero(String(env.get("h", "")))
+		_RK_MATCH_START:  _apply_match_start(int(env.get("seed", 0)), int(env.get("mode", 0)), int(env.get("bo", 1)), int(env.get("style", STYLE_ALTERNATING)), String(env.get("h0", "")), String(env.get("h1", "")))
 		_RK_MATCH_CONFIG: _apply_match_config(int(env.get("mode", 0)), int(env.get("bo", 1)), int(env.get("style", STYLE_ALTERNATING)))
 		_RK_DRAFT:        _apply_draft_event(env.get("event", {}))
 		_RK_INTENT:       _apply_combat_intent(relay_partner_id, env.get("intent", {}))
@@ -862,6 +929,8 @@ func _rpc_room_paired(partner_id: int, my_index: int) -> void:
 	# Mirror DIRECT's late-ready resend so a pre-pair toggle still propagates.
 	if local_ready:
 		_send_ready(local_ready)
+	if local_hero != "":
+		_send_hero(local_hero)
 	if is_host:
 		peer_joined.emit(partner_id)
 	else:

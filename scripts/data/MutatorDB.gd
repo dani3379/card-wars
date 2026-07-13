@@ -174,7 +174,7 @@ const MUTATORS: Dictionary = {
 	},
 	"vampiric": {
 		"name": "Vampiric",
-		"desc": "Your creatures have Lifelink. Every drop they spill heals you a little.",
+		"desc": "Your creatures have Lifesteal. Every drop they spill flows back to you.",
 		"icon": "heart",
 		"on_player_creature_enter": {"kind": "grant_player_keyword", "value": "lifelink"},
 		"gold_bonus": 0,

@@ -98,6 +98,11 @@ func _run() -> void:
 	await _sample_burst("STATE 0b: first ~1s after WARMED load (should stay smooth)", 50)
 
 	await _wait_player_turn()
+	# Some scripted intros/probe timing can reach the sample with no dealt hand.
+	# Build a deterministic five-card hand so drag is never silently skipped.
+	if combat._hand.is_empty():
+		for i in range(mini(5, RS.deck.size())):
+			combat._draw_card(combat._pile_entry(RS.deck[i], RS.deck_uids[i]))
 	_log("[perf] --- window size = %s ---" % str(root.get_visible_rect().size))
 	_log("[perf] node count (whole tree) = %d" % Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
 
@@ -111,6 +116,10 @@ func _run() -> void:
 		# the busy-board states measure over a real formation.
 		fill = EDB.build_enemy_deck(enc_id)
 	var idx := 0
+	for row in [combat.ROW_FRONT, combat.ROW_BACK]:
+		for lane in range(combat.LANES_PER_ROW):
+			if combat._row_array(false, row)[lane] == null:
+				combat.summon_token(2 + (lane % 2), 3, lane, false, row)
 	for row in [combat.ROW_FRONT, combat.ROW_BACK]:
 		for lane in range(combat.LANES_PER_ROW):
 			if fill.is_empty():

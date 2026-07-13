@@ -78,6 +78,7 @@ func _ready() -> void:
 	_overlay.map = self
 	add_child(_overlay)
 	_build_top_hud()
+	GameTheme.fade_in(self, 0.22)
 	GameTheme.make_settings_gear(self)
 	# Open leaning over the army's position on the chart — the player can
 	# wheel out to the full island (or back in) at any time. The per-open
@@ -98,6 +99,11 @@ func _ready() -> void:
 	# visible plate is only size.x/zoom wide — 1.10 is the largest zoom that
 	# still shows the plaque's right edge at ~kp.x + 170).
 	_animate_focus(_player_pos if _has_player else _camp_pos, 1.10)
+	# Frontier reveal: once the focus glide is under way, the roads open —
+	# each reachable site lights up in order of distance from the standard,
+	# then settles into the idle breathing pulse. "Here are your roads."
+	if _overlay != null:
+		_overlay.play_frontier_reveal(0.55)
 	# Checkpoint: every return to the map captures post-room state (HP, gold,
 	# deck changes, relics earned). Clear the room-in-progress fields first so a
 	# later resume lands on the map rather than re-entering the room the player
@@ -180,12 +186,50 @@ func _build_node_buttons() -> void:
 					"corner_radius_bottom_left", "corner_radius_bottom_right"]:
 				hover.set(pr, int(r))
 			btn.add_theme_stylebox_override("hover", hover)
+			btn.mouse_entered.connect(_on_node_hovered.bind(nd, true))
+			btn.mouse_exited.connect(_on_node_hovered.bind(nd, false))
 		btn.pressed.connect(_on_node_pressed.bind(int(nd.row), int(nd.col)))
 		btn.set_meta("plate_pos", nd.pos as Vector2)
 		btn.set_meta("hit_r", r)
 		_site_buttons.append(btn)
 		add_child(btn)
 	_apply_view_to_buttons()
+
+
+func _on_node_hovered(nd: Dictionary, hovered: bool) -> void:
+	if _overlay == null or _marching:
+		return
+	if not hovered:
+		_overlay.clear_route_preview()
+		return
+	if not bool(nd.get("avail", false)) or bool(nd.get("vis", false)):
+		_overlay.clear_route_preview()
+		return
+	if String(nd.get("type", "")) in ["combat", "elite", "boss"]:
+		ScenePreload.begin_warm_encounter_art(
+			String(nd.get("encounter_id", "")))
+	var from_p: Vector2 = _player_pos if _has_player else _camp_pos
+	var dest: Vector2 = nd.get("pos", Vector2.ZERO)
+	if dest == Vector2.ZERO:
+		_overlay.clear_route_preview()
+		return
+	_overlay.preview_route(road_path_between(from_p, dest), dest,
+		_site_label_for_preview(nd))
+
+
+func _site_label_for_preview(nd: Dictionary) -> String:
+	var typ := String(nd.get("type", ""))
+	if typ == "elite":
+		return "GENERAL"
+	if typ == "boss":
+		return "KEEP"
+	if typ == "combat":
+		return "HOLD"
+	if typ == "wayside":
+		var wid: String = String(nd.get("wayside_id", ""))
+		if WAYSIDE_TIPS.has(wid):
+			return String(WAYSIDE_TIPS[wid][0]).to_upper()
+	return typ.to_upper()
 
 
 ## The plate draws through the view transform; the invisible hit buttons are
@@ -289,6 +333,8 @@ func _on_node_pressed(row: int, col: int) -> void:
 	AudioBank.play_sfx("button_click")
 	RunState.visit_node(row, col)
 	var ntype: String = RunState.current_node_type
+	if ntype in ["combat", "elite", "boss"]:
+		ScenePreload.begin_warm_encounter_art(RunState.current_encounter_id)
 	var target := ""
 	match ntype:
 		"combat", "elite", "boss": target = COMBAT_SCENE
@@ -302,7 +348,10 @@ func _on_node_pressed(row: int, col: int) -> void:
 	# scene fades — the commit reads as a move on the campaign map, not a
 	# menu click.
 	if _overlay != null:
+		_overlay.clear_route_preview()
 		await _overlay.march_along(road_path_between(from_p, dest))
+	if ntype in ["combat", "elite", "boss"]:
+		await ScenePreload.wait_for_encounter_art(RunState.current_encounter_id)
 	if target != "":
 		GameTheme.fade_out_then_change_scene(self, target, 0.30)
 	else:
@@ -804,6 +853,46 @@ func _company_next_line(kills: int, deck_index: int) -> String:
 	return "war school ready next fight"
 
 
+func _company_spotlight_line() -> String:
+	var best_name := ""
+	var best_kills := -1
+	var best_gap := 999
+	var best_next := ""
+	var saw_creature := false
+	for i in range(RunState.deck.size()):
+		if i >= RunState.deck_uids.size():
+			continue
+		var data := RunState.get_upgraded_card_data(i)
+		if data.get("type", "") != "creature":
+			continue
+		saw_creature = true
+		var uid := int(RunState.deck_uids[i])
+		var kills := RunState.get_kills(uid)
+		if kills >= RunState.VETERAN_SCHOOL_KILLS \
+				and not RunState.has_upgrade_path(i, "war_school"):
+			return "War school waiting: %s chooses Armored, Swift, or Thorns next fight." \
+				% String(data.get("name", RunState.deck[i]))
+		var gap := 999
+		if kills < RunState.VETERAN_EPITHET_KILLS:
+			gap = RunState.VETERAN_EPITHET_KILLS - kills
+		elif kills < RunState.VETERAN_RANK_KILLS:
+			gap = RunState.VETERAN_RANK_KILLS - kills
+		elif kills < RunState.VETERAN_SCHOOL_KILLS:
+			gap = RunState.VETERAN_SCHOOL_KILLS - kills
+		else:
+			continue
+		if kills > 0 and (gap < best_gap or (gap == best_gap and kills > best_kills)):
+			best_gap = gap
+			best_kills = kills
+			best_next = _company_next_line(kills, i)
+			best_name = String(data.get("name", RunState.deck[i]))
+	if best_name != "":
+		return "Next honor: %s - %d kills, %s." % [best_name, best_kills, best_next]
+	if saw_creature:
+		return "No creature has a tally yet. Three kills earns a name."
+	return "No creatures march in this company."
+
+
 func _show_company_ledger() -> void:
 	var shell := _make_map_overlay("CompanyLedgerOverlay", "THE COMPANY",
 		GameTheme.GILT_BRIGHT)
@@ -814,6 +903,7 @@ func _show_company_ledger() -> void:
 		else "Holds broken %d/%d" % [RunState.holds_broken_in_act, RunState.HOLDS_TO_OPEN_LORD]
 	_overlay_label(root, "%s  -  Fallen on the roll: %d" % [
 		keep_txt, RunState.fallen.size()], 19, Color(0.92, 0.86, 0.70))
+	_overlay_label(root, _company_spotlight_line(), 18, GameTheme.IVORY)
 
 	var scroll := ScrollContainer.new()
 	scroll.custom_minimum_size = Vector2(1010, 520)
@@ -886,12 +976,19 @@ func _show_deck_viewer() -> void:
 	title.size = Vector2(600, 40)
 	overlay.add_child(title)
 
+	# Every card lands in exactly one bucket of each row (curses sit outside
+	# the type/rarity split) so both breakdowns SUM to the header's card count —
+	# a row that silently skips starters or curses reads as a miscount.
 	var creatures := 0
 	var spells := 0
+	var curses := 0
 	var rarity_counts := {"starter": 0, "common": 0, "uncommon": 0, "rare": 0}
 	for card_id in RunState.deck:
 		var cdata = CardDB.get_card_data(card_id)
 		if cdata.is_empty():
+			continue
+		if CardDB.is_curse(card_id):
+			curses += 1
 			continue
 		if cdata.get("type", "") == "creature":
 			creatures += 1
@@ -910,11 +1007,16 @@ func _show_deck_viewer() -> void:
 	var comp_items = [
 		["Creatures: %d" % creatures, Color(0.55, 0.85, 0.55)],
 		["Spells: %d" % spells, Color(0.55, 0.70, 0.95)],
+	]
+	if curses > 0:
+		comp_items.append(["Curses: %d" % curses, Color(0.68, 0.56, 0.72)])
+	comp_items.append_array([
 		["|", Color(0.4, 0.35, 0.3)],
+		["Starter: %d" % rarity_counts["starter"], Color(0.62, 0.60, 0.54)],
 		["Common: %d" % rarity_counts["common"], Color(0.78, 0.75, 0.68)],
 		["Uncommon: %d" % rarity_counts["uncommon"], Color(0.40, 0.75, 0.95)],
 		["Rare: %d" % rarity_counts["rare"], Color(0.95, 0.78, 0.25)],
-	]
+	])
 	for item in comp_items:
 		var sl = GameTheme.make_label(item[0], GameTheme.FONT_BODY, item[1])
 		sl.add_theme_constant_override("outline_size", 3)
@@ -1105,10 +1207,67 @@ class MapTipButton extends Button:
 class MapPulseOverlay extends Control:
 	var map = null                # the MapView (MapTerrain state lives there)
 	var _t := 0.0
+	var _redraw_accum := 0.0
+	const REDRAW_STEP := 1.0 / 30.0
 	var _march_pts: PackedVector2Array = PackedVector2Array()
 	var _march_cum: PackedFloat32Array = PackedFloat32Array()
 	var _march_len := 0.0
 	var _march_prog := -1.0       # <0 idle · 0..1 marching (stays at 1 after)
+	# March dust: puffs dropped under the standard's footfalls, fading as the
+	# column moves on. Arrival: a one-shot ground ring when the march lands.
+	var _dust: Array = []                 # [{p: Vector2, t0: float}]
+	var _dust_last := Vector2.INF
+	var _arrive_t := -10.0
+	var _arrive_p := Vector2.ZERO
+	var _commit_t := -10.0
+	var _commit_p := Vector2.ZERO
+	var _hover_path: PackedVector2Array = PackedVector2Array()
+	var _hover_dest := Vector2.ZERO
+	var _hover_label := ""
+	var _hover_t := -10.0
+	# Frontier reveal: one-shot light-up of the reachable sites on map open,
+	# staggered by distance from the standard. Keyed by node index.
+	var _reveal_t := -100.0
+	var _reveal_delay: Dictionary = {}
+
+	## Arm the open-of-map flourish: reachable sites flash alight nearest-first,
+	## then hand off to the idle breathing rings. No-op under Reduce Motion.
+	func play_frontier_reveal(lead_in: float = 0.0) -> void:
+		if map == null or (UserSettings != null and UserSettings.reduce_motion):
+			return
+		var origin: Vector2 = map._player_pos if bool(map._has_player) \
+			else (map._camp_pos as Vector2)
+		var avail: Array = []
+		for i in range(map._nodes.size()):
+			var nd = map._nodes[i]
+			if bool(nd.avail) and not bool(nd.vis):
+				avail.append({"i": i, "d": origin.distance_to(nd.pos)})
+		if avail.is_empty():
+			return
+		avail.sort_custom(func(a, b): return float(a.d) < float(b.d))
+		_reveal_delay.clear()
+		for k in range(avail.size()):
+			_reveal_delay[int(avail[k].i)] = lead_in + float(k) * 0.14
+		_reveal_t = _t
+
+	func preview_route(path: PackedVector2Array, dest: Vector2, label: String) -> void:
+		if map == null or path.size() < 2:
+			clear_route_preview()
+			return
+		_hover_path = path
+		_hover_dest = dest
+		_hover_label = label
+		_hover_t = _t
+		queue_redraw()
+
+	func clear_route_preview() -> void:
+		if _hover_path.is_empty() and _hover_label == "":
+			return
+		_hover_path = PackedVector2Array()
+		_hover_dest = Vector2.ZERO
+		_hover_label = ""
+		_hover_t = -10.0
+		queue_redraw()
 	# Per-edge arc-length cache for the march glints. _edge_curves is built once at
 	# map-gen and is index-stable, so these cumulative-length arrays are constant —
 	# built lazily on the first draw and reused, instead of rebuilt every frame.
@@ -1119,15 +1278,25 @@ class MapPulseOverlay extends Control:
 	func _ready() -> void:
 		set_anchors_preset(Control.PRESET_FULL_RECT)
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if UserSettings != null and UserSettings.reduce_motion:
+			set_process(false)
+		queue_redraw()
 
 	func _process(delta: float) -> void:
 		_t += delta
-		queue_redraw()
+		# The plate itself is frozen; the live ink animation is deliberately
+		# recorded at 30 Hz instead of rebuilding its arcs/puffs every render frame.
+		_redraw_accum += delta
+		if _redraw_accum >= REDRAW_STEP:
+			_redraw_accum = fmod(_redraw_accum, REDRAW_STEP)
+			queue_redraw()
 
 	## Walk the standard along a road curve. Awaitable; progress sticks at 1
 	## so the banner stays planted at the destination through the scene fade.
 	func march_along(path: PackedVector2Array, duration := 0.55) -> void:
 		_march_pts = path
+		_hover_path = PackedVector2Array()
+		_hover_label = ""
 		_march_cum = PackedFloat32Array()
 		_march_cum.append(0.0)
 		_march_len = 0.0
@@ -1135,10 +1304,24 @@ class MapPulseOverlay extends Control:
 			_march_len += path[i - 1].distance_to(path[i])
 			_march_cum.append(_march_len)
 		_march_prog = 0.0
+		_dust.clear()
+		_dust_last = Vector2.INF
+		if path.size() > 0:
+			_commit_t = _t
+			_commit_p = path[0]
+		if UserSettings != null and UserSettings.reduce_motion:
+			_march_prog = 1.0
+			queue_redraw()
+			return
 		var tw := create_tween()
 		tw.tween_property(self, "_march_prog", 1.0, duration) \
 			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 		await tw.finished
+		# Arrival beat — the ground ring fires as the fade begins, so the march
+		# ENDS somewhere instead of dissolving mid-stride.
+		if not (UserSettings != null and UserSettings.reduce_motion):
+			_arrive_t = _t
+			_arrive_p = _march_pos()
 
 	func _march_pos() -> Vector2:
 		if _march_pts.size() < 2 or _march_len <= 0.0:
@@ -1186,10 +1369,16 @@ class MapPulseOverlay extends Control:
 			Vector2(map._view_zoom, map._view_zoom))
 		var amber: Color = map.PLAYER_AMBER
 		var crimson: Color = map.CRIMSON
+		# 0.7 — hovered route preview: the chosen branch brightens before
+		# commit, so route-planning feels like reading the chart, not hunting
+		# tiny tooltips.
+		if _march_prog < 0.0 and _hover_path.size() >= 2:
+			_draw_route_preview(amber)
 		# 1 — breathing rings on the frontier (quiet during the march).
 		if _march_prog < 0.0:
 			var pulse := 0.5 + 0.5 * sin(_t * 2.6)
-			for nd in map._nodes:
+			for ni in range(map._nodes.size()):
+				var nd = map._nodes[ni]
 				if not bool(nd.avail) or bool(nd.vis):
 					continue
 				var p: Vector2 = nd.pos
@@ -1200,6 +1389,17 @@ class MapPulseOverlay extends Control:
 					Color(col.r, col.g, col.b, 0.10 + 0.24 * pulse), 2.0, true)
 				draw_circle(p, rr,
 					Color(col.r, col.g, col.b, 0.015 + 0.035 * pulse))
+				# Frontier reveal: a one-shot bright ring blooming off the site
+				# when the map opens — nearest road first, then the next.
+				var rd: float = float(_reveal_delay.get(ni, -1.0))
+				if rd >= 0.0 and _reveal_t > -50.0:
+					var rk := (_t - _reveal_t - rd) / 0.5
+					if rk >= 0.0 and rk < 1.0:
+						var rr2 := 10.0 + 42.0 * rk
+						draw_arc(p, rr2, 0, TAU, 44,
+							Color(col.r, col.g, col.b, 0.55 * (1.0 - rk)), 2.6, true)
+						draw_circle(p, 3.6,
+							Color(1.0, 0.92, 0.62, 0.55 * (1.0 - rk)))
 		# 1.5 — march glints: a short runner sliding camp-side → door along
 		# each open leg. Direction without shouting — the baked amber dashes
 		# carry the state; this just says "that way". Quiet during the march.
@@ -1243,6 +1443,39 @@ class MapPulseOverlay extends Control:
 			sp = map._player_pos
 		else:
 			sp = (map._camp_pos as Vector2) + Vector2(30, -4)
+		var quiet_motion: bool = UserSettings != null and UserSettings.reduce_motion
+		# 3.2 — march dust: a puff dropped every few paces, swelling and fading
+		# behind the column. The road remembers the army passed.
+		if not quiet_motion:
+			if _march_prog > 0.0 and _march_prog < 1.0:
+				if _dust_last == Vector2.INF or sp.distance_to(_dust_last) >= 13.0:
+					_dust.append({"p": sp + Vector2(randf() * 6.0 - 3.0, 3.0), "t0": _t})
+					_dust_last = sp
+					if _dust.size() > 40:
+						_dust.pop_front()
+			for d in _dust:
+				var age: float = _t - float(d.t0)
+				if age > 0.9:
+					continue
+				var k := age / 0.9
+				draw_circle(d.p, 2.6 + 5.5 * k,
+					Color(0.72, 0.63, 0.48, 0.16 * (1.0 - k)))
+			# 3.3 — arrival ring: one clean ground pulse where the march ends,
+			# timed to ride through the scene fade.
+			var ak := (_t - _arrive_t) / 0.5
+			if ak >= 0.0 and ak < 1.0:
+				var ar := 8.0 + 42.0 * ak
+				draw_arc(_arrive_p, ar, 0, TAU, 40,
+					Color(1.0, 0.86, 0.50, 0.38 * (1.0 - ak)), 2.4, true)
+				draw_arc(_arrive_p, ar * 0.62, 0, TAU, 32,
+					Color(1.0, 0.92, 0.66, 0.26 * (1.0 - ak)), 1.6, true)
+			var ck := (_t - _commit_t) / 0.36
+			if ck >= 0.0 and ck < 1.0:
+				var cr := 11.0 + 30.0 * ck
+				draw_arc(_commit_p, cr, 0, TAU, 36,
+					Color(1.0, 0.86, 0.50, 0.30 * (1.0 - ck)), 2.2, true)
+				draw_circle(_commit_p, 5.0,
+					Color(1.0, 0.82, 0.42, 0.22 * (1.0 - ck)))
 		var sway := sin(_t * 2.3)
 		if _march_prog >= 0.0 and _march_prog < 1.0:
 			sway = sin(_t * 9.0)   # the banner snaps in the wind on the move
@@ -1272,3 +1505,34 @@ class MapPulseOverlay extends Control:
 		var outline := flag.duplicate()
 		outline.append(flag[0])
 		draw_polyline(outline, Color(0.16, 0.11, 0.05, 0.9), 1.2, true)
+
+	func _draw_route_preview(amber: Color) -> void:
+		var age := clampf((_t - _hover_t) / 0.18, 0.0, 1.0)
+		var pulse := 0.5 + 0.5 * sin(_t * 6.0)
+		draw_polyline(_hover_path,
+			Color(1.0, 0.86, 0.48, 0.20 + 0.16 * pulse * age),
+			13.0, true)
+		draw_polyline(_hover_path,
+			Color(1.0, 0.92, 0.60, 0.68 * age),
+			4.2, true)
+		draw_arc(_hover_dest, 32.0 + 4.0 * pulse, 0, TAU, 48,
+			Color(1.0, 0.88, 0.50, 0.42 * age), 2.8, true)
+		draw_circle(_hover_dest, 6.0,
+			Color(amber.r, amber.g, amber.b, 0.24 * age))
+		if _hover_label == "" or GameTheme.font_display == null:
+			return
+		var fsz := 13
+		var pad := Vector2(9.0, 5.0)
+		var sw := GameTheme.font_display.get_string_size(_hover_label,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, fsz)
+		var plaque := Rect2(_hover_dest + Vector2(-sw.x * 0.5 - pad.x, 35.0),
+			Vector2(sw.x + pad.x * 2.0, 24.0))
+		draw_rect(plaque, Color(0.045, 0.036, 0.026, 0.82 * age), true)
+		draw_rect(plaque, Color(1.0, 0.80, 0.36, 0.62 * age), false, 1.2)
+		var txt_pos := Vector2(plaque.position.x + pad.x, plaque.position.y + 17.0)
+		draw_string_outline(GameTheme.font_display, txt_pos, _hover_label,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, fsz, 3,
+			Color(0.02, 0.015, 0.01, 0.88 * age))
+		draw_string(GameTheme.font_display, txt_pos, _hover_label,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, fsz,
+			Color(1.0, 0.90, 0.58, 0.95 * age))

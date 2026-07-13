@@ -58,7 +58,7 @@ var _hover_id: String = ""            # card id currently previewed
 # Builds one clickable pool tile from a card id and registers it in _pool_rows.
 # Identical across the pool-based modes; clicking routes to the subclass _on_add.
 func _build_pool_thumb(id: String) -> Control:
-	var d := CardDB.get_card_data(id)
+	var d := SkirmishState.skirmish_card_data(id)
 	var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
 	var btn := thumb["button"] as Button
 	btn.pressed.connect(_on_add.bind(id))
@@ -112,7 +112,7 @@ func _show_hover_preview(id: String, anchor: Control) -> void:
 	_hover_id = id
 	_hover_anchor = anchor
 	var card := HOVER_CARD_SCENE.instantiate()
-	card.card_data = CardDB.get_card_data(id).duplicate(true)
+	card.card_data = SkirmishState.skirmish_card_data(id)
 	card.card_id = id
 	card.is_on_battlefield = true       # full card, no drag / hover-lift
 	card.live_baked_mode = true

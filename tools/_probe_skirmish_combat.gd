@@ -357,50 +357,78 @@ func _test_host_applies_reposition() -> void:
 	_check(combat._row_array(true, combat.ROW_FRONT)[src_lane] == null, "source enemy slot cleared")
 
 
-## The SHOVE spell is a board verb: it must push the struck front-row creature into
-## its own back row (the half the net port originally dropped). Verify for BOTH
-## caster sides — the target sits on the caster's FOE side, and the relocate must
-## land on THAT side, not the caster's.
+## The SHOVE spell is a board verb (2026-07-09 flank-push rework): it pushes the
+## struck creature one lane toward its NEAREST FLANK (lanes 0-1 left, 2-3 right)
+## in its own row; a push blocked by the field's edge or another body crashes for
+## 2 damage to each party instead of moving. Verify the slide, the edge crash and
+## the body crash — and for BOTH caster sides, since the relocate must land on
+## the TARGET's side, not the caster's.
 func _test_net_shove_relocate() -> void:
-	print("— shove spell relocates the struck front creature to its own back row (both sides)")
+	print("— shove spell flank-pushes the struck creature (slide / edge crash / body crash, both sides)")
 	if combat._net_match_over:
 		_check(true, "match already over before shove test (skipped, acceptable)")
 		return
-	# Host caster (index 0): foe = the client = host's ENEMY side. Target a front-row
-	# client creature in a lane whose back slot is empty; it must drop to ROW_BACK.
-	combat._row_array(true, combat.ROW_BACK)[3] = null
-	var ec = combat._net_spawn_creature(CDB.get_card_data("brute"), 91001, 3, combat.ROW_FRONT, true, false)
+	# Host caster (index 0): foe = the client = host's ENEMY side.
+	# 1) SLIDE — a lane-2 front creature pushes right into an empty lane 3.
+	combat._row_array(true, combat.ROW_FRONT)[3] = null
+	combat._row_array(true, combat.ROW_FRONT)[2] = null
+	var ec = combat._net_spawn_creature(CDB.get_card_data("brute"), 91001, 2, combat.ROW_FRONT, true, false)
 	await create_timer(0.15).timeout
 	if is_instance_valid(ec):
 		ec.card_data["hp"] = 20
 		ec.current_hp = 20
 		combat._net_resolve_spell({"spell": {"type": "custom", "id": "shove"}}, int(ec.entity_id), 0)
 		await create_timer(0.15).timeout
-		_check(is_instance_valid(ec) and int(ec.current_row) == combat.ROW_BACK,
-			"host's shove pushed the CLIENT front creature to its back row")
-		_check(combat._row_array(true, combat.ROW_BACK)[3] == ec,
-			"the shoved creature occupies the client back slot (host POV enemy array)")
-		_check(combat._row_array(true, combat.ROW_FRONT)[3] == null,
-			"the client front slot was vacated by the shove")
+		_check(is_instance_valid(ec) and int(ec.current_lane) == 3 and int(ec.current_row) == combat.ROW_FRONT,
+			"host's shove slid the CLIENT lane-2 creature to lane 3 (nearest flank)")
+		_check(combat._row_array(true, combat.ROW_FRONT)[3] == ec,
+			"the shoved creature occupies the client lane-3 slot (host POV enemy array)")
+		_check(combat._row_array(true, combat.ROW_FRONT)[2] == null,
+			"the client lane-2 slot was vacated by the shove")
 		# The board ARRAY can move while the visual node stays stuck in the old cell
 		# (the _relocate_creature reparent bug) — assert the actual node re-parented.
-		var back_slot3 = combat._slot_array(true, combat.ROW_BACK)[3]
-		_check(back_slot3 != null and back_slot3.is_ancestor_of(ec),
-			"the shoved creature's VISUAL node re-parented into the back slot (not just the array)")
-	# Client caster (index 1): foe = the host = host's PLAYER side. The relocate must
-	# land on the player side, proving it keys off the target's side, not the caster's.
-	combat._row_array(false, combat.ROW_BACK)[0] = null
-	var pc = combat._net_spawn_creature(CDB.get_card_data("brute"), 91002, 0, combat.ROW_FRONT, false, false)
+		var front_slot3 = combat._slot_array(true, combat.ROW_FRONT)[3]
+		_check(front_slot3 != null and front_slot3.is_ancestor_of(ec),
+			"the shoved creature's VISUAL node re-parented into the lane-3 slot (not just the array)")
+		# 2) EDGE CRASH — now sitting on the flank, a second shove can't move it:
+		# it holds ground and takes the 2 crash damage.
+		var edge_hp: int = int(ec.current_hp)
+		combat._net_resolve_spell({"spell": {"type": "custom", "id": "shove"}}, int(ec.entity_id), 0)
+		await create_timer(0.15).timeout
+		_check(is_instance_valid(ec) and int(ec.current_lane) == 3,
+			"a shove against the field's edge doesn't move the creature")
+		_check(is_instance_valid(ec) and int(ec.current_hp) == edge_hp - 2,
+			"the edge crash dealt 2 damage to the shoved creature")
+		# 3) BODY CRASH — a lane-2 neighbour shoved into the occupied lane 3:
+		# nobody moves, both bodies take 2.
+		var ec2 = combat._net_spawn_creature(CDB.get_card_data("brute"), 91003, 2, combat.ROW_FRONT, true, false)
+		await create_timer(0.15).timeout
+		if is_instance_valid(ec2):
+			ec2.card_data["hp"] = 20
+			ec2.current_hp = 20
+			var blocker_hp: int = int(ec.current_hp)
+			combat._net_resolve_spell({"spell": {"type": "custom", "id": "shove"}}, int(ec2.entity_id), 0)
+			await create_timer(0.15).timeout
+			_check(is_instance_valid(ec2) and int(ec2.current_lane) == 2 and int(ec2.current_hp) == 18,
+				"a blocked shove leaves the pushed creature in place with 2 crash damage")
+			_check(is_instance_valid(ec) and int(ec.current_hp) == blocker_hp - 2,
+				"the crash also dealt 2 damage to the blocking creature")
+	# Client caster (index 1): foe = the host = host's PLAYER side. A lane-1 body
+	# pushes LEFT into an empty lane 0, proving the relocate keys off the target's
+	# side, not the caster's.
+	combat._row_array(false, combat.ROW_FRONT)[0] = null
+	combat._row_array(false, combat.ROW_FRONT)[1] = null
+	var pc = combat._net_spawn_creature(CDB.get_card_data("brute"), 91002, 1, combat.ROW_FRONT, false, false)
 	await create_timer(0.15).timeout
 	if is_instance_valid(pc):
 		pc.card_data["hp"] = 20
 		pc.current_hp = 20
 		combat._net_resolve_spell({"spell": {"type": "custom", "id": "shove"}}, int(pc.entity_id), 1)
 		await create_timer(0.15).timeout
-		_check(is_instance_valid(pc) and int(pc.current_row) == combat.ROW_BACK,
-			"client's shove pushed the HOST front creature to its back row")
-		_check(combat._row_array(false, combat.ROW_BACK)[0] == pc,
-			"the shoved host creature occupies the player back slot (not the caster's side)")
+		_check(is_instance_valid(pc) and int(pc.current_lane) == 0 and int(pc.current_row) == combat.ROW_FRONT,
+			"client's shove slid the HOST lane-1 creature to lane 0 (nearest flank)")
+		_check(combat._row_array(false, combat.ROW_FRONT)[0] == pc,
+			"the shoved host creature occupies the player lane-0 slot (not the caster's side)")
 
 
 ## VFX parity: the host buffers keyword combat callouts (POISON/THORNS/PIERCING) into
@@ -1035,11 +1063,11 @@ func _test_net_worn_spellbook() -> void:
 
 
 ## The newly-ported board/utility spells (holy_smite / ricochet / provision /
-## adrenaline / bloodletting): each must resolve with the right perspective using
+## baggage_train / bloodletting): each must resolve with the right perspective using
 ## the net primitives. Self-contained — spawns its own creatures with bumped HP so
 ## the damage reads are exact regardless of leftover board clutter.
 func _test_net_new_board_spells() -> void:
-	print("— newly-ported skirmish spells: holy_smite / ricochet / provision / adrenaline / bloodletting")
+	print("— newly-ported skirmish spells: holy_smite / ricochet / provision / baggage_train / bloodletting")
 	if combat._net_match_over:
 		_check(true, "match already over before new-spell test (skipped, acceptable)")
 		return
@@ -1079,14 +1107,15 @@ func _test_net_new_board_spells() -> void:
 		if bool(c.is_token):
 			has_token = true
 	_check(has_token, "the mustered body is a token (2/1 soldier)")
-	# adrenaline / Second Wind (host caster): +2 Command and +1 card into the host's own hand.
-	combat._player_draw_pile.append(combat._pile_entry("goblin", 998877))   # guarantee a draw
-	var mana0: int = int(combat.player_mana)
-	var hand0: int = combat._hand.size()
-	combat._net_resolve_spell({"spell": {"type": "custom", "id": "adrenaline"}}, -1, 0)
+	# baggage_train / Baggage Train (host caster): "gain 3 Command next turn" — the
+	# wagons catch up overnight, banked above the cap via _bonus_mana_next_turn (the
+	# Mourner channel), NOT immediate mana. (The old spell id "adrenaline" was reworked
+	# into this next-turn Command; the CARD id stays "adrenaline" for save migration.)
+	var bonus0: int = int(combat._bonus_mana_next_turn)
+	combat._net_resolve_spell({"spell": {"type": "custom", "id": "baggage_train"}}, -1, 0)
 	await create_timer(0.15).timeout
-	_check(int(combat.player_mana) == mana0 + 2, "adrenaline gave the host caster +2 Command")
-	_check(combat._hand.size() == hand0 + 1, "adrenaline drew the host caster a card")
+	_check(int(combat._bonus_mana_next_turn) == bonus0 + 3,
+		"baggage_train banked +3 Command for the host caster's NEXT turn")
 	# bloodletting (host caster): -1 own face, +2 Command.
 	var face0: int = int(combat.player_hp)
 	var mana1: int = int(combat.player_mana)
@@ -1113,9 +1142,9 @@ func _test_net_spell_magnitudes() -> void:
 	await create_timer(0.12).timeout
 	_check(int(combat.enemy_hp) == ef0 - 4, "blood_tithe dealt 4 to the enemy face per its desc (%d -> %d)" % [ef0, int(combat.enemy_hp)])
 	_check(int(combat.player_hp) == pf0 - 2, "blood_tithe cost the caster exactly 2 per its desc (%d -> %d)" % [pf0, int(combat.player_hp)])
-	# patch_up (Field Surgery): FULL heal + the patient sits the round out
-	# (stunned) + a draw — the cantrip rider RETURNED in the 2026-07-07 buff
-	# pass (unconditional this time, not the old full-HP-gated version).
+	# patch_up (Field Surgery, 2026-07-13 rework): FULL heal + the patient
+	# gains Last Stand. The stun and the cantrip draw both left with the
+	# rework — the patient fights on, the caster draws nothing.
 	var pu = combat._net_spawn_creature(CDB.get_card_data("brute"), 93001, 2, combat.ROW_BACK, false, false)
 	await create_timer(0.1).timeout
 	if is_instance_valid(pu):
@@ -1125,8 +1154,9 @@ func _test_net_spell_magnitudes() -> void:
 		combat._net_resolve_spell({"spell": {"type": "custom", "id": "patch_up"}}, int(pu.entity_id), 0)
 		await create_timer(0.12).timeout
 		_check(int(pu.current_hp) == 10, "Field Surgery fully healed the target (5 -> 10)")
-		_check(bool(pu.state.stunned), "Field Surgery stunned the patient for the round")
-		_check(combat._hand.size() == hand_pu + 1, "Field Surgery drew 1 for the caster (cantrip rider)")
+		_check("last_stand" in pu.card_data.get("keywords", []), "Field Surgery granted Last Stand")
+		_check(not bool(pu.state.stunned), "Field Surgery no longer stuns the patient")
+		_check(combat._hand.size() == hand_pu, "Field Surgery no longer draws for the caster")
 		# Self-contained cleanup: leave the board as we found it for later tests.
 		combat._row_array(false, combat.ROW_BACK)[2] = null
 		NM.unregister_entity(93001)
@@ -1471,12 +1501,9 @@ func _test_net_client_passives() -> void:
 	_check(is_instance_valid(ce) and int(ce.current_atk) == 3, "client Corpse Eater grew on a client ally death (2->3)")
 	_check(int(combat.player_hp) == 19, "client Carrion Priest drained the HOST hero")
 
-	# ── plague_doctor: a HOST death feeds the client apothecary (hits host face) ──
-	_spawn_passive(82012, 2, combat.ROW_FRONT, true, "plague_doctor")
-	await create_timer(0.1).timeout
-	combat.player_hp = 20
-	combat._apply_plague_doctor(false)   # a host creature just died
-	_check(int(combat.player_hp) == 19, "client Apothecary pinged the HOST hero on a host death")
+	# ── legacy plague_doctor: retired; Apothecary now uses toxin_draw ──
+	_check(not combat.has_method("_apply_plague_doctor"),
+		"legacy plague_doctor hook is retired (Apothecary uses toxin_draw)")
 
 	# ── vengeance: the client hero taking face damage grows client Vengeance ──
 	var vn = _spawn_passive(82013, 3, combat.ROW_FRONT, true, "vengeance_growth")
@@ -1490,9 +1517,11 @@ func _test_net_client_passives() -> void:
 	_spawn_passive(82020, 0, combat.ROW_FRONT, true, "riteforge_ramp")
 	var ally = combat._net_spawn_creature(CDB.get_card_data("brute"), 82021, 1, combat.ROW_FRONT, true, false)
 	await create_timer(0.1).timeout
-	var ally0: int = int(ally.current_atk)
+	var ally0: int = int(ally.effective_atk())
 	combat._apply_start_round_passives(true)
-	_check(is_instance_valid(ally) and int(ally.current_atk) == ally0 + 1, "client Riteforge ramped its ally +1 at round start")
+	# Riteforge now grants its rally as a THIS-ROUND temp buff (was permanent), so
+	# read effective_atk (current + temp) rather than the base current_atk.
+	_check(is_instance_valid(ally) and int(ally.effective_atk()) == ally0 + 1, "client Riteforge ramped its ally +1 ATK this round at round start")
 
 	# ── Lifelink end-to-end: a client face hit heals the CLIENT hero ──
 	await _clear_net_board()
@@ -1524,15 +1553,17 @@ func _test_net_client_passives() -> void:
 	var hx = _spawn_passive(82051, 1, combat.ROW_FRONT, true, "atk_per_spell", 2, 3)
 	await create_timer(0.1).timeout
 	combat._apply_play_time_passives(hx, true)
-	_check(is_instance_valid(hx) and int(hx.current_atk) == 6, "client Hexblade entered +4 ATK for 4 client spells (2 -> 6)")
+	# Hexblade now scales THIS ROUND per cast, so a late entrance no longer
+	# retroactively catches up to the fight's spell count — it stays 2/3.
+	_check(is_instance_valid(hx) and int(hx.effective_atk()) == 2, "client Hexblade no longer catches up on enter (ignores 4 prior fight spells)")
 
 	# ── per-spell: a client spell grows the client Hexblade + Emberwright pings host ──
 	combat.player_hp = 20
 	_spawn_passive(82052, 2, combat.ROW_FRONT, true, "ember_per_spell", 2, 3)
 	await create_timer(0.1).timeout
-	var hx_atk: int = int(hx.current_atk)
+	var hx_atk: int = int(hx.effective_atk())
 	combat._net_resolve_spell({"spell": {"type": "damage_face", "value": 0}}, -1, 1)
-	_check(is_instance_valid(hx) and int(hx.current_atk) == hx_atk + 1, "a client spell grew the client Hexblade +1")
+	_check(is_instance_valid(hx) and int(hx.effective_atk()) == hx_atk + 1, "a client spell grew the client Hexblade +1 ATK this round")
 	_check(int(combat.player_hp) < 20, "a client spell pinged the HOST hero via client Emberwright")
 
 	# ── double_on_death detected on the client side ──

@@ -125,10 +125,12 @@ func _ready() -> void:
 	_accent_wake = Color(0.64, 0.72, 0.88)   # spectral bone-blue
 	_swap_background_for_act()
 	GameTheme.add_atmosphere(self, "rest", true, _time_of_day_mood_override())
+	GameTheme.fade_in(self, 0.26)
 	AudioBank.play_music_random(["rest", "rest_b", "rest_c"])
 	# Looping fire crackle — silently no-ops if assets/audio/sfx/fire_crackle/
 	# is empty (player will hear only the music until the asset ships).
 	AudioBank.play_ambience("fire_crackle")
+	_build_campfire_life()
 	_build_choice_ui()
 	GameTheme.make_settings_gear(self)
 
@@ -199,6 +201,7 @@ func _build_choice_ui() -> void:
 	title.offset_top = 26
 	title.offset_bottom = 90
 	add_child(title)
+	GameTheme.deal_in(title, 0.02)
 
 	var subtitle = GameTheme.make_label(
 		"♥ %d / %d" % [RunState.hero_hp, RunState.hero_max_hp],
@@ -208,6 +211,7 @@ func _build_choice_ui() -> void:
 	subtitle.offset_top = 96
 	subtitle.offset_bottom = 124
 	add_child(subtitle)
+	GameTheme.deal_in(subtitle, 0.08)
 
 	_add_hero_silhouette()
 
@@ -264,6 +268,7 @@ func _add_hero_silhouette() -> void:
 	var has_specific := ResourceLoader.exists(specific_path)
 	sil.modulate = Color(0.95, 0.88, 0.78, 0.85 if has_specific else 0.45)
 	add_child(sil)
+	GameTheme.deal_in(sil, 0.12)
 
 
 func _silhouette_feather_shader() -> Shader:
@@ -423,6 +428,7 @@ func _start_wake_mode() -> void:
 	title.position = Vector2(500, 30)
 	title.size = Vector2(600, 40)
 	add_child(title)
+	GameTheme.deal_in(title, 0.02)
 
 	var sub = GameTheme.make_label(
 		"Speak one name over the fire. The shade stands in your line next fight.",
@@ -432,19 +438,26 @@ func _start_wake_mode() -> void:
 	sub.size = Vector2(800, 28)
 	sub.modulate = Color(1, 1, 1, 0.85)
 	add_child(sub)
+	GameTheme.deal_in(sub, 0.08)
 
 	var scroll = ScrollContainer.new()
 	scroll.position = Vector2(430, 120)
 	scroll.size = Vector2(740, 660)
 	add_child(scroll)
+	GameTheme.deal_in(scroll, 0.12)
 
 	var list := VBoxContainer.new()
 	list.add_theme_constant_override("separation", 14)
 	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(list)
 
+	var wake_idx := 0
 	for cand in _wake_candidates():
-		list.add_child(_make_wake_tile(cand))
+		var tile := _make_wake_tile(cand)
+		list.add_child(tile)
+		GameTheme.deal_in(tile, 0.16 + float(wake_idx) * 0.04)
+		GameTheme.hover_lift(tile, 1.02)
+		wake_idx += 1
 
 	_add_cancel_btn()
 
@@ -461,7 +474,7 @@ func _make_wake_tile(cand: Dictionary) -> Button:
 	btn.add_theme_stylebox_override("hover",
 		GameTheme.make_panel_style(GameTheme.PARCHMENT, GameTheme.GILT_BRIGHT))
 	btn.add_theme_stylebox_override("pressed", GameTheme.make_panel_style())
-	btn.pressed.connect(_do_wake.bind(cand))
+	btn.pressed.connect(_on_wake_tile_pressed.bind(btn, cand))
 
 	var vbox := VBoxContainer.new()
 	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -493,6 +506,17 @@ func _make_wake_tile(cand: Dictionary) -> Button:
 	return btn
 
 
+func _on_wake_tile_pressed(btn: Button, cand: Dictionary) -> void:
+	if btn == null or not is_instance_valid(btn):
+		return
+	btn.disabled = true
+	GameTheme.claim_pop(btn)
+	await get_tree().create_timer(_claim_hold()).timeout
+	if not is_inside_tree():
+		return
+	_do_wake(cand)
+
+
 func _do_wake(cand: Dictionary) -> void:
 	var entry: Dictionary = cand.entry
 	RunState.next_combat_gift_creature = {
@@ -509,10 +533,12 @@ func _do_wake(cand: Dictionary) -> void:
 # position, parents it to the row, hooks up the click handler, and animates
 # the hotspot so it pulses subtly to suggest the painted scene is "alive."
 func _wire_banner(banner: Control, row: HBoxContainer, accent: Color, on_click: Callable) -> void:
+	var deal_delay := 0.12 + float(row.get_child_count()) * 0.06
 	row.add_child(banner)
 	var click_btn := banner.get_node("ClickButton") as Button
 	if click_btn != null and not click_btn.disabled:
-		click_btn.pressed.connect(on_click)
+		click_btn.pressed.connect(_on_choice_banner_pressed.bind(banner, click_btn, on_click))
+		_wire_hover_motion(click_btn, banner, 1.025)
 	# Hotspot glow — a soft radial gradient tinted by the banner's accent.
 	# Parented inside the banner so it follows layout without needing manual
 	# coords, but z-indexed below the panel so it bleeds out the edges.
@@ -538,6 +564,44 @@ func _wire_banner(banner: Control, row: HBoxContainer, accent: Color, on_click: 
 			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 		tw.tween_property(glow, "modulate:a", 0.52, 1.8) \
 			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	GameTheme.deal_in(banner, deal_delay)
+
+
+func _on_choice_banner_pressed(banner: Control, click_btn: Button, on_click: Callable) -> void:
+	if click_btn != null and is_instance_valid(click_btn):
+		click_btn.disabled = true
+	if banner != null and is_instance_valid(banner):
+		GameTheme.claim_pop(banner)
+	await get_tree().create_timer(_claim_hold()).timeout
+	if not is_inside_tree():
+		return
+	on_click.call()
+
+
+func _claim_hold() -> float:
+	if UserSettings != null and UserSettings.reduce_motion:
+		return 0.01
+	return 0.10
+
+
+func _wire_hover_motion(source: Control, target: Control, lift: float = 1.03) -> void:
+	if source == null or target == null:
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	source.mouse_entered.connect(func():
+		if not is_instance_valid(target):
+			return
+		target.pivot_offset = target.size * 0.5
+		var tw := target.create_tween()
+		tw.tween_property(target, "scale", Vector2(lift, lift), 0.12) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
+	source.mouse_exited.connect(func():
+		if not is_instance_valid(target):
+			return
+		var tw := target.create_tween()
+		tw.tween_property(target, "scale", Vector2.ONE, 0.14) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
 
 
 func _make_hotspot_glow(accent: Color) -> TextureRect:
@@ -579,6 +643,92 @@ func _flavor_for(choice_id: String, fallback_desc: String) -> String:
 
 # ─── Choice handlers ───────────────────────────────────────────────────────
 
+# Where the painted campfire burns in each act's background (fraction of the
+# frame; the paintings and the 1600×900 canvas are both 16:9, so fractions map
+# straight through). Live sparks + a breathing firelight glow sit ON the
+# painted flames instead of floating somewhere generic.
+const FIRE_ANCHORS := {
+	1: Vector2(0.505, 0.74),
+	2: Vector2(0.418, 0.72),
+	3: Vector2(0.440, 0.78),
+}
+
+
+func _build_campfire_life() -> void:
+	# The camp's one live element: sparks rising off the painted fire and the
+	# firelight breathing. Both sit above the atmosphere scrim and below the
+	# choice banners (built after this), so they read as part of the painting.
+	var vp := get_viewport_rect().size
+	var anchor: Vector2 = FIRE_ANCHORS.get(RunState.get_act(), Vector2(0.5, 0.75))
+	var fire_pos := Vector2(vp.x * anchor.x, vp.y * anchor.y)
+
+	# Firelight breathing — a soft additive glow over the flames. Kept even
+	# under Reduce Motion (steady, no pulse): it's light, not movement.
+	var grad := Gradient.new()
+	grad.offsets = PackedFloat32Array([0.0, 1.0])
+	grad.colors = PackedColorArray([
+		Color(1.0, 0.62, 0.24, 0.16), Color(1.0, 0.45, 0.15, 0.0)])
+	var grad_tex := GradientTexture2D.new()
+	grad_tex.gradient = grad
+	grad_tex.fill = GradientTexture2D.FILL_RADIAL
+	grad_tex.fill_from = Vector2(0.5, 0.5)
+	grad_tex.fill_to = Vector2(1.0, 0.5)
+	grad_tex.width = 256
+	grad_tex.height = 256
+	var glow := TextureRect.new()
+	glow.name = "CampfireGlow"
+	glow.texture = grad_tex
+	glow.stretch_mode = TextureRect.STRETCH_SCALE
+	glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	glow.position = fire_pos - Vector2(260, 240)
+	glow.size = Vector2(520, 440)
+	var glow_mat := CanvasItemMaterial.new()
+	glow_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	glow.material = glow_mat
+	add_child(glow)
+	if not (UserSettings != null and UserSettings.reduce_motion):
+		# Two-beat flicker loop with uneven timing — firelight, not a metronome.
+		var tw := glow.create_tween()
+		tw.set_loops()
+		tw.tween_property(glow, "modulate:a", 0.72, 0.9) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		tw.tween_property(glow, "modulate:a", 1.0, 0.55) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		tw.tween_property(glow, "modulate:a", 0.84, 0.7) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		tw.tween_property(glow, "modulate:a", 1.0, 0.45) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+	# Rising sparks — a narrow column off the flame tips (same particle recipe
+	# as Combat's ambient embers, scaled to one campfire).
+	if UserSettings != null and (not UserSettings.particles or UserSettings.reduce_motion):
+		return
+	var sparks := CPUParticles2D.new()
+	sparks.name = "CampfireSparks"
+	sparks.position = fire_pos - Vector2(0, 30)
+	sparks.amount = 16
+	sparks.lifetime = 2.4
+	sparks.preprocess = 2.0
+	sparks.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+	sparks.emission_rect_extents = Vector2(22.0, 8.0)
+	sparks.direction = Vector2(0, -1)
+	sparks.spread = 16.0
+	sparks.gravity = Vector2(0, -26.0)
+	sparks.initial_velocity_min = 22.0
+	sparks.initial_velocity_max = 58.0
+	sparks.angular_velocity_min = -30.0
+	sparks.angular_velocity_max = 30.0
+	sparks.scale_amount_min = 1.2
+	sparks.scale_amount_max = 2.6
+	var ramp := Gradient.new()
+	ramp.set_color(0, Color(1.0, 0.80, 0.36, 0.0))
+	ramp.set_color(1, Color(0.85, 0.25, 0.10, 0.0))
+	ramp.add_point(0.12, Color(1.0, 0.76, 0.34, 0.9))
+	ramp.add_point(0.65, Color(0.95, 0.42, 0.16, 0.5))
+	sparks.color_ramp = ramp
+	add_child(sparks)
+
+
 func _rest_heal_target() -> int:
 	# A2 "Short rations" — camp rest heals 60% of what's missing (round up)
 	# instead of to full. Below A2 the target is always full HP. The banner
@@ -590,8 +740,36 @@ func _rest_heal_target() -> int:
 
 
 func _do_heal() -> void:
+	var before: int = RunState.hero_hp
 	RunState.hero_hp = _rest_heal_target()
 	RunState.register_rest_visit()
+	# The heal gets a beat before the fade: the figure rises off the fire and
+	# a breath of green sparks lifts with it. Without it the biggest single
+	# heal in the game was an instant scene change.
+	var healed: int = RunState.hero_hp - before
+	if healed > 0 and not (UserSettings != null and UserSettings.reduce_motion):
+		var vp := get_viewport_rect().size
+		GameTheme.spawn_floating_text(self, Vector2(vp.x * 0.5, vp.y * 0.40),
+			"+%d HP" % healed, GameTheme.HEALTH_GREEN, true)
+		AudioBank.play_sfx("heal")
+		if UserSettings == null or UserSettings.particles:
+			var motes := CPUParticles2D.new()
+			motes.position = Vector2(vp.x * 0.5, vp.y * 0.52)
+			motes.one_shot = true
+			motes.explosiveness = 0.7
+			motes.amount = 22
+			motes.lifetime = 1.0
+			motes.direction = Vector2(0, -1)
+			motes.spread = 32.0
+			motes.gravity = Vector2(0, -60.0)
+			motes.initial_velocity_min = 40.0
+			motes.initial_velocity_max = 110.0
+			motes.scale_amount_min = 2.0
+			motes.scale_amount_max = 4.0
+			motes.color = Color(0.55, 0.95, 0.55, 0.85)
+			motes.emitting = true
+			add_child(motes)
+		await get_tree().create_timer(0.6).timeout
 	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 
 
@@ -622,6 +800,7 @@ func _begin_pick_card_for_upgrade() -> void:
 	title.position = Vector2(500, 30)
 	title.size = Vector2(600, 40)
 	add_child(title)
+	GameTheme.deal_in(title, 0.02)
 
 	var sub = GameTheme.make_label("Click a card to see the exact + version before you forge it", 16, GameTheme.IVORY)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -629,11 +808,13 @@ func _begin_pick_card_for_upgrade() -> void:
 	sub.size = Vector2(600, 28)
 	sub.modulate = Color(1, 1, 1, 0.85)
 	add_child(sub)
+	GameTheme.deal_in(sub, 0.08)
 
 	var scroll = ScrollContainer.new()
 	scroll.position = Vector2(100, 110)
 	scroll.size = Vector2(1400, 680)
 	add_child(scroll)
+	GameTheme.deal_in(scroll, 0.12)
 
 	var grid = GridContainer.new()
 	grid.columns = 6
@@ -641,6 +822,7 @@ func _begin_pick_card_for_upgrade() -> void:
 	grid.add_theme_constant_override("v_separation", 16)
 	scroll.add_child(grid)
 
+	var pick_idx := 0
 	for i in range(RunState.deck.size()):
 		# Forge "+" stays once per card; other mods (drill, banners) don't
 		# block the forge — Inscryption stacking.
@@ -667,11 +849,25 @@ func _begin_pick_card_for_upgrade() -> void:
 		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-		click_btn.pressed.connect(_select_card_for_upgrade.bind(i))
+		click_btn.pressed.connect(_on_upgrade_card_pressed.bind(wrapper, click_btn, i))
+		_wire_hover_motion(click_btn, wrapper, 1.025)
 		wrapper.add_child(click_btn)
 		grid.add_child(wrapper)
+		GameTheme.deal_in(wrapper, 0.16 + float(pick_idx) * 0.025)
+		pick_idx += 1
 
 	_add_cancel_btn()
+
+
+func _on_upgrade_card_pressed(wrapper: Control, click_btn: Button, deck_index: int) -> void:
+	if click_btn != null and is_instance_valid(click_btn):
+		click_btn.disabled = true
+	if wrapper != null and is_instance_valid(wrapper):
+		GameTheme.claim_pop(wrapper)
+	await get_tree().create_timer(_claim_hold()).timeout
+	if not is_inside_tree():
+		return
+	_select_card_for_upgrade(deck_index)
 
 
 func _select_card_for_upgrade(deck_index: int) -> void:
@@ -696,6 +892,10 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(dim)
+	if UserSettings == null or not UserSettings.reduce_motion:
+		dim.modulate.a = 0.0
+		var dim_tw := dim.create_tween()
+		dim_tw.tween_property(dim, "modulate:a", 1.0, 0.18).set_ease(Tween.EASE_OUT)
 
 	# Compute current + forged data. The "before" side starts from the card's
 	# LIVE modded data (drill stacks, banners included) and the preview lays
@@ -715,6 +915,7 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	title.offset_top = 40
 	title.offset_bottom = 90
 	add_child(title)
+	GameTheme.deal_in(title, 0.04)
 
 	# Card name strip
 	var name_text := "%s  →  %s" % [base_data.name, upgraded_data.name]
@@ -724,16 +925,23 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	name_lbl.offset_top = 100
 	name_lbl.offset_bottom = 130
 	add_child(name_lbl)
+	GameTheme.deal_in(name_lbl, 0.08)
 
 	# Card comparison row: base | arrow | upgraded. Card2D natural size is
 	# 300x400; we render at a comfortable scale so both fit at center.
 	var compare_row := HBoxContainer.new()
 	compare_row.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	compare_row.position = Vector2(800 - 380, 150)
-	compare_row.size = Vector2(760, 420)
 	compare_row.add_theme_constant_override("separation", 30)
 	compare_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	add_child(compare_row)
+	# Offsets AFTER add_child: setting .position on a parentless Control with
+	# center anchors computes offsets against a zero-size rect, which shoved
+	# this row to x≈1220 and pushed the "+" card clean off screen.
+	compare_row.offset_left = -380
+	compare_row.offset_right = 380
+	compare_row.offset_top = 150
+	compare_row.offset_bottom = 570
+	GameTheme.deal_in(compare_row, 0.12)
 
 	_add_preview_card(compare_row, base_data, false)
 	_add_arrow_glyph(compare_row)
@@ -751,6 +959,7 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	summary.offset_top = 600
 	summary.offset_bottom = 700
 	add_child(summary)
+	GameTheme.deal_in(summary, 0.18)
 
 	# Action buttons — UPGRADE in gold (the affirmative path) and CANCEL in
 	# neutral grey. Positioned at bottom-center, well below the cards so
@@ -762,14 +971,17 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	btn_row.add_theme_constant_override("separation", 30)
 	add_child(btn_row)
+	GameTheme.deal_in(btn_row, 0.22)
 
 	var upgrade_btn = GameTheme.make_themed_button("⚒ Forge +", GameTheme.GILT, Vector2(240, 60), 22)
 	upgrade_btn.pressed.connect(_do_upgrade.bind("plus", ""))
 	btn_row.add_child(upgrade_btn)
+	GameTheme.hover_lift(upgrade_btn, 1.03)
 
 	var back_btn = GameTheme.make_back_button("← Back", Vector2(180, 60), 18)
 	back_btn.pressed.connect(_back_to_pick_card)
 	btn_row.add_child(back_btn)
+	GameTheme.hover_lift(back_btn, 1.03)
 
 
 # Builds a preview Card2D into the comparison row. `is_upgraded_preview`
@@ -778,6 +990,9 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 func _add_preview_card(parent: Container, data: Dictionary, is_upgraded_preview: bool) -> void:
 	var wrap := Control.new()
 	wrap.custom_minimum_size = Vector2(300, 400)
+	if is_upgraded_preview:
+		# Named so _do_upgrade can aim the forge-strike set-piece at it.
+		wrap.name = "ForgedPreview"
 
 	# Green halo behind the upgraded card. Procedural radial gradient, parented
 	# at z=-1 so it sits behind the Card2D panel.
@@ -884,6 +1099,10 @@ func _do_upgrade(path: String, keyword: String = "") -> void:
 	RunState.upgrade_card(_selected_card_index, path, keyword)
 	AudioBank.play_sfx("upgrade_confirm")  # silently no-ops if asset missing
 	_selected_card_index = -1
+	# The strike: the forged card flashes white-hot and anvil sparks fall
+	# before the screen moves on — the game's most permanent decision now
+	# lands with the hammer instead of an instant scene change.
+	await GameTheme.forge_strike(self, find_child("ForgedPreview", true, false))
 	# Reforge: loop back to pick-card for the remaining upgrade(s). Decrement
 	# BEFORE the check — the upgrade that just resolved counted against the
 	# starting "2 picks." When the last pick lands, the relic is consumed.
@@ -911,9 +1130,12 @@ func _add_cancel_btn() -> void:
 		_build_choice_ui()
 	)
 	add_child(btn)
+	GameTheme.deal_in(btn, 0.24)
+	GameTheme.hover_lift(btn, 1.03)
 
 
 func _clear_ui() -> void:
 	for child in get_children():
-		if child.name != "Background" and child.name != "Atmosphere":
+		if child.name != "Background" and child.name != "Atmosphere" \
+				and child.name != "CampfireGlow" and child.name != "CampfireSparks":
 			child.queue_free()

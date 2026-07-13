@@ -62,6 +62,20 @@ var _net_opp_mana: int = 0
 var _net_opp_max_mana: int = 0
 var _net_opp_mana_label: Label = null          # numeral pressed into the foe's seal
 var _net_opp_mana_post: Control = null         # the whole foe Command instrument
+# Foe's arsenal (skirmish only): the opponent's drafted battle relic + potion,
+# shown as chips under their Command seal — HS-style "their trinkets are on the
+# table". Drink/trigger beats animate these chips (see _net_show_foe_potion_fx /
+# _pulse_relic_chip). The slot data is already local: both peers exchange their
+# relic+potion picks in NetDraft's deck handoff.
+var _net_foe_rail_root: Control = null
+var _net_foe_relic_chips: Dictionary = {}      # rid -> chip on the foe rail
+var _net_foe_potion_slots_ui: Array = []       # [{pid, chip, used}] on the foe rail
+# rid -> own-rail chip, rebuilt with the relic grid; lets relic triggers pulse
+# their chip (HS trinket flash) in solo and net alike.
+var _relic_chip_by_id: Dictionary = {}
+# "<rid>|<foe:0/1>" -> Time msec of the last pulse; debounces multi-hit triggers
+# (Tome of Many's 2 draws, Bulwark over 3 creatures) into ONE flash.
+var _relic_fx_gate: Dictionary = {}
 
 const MAX_BANKED_MANA: int = 2
 const HAND_DRAW_PER_TURN: int = 4
@@ -304,6 +318,10 @@ var _bandit_steal_fired_this_round: bool = false
 # Set true when the player confirms the end-turn warning dialog. Read+reset
 # inside _on_end_turn to bypass re-prompting on the recursive re-entry.
 var _end_turn_confirmed: bool = false
+# Space is deliberately the cautious end-turn shortcut: unlike E/Enter and the
+# button, it always asks first. This guard prevents double-taps from stacking
+# multiple confirmation dialogs.
+var _space_end_turn_confirm_open: bool = false
 var _face_damage_taken_this_fight: int = 0
 # Familiar: maps deck_uid -> {"atk": int, "hp": int} of permanent buffs applied
 # this fight via Familiar floops. Re-applied on draw so a buffed card retains
@@ -332,6 +350,11 @@ var _doubled_hour: Array = [false, false]      # The Doubled Hour: this side's c
 # back, so a returned-and-replayed Griffin can't loop. Fresh per fight (new scene).
 # Net keeps its own per-side guard in _net_return_once_used.
 var _griffin_returned_uids: Dictionary = {}
+# Uids an ON-DEATH effect already re-homed to hand (Griffin's return, net
+# EV_GIVE_CARD) BEFORE the death filing runs — the filing consumes an entry
+# here and skips its discard append, otherwise the same uid would live in the
+# hand AND the discard pile and the deck would carry the card twice all fight.
+var _pending_return_uids: Dictionary = {}
 # ── NET (skirmish) per-OWNER death/exile bookkeeping ─────────────────────────
 # The solo _last_dead_* trackers only watch the PLAYER side; over the wire each
 # caster needs the last corpse on ITS OWN side. Index 0 = host side, 1 = client
@@ -428,14 +451,22 @@ var _enemy_banner_for_info: Control = null
 var _targeting_arrow: Line2D = null
 var _targeting_arrow_head: Polygon2D = null
 var _prediction_label: Label = null
-# Combat telegraph: hover a battlefield creature to see who it strikes and the
-# outcome. A thin arrow (source→target) + a DIES/-N/SURVIVES chip, both on the
-# HUD layer. Built lazily in _build_combat_telegraph; driven from _process.
+# Combat telegraph: hover a battlefield creature to see its next attack route
+# and outcome. A thin arrow (or a multi-target summary) carries remaining HP,
+# Shield/Last Stand/rescue/lethal and return-damage text on the HUD layer.
 var _telegraph_arrow: Line2D = null
 var _telegraph_head: Polygon2D = null
 var _telegraph_chip: Label = null
+# Stat-provenance caption: hovering a creature whose stats differ from its
+# printed (as-drawn) card shows the breakdown under the token — "ATK 5 — printed
+# 3 · +1 this fight · +1 this round" / "HP 2 of 5" — so the player can tell a
+# fading buff from a drilled veteran. Solo only: a net client's snapshot folds
+# every buff into one atk number at spawn, so the split would lie there.
+var _telegraph_stat_line: Label = null
 var _telegraph_hovered: Control = null  # the card currently driving the read
 var _lane_forecast_nodes: Array = []    # always-on enemy strike forecast layer
+var _lane_forecast_refresh_queued := false
+var _lane_forecast_signature := ""
 var _phase_pulse_node: Control = null    # short sub-phase title punch during clash resolution
 # Change-detection for the per-frame telegraph: the last cursor position we fully
 # resolved. On my own (solo/host) turn the board is static between frames unless I
@@ -460,6 +491,8 @@ var _gold_label: Label = null   # combat gold readout (campaign only; absent in 
 var _gold_displayed: int = -1   # last shown gold, for the change-flash
 var _mana_seal_post: Control = null   # player Command instrument (hover → tooltip)
 var _bank_pips: HBoxContainer = null  # carryover dots on the seal's plinth shelf
+var _bank_pips_cap := -1
+var _bank_pips_lit := -1
 var _turn_label: Label
 
 var _info_label: Label
@@ -520,11 +553,21 @@ var _death_hitstop_armed: bool = false
 var _enemy_presence: Control = null
 var _presence_art: TextureRect = null
 var _presence_flash: ColorRect = null         # red hit-flash overlay
+
+# ── Drag ember trail (JUICE) ──
+# A short comet ribbon behind a held card: Card2D's `dragging` signal drops
+# breadcrumb points and _process ages them out, so the ribbon chases the card
+# while it moves and burns away the instant it stops or is released. Ember for
+# creatures, arcane pale-blue for spells — the board's damage/spell language.
+var _drag_trail: Line2D = null
+var _drag_trail_pts: Array = []          # [{p: Vector2, born: float}]
+const DRAG_TRAIL_LIFE := 0.24
 var _presence_hp_fill: ColorRect = null       # antagonist health bar fill
 var _presence_bark: Label = null              # spoken-line caption
 var _presence_bark_scrim: Panel = null        # soft dark scrim behind the bark
 var _presence_bark_tween: Tween = null
 var _presence_react_tween: Tween = null
+var _presence_hp_tween: Tween = null
 
 # Board container (no effects)
 var _board_container: Control
@@ -615,13 +658,14 @@ func _net_my_index() -> int:
 func _net_my_slot() -> SkirmishState.PlayerSlot:
 	return SkirmishState.get_slot(_net_my_index())
 
-## Which player (0 host / 1 client) takes the FIRST turn this game. It is a COIN
-## FLIP from the shared match seed — NOT "the host always opens" — so nothing about
-## the turn order reveals which side is player 1. It also alternates each game of a
-## Best-of-N series, so neither side opens every game. Both machines derive it from
-## the same SkirmishState.rng_seed (= NetMatch.match_seed) and the same series_game
-## counter (recorded in lockstep on both sides), so they always agree without any
-## negotiation — only the host then acts on it to drive the authoritative turn loop.
+## Which player (0 host / 1 client) takes the FIRST turn this game. The raw seed
+## coin flip decides who WINS THE TOSS; since 2026-07-11 the winner CHOOSES the
+## order (march first / hold back) and the settled pick lands here as
+## _net_first_player_override on both machines (EV/IN_ORDER_PICK). The flip
+## alternates each game of a Best-of-N series, so the toss changes hands.
+## Pre-choice, both machines derive the same flip from SkirmishState.rng_seed
+## (= NetMatch.match_seed) + series_game with no negotiation; only the host
+## drives the authoritative turn loop off the settled order.
 func _net_first_player() -> int:
 	if _net_first_player_override >= 0:
 		return _net_first_player_override
@@ -704,7 +748,7 @@ func _ready() -> void:
 	_setup_fight_state()
 	# Warm the enemy art cache now, before _place_starting_board lays the opening
 	# formation — otherwise each creature's art disk-loads on the frame it appears.
-	_prewarm_enemy_art()
+	await _prewarm_enemy_art()
 	# Music: every fight class rotates a pool (the picker excludes the
 	# currently-playing track, and play_music resumes saved positions). Acts
 	# escalate to heavier books. AudioBank no-ops if a file is missing.
@@ -758,6 +802,9 @@ func _ready() -> void:
 	# we bake. Cards drawn before the bake completes hit the v4 fallback
 	# inside _build_layout — slower but visually identical.
 	await _prebake_hand_textures()
+	var supersample := get_node_or_null("/root/Supersample")
+	if supersample != null:
+		supersample.begin_adaptive_scope(self)
 	# Online skirmish takes over here: no relic combat-start bundle, no encounter
 	# intro, no solo round loop. The host drives the turn sequence; the client
 	# waits for events. Everything below is campaign-only.
@@ -793,6 +840,12 @@ func _ready() -> void:
 	else:
 		await _show_encounter_intro(false, true)
 	_start_round()
+
+
+func _exit_tree() -> void:
+	var supersample := get_node_or_null("/root/Supersample")
+	if supersample != null:
+		supersample.end_adaptive_scope(self)
 
 
 func _sound_war_horn() -> void:
@@ -920,14 +973,17 @@ func _witchs_brew_cast() -> void:
 		if CardDB.is_curse(cid):
 			continue
 		var d: Dictionary = CardDB.get_card_data(cid)
-		if d.get("type", "") == "spell":
+		if d.get("type", "") == "spell" and bool(_random_spell_context_for(d).get("ok", false)):
 			spell_ids.append(cid)
 	if spell_ids.is_empty():
 		return
 	var pick: String = spell_ids[randi() % spell_ids.size()]
 	var data: Dictionary = CardDB.get_card_data(pick)
-	var target: Control = _auto_target_for(data.get("targeting", "none"))
-	var tlane: int = target.current_lane if target != null else -1
+	var cast_ctx: Dictionary = _random_spell_context_for(data)
+	if not bool(cast_ctx.get("ok", false)):
+		return
+	var target: Control = cast_ctx.get("target", null)
+	var tlane: int = int(cast_ctx.get("lane", -1))
 	_show_info("Witch's Brew casts %s!" % data.get("name", "a spell"))
 	_resolve_spell(data, target, tlane)
 
@@ -972,19 +1028,16 @@ func _prebake_hand_textures() -> void:
 			continue
 		seen[entry] = true
 		to_bake.append(_resolve_card_data(_entry_id(entry), _entry_uid(entry)))
-	# Enemy creatures use compact_mode on the battlefield, which doesn't pull
-	# from the cache, so we skip baking them. If the design ever puts enemy
-	# cards into a hand-style view we'd extend this list.
 	await CardTextureCache.bake_many(to_bake)
+	await CardTextureCache.bake_battlefield_many(to_bake)
 
 
 func _prewarm_enemy_art() -> void:
 	# First placement of an enemy creature otherwise does a synchronous disk read +
 	# decode + mipmap of its art ON the gameplay frame it appears — the opening
-	# formation and every reinforcement wave hitch as a result. Enemy creatures
-	# render in compact_mode, which CardTextureCache deliberately skips, so warm the
-	# static art cache here instead: pre-load every art the encounter deck +
-	# reinforcement can show so _place_enemy_card → _find_card_art is a cache hit.
+	# formation and every reinforcement wave hitch as a result. Warm both the
+	# source painting and the flattened compact background for every creature the
+	# encounter deck + reinforcement can show before _place_enemy_card seats it.
 	# Headless probes never render, so warming there is pure wasted I/O — skip it and
 	# leave placement's existing lazy load unchanged.
 	if DisplayServer.get_name() == "headless":
@@ -1000,7 +1053,7 @@ func _prewarm_enemy_art() -> void:
 		if seen.has(cid):
 			continue
 		seen[cid] = true
-		_prewarm_one_art(cd)
+		await _prewarm_one_art(cd)
 	# Named MID-FIGHT spawns are the remaining decode hitch: fight-passive waves
 	# ("Alpha Wolf"), amalgam transition summons ("Star-Reader"), reactive spawns,
 	# and on-death bequests all synthesize card data on the fly, so their painting
@@ -1016,7 +1069,16 @@ func _prewarm_enemy_art() -> void:
 	for n in names:
 		if not seen.has(n):
 			seen[n] = true
-			_prewarm_one_art({"name": n, "type": "creature"})
+			await _prewarm_one_art({"name": n, "type": "creature"})
+	if _encounter_id != "":
+		var enc: Dictionary = EncounterDB.get_encounter(_encounter_id)
+		var enc_type := String(enc.get("type", ""))
+		if enc_type == "boss" or enc_type == "elite":
+			await CardArtAliases.prewarm_texture_path(
+				"res://assets/portraits/boss_%s.png" % _encounter_id)
+		if enc_type == "boss":
+			await CardArtAliases.prewarm_texture_path(
+				"res://assets/portraits/boss_act%d.png" % RunState.get_act())
 
 
 ## Recursively collect every "name"/"id" string inside nested dicts/arrays —
@@ -1038,21 +1100,8 @@ func _collect_spawn_names(v, out: Dictionary) -> void:
 
 
 func _prewarm_one_art(cd: Dictionary) -> void:
-	# Mirror Card2D._find_card_art's resolution order + short-circuit exactly so we
-	# warm the same cache keys it will look up, and no extra ones.
-	var cid := String(cd.get("id", ""))
-	var name_id := String(cd.get("name", "")).to_lower().replace(" ", "_").replace("'", "")
-	var art: Texture2D = null
-	if String(cd.get("type", "creature")) == "spell":
-		art = CardArtAliases.try_load_spell_art(cid)
-		if art == null:
-			art = CardArtAliases.try_load_spell_art(name_id)
-	if art == null:
-		art = CardArtAliases.try_load_creature_art(cid)
-	if art == null and name_id != "":
-		art = CardArtAliases.try_load_creature_art(name_id)
-	if art == null and name_id != "":
-		CardArtAliases.try_load_creature_art("e_" + name_id)
+	await CardArtAliases.prewarm_card_art(cd)
+	await CardTextureCache.bake_battlefield(cd)
 
 
 # =====================================================================
@@ -1197,7 +1246,13 @@ func _setup_net_fight_state() -> void:
 	_encounter_faction = ""
 	_wave_schedule_active = false
 	_encounter_passive = ""
-	_encounter_name = "Skirmish"
+	# Title the fight with the OPPONENT'S lord — both players picked a character
+	# in the lobby, so "Skirmish" would waste the marquee. Reads like a boss
+	# surface: name · lord title (e.g. "Raider · The Landless Brother").
+	var foe_hero := HeroDB.get_hero(_foe_hero_id())
+	var foe_faction: Dictionary = HeroDB.faction_info(String(foe_hero.get("faction", "")))
+	_encounter_name = "%s · %s" % [String(foe_hero.get("name", "Rival Lord")),
+		String(foe_faction.get("lord_title", "Rival Lord"))]
 	_encounter_passive_desc = ""
 	_encounter_preamble = ""
 	_enemy_deck = []                   # remote-driven; never AI-dealt
@@ -1205,6 +1260,23 @@ func _setup_net_fight_state() -> void:
 	_boss_phases = []
 	_reactive_passive = {}
 	_encounter_script = []
+
+
+## The lord the LOCAL player marches as: the lobby pick in skirmish (synced to
+## the opponent), the campaign hero in solo. Cosmetic identity only — it drives
+## the plate portrait and the emote voice, never rules.
+func _my_hero_id() -> String:
+	if _is_net():
+		return SkirmishState.hero_for(SkirmishState.local_index)
+	return RunState.current_hero_id
+
+
+## The opposing lord's hero id — skirmish only ("" in solo, where the foe is an
+## EncounterDB lineup, not a lord).
+func _foe_hero_id() -> String:
+	if _is_net():
+		return SkirmishState.hero_for(1 - SkirmishState.local_index)
+	return ""
 
 
 # =====================================================================
@@ -1249,21 +1321,14 @@ func _all_creatures_both_sides() -> Array:
 
 
 func _has_adjacent_royal_guard(defender: Control) -> bool:
-	# Royal Guard's passive grants -1 dmg to friendly creatures sitting in
-	# either of its two adjacent lanes (same row). Returns true if such a
-	# Royal Guard exists for `defender`'s position.
+	# Royal Guard's passive grants -1 dmg to friendly creatures in its
+	# canonical-adjacent seats (row ±1 + column-mate). Returns true if such
+	# a Royal Guard exists for `defender`'s position.
 	var pos = _find_creature_position(defender)
 	if pos.is_empty():
 		return false
-	var defender_is_enemy: bool = pos.is_enemy
-	var row: int = pos.row
-	var lane: int = pos.lane
-	var arr = _row_array(defender_is_enemy, row)
-	for adj_lane in [lane - 1, lane + 1]:
-		if adj_lane < 0 or adj_lane >= LANES_PER_ROW:
-			continue
-		var neighbor = arr[adj_lane]
-		if neighbor != null and neighbor != defender \
+	for neighbor in _adjacent_creatures(pos.is_enemy, pos.row, pos.lane):
+		if neighbor != defender \
 				and neighbor.card_data.get("passive", "") == "royal_guard" \
 				and neighbor.current_hp > 0:
 			return true
@@ -1336,6 +1401,53 @@ func _relocate_creature(card: Control, side_is_enemy: bool, dest_row: int, dest_
 	return true
 
 
+func _flank_push(card: Control, crash_dmg: int, dir_override: int = 0) -> Dictionary:
+	# Into-the-Breach lateral push (2026-07-09 removal slate): shove `card` one
+	# lane sideways in its own row. Direction defaults to the NEAREST FLANK
+	# (lanes 0-1 go left, lanes 2-3 go right); dir_override (-1/+1) forces it
+	# (Sapper's Charge blasts outward from the bomb, not flank-relative).
+	# Empty destination → the creature slides over. Blocked by the field's edge
+	# or another body → no move, and the crash deals crash_dmg to the pushed
+	# creature AND the blocker. Structures are bolted down: they never move,
+	# never take crash damage, but DO block (the pushed body eats the crash).
+	# Side-agnostic (reads the card's own position), so the net resolver can
+	# call it directly. Returns {moved, crashed, blocker}.
+	var out := {"moved": false, "crashed": false, "blocker": null}
+	if not is_instance_valid(card) or card.current_hp <= 0:
+		return out
+	if card.has_keyword("structure"):
+		return out
+	var pos: Dictionary = _find_creature_position(card)
+	if pos.is_empty():
+		return out
+	var dir: int = dir_override
+	if dir == 0:
+		dir = -1 if int(pos.lane) <= 1 else 1
+	var dest: int = int(pos.lane) + dir
+	if dest < 0 or dest >= LANES_PER_ROW:
+		# Crushed against the field's edge.
+		out.crashed = true
+		if crash_dmg > 0:
+			card.take_damage(crash_dmg)
+		return out
+	var blocker = _row_array(bool(pos.is_enemy), int(pos.row))[dest]
+	if blocker == null:
+		out.moved = _relocate_creature(card, bool(pos.is_enemy), int(pos.row), dest)
+		if out.moved:
+			spawn_floating_number(card.global_position \
+				+ Vector2(card.size.x * card.scale.x * 0.5, -10),
+				"SHOVED", Color(0.75, 0.85, 1.0), false)
+		return out
+	out.crashed = true
+	out.blocker = blocker
+	if crash_dmg > 0:
+		card.take_damage(crash_dmg)
+		if is_instance_valid(blocker) and blocker.current_hp > 0 \
+				and not blocker.has_keyword("structure"):
+			blocker.take_damage(crash_dmg)
+	return out
+
+
 func _adjacent_in_row(is_enemy: bool, row: int, lane: int) -> Array:
 	# Returns alive same-row creatures at lane ±1.
 	var arr = _row_array(is_enemy, row)
@@ -1344,6 +1456,47 @@ func _adjacent_in_row(is_enemy: bool, row: int, lane: int) -> Array:
 		if adj >= 0 and adj < LANES_PER_ROW and arr[adj] != null:
 			out.append(arr[adj])
 	return out
+
+
+func _adjacent_creatures(is_enemy: bool, row: int, lane: int) -> Array:
+	## THE canonical "adjacent" (2026-07-10): same-row lane ±1 PLUS the column-mate
+	## in the other row of the same lane. Every effect whose card text says
+	## "adjacent" resolves through this — the old row-only and either-row-±1
+	## readings are retired. Row-flavored mechanics that say "beside" / push along
+	## the line (Formation, the Stalwart drill, flank physics) stay _adjacent_in_row.
+	var out: Array = _adjacent_in_row(is_enemy, row, lane)
+	var other_row: int = ROW_BACK if row == ROW_FRONT else ROW_FRONT
+	var mate = _row_array(is_enemy, other_row)[lane]
+	if mate != null and is_instance_valid(mate):
+		out.append(mate)
+	# Diagonal Crest (player relic): "Diagonal friendlies count as adjacent." Widen
+	# the set with the two diagonal seats (other row, lane ±1) so EVERY adjacency verb
+	# — Sprite / Crystal Sentry / Glutton / Royal Guard / adj_buff — honours the relic,
+	# not just the linked-banner density counter. Player side only (the relic is the
+	# player's) and net-inert (diagonal_crest isn't in NET_RELIC_POOL → _has_relic is
+	# false in skirmish, so both peers still read the plain row+column set).
+	if not is_enemy and _has_relic("diagonal_crest"):
+		var diag_arr = _row_array(is_enemy, other_row)
+		for dl in [lane - 1, lane + 1]:
+			if dl >= 0 and dl < LANES_PER_ROW:
+				var diag = diag_arr[dl]
+				if diag != null and is_instance_valid(diag) and diag not in out:
+					out.append(diag)
+	return out
+
+
+func _adjacent_empty_seats(is_enemy: bool, row: int, lane: int) -> Array:
+	## Canonical-adjacent EMPTY seats as {row, lane} dicts — same-row ±1 first,
+	## then the column-mate seat. The placement twin of _adjacent_creatures.
+	var seats: Array = []
+	var arr = _row_array(is_enemy, row)
+	for adj in [lane - 1, lane + 1]:
+		if adj >= 0 and adj < LANES_PER_ROW and arr[adj] == null:
+			seats.append({"row": row, "lane": adj})
+	var other: int = ROW_BACK if row == ROW_FRONT else ROW_FRONT
+	if _row_array(is_enemy, other)[lane] == null:
+		seats.append({"row": other, "lane": lane})
+	return seats
 
 
 # ── Draw/discard pile entries ──
@@ -1374,7 +1527,7 @@ func _resolve_card_data(card_id: String, uid: int) -> Dictionary:
 	# back to CardDB; the guard makes that explicit and dodges a stray uid
 	# collision with a leftover campaign deck.)
 	if _is_net():
-		return CardDB.get_card_data(card_id)
+		return SkirmishState.skirmish_card_data(card_id)
 	# Upgraded copies pull their modified stats/keywords from RunState; synthetic
 	# or un-upgraded cards fall back to the base definition.
 	var data: Dictionary
@@ -1435,6 +1588,11 @@ func _look_top_pick(n: int) -> void:
 	# cheapest (most immediately playable), leaving the rest in place.
 	if _player_draw_pile.is_empty():
 		return
+	# A full hand makes _draw_card a no-op — bail BEFORE removing the entry,
+	# or the picked card falls out of every pile and the deck shrinks for
+	# the rest of the fight.
+	if _hand.size() >= MAX_HAND_SIZE:
+		return
 	var count := mini(n, _player_draw_pile.size())
 	var best_i := 0
 	var best_cost := 9999
@@ -1461,10 +1619,9 @@ func cast_random_spell_free() -> void:
 		"offering": true, "fuel_the_pyre": true, "dark_pact": true,  # sacrifice cost
 		"bloodletting": true, "unholy_bargain": true,  # self-harm
 		"blood_tithe": true,  # face damage to self
-		"mass_grave": true, "apocalypse": true,  # board-wipe player too
+		"apocalypse": true,  # board-wipe player too
 		"echo_spell": true,  # recursion
 		"recycle": true, "scrap": true, "gambit": true, "war_chant": true,  # need player hand input
-		"grave_robbery": true, "reanimate": true,  # need last-dead state
 		"turbo": true,  # adds a curse
 		"coin": true,  # the going-second system card — not a real campaign spell
 	}
@@ -1475,13 +1632,17 @@ func cast_random_spell_free() -> void:
 		var d = CardDB.CARD_POOL[id]
 		# Cap the roll at cheap spells (cost 1 or less): a 1-mana 1/2 free-casting a
 		# 4-cost Inferno was a pure high-roll. Keeps the chaos fun, not a blowout.
-		if d.get("type", "") == "spell" and not CardDB.is_curse(id) and int(d.get("cost", 0)) <= 1:
+		if d.get("type", "") == "spell" and not CardDB.is_curse(id) and int(d.get("cost", 0)) <= 1 \
+				and bool(_random_spell_context_for(d).get("ok", false)):
 			candidates.append(id)
 	if candidates.is_empty():
 		return
 	var data := CardDB.get_card_data(candidates[randi() % candidates.size()])
-	var target := _auto_target_for(data.get("targeting", "none"))
-	var tl: int = target.current_lane if target != null else -1
+	var cast_ctx: Dictionary = _random_spell_context_for(data)
+	if not bool(cast_ctx.get("ok", false)):
+		return
+	var target: Control = cast_ctx.get("target", null)
+	var tl: int = int(cast_ctx.get("lane", -1))
 	_show_info("Chaos Imp casts %s!" % data.get("name", "a spell"))
 	# Show the actual card — a random cast used to be a mystery (you saw the
 	# effect but never which spell). Fire-and-forget; it doesn't gate the resolve.
@@ -1489,17 +1650,210 @@ func cast_random_spell_free() -> void:
 	_resolve_spell(data, target, tl)
 
 
+func _random_spell_context_for(data: Dictionary) -> Dictionary:
+	var targeting := String(data.get("targeting", "none"))
+	if targeting == "none":
+		return {"ok": _untargeted_random_spell_can_resolve(data), "target": null, "lane": -1}
+	var target: Control = _auto_target_for(targeting)
+	if target != null:
+		return {"ok": true, "target": target, "lane": target.current_lane}
+	if targeting == "any":
+		return {"ok": true, "target": null, "lane": -1}
+	return {"ok": false, "target": null, "lane": -1}
+
+
+## Places a player-side battlefield body built from raw card data (a token —
+## never a deck card, so its death files into no pile). Shared by Turncoat's
+## desertion, the Whisper-Widow's on-death steal and Pit Brawler's split.
+func _spawn_player_body(data: Dictionary, lane: int, row: int, atk: int, hp: int,
+		shielded: bool = false) -> Control:
+	var body = CARD_SCENE.instantiate()
+	body.card_id = String(data.get("id", "deserter"))
+	body.is_opponent = false
+	body.is_on_battlefield = true
+	body.is_token = true   # not a deck card — its death never files into your piles
+	body.compact_mode = true
+	data["is_token"] = true
+	body.card_data = data
+	body.current_atk = atk
+	body.current_hp = hp
+	body.current_lane = lane
+	body.current_row = row
+	_row_array(false, row)[lane] = body
+	_slot_set_card(_slot_array(false, row)[lane], body)
+	body.destroyed.connect(_on_card_destroyed.bind(body))
+	body.will_die.connect(_on_card_will_die.bind(body))
+	body.state.has_shield = shielded or data.get("keywords", []).has("shield")
+	_refresh_adjacency_buffs()
+	return body
+
+
+## An ENEMY creature walks over to the player's side with its live stats —
+## banish-style removal (no On-Death, no kill ledger, no reactives), then a
+## fresh token body in the player's camp. Returns false (no side effects)
+## when the target is a structure or no front seat is open.
+func _desert_enemy_to_player(target: Control) -> bool:
+	if target == null or not is_instance_valid(target):
+		return false
+	var spot: Dictionary = _pick_empty_for_summon(false, ROW_FRONT)
+	if target.has_keyword("structure") or spot.is_empty():
+		return false
+	var d_data: Dictionary = target.card_data.duplicate(true)
+	var d_atk: int = target.current_atk
+	var d_hp: int = target.current_hp
+	var d_shield: bool = target.state.has_shield
+	var d_pos := _find_creature_position(target)
+	if not d_pos.is_empty():
+		_row_array(d_pos.is_enemy, d_pos.row)[d_pos.lane] = null
+		var d_slots = _slot_array(d_pos.is_enemy, d_pos.row)
+		if d_pos.lane < d_slots.size():
+			_restore_slot_label(d_slots[d_pos.lane], d_pos.lane)
+	target.queue_free()
+	var body = _spawn_player_body(d_data, spot.lane, spot.row, d_atk, d_hp, d_shield)
+	_log_event("%s deserts to your banner." % _log_card_ref(body),
+		_log_data(body), _log_side(body))
+	if body.has_method("_spawn_keyword_chip"):
+		body._spawn_keyword_chip("DESERTED", Color(0.42, 0.75, 0.58))
+	return true
+
+
+## Pit Brawler (HS Grim Patron): a struck, surviving brawler calls a FRESH copy
+## into an open adjacent seat. The copy carries the passive, so a line of
+## brawlers under enemy fire multiplies — capped by open seats and its own HP.
+func _pit_brawler_split(brawler: Control) -> void:
+	if _is_net() or brawler == null or not is_instance_valid(brawler):
+		return
+	if brawler.is_opponent:
+		return
+	var seats: Array = _adjacent_empty_seats(false, brawler.current_row, brawler.current_lane)
+	if seats.is_empty():
+		return
+	var seat: Dictionary = seats[0]
+	var data: Dictionary = CardDB.get_card_data("pit_brawler").duplicate(true)
+	if bool(brawler.card_data.get("is_upgraded", false)):
+		data = RunState._apply_plus_upgrade(data)
+	var copy = _spawn_player_body(data, seat.lane, seat.row,
+		int(data.get("atk", 1)), int(data.get("hp", 4)))
+	_play_landing_pop(copy)
+	spawn_trigger_callout(_card_center(brawler) + Vector2(0, -14), "ANOTHER JOINS", false)
+	_log_event("%s roars — another brawler jumps into the pit." % _log_card_ref(brawler),
+		_log_data(brawler), _log_side(brawler))
+
+
+func _deck_is_highlander() -> bool:
+	# The Long Roll: true when no two cards in the RUN deck share an id (ids
+	# map 1:1 to names). The fight's piles are the same list shuffled, and
+	# ephemera (Discover finds, the Coin) never march home, so the run deck
+	# is the honest ledger.
+	var seen := {}
+	for cid in RunState.deck:
+		if seen.has(cid):
+			return false
+		seen[cid] = true
+	return true
+
+
+func _untargeted_random_spell_can_resolve(data: Dictionary) -> bool:
+	var spell: Dictionary = data.get("spell", {})
+	var stype := String(spell.get("type", ""))
+	var sid := String(spell.get("id", ""))
+	match stype:
+		"damage_face", "draw":
+			return true
+		"damage_all_enemies":
+			return not _all_enemy_creatures().is_empty()
+		"damage_all":
+			return not _all_creatures_both_sides().is_empty()
+		"buff_all_atk":
+			return not _all_player_creatures().is_empty()
+	if stype != "custom":
+		return true
+	match sid:
+		"provision", "muster_fallen":
+			return _has_open_creature_slot(false)
+		"reanimate":
+			return not _last_dead_copy_data().is_empty() and _has_open_creature_slot(false)
+		"grave_robbery":
+			return _last_dead_creature_id != ""
+		"long_roll":
+			# Floored heal (2026-07-13): the highlander deck barely exists, so the
+			# card no longer DEMANDS it — a base heal always lands, the singleton
+			# roll call just pays far more. Only full HP greys it now.
+			return player_hp < player_max_hp
+		"wolf_pits":
+			# Pits are dug for FUTURE arrivals — dead only once nothing more
+			# can ever arrive.
+			return not _enemy_deck.is_empty() or not _reinforcement.is_empty()
+		"informer":
+			return not _enemy_deck.is_empty()
+		"grand_melee":
+			# The X-cost is the whole point — 0 Command means a 0-damage cast.
+			return player_mana > 0 and not _all_enemy_creatures().is_empty()
+		"giantfall":
+			return not _all_enemy_creatures().is_empty()
+		"forgefire":
+			for fg_c in _hand:
+				if is_instance_valid(fg_c) and String(fg_c.card_data.get("id", "")) != "forgefire" \
+						and not bool(fg_c.card_data.get("is_upgraded", false)) \
+						and CardDB.is_upgradeable(fg_c.card_id):
+					return true
+			return false
+		"mass_grave", "ricochet", "wildfire":
+			return not _all_enemy_creatures().is_empty()
+		"ambush":
+			return not _all_enemy_creatures().is_empty() or _has_swift_friendly(false)
+		"plague_bell", "earthquake":
+			return not _all_creatures_both_sides().is_empty()
+		"war_cry", "virulence", "kings_command":
+			return not _all_player_creatures().is_empty()
+		"censer_light":
+			# The smoke needs a zealot to settle on — grey without one.
+			for cl_g in _all_player_creatures():
+				if is_instance_valid(cl_g) and String(cl_g.card_data.get("ctype", "")) == "zealot":
+					return true
+			return false
+		"testudo":
+			# Base writ reaches only the front row; the forged one takes any body.
+			if bool(data.get("is_upgraded", false)):
+				return not _all_player_creatures().is_empty()
+			for tst_g in _row_array(false, ROW_FRONT):
+				if tst_g != null and is_instance_valid(tst_g):
+					return true
+			return false
+		"doubled_hour":
+			return true
+	return true
+
+
+func _has_open_creature_slot(is_enemy: bool) -> bool:
+	for row in [ROW_FRONT, ROW_BACK]:
+		for lane in range(LANES_PER_ROW):
+			if _row_array(is_enemy, row)[lane] == null:
+				return true
+	return false
+
+
+func _has_swift_friendly(is_enemy: bool) -> bool:
+	for c in _all_friendly(is_enemy):
+		if is_instance_valid(c) and _is_swift_attacker(c):
+			return true
+	return false
+
+
 func _auto_target_for(targeting: String) -> Control:
 	# Pick a random valid creature for an auto-cast spell (Chaos Imp / Echo).
 	# Structures aren't valid creature targets — strip them out before rolling.
-	if targeting in ["enemy_creature", "any_creature", "any"]:
-		var ep := _all_enemy_creatures().filter(func(c): return not c.has_keyword("structure"))
-		if ep.size() > 0:
-			return ep[randi() % ep.size()]
-	elif targeting == "friendly_creature":
-		var fp := _all_player_creatures().filter(func(c): return not c.has_keyword("structure"))
-		if fp.size() > 0:
-			return fp[randi() % fp.size()]
+	var pool: Array = []
+	match targeting:
+		"enemy_creature":
+			pool = _all_enemy_creatures()
+		"friendly_creature":
+			pool = _all_player_creatures()
+		"any_creature", "any":
+			pool = _all_enemy_creatures() + _all_player_creatures()
+	var valid := pool.filter(func(c): return is_instance_valid(c) and not c.has_keyword("structure"))
+	if valid.size() > 0:
+		return valid[randi() % valid.size()]
 	return null
 
 
@@ -1779,6 +2133,7 @@ func _start_round() -> void:
 	player_max_mana += _marked_one_mana_bonus
 	if _has_relic("lantern") and round_number == 1:
 		player_max_mana += 1
+		_relic_fired("lantern")
 	if _has_relic("happy_flower") and round_number > 0 and round_number % PASSIVE_HEAL_INTERVAL == 0:
 		player_max_mana += 1
 	# Leyline Conduit passive: +1 mana per alive conduit (both rows).
@@ -1791,6 +2146,7 @@ func _start_round() -> void:
 		for col in [0, LANES_PER_ROW - 1]:
 			if _player_field[col] == null and _player_back[col] == null:
 				player_max_mana += cav_val
+				_relic_fired("cavalry_sigil")
 	# Junk Slot: 4+ empty board slots (both rows, both sides) → +1 max mana.
 	if _has_relic("junk_slot") and _empty_player_slots_count() >= 4:
 		player_max_mana += int(RelicDB.get_relic("junk_slot").get("value", 1))
@@ -1850,6 +2206,8 @@ func _start_round() -> void:
 		for c in _hand:
 			if c != null and is_instance_valid(c):
 				_snecko_randomize_card_cost(c)
+		if not _hand.is_empty():
+			_relic_fired("snecko_eye")
 
 	# Draw — staggered so cards deal in one at a time instead of fanning in
 	# simultaneously. Each card already tweens from the deck into its hand slot
@@ -1870,8 +2228,10 @@ func _start_round() -> void:
 			target += int(RelicDB.get_relic("deep_satchel").get("value", 1))
 		if _has_relic("couriers_bag") and round_number == 1:
 			target += 1
+			_relic_fired("couriers_bag")
 		if _has_relic("tome_of_many") and _ctx_deck().size() >= 20:
 			target += int(RelicDB.get_relic("tome_of_many").get("value", 2))
+			_relic_fired("tome_of_many")
 		if _mutator_hand_draw_increase > 0:
 			target += _mutator_hand_draw_increase
 		if _mutator_hand_draw_reduce > 0:
@@ -1931,6 +2291,10 @@ func _start_round() -> void:
 	_show_turn_banner()
 
 
+# Unholy Bargain's deferred bill: face damage paid at the turn's commit.
+var _bargain_bill := 0
+
+
 func _on_end_turn() -> void:
 	if phase != Phase.PLAYER_TURN:
 		return
@@ -1973,6 +2337,11 @@ func _on_end_turn() -> void:
 	# during the cascade's pause must not re-enter and double-run the clash).
 	# The cascade gets a short beat of its own so the cards visibly peel away
 	# before the lines meet.
+	# Unholy Bargain's bill: the borrowed Command is repaid in blood at the
+	# commit, before the lines meet.
+	if _bargain_bill > 0:
+		damage_player_hero(_bargain_bill)
+		_bargain_bill = 0
 	var shed := _flush_marked_discards()
 	if shed > 0:
 		await _short_pause(0.15 + 0.09 * float(mini(shed, 4)))
@@ -1981,6 +2350,7 @@ func _on_end_turn() -> void:
 	# play for free with its floop pre-armed. Skipped when nothing qualifies.
 	if _has_relic("mime"):
 		await _mime_trigger_floop_from_hand()
+	_play_clash_commit_vfx()
 	_update_hud()
 
 	# Resolve enemy intents (non-attack intents execute now)
@@ -2080,13 +2450,13 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 						t.take_damage(floop_data.value)
 			"buff_row_atk":
 				# Drillmaster: the row drills as one — every OTHER friendly in
-				# this creature's row gains +value ATK for the fight. Row choice
+				# this creature's row gains +value ATK for the round. Row choice
 				# is the decision: plant him where the line is longest.
 				var drill_row = _row_array(is_enemy, card.current_row)
 				for dc in drill_row:
 					if dc != null and is_instance_valid(dc) and dc != card \
 							and dc.current_hp > 0:
-						dc.current_atk += int(floop_data.value)
+						dc.temp_atk_buff += int(floop_data.value)
 						dc.update_stat_display()
 						spawn_floating_number(dc.global_position \
 							+ Vector2(dc.size.x * dc.scale.x * 0.5, -10),
@@ -2094,9 +2464,12 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 							Color(1.0, 0.84, 0.35), false)
 			"haul_front":
 				# Hook: drag the opposing BACK-row creature to the front, exposing a
-				# hidden Ranged / support body to combat, and deal `value` to it. If
-				# the front is occupied or the back is empty, just deal `value` to
-				# whatever the lane would hit.
+				# hidden Ranged / support body to combat, and deal `value` to it.
+				# Harpy's 2026-07-13 trim runs this at value 0 / no stun — a pure
+				# pull; damage and winding fire only for cards that still pay for
+				# riders. If the front is occupied or the back is empty, `value`
+				# hits whatever the lane would hit instead (a 0-value pure pull
+				# that finds no reserve simply does nothing).
 				var back_opp = _row_array(not is_enemy, ROW_BACK)[lane_idx]
 				var pulled := false
 				if back_opp != null and is_instance_valid(back_opp):
@@ -2105,8 +2478,9 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 						spawn_floating_number(back_opp.global_position \
 							+ Vector2(back_opp.size.x * back_opp.scale.x * 0.5, -10),
 							"HOOKED", Color(1.0, 0.82, 0.4), false)
-						back_opp.take_damage(floop_data.value)
-						# Harpy: the hauled creature lands winded — it forfeits its
+						if int(floop_data.get("value", 0)) > 0:
+							back_opp.take_damage(floop_data.value)
+						# The hauled creature lands winded — it forfeits its
 						# attack this round (the assisted-assassination window).
 						if bool(floop_data.get("stun", false)) \
 								and is_instance_valid(back_opp) and back_opp.current_hp > 0:
@@ -2116,20 +2490,65 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 				if not pulled:
 					# No hook landed (front held / back empty): the talons rake the
 					# lane's front instead — same damage, same winding, never a dead
-					# On-Enter just because the enemy keeps no reserve.
+					# On-Enter for a card whose value pays for one.
 					var t2 = get_opposing_card(lane_idx, is_enemy)
-					if t2 != null:
+					if t2 != null and int(floop_data.get("value", 0)) > 0:
 						t2.take_damage(floop_data.value)
 						if bool(floop_data.get("stun", false)) and is_instance_valid(t2) and t2.current_hp > 0:
 							t2.state.stunned = true
 							if t2.has_method("_spawn_keyword_chip"):
 								t2._spawn_keyword_chip("STUNNED", Color(0.85, 0.78, 0.45))
+			"muster_kin":
+				# Blood Kin (Gwent Muster): every other copy still in the draw
+				# pile charges to the hand at a discount — dupe-drafting's payoff,
+				# the honest opposite of The Long Roll's highlander.
+				if not is_enemy:
+					var mk_id: String = String(card.card_data.get("id", ""))
+					var mk_n := 0
+					var mk_i := 0
+					while mk_i < _player_draw_pile.size():
+						if _entry_id(_player_draw_pile[mk_i]) == mk_id \
+								and _hand.size() < MAX_HAND_SIZE:
+							var mk_entry: String = _player_draw_pile[mk_i]
+							_player_draw_pile.remove_at(mk_i)
+							_draw_card(mk_entry)
+							var mk_kin = _hand[_hand.size() - 1] if not _hand.is_empty() else null
+							if mk_kin != null and is_instance_valid(mk_kin) \
+									and mk_kin.card_id == mk_id:
+								mk_kin.card_data["cost"] = maxi(0,
+									int(mk_kin.card_data.get("cost", 0)) - 1)
+							mk_n += 1
+						else:
+							mk_i += 1
+					if mk_n > 0:
+						_show_info("%d Blood Kin answer the call." % mk_n)
+						_log_event("The kin answer — [color=#f2e6c8]%d[/color] charge from the draw pile." % mk_n)
+						_refresh_hand_affordability()
+			"hand_discount":
+				# The Quartermaster (HS Emperor Thaurissan): everything currently
+				# held is requisitioned cheaper — permanent for this fight. Cards
+				# drawn later pay full price.
+				if not is_enemy:
+					var qd_v: int = int(floop_data.get("value", 1))
+					var qd_n := 0
+					for qd_c in _hand:
+						if not is_instance_valid(qd_c) or CardDB.is_curse(qd_c.card_id):
+							continue
+						if int(qd_c.card_data.get("cost", 0)) <= 0:
+							continue
+						qd_c.card_data["cost"] = maxi(0,
+							int(qd_c.card_data.get("cost", 0)) - qd_v)
+						qd_n += 1
+					if qd_n > 0:
+						_show_info("The quartermaster requisitions — %d cards cost %d less." % [qd_n, qd_v])
+						_log_event("The quartermaster's ledger opens — [color=#f2e6c8]%d[/color] held cards cost %d less this fight." % [qd_n, qd_v])
+						_refresh_hand_affordability()
 			"vanguard_split":
 				# Vanguard: placement is the decision. Played to the FRONT row it
-				# gains +value ATK for the fight; played to the BACK row it draws a
+				# gains +value ATK for the round; played to the BACK row it draws a
 				# card (the watcher reports in). current_row is set at placement.
 				if card.current_row == ROW_FRONT:
-					card.current_atk += int(floop_data.value)
+					card.temp_atk_buff += int(floop_data.value)
 					card.update_stat_display()
 					spawn_floating_number(card.global_position \
 						+ Vector2(card.size.x * card.scale.x * 0.5, -10),
@@ -2224,8 +2643,13 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 					card.current_hp = mini(card.current_hp + floop_data.value, card.card_data.hp)
 					card.update_stat_display()
 			"execute":
+				# Assassin (2026-07-10): unconditional — the HP-threshold gate
+				# made it dead vs anything worth killing. value <= 0 means "no
+				# threshold"; a positive value keeps the old conditional form
+				# for any future card that wants it.
 				var opp = get_opposing_card(lane_idx, is_enemy)
-				if opp != null and opp.current_hp <= floop_data.value:
+				var exe_cap: int = int(floop_data.get("value", 0))
+				if opp != null and (exe_cap <= 0 or opp.current_hp <= exe_cap):
 					opp.take_damage(999)
 			"slay_draw":
 				var opp = get_opposing_card(lane_idx, is_enemy)
@@ -2260,11 +2684,9 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 				card.current_hp = mini(card.current_hp + floop_data.value, card.card_data.hp)
 				card.update_stat_display()
 			"heal_adjacent":
-				for adj_lane in [lane_idx - 1, lane_idx + 1]:
-					if adj_lane >= 0 and adj_lane < 4 and friendly_field[adj_lane] != null:
-						var adj_c = friendly_field[adj_lane]
-						adj_c.current_hp = mini(adj_c.current_hp + floop_data.value, adj_c.card_data.hp)
-						adj_c.update_stat_display()
+				for adj_c in _adjacent_creatures(is_enemy, my_row, lane_idx):
+					adj_c.current_hp = mini(adj_c.current_hp + floop_data.value, adj_c.card_data.hp)
+					adj_c.update_stat_display()
 			"heal_all_friendly":
 				for c in all_friendly:
 					c.current_hp = mini(c.current_hp + floop_data.value, c.card_data.hp)
@@ -2281,10 +2703,7 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 					c.update_stat_display()
 			"buff_target_hp":
 				# Buff random adjacent friendly (simplified from targeted)
-				var adj: Array = []
-				for adj_lane in [lane_idx - 1, lane_idx + 1]:
-					if adj_lane >= 0 and adj_lane < 4 and friendly_field[adj_lane] != null:
-						adj.append(friendly_field[adj_lane])
+				var adj: Array = _adjacent_creatures(is_enemy, my_row, lane_idx)
 				if adj.size() > 0:
 					var target = adj[randi() % adj.size()]
 					target.card_data.hp += floop_data.value
@@ -2307,33 +2726,27 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 						c.card_data.keywords.append("armored")
 						c.set_meta("temp_armored", true)
 			"shield_adjacent":
-				for adj_lane in [lane_idx - 1, lane_idx + 1]:
-					if adj_lane >= 0 and adj_lane < 4 and friendly_field[adj_lane] != null:
-						var adj_c = friendly_field[adj_lane]
-						if "armored" not in adj_c.card_data.keywords:
-							adj_c.card_data.keywords.append("armored")
-							adj_c.set_meta("temp_armored", true)
+				for adj_c in _adjacent_creatures(is_enemy, my_row, lane_idx):
+					if "armored" not in adj_c.card_data.keywords:
+						adj_c.card_data.keywords.append("armored")
+						adj_c.set_meta("temp_armored", true)
 			"grant_shield_adjacent":
-				for adj_lane in [lane_idx - 1, lane_idx + 1]:
-					if adj_lane >= 0 and adj_lane < 4 and friendly_field[adj_lane] != null:
-						var adj_c = friendly_field[adj_lane]
-						if not adj_c.state.has_shield:
-							adj_c.state.has_shield = true
-							if adj_c.has_method("_spawn_keyword_chip"):
-								adj_c._spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
+				for adj_c in _adjacent_creatures(is_enemy, my_row, lane_idx):
+					if not adj_c.state.has_shield:
+						adj_c.state.has_shield = true
+						if adj_c.has_method("_spawn_keyword_chip"):
+							adj_c._spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
 			"buff_thorns":
 				card.set_meta("bonus_thorns", card.get_meta("bonus_thorns", 0) + floop_data.value)
 			"grant_thorns_adjacent":
-				for adj_lane in [lane_idx - 1, lane_idx + 1]:
-					if adj_lane >= 0 and adj_lane < 4 and friendly_field[adj_lane] != null:
-						var adj_c = friendly_field[adj_lane]
-						if "thorns" not in adj_c.card_data.keywords:
-							adj_c.card_data.keywords.append("thorns")
-							adj_c.set_meta("temp_thorns", true)
+				for adj_c in _adjacent_creatures(is_enemy, my_row, lane_idx):
+					if "thorns" not in adj_c.card_data.keywords:
+						adj_c.card_data.keywords.append("thorns")
+						adj_c.set_meta("temp_thorns", true)
 			"redirect_adjacent":
 				card.set_meta("redirecting", true)
 			"stun_opposing":
-				var opp = get_opposing_card(lane_idx, not is_enemy)
+				var opp = get_opposing_card(lane_idx, is_enemy)
 				if opp != null:
 					opp.state.stunned = true
 
@@ -2370,7 +2783,10 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 								c.get_parent().remove_child(c)
 							c.queue_free()
 			"raise_dead":
-				if not is_enemy and _player_discard_pile.size() > 0:
+				# Hand-full guard mirrors _look_top_pick: erasing the entry while
+				# _draw_card no-ops would destroy the card for the fight.
+				if not is_enemy and _player_discard_pile.size() > 0 \
+						and _hand.size() < MAX_HAND_SIZE:
 					var creature_indices: Array = []
 					for idx in _player_discard_pile:
 						var cdata = CardDB.get_card_data(_entry_id(idx))
@@ -2380,6 +2796,26 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 						var pick = creature_indices[randi() % creature_indices.size()]
 						_player_discard_pile.erase(pick)
 						_draw_card(pick)
+			"fetch_spell":
+				# Fetch Hound: the newest spell in YOUR discard comes back to hand;
+				# no spell buried (or hand full) = draw 1 instead. Hand-full guard
+				# mirrors raise_dead — erasing the entry while _draw_card no-ops
+				# would destroy the card for the fight. Player-only: solo enemies
+				# have no piles, and skirmish keeps the card out via
+				# SkirmishState.SKIRMISH_DENYLIST (caster-local pile read).
+				if not is_enemy:
+					var fetched := false
+					if _hand.size() < MAX_HAND_SIZE:
+						for fi in range(_player_discard_pile.size() - 1, -1, -1):
+							var fentry = _player_discard_pile[fi]
+							if CardDB.get_card_data(_entry_id(fentry)).get("type", "") == "spell" \
+									and not CardDB.is_curse(_entry_id(fentry)):
+								_player_discard_pile.remove_at(fi)
+								_draw_card(fentry)
+								fetched = true
+								break
+					if not fetched:
+						draw_one()
 			"gain_gold":
 				if not is_enemy:
 					RunState.gain_gold(floop_data.value)
@@ -2388,23 +2824,11 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 				# over the wire in skirmish), not always the local player.
 				_battlecry_gain_command(is_enemy, int(floop_data.value))
 			"buff_adjacent_atk":
-				# 4x4: "adjacent" = same row ±1 lane PLUS the column-mate in the
-				# other row (the creature directly behind / in front of this one).
-				# The old code only walked the flooper's own row, so Sprite buffed
-				# its left/right neighbour but silently missed the friend stacked
-				# behind it.
-				var other_row: int = ROW_BACK if my_row == ROW_FRONT else ROW_FRONT
-				var other_row_arr = _row_array(is_enemy, other_row)
-				for adj_lane in [lane_idx - 1, lane_idx + 1]:
-					if adj_lane >= 0 and adj_lane < LANES_PER_ROW:
-						var adj = friendly_field[adj_lane]
-						if adj != null:
-							adj.temp_atk_buff += floop_data.value
-							adj.update_stat_display()
-				var column_mate = other_row_arr[lane_idx]
-				if column_mate != null:
-					column_mate.temp_atk_buff += floop_data.value
-					column_mate.update_stat_display()
+				# Canonical adjacency (row ±1 + column-mate) — Sprite was the rule's
+				# first citizen; every "adjacent" verb now shares _adjacent_creatures.
+				for adj in _adjacent_creatures(is_enemy, my_row, lane_idx):
+					adj.temp_atk_buff += floop_data.value
+					adj.update_stat_display()
 			"discount_next":
 				if not is_enemy:
 					_card_cost_discount += int(floop_data.get("value", 1))
@@ -2418,7 +2842,7 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 							_hand.erase(hc)
 							if hc.get_parent() != null:
 								hc.get_parent().remove_child(hc)
-							_exhaust_pile.append(hc.card_id)
+							_exhaust_pile.append(_pile_entry(hc.card_id, hc.deck_uid))
 							hc.queue_free()
 							var se_grow: int = int(floop_data.get("value", 2))
 							card.current_atk += se_grow
@@ -2493,26 +2917,23 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 			"kill_adjacent_summon":
 				if is_enemy:
 					# Enemy: random pick (no UI for enemy decisions).
-					var adj: Array[int] = []
-					if lane_idx > 0 and friendly_field[lane_idx - 1] != null:
-						adj.append(lane_idx - 1)
-					if lane_idx < 3 and friendly_field[lane_idx + 1] != null:
-						adj.append(lane_idx + 1)
+					var adj: Array = _adjacent_creatures(is_enemy, my_row, lane_idx)
 					if adj.size() > 0:
-						var target_lane = adj[randi() % adj.size()]
-						var victim = friendly_field[target_lane]
-						if victim != null:
-							victim.take_damage(999)
-						summon_token(floop_data.atk, floop_data.hp, target_lane, is_enemy)
+						var victim = adj[randi() % adj.size()]
+						var vlane: int = victim.current_lane
+						var vrow: int = victim.current_row
+						victim.take_damage(999)
+						summon_token(floop_data.atk, floop_data.hp, vlane, is_enemy, vrow)
 				else:
 					var victim = await _pick_adjacent_friendly(lane_idx, my_row,
 						"Necromancer — click an adjacent friendly to kill")
 					if victim != null and is_instance_valid(victim):
 						var vlane: int = victim.current_lane
+						var vrow: int = victim.current_row
 						victim.take_damage(999)
-						summon_token(floop_data.atk, floop_data.hp, vlane, is_enemy)
+						summon_token(floop_data.atk, floop_data.hp, vlane, is_enemy, vrow)
 			"steal_atk":
-				var opp = get_opposing_card(lane_idx, not is_enemy)
+				var opp = get_opposing_card(lane_idx, is_enemy)
 				# Gate the drain on effective ATK so a 0-base creature buffed
 				# above 0 (War Cry, Hexblade, etc.) still counts as drainable.
 				# The actual subtraction still applies to base current_atk
@@ -2529,20 +2950,14 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 				# the devour gains. Mirrors the enemy "devour" ability path
 				# (see _resolve_enemy_ability) which already does this right.
 				if is_enemy:
-					var adj: Array[int] = []
-					if lane_idx > 0 and friendly_field[lane_idx - 1] != null:
-						adj.append(lane_idx - 1)
-					if lane_idx < 3 and friendly_field[lane_idx + 1] != null:
-						adj.append(lane_idx + 1)
+					var adj: Array = _adjacent_creatures(is_enemy, my_row, lane_idx)
 					if adj.size() > 0:
-						var target_lane = adj[randi() % adj.size()]
-						var victim = friendly_field[target_lane]
-						if victim != null:
-							card.current_atk += victim.effective_atk()
-							card.current_hp += victim.current_hp
-							card.card_data.hp += victim.current_hp
-							card.update_stat_display()
-							victim.take_damage(999)
+						var victim = adj[randi() % adj.size()]
+						card.current_atk += victim.effective_atk()
+						card.current_hp += victim.current_hp
+						card.card_data.hp += victim.current_hp
+						card.update_stat_display()
+						victim.take_damage(999)
 				else:
 					var victim = await _pick_adjacent_friendly(lane_idx, my_row,
 						"Corpse Eater — click an adjacent friendly to devour")
@@ -2553,16 +2968,16 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 						card.update_stat_display()
 						victim.take_damage(999)
 			"blood_sacrifice":
-				# Kill self, give adjacent +X ATK permanent. Counts as a real
+				# Kill self, give adjacent +X ATK for the round. Counts as a real
 				# sacrifice — triggers Bone Pile, Butcher's Cleaver, ON_PLAYER_SACRIFICE.
-				for adj_lane in [lane_idx - 1, lane_idx + 1]:
-					if adj_lane >= 0 and adj_lane < 4 and friendly_field[adj_lane] != null:
-						friendly_field[adj_lane].current_atk += floop_data.value
-						friendly_field[adj_lane].update_stat_display()
+				for adj_c in _adjacent_creatures(is_enemy, my_row, lane_idx):
+					adj_c.temp_atk_buff += floop_data.value
+					adj_c.update_stat_display()
 				if not is_enemy:
 					_trigger_player_sacrifice(card)
-					# Blood Pyre cantrips: draw 1 so the sacrifice replaces its own body.
-					draw_one()
+				# Blood Pyre cantrips: draw 1 so the sacrifice replaces its own body.
+				# Routed to the OWNER so a client-owned pyre in skirmish draws too.
+				_battlecry_draw(is_enemy, 1)
 				card.take_damage(999)
 
 
@@ -2735,34 +3150,74 @@ func _run_doubled_hour_snipe() -> void:
 		await _resolve_ranged_attacks()
 
 
-## Twinblade (attacks_twice): after the main clash (and any Doubled Hour), each
-## creature with the passive that already swung gets its attack back and swings
-## once more. Deaths held so second swings resolve simultaneously. Shared by
-## solo _do_combat and the net clash, same as the Doubled Hour passes.
-func _run_twinblade_swings(player_front_empty: Array[bool],
-		enemy_front_empty: Array[bool]) -> void:
-	var any := false
+## Twinblade (attacks_twice, reworked 2026-07-13 "Strikes its lane and an
+## adjacent lane each round"): after the main clash (and any Doubled Hour), each
+## creature with the passive that already swung delivers its FLANK BLOW — one
+## direct strike into an adjacent column (front row before back; both adjacent
+## columns open = the blow carries to the face, the same grammar as attacking
+## down an empty lane). Deaths held so flank blows resolve simultaneously.
+## Shared by solo _do_combat and the net clash, same as the Doubled Hour passes.
+func _run_twinblade_swings(_player_front_empty: Array[bool],
+		_enemy_front_empty: Array[bool]) -> void:
+	# Collect the EXACT set of twinblades that just swung — never re-scan the
+	# field by has_attacked_this_turn in the delivery loop. In a one-directional
+	# net pass only the attacking side's flags are set, so a flag-scan would hand
+	# the DEFENDER's Twinblade a free flank blow on the opponent's turn (it sits
+	# at has_attacked_this_turn == false the whole pass). Un-flag them so the
+	# flank blow's own strike path can re-arm and land.
+	var swung: Array = []
 	for tb_enemy in [false, true]:
 		for c in _all_friendly(tb_enemy):
 			if is_instance_valid(c) and c.card_data.get("passive", "") == "attacks_twice" \
 					and c.has_attacked_this_turn \
 					and not c.state.stunned and not c.state.is_frozen:
 				c.has_attacked_this_turn = false
-				any = true
-	if not any:
+				swung.append(c)
+	if swung.is_empty():
 		return
 	Card2D.defer_deaths = true
 	for tb_enemy in [false, true]:
 		for row in [ROW_FRONT, ROW_BACK]:
 			for lane_idx in range(LANES_PER_ROW):
 				var c = _row_array(tb_enemy, row)[lane_idx]
-				if c != null and is_instance_valid(c) \
-						and c.card_data.get("passive", "") == "attacks_twice" \
+				if c != null and is_instance_valid(c) and c in swung \
 						and not c.has_attacked_this_turn:
-					await _resolve_column_attack(lane_idx, row, tb_enemy,
-						player_front_empty if tb_enemy else enemy_front_empty)
+					await _twinblade_flank_blow(c, lane_idx, tb_enemy)
 	Card2D.defer_deaths = false
 	_cleanup_dead()
+
+
+## The flank blow's mark: scan the opposing columns adjacent to the Twinblade's
+## own (lane-1 before lane+1), front row before back — the first living body
+## found eats the strike. Null = both adjacent columns are open.
+func _twinblade_flank_target(lane_idx: int, tb_enemy: bool) -> Control:
+	var opp_is_enemy := not tb_enemy
+	for row in [ROW_FRONT, ROW_BACK]:
+		for adj_lane in [lane_idx - 1, lane_idx + 1]:
+			if adj_lane < 0 or adj_lane >= LANES_PER_ROW:
+				continue
+			var t = _row_array(opp_is_enemy, row)[adj_lane]
+			if t != null and is_instance_valid(t) and t.current_hp > 0:
+				return t
+	return null
+
+
+func _twinblade_flank_blow(card: Control, lane_idx: int, tb_enemy: bool) -> void:
+	if not card.can_attack():
+		card.has_attacked_this_turn = true
+		return
+	var target := _twinblade_flank_target(lane_idx, tb_enemy)
+	if target == null:
+		# Both adjacent columns open — the blow carries to the face
+		# (_creature_hits_face marks the swing spent + runs the riders).
+		await _creature_hits_face(card, lane_idx, tb_enemy)
+		return
+	# Full shared strike (thorns, on-hit passives, riders, net beats). The lane
+	# passed is the DEFENDER's column so Piercing overflow punches down the
+	# struck lane, not the Twinblade's own.
+	var t_pos := _find_creature_position(target)
+	var strike_lane: int = int(t_pos.get("lane", lane_idx)) if not t_pos.is_empty() else lane_idx
+	await _creature_attacks_creature(card, target, strike_lane, tb_enemy)
 
 
 func _resolve_column_attack(lane_idx: int, row: int, is_enemy: bool,
@@ -2862,7 +3317,8 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool,
 			atk += 2
 		if opponent.get_meta("enrage_vulnerable", false):
 			atk += 1
-		_play_attack_tracer(_card_center(card), _card_center(opponent), is_enemy)
+		_play_attack_tracer(_card_center(card), _card_center(opponent),
+			is_enemy, float(atk), atk >= HEAVY_HIT_DAMAGE)
 		if opponent.has_method("play_hit_recoil"):
 			opponent.play_hit_recoil(is_enemy)
 		_apply_thorns(opponent, card, is_enemy)
@@ -2871,7 +3327,7 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool,
 			% [_log_card_ref(card), _log_card_ref(opponent), atk],
 			_log_data(card), _log_side(card))
 		opponent.take_damage(atk)
-		var swift_dealt: bool = opponent.current_hp < swift_hp_before
+		var swift_dmg: int = maxi(0, swift_hp_before - maxi(opponent.current_hp, 0))
 		# Poison: swift attacker with Poison kills defender on any hit.
 		# Virulence (Unclean Blessing) makes the whole side's attacks poisonous.
 		if opponent.current_hp > 0 and atk > 0 \
@@ -2879,6 +3335,7 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool,
 			opponent.current_hp = 0
 			opponent.update_stat_display()
 			spawn_keyword_callout_kw(opponent, "poison")
+			_apply_toxin_salve(not is_enemy)
 			if not Card2D.defer_deaths:
 				opponent.try_die()
 		_net_log_hit(card, opponent, swift_hp_before)
@@ -2888,8 +3345,8 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool,
 				_card_center(opponent) - _card_center(card), float(atk), was_lethal)
 		if was_lethal and (card.has_keyword("piercing") or (is_enemy and _has_encounter_passive_keyword(card, "piercing")) or card.get_meta("inspire_piercing", false) or (not is_enemy and _has_relic("piercing_crown"))):
 			_apply_piercing_overflow(card, opponent, lane_idx, is_enemy)
-		# Keyword riders: Lifelink (heal on damage) + Rampage (+ATK on kill).
-		_apply_combat_strike_riders(card, swift_dealt, was_lethal, is_enemy)
+		# Keyword riders: Lifesteal (heal = damage dealt) + Rampage (+ATK on kill).
+		_apply_combat_strike_riders(card, swift_dmg, was_lethal, is_enemy)
 		if was_lethal:
 			screen_shake(6.0)
 			await _short_pause(HITSTOP_BEAT)
@@ -2902,23 +3359,21 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool,
 
 
 func _apply_cleave_splash(attacker: Control, lane_idx: int, is_enemy: bool) -> void:
-	# Cleave Hound: after the main hit, deal 1 to each adjacent opposing
-	# creature. Hits front-row if present, otherwise back-row. Pure splash;
+	# Cleave Hound: after the main hit, deal 1 to each creature adjacent to the
+	# struck seat (canonical adjacency: its row ±1 + its column-mate — so the
+	# axe now clips the body stacked behind a struck front-liner). The seat is
+	# the column's front if occupied, else the back (matching where the main
+	# hit landed; a face hit anchors on the empty front seat). Pure splash;
 	# doesn't trigger thorns/poison/piercing.
 	if not is_instance_valid(attacker):
 		return
 	var opp_is_enemy = not is_enemy
-	for adj in [lane_idx - 1, lane_idx + 1]:
-		if adj < 0 or adj >= LANES_PER_ROW:
-			continue
-		var opp_front = _row_array(opp_is_enemy, ROW_FRONT)[adj]
-		var opp_back = _row_array(opp_is_enemy, ROW_BACK)[adj]
-		var target: Control = null
-		if opp_front != null and opp_front.current_hp > 0:
-			target = opp_front
-		elif opp_back != null and opp_back.current_hp > 0:
-			target = opp_back
-		if target != null:
+	var struck_row: int = ROW_FRONT
+	if _row_array(opp_is_enemy, ROW_FRONT)[lane_idx] == null \
+			and _row_array(opp_is_enemy, ROW_BACK)[lane_idx] != null:
+		struck_row = ROW_BACK
+	for target in _adjacent_creatures(opp_is_enemy, struck_row, lane_idx):
+		if target.current_hp > 0:
 			var splash_hp_before: int = int(target.current_hp)
 			target.take_damage(1)
 			_net_log_hit(attacker, target, splash_hp_before)
@@ -3032,30 +3487,69 @@ func _detonate_doom(card: Control) -> void:
 		card.take_damage(999)
 
 
-func _apply_combat_strike_riders(attacker: Control, dealt_damage: bool, defender_was_killed: bool, attacker_is_enemy: bool) -> void:
+## Anvil archetype (2026-07-13): "want to be hit" bodies that turn a SURVIVED
+## strike into value. Called wherever a defender is struck and lives — the same
+## sites as royal_guard / rage_on_hit (column melee + sniper). These cards are
+## skirmish-denylisted for now, so the enemy-side branches only matter if/when
+## they get a net port; solo enemy decks never carry the passives.
+func _apply_struck_survivor_passives(defender: Control, attacker_is_enemy: bool) -> void:
+	if defender == null or not is_instance_valid(defender) or defender.current_hp <= 0:
+		return
+	var d_is_enemy: bool = not attacker_is_enemy   # whose creature the defender is
+	var up: bool = bool(defender.card_data.get("is_upgraded", false))
+	var anchor: Vector2 = defender.global_position \
+		+ Vector2(defender.size.x * defender.scale.x * 0.5, -12)
+	match String(defender.card_data.get("passive", "")):
+		"strike_burn":   # Bulwark — the rampart bleeds whoever throws itself at it
+			var n: int = 2 if up else 1
+			if d_is_enemy: damage_player_hero(n)
+			else: damage_enemy_hero(n)
+			spawn_trigger_callout(anchor, "BULWARK %d" % n, false, int(defender.entity_id))
+		"anvil_heal":    # a wall that holds patches the warband
+			var h: int = 2 if up else 1
+			if not d_is_enemy:
+				player_hp = mini(player_hp + h, player_max_hp)
+				_update_hud()
+			elif _is_net():
+				_net_heal_hero(true, h)
+				_update_hud()
+			spawn_trigger_callout(anchor, "+%d HP" % h, false, int(defender.entity_id))
+		"anvil_spawn":   # splinters fly — a chump musters when the stockade holds
+			var seats: Array = _adjacent_empty_seats(d_is_enemy, defender.current_row, defender.current_lane)
+			if seats.size() > 0:
+				summon_token(1, 1, seats[0].lane, d_is_enemy, seats[0].row)
+				spawn_trigger_callout(anchor, "SPLINTER", false, int(defender.entity_id))
+	# Bastion Lord (bulwark_lord): ANY friendly struck survivor adds a volley — 1
+	# to the attacker's hero — so a whole defensive line becomes a slow clock.
+	if _has_passive_on_side("bulwark_lord", d_is_enemy):
+		if d_is_enemy: damage_player_hero(1)
+		else: damage_enemy_hero(1)
+
+
+func _apply_combat_strike_riders(attacker: Control, damage_dealt: int, defender_was_killed: bool, attacker_is_enemy: bool) -> void:
 	# Shared post-strike rider for every combat-damage path (column / swift /
-	# ranged / hydra / face). Keeps Rampage + Lifelink behaving identically no
+	# ranged / hydra / face). Keeps Rampage + Lifesteal behaving identically no
 	# matter which attack routine landed the hit.
-	#   dealt_damage  — this strike landed > 0 damage (Lifelink heals).
+	#   damage_dealt  — HP this strike actually removed (Lifesteal heals for it:
+	#                   a Shield absorbing the hit means 0, Armored trims it,
+	#                   overkill is capped to what the target really lost).
 	#   defender_was_killed — the target died to this strike (Rampage grows).
 	if attacker == null or not is_instance_valid(attacker):
 		return
-	# Lifelink — heal the PLAYER once per strike (not per damage point) whenever
-	# a friendly creature deals combat damage. Generic, reusable version of the
-	# Vampire Lord passive (which also bundles +ATK and is kill-gated).
-	if dealt_damage and not attacker_is_enemy and attacker.has_keyword("lifelink") and player_hp < player_max_hp:
-		var ll: int = int(attacker.card_data.get("lifelink", 1))
-		if ll > 0:
-			player_hp = mini(player_hp + ll, player_max_hp)
-			_show_lifelink_heal(ll)
+	# Lifesteal — heal the PLAYER for the damage the strike actually dealt (the
+	# HP the target really lost, NOT the attacker's printed ATK). Generic,
+	# reusable version of the Vampire Lord passive (which is kill-gated).
+	if damage_dealt > 0 and not attacker_is_enemy and attacker.has_keyword("lifelink") and player_hp < player_max_hp:
+		var healed: int = mini(player_hp + damage_dealt, player_max_hp) - player_hp
+		if healed > 0:
+			player_hp += healed
+			_show_lifelink_heal(healed)
 			_stoke_acolytes(false)
 			_update_hud()
-	# Net mirror: the CLIENT's Lifelink heals the client's hero (the host's enemy hero).
-	elif dealt_damage and attacker_is_enemy and _is_net() and attacker.has_keyword("lifelink"):
-		var llc: int = int(attacker.card_data.get("lifelink", 1))
-		if llc > 0:
-			_net_heal_hero(true, llc)
-			_update_hud()
+	# Net mirror: the CLIENT's Lifesteal heals the client's hero (the host's enemy hero).
+	elif damage_dealt > 0 and attacker_is_enemy and _is_net() and attacker.has_keyword("lifelink"):
+		_net_heal_hero(true, damage_dealt)
+		_update_hud()
 	# Rampage — permanent +ATK on every combat kill, for the rest of the fight.
 	if defender_was_killed and attacker.has_keyword("rampage"):
 		var amt: int = int(attacker.card_data.get("rampage", 1))
@@ -3067,17 +3561,22 @@ func _apply_combat_strike_riders(attacker: Control, dealt_damage: bool, defender
 			attacker.update_stat_display()
 			var rp_pos := attacker.global_position + Vector2(attacker.size.x * attacker.scale.x * 0.5, -10)
 			spawn_floating_number(rp_pos, "RAMPAGE +%d" % amt, Color(1.0, 0.62, 0.20), false)
-	# Headhunter (draw_on_slay): a confirmed kill reports back — the OWNER draws
-	# 1 (2 upgraded). Rides every combat path (swift / column / ranged / doubled);
-	# _battlecry_draw routes the draw to the right hand in net and no-ops for
-	# solo enemies (no hand to draw to).
-	if defender_was_killed and attacker.card_data.get("passive", "") == "draw_on_slay":
-		var hh_n: int = 2 if bool(attacker.card_data.get("is_upgraded", false)) else 1
-		_battlecry_draw(attacker_is_enemy, hh_n)
+	# Headhunter (slay_heal): a confirmed kill feeds the warband — the OWNER's
+	# hero heals 2 (3 upgraded). Rides every combat path (swift / column /
+	# ranged / doubled). Same owner-routing as Lifesteal above: player heals
+	# locally, the net client's hero heals via _net_heal_hero; solo enemies
+	# don't field it.
+	if defender_was_killed and attacker.card_data.get("passive", "") == "slay_heal":
+		var hh_n: int = 3 if bool(attacker.card_data.get("is_upgraded", false)) else 2
+		if not attacker_is_enemy:
+			player_hp = mini(player_hp + hh_n, player_max_hp)
+			_update_hud()
+		elif _is_net():
+			_net_heal_hero(true, hh_n)
+			_update_hud()
 		spawn_trigger_callout(attacker.global_position \
 			+ Vector2(attacker.size.x * attacker.scale.x * 0.5, -12),
-			"SLAY — DRAW %d" % hh_n if hh_n > 1 else "SLAY — DRAW",
-			false, int(attacker.entity_id))
+			"SLAY — HEAL %d" % hh_n, false, int(attacker.entity_id))
 	if defender_was_killed and not attacker_is_enemy and not _is_net() \
 			and attacker.card_data.get("passive", "") == "slay_gold":
 		var sg_n: int = int(attacker.card_data.get("slay_gold", 5))
@@ -3183,7 +3682,8 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 		defender_side, defender.card_data.name, defender.current_hp, defender.card_data.hp,
 		lane_idx, atk, maxi(0, defender.current_hp - atk)])
 	# Impact lands: streak from attacker to target.
-	_play_attack_tracer(_card_center(attacker), _card_center(defender), attacker_is_enemy)
+	_play_attack_tracer(_card_center(attacker), _card_center(defender),
+		attacker_is_enemy, float(atk), atk >= HEAVY_HIT_DAMAGE)
 	var hp_before: int = defender.current_hp
 	# Cross-Blitz mutual trade: if this defender is about to counter (see
 	# _apply_mutual_retaliation), make it LUNGE back into the attacker instead of just
@@ -3201,9 +3701,9 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 		% [_log_card_ref(attacker), _log_card_ref(defender), atk],
 		_log_data(attacker), _log_side(attacker))
 	defender.take_damage(atk)
-	# Did this strike actually remove HP? (A Shield absorbs the whole hit, so
-	# atk > 0 but no damage was dealt — Lifelink shouldn't trigger on that.)
-	var strike_dealt_damage: bool = defender.current_hp < hp_before
+	# HP this strike actually removed (a Shield absorbing the whole hit means 0;
+	# overkill is capped — Lifesteal heals for what the defender really lost).
+	var strike_damage: int = maxi(0, hp_before - maxi(defender.current_hp, 0))
 	attacker.has_attacked_this_turn = true
 	# Poison: if attacker has Poison and dealt damage, defender dies regardless
 	# of remaining HP. Shield absorbing the hit means no damage was dealt.
@@ -3213,6 +3713,7 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 		defender.current_hp = 0
 		defender.update_stat_display()
 		spawn_keyword_callout_kw(defender, "poison")
+		_apply_toxin_salve(not attacker_is_enemy)
 		if not Card2D.defer_deaths:
 			defender.try_die()
 	_net_log_hit(attacker, defender, hp_before)
@@ -3230,7 +3731,7 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 	# sound inside take_damage (Card2D._flash_hit plays "hit_creature") — a cue
 	# here too would double every ordinary strike. "creature_death" falls back
 	# to "death" until bespoke clips land (AudioBank.SFX_FALLBACKS).
-	if strike_dealt_damage and was_lethal and not defender._dead:
+	if strike_damage > 0 and was_lethal and not defender._dead:
 		defender.death_cue_played = true
 		AudioBank.play_sfx("creature_death", 0.05)
 
@@ -3247,29 +3748,32 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 		defender.current_atk += rage_gain
 		defender.update_stat_display()
 
+	# Anvil archetype: bulwark burn / heal / splinter, plus the Bastion Lord volley.
+	if atk > 0:
+		_apply_struck_survivor_passives(defender, attacker_is_enemy)
+
+	# Pit Brawler: a struck survivor calls a fresh copy into an adjacent seat.
+	if defender.current_hp > 0 and defender.card_data.get("passive", "") == "pit_brawler" and atk > 0:
+		_pit_brawler_split(defender)
+
 	# Bodkin Points: every killing blow by a player creature punches through the
 	# column, as if Piercing (rides the same overflow machinery + callout).
 	if defender.current_hp <= 0 and (attacker.has_keyword("piercing") or (attacker_is_enemy and _has_encounter_passive_keyword(attacker, "piercing")) or attacker.get_meta("inspire_piercing", false) or (not attacker_is_enemy and _has_relic("piercing_crown"))):
 		_apply_piercing_overflow(attacker, defender, lane_idx, attacker_is_enemy)
 
-	# Vampire Lord passive: heal 2 and +1 ATK on kill (+2 ATK if upgraded). The heal
-	# goes to the attacker's OWN hero — solo only fires for the player; net mirrors it
-	# so a Player-2 Vampire Lord heals Player 2 (the host's enemy hero).
+	# Vampire Lord passive (reworked 2026-07-10): Slay → it gains +1/+1 this
+	# fight (+2/+2 forged). The old hero-heal moved into the printed Lifesteal
+	# keyword, so the passive is side-agnostic — a net Player-2 lord grows the
+	# same way without a special branch.
 	if attacker.card_data.get("passive", "") == "vampire_lord" and defender.current_hp <= 0:
 		var vamp_gain: int = 2 if bool(attacker.card_data.get("is_upgraded", false)) else 1
-		if not attacker_is_enemy:
-			if player_hp < player_max_hp:
-				player_hp = mini(player_hp + 2, player_max_hp)
-				_stoke_acolytes(false)
-			attacker.current_atk += vamp_gain
-			attacker.update_stat_display()
-		elif _is_net():
-			enemy_hp = mini(enemy_hp + 2, SkirmishState.START_HP)
-			attacker.current_atk += vamp_gain
-			attacker.update_stat_display()
+		attacker.current_atk += vamp_gain
+		attacker.card_data.hp += vamp_gain
+		attacker.current_hp += vamp_gain
+		attacker.update_stat_display()
 
-	# Keyword riders: Lifelink (heal on damage) + Rampage (+ATK on kill).
-	_apply_combat_strike_riders(attacker, strike_dealt_damage, was_lethal, attacker_is_enemy)
+	# Keyword riders: Lifesteal (heal = damage dealt) + Rampage (+ATK on kill).
+	_apply_combat_strike_riders(attacker, strike_damage, was_lethal, attacker_is_enemy)
 
 	# Cross-Blitz mutual trade: in the MP one-directional clash the just-struck
 	# defender fires its ATK straight back at the attacker, so an even fight kills
@@ -3335,7 +3839,8 @@ func _apply_mutual_retaliation(attacker: Control, defender: Control, attacker_is
 	# compounds every trade). take_damage() below already flashes the struck attacker
 	# (_flash_hit / _mark_mortally_struck), so the counter still reads without a
 	# second position tween. The defender's own bite-back is shown by its lunge (above).
-	_play_attack_tracer(_card_center(defender), _card_center(attacker), defender_is_enemy)
+	_play_attack_tracer(_card_center(defender), _card_center(attacker),
+		defender_is_enemy, float(retal), retal >= HEAVY_HIT_DAMAGE)
 	var a_hp_before: int = attacker.current_hp
 	_log_event("%s strikes back at %s for [color=#f2e6c8]%d[/color]." \
 		% [_log_card_ref(defender), _log_card_ref(attacker), retal],
@@ -3348,6 +3853,7 @@ func _apply_mutual_retaliation(attacker: Control, defender: Control, attacker_is
 		attacker.current_hp = 0
 		attacker.update_stat_display()
 		spawn_keyword_callout_kw(attacker, "poison")
+		_apply_toxin_salve(not defender_is_enemy)
 		if not Card2D.defer_deaths:
 			attacker.try_die()
 	# Log the counter as a strike from defender→attacker so the client replays it
@@ -3374,28 +3880,34 @@ func _creature_hits_face(card: Control, lane_idx: int, is_enemy: bool) -> void:
 	if not is_instance_valid(card):
 		return
 	var atk = _effective_attack(card, lane_idx, is_enemy)
-	var face_dealt: bool = false
+	var face_dmg: int = 0
 	if is_enemy:
 		if _encounter_passive == "harpy_swift_face" and card.has_keyword("swift"):
 			atk += 1
 		var reduction = _get_wall_reduction(lane_idx, false)
 		atk = maxi(0, atk - reduction)
 		if atk > 0:
+			_play_face_strike_vfx(card, lane_idx, is_enemy, atk)
+			_net_arm_face_hit_source(card, lane_idx, atk)
 			damage_player_hero(atk, false)
-			face_dealt = true
+			_net_clear_face_hit_source()
+			face_dmg = atk
 	else:
 		# Host/player attacker → defender is the enemy/client. In net the CLIENT's walls
 		# blunt the hit (solo enemies have no wall passives, so this is a no-op there).
 		if _is_net():
 			atk = maxi(0, atk - _get_wall_reduction(lane_idx, true))
 		if atk > 0:
+			_play_face_strike_vfx(card, lane_idx, is_enemy, atk)
+			_net_arm_face_hit_source(card, lane_idx, atk)
 			damage_enemy_hero(atk, false)
-		face_dealt = atk > 0
+			_net_clear_face_hit_source()
+		face_dmg = atk
 
 	card.has_attacked_this_turn = true
-	# Keyword riders: Lifelink heals when this creature lands face damage (no
-	# defender to kill, so Rampage never fires here).
-	_apply_combat_strike_riders(card, face_dealt, false, is_enemy)
+	# Keyword riders: Lifesteal heals for the face damage landed (no defender
+	# to kill, so Rampage never fires here).
+	_apply_combat_strike_riders(card, face_dmg, false, is_enemy)
 	# Hero-damage functions already shake + flash; just pace the cascade.
 	await _short_pause(HITSTOP_BEAT if atk > 0 else POST_HIT_BEAT)
 
@@ -3419,21 +3931,26 @@ func _resolve_hydra_attack(attacker: Control, lane_idx: int, is_enemy: bool) -> 
 		if t != null and t.current_hp > 0:
 			live.append(t)
 	if live.is_empty():
+		_play_face_strike_vfx(attacker, lane_idx, is_enemy, atk)
+		_net_arm_face_hit_source(attacker, lane_idx, atk)
 		if is_enemy:
 			damage_player_hero(atk, false)
 		else:
 			damage_enemy_hero(atk, false)
-		# Lifelink heals once for the unblocked face swing.
-		_apply_combat_strike_riders(attacker, atk > 0, false, is_enemy)
+		_net_clear_face_hit_source()
+		# Lifesteal heals for the unblocked face swing.
+		_apply_combat_strike_riders(attacker, atk, false, is_enemy)
 		await _short_pause(HITSTOP_BEAT)
 		return
 	# Bites through the whole line at once — streak + recoil on every target.
-	# Lifelink heals once for the swing; Rampage fires PER KILL (a full-line
-	# sweep is the Hydra's whole payoff — 3 kills = 3 Rampage triggers).
-	var hydra_dealt: bool = false
+	# Lifesteal heals once for the swing — for the total HP the line lost;
+	# Rampage fires PER KILL (a full-line sweep is the Hydra's whole payoff —
+	# 3 kills = 3 Rampage triggers).
+	var hydra_dmg: int = 0
 	var hydra_kills: int = 0
 	for t in live:
-		_play_attack_tracer(_card_center(attacker), _card_center(t), is_enemy)
+		_play_attack_tracer(_card_center(attacker), _card_center(t),
+			is_enemy, float(atk), atk >= HEAVY_HIT_DAMAGE)
 		if t.has_method("play_hit_recoil"):
 			t.play_hit_recoil(is_enemy)
 		var t_hp_before: int = t.current_hp
@@ -3441,8 +3958,7 @@ func _resolve_hydra_attack(attacker: Control, lane_idx: int, is_enemy: bool) -> 
 			% [_log_card_ref(attacker), _log_card_ref(t), atk],
 			_log_data(attacker), _log_side(attacker))
 		t.take_damage(atk)
-		if t.current_hp < t_hp_before:
-			hydra_dealt = true
+		hydra_dmg += maxi(0, t_hp_before - maxi(t.current_hp, 0))
 		if t.current_hp <= 0:
 			hydra_kills += 1
 		if attacker.current_hp > 0:
@@ -3456,13 +3972,13 @@ func _resolve_hydra_attack(attacker: Control, lane_idx: int, is_enemy: bool) -> 
 				attacker.take_damage(recoil)
 		_net_log_hit(attacker, t, t_hp_before)
 	if is_instance_valid(attacker):
-		_apply_combat_strike_riders(attacker, hydra_dealt, hydra_kills > 0, is_enemy)
+		_apply_combat_strike_riders(attacker, hydra_dmg, hydra_kills > 0, is_enemy)
 		# Extra kills beyond the first re-fire the kill-gated riders only
-		# (dealt=false keeps Lifelink at once per swing).
+		# (0 damage keeps Lifesteal at once per swing).
 		for _hk in range(maxi(0, hydra_kills - 1)):
 			if not is_instance_valid(attacker):
 				break
-			_apply_combat_strike_riders(attacker, false, true, is_enemy)
+			_apply_combat_strike_riders(attacker, 0, true, is_enemy)
 	screen_shake(6.0)
 	await _short_pause(HITSTOP_BEAT)
 
@@ -3473,19 +3989,12 @@ func _redirect_target(defender: Control, defender_is_enemy: bool, lane_idx: int,
 	# is "redirecting" and sits adjacent to the intended defender intercepts the
 	# blow in its place.
 	# Guardian keyword: permanently redirects adjacent attacks (no floop needed).
-	# Siege Golem (unstoppable): the ram hits what it aims at — no interception.
-	if attacker != null and is_instance_valid(attacker) \
-			and bool(attacker.card_data.get("unstoppable", false)):
-		return defender
-	var field = _row_array(defender_is_enemy, row)
-	for adj in [lane_idx - 1, lane_idx + 1]:
-		if adj >= 0 and adj < LANES_PER_ROW:
-			var g = field[adj]
-			if g != null and g.current_hp > 0:
-				if g.get_meta("redirecting", false) and g.card_data.get("passive", "") == "royal_guard":
-					return g
-				if g.has_keyword("guardian"):
-					return g
+	for g in _adjacent_creatures(defender_is_enemy, row, lane_idx):
+		if g.current_hp > 0:
+			if g.get_meta("redirecting", false) and g.card_data.get("passive", "") == "royal_guard":
+				return g
+			if g.has_keyword("guardian"):
+				return g
 	return defender
 
 
@@ -3578,7 +4087,7 @@ func _sniper_can_keep_firing(card: Control) -> bool:
 func _sniper_fire(card: Control, lane_idx: int, is_enemy: bool) -> void:
 	# Sniper: fire at the lowest-HP enemy; if the shot kills, fire again at the
 	# next-weakest — a marksman cleaning up a softened line. ATK is recomputed per
-	# shot so Rampage (+ATK on kill) compounds down the chain; Lifelink heals per
+	# shot so Rampage (+ATK on kill) compounds down the chain; Lifesteal heals per
 	# hit. Each shot kills (shrinking the pool) or stops, so it always terminates.
 	var opp_is_enemy := not is_enemy
 	for _shot in range(8):
@@ -3590,14 +4099,18 @@ func _sniper_fire(card: Control, lane_idx: int, is_enemy: bool) -> void:
 			# Nothing to shoot: only the OPENING shot carries to face (a chain that
 			# already cleared the board doesn't keep plinking the hero).
 			if _shot == 0:
+				_play_face_strike_vfx(card, lane_idx, is_enemy, atk)
+				_net_arm_face_hit_source(card, lane_idx, atk)
 				if is_enemy:
 					damage_player_hero(atk, false)
 				else:
 					damage_enemy_hero(atk, false)
-				_apply_combat_strike_riders(card, atk > 0, false, is_enemy)
+				_net_clear_face_hit_source()
+				_apply_combat_strike_riders(card, atk, false, is_enemy)
 				await _short_pause(POST_HIT_BEAT)
 			return
-		_play_attack_tracer(_card_center(card), _card_center(target), is_enemy)
+		_play_attack_tracer(_card_center(card), _card_center(target),
+			is_enemy, float(atk), atk >= HEAVY_HIT_DAMAGE, true)
 		if target.has_method("play_hit_recoil"):
 			target.play_hit_recoil(is_enemy)
 		var t_pos := _find_creature_position(target)
@@ -3619,12 +4132,13 @@ func _sniper_fire(card: Control, lane_idx: int, is_enemy: bool) -> void:
 			% [_log_card_ref(card), _log_card_ref(target), atk],
 			_log_data(card), _log_side(card))
 		target.take_damage(atk)
-		var dealt: bool = target.current_hp < hp_before
-		if target.current_hp > 0 and dealt \
+		var shot_dmg: int = maxi(0, hp_before - maxi(target.current_hp, 0))
+		if target.current_hp > 0 and shot_dmg > 0 \
 				and (card.has_keyword("poison") or _virulence_active[1 if is_enemy else 0]):
 			target.current_hp = 0
 			target.update_stat_display()
 			spawn_keyword_callout_kw(target, "poison")
+			_apply_toxin_salve(not is_enemy)
 			if not Card2D.defer_deaths:
 				target.try_die()
 		_net_log_hit(card, target, hp_before)
@@ -3632,7 +4146,7 @@ func _sniper_fire(card: Control, lane_idx: int, is_enemy: bool) -> void:
 		if is_instance_valid(card) and is_instance_valid(target):
 			_spawn_impact_burst(_card_center(target),
 				_card_center(target) - _card_center(card), float(atk), killed)
-		if dealt and killed and is_instance_valid(target) and not target._dead:
+		if shot_dmg > 0 and killed and is_instance_valid(target) and not target._dead:
 			target.death_cue_played = true
 			AudioBank.play_sfx("creature_death", 0.05)
 		if is_instance_valid(target) and target.current_hp > 0 \
@@ -3645,9 +4159,14 @@ func _sniper_fire(card: Control, lane_idx: int, is_enemy: bool) -> void:
 			var rage_gain: int = 3 if bool(target.card_data.get("is_upgraded", false)) else 2
 			target.current_atk += rage_gain
 			target.update_stat_display()
+		if is_instance_valid(target) and target.current_hp > 0 and atk > 0:
+			_apply_struck_survivor_passives(target, is_enemy)
+		if is_instance_valid(target) and target.current_hp > 0 \
+				and target.card_data.get("passive", "") == "pit_brawler" and atk > 0:
+			_pit_brawler_split(target)
 		if killed and (card.has_keyword("piercing") or (is_enemy and _has_encounter_passive_keyword(card, "piercing")) or card.get_meta("inspire_piercing", false) or (not is_enemy and _has_relic("piercing_crown"))):
 			_apply_piercing_overflow(card, target, target_lane, is_enemy, t_pos)
-		_apply_combat_strike_riders(card, dealt, killed, is_enemy)
+		_apply_combat_strike_riders(card, shot_dmg, killed, is_enemy)
 		# Pavise: an enemy sniper's shot that lands on the player's BACK row is
 		# answered — the shieldwall's return bolt hits the marksman for 3. A
 		# dead sniper's chain ends with him. (Position captured pre-shot so a
@@ -3670,11 +4189,6 @@ func _apply_thorns(defender: Control, attacker: Control, attacker_is_enemy: bool
 	# Bridge Watcher / Corner Stone relics grant Thorns 2 by lane position to the
 	# player's creatures — checked alongside the existing sources so the relics
 	# stack with intrinsic thorns rather than replacing them.
-	# Siege Golem (unstoppable): no sting touches the ram — all Thorns sources
-	# (intrinsic, granted, relic-lane, venomous) are ignored against it.
-	if attacker != null and is_instance_valid(attacker) \
-			and bool(attacker.card_data.get("unstoppable", false)):
-		return
 	var defender_is_friendly: bool = attacker_is_enemy
 	var has_thorns: bool = defender.has_keyword("thorns") \
 		or (not attacker_is_enemy and _has_encounter_passive_keyword(defender, "thorns")) \
@@ -3706,6 +4220,7 @@ func _apply_thorns(defender: Control, attacker: Control, attacker_is_enemy: bool
 			attacker.current_hp = 0
 			attacker.update_stat_display()
 			spawn_keyword_callout_kw(attacker, "poison")
+			_apply_toxin_salve(attacker_is_enemy)
 			if not Card2D.defer_deaths:
 				attacker.try_die()
 		# Man-Trap: an enemy that DIES on the player's thorns (the sting or the
@@ -3716,13 +4231,11 @@ func _apply_thorns(defender: Control, attacker: Control, attacker_is_enemy: bool
 				and (not is_instance_valid(attacker) or attacker.current_hp <= 0) \
 				and not trap_pos.is_empty() and bool(trap_pos["is_enemy"]):
 			var trap_dmg: int = int(RelicDB.get_relic("briar_amulet").get("value", 2))
-			var trap_arr = _row_array(true, int(trap_pos["row"]))
-			for trap_adj in [int(trap_pos["lane"]) - 1, int(trap_pos["lane"]) + 1]:
-				if trap_adj >= 0 and trap_adj < LANES_PER_ROW \
-						and trap_arr[trap_adj] != null and trap_arr[trap_adj].current_hp > 0:
-					spawn_floating_number(_card_center(trap_arr[trap_adj]) + Vector2(0, -14),
+			for trap_neighbor in _adjacent_creatures(true, int(trap_pos["row"]), int(trap_pos["lane"])):
+				if trap_neighbor != null and is_instance_valid(trap_neighbor) and trap_neighbor.current_hp > 0:
+					spawn_floating_number(_card_center(trap_neighbor) + Vector2(0, -14),
 						"MAN-TRAP %d" % trap_dmg, Color(0.62, 0.80, 0.35), false)
-					trap_arr[trap_adj].take_damage(trap_dmg)
+					trap_neighbor.take_damage(trap_dmg)
 
 
 func _effective_attack(card: Control, lane_idx: int, is_enemy: bool) -> int:
@@ -3926,6 +4439,8 @@ func _apply_pact_of_embers() -> void:
 	if best != null:
 		best.set_meta("pact_of_embers_zero", true)
 		_refresh_hand_affordability()
+		if best_cost > 0:
+			_relic_fired("pact_of_embers")
 
 
 func _count_adjacent_friendlies(card: Control) -> int:
@@ -3978,10 +4493,11 @@ func _apply_linked_banner_hp() -> void:
 			c.update_stat_display()
 
 
-func _get_adj_buff_atk(lane_idx: int, is_enemy: bool) -> int:
-	# 4x4: adjacent-buff sources contribute from the same column-1/column+1 in
-	# EITHER row, because front and back share the lane semantically — this keeps
-	# Bannerman-style cards strong without needing a row-aware Card2D ref here.
+func _get_adj_buff_atk(lane_idx: int, row: int, is_enemy: bool) -> int:
+	# Canonical adjacency (row ±1 + column-mate): an adj_buff source feeds the
+	# seats beside it in its own row plus the seat sharing its lane — the
+	# adjacency relation is symmetric, so reading the receiver's neighbors
+	# finds every source whose aura covers it.
 	#
 	# NOTE: adj_buff.hp is currently NOT applied anywhere. Every card in CardDB
 	# sets hp:0 so the omission is harmless today, but if you author a card
@@ -3989,17 +4505,31 @@ func _get_adj_buff_atk(lane_idx: int, is_enemy: bool) -> int:
 	# buff is removed when the source dies. See follow-up in tools/_sync_sim.py
 	# for places that mirror this logic.
 	var total := 0
-	for row in [ROW_FRONT, ROW_BACK]:
-		var field = _row_array(is_enemy, row)
-		for adj in [lane_idx - 1, lane_idx + 1]:
-			if adj < 0 or adj >= LANES_PER_ROW:
-				continue
-			var neighbor = field[adj]
-			if neighbor != null and is_instance_valid(neighbor) and neighbor.card_data.has("adj_buff"):
-				total += int(neighbor.card_data.adj_buff.get("atk", 0))
-				# (Banner of Unity's old "+1 to adjacency" bonus lived here —
-				# redesigned 2026-07-03 into the flanked-play rally in
-				# _play_creature, so adjacency math is clean again.)
+	for neighbor in _adjacent_creatures(is_enemy, row, lane_idx):
+		if neighbor.card_data.has("adj_buff"):
+			total += int(neighbor.card_data.adj_buff.get("atk", 0))
+			# (Banner of Unity's old "+1 to adjacency" bonus lived here —
+			# redesigned 2026-07-03 into the flanked-play rally in
+			# _play_creature, so adjacency math is clean again.)
+	return total
+
+
+func _get_type_buff_atk(receiver: Control, is_enemy: bool) -> int:
+	# Type-wide ATK auras (Warchief: "your other Soldiers get +1 ATK"): every
+	# OTHER living friendly carrying a matching `type_buff` feeds this
+	# creature. State-derived like adjacency — recomputed at every board
+	# mutation by _refresh_adjacency_buffs, so it rides adj_atk_buff and the
+	# net snapshot the same way.
+	var total := 0
+	var rc: String = String(receiver.card_data.get("ctype", ""))
+	if rc == "":
+		return 0
+	for src_c in _all_friendly(is_enemy):
+		if src_c == receiver or not is_instance_valid(src_c) or src_c.current_hp <= 0:
+			continue
+		var tb = src_c.card_data.get("type_buff", null)
+		if tb is Dictionary and String(tb.get("ctype", "")) == rc:
+			total += int(tb.get("atk", 0))
 	return total
 
 
@@ -4023,15 +4553,16 @@ func _refresh_adjacency_buffs() -> void:
 				var c = arr[lane]
 				if c == null or not is_instance_valid(c):
 					continue
-				var bonus := _get_adj_buff_atk(lane, is_enemy)
+				var bonus := _get_adj_buff_atk(lane, row, is_enemy) \
+						+ _get_type_buff_atk(c, is_enemy)
 				if c.adj_atk_buff != bonus:
 					c.adj_atk_buff = bonus
 					if c.has_method("update_stat_display"):
 						c.update_stat_display()
-	# Battle Drummer (drummer_swift): adjacent friendlies (same row, ±1 lane)
-	# hold Swift while the drum beats. Meta-flag grant on War Cry's channel,
-	# cleared and re-derived at every board mutation so the aura moves with
-	# the drummer and dies with it — see _is_swift_attacker.
+	# Battle Drummer (drummer_swift): adjacent friendlies (canonical: row ±1 +
+	# column-mate) hold Swift while the drum beats. Meta-flag grant on War
+	# Cry's channel, cleared and re-derived at every board mutation so the aura
+	# moves with the drummer and dies with it — see _is_swift_attacker.
 	for c0 in _all_creatures_both_sides():
 		if is_instance_valid(c0):
 			c0.set_meta("drummer_swift", false)
@@ -4044,26 +4575,10 @@ func _refresh_adjacency_buffs() -> void:
 					continue
 				if String(dr.card_data.get("passive", "")) != "drummer_swift":
 					continue
-				for nl in [lane - 1, lane + 1]:
-					if nl < 0 or nl >= LANES_PER_ROW:
-						continue
-					var nb = arr[nl]
-					if nb != null and is_instance_valid(nb):
-						nb.set_meta("drummer_swift", true)
-	# Warchief (warchief_aura): "its ATK is ALWAYS 2 plus your other creatures" —
-	# recompute live at every board mutation (this runs at combat start, after
-	# each death flush, and on placements), so it swings with the count as the
-	# line grows or falls, not with a stale start-of-round snapshot.
-	for is_enemy in [false, true]:
-		var side: Array = _all_friendly(is_enemy)
-		for c in side:
-			if is_instance_valid(c) and c.card_data.get("passive", "") == "warchief_aura":
-				var wc_atk: int = 2 + maxi(0, side.size() - 1)
-				if bool(c.card_data.get("is_upgraded", false)):
-					wc_atk += 1
-				if c.current_atk != wc_atk:
-					c.current_atk = wc_atk
-					c.update_stat_display()
+				for nb in _adjacent_creatures(is_enemy, row, lane):
+					nb.set_meta("drummer_swift", true)
+	# (Warchief's old count-my-allies ATK aura lived here — reworked 2026-07-10
+	# into the Soldier type_buff aura, summed in _get_type_buff_atk.)
 
 
 func _has_passive_on_field(passive_name: String) -> bool:
@@ -4073,44 +4588,69 @@ func _has_passive_on_field(passive_name: String) -> bool:
 	return false
 
 
-## Start-of-round ATK engines for one side: Riteforge (all allies +N permanently per
-## round) and Warchief (ATK = 2 + other allies). Solo runs it for the player; the net
-## turn machine also runs it host-side for the client (_net_open_placement, active==1).
+## Start-of-round ATK engines for one side: Riteforge (all allies +N per round).
+## Solo runs it for the player; the net turn machine also runs it host-side for
+## the client (_net_open_placement, active==1). (Warchief's aura moved to the
+## state-derived type_buff path 2026-07-10.)
 func _apply_start_round_passives(owner_is_enemy: bool) -> void:
 	var mine: Array = _all_friendly(owner_is_enemy)
+	# The Farmer's Son (moon_flip): round parity turns the moon — ATK swings
+	# between the printed 1 and 4 (5 forged). Applied as a RELATIVE delta so
+	# drummer auras and permanent gains survive the flip.
+	for _mf in mine:
+		if not is_instance_valid(_mf) or _mf.card_data.get("passive", "") != "moon_flip":
+			continue
+		var mf_delta: int = 4 if bool(_mf.card_data.get("is_upgraded", false)) else 3
+		if bool(_mf.get_meta("moon_high", false)):
+			_mf.current_atk = maxi(0, _mf.current_atk - mf_delta)
+			_mf.set_meta("moon_high", false)
+			log_status(_mf, "the moon wanes — a farmhand again")
+		else:
+			_mf.current_atk += mf_delta
+			_mf.set_meta("moon_high", true)
+			log_status(_mf, "the moon takes him")
+		_mf.update_stat_display()
+	# The Great Bombard: player-cast fuses tick at the start of the PLAYER's
+	# round; at zero the shot lands on every enemy creature. Solo-only card.
+	if not owner_is_enemy and not _bombard_fuses.is_empty():
+		var bf_i := 0
+		while bf_i < _bombard_fuses.size():
+			var fuse: Dictionary = _bombard_fuses[bf_i]
+			fuse["left"] = int(fuse.get("left", 1)) - 1
+			if int(fuse["left"]) <= 0:
+				_bombard_fuses.remove_at(bf_i)
+				var bf_dmg: int = int(fuse.get("dmg", 10))
+				screen_shake(10.0)
+				if AudioBank != null:
+					AudioBank.play_sfx("spell_cast", 0.04, 3.0, 0.6)
+				_show_info("The great bombard fires!")
+				_log_event("The great bombard fires — [color=#f2e6c8]%d[/color] damage across the enemy line." % bf_dmg)
+				for bf_e in _all_enemy_creatures():
+					bf_e.take_damage(bf_dmg)
+			else:
+				bf_i += 1
 	for _rf in mine:
 		if _rf.card_data.get("passive", "") == "riteforge_ramp":
 			var rf_gain: int = 2 if bool(_rf.card_data.get("is_upgraded", false)) else 1
 			for ally in mine:
-				ally.current_atk += rf_gain
+				ally.temp_atk_buff += rf_gain   # this round only (resets end of turn)
 				ally.update_stat_display()
-	for _wc in mine:
-		if _wc.card_data.get("passive", "") == "warchief_aura":
-			var wc_base: int = 2 + maxi(0, mine.size() - 1)
-			if bool(_wc.card_data.get("is_upgraded", false)):
-				wc_base += 1
-			_wc.current_atk = wc_base
-			_wc.update_stat_display()
-	# Summoner (summon_each_round): musters a 1/1 (2/2 upgraded) in an adjacent
-	# empty column each round — front row preferred, back as fallback.
+	# Summoner (summon_each_round): musters a 2/2 (3/3 upgraded) in an adjacent
+	# empty seat each round — canonical adjacency: own row ±1 first, then the
+	# column-mate seat.
 	for _sm in mine:
 		if _sm.card_data.get("passive", "") != "summon_each_round":
 			continue
 		if not is_instance_valid(_sm):
 			continue
-		var sm_n: int = 2 if bool(_sm.card_data.get("is_upgraded", false)) else 1
-		var sm_done := false
-		for adj_lane in [_sm.current_lane - 1, _sm.current_lane + 1]:
-			if sm_done or adj_lane < 0 or adj_lane >= LANES_PER_ROW:
-				continue
-			for adj_row in [ROW_FRONT, ROW_BACK]:
-				if _row_array(owner_is_enemy, adj_row)[adj_lane] == null:
-					summon_token(sm_n, sm_n, adj_lane, owner_is_enemy, adj_row)
-					spawn_trigger_callout(_sm.global_position \
-						+ Vector2(_sm.size.x * _sm.scale.x * 0.5, -12),
-						"MUSTER", false, int(_sm.entity_id))
-					sm_done = true
-					break
+		var sm_n: int = 3 if bool(_sm.card_data.get("is_upgraded", false)) else 2
+		var sm_seats: Array = _adjacent_empty_seats(owner_is_enemy, _sm.current_row, _sm.current_lane)
+		if sm_seats.size() > 0:
+			var sm_seat: Dictionary = sm_seats[0]
+			summon_token(sm_n, sm_n, sm_seat.lane, owner_is_enemy, sm_seat.row)
+			spawn_trigger_callout(_sm.global_position \
+				+ Vector2(_sm.size.x * _sm.scale.x * 0.5, -12),
+				"MUSTER", false, int(_sm.entity_id))
 	# Trebuchet (trebuchet_volley): pays 3 face (4 forged) each round it HOLDS
 	# the back row — the wall deck's clock. Standing in the front silences it.
 	for _tb in mine:
@@ -4124,17 +4664,35 @@ func _apply_start_round_passives(owner_is_enemy: bool) -> void:
 		else:
 			damage_enemy_hero(tb_dmg)
 		spawn_trigger_callout(_tb.global_position + Vector2(_tb.size.x * _tb.scale.x * 0.5, -12), "VOLLEY %d" % tb_dmg, false, int(_tb.entity_id))
+	# Heartwood (endure_grow): a creature that lives to see a new round digs in —
+	# permanent +1/+1 (+2/+2 forged) each round it survives. Slow by design (the
+	# attrition-pacing rule kills fast board engines); pair it with Regenerate /
+	# a Guardian screen so it stands long enough to become a threat.
+	for _hw in mine:
+		if not is_instance_valid(_hw) or _hw.card_data.get("passive", "") != "endure_grow":
+			continue
+		var hw_g: int = 2 if bool(_hw.card_data.get("is_upgraded", false)) else 1
+		_hw.card_data["atk"] = int(_hw.card_data.get("atk", 0)) + hw_g
+		_hw.card_data["hp"] = int(_hw.card_data.get("hp", 0)) + hw_g
+		_hw.current_atk += hw_g
+		_hw.current_hp += hw_g
+		_hw.update_stat_display()
+		spawn_trigger_callout(_hw.global_position + Vector2(_hw.size.x * _hw.scale.x * 0.5, -12), "+%d/+%d" % [hw_g, hw_g], false, int(_hw.entity_id))
 	# Bulwark Engine (board relic, host-authoritative in net): Armored friendlies on
 	# this side gain +1 max HP (and heal the point) each round, so a wall thickens.
 	# Lives here — the per-side start-round chokepoint — so the client's own copy
 	# fires host-side and rides the board snapshot; see _relic_active_for_side.
 	if _relic_active_for_side(owner_is_enemy, "bulwark_engine"):
 		var be: int = int(RelicDB.get_relic("bulwark_engine").get("value", 1))
+		var be_hit := false
 		for c in mine:
 			if is_instance_valid(c) and c.has_keyword("armored"):
 				c.card_data["hp"] = int(c.card_data.get("hp", 0)) + be
 				c.current_hp += be
 				c.update_stat_display()
+				be_hit = true
+		if be_hit:
+			_relic_fired_for_side(owner_is_enemy, "bulwark_engine")
 
 
 # ── Enter-with-a-bonus passives, per owner side (Wave: passive parity) ──
@@ -4202,9 +4760,8 @@ func _apply_play_time_passives(card: Control, owner_is_enemy: bool) -> void:
 				+ Vector2(card.size.x * card.scale.x * 0.5, -10),
 				"+%d/+%d" % [ok_fallen, ok_fallen], Color(1.0, 0.84, 0.35), false)
 			_net_fx_text(card, "+%d/+%d" % [ok_fallen, ok_fallen], Color(1.0, 0.84, 0.35))
-	if card.card_data.get("passive", "") == "atk_per_spell":
-		card.current_atk += _pt_spells_fight(owner_is_enemy)
-		card.update_stat_display()
+	# Hexblade (atk_per_spell) scales THIS ROUND only now (temp_atk_buff, applied
+	# per cast in the spell hook) — no fight-long catch-up on a late entrance.
 	if card.card_data.get("passive", "") == "warchief_aura":
 		card.current_atk = 2 + maxi(0, _all_friendly(owner_is_enemy).size() - 1)
 		if bool(card.card_data.get("is_upgraded", false)):
@@ -4221,7 +4778,7 @@ func _apply_play_time_passives(card: Control, owner_is_enemy: bool) -> void:
 		var rf_enter: int = 2 if bool(card.card_data.get("is_upgraded", false)) else 1
 		for ally in _all_friendly(owner_is_enemy):
 			if is_instance_valid(ally):
-				ally.current_atk += rf_enter
+				ally.temp_atk_buff += rf_enter   # this round only (resets end of turn)
 				ally.update_stat_display()
 		spawn_trigger_callout(card.global_position \
 			+ Vector2(card.size.x * card.scale.x * 0.5, -12),
@@ -4396,14 +4953,15 @@ func _apply_ally_death_passives(owner_is_enemy: bool, dead_card: Control = null)
 				spawn_trigger_callout(c.global_position \
 					+ Vector2(c.size.x * c.scale.x * 0.5, -12),
 					"DRAIN", true, int(c.entity_id))
-	# Gravedigger — "when one of your creatures dies, draw 1 (up to twice per round)."
-	# Draws once per death (not per Gravedigger). The draw routes through
-	# _battlecry_draw so it lands on the OWNER: solo → local draw_one; net-host →
-	# host draws locally / client gets EV_DRAW. The per-side death tally is the
-	# "twice per round" cap (this death is already counted in it), and the fallen
-	# card is out of the field arrays by now, so it can't draw off its own death.
-	var side_round_deaths: int = _enemy_deaths_this_round if owner_is_enemy else _friendly_deaths_this_round
-	if side_round_deaths <= 2:
+	# Gravedigger — "When a friendly creature dies on your turn: draw 1."
+	# Draws once per death (not per Gravedigger), only during the placement
+	# phase (sacrifices, detonations the owner triggers) — a clash-time draw
+	# just displaces the next refill, so it was phantom value (2026-07-13
+	# telemetry). The draw routes through _battlecry_draw so it lands on the
+	# OWNER: solo → local draw_one; net-host → host draws locally / client gets
+	# EV_DRAW. The fallen card is out of the field arrays by now, so it can't
+	# draw off its own death.
+	if phase == Phase.PLAYER_TURN:
 		for c in _all_friendly(owner_is_enemy):
 			if c == dead_card:
 				continue
@@ -4423,19 +4981,39 @@ func _apply_ally_death_passives(owner_is_enemy: bool, dead_card: Control = null)
 			var gw_row: int = dead_card.current_row if dead_card.current_row in [ROW_FRONT, ROW_BACK] else ROW_FRONT
 			var gw_lane: int = dead_card.current_lane if (dead_card.current_lane >= 0 and dead_card.current_lane < LANES_PER_ROW) else 0
 			summon_token(1, 1, gw_lane, owner_is_enemy, gw_row)
+			_relic_fired_for_side(owner_is_enemy, "gravewardens_pact")
 
 
-## The Apothecary (plague_doctor): apothecaries on the side OPPOSITE the just-dead
-## creature ping the dead creature's hero. Solo: a player apothecary profits from enemy
-## deaths. Net mirrors it both ways (a Player-2 apothecary profits from host deaths).
-func _apply_plague_doctor(dyer_is_enemy: bool) -> void:
-	for pd in _all_friendly(not dyer_is_enemy):
-		if pd.card_data.get("passive", "") == "plague_doctor":
-			var n: int = 2 if bool(pd.card_data.get("is_upgraded", false)) else 1
-			if _is_net():
-				_net_damage_hero(dyer_is_enemy, n)
-			else:
-				damage_enemy_hero(n)
+## The Apothecary (toxin_salve): every foe Poison drops yields a dose for the
+## warband — apothecaries on the side OPPOSITE the poisoned casualty heal their
+## owner's hero 2 (3 forged). Called from the poison-kill sites (strike / Swift
+## pre-phase / counter / sniper chain / venom thorns). Clash-time draws were
+## phantom value (they just displaced the refill — 2026-07-13 telemetry), so
+## the payoff pays in the live currency instead. Player heals locally; the net
+## client's hero heals via _net_heal_hero; solo enemies don't field it.
+func _apply_toxin_salve(victim_is_enemy: bool) -> void:
+	for pd in _all_friendly(not victim_is_enemy):
+		if is_instance_valid(pd) and pd.card_data.get("passive", "") == "toxin_salve":
+			var ts_n: int = 3 if bool(pd.card_data.get("is_upgraded", false)) else 2
+			spawn_floating_number(pd.global_position \
+				+ Vector2(pd.size.x * pd.scale.x * 0.5, -10),
+				"+%d HP" % ts_n, Color(0.58, 0.93, 0.34), false)
+			if victim_is_enemy:
+				player_hp = mini(player_hp + ts_n, player_max_hp)
+				_update_hud()
+			elif _is_net():
+				_net_heal_hero(true, ts_n)
+				_update_hud()
+
+
+## Shieldmaiden (interpose): the first live interposer holding `side`'s FRONT
+## row — she catches creature strikes aimed at her own hero's face.
+func _find_interposer(side_is_enemy: bool) -> Control:
+	for c in _row_array(side_is_enemy, ROW_FRONT):
+		if c != null and is_instance_valid(c) and c.current_hp > 0 \
+				and c.card_data.get("passive", "") == "interpose":
+			return c
+	return null
 
 
 func _post_combat_sequence() -> void:
@@ -4519,6 +5097,7 @@ func _apply_round_end_relics() -> void:
 			_mana_drunkard_streak += 1
 			if _mana_drunkard_streak == 2:
 				_mana_drunkard_bonus += int(RelicDB.get_relic("mana_drunkard").get("value", 1))
+				_relic_fired("mana_drunkard")
 		else:
 			_mana_drunkard_streak = 0
 	# Steady Banner: friendlies that survived the round earn +2 ATK persistent.
@@ -4803,6 +5382,7 @@ func _enemy_place_creatures() -> void:
 	var enc = EncounterDB.get_encounter(_encounter_id) if _encounter_id != "" else {}
 	var enc_type = enc.get("type", "combat")
 	var max_place := 1
+	var surge_now := false
 	# Successor Wars: a faction wave schedule overrides the uniform drip in
 	# normal holds (rounds 1-7). _next_wave_count() returns -1 when no
 	# schedule applies — untagged/elite/boss fights and the round-8+
@@ -4810,7 +5390,8 @@ func _enemy_place_creatures() -> void:
 	var wave_n: int = _next_wave_count()
 	if wave_n >= 0:
 		max_place = wave_n
-		if _wave_surge_pending():
+		surge_now = _wave_surge_pending()
+		if surge_now:
 			# Spend the Everflame's one-time surge and give the spike the
 			# climax-banner treatment (rides _show_combat_banner like
 			# Ignition / Lich Rises) so it never reads as random.
@@ -4840,6 +5421,11 @@ func _enemy_place_creatures() -> void:
 	var placed := 0
 	# 4x4: priority is a list of {row, lane} slots — front first, then back.
 	var slot_priority: Array = _get_placement_priority_4x4(enc_type)
+	if wave_n > 0:
+		_play_faction_wave_vfx(_encounter_faction, wave_n, surge_now, slot_priority)
+		if DisplayServer.get_name() != "headless" \
+				and not (UserSettings != null and UserSettings.reduce_motion):
+			await _short_pause(0.12 if surge_now else 0.08)
 	for slot in slot_priority:
 		if placed >= max_place:
 			break
@@ -4931,6 +5517,12 @@ func _slot_in_list(slots: Array, row: int, lane: int) -> bool:
 var _entrance_slam_done: bool = false
 # Poisoned Rations relic: only the FIRST tagged reinforcement dies on arrival.
 var _poisoned_rations_fired: bool = false
+# Wolf-Pits spell: pending trap charges — each entry is the damage one arrival
+# takes as it lands. Casts stack (two pits per cast, FIFO).
+var _pit_traps: Array[int] = []
+# The Great Bombard: lit fuses — {left: rounds until it fires, dmg: the shot}.
+# Ticked at the start of the player's round in _apply_start_round_passives.
+var _bombard_fuses: Array[Dictionary] = []
 
 func _place_enemy_card(data: Dictionary, lane_idx: int, row: int = ROW_FRONT,
 		arc_in: bool = false) -> void:
@@ -4980,6 +5572,12 @@ func _place_enemy_card(data: Dictionary, lane_idx: int, row: int = ROW_FRONT,
 	# Mutator: stat/keyword bumps applied before the stat display catches up,
 	# so the freshly-placed card shows its modified numbers from frame one.
 	_mutator_apply_to_enemy(card)
+	# Encounter passives that grant a keyword to the WHOLE enemy line inject it
+	# onto the card here (Card2D.take_damage / the strike paths read the card's
+	# own keyword list — the encounter-keyword lookup is NOT consulted for
+	# Armored). sentinel_stone (The Tooth-Stones): every enemy is living stone.
+	if _encounter_passive == "sentinel_stone" and not card.has_keyword("armored"):
+		card.card_data.keywords.append("armored")
 	card.update_stat_display()
 	KeywordEffects.dispatch_on_enter(card, lane_idx, true, self)
 	if card.card_data.has("on_play"):
@@ -5000,6 +5598,17 @@ func _place_enemy_card(data: Dictionary, lane_idx: int, row: int = ROW_FRONT,
 		spawn_floating_number(_card_center(card) + Vector2(0, -16),
 			"POISONED RATIONS", Color(0.55, 0.85, 0.40), false)
 		card.take_damage(999)
+	# Wolf-Pits: the next arrivals fall in as they land — one charge per body,
+	# fired at the same late beat the Poisoned Rations kill uses (after the
+	# on-enter, so the arrival is seen before it drops).
+	if not _pit_traps.is_empty() and not _is_net() \
+			and is_instance_valid(card) and card.current_hp > 0:
+		var pit_dmg: int = _pit_traps.pop_front()
+		spawn_floating_number(_card_center(card) + Vector2(0, -16),
+			"WOLF-PIT %d" % pit_dmg, Color(0.92, 0.62, 0.25), false)
+		_log_event("%s falls into a wolf-pit — %d damage." \
+			% [_log_card_ref(card), pit_dmg], _log_data(card), _log_side(card))
+		card.take_damage(pit_dmg)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -5311,6 +5920,35 @@ func _on_end_turn_confirmed() -> void:
 	_on_end_turn()
 
 
+func _request_space_end_turn() -> void:
+	if phase != Phase.PLAYER_TURN or _space_end_turn_confirm_open:
+		return
+	# Do not turn an attempted targeting confirm into an end-turn request.
+	if _targeting_spell != null or _targeting_potion_idx >= 0:
+		return
+	_space_end_turn_confirm_open = true
+	GameTheme.show_confirm_dialog(self,
+		"End Turn?",
+		"End the turn now and begin the clash?",
+		"END TURN",
+		"KEEP PLAYING",
+		Callable(self, "_confirm_space_end_turn"),
+		Callable(self, "_cancel_space_end_turn"))
+
+
+func _confirm_space_end_turn() -> void:
+	_space_end_turn_confirm_open = false
+	# This confirmation replaces the conditional playable-action warning; never
+	# make the player approve the same end-turn twice.
+	_end_turn_confirmed = true
+	_on_end_turn()
+	_end_turn_confirmed = false
+
+
+func _cancel_space_end_turn() -> void:
+	_space_end_turn_confirm_open = false
+
+
 func _has_playable_action() -> bool:
 	# Returns true if the player has an affordable, meaningful card in hand.
 	# Sacrifice is a free action but not worth nagging about.
@@ -5443,6 +6081,17 @@ func _on_card_played(card: Control) -> void:
 		_show_info("Not enough Command!")
 		_layout_hand()  # bounce the dragged card back into the fan
 		return
+	# HS trinket beats: flash the discount relic's chip when its cut actually
+	# paid on this play (base cost > 0, condition met). Read the flags BEFORE
+	# the play flips them below/inside the resolvers.
+	if int(card.card_data.get("cost", 0)) > 0:
+		if card.is_spell() and _has_relic("ember_crown") and not _first_spell_this_turn:
+			_relic_fired("ember_crown")
+		elif card.is_spell() and _spell_tome_active:
+			_relic_fired("spell_tome")
+		if card.is_creature() and _has_relic("last_breath") \
+				and int(card.card_data.get("hp", 99)) == 1:
+			_relic_fired("last_breath")
 	# Consume the Ironclad Veteran discount charge ONLY if it actually applied
 	# (i.e. cost was still > 0 after mutator+Ember adjustments). _effective_cost
 	# itself is side-effect free so this consumption happens here, where we
@@ -5679,17 +6328,15 @@ func _play_creature(card: Control, cost: int) -> void:
 	# _play_landing_pop's no-arc path is the right amount of feedback.
 	_place_card_in_slot(card, lane_idx, row, play_start_global, false)
 
-	# Mimic Ring relic: copy one combat keyword from an adjacent friendly. We
-	# look at the same-row neighbors (±1 lane) the card just landed next to,
-	# collect their combat keywords, and append the first one the new card
-	# doesn't already have. Skipped if no adjacent ally or no copyable keyword
-	# is available.
+	# Mimic Ring relic: copy one combat keyword from an adjacent friendly. Canonical
+	# adjacency (row ±1 + column-mate) — the card copies from any adjacent ally,
+	# collecting their combat keywords and appending the first one it lacks. Skipped
+	# if no adjacent ally or no copyable keyword is available.
 	if _has_relic("mimic_ring") and card.is_creature():
-		var neighbors: Array[Control] = []
-		var same_row = _row_array(false, row)
-		for adj in [lane_idx - 1, lane_idx + 1]:
-			if adj >= 0 and adj < LANES_PER_ROW and same_row[adj] != null and same_row[adj] != card:
-				neighbors.append(same_row[adj])
+		var neighbors: Array = []
+		for adj_ally in _adjacent_creatures(false, row, lane_idx):
+			if adj_ally != card:
+				neighbors.append(adj_ally)
 		var picked_kw := ""
 		for n in neighbors:
 			for kw in n.card_data.get("keywords", []):
@@ -5874,6 +6521,7 @@ func _resolve_spell(data: Dictionary, target: Control, target_lane: int) -> void
 	if _has_relic("worn_spellbook") \
 			and spell_type in ["damage", "damage_face", "damage_all_enemies", "damage_all"]:
 		value += 1
+		_relic_fired("worn_spellbook")
 	# Reagent Pouch: first spell each combat is Sharpened (+spell.value bonus).
 	if _has_relic("reagent_pouch") and not _reagent_pouch_consumed \
 			and spell_type in ["damage", "damage_face", "damage_all_enemies", "damage_all"]:
@@ -5972,14 +6620,40 @@ func _resolve_spell(data: Dictionary, target: Control, target_lane: int) -> void
 		_last_spell_target_lane = target_lane
 
 
+## Legacy spell-id fold: the 2026-07-10 boring-cards swap renamed three custom
+## spell ids (shield_wall→Testudo, inspire→Turncoat, adrenaline→Baggage Train).
+## Both resolvers key their arms on the NEW ids; this folds any stale reference
+## (an Echo memory from an old save, a legacy net peer) onto them.
+func _canonical_custom_spell_id(spell_id: String) -> String:
+	match spell_id:
+		"shield_wall":
+			return "testudo"
+		"inspire":
+			return "turncoat"
+		"adrenaline":
+			return "baggage_train"
+		"mending_light":
+			return "censer_light"
+	return spell_id
+
+
 func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 		data: Dictionary = {}) -> void:
+	spell_id = _canonical_custom_spell_id(spell_id)
 	# Worn Spellbook ("Your damage spells deal +1 damage") applies to every
 	# numeric-damage custom spell, not just the two that originally opted in.
 	# Excluded by design: hex (debuff with incidental dmg), holy_smite (execute
 	# scaled by missing HP), fuel_the_pyre / cataclysm (scaled by creature
 	# ATK), apocalypse (999 overkill), and any spell that damages the player.
 	var spell_dmg_bonus: int = 1 if _has_relic("worn_spellbook") else 0
+	# The chip beat only fires for spells whose damage line actually reads the
+	# bonus — the net resolver's pure-damage id list (buff/utility customs
+	# compute spell_dmg_bonus but never spend it).
+	if spell_dmg_bonus > 0 and spell_id in [
+			"immolate", "inferno", "wildfire", "petard", "earthquake", "blood_tithe",
+			"flame_bolt", "ricochet", "quick_shot", "slash", "smite_spell",
+			"ballista_bolt"]:
+		_relic_fired("worn_spellbook")
 	# Per-card "+" upgrade bonuses. The Rest screen's plus upgrade merges
 	# these into card_data via RunState._apply_plus_upgrade. Resolvers that
 	# care read whichever fields are relevant; the rest no-op cleanly.
@@ -6015,6 +6689,84 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 			# the same card_data key, so the shown number is the landed number.
 			if target != null:
 				target.take_damage(2 + int(data.get("fuse", 0)) + spell_dmg_bonus + plus_dmg)
+		"sappers_charge":
+			# Sapper's Charge (2026-07-10 rework — the bomb is ALL physics now):
+			# a 1-damage scorch on the body it lands on, and the blast hurls its
+			# row neighbours one lane OUTWARD. The payload is the CRASH (4, "+"
+			# 6) — a neighbour with an open lane to fly into takes nothing, so
+			# the skill is aiming at packed lines: the field's edge and the
+			# bodies behind do the killing, not the powder.
+			if target != null:
+				var keg_pos: Dictionary = _find_creature_position(target)
+				var keg_crash: int = 4 + plus_dmg
+				target.take_damage(1)
+				if not keg_pos.is_empty():
+					var keg_row = _row_array(bool(keg_pos.is_enemy), int(keg_pos.row))
+					for keg_dir in [-1, 1]:
+						var keg_lane: int = int(keg_pos.lane) + keg_dir
+						if keg_lane < 0 or keg_lane >= LANES_PER_ROW:
+							continue
+						var keg_adj = keg_row[keg_lane]
+						if keg_adj != null and is_instance_valid(keg_adj) and keg_adj.current_hp > 0:
+							_flank_push(keg_adj, keg_crash, keg_dir)
+				_cleanup_dead()
+				_refresh_adjacency_buffs()
+		"ballista_bolt":
+			# Ballista Bolt: one heavy shot down the column — overkill on the
+			# first body carries into the creature behind it, and whatever is
+			# left of THAT punches through to face. Armored absorbs 1 per body
+			# hit, and a Last Stand survivor stops the bolt dead.
+			if target != null:
+				var bb_pos: Dictionary = _find_creature_position(target)
+				var bb_force: int = 5 + spell_dmg_bonus + plus_dmg
+				var bb_absorb: int = target.current_hp \
+					+ (1 if target.has_keyword("armored") else 0)
+				target.take_damage(bb_force)
+				var bb_spill: int = bb_force - bb_absorb
+				var bb_stopped: bool = is_instance_valid(target) and target.current_hp > 0
+				if bb_spill > 0 and not bb_stopped and not bb_pos.is_empty():
+					var bb_behind: Control = null
+					if int(bb_pos.row) == ROW_FRONT:
+						bb_behind = _row_array(bool(bb_pos.is_enemy), ROW_BACK)[int(bb_pos.lane)]
+					if bb_behind != null and is_instance_valid(bb_behind) \
+							and bb_behind.current_hp > 0 and not bb_behind.has_keyword("structure"):
+						var bb_absorb2: int = bb_behind.current_hp \
+							+ (1 if bb_behind.has_keyword("armored") else 0)
+						bb_behind.take_damage(bb_spill)
+						bb_spill -= bb_absorb2
+						bb_stopped = is_instance_valid(bb_behind) and bb_behind.current_hp > 0
+					if bb_spill > 0 and not bb_stopped:
+						damage_enemy_hero(bb_spill)
+				_cleanup_dead()
+		"scatter_line":
+			# Scatter the Line: the whole enemy warband is blown one lane toward
+			# its nearest flank — outer lanes first (0,1 then 3,2) so inner
+			# bodies cascade into vacated slots deterministically. Packed lines
+			# crash repeatedly; a loose line just gets scrambled out of your
+			# attackers' columns.
+			var sc_crash: int = 2 + plus_dmg
+			for sc_row in [ROW_FRONT, ROW_BACK]:
+				for sc_lane in [0, 1, 3, 2]:
+					var sc = _row_array(true, sc_row)[sc_lane]
+					if sc != null and is_instance_valid(sc) and sc.current_hp > 0:
+						_flank_push(sc, sc_crash)
+			_cleanup_dead()
+			_refresh_adjacency_buffs()
+		"close_ranks":
+			# Close Ranks: the lateral mirror of Scatter. Every enemy is pulled one
+			# lane TOWARD THE CENTRE SEAM (lanes 0,1 shove right; 2,3 shove left),
+			# so the warband compresses into the middle columns — where a fortress
+			# deck parks its Bastion Lord and walls — crashing bodies together as
+			# they pile in. Outer lanes first so the inner collision resolves last.
+			var cr_crash: int = 2 + plus_dmg
+			for cr_row in [ROW_FRONT, ROW_BACK]:
+				for cr_lane in [0, 3, 1, 2]:
+					var cr = _row_array(true, cr_row)[cr_lane]
+					if cr != null and is_instance_valid(cr) and cr.current_hp > 0:
+						var cr_dir: int = 1 if cr_lane <= 1 else -1
+						_flank_push(cr, cr_crash, cr_dir)
+			_cleanup_dead()
+			_refresh_adjacency_buffs()
 		"muster_fallen":
 			# Muster the Fallen: the run's Roll of the Fallen marches once
 			# more — a Shade per name (max 4, floor 1), front lanes first.
@@ -6034,7 +6786,7 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 					_hand.erase(hc)
 					if hc.get_parent() != null:
 						hc.get_parent().remove_child(hc)
-					_exhaust_pile.append(hc.card_id)
+					_exhaust_pile.append(_pile_entry(hc.card_id, hc.deck_uid))
 					hc.queue_free()
 					pen_burned = true
 					break
@@ -6064,16 +6816,18 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 					if target.has_method("flash_doom_tick"):
 						target.flash_doom_tick()
 		"shove":
+			# 2026-07-09 rework — the old free front→back push + stun was the
+			# pool's top sim outlier (never-dead attack denial at 0 Command).
+			# Now Into-the-Breach physics: one lane toward the nearest flank;
+			# a blocked shove crashes both bodies instead of moving. The "+"
+			# bloodies the target before the throw.
 			if target != null:
-				var shoved: bool = false
-				if target.current_row == ROW_FRONT:
-					shoved = _relocate_creature(target, true, ROW_BACK, target.current_lane)
-				if not shoved and is_instance_valid(target):
-					target.state.stunned = true
-					if target.has_method("_spawn_keyword_chip"):
-						target._spawn_keyword_chip("STUNNED", Color(0.85, 0.78, 0.45))
-					if plus_dmg > 0:
-						target.take_damage(plus_dmg + spell_dmg_bonus)
+				if plus_dmg > 0:
+					target.take_damage(plus_dmg + spell_dmg_bonus)
+				if is_instance_valid(target) and target.current_hp > 0:
+					_flank_push(target, 2)
+				_cleanup_dead()
+				_refresh_adjacency_buffs()
 		"provision":
 			# Summon one 2/1 Soldier in an empty lane — a body that actually
 			# threatens a trade and feeds sacrifice/Overrun (the "+" drops Exhaust).
@@ -6095,12 +6849,12 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				for _i in plus_draw:
 					draw_one()
 		"unholy_bargain":
-			var bargain_draws: int = 2 + plus_draw
-			if _friendly_deaths_this_fight > 0:
-				bargain_draws += 1
-			for i in bargain_draws:
-				draw_one()
-			damage_player_hero(2)
+			# Faustian tempo (2026-07-10 rework): the Command arrives now, the
+			# bill lands at the turn's commit (_bargain_bill in _on_end_turn).
+			# The old draw-N was dead in the refill economy — the hand refills
+			# to 5 anyway, so drawn cards were never real advantage.
+			player_mana += 3 + plus_dmg
+			_bargain_bill += 3
 		"dark_pact":
 			if target != null:
 				var pact_gain: int = 1 + plus_dmg
@@ -6114,14 +6868,18 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 					c.current_hp += pact_gain
 					c.update_stat_display()
 		"kings_command":
-			# Go-wide crown: +1/+1 this fight PER friendly creature ("+" adds +1/+1
-			# more) — dead on a thin board, a coronation on a full one.
-			var kc_g: int = _all_player_creatures().size() + plus_dmg
+			# The king calls the charge (2026-07-13 rework): +1 ATK THIS ROUND per
+			# friendly creature, to every friendly — width converts to one alpha
+			# strike. This-fight stat banking washed (63-74% of bodies die the
+			# round they land — playlog truth); the charge swings the clash it's
+			# called into. "+" makes the call cheaper (cost 1), not bigger.
+			var kc_g: int = _all_player_creatures().size()
 			for c in _all_player_creatures():
-				c.current_atk += kc_g
-				c.card_data.hp += kc_g
-				c.current_hp += kc_g
+				c.temp_atk_buff += kc_g
 				c.update_stat_display()
+				spawn_floating_number(c.global_position \
+					+ Vector2(c.size.x * c.scale.x * 0.5, -10),
+					"+%d ATK" % kc_g, Color(1.0, 0.82, 0.4), false)
 		"mass_grave":
 			var pile_size = _player_discard_pile.size()
 			var dmg = maxi(1, pile_size) + spell_dmg_bonus + plus_dmg
@@ -6147,9 +6905,27 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				# Pile entries are "card_id#uid" — pushing a bare id would
 				# read back as uid=-1 and skip the upgrade lookup, so an
 				# upgraded creature came back un-upgraded.
-				_player_draw_pile.push_front(
-					_pile_entry(_last_dead_creature_id, _last_dead_creature_uid))
-				draw_one()
+				var robbed := _pile_entry(_last_dead_creature_id, _last_dead_creature_uid)
+				# The corpse's entry is ALREADY in a pile (death files it in the
+				# discard; a reshuffle may have moved it to the draw pile) — pull
+				# that exact entry out before re-adding, or the robbery leaves a
+				# duplicate and the deck carries the creature twice all fight.
+				_player_discard_pile.erase(robbed)
+				_player_draw_pile.erase(robbed)
+				# If it already cycled back on its own (in hand, or replayed to
+				# the field), there is nothing left to rob — fizzle rather than
+				# duplicate the soldier.
+				var already_back := false
+				if _last_dead_creature_uid >= 0:
+					for hc in _hand:
+						if is_instance_valid(hc) and hc.deck_uid == _last_dead_creature_uid:
+							already_back = true
+					for bc in _all_player_creatures():
+						if is_instance_valid(bc) and bc.deck_uid == _last_dead_creature_uid:
+							already_back = true
+				if not already_back:
+					_player_draw_pile.push_front(robbed)
+					draw_one()
 		"cataclysm":
 			if target != null:
 				var cat_dmg: int = target.effective_atk() + plus_dmg
@@ -6180,15 +6956,24 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				if plus_dmg > 0:
 					target.take_damage(plus_dmg)
 		"apocalypse":
-			# Hit every creature for 999. Last Stand survivors stay alive (and
-			# in their lane) — that's the point of the keyword. Face damage is
-			# the count of creatures that actually died.
-			var kills := 0
+			# The end of all things — then YOUR dead rise (2026-07-10 rework).
+			# Snapshot the player's held seats first; after the wipe a Shade
+			# stands where each creature fell (2/2 forged, via dmg_bonus).
+			# Last Stand survivors keep their lane — summon_token falls
+			# through occupied seats to the other row or skips.
+			var risen: Array = []
+			for row in [ROW_FRONT, ROW_BACK]:
+				var arr = _row_array(false, row)
+				for lane in range(LANES_PER_ROW):
+					if arr[lane] != null and is_instance_valid(arr[lane]):
+						risen.append([lane, row])
 			for c in _all_creatures_both_sides():
 				c.take_damage(999)
-				if c.current_hp <= 0:
-					kills += 1
-			damage_player_hero(kills)
+			var shade_stat: int = 1 + plus_dmg
+			if not risen.is_empty():
+				await _short_pause(0.35)
+				for seat in risen:
+					summon_token(shade_stat, shade_stat, seat[0], false, seat[1], {}, "Shade")
 		"last_rites":
 			# Morbid removal: 3 damage — 6 once a friendly has fallen this fight
 			# (same counter the vengeance-rally Inspire reads).
@@ -6247,6 +7032,9 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				c.card_data.hp += 1
 				c.update_stat_display()
 		"earthquake":
+			# 2026-07-09 nerf-reshape: the quake no longer takes sides — it
+			# always damaged BOTH armies, so now the shake collapses both front
+			# lines too (back-row builds shrug it off; packed fronts pay).
 			var quake_dmg: int = 2 + spell_dmg_bonus + plus_dmg
 			for c in _all_creatures_both_sides():
 				if c != null and is_instance_valid(c):
@@ -6256,6 +7044,9 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				var quake_enemy = _enemy_field[quake_lane]
 				if quake_enemy != null and is_instance_valid(quake_enemy) and quake_enemy.current_hp > 0:
 					_relocate_creature(quake_enemy, true, ROW_BACK, quake_lane)
+				var quake_own = _player_field[quake_lane]
+				if quake_own != null and is_instance_valid(quake_own) and quake_own.current_hp > 0:
+					_relocate_creature(quake_own, false, ROW_BACK, quake_lane)
 			_refresh_adjacency_buffs()
 		"slash":
 			if target != null:
@@ -6267,16 +7058,18 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				target.take_damage(slash_dmg)
 				if is_instance_valid(target) and target.current_hp > 0 and can_blast_move:
 					_relocate_creature(target, true, ROW_BACK, target.current_lane)
-				if target.current_hp <= 0:
-					for _i in 1 + plus_slay_draw:
-						draw_one()
-		"shield_wall":
-			if target != null:
-				var bandage: int = 4 + plus_dmg
-				target.current_hp += bandage
-				target.card_data.hp += bandage
-				target.set_meta("shield_wall_thorns", true)
-				target.update_stat_display()
+		"testudo":
+			# The front line locks shields — one Shield each; the forged writ
+			# reaches the back row too. Timing is the whole decision: cast INTO
+			# the big clash, not after it.
+			for tst_row in ([ROW_FRONT, ROW_BACK] if is_plus else [ROW_FRONT]):
+				for tst_c in _row_array(false, tst_row):
+					if tst_c != null and is_instance_valid(tst_c) and tst_c.current_hp > 0 \
+							and not tst_c.state.has_shield:
+						tst_c.state.has_shield = true
+						if tst_c.has_method("_spawn_keyword_chip"):
+							tst_c._spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
+						tst_c.update_stat_display()
 		"war_cry":
 			# Rallying yell — the whole warband strikes in the Swift pre-phase
 			# this round ("+" adds +1 ATK while they charge). Free simultaneity
@@ -6287,17 +7080,19 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 					c.temp_atk_buff += plus_dmg
 				c.update_stat_display()
 		"patch_up":
-			# Field Surgery: full triage, real cost — the patient is off the
-			# table for the round. The decision is WHEN: a wounded fatty healed
-			# mid-fight forfeits its swing, so timing the surgery matters. The
-			# cantrip keeps it from sitting dead in a hand mid-rush.
+			# Field Surgery: full triage, and the patient walks away stubborn —
+			# it gains Last Stand (re-armed if a printed one was already spent).
+			# The decision is WHO: on a body the enemy pops anyway the graft is
+			# wasted; on a big veteran it buys a second life.
 			if target != null:
 				target.current_hp = int(target.card_data.get("hp", target.current_hp))
-				target.state.stunned = true
+				if "last_stand" not in target.card_data.get("keywords", []):
+					target.card_data.keywords.append("last_stand")
+				target.last_stand_used = false
 				if target.has_method("_spawn_keyword_chip"):
-					target._spawn_keyword_chip("RESTING", Color(0.85, 0.78, 0.45))
+					target._spawn_keyword_chip("LAST STAND", Color(1.0, 0.85, 0.20), "last_stand")
+				_vfx_blessing(target.get_global_rect().get_center())
 				target.update_stat_display()
-				draw_one()
 		"flame_bolt":
 			# Combo — base 3, ramped to 5 if you've cast any spell this turn.
 			# _cards_played_this_turn counts both creatures and spells, but the
@@ -6333,13 +7128,22 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				if _is_swift_attacker(c):
 					c.temp_atk_buff += swift_gain
 					c.update_stat_display()
-		"inspire":
-			for c in _all_player_creatures():
-				c.set_meta("war_cry_swift", true)
-				c.set_meta("inspire_piercing", true)
-				if plus_dmg > 0:
-					c.temp_atk_buff += plus_dmg
-				c.update_stat_display()
+		"turncoat":
+			# An enemy of 3 ATK or less (4 forged) walks over to your side of the
+			# table — the whole soldier: keywords, On-Death, passive and all.
+			# Desertion is NOT a death: banish-style removal, so no On-Death, no
+			# kill ledger, no reactives. Too strong, a structure, or a full camp →
+			# it merely hesitates (stunned this round). Never a dead cast.
+			# (Conversion body factored into _desert_enemy_to_player 2026-07-13 —
+			# the Whisper-Widow's on-death steal shares it.)
+			if target != null:
+				var tcn_gate: int = 4 if is_plus else 3
+				if not (target.effective_atk() <= tcn_gate and _desert_enemy_to_player(target)):
+					target.state.stunned = true
+					if target.has_method("_spawn_keyword_chip"):
+						target._spawn_keyword_chip("STUNNED", Color(0.85, 0.78, 0.45))
+					_log_event("%s hesitates — it forfeits its attack this round." \
+						% _log_card_ref(target), _log_data(target), _log_side(target))
 		"lost_tome":
 			# Discover a random common spell.
 			await _show_discover("spell", "common")
@@ -6415,25 +7219,24 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 					_vfx_fire(_enemy_hp_label.get_global_rect().get_center())
 				damage_enemy_hero(wf_kills)
 		"censer_light":
-			# Pyre sustain anointing (card "Censer Light"). A friendly creature gains
-			# Lifelink (added to its runtime keywords so the chip shows AND
-			# _apply_combat_strike_riders heals off it) and +1 (+upgrade) ATK for the
-			# rest of the fight via persistent_atk_buff. Reuses the same runtime
-			# keyword-grant + chip pattern as Adaptable (_show_keyword_choice).
-			if target != null:
-				if "lifelink" not in target.card_data.get("keywords", []):
-					target.card_data.keywords.append("lifelink")
-				# Make sure the lifelink heal amount is at least 1 so the keyword
-				# isn't a no-op on a creature that never had a lifelink value.
-				if int(target.card_data.get("lifelink", 0)) < 1:
-					target.card_data["lifelink"] = 1
-				var cl_atk: int = 1 + plus_dmg
-				target.persistent_atk_buff += cl_atk
-				target.persistent_atk_buff_rounds = 99  # rest of this fight
-				if target.has_method("_spawn_keyword_chip"):
-					target._spawn_keyword_chip("LIFELINK", Color(0.95, 0.35, 0.45))
-				_vfx_blessing(target.get_global_rect().get_center())
-				target.update_stat_display()
+			# Censer Light (2026-07-13 rework): the smoke settles on the whole
+			# order — every friendly ZEALOT gains Lifesteal for the fight (added
+			# to runtime keywords so the chip shows AND _apply_combat_strike_riders
+			# heals off it). The forged writ also puts +1 ATK behind their blows
+			# (dmg_bonus channel). The draft question it asks: how deep is your
+			# zealot bench?
+			for zc in _all_player_creatures():
+				if not is_instance_valid(zc) or String(zc.card_data.get("ctype", "")) != "zealot":
+					continue
+				if "lifelink" not in zc.card_data.get("keywords", []):
+					zc.card_data.keywords.append("lifelink")
+				if plus_dmg > 0:
+					zc.persistent_atk_buff += plus_dmg
+					zc.persistent_atk_buff_rounds = 99  # rest of this fight
+				if zc.has_method("_spawn_keyword_chip"):
+					zc._spawn_keyword_chip("LIFESTEAL", Color(0.95, 0.35, 0.45))
+				_vfx_blessing(zc.get_global_rect().get_center())
+				zc.update_stat_display()
 		"rout":
 			# The enemy line breaks and runs: every enemy creature is driven into
 			# its back row, takes damage, and forfeits its attack this round.
@@ -6459,13 +7262,6 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 			_virulence_active[0] = true
 			for c in _all_player_creatures():
 				spawn_keyword_callout_kw(c, "poison")
-		"mending_light":
-			if player_hp < player_max_hp:
-				player_hp = mini(player_hp + 5, player_max_hp)
-				_stoke_acolytes(false)
-			for c in _all_player_creatures():
-				c.current_hp = mini(c.current_hp + 2, c.card_data.hp)
-				c.update_stat_display()
 		"banish":
 			if target != null:
 				var banish_limit: int = 4 + plus_dmg
@@ -6500,10 +7296,110 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				if target.current_hp <= 0:
 					for _i in 1 + plus_slay_draw:
 						draw_one()
-		"adrenaline":
-			player_mana += 2
-			for _i in 1 + plus_draw:
-				draw_one()
+		"baggage_train":
+			# The wagons catch up overnight: +3 Command at the start of your NEXT
+			# turn (+4 forged), riding the Mourner channel — above the banking
+			# cap. The price is tempo NOW for a two-play turn TOMORROW.
+			var bgt_n: int = 4 if is_plus else 3
+			_bonus_mana_next_turn += bgt_n
+			_log_event("The baggage train rolls in at dawn — [color=#f2e6c8]+%d Command[/color] next turn." % bgt_n)
+		"long_roll":
+			# The Long Roll: a base heal always answers; a march where no two
+			# names repeat pays far more. The gate already vetoed full HP; re-check
+			# so an Echo copy can't cheat a heal past a full bar.
+			if player_hp < player_max_hp:
+				var lr_base: int = 7 if is_plus else 5
+				var lr_high: int = 16 if is_plus else 12
+				var lr_heal: int = lr_high if _deck_is_highlander() else lr_base
+				player_hp = mini(player_hp + lr_heal, player_max_hp)
+				_stoke_acolytes(false)
+				spawn_floating_number(Vector2(get_viewport_rect().size.x * 0.12,
+					get_viewport_rect().size.y * 0.78), "+%d" % lr_heal,
+					Color(0.45, 0.9, 0.45), false)
+				_log_event("The Long Roll is read. You heal [color=#7ce87c]%d[/color]." % lr_heal)
+				_update_hud()
+		"wolf_pits":
+			# Two hidden pits queue against the NEXT enemy arrivals — the
+			# charges spring at the end of _place_enemy_card. Casts stack.
+			var wp_dmg: int = 3 + plus_dmg
+			_pit_traps.append(wp_dmg)
+			_pit_traps.append(wp_dmg)
+			_show_info("Wolf-pits dug — the next 2 arrivals fall in.")
+			_log_event("Wolf-pits dug across the field — the next 2 arrivals take %d as they land." % wp_dmg)
+		"informer":
+			# MtG Cabal Therapy vs the encounter deck: read the next arrivals,
+			# strike one name from the muster. Reuses the Discover modal.
+			var inf_n: int = mini(3, _enemy_deck.size())
+			var inf_ids: Array = []
+			for inf_i in range(inf_n):
+				var inf_id := String(_enemy_deck[inf_i].get("id", ""))
+				if inf_id != "" and not inf_ids.has(inf_id):
+					inf_ids.append(inf_id)
+			if not inf_ids.is_empty():
+				var inf_pick: String = await _build_discover_overlay(inf_ids,
+					"The foe's next arrivals", "Strike it")
+				for inf_i in range(mini(inf_n, _enemy_deck.size())):
+					if String(_enemy_deck[inf_i].get("id", "")) == inf_pick:
+						_log_event("The informer names [color=#f2e6c8]%s[/color] — struck from the foe's muster." \
+							% String(_enemy_deck[inf_i].get("name", inf_pick)))
+						_enemy_deck.remove_at(inf_i)
+						break
+		"forgefire":
+			# StS Apotheosis: every card in hand folds its "+" for this fight
+			# only — the run's deck list never changes, so it stacks with (and
+			# never replaces) the camp forge.
+			var ff_hits := 0
+			for ff_card in _hand.duplicate():
+				if not is_instance_valid(ff_card):
+					continue
+				if bool(ff_card.card_data.get("is_upgraded", false)):
+					continue
+				if not CardDB.is_upgradeable(ff_card.card_id):
+					continue
+				ff_card.card_data = RunState._apply_plus_upgrade(ff_card.card_data)
+				if ff_card.has_method("rebuild_face"):
+					ff_card.rebuild_face()
+				ff_hits += 1
+			if ff_hits > 0:
+				if AudioBank != null:
+					AudioBank.play_sfx("spell_cast", 0.04, 0.0, 0.8)
+				_show_info("The forge breathes — %d cards take their +." % ff_hits)
+				_log_event("Forgefire: [color=#f2e6c8]%d[/color] cards in hand are forged for this fight." % ff_hits)
+				_refresh_hand_affordability()
+		"grand_melee":
+			# StS Whirlwind, the X-cost: the card costs 0 — its price is EVERY
+			# point of Command you still hold, 1 AoE damage per point (forged:
+			# the enemy face bleeds the same). The gate blocks a 0-point cast.
+			var gm_pts: int = player_mana
+			player_mana = 0
+			if gm_pts > 0:
+				_pulse_mana_label(gm_pts)
+				for gm_e in _all_enemy_creatures():
+					gm_e.take_damage(gm_pts)
+				if is_plus:
+					damage_enemy_hero(gm_pts)
+				_log_event("Grand melee — every point of Command spends itself: [color=#f2e6c8]%d[/color] damage across the line." % gm_pts)
+				_update_hud()
+		"giantfall":
+			# Gwent Scorch: the tallest head comes off. Deterministic — the
+			# highest effective ATK on the enemy side dies outright (its
+			# On-Death fires; that is the Gwent rule too).
+			var gf_best: Control = null
+			for gf_e in _all_enemy_creatures():
+				if not is_instance_valid(gf_e):
+					continue
+				if gf_best == null or gf_e.effective_atk() > gf_best.effective_atk():
+					gf_best = gf_e
+			if gf_best != null:
+				_log_event("Giantfall — %s is cut down." % _log_card_ref(gf_best),
+					_log_data(gf_best), _log_side(gf_best))
+				gf_best.take_damage(999)
+		"great_bombard":
+			# StS The Bomb as a siege gun: a 2-round fuse, then the whole enemy
+			# line takes the shot. Fuses tick in _apply_start_round_passives.
+			_bombard_fuses.append({"left": 2, "dmg": 10 + plus_dmg})
+			_show_info("The great bombard is loaded — it fires in 2 rounds.")
+			_log_event("The great bombard is loaded and laid — [color=#f2e6c8]%d[/color] damage, 2 rounds out." % (10 + plus_dmg))
 		"coin":
 			# The Coin (going-second compensation). Solo never grants it, but keep a
 			# resolver arm so it's never a dead card if a future effect hands it over.
@@ -6530,7 +7426,7 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 					_hand.erase(picked)
 					if picked.get_parent() != null:
 						picked.get_parent().remove_child(picked)
-					_exhaust_pile.append(picked.card_id)
+					_exhaust_pile.append(_pile_entry(picked.card_id, picked.deck_uid))
 					picked.queue_free()
 					player_mana += cost
 					for _i in plus_draw:
@@ -6634,24 +7530,46 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 			_cleanup_dead()
 		"hex":
 			if target != null:
-				var had_keywords: bool = not target.card_data.get("keywords", []).is_empty()
+				var had_keywords: bool = _strip_hex_keywords(target)
 				target.take_damage((4 if had_keywords else 1) + plus_dmg)
-				if is_instance_valid(target):
-					var combat_kws := KeywordEffects.COMBAT_KEYWORDS.duplicate()
-					for kw in combat_kws:
-						target.card_data.keywords.erase(kw)
-						if kw == "sniper":
-							target.card_data.erase("sniper")
-					# Also clear non-combat keywords that grant abilities.
-					for kw in ["regenerate", "wither"]:
-						target.card_data.keywords.erase(kw)
-					if target.card_data.has("wither"):
-						target.card_data.erase("wither")
-					target.update_stat_display()
 		_:
 			pass
 
 	_update_hud()
+
+
+func _strip_hex_keywords(target: Control) -> bool:
+	if target == null or not is_instance_valid(target):
+		return false
+	var had_keywords: bool = not target.card_data.get("keywords", []).is_empty() or target.state.has_shield
+	var stripped: Array = target.card_data.get("keywords", []).duplicate()
+	target.card_data["keywords"] = []
+	if stripped.has("on_death"):
+		target.card_data.erase("on_death")
+	if stripped.has("adj_buff"):
+		target.card_data.erase("adj_buff")
+	if stripped.has("wither"):
+		target.card_data.erase("wither")
+	if stripped.has("doom"):
+		target.card_data.erase("doom")
+		target.card_data.erase("doom_damage")
+	if stripped.has("sniper"):
+		target.card_data.erase("sniper")
+	for key in ["rampage", "lifelink", "overrun", "formation"]:
+		if stripped.has(key):
+			target.card_data.erase(key)
+	if target.has_meta("temp_armored"):
+		target.remove_meta("temp_armored")
+	if target.has_meta("temp_thorns"):
+		target.remove_meta("temp_thorns")
+	if target.has_meta("bonus_thorns"):
+		target.remove_meta("bonus_thorns")
+	target.state.has_shield = false
+	if target.has_method("update_doom_display"):
+		target.update_doom_display()
+	target.update_stat_display()
+	_refresh_adjacency_buffs()
+	return had_keywords
 
 
 func _after_spell(card: Control) -> void:
@@ -6695,7 +7613,7 @@ func _after_spell(card: Control) -> void:
 		_doubling_active_spell = false
 	var was_exhausted: bool = card.has_keyword("exhaust")
 	if was_exhausted:
-		_exhaust_pile.append(card.card_id)
+		_exhaust_pile.append(_pile_entry(card.card_id, card.deck_uid))
 		var ex_anchor := card.global_position \
 			+ Vector2(card.size.x * card.scale.x * 0.5, card.size.y * card.scale.y * 0.10)
 		spawn_keyword_callout(ex_anchor, "EXHAUST",
@@ -6754,13 +7672,12 @@ func _after_spell(card: Control) -> void:
 			creature_cards[randi() % creature_cards.size()].set_meta("mummified_zero", true)
 	# Glowing Hand counter for damage-spell bonus stacking.
 	_glowing_hand_spells_cast += 1
-	# Hexblade: each spell cast bumps current_atk by 1. Using += preserves any
-	# other buffs (Battle Drummer adjacency, War Cry, persistent buffs) that
-	# might have been applied — the previous `= base + counter` form silently
-	# wiped them on every spell.
+	# Hexblade: each spell cast bumps temp_atk_buff by 1 — a THIS-ROUND scaler
+	# (resets in end-of-turn upkeep), so a long PvP fight can't snowball it into
+	# a double-digit monster. Using += preserves other buffs applied this round.
 	for _hb in _all_player_creatures():
 		if _hb.card_data.get("passive", "") == "atk_per_spell":
-			_hb.current_atk += 1
+			_hb.temp_atk_buff += 1
 			_hb.update_stat_display()
 	# Emberwright (ember_per_spell): each spell cast pings the enemy face — the
 	# spell-matters board-pressure payoff that companions Hexblade's ATK scaling.
@@ -6982,6 +7899,55 @@ func _cancel_potion_targeting() -> void:
 	_info_label.text = ""
 
 
+func _play_potion_drink_fx(pid: String, target: Control) -> void:
+	## Solo drink beat: the bottle lifts off the belt, tips as it flies, and a
+	## splash of the draught's colour bursts where it lands (the target for
+	## targeted potions, above the belt for self-draughts). The net game has
+	## its own reveal (_net_show_potion_reveal) — this is the solo counterpart,
+	## so a quaff reads as an action instead of numbers changing.
+	if _hud_layer == null or DisplayServer.get_name() == "headless" or _is_net():
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	var data: Dictionary = PotionDB.get_potion(pid)
+	var col: Color = data.get("color", Color(0.6, 0.8, 0.5))
+	var icon: Texture2D = PotionDB.icon_for(pid)
+	var from: Vector2 = Vector2(120.0, get_viewport_rect().size.y * 0.60)
+	if _potion_bar_root != null and is_instance_valid(_potion_bar_root):
+		from = _potion_bar_root.get_global_rect().get_center()
+	var to: Vector2 = from + Vector2(46.0, -110.0)
+	if target != null and is_instance_valid(target):
+		to = _card_center(target)
+	if icon != null:
+		var b := TextureRect.new()
+		b.texture = icon
+		b.modulate = Color.WHITE if PotionDB.is_painted_icon(pid) else col
+		# Painted potion icons are full-size PNGs — without EXPAND_IGNORE_SIZE
+		# the texture draws at native resolution and floods the screen.
+		b.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		b.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		b.size = Vector2(44, 44)
+		b.pivot_offset = Vector2(22, 30)
+		b.position = from - Vector2(22, 22)
+		b.z_index = 235
+		b.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_hud_layer.add_child(b)
+		var tw := b.create_tween()
+		tw.tween_property(b, "position", to - Vector2(22, 22),
+			UserSettings.anim_time(0.26)) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		tw.parallel().tween_property(b, "rotation_degrees", -38.0,
+			UserSettings.anim_time(0.26)).set_ease(Tween.EASE_OUT)
+		tw.parallel().tween_property(b, "scale", Vector2(1.18, 1.18),
+			UserSettings.anim_time(0.26))
+		tw.tween_property(b, "modulate:a", 0.0,
+			UserSettings.anim_time(0.18)).set_ease(Tween.EASE_IN)
+		tw.tween_callback(b.queue_free)
+	# The splash lands on the tip-back beat.
+	get_tree().create_timer(UserSettings.anim_time(0.24)).timeout.connect(func():
+		spawn_spell_burst(to, col))
+
+
 func _dregs_bottle_throw() -> void:
 	## Dregs relic: the drained bottle follows the draught — 2 damage to a
 	## random enemy creature, or the enemy face if the field is clear. Fired
@@ -7014,6 +7980,7 @@ func _resolve_combat_potion(pid: String, target: Control) -> void:
 	var pot_tint: Color = Color.WHITE if PotionDB.is_painted_icon(pid) \
 		else data.get("color", Color(0.7, 0.7, 0.7))
 	_log_event(quaff_line + ".", {}, 0, pot_icon, pot_tint)
+	_play_potion_drink_fx(pid, target)
 	match data.get("effect", ""):
 		"heal_hp":
 			var pot_before: int = player_hp
@@ -7061,15 +8028,14 @@ func _resolve_combat_potion(pid: String, target: Control) -> void:
 				_vfx_fire(target.get_global_rect().get_center())
 				target.update_stat_display()
 		"grant_lifelink":
-			# Vampiric Draught: friendly heals you for 2 on battle damage this
+			# Vampiric Draught: friendly heals you for the damage it deals this
 			# fight, plus a 4 HP top-up now. Mirrors Censer Light's runtime
 			# keyword-grant pattern so _apply_combat_strike_riders heals off it.
 			if target != null and target.is_creature():
 				if "lifelink" not in target.card_data.get("keywords", []):
 					target.card_data.keywords.append("lifelink")
-				target.card_data["lifelink"] = maxi(2, int(target.card_data.get("lifelink", 0)))
 				if target.has_method("_spawn_keyword_chip"):
-					target._spawn_keyword_chip("LIFELINK", Color(0.95, 0.35, 0.45))
+					target._spawn_keyword_chip("LIFESTEAL", Color(0.95, 0.35, 0.45))
 				_vfx_blight(target.get_global_rect().get_center())
 				target.update_stat_display()
 			var elx_before: int = player_hp
@@ -7131,7 +8097,7 @@ func _resolve_combat_potion(pid: String, target: Control) -> void:
 					_hand.erase(nip_card)
 					if nip_card.get_parent() != null:
 						nip_card.get_parent().remove_child(nip_card)
-					_exhaust_pile.append(nip_card.card_id)
+					_exhaust_pile.append(_pile_entry(nip_card.card_id, nip_card.deck_uid))
 					nip_card.queue_free()
 					buried += 1
 			for _i in range(buried):
@@ -7391,6 +8357,7 @@ func _animate_dismiss(card: Control, delay: float = 0.0) -> void:
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN).set_delay(delay)
 	tw.tween_property(card, "modulate:a", 0.10, 0.38) \
 		.set_ease(Tween.EASE_IN).set_delay(delay)
+	_play_discard_landing_vfx(target, delay + 0.34)
 	tw.chain().tween_callback(card.queue_free)
 
 
@@ -7435,9 +8402,11 @@ func draw_one() -> void:
 	if _player_draw_pile.is_empty():
 		if _player_discard_pile.is_empty():
 			return
+		var reshuffled_count := _player_discard_pile.size()
 		_player_draw_pile = _player_discard_pile.duplicate()
 		_player_draw_pile.shuffle()
 		_player_discard_pile.clear()
+		_play_reshuffle_pile_vfx(reshuffled_count)
 	if _player_draw_pile.is_empty():
 		return
 	_draw_card(_player_draw_pile.pop_front())
@@ -7445,6 +8414,52 @@ func draw_one() -> void:
 	# Reactive passive: ON_PLAYER_DRAW (triggers only on extra draws beyond 5)
 	if _extra_draws_this_turn > _refill_draws_this_turn:
 		_dispatch_reactive("ON_PLAYER_DRAW", null, -1)
+
+
+func _hand_deal_delay() -> float:
+	if UserSettings != null and UserSettings.reduce_motion:
+		return 0.0
+	return clampf(float(maxi(_hand.size() - 1, 0)) * 0.032, 0.0, 0.18)
+
+
+func _pile_anchor(label: Control, fallback: Vector2) -> Vector2:
+	if label != null and is_instance_valid(label):
+		return label.get_global_rect().get_center()
+	return fallback
+
+
+func _play_reshuffle_pile_vfx(count: int) -> void:
+	if count <= 0 or _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var discard_pos := _pile_anchor(_discard_count_label, Vector2(150.0, 640.0))
+	var deck_pos := _pile_anchor(_deck_count_label, Vector2(100.0, 311.0))
+	var col := Color(0.90, 0.78, 0.56, 0.88)
+	_spawn_vfx_streak(discard_pos + Vector2(16.0, -8.0),
+		deck_pos + Vector2(-8.0, 10.0), col, 5.0, 226, 0.42, -42.0)
+	_spawn_vfx_ring(deck_pos, Color(0.96, 0.84, 0.58, 0.64),
+		34.0, 1.32, 0.40, 224, 3.0, 0.58, Vector2(1.12, 0.74))
+	spawn_floating_number(deck_pos + Vector2(0.0, -24.0),
+		"SHUFFLE %d" % count, Color(0.90, 0.78, 0.56), false)
+	if _deck_count_label != null:
+		_punch_label(_deck_count_label, 1.16)
+	if _discard_count_label != null:
+		_punch_label(_discard_count_label, 1.12)
+	if AudioBank != null:
+		AudioBank.play_sfx("card_draw", 0.04, -5.0, 0.78)
+
+
+func _play_discard_landing_vfx(global_pos: Vector2, delay: float = 0.0) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var fire := func():
+		_spawn_vfx_ring(global_pos, Color(0.78, 0.70, 0.54, 0.58),
+			32.0, 1.22, 0.30, 224, 2.5, 0.58, Vector2(1.16, 0.70))
+		if _discard_count_label != null:
+			_punch_label(_discard_count_label, 1.14)
+	if delay > 0.0:
+		get_tree().create_timer(delay).timeout.connect(fire)
+	else:
+		fire.call()
 
 
 func _draw_card(entry: String) -> void:
@@ -7491,13 +8506,18 @@ func _draw_card(entry: String) -> void:
 	if card.is_creature():
 		card.dragging.connect(_on_card_dragging.bind(card))
 		card.drag_ended.connect(_clear_slot_highlights)
+	# Every hand card (spells too) feeds the drag ember trail.
+	card.dragging.connect(_on_card_drag_trail.bind(card))
 	# Deal the card in from the deck pile: start it small at the deck's screen
 	# position so the hand-reflow tween (in Card2D.set_hand_target) slides it
 	# into the fan. _hand_container is a plain Control, so manual position sticks.
 	if _hand_container != null and _hand_container.global_position != Vector2.ZERO:
 		var deck_screen := Vector2(100.0, 311.0)
 		card.position = deck_screen - _hand_container.global_position - Vector2(96.0, 128.0)
-		card.scale = Vector2(0.6, 0.6)
+		card.scale = Vector2(0.46, 0.46)
+		if DisplayServer.get_name() != "headless":
+			card.set_meta("hand_deal_delay", _hand_deal_delay())
+			card.set_meta("hand_deal_pop", true)
 	_layout_hand()
 	# Branded-curse draw sting (Deserter's Mark / Grave-Debt / War-Debt): fires
 	# the moment the curse lands in hand, with floating text at the draw pile so
@@ -7664,6 +8684,8 @@ func _animate_card_to_discard(card: Control) -> void:
 	# _hand, so _layout_hand won't fight this tween.
 	if not is_instance_valid(card):
 		return
+	if card.has_method("begin_flight"):
+		card.begin_flight()
 	if _hand_container == null:
 		card.queue_free()
 		return
@@ -7680,6 +8702,7 @@ func _animate_card_to_discard(card: Control) -> void:
 	tw.tween_property(card, "rotation", randf_range(-0.6, 0.6), 0.32)
 	tw.tween_property(card, "scale", Vector2(0.45, 0.45), 0.32)
 	tw.tween_property(card, "modulate:a", 0.0, 0.32).set_delay(0.08)
+	_play_discard_landing_vfx(disc_screen, 0.30)
 	tw.chain().tween_callback(card.queue_free)
 
 
@@ -7688,19 +8711,41 @@ func _animate_card_to_discard(card: Control) -> void:
 # =====================================================================
 
 func damage_player_hero(amount: int, from_effect: bool = true) -> void:
+	# Shieldmaiden (interpose): while she holds your front row, creature strikes
+	# aimed at your face (from_effect=false) land on her instead. Effect damage —
+	# spells, Curse stings, Doom, piercing spill — goes past her: she blocks
+	# blades, not fate. Net: strikes resolve on the host for both heroes (the
+	# twin check lives in damage_enemy_hero), and her HP ships in the snapshot.
+	if not from_effect and amount > 0:
+		var _ip := _find_interposer(false)
+		if _ip != null:
+			_log_event("%s interposes — the blow meant for you lands on her." \
+				% _log_card_ref(_ip), _log_data(_ip), _log_side(_ip))
+			spawn_floating_number(_ip.global_position \
+				+ Vector2(_ip.size.x * _ip.scale.x * 0.5, -10),
+				"INTERPOSED", Color(0.75, 0.85, 1.0), false)
+			_net_fx_text(_ip, "INTERPOSED", Color(0.75, 0.85, 1.0))
+			_ip.take_damage(amount)
+			if is_instance_valid(_ip) and _ip.current_hp <= 0 and not Card2D.defer_deaths:
+				_ip.try_die()
+			return
 	player_hp -= amount
 	_face_damage_taken_this_fight += amount
 	# Clash replay: a face hit is a logged beat (owner 0 = the host's hero).
 	if _net_clash_recording and amount > 0:
-		_net_clash_log.append({"f": 0, "fhp": int(player_hp), "n": int(amount)})
+		_net_clash_log.append(_net_enrich_face_hit(
+			{"f": 0, "fhp": int(player_hp), "n": int(amount)}))
 	# Ember Warden (grows_on_burn), mirrored: effect damage to the PLAYER's face
 	# stokes wardens on the opposing side (net client wardens; solo enemy wardens
 	# only if an encounter deck fields one). Creature strikes pass from_effect=false.
+	# +2 ATK this round (+3 forged) — temp_atk_buff, so the surge rides THIS
+	# round's clash and washes off after (2026-07-13 rework: the old permanent
+	# +1 crept unpayably; a burn deck now spikes the round it burns).
 	if from_effect and amount > 0:
 		for _we in _all_friendly(true):
 			if is_instance_valid(_we) and _we.card_data.get("passive", "") == "grows_on_burn":
-				var we_gain: int = 2 if bool(_we.card_data.get("is_upgraded", false)) else 1
-				_we.current_atk += we_gain
+				var we_gain: int = 3 if bool(_we.card_data.get("is_upgraded", false)) else 2
+				_we.temp_atk_buff += we_gain
 				_we.update_stat_display()
 				spawn_floating_number(_we.global_position \
 					+ Vector2(_we.size.x * _we.scale.x * 0.5, -10),
@@ -7752,7 +8797,32 @@ func damage_player_hero(amount: int, from_effect: bool = true) -> void:
 	_update_hud()
 
 
+func heal_enemy_hero(amount: int) -> void:
+	# The enemy face heals (Pressed Man's bill). Solo-only callers today —
+	# a net mirror (EV hp sync) must land before any healing card goes
+	# net-legal; the on-death "FOE HEALS N" callout carries the visibility.
+	if amount <= 0:
+		return
+	enemy_hp = mini(enemy_hp + amount, enemy_max_hp)
+	_log_event("The foe's wounds close — it heals %d." % amount)
+	_update_hud()
+
+
 func damage_enemy_hero(amount: int, from_effect: bool = true) -> void:
+	# Interpose twin: the CLIENT's Shieldmaiden guards the client's face in
+	# skirmish (enemy_hp is the client's hero on the host sim). Solo encounters
+	# never field her, so this is net-only in practice. Checked before Pyre
+	# Stoker — a caught blade never reached the face it would have stoked.
+	if not from_effect and amount > 0:
+		var _eip := _find_interposer(true)
+		if _eip != null:
+			_log_event("%s interposes — the blow meant for the foe lands on her." \
+				% _log_card_ref(_eip), _log_data(_eip), _log_side(_eip))
+			_net_fx_text(_eip, "INTERPOSED", Color(0.75, 0.85, 1.0))
+			_eip.take_damage(amount)
+			if is_instance_valid(_eip) and _eip.current_hp <= 0 and not Card2D.defer_deaths:
+				_eip.try_die()
+			return
 	# Pyre Stoker: face damage you deal this turn gets +1 if you played 3+ cards.
 	# Reads _cards_played_this_turn directly so each face hit recomputes the
 	# bonus — if you cross the threshold mid-turn, subsequent hits scale.
@@ -7761,15 +8831,17 @@ func damage_enemy_hero(amount: int, from_effect: bool = true) -> void:
 	enemy_hp -= amount
 	# Clash replay: owner 1 = the client's hero (amount is post-Pyre-Stoker).
 	if _net_clash_recording and amount > 0:
-		_net_clash_log.append({"f": 1, "fhp": int(enemy_hp), "n": int(amount)})
+		_net_clash_log.append(_net_enrich_face_hit(
+			{"f": 1, "fhp": int(enemy_hp), "n": int(amount)}))
 	# Ember Warden (grows_on_burn): the enemy face burning from a spell or effect
 	# (never a plain creature strike — those pass from_effect=false) stokes the
-	# player's wardens: +1 ATK this fight, +2 upgraded.
+	# player's wardens: +2 ATK this round, +3 forged (temp_atk_buff — the surge
+	# rides this round's clash and washes off after).
 	if from_effect and amount > 0:
 		for _ww in _all_friendly(false):
 			if is_instance_valid(_ww) and _ww.card_data.get("passive", "") == "grows_on_burn":
-				var ww_gain: int = 2 if bool(_ww.card_data.get("is_upgraded", false)) else 1
-				_ww.current_atk += ww_gain
+				var ww_gain: int = 3 if bool(_ww.card_data.get("is_upgraded", false)) else 2
+				_ww.temp_atk_buff += ww_gain
 				_ww.update_stat_display()
 				spawn_floating_number(_ww.global_position \
 					+ Vector2(_ww.size.x * _ww.scale.x * 0.5, -10),
@@ -8027,6 +9099,12 @@ func summon_token(atk: int, hp: int, lane_idx: int, is_enemy: bool, row: int = R
 	# (Armored in take_damage, Swift in the pre-phase, Thorns on retaliation).
 	if token_name != "":
 		card.card_data["name"] = token_name
+		# Named war-material tokens carry the matching creature type, so they
+		# feed the ctype effects (Warchief's Soldier aura, DEAD readers).
+		if token_name == "Soldier":
+			card.card_data["ctype"] = "soldier"
+		elif token_name == "Shade":
+			card.card_data["ctype"] = "dead"
 	for kw in extra_keywords:
 		if not card.card_data["keywords"].has(kw):
 			card.card_data["keywords"].append(kw)
@@ -8039,6 +9117,7 @@ func summon_token(atk: int, hp: int, lane_idx: int, is_enemy: bool, row: int = R
 	_slot_set_card(slot, card)
 	card.destroyed.connect(_on_card_destroyed.bind(card))
 	card.will_die.connect(_on_card_will_die.bind(card))
+	_play_landing_pop(card)
 	# Linked Banner: a freshly-summoned friendly bumps neighbors' adjacency
 	# counts. Re-scan so any ally that just hit 2+ adjacents gets +1 HP.
 	if not is_enemy:
@@ -8062,6 +9141,10 @@ func _griffin_return_to_hand(card: Control) -> void:
 	if _griffin_returned_uids.has(uid):
 		return   # already came back once this fight
 	_griffin_returned_uids[uid] = true
+	# Runs mid-on_death, BEFORE _on_card_destroyed files the corpse into the
+	# discard — flag the uid so that filing is skipped and the card isn't
+	# counted twice (hand + discard).
+	_pending_return_uids[uid] = true
 	_player_draw_pile.push_front(_pile_entry(card.card_id, uid))
 	draw_one()
 
@@ -8105,6 +9188,10 @@ func _show_recycle_modal() -> Control:
 	## the bookkeeping — exhaust + mana gain). Returns null if cancelled or
 	## hand is empty.
 	if _hand.is_empty():
+		return null
+	# Headless: nobody can click — pick nothing so the await never parks
+	# (same idiom as _show_discard_picker / the war-school auto-pick).
+	if DisplayServer.get_name() == "headless":
 		return null
 
 	# Snapshot hand contents (the array can mutate during the await window
@@ -8152,7 +9239,7 @@ func _show_recycle_modal() -> Control:
 		slot.custom_minimum_size = Vector2(220, 300)
 		grid.add_child(slot)
 
-		var display := CARD_SCENE.instantiate()
+		var display: Control = CARD_SCENE.instantiate()
 		display.card_id = hand_card.card_id
 		display.card_data = data.duplicate(true)
 		display.is_on_battlefield = true
@@ -8189,6 +9276,11 @@ func _show_discard_picker(target_count: int, title_text: String, allow_fewer: bo
 	if _hand.is_empty():
 		return []
 	if target_count <= 0:
+		return []
+	# Headless: nobody can click the modal, so the await would park forever and
+	# the casting spell never reaches _after_spell (probes see it "vanish").
+	# Pick nothing — same idiom as the war-school auto-pick.
+	if DisplayServer.get_name() == "headless":
 		return []
 	# Snapshot hand so mid-modal draws (Mule discards before drawing) don't
 	# desync the displayed cards.
@@ -8254,7 +9346,7 @@ func _show_discard_picker(target_count: int, title_text: String, allow_fewer: bo
 		slot.add_theme_stylebox_override("panel", bg)
 		grid.add_child(slot)
 
-		var display := CARD_SCENE.instantiate()
+		var display: Control = CARD_SCENE.instantiate()
 		display.card_id = hand_card.card_id
 		display.card_data = data.duplicate(true)
 		display.is_on_battlefield = true
@@ -8321,15 +9413,13 @@ func _show_discard_picker(target_count: int, title_text: String, allow_fewer: bo
 
 func _pick_adjacent_friendly(lane_idx: int, my_row: int, prompt: String) -> Control:
 	## Used by floops that say "pick adjacent friendly" (Necromancer kill,
-	## Corpse Eater devour). Highlights the candidate cards in red and waits
-	## for a click. Returns null if no adjacent friendly exists or the click
-	## misses. Falls through to random if there's only one candidate (no
-	## decision to make).
+	## Corpse Eater devour). Canonical adjacency: row ±1 + column-mate.
+	## Highlights the candidate cards in red and waits for a click. Returns
+	## null if no adjacent friendly exists or the click misses. Falls through
+	## to random if there's only one candidate (no decision to make).
 	var candidates: Array[Control] = []
-	var field := _row_array(false, my_row)
-	for adj_lane in [lane_idx - 1, lane_idx + 1]:
-		if adj_lane >= 0 and adj_lane < LANES_PER_ROW and field[adj_lane] != null:
-			candidates.append(field[adj_lane])
+	for c in _adjacent_creatures(false, my_row, lane_idx):
+		candidates.append(c)
 	if candidates.is_empty():
 		return null
 	if candidates.size() == 1:
@@ -9098,9 +10188,15 @@ func _war_school_overlay(veteran_name: String, schools: Array) -> String:
 	return result["kw"]
 
 
-func _build_discover_overlay(card_ids: Array) -> String:
+func _build_discover_overlay(card_ids: Array, title_text: String = "Discover",
+		btn_text: String = "Pick") -> String:
 	## Modal overlay: dim background + row of 3 large cards + Pick buttons.
-	## Returns the chosen card's id (or "" if somehow dismissed).
+	## Returns the chosen card's id (or "" if somehow dismissed). The Informer
+	## reuses it with its own title/button to read the enemy muster.
+	# Headless sessions auto-pick the first option (same convention as the war
+	# school modal) so probes/autorun never stall on a click that can't come.
+	if DisplayServer.get_name() == "headless":
+		return String(card_ids[0]) if not card_ids.is_empty() else ""
 	var overlay := ColorRect.new()
 	overlay.color = Color(0.05, 0.03, 0.04, 0.78)
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -9118,7 +10214,7 @@ func _build_discover_overlay(card_ids: Array) -> String:
 	center.add_child(col)
 
 	var title := Label.new()
-	title.text = "Discover"
+	title.text = title_text
 	title.add_theme_font_override("font", GameTheme.font_display)
 	title.add_theme_font_size_override("font_size", 36)
 	title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.30))
@@ -9152,7 +10248,7 @@ func _build_discover_overlay(card_ids: Array) -> String:
 		card_node.is_on_battlefield = true  # static display, no drag
 		slot.add_child(card_node)
 
-		var pick_btn := GameTheme.make_themed_button("Pick",
+		var pick_btn := GameTheme.make_themed_button(btn_text,
 			Color(0.18, 0.30, 0.14), Vector2(140, 40), 16)
 		pick_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		pick_btn.pressed.connect(func():
@@ -9189,6 +10285,12 @@ func _add_discovered_card_to_hand(card_id: String) -> int:
 	card_node.card_id = card_id
 	card_node.deck_uid = uid
 	card_node.card_data = data.duplicate(true)
+	# Discovered finds are DISCOUNTED 2 (min 0) — paying a card + Command for
+	# the discover, then full price again for the find, was a strict tempo
+	# loss (2026-07-10). Ephemeral instance dict: the discount dies with the
+	# fight. Every discover path shares this rule (Lost Tome / War Council /
+	# Scholar / Treasure Hunter / the Toolbox relic).
+	card_node.card_data["cost"] = maxi(0, int(card_node.card_data.get("cost", 0)) - 2)
 	card_node.live_baked_mode = true   # baked frame+art, live text (see _draw_card note)
 	_hand_container.add_child(card_node)
 	_hand.append(card_node)
@@ -9203,6 +10305,7 @@ func _add_discovered_card_to_hand(card_id: String) -> int:
 	if card_node.is_creature():
 		card_node.dragging.connect(_on_card_dragging.bind(card_node))
 		card_node.drag_ended.connect(_clear_slot_highlights)
+	card_node.dragging.connect(_on_card_drag_trail.bind(card_node))
 	# Spawn the card at the deck pile and let _layout_hand tween it into the
 	# fan, matching how normal draws look.
 	if _hand_container != null and _hand_container.global_position != Vector2.ZERO:
@@ -9262,6 +10365,7 @@ func _check_game_over() -> void:
 		# to the Pyre Cult," not "I died to Burning Martyr's on-death."
 		RunState.cause_of_death = _encounter_name if _encounter_name != "" else "an unknown foe"
 		_presence_say(_pick_bark("slay"), Color(0.95, 0.85, 0.5))   # the foe's parting line
+		_show_battle_verdict(false)
 		if AudioBank != null:
 			AudioBank.duck_music(-8.0, 1.3)
 			AudioBank.play_sfx("defeat")
@@ -9280,13 +10384,17 @@ func _check_game_over() -> void:
 		# the gold line is known) so the killing blow's death burst and shake get
 		# a held beat — they used to swap in the very frame the last creature died.
 		var victory_banner := "VICTORY!"
+		var node_type = RunState.current_node_type
 		RunState.hero_hp = max(player_hp, 1)
 		# Run-stat bookkeeping for the GameOver recap.
 		RunState.fights_won += 1
 		# Successor Wars: every garrison/stronghold that falls counts toward
 		# opening the rival lord's keep (RunState.is_lord_gate_open).
-		if RunState.current_node_type in ["combat", "elite"]:
+		var gate_was_open: bool = RunState.is_lord_gate_open()
+		var conquest_line := ""
+		if node_type in ["combat", "elite"]:
 			RunState.holds_broken_in_act += 1
+			conquest_line = _victory_conquest_line(gate_was_open)
 		if _mutator_id != "" and not RunState.mutators_survived.has(_mutator_id):
 			RunState.mutators_survived.append(_mutator_id)
 		# Vulture's Feast
@@ -9322,7 +10430,6 @@ func _check_game_over() -> void:
 		# Gold reward — fights pay ground, not cards (Successor Wars Phase 4):
 		# the card drip moved to recruit stops, so the gold base is bumped to
 		# keep the shop a real deck-growth lever.
-		var node_type = RunState.current_node_type
 		var gold_won: int = 0
 		match node_type:
 			"combat": gold_won = RunState.roll_gold_reward(40)
@@ -9362,9 +10469,12 @@ func _check_game_over() -> void:
 		# The held beat: banner text + sting land together after the final death
 		# has breathed. Well inside the earliest scene fade (elite, 1.0s).
 		get_tree().create_timer(0.45).timeout.connect(func():
+			_show_battle_verdict(true, gold_won)
 			if is_instance_valid(_phase_label):
 				_phase_label.text = victory_banner
 				_phase_label.add_theme_color_override("font_color", Color(1.0, 0.82, 0.34))
+			if conquest_line != "":
+				_show_info(conquest_line)
 			if AudioBank != null:
 				# Dip the combat track under the sting so the fanfare reads
 				# over the music instead of fighting it.
@@ -9634,6 +10744,14 @@ func _resolve_enemy_ability(card: Control, lane_idx: int) -> void:
 				card.current_atk += steal
 				opp.update_stat_display()
 				card.update_stat_display()
+		"steal_command":
+			var value: int = int(ability.get("value", 1))
+			if value > 0:
+				_bonus_mana_next_turn -= value
+				_show_info("%s steals %d Command next round." \
+					% [card.card_data.get("name", "Cutpurse"), value])
+				_log_event("%s steals [color=#f2e6c8]%d Command[/color] next round." \
+					% [_log_card_ref(card), value], _log_data(card), _log_side(card))
 		"curse":
 			_player_discard_pile.append(CardDB.random_curse_id())
 		"devour":
@@ -10643,7 +11761,7 @@ func _reveal_cast_card(card_data: Dictionary, caption: String,
 	# skirmish OPPONENT-cast reveal (and on Chaos Imp / Echo casts in solo). A real
 	# Card2D in the same baked-overlay mode the hand uses paints the frame/art from the
 	# bake AND draws name + rules + stats live on top.
-	var pic := CARD_SCENE.instantiate()
+	var pic: Control = CARD_SCENE.instantiate()
 	pic.card_id = String(card_data.get("id", ""))
 	pic.card_data = card_data.duplicate(true)
 	pic.live_baked_mode = true   # baked frame+art + live text — identical to a hand card
@@ -10659,19 +11777,19 @@ func _reveal_cast_card(card_data: Dictionary, caption: String,
 	pic.position = center - Vector2(112.5, 150.0)
 	# Pop the card in with a small back-eased scale as the holder fades up.
 	pic.scale = Vector2(reveal_scale * 0.80, reveal_scale * 0.80)
-	var ptw := pic.create_tween()
+	var ptw: Tween = pic.create_tween()
 	ptw.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	ptw.tween_property(pic, "scale", Vector2(reveal_scale, reveal_scale), 0.26)
 
-	var tw := holder.create_tween()
+	var tw: Tween = holder.create_tween()
 	tw.tween_property(holder, "modulate:a", 1.0, 0.18)
 	tw.tween_interval(1.15)
 	tw.tween_property(holder, "modulate:a", 0.0, 0.40)
 	tw.tween_callback(holder.queue_free)
 
 
-func _dispatch_encounter_on_enemy_death(lane_idx: int, dead_card: Control = null) -> void:
-	EncounterEffects.dispatch_encounter_on_enemy_death(self, lane_idx, dead_card)
+func _dispatch_encounter_on_enemy_death(lane_idx: int, dead_card: Control = null, row: int = -1) -> void:
+	EncounterEffects.dispatch_encounter_on_enemy_death(self, lane_idx, dead_card, row)
 
 
 func _dispatch_encounter_on_player_death(_lane_idx: int) -> void:
@@ -10725,6 +11843,8 @@ func _highest_atk_enemy_creature() -> Control:
 # The player creature currently flagged as the start-of-round passive's victim,
 # so we can clear the old flag before moving it elsewhere.
 var _passive_threat_marked: Control = null
+var _passive_threat_amount: int = 0
+var _martyr_chosen: Control = null
 
 func _refresh_passive_threat_glow() -> void:
 	# Glow the player creature the boss's start-of-round passive will snipe, using
@@ -10732,15 +11852,69 @@ func _refresh_passive_threat_glow() -> void:
 	# the warning can never disagree with what actually happens. Presentation only
 	# — nothing here mutates the board.
 	var target: Control = null
+	var amount: int = 0
 	if _encounter_passive == "hollow_king_snipe" or _encounter_passive == "hollow_king_phase2":
 		target = _highest_atk_player_creature()
-	if target == _passive_threat_marked:
+		amount = 3
+	elif _encounter_passive == "executioner_face":
+		target = _highest_atk_enemy_creature()
+		if target != null:
+			amount = target.effective_atk()
+	if target == _passive_threat_marked and amount == _passive_threat_amount:
 		return
 	if _passive_threat_marked != null and is_instance_valid(_passive_threat_marked):
 		_passive_threat_marked.set_danger_marked(false)
 	_passive_threat_marked = target
+	_passive_threat_amount = amount
 	if target != null and is_instance_valid(target):
-		target.set_danger_marked(true, 3)
+		target.set_danger_marked(true, amount)
+
+
+func _mark_martyr_chosen() -> void:
+	var best: Control = null
+	var best_hp: int = 999999
+	var best_atk: int = 999999
+	for c in _all_enemy_creatures():
+		if c == null or not is_instance_valid(c) or c.current_hp <= 0:
+			continue
+		if not c.card_data.has("on_death"):
+			continue
+		if c.has_keyword("structure"):
+			continue
+		var hp: int = int(c.current_hp)
+		var atk: int = c.effective_atk()
+		if best == null or hp < best_hp or (hp == best_hp and atk < best_atk):
+			best = c
+			best_hp = hp
+			best_atk = atk
+	if best == _martyr_chosen:
+		return
+	if _martyr_chosen != null and is_instance_valid(_martyr_chosen):
+		_martyr_chosen.set_meta("martyr_chosen", false)
+		if _martyr_chosen.has_method("set_danger_marked"):
+			_martyr_chosen.set_danger_marked(false)
+	_martyr_chosen = best
+	if best != null and is_instance_valid(best):
+		best.set_meta("martyr_chosen", true)
+		if best.has_method("set_danger_marked"):
+			best.set_danger_marked(true, 0)
+		_show_info("%s is Chosen for the martyr-pact." % best.card_data.get("name", "A cultist"))
+		_log_event("%s is Chosen: its on-death will fire twice." \
+			% _log_card_ref(best), _log_data(best), _log_side(best))
+
+
+func _double_martyr_on_death(dead_card: Control, lane_idx: int, row: int = -1) -> void:
+	if dead_card == null or not is_instance_valid(dead_card):
+		return
+	if not bool(dead_card.get_meta("martyr_chosen", false)):
+		return
+	var data: Dictionary = dead_card.card_data
+	if data.has("on_death"):
+		_log_event("%s's martyr-pact repeats." % _log_card_ref(dead_card),
+			_log_data(dead_card), _log_side(dead_card))
+		KeywordEffects._run_on_death(data.on_death, lane_idx, true, self, row)
+	if dead_card == _martyr_chosen:
+		_martyr_chosen = null
 
 
 func _find_empty_enemy_slot() -> Dictionary:
@@ -11373,10 +12547,16 @@ func _update_presence_hp() -> void:
 		return
 	var full: float = _presence_hp_fill.get_meta("full_w", float(PRESENCE_W - 20))
 	var ratio := clampf(float(enemy_hp) / float(maxi(enemy_max_hp, 1)), 0.0, 1.0)
-	var tw := _presence_hp_fill.create_tween()
-	tw.tween_property(_presence_hp_fill, "offset_right", full * ratio, 0.3) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	var target := full * ratio
 	_presence_hp_fill.color = Color(0.78, 0.16, 0.13, 1.0).lerp(Color(0.35, 0.05, 0.05, 1.0), 1.0 - ratio)
+	if is_equal_approx(float(_presence_hp_fill.get_meta("target_w", -1.0)), target):
+		return
+	_presence_hp_fill.set_meta("target_w", target)
+	if _presence_hp_tween != null and _presence_hp_tween.is_valid():
+		_presence_hp_tween.kill()
+	_presence_hp_tween = _presence_hp_fill.create_tween()
+	_presence_hp_tween.tween_property(_presence_hp_fill, "offset_right", target, 0.3) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 
 func _pick_bark(kind: String) -> String:
@@ -11680,6 +12860,10 @@ func _place_card_in_slot(card: Control, lane_idx: int, row: int = ROW_FRONT,
 			card.dragging.connect(_on_card_dragging.bind(card))
 		if not card.drag_ended.is_connected(_clear_slot_highlights):
 			card.drag_ended.connect(_clear_slot_highlights)
+		# Field repositioning leaves the same ember ribbon as a hand drag.
+		# Guarded: cards played from hand already carry the connection.
+		if not card.dragging.is_connected(_on_card_drag_trail.bind(card)):
+			card.dragging.connect(_on_card_drag_trail.bind(card))
 	# Friendly damage hook. Used by Stalwart's Anvil, Wormwood, Spike Driver,
 	# and any future relic that reacts to "ally took a hit". The Card2D signal
 	# fires only when amount > 0, so guard logic stays in the handler.
@@ -11760,12 +12944,85 @@ func _play_landing_pop(card: Control, from_global: Vector2 = Vector2.ZERO,
 		# re-arms the idle bob itself when the press settles.
 		if card.has_method("play_wax_press"):
 			card.play_wax_press(rest_scale)
+		_play_slot_claim_vfx(card)
 	else:
 		# Drop-in entrance (enemy placements / repositions): arrive slightly
 		# large, then the shared wax press stamps it onto the board.
 		card.scale = rest_scale * 1.22
 		if card.has_method("play_wax_press"):
 			card.play_wax_press(rest_scale)
+		_play_slot_claim_vfx(card)
+
+
+func _landing_color_for(card: Control) -> Color:
+	if card == null or not is_instance_valid(card):
+		return Color(1.0, 0.74, 0.36)
+	if card.has_keyword("structure"):
+		return Color(0.68, 0.65, 0.58)
+	if card.is_opponent:
+		if _encounter_faction != "":
+			return _faction_vfx_color(_encounter_faction).lerp(Color.WHITE, 0.10)
+		return Color(1.0, 0.48, 0.30)
+	if bool(card.is_token):
+		return Color(0.88, 0.78, 0.58)
+	return Color(1.0, 0.82, 0.34)
+
+
+func _play_slot_claim_vfx(card: Control) -> void:
+	if card == null or not is_instance_valid(card):
+		return
+	if DisplayServer.get_name() == "headless":
+		return
+	var lane: int = int(card.current_lane)
+	var row: int = int(card.current_row)
+	if lane < 0 or lane >= LANES_PER_ROW or (row != ROW_FRONT and row != ROW_BACK):
+		return
+	var slot: Control = _slot_array(card.is_opponent, row)[lane]
+	if slot == null or not is_instance_valid(slot):
+		return
+	var col := _landing_color_for(card)
+	_pulse_lane_slot(slot, col)
+	var center := _slot_global_center(card.is_opponent, row, lane)
+	var token_scale := 0.82 if bool(card.is_token) else 1.0
+	var oval := Vector2(1.18, 0.58)
+	var radius := 42.0 * token_scale
+	if card.has_keyword("structure"):
+		oval = Vector2(1.04, 0.72)
+		radius = 50.0
+	_spawn_vfx_ring(center + Vector2(0.0, 36.0), Color(col.r, col.g, col.b, 0.62),
+		radius, 1.24, 0.34, 222, 3.0, 0.54, oval)
+	if not (UserSettings != null and UserSettings.reduce_motion):
+		var dir := -1.0 if card.is_opponent else 1.0
+		_spawn_vfx_streak(center + Vector2(-48.0, 34.0 * dir),
+			center + Vector2(48.0, 12.0 * dir),
+			Color(col.r, col.g, col.b, 0.50), 3.0, 221, 0.24, 10.0 * dir)
+
+
+func _pulse_lane_slot(slot: Control, color: Color) -> void:
+	if slot == null or not is_instance_valid(slot):
+		return
+	var hl: ColorRect = slot.get_node_or_null("Highlight") as ColorRect
+	if hl != null:
+		var restore := hl.color
+		restore.a = 0.0
+		hl.color = Color(color.r, color.g, color.b, 0.24)
+		var htw := hl.create_tween()
+		htw.tween_property(hl, "color:a", 0.0, 0.30).set_ease(Tween.EASE_IN)
+		htw.tween_callback(func():
+			if is_instance_valid(hl):
+				hl.color = restore)
+	var station: Control = slot.get_node_or_null("Station") as Control
+	if station != null:
+		var rest_a := 1.0 if _stations_lit else STATION_REST_ALPHA
+		station.modulate.a = 1.0
+		var stw := station.create_tween()
+		stw.tween_property(station, "modulate:a", rest_a, 0.34).set_ease(Tween.EASE_OUT)
+	var shadow: Control = slot.get_node_or_null("ContactShadow") as Control
+	if shadow != null:
+		var base_a := shadow.modulate.a
+		shadow.modulate.a = minf(1.0, base_a + 0.18)
+		var ctw := shadow.create_tween()
+		ctw.tween_property(shadow, "modulate:a", base_a, 0.22).set_ease(Tween.EASE_OUT)
 
 
 func _on_card_will_die(card: Control) -> void:
@@ -11845,6 +13102,7 @@ func _on_card_destroyed(card: Control) -> void:
 	# JUICE — register this death for the coalesced "notable kill" hit-stop so a
 	# multi-creature wipe or a chunky bruiser dying lands with weight.
 	_note_death(card, was_enemy)
+	_play_creature_death_vfx(card, was_enemy)
 
 	# The slot arrays were nulled above — re-tally adjacency so neighbours of the
 	# fallen card lose its buff immediately (any on_death summon below re-tallies).
@@ -11877,25 +13135,19 @@ func _on_card_destroyed(card: Control) -> void:
 	# Wolf pack revenge, Necromancer summon, etc.).
 	if was_enemy:
 		_enemy_deaths_this_fight += 1
-		_dispatch_encounter_on_enemy_death(lane, card)
-		# The Apothecary (plague_doctor): a friendly turns every enemy death into a
-		# clock — deal damage to the dead foe's hero. (poison kills, AoE, Doom, and
-		# ordinary trades all feed it.)
-		_apply_plague_doctor(true)
+		_dispatch_encounter_on_enemy_death(lane, card, row)
 	else:
 		_on_friendly_death(card, lane)
 		_dispatch_encounter_on_player_death(lane)
 	# NET mirror: the client's side gets the same death payoffs from its perspective —
-	# its allies' deaths grow/drain ITS passives, and its apothecaries profit when a
-	# host creature falls. Solo never enters here (player-side handled above).
-	if _is_net():
-		if was_enemy:
-			# Count the client's death for its own Gravedigger cap before the payoffs
-			# read it (mirrors _on_friendly_death incrementing before its false call).
-			_enemy_deaths_this_round += 1
-			_apply_ally_death_passives(true, card)
-		else:
-			_apply_plague_doctor(false)
+	# its allies' deaths grow/drain ITS passives. Solo never enters here (player-side
+	# handled above). (The Apothecary left this hook 2026-07-10: toxin_salve fires
+	# from the poison-kill sites, not from generic deaths.)
+	if _is_net() and was_enemy:
+		# Count the client's death for its own Gravedigger cap before the payoffs
+		# read it (mirrors _on_friendly_death incrementing before its false call).
+		_enemy_deaths_this_round += 1
+		_apply_ally_death_passives(true, card)
 
 	# Reactive passive (ON_CREATURE_DEATH triggers — Necromancer Tower's
 	# double_on_death, etc.).
@@ -11912,6 +13164,7 @@ func _on_card_destroyed(card: Control) -> void:
 			back_mate.card_data["hp"] = int(back_mate.card_data.get("hp", 0)) + 1
 			back_mate.current_hp += 1
 			back_mate.update_stat_display()
+			_relic_fired_for_side(was_enemy, "rear_guard_charm")
 
 	# Stygian Soul: heal 1 HP per enemy death, capped at 5 per combat.
 	if was_enemy and _has_relic("stygian_soul"):
@@ -11946,9 +13199,14 @@ func _on_card_destroyed(card: Control) -> void:
 				fresh.card_data["cost"] = int(fresh.card_data.get("cost", 0)) + bump
 		death_card_handled = true
 
-	# Move friendly non-tokens to discard (skipped if Death Card handled it).
+	# Move friendly non-tokens to discard (skipped if Death Card handled it, or
+	# if an on_death effect already floated this uid back to hand — Griffin's
+	# return / net EV_GIVE_CARD — filing it too would double-count the card).
 	if not was_enemy and not card.is_token and not death_card_handled:
-		_player_discard_pile.append(_pile_entry(card.card_id, card.deck_uid))
+		if _pending_return_uids.has(int(card.deck_uid)):
+			_pending_return_uids.erase(int(card.deck_uid))
+		else:
+			_player_discard_pile.append(_pile_entry(card.card_id, card.deck_uid))
 
 	# Resonance Crystal relic: first keyword-bearing creature death this fight
 	# propagates ONE of its combat keywords to every surviving friendly. We
@@ -12484,7 +13742,7 @@ func _show_log_preview(data: Dictionary, row: Control) -> void:
 	_hide_log_preview()
 	if _hud_layer == null or data.is_empty():
 		return
-	var pic := CARD_SCENE.instantiate()
+	var pic: Control = CARD_SCENE.instantiate()
 	pic.card_id = String(data.get("id", ""))
 	pic.card_data = data.duplicate(true)
 	pic.live_baked_mode = true
@@ -12505,7 +13763,7 @@ func _show_log_preview(data: Dictionary, row: Control) -> void:
 	pic.pivot_offset = Vector2(112.5, 150.0)
 	pic.scale = Vector2(0.92, 0.92)
 	pic.modulate.a = 0.0
-	var tw := pic.create_tween()
+	var tw: Tween = pic.create_tween()
 	tw.set_parallel(true)
 	tw.tween_property(pic, "scale", Vector2.ONE, 0.14) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
@@ -12832,7 +14090,26 @@ func _portrait_art_for_card(cd: Dictionary) -> Texture2D:
 	return art
 
 
+## The bottom-left plate's face. Skirmish shows the lord YOU picked in the
+## lobby; solo keeps the Dürer knight — the campaign player is "the marching
+## army", not one of the five rival lords.
+func _resolve_player_portrait() -> Texture2D:
+	if _is_net():
+		var p := "res://assets/portraits/hero_portrait_%s.png" % _my_hero_id()
+		if ResourceLoader.exists(p):
+			return load(p)
+	return load("res://assets/portraits/player_knight.png")
+
+
 func _resolve_enemy_portrait() -> Texture2D:
+	# Skirmish: the foe plate is the OPPONENT'S chosen lord — the same painting
+	# their own machine shows on its bottom-left plate, so both players agree on
+	# who's who across the table.
+	if _is_net():
+		var hp_path := "res://assets/portraits/hero_portrait_%s.png" % _foe_hero_id()
+		if ResourceLoader.exists(hp_path):
+			return load(hp_path)
+		return load("res://assets/portraits/enemy_commander.png")
 	# Per-encounter portrait instead of one shared face. Resolution order:
 	#   1. assets/portraits/boss_<encounter_id>.png  (painted splash for a
 	#      specific boss/elite — e.g. boss_iron_warden, boss_collector, etc.)
@@ -13069,7 +14346,7 @@ func _build_player_banner_diegetic() -> void:
 
 	# Portrait region: top down to where the HP bar starts (bottom 64px).
 	const HP_TOP := -68
-	var knight: Texture2D = load("res://assets/portraits/player_knight.png")
+	var knight: Texture2D = _resolve_player_portrait()
 	if knight != null:
 		var img := TextureRect.new()
 		img.texture = knight
@@ -13594,11 +14871,19 @@ func _set_seal_readout(lbl: Label, text: String) -> void:
 func _update_bank_pips() -> void:
 	if _bank_pips == null or not is_instance_valid(_bank_pips):
 		return
-	for c in _bank_pips.get_children():
-		c.queue_free()
 	var cap: int = player_mana if _has_relic("ice_cream") else MAX_BANKED_MANA
 	cap = clampi(cap, 0, 6)   # bound the row so a fat Ice Cream bank can't overflow
 	var lit: int = clampi(player_mana, 0, cap)
+	# Most HUD refreshes do not change the bank. Avoid deleting and rebuilding
+	# Controls + StyleBoxes for an identical row dozens of times per turn.
+	if cap == _bank_pips_cap and lit == _bank_pips_lit:
+		if _mana_seal_post != null and is_instance_valid(_mana_seal_post):
+			_mana_seal_post.tooltip_text = _command_tooltip_text()
+		return
+	_bank_pips_cap = cap
+	_bank_pips_lit = lit
+	for c in _bank_pips.get_children():
+		c.queue_free()
 	for i in range(cap):
 		var dot := Panel.new()
 		dot.custom_minimum_size = Vector2(9, 9)
@@ -14628,6 +15913,7 @@ func _build_settings_gear_button() -> void:
 
 ## The lines the player can send. The INDEX is the wire payload (EV_EMOTE.idx),
 ## so both machines read the same string from this list — keep the order stable.
+## This is the GENERIC voice — a lord with a HERO_EMOTES table speaks in its own.
 const EMOTES: Array = [
 	"Steel greets steel.",         # greeting
 	"Well fought.",                # salute
@@ -14636,6 +15922,53 @@ const EMOTES: Array = [
 	"Blame the levy.",             # oops (a lord never errs — his conscripts do)
 	"You will burn.",              # threat (title drop)
 ]
+## Per-lord emote voices — the SAME six slots as EMOTES (greeting / salute /
+## thanks / wow / oops / threat), so the wire payload stays the index and each
+## machine renders line #idx from the SPEAKER'S table (both know both lobby
+## picks). Missing table → generic EMOTES. Keep lines ≤ ~27 chars — the bubble
+## label is single-line at its 330px clamp.
+const HERO_EMOTES: Dictionary = {
+	"raider": [
+		"Race you to the keep.",
+		"Well ridden.",
+		"Salt and speed to you.",
+		"That horse has wings.",
+		"Wrong road. It happens.",
+		"You can't outrun me.",
+	],
+	"stalwart": [
+		"Come break on the wall.",
+		"A worthy siege.",
+		"The wall remembers.",
+		"Even stone blinks.",
+		"A crack. We mortar it.",
+		"I will still be here.",
+	],
+	"acolyte": [
+		"Your account is open.",
+		"Paid in full.",
+		"Noted in the ledger.",
+		"What a deposit.",
+		"A clerical error.",
+		"Everything is owed.",
+	],
+	"pyromancer": [
+		"I have seen this game.",
+		"Well played. As foreseen.",
+		"The circle thanks you.",
+		"Even I didn't see that.",
+		"Recalculating.",
+		"You end in fire.",
+	],
+	"kindler": [
+		"Smell that? Fuses.",
+		"You burned bright.",
+		"Kindness is kindling.",
+		"BOOM. Beautiful.",
+		"That one went early.",
+		"Everything burns.",
+	],
+}
 ## The enemy's answering barks — solo / vs-bot only, chosen at random. A darker
 ## register than the player's courtly lines (this is a war, and it wants you dead).
 const ENEMY_EMOTES: Array = [
@@ -14741,9 +16074,10 @@ func _open_emote_menu() -> void:
 	var panel := VBoxContainer.new()
 	panel.add_theme_constant_override("separation", int(SEP))
 	catcher.add_child(panel)
-	for i in EMOTES.size():
+	var lines := _emote_lines(_my_hero_id())   # your lord's voice
+	for i in lines.size():
 		var b := Button.new()
-		b.text = String(EMOTES[i])
+		b.text = String(lines[i])
 		b.custom_minimum_size = Vector2(MENU_W, LINE_H)
 		_style_emote_menu_button(b)
 		var idx := i
@@ -14753,7 +16087,7 @@ func _open_emote_menu() -> void:
 		)
 		panel.add_child(b)
 
-	var total_h: float = float(EMOTES.size()) * LINE_H + float(EMOTES.size() - 1) * SEP
+	var total_h: float = float(lines.size()) * LINE_H + float(lines.size() - 1) * SEP
 	var orb := _emote_btn.get_global_rect() if _emote_btn != null else Rect2(232, 620, 48, 48)
 	panel.global_position = Vector2(orb.position.x, orb.position.y - total_h - 8.0)
 
@@ -14786,16 +16120,22 @@ func _close_emote_menu() -> void:
 	_emote_menu = null
 
 
+## A lord's emote table (six lines, EMOTES slot order), generic if it has none.
+func _emote_lines(hid: String) -> Array:
+	return HERO_EMOTES.get(hid, EMOTES)
+
+
 ## Fire the player's chosen line: float it over our own portrait, then either
 ## ship it to the real opponent (skirmish) or nudge the AI to bark back (solo).
 func _player_emote(idx: int) -> void:
-	if idx < 0 or idx >= EMOTES.size():
+	var lines := _emote_lines(_my_hero_id())
+	if idx < 0 or idx >= lines.size():
 		return
 	var now := Time.get_ticks_msec()
 	if now < _emote_cooldown_until:
 		return   # throttle — one line every ~2.5s so bubbles never stack/spam
 	_emote_cooldown_until = now + 2500
-	_show_emote_bubble(false, String(EMOTES[idx]))
+	_show_emote_bubble(false, String(lines[idx]))
 	if AudioBank != null:
 		AudioBank.play_sfx("button_click", 0.05, -2.0, 1.25)
 	if _is_net() and not NetMatch.vs_bot:
@@ -14814,11 +16154,14 @@ func _net_send_emote(idx: int) -> void:
 		NetMatch.send_intent(msg)
 
 
-## The opponent sent emote #idx — float their line over the enemy plate.
+## The opponent sent emote #idx — float their line over the enemy plate. The
+## line is read from the SENDER'S lord table (their lobby pick is synced), so
+## both machines show the same words for the same index.
 func _net_show_foe_emote(idx: int) -> void:
-	if idx < 0 or idx >= EMOTES.size():
+	var lines := _emote_lines(_foe_hero_id())
+	if idx < 0 or idx >= lines.size():
 		return
-	_show_emote_bubble(true, String(EMOTES[idx]))
+	_show_emote_bubble(true, String(lines[idx]))
 	if AudioBank != null:
 		AudioBank.play_sfx("button_click", 0.05, -4.0, 1.05)
 
@@ -14830,7 +16173,14 @@ func _maybe_enemy_emote_reply() -> void:
 		return
 	if randf() > 0.55:
 		return
-	var line := String(ENEMY_EMOTES[randi() % ENEMY_EMOTES.size()])
+	# Practice bot answers in its own lord's voice; solo encounters keep the
+	# darker ENEMY_EMOTES register (they're monsters, not lords).
+	var line: String
+	if _is_net():
+		var lines := _emote_lines(_foe_hero_id())
+		line = String(lines[randi() % lines.size()])
+	else:
+		line = String(ENEMY_EMOTES[randi() % ENEMY_EMOTES.size()])
 	get_tree().create_timer(0.85).timeout.connect(func():
 		if not is_instance_valid(self) or phase == Phase.GAME_OVER:
 			return
@@ -15022,6 +16372,7 @@ func _refresh_relic_display() -> void:
 	for child in _relic_panel.get_children():
 		child.queue_free()
 	_relic_counter_badges.clear()
+	_relic_chip_by_id.clear()
 	var ids: Array = []
 	if _is_net():
 		# Skirmish: only the drafted battle relic shows — the campaign's leftover
@@ -15059,6 +16410,7 @@ func _refresh_relic_display() -> void:
 		# look (and the StS-style hover pop + tooltip that comes with it).
 		var chip := GameTheme.make_relic_chip(relic_id, chip_size)
 		_relic_panel.add_child(chip)
+		_relic_chip_by_id[relic_id] = chip
 		# Counter relics get a live numeral badge across the bottom of the chip.
 		if relic_id in COUNTER_RELICS:
 			var badge := _make_relic_counter_badge()
@@ -15181,7 +16533,7 @@ func _update_hud() -> void:
 	# refresh (i.e. after every damage / heal / board change).
 	_update_low_hp_dread()
 	_refresh_threat_flags()
-	_refresh_lane_forecast()
+	_request_lane_forecast_refresh()
 	# Round 1 is the muster beat — set your line before the lines clash.
 	# IMPORTANT: combat runs EVERY round (there is no setup-only turn), so the
 	# copy must NOT imply turn 1 is consequence-free — ending it triggers the
@@ -15251,6 +16603,8 @@ func screen_shake(amount: float) -> void:
 
 
 func screen_flash(color: Color, duration: float) -> void:
+	if DisplayServer.get_name() == "headless":
+		return
 	var flash := ColorRect.new()
 	flash.set_anchors_preset(Control.PRESET_FULL_RECT)
 	flash.color = color
@@ -15262,6 +16616,244 @@ func screen_flash(color: Color, duration: float) -> void:
 	var tw := create_tween()
 	tw.tween_property(flash, "color:a", 0.0, UserSettings.anim_time(duration))
 	tw.tween_callback(flash.queue_free)
+
+
+const _FACTION_VFX_COLORS := {
+	"grasswake": Color(0.48, 0.88, 0.56),
+	"last_wall": Color(0.92, 0.80, 0.54),
+	"owed": Color(0.60, 0.86, 0.38),
+	"lanternhall": Color(0.58, 0.78, 1.0),
+	"everflame": Color(1.0, 0.48, 0.18),
+}
+
+
+func _faction_vfx_color(faction: String) -> Color:
+	return _FACTION_VFX_COLORS.get(faction, Color(1.0, 0.74, 0.36))
+
+
+func _slot_global_center(is_enemy: bool, row: int, lane: int) -> Vector2:
+	var slots: Array = _slot_array(is_enemy, row)
+	if lane >= 0 and lane < slots.size():
+		var slot = slots[lane]
+		if slot != null and is_instance_valid(slot):
+			return slot.get_global_rect().get_center()
+	var vp := get_viewport_rect().size
+	var x := vp.x * (0.58 + float(lane) * 0.08)
+	var y := vp.y * (0.32 if is_enemy else 0.68)
+	if row == ROW_BACK:
+		y += -86.0 if is_enemy else 86.0
+	return Vector2(x, y)
+
+
+func _on_card_drag_trail(global_pos: Vector2, card: Control) -> void:
+	# Breadcrumb feed for the drag ember trail (see the state block). Connected
+	# to EVERY player card's `dragging` signal — hand plays, spell throws, and
+	# battlefield repositioning all leave the same ribbon. The signal only
+	# fires on cursor motion, so decay lives in _process, not here.
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	if _drag_trail == null or not is_instance_valid(_drag_trail):
+		_drag_trail = Line2D.new()
+		_drag_trail.width = 13.0
+		_drag_trail.antialiased = true
+		_drag_trail.joint_mode = Line2D.LINE_JOINT_ROUND
+		_drag_trail.begin_cap_mode = Line2D.LINE_CAP_ROUND
+		_drag_trail.end_cap_mode = Line2D.LINE_CAP_ROUND
+		_drag_trail.z_index = 210
+		var wc := Curve.new()
+		wc.add_point(Vector2(0.0, 0.08))   # tail thins to a spark
+		wc.add_point(Vector2(1.0, 1.0))
+		_drag_trail.width_curve = wc
+		var grad := Gradient.new()
+		grad.set_color(0, Color(1, 1, 1, 0.0))
+		grad.set_color(1, Color(1, 1, 1, 0.50))
+		_drag_trail.gradient = grad
+		_hud_layer.add_child(_drag_trail)
+	if _drag_trail_pts.is_empty():
+		# Fresh grab — tint the ribbon to what's being carried.
+		_drag_trail.default_color = Color(1.0, 0.74, 0.30) \
+			if card.is_creature() else Color(0.62, 0.82, 1.0)
+	# Anchor at the card's lower third, not the cursor: the ribbon reads as
+	# coming off the card's body, and mostly clears the face on the way up.
+	var anchor := global_pos + Vector2(0.0, card.size.y * card.scale.y * 0.30)
+	_drag_trail_pts.append({"p": anchor, "born": Time.get_ticks_msec() / 1000.0})
+	if _drag_trail_pts.size() > 24:
+		_drag_trail_pts.pop_front()
+	set_process(true)
+
+
+func _update_drag_trail() -> void:
+	# Per-frame decay: age out breadcrumbs so the ribbon burns down from the
+	# tail. Runs from _process only while points remain (_combat_process_needed
+	# keeps the loop alive; it turns itself back off once the trail is gone).
+	if _drag_trail_pts.is_empty():
+		return
+	var now := Time.get_ticks_msec() / 1000.0
+	while not _drag_trail_pts.is_empty() \
+			and now - float(_drag_trail_pts[0].born) > DRAG_TRAIL_LIFE:
+		_drag_trail_pts.pop_front()
+	if _drag_trail == null or not is_instance_valid(_drag_trail):
+		_drag_trail_pts.clear()
+		return
+	var pts := PackedVector2Array()
+	for e in _drag_trail_pts:
+		pts.append(e.p)
+	_drag_trail.points = pts
+	_drag_trail.visible = pts.size() >= 2
+
+
+func _spawn_vfx_ring(center: Vector2, color: Color, radius: float,
+		end_scale: float, duration: float, z: int = 220, width: float = 3.0,
+		start_scale: float = 0.55, oval: Vector2 = Vector2.ONE) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var ring := Line2D.new()
+	ring.width = width
+	ring.antialiased = true
+	ring.z_index = z
+	ring.default_color = color
+	var pts := PackedVector2Array()
+	for i in range(49):
+		var a := TAU * float(i) / 48.0
+		pts.append(Vector2(cos(a), sin(a)) * radius)
+	ring.points = pts
+	ring.position = center
+	ring.scale = oval * start_scale
+	_hud_layer.add_child(ring)
+	var tw := ring.create_tween().set_parallel(true)
+	tw.tween_property(ring, "scale", oval * end_scale,
+		UserSettings.anim_time(duration)).set_ease(Tween.EASE_OUT)
+	tw.tween_property(ring, "width", maxf(1.0, width * 0.35),
+		UserSettings.anim_time(duration)).set_ease(Tween.EASE_IN)
+	tw.tween_property(ring, "modulate:a", 0.0,
+		UserSettings.anim_time(duration)).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(ring.queue_free)
+
+
+func _spawn_vfx_streak(from_pos: Vector2, to_pos: Vector2, color: Color,
+		width: float = 5.0, z: int = 225, duration: float = 0.30,
+		bow: float = 0.0) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var line := Line2D.new()
+	line.width = width
+	line.antialiased = true
+	line.joint_mode = Line2D.LINE_JOINT_ROUND
+	line.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	line.end_cap_mode = Line2D.LINE_CAP_ROUND
+	line.z_index = z
+	line.default_color = color
+	var pts := PackedVector2Array()
+	var ctrl := (from_pos + to_pos) * 0.5
+	var dir := to_pos - from_pos
+	if absf(bow) > 0.01 and dir.length_squared() > 1.0:
+		ctrl += dir.orthogonal().normalized() * bow
+	for i in range(15):
+		pts.append(_bezier_quad(from_pos, ctrl, to_pos, float(i) / 14.0))
+	line.points = pts
+	_hud_layer.add_child(line)
+	var tw := line.create_tween().set_parallel(true)
+	tw.tween_property(line, "width", maxf(1.0, width * 0.30),
+		UserSettings.anim_time(duration)).set_ease(Tween.EASE_IN)
+	tw.tween_property(line, "modulate:a", 0.0,
+		UserSettings.anim_time(duration)).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(line.queue_free)
+
+
+func _preview_enemy_wave_centers(slot_priority: Array, wave_count: int) -> Array:
+	var centers: Array = []
+	for slot in slot_priority:
+		if centers.size() >= wave_count:
+			break
+		if not (slot is Dictionary):
+			continue
+		var row: int = int(slot.get("row", ROW_FRONT))
+		var lane: int = int(slot.get("lane", 0))
+		var arr: Array = _row_array(true, row)
+		if lane < 0 or lane >= arr.size() or arr[lane] != null:
+			continue
+		centers.append(_slot_global_center(true, row, lane))
+	if centers.is_empty():
+		var vp := get_viewport_rect().size
+		centers.append(Vector2(vp.x * 0.5, vp.y * 0.30))
+	return centers
+
+
+func _play_faction_wave_vfx(faction: String, wave_count: int, surge: bool,
+		slot_priority: Array) -> void:
+	if _hud_layer == null or wave_count <= 0 or DisplayServer.get_name() == "headless":
+		return
+	var centers: Array = _preview_enemy_wave_centers(slot_priority, wave_count)
+	var color: Color = _faction_vfx_color(faction)
+	screen_flash(Color(color.r, color.g, color.b, 0.15 if surge else 0.07),
+		0.22 if surge else 0.14)
+	if surge:
+		screen_shake(7.0)
+	if UserSettings != null and UserSettings.reduce_motion:
+		for c in centers:
+			_spawn_vfx_ring(c, Color(color.r, color.g, color.b, 0.75),
+				44.0, 1.20, 0.32, 226, 3.0, 0.70, Vector2(1.15, 0.72))
+		return
+	var vp := get_viewport_rect().size
+	match faction:
+		"grasswake":
+			for i in range(centers.size()):
+				var c: Vector2 = centers[i]
+				_spawn_vfx_streak(Vector2(vp.x + 70.0, c.y - 34.0),
+					c + Vector2(-82.0, randf_range(-12.0, 12.0)),
+					Color(color.r, color.g, color.b, 0.78), 6.0, 226, 0.34, -28.0)
+				_spawn_vfx_ring(c, Color(color.r, color.g, color.b, 0.62),
+					46.0, 1.38, 0.42, 224, 3.0, 0.56, Vector2(1.28, 0.58))
+				_spawn_family_particles(c + Vector2(18.0, 8.0), {
+					"amount": 10, "lifetime": 0.55, "spread": 80.0,
+					"velocity_min": 70.0, "velocity_max": 150.0,
+					"gravity": Vector2(-80.0, 40.0),
+					"scale_min": 1.4, "scale_max": 3.0,
+					"color": Color(color.r, color.g, color.b, 0.86),
+				})
+		"last_wall":
+			for c in centers:
+				_spawn_vfx_ring(c, Color(color.r, color.g, color.b, 0.74),
+					48.0, 1.24, 0.42, 226, 4.0, 0.64, Vector2(1.08, 0.78))
+				_spawn_vfx_streak(c + Vector2(-58.0, 0.0), c + Vector2(58.0, 0.0),
+					Color(color.r, color.g, color.b, 0.88), 4.0, 227, 0.28, 0.0)
+				_spawn_vfx_streak(c + Vector2(0.0, -42.0), c + Vector2(0.0, 42.0),
+					Color(1.0, 0.92, 0.66, 0.62), 3.0, 227, 0.28, 0.0)
+		"owed":
+			for c in centers:
+				_spawn_vfx_ring(c, Color(color.r, color.g, color.b, 0.70),
+					50.0, 1.30, 0.48, 224, 3.0, 0.60, Vector2(1.0, 0.68))
+				_spawn_vfx_streak(c + Vector2(-34.0, 42.0), c + Vector2(34.0, -42.0),
+					Color(0.34, 0.48, 0.22, 0.82), 4.0, 227, 0.34, 10.0)
+				_spawn_family_particles(c + Vector2(0.0, 22.0), {
+					"amount": 16, "lifetime": 0.75, "direction": Vector2(0, -1),
+					"spread": 140.0, "velocity_min": 25.0, "velocity_max": 95.0,
+					"gravity": Vector2(0, -20.0),
+					"scale_min": 2.0, "scale_max": 4.2,
+					"color": Color(color.r, color.g, color.b, 0.80),
+				})
+		"lanternhall":
+			for c in centers:
+				_spawn_vfx_streak(c + Vector2(-56.0, 42.0), c + Vector2(56.0, -42.0),
+					Color(color.r, color.g, color.b, 0.90), 4.0, 228, 0.30, -10.0)
+				_spawn_vfx_streak(c + Vector2(-44.0, -38.0), c + Vector2(44.0, 38.0),
+					Color(0.86, 0.95, 1.0, 0.70), 3.0, 228, 0.26, 10.0)
+				_spawn_vfx_ring(c, Color(color.r, color.g, color.b, 0.56),
+					42.0, 1.22, 0.36, 224, 2.5, 0.60, Vector2(1.18, 0.66))
+		"everflame":
+			for c in centers:
+				_spawn_vfx_streak(c + Vector2(-74.0, 48.0), c + Vector2(70.0, -34.0),
+					Color(color.r, color.g, color.b, 0.90), 6.0, 228, 0.34, -16.0)
+				_spawn_vfx_ring(c, Color(1.0, 0.66, 0.24, 0.70),
+					45.0, 1.36, 0.40, 225, 3.5, 0.56, Vector2(1.16, 0.62))
+				spawn_ash_burst(c + Vector2(0.0, 18.0),
+					Color(color.r, color.g, color.b, 0.95), 18)
+		_:
+			for c in centers:
+				_spawn_vfx_ring(c, Color(color.r, color.g, color.b, 0.70),
+					44.0, 1.25, 0.38, 224, 3.0, 0.60, Vector2(1.1, 0.7))
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -15577,6 +17169,35 @@ func _note_death(card: Control, _was_enemy: bool) -> void:
 		screen_shake(mag)
 		_reset_death_frame_counter.call_deferred()
 
+
+func _play_creature_death_vfx(card: Control, was_enemy: bool) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless" \
+			or card == null or not is_instance_valid(card):
+		return
+	var pos := _card_center(card)
+	var bulk: int = maxi(int(card.card_data.get("atk", 1)),
+		int(card.card_data.get("hp", 1)))
+	var color := Color(0.86, 0.74, 0.56)
+	if was_enemy and _encounter_faction != "":
+		color = _faction_vfx_color(_encounter_faction).lerp(Color.WHITE, 0.14)
+	elif not was_enemy:
+		color = Color(1.0, 0.78, 0.34)
+	if card.has_keyword("structure"):
+		color = Color(0.64, 0.61, 0.54)
+
+	var amount: int = int(clampf(16.0 + float(bulk) * 3.0, 18.0, 44.0))
+	spawn_ash_burst(pos, Color(color.r, color.g, color.b, 0.88), amount)
+	_spawn_vfx_ring(pos, Color(color.r, color.g, color.b, 0.72),
+		clampf(36.0 + float(bulk) * 4.0, 42.0, 76.0),
+		1.28, 0.42, 218, 3.0, 0.54, Vector2(1.0, 0.66))
+	if bulk >= 6:
+		_spawn_vfx_ring(pos, Color(1.0, 0.92, 0.68, 0.75),
+			58.0, 1.42, 0.50, 219, 4.0, 0.50, Vector2(1.08, 0.70))
+	if not was_enemy and not _is_net() and int(card.deck_uid) >= 0 \
+			and RunState.get_kills(int(card.deck_uid)) >= RunState.VETERAN_EPITHET_KILLS:
+		_spawn_vfx_streak(pos + Vector2(-54.0, 26.0), pos + Vector2(54.0, -26.0),
+			Color(1.0, 0.86, 0.40, 0.78), 4.0, 220, 0.36, -12.0)
+
 func _reset_death_frame_counter() -> void:
 	# Deferred to end-of-frame so all deaths in one combat step share the same
 	# emphasis, then the gate reopens for the next frame's deaths.
@@ -15763,6 +17384,66 @@ func _clear_lane_forecast() -> void:
 	_lane_forecast_nodes.clear()
 
 
+func _request_lane_forecast_refresh() -> void:
+	# An action can call _update_hud several times before the frame is drawn.
+	# Rebuilding immediately leaves every queue_free'd forecast alive until the
+	# frame boundary and stacks several replacement node sets on the input frame.
+	# Re-arm the hover read too: keyboard actions and remote snapshots can change
+	# the result without moving the mouse.
+	_telegraph_last_mouse = Vector2(-1.0e9, -1.0e9)
+	if _lane_forecast_refresh_queued:
+		return
+	_lane_forecast_refresh_queued = true
+	_flush_lane_forecast_refresh.call_deferred()
+
+
+func _flush_lane_forecast_refresh() -> void:
+	_lane_forecast_refresh_queued = false
+	if not is_inside_tree():
+		return
+	var signature := _lane_forecast_state_signature()
+	if signature == _lane_forecast_signature:
+		return
+	_lane_forecast_signature = signature
+	_refresh_lane_forecast()
+
+
+func _lane_forecast_state_signature() -> String:
+	# Everything the strike predictor can visibly depend on. Hashing at most 16
+	# small card dictionaries on a HUD event is far cheaper than recreating up
+	# to dozens of Line2D/Label/Polygon nodes when nothing relevant changed.
+	var parts := PackedStringArray([
+		str(int(phase)), str(Card2D.board_interactive),
+		str(_targeting_spell != null), str(_targeting_potion_idx),
+		str(UserSettings == null or UserSettings.combat_telegraph),
+		str(round_number), str(_net_active_index), str(_encounter_passive),
+		str(_virulence_active), str(_doubled_hour), str(_cards_played_this_turn),
+		str(get_meta("phantom_veil_used", false)),
+	])
+	for is_enemy in [true, false]:
+		for row in [ROW_FRONT, ROW_BACK]:
+			var arr = _row_array(is_enemy, row)
+			for lane in range(LANES_PER_ROW):
+				var card = arr[lane]
+				if card == null or not is_instance_valid(card):
+					parts.append("-")
+					continue
+				parts.append("%d:%d:%d:%d:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s" % [
+					card.get_instance_id(), card.card_data.hash(),
+					card.effective_atk(), card.current_hp,
+					str(card.can_attack()), str(card.last_stand_used),
+					str(card.state.has_shield),
+					String(card.get_meta("current_intent", "ATK")),
+					str(card.state.stunned), str(card.state.is_frozen),
+					str(card.get_meta("marked", false)),
+					str(card.get_meta("enrage_vulnerable", false)),
+					str(card.get_meta("redirecting", false)),
+					str(card.get_meta("charges_this_turn", false)),
+					str(_is_swift_attacker(card)),
+				])
+	return "|".join(parts)
+
+
 func _refresh_lane_forecast() -> void:
 	# Always-on enemy strike read for the planning phase. This reuses the same
 	# predictor as the hover arrow so the quiet board-wide chips and the loud
@@ -15793,13 +17474,23 @@ func _refresh_lane_forecast() -> void:
 func _forecast_attacker_can_strike(attacker: Control) -> bool:
 	if attacker == null or not is_instance_valid(attacker):
 		return false
-	if attacker.has_keyword("structure") or not attacker.can_attack():
+	if attacker.has_keyword("structure") or not attacker.can_attack() \
+			or attacker.state.stunned or attacker.state.is_frozen:
 		return false
-	var intent: String = String(attacker.get_meta("current_intent", "ATK"))
-	if not (intent == "ATK" or intent == "CHARGE" or intent == "ENRAGE" \
-			or intent.begins_with("CHARGE")):
-		return false
-	return attacker.effective_atk() > 0
+	# Alternating skirmish: only the active player's line strikes. In sealed mode
+	# active_index is -1 and both committed lines resolve together.
+	if _is_net() and _net_active_index >= 0:
+		var mine: int = _net_my_index()
+		var owner: int = 1 - mine if attacker.is_opponent else mine
+		if owner != _net_active_index:
+			return false
+	# Solo intents execute immediately before combat. HEAL / SUMMON / ABILITY
+	# explicitly spend this creature's attack; GUARD / RALLY / RETREAT do not.
+	if not _is_net() and attacker.is_opponent and phase == Phase.PLAYER_TURN:
+		var intent: String = String(attacker.get_meta("current_intent", "ATK"))
+		if intent in ["HEAL", "SUMMON", "ABILITY"]:
+			return false
+	return true
 
 
 func _add_lane_forecast(attacker: Control, read: Dictionary) -> void:
@@ -15926,9 +17617,9 @@ func _add_lane_forecast_target_ring(dst: Vector2, read: Dictionary, danger: Colo
 
 
 func _forecast_chip_text(read: Dictionary) -> String:
-	var text := String(read.get("text", ""))
+	var text := String(read.get("quiet_text", read.get("text", "")))
 	if bool(read.get("face", false)):
-		return "HP -%d" % int(read.get("damage", 0))
+		return text
 	if text.begins_with("-"):
 		text = "TAKES %s" % text.substr(1)
 	if int(read.get("target_row", ROW_FRONT)) == ROW_BACK:
@@ -16031,6 +17722,9 @@ func _hide_targeting_arrow() -> void:
 
 
 func _process(_delta: float) -> void:
+	# Trail decay runs ahead of the targeting early-return so a released card's
+	# ribbon still burns out while a spell is being aimed.
+	_update_drag_trail()
 	if _targeting_spell != null and _targeting_arrow != null and _targeting_arrow.visible:
 		# Skip the whole rebuild (bezier arc + arrowhead + damage-prediction scan)
 		# when the cursor is static — the board is frozen on player input, so last
@@ -16051,6 +17745,8 @@ func _process(_delta: float) -> void:
 
 
 func _combat_process_needed() -> bool:
+	if not _drag_trail_pts.is_empty():
+		return true   # a drag ribbon is still burning down
 	if _targeting_spell != null and _targeting_arrow != null and _targeting_arrow.visible:
 		return true
 	if _telegraph_arrow == null:
@@ -16112,7 +17808,113 @@ func _card_center(card: Control) -> Vector2:
 	return card.global_position + card.size * card.scale * 0.5
 
 
-func _play_attack_tracer(from_pos: Vector2, to_pos: Vector2, attacker_is_enemy: bool) -> void:
+func _play_face_strike_vfx(card: Control, lane_idx: int, is_enemy: bool, power: int) -> void:
+	if card == null or not is_instance_valid(card) or power <= 0:
+		return
+	var target_is_enemy := not is_enemy
+	var target_pos := _face_lane_point(target_is_enemy, lane_idx)
+	var interposer := _find_interposer(target_is_enemy)
+	if interposer != null and is_instance_valid(interposer):
+		target_pos = _card_center(interposer)
+	var from_pos := _card_center(card)
+	_play_attack_tracer(from_pos, target_pos, is_enemy,
+		float(power), power >= HEAVY_HIT_DAMAGE)
+	_spawn_impact_burst(target_pos, target_pos - from_pos, float(power), false)
+	if _hud_layer != null and DisplayServer.get_name() != "headless":
+		var col := Color(1.0, 0.42, 0.28, 0.72) if is_enemy else Color(1.0, 0.82, 0.34, 0.72)
+		_spawn_vfx_ring(target_pos, col, 28.0 + float(power) * 1.6,
+			1.32, 0.28, 229, 2.5, 0.52, Vector2(1.28, 0.54))
+
+
+func _play_attack_tracer(from_pos: Vector2, to_pos: Vector2, attacker_is_enemy: bool,
+		power: float = 2.0, heavy: bool = false, ranged: bool = false) -> void:
+	# Gold = player strike, ember-red = enemy. Heavy blows get a white-hot core;
+	# ranged shots draw tighter, colder lines so snipers don't read like melee.
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var dir := to_pos - from_pos
+	if dir.length_squared() <= 1.0:
+		return
+	var base_col := Color(1.0, 0.42, 0.28, 0.95) if attacker_is_enemy else Color(1.0, 0.82, 0.34, 0.95)
+	if ranged:
+		base_col = Color(1.0, 0.58, 0.34, 0.95) if attacker_is_enemy else Color(0.76, 0.92, 1.0, 0.95)
+	var hot_col := Color(1.0, 0.96, 0.76, 0.94)
+	var glow_col := Color(base_col.r, base_col.g, base_col.b, 0.28)
+	var slash_width := clampf(5.0 + (power - 2.0) * 0.48, 4.5, 9.0)
+	var mid := (from_pos + to_pos) * 0.5
+	var bow := clampf(dir.length() * (0.045 if ranged else 0.085), 10.0, 38.0)
+	if attacker_is_enemy:
+		bow *= -1.0
+	var ctrl := mid + dir.orthogonal().normalized() * bow
+	var pts := PackedVector2Array()
+	var steps := 18
+	for i in range(steps + 1):
+		pts.append(_bezier_quad(from_pos, ctrl, to_pos, float(i) / float(steps)))
+	if UserSettings.reduce_motion:
+		_spawn_vfx_streak(from_pos, to_pos, base_col, slash_width * 0.75, 230, 0.16)
+		return
+	var glow := Line2D.new()
+	glow.width = slash_width * 2.15
+	glow.antialiased = true
+	glow.joint_mode = Line2D.LINE_JOINT_ROUND
+	glow.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	glow.end_cap_mode = Line2D.LINE_CAP_ROUND
+	glow.z_index = 229
+	glow.default_color = glow_col
+	glow.points = pts
+	_hud_layer.add_child(glow)
+	var glow_tw := glow.create_tween()
+	glow_tw.tween_property(glow, "width", maxf(1.0, slash_width * 0.85),
+		UserSettings.anim_time(0.18)).set_ease(Tween.EASE_IN)
+	glow_tw.parallel().tween_property(glow, "modulate:a", 0.0,
+		UserSettings.anim_time(0.20)).set_ease(Tween.EASE_IN)
+	glow_tw.tween_callback(glow.queue_free)
+	var line := Line2D.new()
+	line.width = slash_width
+	line.antialiased = true
+	line.joint_mode = Line2D.LINE_JOINT_ROUND
+	line.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	line.end_cap_mode = Line2D.LINE_CAP_ROUND
+	line.z_index = 230
+	line.default_color = base_col
+	var curve := Curve.new()
+	curve.add_point(Vector2(0.0, 0.3))
+	curve.add_point(Vector2(1.0, 1.0))
+	line.width_curve = curve
+	line.points = pts
+	_hud_layer.add_child(line)
+	var tw := line.create_tween()
+	tw.tween_interval(UserSettings.anim_time(0.035))
+	tw.tween_property(line, "modulate:a", 0.0,
+		UserSettings.anim_time(0.17)).set_ease(Tween.EASE_IN)
+	tw.tween_callback(line.queue_free)
+	if heavy or power >= HEAVY_HIT_DAMAGE:
+		var core := Line2D.new()
+		core.width = maxf(1.6, slash_width * 0.34)
+		core.antialiased = true
+		core.joint_mode = Line2D.LINE_JOINT_ROUND
+		core.begin_cap_mode = Line2D.LINE_CAP_ROUND
+		core.end_cap_mode = Line2D.LINE_CAP_ROUND
+		core.z_index = 231
+		core.default_color = hot_col
+		core.points = pts
+		_hud_layer.add_child(core)
+		var core_tw := core.create_tween()
+		core_tw.tween_property(core, "modulate:a", 0.0,
+			UserSettings.anim_time(0.12)).set_ease(Tween.EASE_IN)
+		core_tw.tween_callback(core.queue_free)
+		_spawn_vfx_ring(to_pos, Color(base_col.r, base_col.g, base_col.b, 0.50),
+			22.0 + power * 2.0, 1.26, 0.22, 228, 2.0, 0.50, Vector2(1.24, 0.54))
+	if ranged:
+		var n := dir.normalized()
+		var side := n.orthogonal() * 9.0
+		_spawn_vfx_streak(to_pos - n * 38.0 + side, to_pos,
+			Color(hot_col.r, hot_col.g, hot_col.b, 0.70), 2.0, 232, 0.13, 0.0)
+		_spawn_vfx_streak(to_pos - n * 38.0 - side, to_pos,
+			Color(base_col.r, base_col.g, base_col.b, 0.66), 2.0, 232, 0.13, 0.0)
+
+
+func _play_attack_tracer_legacy(from_pos: Vector2, to_pos: Vector2, attacker_is_enemy: bool) -> void:
 	# A brief, bowed streak from attacker to target so the eye can follow each blow
 	# during the now-staggered swing. Gold = player strike, ember-red = enemy.
 	# Self-frees; no await needed by the caller.
@@ -16167,7 +17969,7 @@ func _play_pierce_lance(from_pos: Vector2, to_pos: Vector2) -> void:
 
 
 func spawn_ash_burst(global_pos: Vector2, color: Color, amount: int = 26) -> void:
-	if not UserSettings.particles:
+	if not UserSettings.particles or DisplayServer.get_name() == "headless":
 		return
 	# One-shot rising ember/ash burst, parented to the HUD layer so it survives the
 	# source card being freed. Used by the sacrifice ritual and piercing exit spark.
@@ -16205,7 +18007,7 @@ func _spawn_impact_burst(global_pos: Vector2, strike_dir: Vector2, power: float,
 	# tracer say "a strike travelled"; this says "it landed HERE". Heavier blows
 	# spray harder; kills flash white-hot. Sparks fall (gravity down) where the
 	# ash burst's embers rise — different material, so kills still read distinct.
-	if not UserSettings.particles:
+	if not UserSettings.particles or DisplayServer.get_name() == "headless":
 		return
 	var parent: Node = _hud_layer if _hud_layer != null else self
 	var p := CPUParticles2D.new()
@@ -16247,7 +18049,7 @@ func _update_damage_prediction() -> void:
 	var plus_dmg: int = int(_targeting_data.get("dmg_bonus", 0))
 	var text := ""
 	var color := Color(1.0, 0.85, 0.30)
-	if spell_type == "damage" or (spell_type == "custom" and custom_id in ["penance", "hex", "pillage", "fuel_the_pyre", "holy_smite", "shove", "slash", "smite_spell", "quick_shot", "last_rites", "slow_match", "banish", "petard"]):
+	if spell_type == "damage" or (spell_type == "custom" and custom_id in ["penance", "hex", "pillage", "fuel_the_pyre", "holy_smite", "shove", "slash", "smite_spell", "quick_shot", "last_rites", "slow_match", "banish", "petard", "sappers_charge", "ballista_bolt"]):
 		var dmg: int = _predicted_damage_against(hovered_card, spell_type, custom_id, raw_value, plus_dmg)
 		if dmg <= 0:
 			_prediction_label.visible = false
@@ -16319,14 +18121,24 @@ func _predicted_damage_against(card: Control, spell_type: String, custom_id: Str
 				break
 		dmg = (6 if pen_curse else 2) + spell_dmg_bonus + plus_dmg
 	elif custom_id == "hex":
-		var has_keywords: bool = not card.card_data.get("keywords", []).is_empty()
+		var has_keywords: bool = not card.card_data.get("keywords", []).is_empty() or card.state.has_shield
 		dmg = (4 if has_keywords else 1) + plus_dmg
 	elif custom_id == "pillage":
 		dmg = 2 + spell_dmg_bonus + plus_dmg
 	elif custom_id == "shove":
-		var can_move: bool = card.current_row == ROW_FRONT \
-			and _row_array(true, ROW_BACK)[card.current_lane] == null
-		dmg = 0 if can_move or plus_dmg <= 0 else plus_dmg + spell_dmg_bonus
+		# Flank-push physics: predict the crash. Direction mirrors _flank_push
+		# (lanes 0-1 left, 2-3 right); a blocked or edge-bound shove deals 2.
+		var push_dir: int = -1 if card.current_lane <= 1 else 1
+		var push_dest: int = card.current_lane + push_dir
+		var push_blocked: bool = push_dest < 0 or push_dest >= LANES_PER_ROW \
+			or _row_array(true, card.current_row)[push_dest] != null
+		dmg = (plus_dmg + spell_dmg_bonus if plus_dmg > 0 else 0) \
+			+ (2 if push_blocked else 0)
+		# Upgraded shove on a blocked target is TWO hits — Armored absorbs from
+		# each, and the shared adjust below only covers one of them.
+		if plus_dmg > 0 and push_blocked \
+				and card.has_method("has_keyword") and card.has_keyword("armored"):
+			dmg -= 1
 	elif custom_id == "slash":
 		var can_blast_move: bool = card.current_row == ROW_FRONT \
 			and _row_array(true, ROW_BACK)[card.current_lane] == null
@@ -16341,6 +18153,12 @@ func _predicted_damage_against(card: Control, spell_type: String, custom_id: Str
 		dmg = 2 + int(_targeting_data.get("fuse", 0)) + spell_dmg_bonus + plus_dmg
 	elif custom_id == "petard":
 		dmg = 5 + spell_dmg_bonus + plus_dmg
+	elif custom_id == "sappers_charge":
+		# The bomb's payload rides the THROWN neighbours (crash 4, "+" 6) — the
+		# body it lands on only takes the 1-damage scorch shown here.
+		dmg = 1
+	elif custom_id == "ballista_bolt":
+		dmg = 5 + spell_dmg_bonus + plus_dmg
 	elif custom_id == "fuel_the_pyre":
 		dmg = 999  # Kills target outright (sets up "LETHAL!" automatically)
 	elif custom_id == "last_rites":
@@ -16353,7 +18171,7 @@ func _predicted_damage_against(card: Control, spell_type: String, custom_id: Str
 		var limit: int = 4 + plus_dmg
 		dmg = card.current_hp if card.current_hp <= limit else limit
 	var banish_exiles: bool = custom_id == "banish" and card.current_hp <= 4 + plus_dmg
-	if not banish_exiles and card.has_method("has_keyword") and card.has_keyword("armored"):
+	if custom_id != "hex" and not banish_exiles and card.has_method("has_keyword") and card.has_keyword("armored"):
 		# Match Card2D.take_damage: Armored floors damage at 1, never fully negates,
 		# so the lethal/non-lethal read can't disagree with the actual hit.
 		dmg = maxi(1, dmg - 1)
@@ -16361,11 +18179,10 @@ func _predicted_damage_against(card: Control, spell_type: String, custom_id: Str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  COMBAT TELEGRAPH — hover a battlefield creature to read who it strikes and
-#  whether the trade kills it. The only forward read the board had was the
-#  aggregate INCOMING-face chip; this answers "what happens in THIS lane" before
-#  the player commits. Computed with the real combat rules (same-column target
-#  priority front→back→face, effective_atk + banners, Armored/Shield/Last Stand).
+#  COMBAT TELEGRAPH — hover a battlefield creature to read its NEXT attack.
+#  Normal columns, Swift, Sniper, Hydra/Charge, face interception and the live
+#  damage/status stack each have a forecast branch. This is deliberately not a
+#  claim about the final board after the entire ordered clash and death cascade.
 # ─────────────────────────────────────────────────────────────────────────────
 
 func _build_combat_telegraph() -> void:
@@ -16404,6 +18221,21 @@ func _build_combat_telegraph() -> void:
 	_telegraph_chip.z_index = 237
 	_telegraph_chip.visible = false
 	_hud_layer.add_child(_telegraph_chip)
+	# Stat-provenance caption — quieter than the outcome chip (it's reference
+	# ink, not a verdict), parchment ivory so it reads apart from the gold/red
+	# stat tints it explains. Signs carry the direction, not colour.
+	_telegraph_stat_line = Label.new()
+	_telegraph_stat_line.add_theme_font_size_override("font_size", 18)
+	if GameTheme.font_title != null:
+		_telegraph_stat_line.add_theme_font_override("font", GameTheme.font_title)
+	_telegraph_stat_line.add_theme_color_override("font_color", Color(0.95, 0.90, 0.78))
+	_telegraph_stat_line.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	_telegraph_stat_line.add_theme_constant_override("outline_size", 5)
+	_telegraph_stat_line.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_telegraph_stat_line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_telegraph_stat_line.z_index = 237
+	_telegraph_stat_line.visible = false
+	_hud_layer.add_child(_telegraph_stat_line)
 	_refresh_combat_process()
 
 
@@ -16415,6 +18247,8 @@ func _hide_combat_telegraph() -> void:
 		_telegraph_head.visible = false
 	if _telegraph_chip != null:
 		_telegraph_chip.visible = false
+	if _telegraph_stat_line != null:
+		_telegraph_stat_line.visible = false
 
 
 func _update_combat_telegraph() -> void:
@@ -16457,13 +18291,42 @@ func _update_combat_telegraph() -> void:
 		_hide_combat_telegraph()
 		return
 	_telegraph_hovered = hovered
+	# Stat provenance rides the same hover, independent of whether a strike
+	# resolves — a frozen veteran's breakdown is still worth reading.
+	_update_stat_provenance(hovered)
 	# Resolve who this creature would strike, and the outcome of that strike.
 	var read := _predict_lane_strike(hovered)
 	if read.is_empty():
 		# Nothing to hit this turn (can't attack, or no target + no open column).
-		_hide_combat_telegraph()
+		# Hide only the strike read — the provenance caption stays with the hover.
+		_telegraph_arrow.visible = false
+		_telegraph_head.visible = false
+		_telegraph_chip.visible = false
 		return
+	var timing_caveat := _forecast_hover_timing_caveat(hovered)
+	if timing_caveat != "":
+		# The card-level calculation remains useful, but do not present it as a
+		# guaranteed final result when an earlier/random beat can retarget it.
+		read["text"] = String(read.get("text", "")) + "\n" + timing_caveat
 	var dst: Vector2 = read["point"]
+	if bool(read.get("summary", false)):
+		# Multi-target attacks have no honest single arrow. Seat the aggregate
+		# above the source instead of pointing at one false target.
+		_telegraph_arrow.visible = false
+		_telegraph_head.visible = false
+		_telegraph_chip.text = read["text"]
+		_telegraph_chip.add_theme_color_override("font_color", read["color"])
+		_telegraph_chip.visible = true
+		_telegraph_chip.size = Vector2.ZERO
+		_telegraph_chip.reset_size()
+		var summary_size: Vector2 = _telegraph_chip.size
+		var summary_src := _card_center(hovered)
+		var summary_vp := get_viewport().get_visible_rect().size
+		_telegraph_chip.position = Vector2(
+			clampf(summary_src.x - summary_size.x * 0.5,
+				8.0, maxf(8.0, summary_vp.x - summary_size.x - 8.0)),
+			maxf(8.0, hovered.global_position.y - summary_size.y - 18.0))
+		return
 	if bool(read.get("face", false)):
 		# Face reads use the lane-local breakthrough marker from the quiet forecast.
 		# The loud hover layer only adds the outcome chip; no arrow to the HUD.
@@ -16505,6 +18368,84 @@ func _update_combat_telegraph() -> void:
 	_telegraph_chip.position = Vector2(dst.x - lbl_size.x * 0.5, dst.y - lbl_size.y - 22)
 
 
+func _update_stat_provenance(hovered: Control) -> void:
+	# Show WHERE a token's live stats came from whenever they differ from the
+	# printed (as-drawn, run-mods folded) card — the gold/red tint says "changed",
+	# this says "from what, and for how long". Skipped in net: the client's
+	# snapshot pre-folds every buff into one atk number, so the decomposition
+	# below would be fiction there (the tint/caret still mark changed stats).
+	if _telegraph_stat_line == null:
+		return
+	if _is_net():
+		_telegraph_stat_line.visible = false
+		return
+	var txt := _stat_provenance_text(hovered)
+	if txt == "":
+		_telegraph_stat_line.visible = false
+		return
+	_telegraph_stat_line.text = txt
+	_telegraph_stat_line.visible = true
+	_telegraph_stat_line.size = Vector2.ZERO
+	_telegraph_stat_line.reset_size()
+	var sz: Vector2 = _telegraph_stat_line.size
+	# Under the token (the outcome chip owns the space above the target); flip
+	# above when the token sits at the screen's bottom edge. Clamped on-screen.
+	var bottom: float = hovered.global_position.y + hovered.size.y * hovered.scale.y
+	var pos := Vector2(_card_center(hovered).x - sz.x * 0.5, bottom + 6.0)
+	var vp: Vector2 = get_viewport().get_visible_rect().size
+	if pos.y + sz.y > vp.y - 8.0:
+		pos.y = hovered.global_position.y - sz.y - 6.0
+	pos.x = clampf(pos.x, 8.0, vp.x - sz.x - 8.0)
+	_telegraph_stat_line.position = pos
+
+
+func _stat_provenance_text(c: Control) -> String:
+	# One line per stat that differs from the printed card, empty when nothing
+	# does. ATK decomposes into the buckets Card2D actually tracks:
+	#   current_atk − printed  → "this fight" (rally/ramps/debuffs — permanent)
+	#   persistent_atk_buff    → timed ("for N rounds"); ≥99 rounds is the
+	#                            "rest of this fight" idiom → fight bucket;
+	#                            1 round left reads as "this round"
+	#   adj_atk_buff           → "Adj. Buff" (live while the neighbour stands)
+	#   temp_atk_buff          → "this round"
+	# Durations follow COPY_STYLE §5; signs carry direction per §2.
+	var printed_atk: int = int(c.card_data.get("atk", c.current_atk))
+	var lines: PackedStringArray = []
+	var shown_atk: int = c.effective_atk()
+	if shown_atk != printed_atk:
+		var fight: int = int(c.current_atk) - printed_atk
+		var round_d: int = int(c.temp_atk_buff)
+		var timed := ""
+		var pers: int = int(c.persistent_atk_buff)
+		if pers != 0:
+			if int(c.persistent_atk_buff_rounds) >= 99:
+				fight += pers
+			elif int(c.persistent_atk_buff_rounds) <= 1:
+				round_d += pers
+			else:
+				timed = "%+d for %d rounds" % [pers, int(c.persistent_atk_buff_rounds)]
+		var comps: PackedStringArray = []
+		if fight != 0:
+			comps.append("%+d this fight" % fight)
+		if int(c.adj_atk_buff) != 0:
+			comps.append("%+d Adj. Buff" % int(c.adj_atk_buff))
+		if timed != "":
+			comps.append(timed)
+		if round_d != 0:
+			comps.append("%+d this round" % round_d)
+		var line := "ATK %d — printed %d" % [shown_atk, printed_atk]
+		if not comps.is_empty():
+			line += " · " + " · ".join(comps)
+		lines.append(line)
+	# HP against the LIVE max (card_data.hp — in-fight +HP buffs raise it), the
+	# number heal decisions need. "of" not "/" so it can't misread as a fraction
+	# of something else at caption size.
+	var max_hp: int = int(c.card_data.get("hp", c.current_hp))
+	if int(c.current_hp) != max_hp:
+		lines.append("HP %d of %d" % [int(c.current_hp), max_hp])
+	return "\n".join(lines)
+
+
 func _find_hovered_battlefield_creature(pos: Vector2) -> Control:
 	# Any living creature on either side under the cursor. Both sides are valid
 	# so the player can also read what the enemy line will do to them.
@@ -16518,87 +18459,647 @@ func _find_hovered_battlefield_creature(pos: Vector2) -> Control:
 	return null
 
 
-func _predict_lane_strike(attacker: Control) -> Dictionary:
-	# Mirror _resolve_column_attack's targeting + the Card2D.take_damage math so
-	# the hover read matches the real clash. Returns:
-	#   { point: Vector2, text: String, color: Color }  or {} if no strike.
+func _forecast_hover_timing_caveat(attacker: Control) -> String:
 	if attacker == null or not is_instance_valid(attacker):
+		return ""
+	# Random/moving enemy intents resolve before combat. Their exact post-intent
+	# board cannot honestly be represented by a pre-commit static arrow.
+	if not _is_net() and phase == Phase.PLAYER_TURN:
+		for source in _all_enemy_creatures():
+			var intent: String = String(source.get_meta("current_intent", "ATK"))
+			if intent == "SUMMON":
+				return "SUMMON RESOLVES FIRST - TARGET MAY CHANGE"
+			if intent == "ABILITY":
+				var ability_type: String = String(source.card_data.get("ability", {}).get("type", ""))
+				if ability_type not in ["warcry", "steal_command", "curse", "heal_all"]:
+					return "ABILITY RESOLVES FIRST - OUTCOME MAY CHANGE"
+	# A back-row attacker follows its own front line. If that earlier body can
+	# alter the same target, show the ordering caveat instead of overpromising.
+	if int(attacker.current_row) == ROW_BACK:
+		var front_ally = _row_array(bool(attacker.is_opponent), ROW_FRONT)[int(attacker.current_lane)]
+		if front_ally != null and is_instance_valid(front_ally) \
+				and _forecast_attacker_can_strike(front_ally) \
+				and (_is_swift_attacker(front_ally) \
+					or not _is_sniper(front_ally, bool(front_ally.is_opponent), ROW_FRONT)):
+			return "FRONT LINE STRIKES FIRST - TARGET MAY CHANGE"
+	# Swift removes casualties before the main clash. A non-Swift body opposite
+	# an eligible Swift attacker may never reach the forecasted hit.
+	if not _is_swift_attacker(attacker):
+		var opp_is_enemy: bool = not bool(attacker.is_opponent)
+		for row in [ROW_FRONT, ROW_BACK]:
+			var swift_foe = _row_array(opp_is_enemy, row)[int(attacker.current_lane)]
+			if swift_foe != null and is_instance_valid(swift_foe) \
+					and _is_swift_attacker(swift_foe) \
+					and _forecast_attacker_can_strike(swift_foe):
+				return "SWIFT STRIKES FIRST - OUTCOME MAY CHANGE"
+	return ""
+
+
+func _predict_lane_strike(attacker: Control) -> Dictionary:
+	# Forecast the hovered creature's NEXT attack action. Other Swift strikes,
+	# deaths and random ABILITY intents can still alter later clash beats; this
+	# function does not pretend a static hover is a full combat simulator.
+	if not _forecast_attacker_can_strike(attacker):
 		return {}
-	if not attacker.can_attack():
-		# Flooping / structure / stunned / frozen — nothing to telegraph.
-		return {}
-	var is_enemy: bool = attacker.is_opponent
-	var lane: int = attacker.current_lane
+	var is_enemy: bool = bool(attacker.is_opponent)
+	var lane: int = int(attacker.current_lane)
 	if lane < 0 or lane >= LANES_PER_ROW:
 		return {}
+	var atk: int = _forecast_attack_power(attacker, lane, is_enemy)
+	# Swift owns the next action and uses its same-column routine. A Swift
+	# Sniper/Hydra is spent there before the later special phase can see it.
+	if not _is_swift_attacker(attacker):
+		if _is_sniper(attacker, is_enemy, int(attacker.current_row)):
+			return _forecast_sniper_strike(attacker, atk, lane, is_enemy)
+		if attacker.card_data.get("passive", "") == "attacks_all_lanes" \
+				or bool(attacker.get_meta("charges_this_turn", false)):
+			return _forecast_sweep_strike(attacker, atk, lane, is_enemy)
+		if attacker.card_data.get("passive", "") == "siege":
+			var siege_opp: bool = not is_enemy
+			var siege_front = _row_array(siege_opp, ROW_FRONT)[lane]
+			var siege_back = _row_array(siege_opp, ROW_BACK)[lane]
+			if siege_front != null or siege_back != null:
+				var blocker: Control = siege_front if siege_front != null else siege_back
+				return {
+					"point": _card_center(blocker), "text": "BLOCKED - NO STRIKE",
+					"quiet_text": "BLOCKED", "color": Color(0.72, 0.76, 0.82),
+					"face": false, "damage": 0, "target_row": blocker.current_row,
+				}
+			return _forecast_append_repeats(
+				_forecast_face_strike(attacker, atk, lane, is_enemy, true),
+				attacker, is_enemy)
+	return _forecast_column_strike(attacker, atk, lane, is_enemy,
+		"swift" if _is_swift_attacker(attacker) else "standard")
+
+
+func _forecast_attack_power(attacker: Control, lane: int, is_enemy: bool) -> int:
 	var atk: int = _effective_attack(attacker, lane, is_enemy)
+	# Announced solo intents have not mutated the board during planning yet.
+	if not _is_net() and is_enemy and phase == Phase.PLAYER_TURN:
+		var intent: String = String(attacker.get_meta("current_intent", "ATK"))
+		if intent == "CHARGE":
+			atk += 1
+		elif intent == "ENRAGE":
+			atk += 2
+		for ally in _adjacent_in_row(true, int(attacker.current_row), lane):
+			if String(ally.get_meta("current_intent", "ATK")) == "RALLY":
+				atk += 1
+		# ABILITY: warcry spends the source's attack but buffs the rest first.
+		for source in _all_enemy_creatures():
+			if String(source.get_meta("current_intent", "ATK")) != "ABILITY":
+				continue
+			var ability: Dictionary = source.card_data.get("ability", {})
+			if String(ability.get("type", "")) == "warcry":
+				atk += int(ability.get("value", 1))
+	return maxi(0, atk)
+
+
+func _forecast_column_strike(attacker: Control, atk: int, lane: int,
+		is_enemy: bool, kind: String) -> Dictionary:
 	var opp_is_enemy := not is_enemy
 	var opp_front = _row_array(opp_is_enemy, ROW_FRONT)[lane]
 	var opp_back = _row_array(opp_is_enemy, ROW_BACK)[lane]
 	var target: Control = null
-	var target_row := ROW_FRONT
 	if opp_front != null and is_instance_valid(opp_front) and opp_front.current_hp > 0:
 		target = _redirect_target(opp_front, opp_is_enemy, lane, ROW_FRONT, attacker)
 	elif opp_back != null and is_instance_valid(opp_back) and opp_back.current_hp > 0 \
 			and not opp_back.has_keyword("structure"):
 		target = _redirect_target(opp_back, opp_is_enemy, lane, ROW_BACK, attacker)
-		target_row = ROW_BACK
 	if target == null or not is_instance_valid(target):
-		# Empty opposing column → this attacker swings at the hero face.
-		var face_pt := _face_lane_point(opp_is_enemy, lane)
-		var color := Color(1.0, 0.40, 0.20) if not is_enemy else Color(1.0, 0.55, 0.30)
-		var verb := "FACE" if not is_enemy else "YOUR HP"
-		return {
-			"point": face_pt,
-			"text": "%s -%d" % [verb, atk],
-			"color": color,
-			"face": true,
-			"damage": atk,
-			"lane": lane,
-			"target_is_enemy": opp_is_enemy,
-		}
-	# A creature trade — predict the target's HP after this single blow.
-	var dmg := _telegraph_damage_to(target, atk)
-	var hp_after: int = target.current_hp - dmg
-	var text := ""
-	var color := Color(0.85, 0.78, 0.55)
-	if dmg <= 0:
-		text = "NO DMG"
-		color = Color(0.70, 0.78, 0.92)
-	elif hp_after <= 0:
-		# Last Stand survives a lethal blow once.
-		if target.has_keyword("last_stand") and not target.last_stand_used:
-			text = "LAST STAND"
-			color = Color(1.0, 0.85, 0.30)
+		var face_read := _forecast_face_strike(attacker, atk, lane, is_enemy, true)
+		# Cleave still splashes around the empty struck seat after a face hit.
+		if kind == "standard" and attacker.card_data.get("passive", "") == "cleave":
+			var face_cleave := _forecast_cleave_summary(null, opp_is_enemy, lane)
+			if face_cleave != "":
+				face_read["text"] += "\n" + face_cleave
+		return _forecast_append_repeats(face_read, attacker, is_enemy)
+	var read := _forecast_creature_impact(attacker, target, atk, lane, is_enemy, kind)
+	# Cleave is a rider on the normal column resolver; the Swift routine does not
+	# fire it on the pre-phase hit.
+	if kind == "standard" and attacker.card_data.get("passive", "") == "cleave":
+		var cleave_summary := _forecast_cleave_summary(target, opp_is_enemy, lane)
+		if cleave_summary != "":
+			read["text"] += "\n" + cleave_summary
+	return _forecast_append_repeats(read, attacker, is_enemy)
+
+
+func _forecast_sniper_strike(attacker: Control, atk: int, lane: int,
+		is_enemy: bool) -> Dictionary:
+	var target := _forecast_sniper_pick_lowest(not is_enemy)
+	if target == null:
+		var face_read := _forecast_face_strike(attacker, atk, lane, is_enemy, false)
+		if _doubled_hour[1 if is_enemy else 0]:
+			face_read["text"] += "\nSECOND VOLLEY LATER"
+		return face_read
+	var read := _forecast_creature_impact(attacker, target, atk, lane, is_enemy, "sniper")
+	if bool(read.get("lethal", false)) and String(read.get("rescue", "")) == "" \
+			and bool(read.get("attacker_survives", true)):
+		read["text"] += "\nCHAINS ON KILL"
+		read["quiet_text"] = String(read.get("quiet_text", read["text"])) + " - CHAIN"
+	if _doubled_hour[1 if is_enemy else 0] and bool(read.get("attacker_survives", true)):
+		read["text"] += "\nSECOND VOLLEY LATER"
+	return read
+
+
+func _forecast_append_repeats(read: Dictionary, attacker: Control,
+		is_enemy: bool) -> Dictionary:
+	if not bool(read.get("attacker_survives", true)):
+		return read
+	if attacker.card_data.get("passive", "") == "attacks_twice":
+		read["text"] += "\nFLANK BLOW LATER"
+	if _doubled_hour[1 if is_enemy else 0]:
+		read["text"] += "\nSTRIKES AGAIN LATER"
+	return read
+
+
+func _forecast_sniper_pick_lowest(target_is_enemy: bool) -> Control:
+	# Intent HEAL / heal-all resolve before the ranged phase, so target selection
+	# must compare the HP the Sniper will actually see rather than today's number.
+	var best: Control = null
+	var best_hp := 1 << 30
+	for row in [ROW_FRONT, ROW_BACK]:
+		for lane in range(LANES_PER_ROW):
+			var card = _row_array(target_is_enemy, row)[lane]
+			if card == null or not is_instance_valid(card) or card.current_hp <= 0 \
+					or card.has_keyword("structure"):
+				continue
+			var projected_hp := _forecast_projected_hp(card)
+			if best == null or projected_hp < best_hp:
+				best = card
+				best_hp = projected_hp
+	return best
+
+
+func _forecast_sweep_strike(attacker: Control, atk: int, lane: int,
+		is_enemy: bool) -> Dictionary:
+	var targets: Array = _all_player_creatures() if is_enemy else _all_enemy_creatures()
+	var live: Array = []
+	for target in targets:
+		if target != null and is_instance_valid(target) and target.current_hp > 0:
+			live.append(target)
+	if live.is_empty():
+		return _forecast_append_repeats(
+			_forecast_face_strike(attacker, atk, lane, is_enemy, false),
+			attacker, is_enemy)
+	var died := 0
+	var saved := 0
+	var veiled := 0
+	var shields := 0
+	var hurt := 0
+	var total_damage := 0
+	for target in live:
+		var impact := _forecast_creature_impact(attacker, target, atk, lane, is_enemy, "sweep")
+		total_damage += int(impact.get("damage", 0))
+		if bool(impact.get("shield_break", false)):
+			shields += 1
+		elif String(impact.get("rescue", "")).begins_with("PHANTOM VEIL"):
+			veiled += 1
+		elif String(impact.get("rescue", "")) != "" or bool(impact.get("last_stand", false)):
+			saved += 1
+		elif bool(impact.get("lethal", false)):
+			died += 1
+		elif int(impact.get("damage", 0)) > 0:
+			hurt += 1
+	var clauses := PackedStringArray()
+	if died > 0: clauses.append("%d DIE" % died)
+	if saved > 0: clauses.append("%d SURVIVE" % saved)
+	if veiled > 0: clauses.append("%d MAY BE VEILED" % veiled)
+	if shields > 0: clauses.append("%d SHIELD" % shields)
+	if hurt > 0: clauses.append("%d HURT" % hurt)
+	var is_hydra: bool = attacker.card_data.get("passive", "") == "attacks_all_lanes"
+	var text := "HITS ALL %d" % live.size()
+	if not clauses.is_empty():
+		text += " - " + " - ".join(clauses)
+	# Recoil is sequential, so model Shield / Armored / Last Stand per hit.
+	var source_state := _forecast_card_state(attacker)
+	var recoil_total := 0
+	for target in live:
+		if int(source_state["hp"]) <= 0:
+			break
+		var recoil: int = _forecast_attack_power(target, int(target.current_lane), bool(target.is_opponent)) \
+			if is_hydra else 1
+		if recoil <= 0:
+			continue
+		var before: int = int(source_state["hp"])
+		_forecast_apply_damage_state(attacker, source_state, recoil, false)
+		recoil_total += maxi(0, before - maxi(int(source_state["hp"]), 0))
+	var source_survives := true
+	if bool(source_state.get("last_stand", false)):
+		text += "\nTAKES %d BACK - LAST STAND" % recoil_total
+	elif int(source_state["hp"]) <= 0:
+		var source_rescue := _forecast_creature_rescue(attacker)
+		if source_rescue != "":
+			text += "\nTAKES %d BACK - ATTACKER %s" % [recoil_total, source_rescue]
+			source_survives = source_rescue == "REBORN" \
+				or source_rescue.begins_with("PHANTOM VEIL")
 		else:
-			text = "DIES"
-			color = Color(1.0, 0.32, 0.22)
+			var source_followup := _forecast_death_followup(attacker)
+			text += "\nTAKES %d BACK - ATTACKER %s" % [recoil_total,
+				source_followup if source_followup != "" else "DIES"]
+			source_survives = false
+	elif recoil_total > 0:
+		text += "\nTAKES %d BACK - %d HP" % [recoil_total, int(source_state["hp"])]
+	elif bool(source_state.get("shield_break", false)):
+		text += "\nRECOIL BREAKS SHIELD"
+	var read := {
+		"point": _card_center(attacker), "text": text,
+		"quiet_text": "HITS ALL %d" % live.size(),
+		"color": Color(1.0, 0.55, 0.28), "face": false, "summary": true,
+		"damage": total_damage, "target_count": live.size(), "targets": live,
+		"attacker_survives": source_survives,
+	}
+	return _forecast_append_repeats(read, attacker, is_enemy)
+
+
+func _forecast_face_strike(attacker: Control, atk: int, lane: int,
+		is_enemy: bool, use_column_rules: bool) -> Dictionary:
+	var target_is_enemy := not is_enemy
+	var dmg := atk
+	if use_column_rules:
+		if is_enemy and _encounter_passive == "harpy_swift_face" \
+				and attacker.has_keyword("swift"):
+			dmg += 1
+		dmg = maxi(0, dmg - _get_wall_reduction(lane, target_is_enemy))
+	var interposer := _find_interposer(target_is_enemy)
+	if interposer != null and is_instance_valid(interposer):
+		var caught := _forecast_creature_impact(attacker, interposer, dmg, lane,
+			is_enemy, "interpose")
+		caught["text"] = "INTERPOSES - " + String(caught["text"])
+		caught["quiet_text"] = "INTERPOSES"
+		return caught
+	if not is_enemy and _has_relic("pyre_stoker") and _cards_played_this_turn >= 3 \
+			and dmg > 0:
+		dmg += int(RelicDB.get_relic("pyre_stoker").get("value", 1))
+	var hp_before: int = enemy_hp if target_is_enemy else player_hp
+	var hp_after: int = hp_before - dmg
+	var text := ""
+	var color := Color(1.0, 0.40, 0.20) if target_is_enemy else Color(1.0, 0.55, 0.30)
+	if dmg <= 0:
+		text = "NO FACE DAMAGE"
+		color = Color(0.70, 0.78, 0.92)
+	elif hp_after <= 0 and not target_is_enemy and _has_relic("phoenix_heart") \
+			and not RunState.phoenix_heart_consumed:
+		text = "PHOENIX HEART - 1 HP"
+		color = Color(1.0, 0.85, 0.30)
+	elif hp_after <= 0:
+		text = "LETHAL" if target_is_enemy else "DEFEAT"
+		color = Color(1.0, 0.32, 0.22)
 	else:
-		text = "-%d" % dmg
-		color = Color(1.0, 0.55, 0.28)
+		text = "%s -%d - %d LEFT" % ["FOE HP" if target_is_enemy else "YOUR HP", dmg, hp_after]
 	return {
-		"point": _card_center(target),
-		"text": text,
-		"color": color,
-		"face": false,
-		"damage": dmg,
-		"target_row": target.current_row,
+		"point": _face_lane_point(target_is_enemy, lane), "text": text,
+		"quiet_text": "HP -%d" % dmg, "color": color, "face": true,
+		"damage": dmg, "hp_after": 1 if text.begins_with("PHOENIX") else hp_after,
+		"lane": lane, "target_is_enemy": target_is_enemy,
 	}
 
 
+func _forecast_creature_impact(attacker: Control, target: Control, base_atk: int,
+		lane: int, attacker_is_enemy: bool, kind: String) -> Dictionary:
+	var atk := base_atk
+	# Swift applies vulnerability but its live branch does not apply Royal Guard
+	# protection or Archlich's floor. Standard and Sniper apply all three.
+	if kind in ["standard", "swift", "sniper"]:
+		if bool(target.get_meta("marked", false)):
+			atk += 2
+		if bool(target.get_meta("enrage_vulnerable", false)) \
+				or (not _is_net() and target.is_opponent and phase == Phase.PLAYER_TURN \
+					and String(target.get_meta("current_intent", "ATK")) == "ENRAGE"):
+			atk += 1
+	if kind in ["standard", "sniper"]:
+		if _has_adjacent_royal_guard(target):
+			atk = maxi(1, atk - 1)
+		if _encounter_passive == "archlich_immortal" and not attacker_is_enemy \
+				and _forecast_projected_hp(target) - atk < 1:
+			atk = maxi(0, _forecast_projected_hp(target) - 1)
+	var state := _forecast_card_state(target)
+	_forecast_apply_damage_state(target, state, atk, false)
+	var poisonous: bool = kind in ["standard", "swift", "sniper"] \
+		and (attacker.has_keyword("poison") \
+			or _virulence_active[1 if attacker_is_enemy else 0])
+	var poison_lands := false
+	if poisonous and int(state["hp"]) > 0:
+		# Mirror the live branch distinction: Sniper requires actual HP loss;
+		# standard/Swift currently key on positive attack power.
+		poison_lands = int(state.get("damage", 0)) > 0 if kind == "sniper" else atk > 0
+	if poison_lands:
+		state["hp"] = 0
+		state["lethal"] = true
+		state["poison"] = true
+		state["last_stand"] = false
+	var rescue := _forecast_creature_rescue(target) if bool(state.get("lethal", false)) else ""
+	var death_followup := _forecast_death_followup(target) \
+		if bool(state.get("lethal", false)) and rescue == "" else ""
+	var text := _forecast_impact_text(state, rescue)
+	if death_followup == "RETURNS TO HAND":
+		text = death_followup
+	elif death_followup != "":
+		text += "\n" + death_followup
+	var hit_gain := 0
+	if kind in ["standard", "sniper"] and int(state["hp"]) > 0 and atk > 0:
+		if target.card_data.get("passive", "") == "royal_guard":
+			hit_gain = 2 if bool(target.card_data.get("is_upgraded", false)) else 1
+		elif target.card_data.get("passive", "") == "rage_on_hit":
+			hit_gain = 3 if bool(target.card_data.get("is_upgraded", false)) else 2
+		if hit_gain > 0:
+			text += "\nGAINS +%d ATK" % hit_gain
+		if target.card_data.get("passive", "") == "pit_brawler" and not _is_net() \
+				and not target.is_opponent \
+				and not _adjacent_empty_seats(false, target.current_row, target.current_lane).is_empty():
+			text += "\nSPAWNS ANOTHER BRAWLER"
+	var counter_gain := hit_gain
+	if bool(state.get("shield_break", false)) \
+			and target.card_data.get("passive", "") == "shield_rage":
+		var shield_gain: int = 3 if bool(target.card_data.get("is_upgraded", false)) else 2
+		text += "\nGAINS +%d ATK" % shield_gain
+		counter_gain += shield_gain
+	if bool(state.get("last_stand", false)) \
+			and target.card_data.get("passive", "") == "paladin_rally":
+		var rally_gain: int = 3 if bool(target.card_data.get("is_upgraded", false)) else 2
+		text += "\nRALLIES +%d ATK - HEALS 3" % rally_gain
+		counter_gain += rally_gain
+	var return_outcome := {"text": "", "survives": true}
+	if kind in ["standard", "swift", "sniper"]:
+		var pavise := 0
+		if kind == "sniper" and attacker_is_enemy and target.current_row == ROW_BACK \
+				and _has_relic("hexagonal_shield"):
+			pavise = int(RelicDB.get_relic("hexagonal_shield").get("value", 3))
+		return_outcome = _forecast_return_outcome(target, attacker,
+			attacker_is_enemy, kind, counter_gain, pavise)
+		var source_line: String = String(return_outcome.get("text", ""))
+		if source_line != "":
+			text += "\n" + source_line
+	if kind in ["standard", "swift", "sniper"] \
+			and bool(state.get("lethal", false)) and int(state.get("overkill", 0)) > 0 \
+			and (kind != "sniper" or rescue == "") \
+			and _forecast_has_piercing(attacker, attacker_is_enemy):
+		text += "\nPIERCES %d" % int(state["overkill"])
+	var quiet_text := _forecast_impact_text(state, rescue)
+	if death_followup == "RETURNS TO HAND":
+		quiet_text = death_followup
+	elif death_followup != "":
+		quiet_text += " - " + death_followup
+	return {
+		"point": _card_center(target), "text": text,
+		"quiet_text": quiet_text,
+		"color": Color(1.0, 0.85, 0.30) if death_followup != "" \
+			else _forecast_impact_color(state, rescue), "face": false,
+		"damage": int(state.get("damage", 0)), "hp_after": int(state["hp"]),
+		"target_row": int(target.current_row), "target": target,
+		"lethal": bool(state.get("lethal", false)), "rescue": rescue,
+		"last_stand": bool(state.get("last_stand", false)),
+		"shield_break": bool(state.get("shield_break", false)),
+		"overkill": int(state.get("overkill", 0)),
+		"death_followup": death_followup,
+		"attacker_survives": bool(return_outcome.get("survives", true)),
+	}
+
+
+func _forecast_card_state(card: Control) -> Dictionary:
+	return {
+		"hp": _forecast_projected_hp(card), "shield": bool(card.state.has_shield),
+		"last_stand_used": bool(card.last_stand_used), "damage": 0,
+		"shield_break": false, "last_stand": false, "lethal": false,
+		"overkill": 0, "poison": false,
+	}
+
+
+func _forecast_projected_hp(card: Control) -> int:
+	var hp: int = int(card.current_hp)
+	if _is_net() or phase != Phase.PLAYER_TURN or not card.is_opponent:
+		return hp
+	var max_hp: int = int(card.card_data.get("hp", hp))
+	if String(card.get_meta("current_intent", "ATK")) == "HEAL":
+		hp = mini(hp + 3, max_hp)
+	# ABILITY: heal_all also lands before combat and can change Sniper ordering.
+	for source in _all_enemy_creatures():
+		if String(source.get_meta("current_intent", "ATK")) != "ABILITY":
+			continue
+		var ability: Dictionary = source.card_data.get("ability", {})
+		if String(ability.get("type", "")) == "heal_all":
+			hp = mini(hp + int(ability.get("value", 2)), max_hp)
+	# A draining ability heals its own source after biting the opposing column.
+	if String(card.get_meta("current_intent", "ATK")) == "ABILITY" \
+			and String(card.card_data.get("ability", {}).get("type", "")) == "drain":
+		hp = mini(hp + 2, max_hp)
+	return hp
+
+
+func _forecast_apply_damage_state(card: Control, state: Dictionary, amount: int,
+		bypass_armor: bool) -> void:
+	state["damage"] = 0
+	state["shield_break"] = false
+	state["last_stand"] = false
+	state["lethal"] = false
+	state["overkill"] = 0
+	if bool(state.get("shield", false)):
+		state["shield"] = false
+		state["shield_break"] = true
+		return
+	var applied := amount
+	if not bypass_armor and _forecast_card_has_keyword(card, "armored"):
+		applied = maxi(1, applied - 1)
+	applied += int(card.card_data.get("extra_damage", 0))
+	var hp_before: int = int(state["hp"])
+	var raw_after := hp_before - applied
+	state["overkill"] = maxi(0, -raw_after)
+	state["hp"] = raw_after
+	state["damage"] = maxi(0, hp_before - maxi(raw_after, 0))
+	if int(state["hp"]) <= 0 and _forecast_card_has_keyword(card, "last_stand") \
+			and not bool(state.get("last_stand_used", false)):
+		state["hp"] = 1
+		state["last_stand_used"] = true
+		state["last_stand"] = true
+		state["overkill"] = 0
+		state["damage"] = maxi(0, hp_before - 1)
+	else:
+		state["lethal"] = int(state["hp"]) <= 0
+
+
+func _forecast_card_has_keyword(card: Control, keyword: String) -> bool:
+	if card.has_keyword(keyword):
+		return true
+	# GUARD grants temporary Armored before this enemy still takes its strike.
+	return keyword == "armored" and not _is_net() and card.is_opponent \
+		and phase == Phase.PLAYER_TURN \
+		and String(card.get_meta("current_intent", "ATK")) == "GUARD"
+
+
+func _forecast_creature_rescue(target: Control) -> String:
+	# Live pre-death order: Phantom Veil first, then the Revenant's own Reborn.
+	if not target.is_opponent and _has_relic("phantom_veil") \
+			and not bool(get_meta("phantom_veil_used", false)):
+		# Another earlier death in resolver order may spend it first; never state
+		# this conditional rescue as certain from a single-card hover.
+		return "PHANTOM VEIL MAY SAVE"
+	var on_death: Dictionary = target.card_data.get("on_death", {})
+	if String(on_death.get("type", "")) == "reborn" \
+			and not bool(target.get_meta("reborn_used", false)):
+		return "REBORN"
+	return ""
+
+
+func _forecast_death_followup(target: Control) -> String:
+	# These effects happen after the original body really dies; they must enrich
+	# the text without suppressing Sniper chains or Piercing's lethal trigger.
+	var on_death: Dictionary = target.card_data.get("on_death", {})
+	if String(on_death.get("type", "")) == "return_to_hand_once" \
+			and (_is_net() or not target.is_opponent) \
+			and not target.is_token and int(target.deck_uid) >= 0 \
+			and not _griffin_returned_uids.has(int(target.deck_uid)):
+		return "RETURNS TO HAND"
+	if not _is_net() and not target.is_opponent and not target.is_token \
+			and _has_relic("death_card") and _hand.size() < MAX_HAND_SIZE:
+		return "RETURNS TO HAND"
+	var side: int = 1 if target.is_opponent else 0
+	if not target.is_token and _relic_active_for_side(target.is_opponent, "gravewardens_pact"):
+		var cap: int = int(RelicDB.get_relic("gravewardens_pact").get("value", 3))
+		if _gravewardens_rebirths[side] < cap:
+			return "REBORN AS A 1/1 IMP"
+	return ""
+
+
+func _forecast_impact_text(state: Dictionary, rescue: String) -> String:
+	if bool(state.get("poison", false)) and bool(state.get("lethal", false)):
+		return (rescue if rescue != "" else "DIES") + " - POISON"
+	if bool(state.get("lethal", false)):
+		return rescue if rescue != "" else "DIES"
+	if bool(state.get("last_stand", false)):
+		return "LAST STAND - 1 HP"
+	if bool(state.get("shield_break", false)):
+		return "SHIELD BREAKS"
+	var damage: int = int(state.get("damage", 0))
+	if damage <= 0:
+		return "NO DAMAGE"
+	return "TAKES %d - %d HP" % [damage, int(state["hp"])]
+
+
+func _forecast_impact_color(state: Dictionary, rescue: String) -> Color:
+	if bool(state.get("lethal", false)) and rescue == "":
+		return Color(1.0, 0.32, 0.22)
+	if rescue != "" or bool(state.get("last_stand", false)):
+		return Color(1.0, 0.85, 0.30)
+	if bool(state.get("shield_break", false)) or int(state.get("damage", 0)) <= 0:
+		return Color(0.70, 0.78, 0.92)
+	return Color(1.0, 0.55, 0.28)
+
+
+func _forecast_return_outcome(defender: Control, attacker: Control,
+		attacker_is_enemy: bool, kind: String, counter_bonus: int = 0,
+		extra_bypass: int = 0) -> Dictionary:
+	if defender.current_hp <= 0:
+		return {"text": "", "survives": true}
+	var defender_is_friendly: bool = attacker_is_enemy
+	var has_thorns: bool = not bool(attacker.card_data.get("unstoppable", false)) \
+		and (defender.has_keyword("thorns") \
+		or (not attacker_is_enemy and _has_encounter_passive_keyword(defender, "thorns")) \
+		or bool(defender.get_meta("shield_wall_thorns", false)) \
+		or (defender_is_friendly and _has_relic("bridge_watcher") \
+			and defender.current_lane in [1, 2]) \
+		or (defender_is_friendly and _has_relic("corner_stone") \
+			and defender.current_lane in [0, LANES_PER_ROW - 1]))
+	var will_counter: bool = kind == "standard" and _is_net() and _net_active_index >= 0 \
+		and _defender_will_counter(defender)
+	if not has_thorns and not will_counter and extra_bypass <= 0:
+		return {"text": "", "survives": true}
+	var source_state := _forecast_card_state(attacker)
+	var before: int = int(source_state["hp"])
+	if has_thorns:
+		var thorns := 1
+		if defender_is_friendly \
+				and ((_has_relic("bridge_watcher") and defender.current_lane in [1, 2]) \
+					or (_has_relic("corner_stone") and defender.current_lane in [0, LANES_PER_ROW - 1])):
+			thorns = 2
+		_forecast_apply_damage_state(attacker, source_state, thorns, true)
+		var thorn_lost: int = maxi(0, before - maxi(int(source_state["hp"]), 0))
+		if bool(defender.card_data.get("venom_thorns", false)) and thorn_lost > 0 \
+				and int(source_state["hp"]) > 0:
+			source_state["hp"] = 0
+			source_state["lethal"] = true
+	if will_counter and int(source_state["hp"]) > 0:
+		var defender_is_enemy: bool = not attacker_is_enemy
+		var retal := _forecast_attack_power(defender,
+			int(defender.current_lane), defender_is_enemy) + counter_bonus
+		if retal > 0:
+			_forecast_apply_damage_state(attacker, source_state, retal, false)
+			var counter_poison: bool = defender.has_keyword("poison") \
+				or _virulence_active[1 if defender_is_enemy else 0]
+			if counter_poison and int(source_state["hp"]) > 0:
+				source_state["hp"] = 0
+				source_state["lethal"] = true
+	# Hexagonal Shield's Pavise bolt lands after an enemy Sniper's back-row shot.
+	if extra_bypass > 0 and int(source_state["hp"]) > 0:
+		_forecast_apply_damage_state(attacker, source_state, extra_bypass, true)
+	var lost: int = maxi(0, before - maxi(int(source_state["hp"]), 0))
+	if bool(source_state.get("lethal", false)):
+		var rescue := _forecast_creature_rescue(attacker)
+		var followup := _forecast_death_followup(attacker) if rescue == "" else ""
+		var outcome := rescue if rescue != "" else followup
+		if outcome == "":
+			outcome = "DIES ON RETURN"
+		var remains_on_board: bool = rescue == "REBORN" or rescue.begins_with("PHANTOM VEIL")
+		return {
+			"text": "ATTACKER %s" % outcome,
+			"survives": remains_on_board,
+		}
+	if bool(source_state.get("last_stand", false)):
+		return {"text": "ATTACKER: LAST STAND", "survives": true}
+	if bool(source_state.get("shield_break", false)):
+		return {"text": "ATTACKER SHIELD BREAKS", "survives": true}
+	return {
+		"text": "ATTACKER TAKES %d - %d HP" % [lost, int(source_state["hp"])],
+		"survives": true,
+	}
+
+
+func _forecast_has_piercing(attacker: Control, attacker_is_enemy: bool) -> bool:
+	return attacker.has_keyword("piercing") \
+		or (attacker_is_enemy and _has_encounter_passive_keyword(attacker, "piercing")) \
+		or bool(attacker.get_meta("inspire_piercing", false)) \
+		or (not attacker_is_enemy and _has_relic("piercing_crown"))
+
+
+func _forecast_cleave_summary(main_target: Control, target_is_enemy: bool,
+		lane: int) -> String:
+	var row: int = ROW_FRONT
+	var pos := _find_creature_position(main_target) \
+		if main_target != null and is_instance_valid(main_target) else {}
+	if not pos.is_empty():
+		row = int(pos["row"])
+	elif _row_array(target_is_enemy, ROW_FRONT)[lane] == null \
+			and _row_array(target_is_enemy, ROW_BACK)[lane] != null:
+		row = ROW_BACK
+	var hit := 0
+	var died := 0
+	var shields := 0
+	for target in _adjacent_creatures(target_is_enemy, row, lane):
+		if target == null or not is_instance_valid(target) or target.current_hp <= 0:
+			continue
+		var state := _forecast_card_state(target)
+		_forecast_apply_damage_state(target, state, 1, false)
+		hit += 1
+		if bool(state.get("shield_break", false)):
+			shields += 1
+		elif bool(state.get("lethal", false)):
+			died += 1
+	if hit <= 0:
+		return ""
+	var text := "CLEAVE HITS %d" % hit
+	if died > 0:
+		text += " - %d DIE" % died
+	if shields > 0:
+		text += " - %d SHIELD" % shields
+	return text
+
+
 func _telegraph_damage_to(target: Control, atk: int) -> int:
-	# Single-blow damage after the target's mitigation. Mirrors Card2D.take_damage:
-	# Shield eats the whole hit; Armored knocks 1 off (2 for the player's own under
-	# Fortress Stone); extra_damage adds on. Clamped at 0.
+	# Compatibility helper for probes and older callers. Structured hover text is
+	# built from _forecast_apply_damage_state so Shield/Last Stand stay in parity.
 	if target == null or not is_instance_valid(target):
 		return 0
-	if target.state.has_shield:
-		return 0
-	var dmg := atk
-	if target.has_keyword("armored"):
-		dmg = maxi(1, dmg - 1)
-	dmg += int(target.card_data.get("extra_damage", 0))
-	return maxi(0, dmg)
+	var state := _forecast_card_state(target)
+	_forecast_apply_damage_state(target, state, atk, false)
+	return int(state.get("damage", 0))
 
 
 func _face_lane_point(target_is_enemy: bool, lane: int) -> Vector2:
@@ -16655,7 +19156,7 @@ func _pulse_mana_label(amount: int) -> void:
 const SPELL_FAMILIES := {
 	# FIRE — rising orange cone + warm screen flash
 	"flame_bolt": "fire", "fireball": "fire", "inferno": "fire",
-	"fuel_the_pyre": "fire", "petard": "fire",
+	"fuel_the_pyre": "fire", "petard": "fire", "sappers_charge": "fire",
 	# SHOCK — white-blue lightning bolt + brief flash
 	"lightning": "shock", "holy_smite": "shock", "time_snare": "shock",
 	# BLIGHT — purple drift particles + magenta core
@@ -16665,14 +19166,15 @@ const SPELL_FAMILIES := {
 	"lay_on_hands": "blight", "grave_pact": "blight",   # Unclean Blessing / Last Rites
 	# BLESSING — golden upward shimmer + soft warm flash
 	"patch_up": "blessing", "mending_light": "blessing",
-	"battle_hymn": "blessing", "inspire": "blessing", "war_cry": "blessing",
-	"second_wind": "blessing", "shield_wall": "blessing",
+	"battle_hymn": "blessing", "war_cry": "blessing",
+	"second_wind": "blessing", "shield_wall": "blessing",   # Testudo (card id)
 	"kings_command": "blessing",
 	# EARTH — brown dust + Y-axis screen shake
 	"earthquake": "earth", "shove": "earth", "reposition": "earth",
 	"cataclysm": "earth", "overwhelming_force": "earth", "barricade": "earth",
+	"ballista_bolt": "earth", "scatter_line": "earth", "close_ranks": "earth",
 	# MIND — pale cool sweep + target outline pulse
-	"concentrate": "mind", "adrenaline": "mind", "gambit": "mind",
+	"concentrate": "mind", "adrenaline": "mind", "inspire": "mind", "gambit": "mind",   # Baggage Train / Turncoat (card ids)
 	"echo_spell": "mind", "banish": "mind", "soul_swap": "mind",
 	"provision": "mind", "scrap": "mind", "turbo": "mind",
 	"recycle": "mind", "ambush": "mind", "war_chant": "mind", "ricochet": "mind",
@@ -16728,6 +19230,7 @@ func _play_spell_cast_vfx(card_data: Dictionary, target: Control) -> void:
 		# Legacy fallback — keep the old color burst so unfamilied spells still
 		# read as "cast".
 		spawn_spell_burst(pos, _legacy_spell_color(spell_type))
+	_spawn_spell_impact_ring(pos, _spell_vfx_color(family, spell_type), family)
 	if AudioBank != null:
 		AudioBank.play_sfx("spell_cast")
 
@@ -16755,8 +19258,55 @@ func _legacy_spell_color(spell_type: String) -> Color:
 			return Color(1.0, 0.70, 0.30)
 
 
+func _spell_vfx_color(family: String, spell_type: String) -> Color:
+	match family:
+		"fire":
+			return Color(1.0, 0.50, 0.16)
+		"shock":
+			return Color(0.76, 0.92, 1.0)
+		"blight":
+			return Color(0.72, 0.30, 0.88)
+		"blessing":
+			return Color(1.0, 0.90, 0.48)
+		"earth":
+			return Color(0.62, 0.46, 0.28)
+		"mind":
+			return Color(0.82, 0.90, 1.0)
+		_:
+			return _legacy_spell_color(spell_type)
+
+
+func _spawn_spell_impact_ring(global_pos: Vector2, color: Color, family: String) -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	var oval := Vector2(1.0, 0.72)
+	if family in ["shock", "mind", "blessing"]:
+		oval = Vector2.ONE
+	if UserSettings != null and UserSettings.reduce_motion:
+		_spawn_vfx_ring(global_pos, Color(color.r, color.g, color.b, 0.60),
+			38.0, 1.10, 0.24, 222, 2.5, 0.70, oval)
+		return
+	_spawn_vfx_ring(global_pos, Color(color.r, color.g, color.b, 0.72),
+		42.0, 1.36, 0.36, 222, 3.0, 0.50, oval)
+	match family:
+		"shock":
+			_spawn_vfx_streak(global_pos + Vector2(-46.0, 24.0),
+				global_pos + Vector2(46.0, -24.0),
+				Color(0.88, 0.97, 1.0, 0.90), 3.0, 224, 0.22, -8.0)
+		"blessing":
+			_spawn_vfx_ring(global_pos, Color(1.0, 0.96, 0.72, 0.62),
+				30.0, 1.45, 0.44, 223, 2.0, 0.58, Vector2.ONE)
+		"earth":
+			_spawn_vfx_streak(global_pos + Vector2(-60.0, 28.0),
+				global_pos + Vector2(60.0, 28.0),
+				Color(color.r, color.g, color.b, 0.72), 5.0, 223, 0.32, 0.0)
+		"mind":
+			_spawn_vfx_ring(global_pos, Color(0.92, 0.96, 1.0, 0.48),
+				28.0, 1.55, 0.46, 223, 2.0, 0.52, Vector2.ONE)
+
+
 func spawn_spell_burst(global_pos: Vector2, color: Color) -> void:
-	if not UserSettings.particles:
+	if not UserSettings.particles or DisplayServer.get_name() == "headless":
 		return
 	# One-shot particle pop where a spell resolves. CPUParticles so it renders on
 	# every backend. Self-frees once the burst finishes.
@@ -16790,7 +19340,7 @@ func spawn_spell_burst(global_pos: Vector2, color: Color) -> void:
 # =====================================================================
 
 func _spawn_family_particles(global_pos: Vector2, params: Dictionary) -> void:
-	if not UserSettings.particles:
+	if not UserSettings.particles or DisplayServer.get_name() == "headless":
 		return
 	# Generic CPUParticles2D emitter. `params` keys mirror the Godot 4
 	# CPUParticles2D property names but with Pythonic min/max suffixes so the
@@ -16854,6 +19404,8 @@ func _vfx_shock(target_global: Vector2) -> void:
 
 
 func _spawn_lightning_bolt(start_pos: Vector2, end_pos: Vector2, color: Color) -> void:
+	if DisplayServer.get_name() == "headless":
+		return
 	# Line2D with mid-point jitter so each cast reads as a fresh strike rather
 	# than a straight beam. Fades width + alpha over ~0.22s and self-frees.
 	var line := Line2D.new()
@@ -16957,7 +19509,7 @@ func _vfx_mind(target_global: Vector2, target: Control) -> void:
 func _pulse_target_outline(target: Control, color: Color) -> void:
 	# Brief translucent fill that expands slightly while fading — reads as the
 	# target being "touched" by the cast without requiring an outline shader.
-	if not is_instance_valid(target):
+	if DisplayServer.get_name() == "headless" or not is_instance_valid(target):
 		return
 	var rect := ColorRect.new()
 	var bounds := target.get_global_rect()
@@ -17300,6 +19852,123 @@ func _show_turn_banner() -> void:
 	tw.chain().tween_callback(banner.queue_free)
 
 
+func _show_battle_verdict(won: bool, gold_won: int = 0, with_scrim: bool = true,
+		auto_fade: bool = false) -> void:
+	# The fight's decisive beat. Every strike in the game got ceremony, but the
+	# moment the whole fight builds to used to be a 24px caption swap in the top
+	# HUD. This is the payoff: a focusing scrim, then VICTORY struck down onto
+	# the page in the gilt display face with a gold eruption and the spoils
+	# counting up beneath — or DEFEAT dropping in ink-heavy over a blood-dark
+	# scrim. Solo lets the scene's ink wipe carry everything off; net verdicts
+	# pass auto_fade (and no scrim) so the word clears itself above the live
+	# rematch panel. Audio stays with the callers (victory/defeat stings).
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var vp := get_viewport_rect().size
+	var reduced: bool = UserSettings != null and UserSettings.reduce_motion
+	var center := Vector2(vp.x * 0.5, vp.y * 0.36)
+	var pieces: Array = []
+	if with_scrim:
+		var scrim := ColorRect.new()
+		scrim.color = Color(0.03, 0.018, 0.012, 0.0)
+		scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
+		scrim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		scrim.z_index = 245
+		_hud_layer.add_child(scrim)
+		scrim.create_tween().tween_property(scrim, "color:a",
+			0.30 if won else 0.48, 0.55).set_ease(Tween.EASE_OUT)
+		pieces.append(scrim)
+	var word := Label.new()
+	word.text = "VICTORY" if won else "DEFEAT"
+	if GameTheme.font_display != null:
+		word.add_theme_font_override("font", GameTheme.font_display)
+	word.add_theme_font_size_override("font_size", 92)
+	word.add_theme_color_override("font_color",
+		GameTheme.GILT_BRIGHT if won else Color(0.88, 0.22, 0.16))
+	word.add_theme_color_override("font_outline_color",
+		Color(0.30, 0.14, 0.02, 0.95) if won else Color(0.04, 0.01, 0.01, 0.95))
+	word.add_theme_constant_override("outline_size", 12)
+	word.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	word.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	word.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	word.z_index = 248
+	word.size = Vector2(vp.x, 130)
+	word.position = Vector2(0.0, center.y - 65.0)
+	word.pivot_offset = Vector2(vp.x * 0.5, 65.0)
+	word.modulate.a = 0.0
+	_hud_layer.add_child(word)
+	pieces.append(word)
+	var tw := word.create_tween()
+	tw.set_parallel(true)
+	if reduced:
+		tw.tween_property(word, "modulate:a", 1.0, 0.20)
+	elif won:
+		# The stamp: oversized, then struck down onto the page with a gilt
+		# eruption + shake at the moment it lands.
+		word.scale = Vector2(1.55, 1.55)
+		tw.tween_property(word, "modulate:a", 1.0, 0.12)
+		tw.tween_property(word, "scale", Vector2.ONE, 0.28) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		get_tree().create_timer(0.18).timeout.connect(func():
+			if not is_instance_valid(word):
+				return
+			spawn_spell_burst(center, Color(1.0, 0.84, 0.38, 0.95))
+			_spawn_vfx_ring(center, Color(1.0, 0.86, 0.44, 0.70),
+				90.0, 3.2, 0.55, 247, 4.0, 0.5, Vector2(1.35, 0.75))
+			_spawn_vfx_ring(center, Color(1.0, 0.70, 0.25, 0.45),
+				60.0, 2.4, 0.45, 247, 3.0, 0.4, Vector2(1.2, 0.85))
+			screen_shake(5.0)
+		)
+	else:
+		# The fall: the word drops onto the page and lands heavy.
+		word.position.y -= 44.0
+		tw.tween_property(word, "modulate:a", 1.0, 0.20)
+		tw.tween_property(word, "position:y", center.y - 65.0, 0.30) \
+			.set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
+		get_tree().create_timer(0.30).timeout.connect(func():
+			if is_instance_valid(word):
+				screen_shake(4.0)
+		)
+	if won and gold_won > 0:
+		var gold_lbl := Label.new()
+		gold_lbl.text = "+0 gold"
+		if GameTheme.font_display != null:
+			gold_lbl.add_theme_font_override("font", GameTheme.font_display)
+		gold_lbl.add_theme_font_size_override("font_size", 30)
+		gold_lbl.add_theme_color_override("font_color", Color(1.0, 0.84, 0.40))
+		gold_lbl.add_theme_color_override("font_outline_color", Color(0.05, 0.02, 0.0, 0.9))
+		gold_lbl.add_theme_constant_override("outline_size", 6)
+		gold_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		gold_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		gold_lbl.z_index = 248
+		gold_lbl.size = Vector2(vp.x, 40)
+		gold_lbl.position = Vector2(0.0, center.y + 62.0)
+		gold_lbl.modulate.a = 0.0
+		_hud_layer.add_child(gold_lbl)
+		pieces.append(gold_lbl)
+		var gt := gold_lbl.create_tween()
+		gt.tween_interval(0.40)
+		gt.tween_property(gold_lbl, "modulate:a", 1.0, 0.16)
+		if reduced:
+			gt.tween_callback(func():
+				if is_instance_valid(gold_lbl):
+					gold_lbl.text = "+%d gold" % gold_won)
+		else:
+			# Spoils count up — the gold is EARNED in front of you, not stated.
+			gt.tween_method(func(v: float):
+				if is_instance_valid(gold_lbl):
+					gold_lbl.text = "+%d gold" % int(round(v)),
+				0.0, float(gold_won), 0.5)
+	if auto_fade:
+		# No scene wipe is coming (net rematch flow) — clear the ceremony after
+		# it has been read so the result panel keeps the stage.
+		for pc in pieces:
+			var ft := (pc as CanvasItem).create_tween()
+			ft.tween_interval(1.7)
+			ft.tween_property(pc, "modulate:a", 0.0, 0.40).set_ease(Tween.EASE_IN)
+			ft.tween_callback(pc.queue_free)
+
+
 func _show_info(msg: String) -> void:
 	_info_label.text = msg
 	_info_label.modulate = Color(1, 1, 1, 1)
@@ -17311,6 +19980,22 @@ func _show_info(msg: String) -> void:
 	get_tree().create_timer(2.0).timeout.connect(func():
 		if _info_token == my_token and _info_label != null:
 			_info_label.text = "")
+
+
+func _victory_conquest_line(gate_was_open: bool) -> String:
+	# Normal fights no longer hand out cards, so the map progress has to land
+	# right on victory: the player should feel ground taken, not just gold paid.
+	var broken: int = RunState.holds_broken_in_act
+	var need: int = RunState.HOLDS_TO_OPEN_LORD
+	if not gate_was_open and RunState.is_lord_gate_open():
+		return "Keep road open - march on the lord, or raid harder holds."
+	if RunState.is_lord_gate_open():
+		if broken >= need + 1:
+			return "Pursuit rises - remaining holds reinforce on rounds 2 and 4."
+		return "Keep road open - remaining holds draw pursuit."
+	var left: int = maxi(need - broken, 0)
+	return "Hold broken %d/%d - %d more %s the keep road." % [
+		broken, need, left, "opens" if left == 1 else "open"]
 
 
 func _set_phase_caption(t: String) -> void:
@@ -17377,9 +20062,90 @@ func _spawn_phase_pulse(t: String) -> void:
 	else:
 		tw.tween_property(panel, "scale", Vector2.ONE, 0.18) \
 			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-		tw.chain().tween_interval(0.34)
+	tw.chain().tween_interval(0.34)
 	tw.chain().tween_property(panel, "modulate:a", 0.0, 0.26).set_ease(Tween.EASE_IN)
 	tw.chain().tween_callback(panel.queue_free)
+	_play_phase_board_sweep(t, accent)
+
+
+func _play_clash_commit_vfx() -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	if _all_creatures_both_sides().is_empty():
+		return
+	var col := Color(1.0, 0.70, 0.28)
+	_play_midline_flash(col, 0.34)
+	var center := get_viewport_rect().size * 0.5
+	_spawn_vfx_ring(center + Vector2(0.0, 12.0), Color(col.r, col.g, col.b, 0.58),
+		84.0, 1.20, 0.34, 226, 3.5, 0.62, Vector2(1.55, 0.44))
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	for lane in range(LANES_PER_ROW):
+		if _player_field[lane] != null or _enemy_field[lane] != null \
+				or _player_back[lane] != null or _enemy_back[lane] != null:
+			_spawn_vfx_streak(_slot_global_center(false, ROW_FRONT, lane) + Vector2(0.0, -10.0),
+				_slot_global_center(true, ROW_FRONT, lane) + Vector2(0.0, 10.0),
+				Color(col.r, col.g, col.b, 0.50), 3.0, 223, 0.24, 0.0)
+	if _end_turn_btn != null and is_instance_valid(_end_turn_btn):
+		_end_turn_btn.pivot_offset = _end_turn_btn.size * 0.5
+		var rest := _end_turn_btn.scale
+		var tw := _end_turn_btn.create_tween()
+		tw.tween_property(_end_turn_btn, "scale", rest * 0.94, 0.06) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		tw.tween_property(_end_turn_btn, "scale", rest, 0.18) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+func _play_phase_board_sweep(t: String, accent: Color) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var col := Color(accent.r, accent.g, accent.b, 0.62)
+	match t:
+		"SWIFT STRIKES":
+			for side_enemy in [false, true]:
+				var y_front := _slot_global_center(side_enemy, ROW_FRONT, 1).y - 18.0
+				var y_back := _slot_global_center(side_enemy, ROW_BACK, 1).y - 18.0
+				_spawn_vfx_streak(Vector2(_slot_global_center(side_enemy, ROW_FRONT, 0).x - 54.0, y_front),
+					Vector2(_slot_global_center(side_enemy, ROW_FRONT, LANES_PER_ROW - 1).x + 54.0, y_front),
+					col, 3.0, 222, 0.24, 0.0)
+				_spawn_vfx_streak(Vector2(_slot_global_center(side_enemy, ROW_BACK, 0).x - 40.0, y_back),
+					Vector2(_slot_global_center(side_enemy, ROW_BACK, LANES_PER_ROW - 1).x + 40.0, y_back),
+					Color(accent.r, accent.g, accent.b, 0.42), 2.0, 222, 0.22, 0.0)
+		"CLASH":
+			_play_midline_flash(accent, 0.28)
+			for lane in range(LANES_PER_ROW):
+				_spawn_vfx_streak(_slot_global_center(false, ROW_FRONT, lane) + Vector2(0.0, -6.0),
+					_slot_global_center(true, ROW_FRONT, lane) + Vector2(0.0, 6.0),
+					Color(accent.r, accent.g, accent.b, 0.46), 3.0, 222, 0.24, 0.0)
+		"THE FALLEN":
+			var center := get_viewport_rect().size * 0.5
+			_spawn_vfx_ring(center + Vector2(0.0, 26.0),
+				Color(accent.r, accent.g, accent.b, 0.46),
+				92.0, 1.12, 0.40, 221, 3.0, 0.72, Vector2(1.42, 0.38))
+		"THE DOUBLED HOUR":
+			var c := get_viewport_rect().size * 0.5
+			_spawn_vfx_streak(c + Vector2(-260.0, -92.0), c + Vector2(260.0, 92.0),
+				Color(accent.r, accent.g, accent.b, 0.52), 3.0, 222, 0.28, -16.0)
+			_spawn_vfx_streak(c + Vector2(-260.0, 92.0), c + Vector2(260.0, -92.0),
+				Color(accent.r, accent.g, accent.b, 0.40), 2.0, 222, 0.28, 16.0)
+		"ENEMY REINFORCES":
+			var y := _slot_global_center(true, ROW_FRONT, 1).y - 26.0
+			_spawn_vfx_streak(Vector2(_slot_global_center(true, ROW_FRONT, 0).x - 70.0, y),
+				Vector2(_slot_global_center(true, ROW_FRONT, LANES_PER_ROW - 1).x + 70.0, y),
+				col, 4.0, 222, 0.30, 0.0)
+			_spawn_vfx_ring(_slot_global_center(true, ROW_FRONT, 1).lerp(
+				_slot_global_center(true, ROW_FRONT, 2), 0.5),
+				Color(accent.r, accent.g, accent.b, 0.36),
+				78.0, 1.16, 0.34, 221, 2.5, 0.64, Vector2(1.65, 0.42))
+
+
+func _play_midline_flash(color: Color, duration: float) -> void:
+	if _midline == null or not is_instance_valid(_midline):
+		return
+	var base := _midline.modulate
+	_midline.modulate = Color(color.r, color.g, color.b, maxf(base.a, 1.0))
+	var tw := _midline.create_tween()
+	tw.tween_property(_midline, "modulate", base, duration).set_ease(Tween.EASE_OUT)
 
 
 func _phase_accent(t: String) -> Color:
@@ -17415,6 +20181,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		match event.keycode:
 			KEY_E, KEY_ENTER:
 				_on_end_turn()
+			KEY_SPACE:
+				_request_space_end_turn()
+				get_viewport().set_input_as_handled()
 			KEY_ESCAPE:
 				# Esc backs out one level: cancel an in-flight spell/potion target
 				# first, otherwise open the pause/Settings overlay (its own Esc
@@ -17487,6 +20256,9 @@ func _net_begin_combat() -> void:
 		_net_opp_max_mana = opp_slot.base_max_mana
 	if _net_opp_mana_post == null:
 		_build_command_seal_post(true)
+	# Foe's arsenal rail: their drafted battle relic + potion, on the table like
+	# HS trinkets (the picks crossed the wire in NetDraft's deck handoff).
+	_net_build_foe_arsenal()
 	phase = Phase.PLAYER_TURN
 	# ── SEALED ORDERS style: no opener, no Coin — both sides give orders blind,
 	# so there is nothing to compensate. Initiative (reveal order + sorcery
@@ -17505,9 +20277,47 @@ func _net_begin_combat() -> void:
 			await get_tree().create_timer(0.6).timeout
 			_sealed_begin_round(1)
 		return
-	# Who opens is a COIN FLIP from the shared seed (never "the host"), so gameplay
-	# never reveals which side is player 1. The opening experience keys off going
-	# first / second, not host / client — both roles are identical and swap with it.
+	# ── THE TOSS (2026-07-11): the seed coin flip now decides who CHOOSES the
+	# ground, not who marches first. The winner picks MARCH FIRST (dictate the
+	# opening line, act first every round) or HOLD BACK (see the foe's line,
+	# keep the Coin, and your very first turn STRIKES — the second player's
+	# opening turn is de facto turn 2, so it fights like one). The pick lands in
+	# _net_first_player_override on BOTH machines, so everything downstream
+	# (pre-deal, Coin, button labels, the host's turn loop) keys off the settled
+	# order. Probes pre-set the override and skip the toss; headless resolves to
+	# the raw flip; the bot never chooses — the human always takes the toss.
+	# attach_combat must be wired BEFORE the wait so the peer's pick (buffered
+	# during our boot) can land — it stays ahead of the host's round 1 either way.
+	NetMatch.attach_combat()
+	if _net_first_player_override < 0:
+		var toss_winner: int = _net_my_index() if SkirmishState.vs_bot \
+			else _net_first_player()
+		if DisplayServer.get_name() == "headless":
+			_net_first_player_override = _net_first_player()
+		elif toss_winner == _net_my_index():
+			var pick_first: bool = await _net_show_order_choice()
+			_net_first_player_override = _net_my_index() if pick_first \
+				else 1 - _net_my_index()
+			if not SkirmishState.vs_bot:
+				if _is_host():
+					NetMatch.send_to_client({"t": NetMatch.EV_ORDER_PICK,
+						"first": _net_first_player_override})
+				else:
+					NetMatch.send_intent({"t": NetMatch.IN_ORDER_PICK,
+						"first": _net_first_player_override})
+		else:
+			_show_info("The foe won the toss — they are choosing the ground…")
+			# Wait for the pick to cross the wire; a generous timeout falls back
+			# to the raw flip so a dropped message can never soft-lock the match.
+			var toss_waited := 0.0
+			while _net_first_player_override < 0 and toss_waited < 90.0 \
+					and not _net_match_over:
+				await get_tree().create_timer(0.2).timeout
+				toss_waited += 0.2
+			if _net_first_player_override < 0:
+				_net_first_player_override = _net_first_player()
+	# The opening experience keys off going first / second, not host / client —
+	# both roles are identical and swap with the settled order.
 	var first_index: int = _net_first_player()
 	var i_go_first: bool = first_index == NetMatch.local_player_index
 	if i_go_first:
@@ -17537,14 +20347,9 @@ func _net_begin_combat() -> void:
 		_layout_hand()
 		# Share the pre-dealt opening hand so the opponent's foe-readout is correct.
 		_net_broadcast_hand_count()
-		_show_info("Skirmish — your opponent moves first. Plan your opening hand…")
-	# Listeners are wired and this side's opening (foe seal + any going-second
-	# pre-deal) is done — replay any opening messages the peer sent while we were
-	# still booting (texture prebake). Without this, a going-first client that was
-	# slow to boot lost the host's very first EV_TURN_BEGIN and both sides
-	# deadlocked at round 1 (see NetMatch.attach_combat). Must run BEFORE the host
-	# opens round 1, so a buffered client intent is delivered in order.
-	NetMatch.attach_combat()
+		_show_info("Skirmish — the foe marches first. Your opening turn will STRIKE.")
+	# (attach_combat already ran ahead of the toss above — the buffered-message
+	# replay that used to live here rides that earlier call; see NetMatch.attach_combat.)
 	# Only the HOST drives the authoritative turn machine — but it opens the match for
 	# WHOEVER the coin flip chose (first_index), host or client alike.
 	if _is_host():
@@ -17559,6 +20364,57 @@ func _net_begin_combat() -> void:
 			_net_prebake_bot_textures()
 		await get_tree().create_timer(0.6).timeout
 		_net_begin_round(1)
+
+
+## The toss modal: the coin-flip winner picks the ground. Awaitable; returns
+## true = MARCH FIRST, false = HOLD BACK (go second). Mouse-only like the rest
+## of the game; lives on its own CanvasLayer so it sits above board and hand.
+func _net_show_order_choice() -> bool:
+	var layer := CanvasLayer.new()
+	layer.layer = 30
+	add_child(layer)
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.74)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	layer.add_child(dim)
+	var col := VBoxContainer.new()
+	col.set_anchors_preset(Control.PRESET_CENTER)
+	col.offset_left = -330
+	col.offset_right = 330
+	col.offset_top = -240
+	col.offset_bottom = 240
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.add_theme_constant_override("separation", 14)
+	dim.add_child(col)
+	var title = GameTheme.make_label("YOU WON THE TOSS", 34, GameTheme.GILT_BRIGHT, true)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(title)
+	var sub = GameTheme.make_label("Choose the ground.", 18, GameTheme.DESC_DIM)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(sub)
+	var picked: Array = [-1]
+	for opt in [
+		["MARCH FIRST", "Dictate the opening line — you act first every round.", 1],
+		["HOLD BACK", "See their line before yours, keep the Coin — and your first turn STRIKES.", 0],
+	]:
+		var btn = GameTheme.make_themed_button(String(opt[0]),
+			Color(0.14, 0.10, 0.05), Vector2(560, 64), 22)
+		btn.pressed.connect(func():
+			picked[0] = int(opt[2])
+			layer.queue_free())
+		col.add_child(btn)
+		var line = GameTheme.make_label(String(opt[1]), 15, GameTheme.IVORY)
+		line.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		line.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		line.custom_minimum_size = Vector2(540, 0)
+		line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		col.add_child(line)
+		GameTheme.hover_lift(btn)
+	GameTheme.deal_in(col, 0.05)
+	while picked[0] < 0:
+		await get_tree().process_frame
+	return picked[0] == 1
 
 
 ## HOST: open a new combat ROUND. Both players take a placement turn (opener first,
@@ -17672,7 +20528,7 @@ func _sealed_commit_creature(card: Control, cost: int, lane_idx: int, row: int) 
 	# Display-only stand-in: seats visually + occupies the row array (so a second
 	# order can't take the slot) but is NOT registered / entered — the reveal frees
 	# it and the authoritative spawn takes its place. _net_sync_board skips it.
-	var stand := CARD_SCENE.instantiate()
+	var stand: Control = CARD_SCENE.instantiate()
 	stand.card_id = cid
 	stand.is_on_battlefield = true
 	stand.compact_mode = true
@@ -17789,7 +20645,7 @@ func _sealed_reveal() -> void:
 		_net_client_unspent_mana = int(b.get("mana", 0)) if side == 1 else 0
 		for o_raw in b.get("list", []):
 			var o: Dictionary = o_raw
-			var data := CardDB.get_card_data(String(o.get("id", "")))
+			var data := SkirmishState.skirmish_card_data(String(o.get("id", "")))
 			if data.is_empty():
 				continue
 			var lane := int(o.get("lane", -1))
@@ -17962,7 +20818,11 @@ func _net_finish_placement(who: int) -> void:
 	if _net_active_index != who:
 		return   # stale / duplicate DONE — ignore
 	_net_placed_count += 1
-	if _net_turn_round > 1:
+	# Every DONE strikes EXCEPT the opener's very first (an empty opposing board
+	# would mean free face hits). The second player's first turn is de facto
+	# turn 2 — the foe's line is already standing — so it fights like one
+	# (2026-07-11; round 1 used to be place-only for both sides).
+	if _net_turn_round > 1 or _net_placed_count >= 2:
 		await _net_run_clash(who)
 	if _net_match_over:
 		return
@@ -17987,10 +20847,13 @@ func _net_local_turn_begin() -> void:
 	# The active player may reposition this turn — _start_round already re-enabled
 	# board_interactive.
 	Card2D.board_interactive = true
-	# The button names its consequence (mirrors solo's CLASH label): from round 2
-	# ending your turn sends your line across the board; round 1 is place-only.
+	# The button names its consequence (mirrors solo's CLASH label): every turn
+	# ends in a strike EXCEPT the opener's first — the second player's opening
+	# turn already faces a standing line, so it strikes too.
 	if _end_turn_btn != null:
-		_end_turn_btn.text = "STRIKE  [E]" if _net_turn_round > 1 else "DONE  [E]"
+		var will_strike: bool = _net_turn_round > 1 \
+			or _net_goes_second(NetMatch.local_player_index)
+		_end_turn_btn.text = "STRIKE  [E]" if will_strike else "DONE  [E]"
 	_net_broadcast_hand_count()
 
 
@@ -18023,8 +20886,10 @@ func _net_set_local_active(active: bool) -> void:
 
 # ── DONE / CLASH (the end-turn button's skirmish role) ───────────────────
 
-## The DONE button finishes THIS side's placement turn. It no longer attacks — the
-## clash is a separate simultaneous pass the host runs once BOTH sides have placed.
+## The DONE / STRIKE button commits THIS side's turn. Every commit fires the
+## one-directional clash for the committing side EXCEPT the opener's very first
+## turn (empty opposing board = free face hits); the second player's first turn
+## faces a standing line, so it strikes like any other.
 func _net_on_done_placing() -> void:
 	# Sealed style: the button is SEAL ORDERS / PASS, never a turn hand-off.
 	if _is_sealed():
@@ -18035,6 +20900,8 @@ func _net_on_done_placing() -> void:
 	# Marked discards cash out as the turn is committed (hand-local; the foe
 	# gets the EV_DISCARD_FX beat + hand-count tick from inside the flush).
 	_flush_marked_discards()
+	if _net_turn_round > 1 or _net_goes_second(NetMatch.local_player_index):
+		_play_clash_commit_vfx()
 	if _is_host():
 		_net_finish_placement(0)
 	else:
@@ -18056,6 +20923,7 @@ func _net_on_done_placing() -> void:
 var _net_clash_recording: bool = false
 var _net_clash_log: Array = []
 var _net_clash_banner_sent: bool = false
+var _net_face_hit_source: Dictionary = {}
 # Cross-Blitz mutual trade: true only during the MP one-directional MAIN clash, so
 # a struck defender hits its attacker straight back (see _apply_mutual_retaliation).
 # Solo/sealed are already simultaneous, so this stays false there.
@@ -18074,6 +20942,31 @@ func _net_log_lunge(attacker: Control) -> void:
 	if attacker.has_method("effective_atk"):
 		entry["latk"] = int(attacker.effective_atk())
 	_net_clash_log.append(entry)
+
+
+func _net_arm_face_hit_source(attacker: Control, lane_idx: int, power: int = -1) -> void:
+	_net_face_hit_source.clear()
+	if not _net_clash_recording:
+		return
+	if attacker == null or not is_instance_valid(attacker) or int(attacker.entity_id) < 0:
+		return
+	_net_face_hit_source = {
+		"a": int(attacker.entity_id),
+		"o": 1 if attacker.is_opponent else 0,
+		"lane": lane_idx,
+	}
+	if power > 0:
+		_net_face_hit_source["p"] = power
+
+
+func _net_clear_face_hit_source() -> void:
+	_net_face_hit_source.clear()
+
+
+func _net_enrich_face_hit(entry: Dictionary) -> Dictionary:
+	if not _net_face_hit_source.is_empty():
+		entry.merge(_net_face_hit_source, true)
+	return entry
 
 
 func _net_log_hit(attacker: Control, defender: Control, hp_before: int, is_counter: bool = false) -> void:
@@ -18162,7 +21055,7 @@ func _net_send_clash_log() -> void:
 ## blow and a creature slain by the first striker still retaliates (Card2D.defer_deaths
 ## holds deaths until the phase flushes), so nobody gets a de-facto Swift. This is the
 ## net analogue of solo's _do_combat clash: Swift pre-phase, main column strike, then
-## Ranged. Thorns / Piercing / Armored / Last Stand / Lifelink / Rampage
+## Ranged. Thorns / Piercing / Armored / Last Stand / Lifesteal / Rampage
 ## / on-death all come free from the shared campaign resolvers.
 ## Resolve an attack pass. attacking_side: -1 = BOTH sides strike simultaneously
 ## (the SEALED battle style's resolution + the pre-2026-07 legacy clash);
@@ -18215,6 +21108,17 @@ func _net_run_clash(attacking_side: int = -1) -> void:
 	for i in range(LANES_PER_ROW):
 		player_front_empty.append(_row_array(false, ROW_FRONT)[i] == null)
 		enemy_front_empty.append(_row_array(true, ROW_FRONT)[i] == null)
+	var net_swift_queued := false
+	for c in _all_creatures_both_sides():
+		if not is_instance_valid(c):
+			continue
+		var c_side_strikes: bool = client_strikes if c.is_opponent else host_strikes
+		if c_side_strikes and _is_swift_attacker(c) and c.can_attack() and not c.has_attacked_this_turn:
+			net_swift_queued = true
+			break
+	if net_swift_queued:
+		_set_phase_caption("SWIFT STRIKES")
+		_net_log_caption("SWIFT STRIKES")
 	# SWIFT PHASE — striking sides only, deaths HELD so Swift-vs-Swift trades
 	# (see _do_combat).
 	Card2D.defer_deaths = true
@@ -18233,6 +21137,8 @@ func _net_run_clash(attacking_side: int = -1) -> void:
 	_net_send_clash_log()   # ship the Swift beats AHEAD of their outcome snapshot
 	_net_sync_board()   # let the client see the Swift results before the main clash
 	_net_clash_recording = true
+	_set_phase_caption("CLASH")
+	_net_log_caption("CLASH")
 	# MAIN PASS — striking sides per lane, deaths HELD so mutual kills drop both.
 	# In a one-directional pass this is where the Cross-Blitz counterstrike lives:
 	# the struck defender hits back inside _creature_attacks_creature (gated below).
@@ -18392,6 +21298,7 @@ func _net_show_result(winner_index: int) -> void:
 		if AudioBank != null:
 			AudioBank.play_sfx("victory" if series_won else "defeat")
 		_net_build_result_panel(sverdict)
+		_show_battle_verdict(series_won, 0, false, true)
 		return
 
 	# ── Single game (Bo1): the original behaviour. ──
@@ -18408,6 +21315,8 @@ func _net_show_result(winner_index: int) -> void:
 	# Stay connected: offer a rematch (same drafted decks, fresh HP/board) instead
 	# of auto-dropping to the menu. The connection is held open until someone leaves.
 	_net_build_result_panel(verdict)
+	if winner_index >= 0:
+		_show_battle_verdict(winner_index == me, 0, false, true)
 
 
 ## "You N – M Opponent" from the local player's POV (Best-of-N standing).
@@ -18701,7 +21610,7 @@ func _net_replay_clash(ev: Dictionary) -> void:
 		elif s.has("pl"):     # a piercing kill's skewer
 			_net_replay_pierce(int(s.get("pl", -1)), int(s.get("pv", -1)))
 		elif s.has("f"):      # a hero took the blow
-			await _net_replay_face_hit(int(s.get("f", 0)), int(s.get("fhp", 0)), int(s.get("n", 0)))
+			await _net_replay_face_hit(s)
 		elif s.has("d"):      # a creature took the blow
 			await _net_replay_creature_hit(s)
 	_net_replay_active = false
@@ -18738,7 +21647,8 @@ func _net_replay_creature_hit(s: Dictionary) -> void:
 		# separate {l} entry), so only the counter needs one synthesized here.
 		if bool(s.get("ctr", false)) and striker.has_method("play_attack_lunge"):
 			striker.play_attack_lunge(_lunge_strength(maxi(dmg, 1)))
-		_play_attack_tracer(_card_center(striker), _card_center(victim), attacker_is_foe)
+		_play_attack_tracer(_card_center(striker), _card_center(victim),
+			attacker_is_foe, float(maxi(dmg, 1)), dmg >= HEAVY_HIT_DAMAGE)
 		# Thorns / Hydra self-bite: the attacker's own chip rides the same entry.
 		if s.has("ahp") and int(s.get("ahp", 0)) < int(striker.current_hp):
 			var sting: int = int(striker.current_hp) - int(s.get("ahp", 0))
@@ -18771,6 +21681,7 @@ func _net_replay_creature_hit(s: Dictionary) -> void:
 	else:
 		# Kill contract: the cue sounds at the impact beat; the corpse slumps and
 		# stands until the trailing snapshot flushes it — the deferred-deaths feel.
+		victim.death_cue_played = true
 		AudioBank.play_sfx("creature_death", 0.05)
 		if victim.has_method("_mark_mortally_struck"):
 			victim._mark_mortally_struck()
@@ -18797,10 +21708,24 @@ func _net_replay_pierce(attacker_eid: int, victim_eid: int) -> void:
 		spawn_ash_burst(beyond, Color(1.0, 0.86, 0.46), 14)
 
 
-func _net_replay_face_hit(owner_idx: int, hp_after: int, dmg: int) -> void:
+func _net_replay_face_hit(entry, hp_after_legacy: int = -1, dmg_legacy: int = -1) -> void:
 	# Mirrors the juice of damage_player_hero (own face — loud) and
 	# damage_enemy_hero (foe face — lighter) for whichever hero the log names.
+	var s: Dictionary = entry if entry is Dictionary else {
+		"f": int(entry),
+		"fhp": hp_after_legacy,
+		"n": dmg_legacy,
+	}
+	var owner_idx: int = int(s.get("f", 0))
+	var hp_after: int = int(s.get("fhp", 0))
+	var dmg: int = int(s.get("n", 0))
 	var mine: bool = owner_idx == NetMatch.local_player_index
+	if dmg > 0 and s.has("a"):
+		var striker = NetMatch.get_entity(int(s.get("a", -1)))
+		if striker != null and is_instance_valid(striker):
+			var vfx_power: int = int(s.get("p", dmg))
+			_play_face_strike_vfx(striker, int(s.get("lane", striker.current_lane)),
+				striker.is_opponent, vfx_power)
 	if mine:
 		player_hp = hp_after
 		if dmg > 0:
@@ -18857,7 +21782,7 @@ func _net_replay_fx(ev: Dictionary) -> void:
 
 
 func _net_display_data_from_sync(cd: Dictionary) -> Dictionary:
-	var base := CardDB.get_card_data(String(cd.get("id", "")))
+	var base := SkirmishState.skirmish_card_data(String(cd.get("id", "")))
 	var data: Dictionary
 	if base.is_empty():
 		data = {"id": String(cd.get("id", "token")), "name": "Token", "type": "creature", "cost": 0}
@@ -18912,9 +21837,17 @@ func _net_update_creature(node: Control, cd: Dictionary) -> void:
 	# Snapshots carry only final stats, so animate the delta for clash feel — the
 	# client never runs the resolver, this is its only combat feedback (v1 coarse).
 	if new_hp < old_hp:
+		var lost_hp: int = old_hp - new_hp
 		if node.has_method("play_hit_recoil"):
 			node.play_hit_recoil(bool(node.is_opponent))
-		spawn_floating_number(_card_center(node), "-%d" % (old_hp - new_hp), Color(0.95, 0.38, 0.38), false)
+		_spawn_impact_burst(_card_center(node),
+			Vector2(0.0, 1.0 if bool(node.is_opponent) else -1.0),
+			float(lost_hp), new_hp <= 0)
+		spawn_floating_number(_card_center(node), "-%d" % lost_hp, Color(0.95, 0.38, 0.38), false)
+		if new_hp > 0 and node.has_method("_flash_hit"):
+			node._flash_hit()
+		elif new_hp <= 0 and node.has_method("_mark_mortally_struck"):
+			node._mark_mortally_struck()
 	elif new_hp > old_hp:
 		spawn_floating_number(_card_center(node), "+%d" % (new_hp - old_hp), Color(0.45, 0.9, 0.5), false)
 
@@ -18965,7 +21898,12 @@ func _net_despawn_creature(node: Control, exiled: bool = false) -> void:
 	# (tracked in their own deck, on their own machine) are skipped — and so is an
 	# EXILED creature (Banish removes it from the game, it does not go to discard).
 	if not exiled and is_instance_valid(node) and not node.is_opponent and node.deck_uid >= 0:
-		_player_discard_pile.append(_pile_entry(node.card_id, node.deck_uid))
+		if _pending_return_uids.has(int(node.deck_uid)):
+			# An EV_GIVE_CARD already floated this uid back to our hand (Griffin /
+			# Grave Robbery) — filing it too would double-count the card.
+			_pending_return_uids.erase(int(node.deck_uid))
+		else:
+			_player_discard_pile.append(_pile_entry(node.card_id, node.deck_uid))
 	for is_enemy in [false, true]:
 		for row in [ROW_FRONT, ROW_BACK]:
 			var arr = _row_array(is_enemy, row)
@@ -18973,8 +21911,33 @@ func _net_despawn_creature(node: Control, exiled: bool = false) -> void:
 				if arr[lane] == node:
 					arr[lane] = null
 	if is_instance_valid(node):
-		spawn_ash_burst(_card_center(node), Color(0.62, 0.60, 0.66), 18)
-		node.queue_free()
+		var pos := _card_center(node)
+		if exiled:
+			spawn_ash_burst(pos, Color(0.62, 0.60, 0.66), 18)
+			var xtw := node.create_tween()
+			xtw.tween_property(node, "modulate:a", 0.0, UserSettings.anim_time(0.18))
+			xtw.tween_callback(node.queue_free)
+			return
+		var cue_already_played: bool = bool(node.death_cue_played)
+		node.death_cue_played = true
+		if not cue_already_played and AudioBank != null:
+			AudioBank.play_sfx("creature_death", 0.05)
+			screen_shake(5.0)
+		if node.has_method("_mark_mortally_struck"):
+			node._mark_mortally_struck()
+		_play_creature_death_vfx(node, bool(node.is_opponent))
+		node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		node.pivot_offset = node.size * 0.5
+		node.z_index = maxi(int(node.z_index), 40)
+		var tw := node.create_tween()
+		tw.set_parallel(true)
+		tw.tween_property(node, "modulate", Color(0.35, 0.08, 0.08, 0.0),
+			UserSettings.anim_time(0.34)).set_ease(Tween.EASE_IN)
+		tw.tween_property(node, "scale", node.scale * 0.45,
+			UserSettings.anim_time(0.34)).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_BACK)
+		tw.tween_property(node, "rotation", node.rotation + randf_range(-0.5, 0.5),
+			UserSettings.anim_time(0.34))
+		tw.chain().tween_callback(node.queue_free)
 
 
 ## Materialize a board creature from card data on a given side. On the host
@@ -19102,6 +22065,9 @@ func _net_process_intent(intent: Dictionary) -> void:
 				# Legacy payload shape from the first net-potion pass.
 				_net_heal_hero(true, int(intent.get("value", 8)))
 				_net_sync_board()
+		NetMatch.IN_ORDER_PICK:
+			# The client won the toss — its settled order binds the host too.
+			_net_first_player_override = int(intent.get("first", 0))
 		NetMatch.IN_END_ACTIONS:
 			if _net_active_index == 1:
 				_net_finish_placement(1)
@@ -19127,6 +22093,10 @@ func _net_process_intent(intent: Dictionary) -> void:
 		NetMatch.EV_POTION_FX:
 			# The client drank a potion — show the drink beat over its portrait.
 			_net_show_foe_potion_fx(String(intent.get("pid", "")))
+		NetMatch.EV_RELIC_FX:
+			# The client's resource relic paid out on its machine — pulse its
+			# chip on our foe-arsenal rail (HS trinket beat).
+			_net_on_relic_fx(intent)
 		NetMatch.EV_EMOTE:
 			# The client sent an emote — float their line over the enemy plate.
 			_net_show_foe_emote(int(intent.get("idx", -1)))
@@ -19145,7 +22115,7 @@ func _net_apply_remote_creature(intent: Dictionary, animate: bool = false) -> vo
 		return
 	if _row_array(true, row)[lane] != null:
 		return   # slot occupied — drop the play (client mis-synced)
-	var data := CardDB.get_card_data(String(intent.get("id", "")))
+	var data := SkirmishState.skirmish_card_data(String(intent.get("id", "")))
 	if data.is_empty():
 		return
 	var uid: int = int(intent.get("uid", _net_issue_token_id()))
@@ -19211,14 +22181,22 @@ func _net_field_move_dropped(global_pos: Vector2, card: Control) -> void:
 			AudioBank.play_sfx("card_play")
 		_net_sync_board()
 	else:
-		# Client: count it locally for the UI budget, tell the host, and return the
+		# Client: predict the approved local move immediately for feel, then let the
 		# card home — the host's snapshot will perform the actual move.
 		_moves_used_this_turn += 1
+		_row_array(false, src_row)[src_lane] = null
+		card.current_row = dest_row
+		card.current_lane = dest_lane
+		_reset_card_after_drag(card)
+		_slot_set_card(_slot_array(false, dest_row)[dest_lane], card)
+		_row_array(false, dest_row)[dest_lane] = card
+		_play_landing_pop(card)
+		if AudioBank != null:
+			AudioBank.play_sfx("card_play")
 		NetMatch.send_intent({
 			"t": NetMatch.IN_REPOSITION, "eid": int(card.entity_id),
 			"lane": dest_lane, "row": dest_row,
 		})
-		_return_card_to_slot(card)
 
 
 ## HOST: validate + apply the client's reposition (its creatures sit on the host's
@@ -19249,6 +22227,8 @@ func _net_apply_remote_reposition(intent: Dictionary) -> void:
 	_row_array(true, dest_row)[dest_lane] = node
 	_moves_used_this_turn += 1
 	_play_landing_pop(node)
+	if AudioBank != null:
+		AudioBank.play_sfx("card_play")
 	_net_sync_board()
 
 
@@ -19272,7 +22252,7 @@ func _bot_refill_hand() -> void:
 		var id := String(slot.deck[_bot_deck_cursor])
 		var uid: int = int(slot.deck_uids[_bot_deck_cursor]) \
 			if _bot_deck_cursor < slot.deck_uids.size() else _net_issue_token_id()
-		_bot_hand.append({"uid": uid, "id": id, "data": CardDB.get_card_data(id)})
+		_bot_hand.append({"uid": uid, "id": id, "data": SkirmishState.skirmish_card_data(id)})
 		_bot_deck_cursor += 1
 
 
@@ -19357,8 +22337,9 @@ func _net_prebake_bot_textures() -> void:
 		if seen.has(sid):
 			continue
 		seen[sid] = true
-		to_bake.append(CardDB.get_card_data(sid))
+		to_bake.append(SkirmishState.skirmish_card_data(sid))
 	await CardTextureCache.bake_many(to_bake)
+	await CardTextureCache.bake_battlefield_many(to_bake)
 
 
 ## Cosmetic: a ghost of the card the foe (bot OR human opponent) is about to play
@@ -19501,6 +22482,9 @@ func _on_net_event(event: Dictionary) -> void:
 ## _net_flush_backlog once a clash replay finishes.
 func _net_process_event(event: Dictionary) -> void:
 	match String(event.get("t", "")):
+		NetMatch.EV_ORDER_PICK:
+			# The host settled the toss (its own pick, applied host-side already).
+			_net_first_player_override = int(event.get("first", 0))
 		NetMatch.EV_TURN_BEGIN:
 			_net_client_turn_begin(int(event.get("active", 0)), int(event.get("round", 0)))
 		NetMatch.EV_ORDERS_PHASE:
@@ -19535,6 +22519,10 @@ func _net_process_event(event: Dictionary) -> void:
 		NetMatch.EV_POTION_FX:
 			# The host drank a potion — show the drink beat over its portrait.
 			_net_show_foe_potion_fx(String(event.get("pid", "")))
+		NetMatch.EV_RELIC_FX:
+			# A relic beat: theirs (mine=true → our foe rail) or OURS resolved
+			# host-side (mine=false → our own grid pulses).
+			_net_on_relic_fx(event)
 		NetMatch.EV_EMOTE:
 			# The host sent an emote — float their line over the enemy plate.
 			_net_show_foe_emote(int(event.get("idx", -1)))
@@ -19775,14 +22763,13 @@ func _net_apply_host_potion(pid: String, caster_is_enemy: bool, target: Control 
 					target._spawn_keyword_chip("RAMPAGE", Color(1.0, 0.62, 0.20))
 				target.update_stat_display()
 		"grant_lifelink":
-			# Vampiric Draught: Lifelink 2 on a friendly for the fight + a 4 HP
+			# Vampiric Draught: Lifesteal on a friendly for the fight + a 4 HP
 			# caster top-up (host-authoritative HP).
 			if target != null and is_instance_valid(target) and target.is_creature():
 				if "lifelink" not in target.card_data.get("keywords", []):
 					target.card_data.keywords.append("lifelink")
-				target.card_data["lifelink"] = maxi(2, int(target.card_data.get("lifelink", 0)))
 				if target.has_method("_spawn_keyword_chip"):
-					target._spawn_keyword_chip("LIFELINK", Color(0.95, 0.35, 0.45))
+					target._spawn_keyword_chip("LIFESTEAL", Color(0.95, 0.35, 0.45))
 				target.update_stat_display()
 			_net_heal_hero(caster_is_enemy, 4)
 		"sacrifice_for_command":
@@ -19827,23 +22814,307 @@ func _net_send_potion_fx(pid: String) -> void:
 		NetMatch.send_intent(msg)
 
 
-## The foe drank a potion: a labelled beat over their portrait, tinted by the
-## potion's own colour — so the opponent's swing isn't a silent HP/hand jump.
+## The foe drank a potion — a Hearthstone-style reveal: the bottle lifts off
+## their arsenal rail, blooms enlarged over the enemy half of the board with its
+## name on a plate, holds a beat, then burns out. The rail chip drains to a dim
+## empty husk so the belt tracks what they have left. Reduce-motion keeps the
+## old floating-text beat (plus the chip drain, which is state, not motion).
 func _net_show_foe_potion_fx(pid: String) -> void:
 	if _hud_layer == null:
 		return
 	var data: Dictionary = PotionDB.get_potion(pid)
 	var nm: String = String(data.get("name", "a potion"))
 	var col: Color = data.get("color", Color(0.82, 0.74, 0.58))
-	var anchor := Vector2(get_viewport_rect().size.x * 0.5, 120.0)
-	if _enemy_hp_label != null and is_instance_valid(_enemy_hp_label):
-		anchor = _enemy_hp_label.get_global_rect().get_center() + Vector2(0.0, 34.0)
-	elif _net_opp_hand_box != null and is_instance_valid(_net_opp_hand_box):
-		anchor = _net_opp_hand_box.global_position \
-			+ Vector2(_net_opp_hand_box.size.x * 0.5, 40.0)
-	spawn_floating_number(anchor, "FOE DRINKS: %s" % nm.to_upper(), col, false)
 	if AudioBank != null:
 		AudioBank.play_sfx("potion_use", 0.06, -3.0)
+	var rail_chip: Control = _net_foe_consume_potion_chip(pid)
+	# Keep our copy of the foe's slot honest: the drinker consumes from ITS OWN
+	# slot only, so without this a Bo3 game-2 rail (rebuilt from our copy) would
+	# show a bottle they already drank in game 1.
+	var fx_opp_slot: SkirmishState.PlayerSlot = SkirmishState.get_slot(SkirmishState.opponent_index())
+	if fx_opp_slot != null:
+		fx_opp_slot.potions.erase(pid)
+	if UserSettings != null and UserSettings.reduce_motion:
+		var anchor := Vector2(get_viewport_rect().size.x * 0.5, 120.0)
+		if _enemy_hp_label != null and is_instance_valid(_enemy_hp_label):
+			anchor = _enemy_hp_label.get_global_rect().get_center() + Vector2(0.0, 34.0)
+		spawn_floating_number(anchor, "FOE DRINKS: %s" % nm.to_upper(), col, false)
+		return
+	_net_show_potion_reveal(pid, nm, col, rail_chip)
+
+
+## HS "opponent played a card" reveal for a foe potion: a big framed bottle chip
+## with the potion's name flies from its rail slot (or the enemy plate), blooms
+## at center over the enemy rows with a colour-burst ring, holds long enough to
+## read, then fades upward. Pure presentation — the effect resolves elsewhere.
+func _net_show_potion_reveal(pid: String, nm: String, col: Color, from_chip: Control) -> void:
+	const CHIP := 116.0
+	var holder := Control.new()
+	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	holder.z_index = 60
+	_hud_layer.add_child(holder)
+	# Children are laid out around the holder's ORIGIN, so scaling the holder
+	# (pivot_offset default 0,0) blooms the whole reveal around its center.
+	var chip := GameTheme.make_potion_chip(pid, int(CHIP))
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Plain-Control parent: size must be set by hand (custom_minimum_size only
+	# binds inside containers — an unsized Panel renders as nothing).
+	chip.size = Vector2(CHIP, CHIP)
+	chip.position = Vector2(-CHIP * 0.5, -CHIP * 0.5)
+	holder.add_child(chip)
+	var caption := _make_rail_caption("THE FOE DRINKS")
+	caption.position = Vector2(-160.0, -CHIP * 0.5 - 34.0)
+	caption.size = Vector2(320.0, 24.0)
+	holder.add_child(caption)
+	var name_lbl := Label.new()
+	name_lbl.text = nm.to_upper()
+	name_lbl.add_theme_font_size_override("font_size", 24)
+	name_lbl.add_theme_color_override("font_color", GameTheme.GILT_BRIGHT)
+	name_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.92))
+	name_lbl.add_theme_constant_override("outline_size", 6)
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if GameTheme.font_display:
+		name_lbl.add_theme_font_override("font", GameTheme.font_display)
+	name_lbl.position = Vector2(-180.0, CHIP * 0.5 + 8.0)
+	name_lbl.size = Vector2(360.0, 32.0)
+	holder.add_child(name_lbl)
+	# From the drained rail chip when it exists, else the enemy plate — to a
+	# bloom point over the enemy rows (upper-center, clear of the title band).
+	var vp := get_viewport_rect().size
+	var dest := Vector2(vp.x * 0.5, vp.y * 0.34)
+	var start := dest
+	if from_chip != null and is_instance_valid(from_chip):
+		start = from_chip.get_global_rect().get_center()
+	elif _enemy_banner_for_info != null and is_instance_valid(_enemy_banner_for_info):
+		start = _enemy_banner_for_info.get_global_rect().get_center()
+	holder.global_position = start
+	holder.scale = Vector2(0.35, 0.35)
+	holder.modulate.a = 0.0
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(holder, "global_position", dest, UserSettings.anim_time(0.34)) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.tween_property(holder, "scale", Vector2.ONE, UserSettings.anim_time(0.34)) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(holder, "modulate:a", 1.0, UserSettings.anim_time(0.16))
+	tw.chain().tween_callback(_spawn_chip_burst.bind(dest, CHIP * 0.72, col))
+	tw.chain().tween_interval(UserSettings.anim_time(0.95))
+	var out := tw.chain()
+	out.tween_property(holder, "modulate:a", 0.0, UserSettings.anim_time(0.30)) \
+		.set_ease(Tween.EASE_IN)
+	out.parallel().tween_property(holder, "global_position", dest + Vector2(0.0, -46.0),
+		UserSettings.anim_time(0.30)).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(holder.queue_free)
+
+
+## Drain the foe-rail chip for potion `pid`: mark the first unused slot with that
+## potion as spent and dim it to an empty husk. Returns the chip (the reveal
+## animation launches from it) or null when the rail never listed it.
+func _net_foe_consume_potion_chip(pid: String) -> Control:
+	for entry in _net_foe_potion_slots_ui:
+		if bool(entry.get("used", false)) or String(entry.get("pid", "")) != pid:
+			continue
+		entry["used"] = true
+		var chip: Control = entry.get("chip", null)
+		if chip == null or not is_instance_valid(chip):
+			return null
+		chip.pivot_offset = chip.size * 0.5
+		if UserSettings != null and UserSettings.reduce_motion:
+			chip.modulate = Color(0.45, 0.42, 0.38, 0.55)
+		else:
+			var tw := create_tween().set_parallel(true)
+			tw.tween_property(chip, "modulate", Color(0.45, 0.42, 0.38, 0.55),
+				UserSettings.anim_time(0.45)).set_ease(Tween.EASE_OUT)
+			tw.tween_property(chip, "scale", Vector2(0.9, 0.9),
+				UserSettings.anim_time(0.45)).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		return chip
+	return null
+
+
+# ── Foe's arsenal rail (skirmish): the opponent's drafted relic + potion ─────
+#
+#  HS shows you the opponent's weapon and trinkets on their side of the table;
+#  this is that rail for the skirmish draft picks. Both peers exchanged their
+#  relic + potion ids in NetDraft's deck handoff, so the data is already local —
+#  this only makes it VISIBLE. Chips reuse the GameTheme relic/potion kit, so
+#  the rich hover (name + rules) comes free; trigger/drink beats animate them.
+
+func _net_build_foe_arsenal() -> void:
+	if _hud_layer == null or _net_foe_rail_root != null:
+		return
+	var opp_slot: SkirmishState.PlayerSlot = SkirmishState.get_slot(SkirmishState.opponent_index())
+	if opp_slot == null:
+		return
+	var rids: Array = []
+	for rid in opp_slot.relics:
+		if not RelicDB.get_relic(String(rid)).is_empty():
+			rids.append(String(rid))
+	var pids: Array = []
+	for pid in opp_slot.potions:
+		if not PotionDB.get_potion(String(pid)).is_empty():
+			pids.append(String(pid))
+	if rids.is_empty() and pids.is_empty():
+		return   # the foe declined both drafts — no rail, no orphan caption
+	# Right rail, directly under the foe's Command seal (which ends at y 556),
+	# spanning the enemy column's full plate width. The glossary "?" orb
+	# (bottom-anchored, x -72..-24, y ~598 at 900px) stays clear of the
+	# centered chip row (2 chips end at x -84).
+	const CHIP := 44
+	const GAP := 8
+	var root := Control.new()
+	root.name = "NetFoeArsenal"
+	root.anchor_left = 1.0
+	root.anchor_right = 1.0
+	root.anchor_top = 0.0
+	root.anchor_bottom = 0.0
+	root.offset_left = -250
+	root.offset_right = -14
+	root.offset_top = 560
+	root.offset_bottom = 560 + 26 + CHIP
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.z_index = 5
+	_hud_layer.add_child(root)
+	_net_foe_rail_root = root
+	var caption := _make_rail_caption("FOE'S ARSENAL")
+	caption.anchor_left = 0.0
+	caption.anchor_right = 1.0
+	caption.offset_top = 0
+	caption.offset_bottom = 20
+	root.add_child(caption)
+	var n: int = rids.size() + pids.size()
+	var total_w: float = float(n * CHIP + (n - 1) * GAP)
+	var x: float = (236.0 - total_w) * 0.5
+	# Plain-Control parent: chip sizes must be set by hand (custom_minimum_size
+	# only binds inside containers — an unsized Panel renders as nothing).
+	for rid in rids:
+		var chip := GameTheme.make_relic_chip(rid, CHIP)
+		chip.size = Vector2(CHIP, CHIP)
+		chip.position = Vector2(x, 26.0)
+		root.add_child(chip)
+		_net_foe_relic_chips[rid] = chip
+		x += CHIP + GAP
+	for pid in pids:
+		var chip := GameTheme.make_potion_chip(pid, CHIP)
+		chip.size = Vector2(CHIP, CHIP)
+		chip.position = Vector2(x, 26.0)
+		root.add_child(chip)
+		_net_foe_potion_slots_ui.append({"pid": pid, "chip": chip, "used": false})
+		x += CHIP + GAP
+
+
+# ── Relic trigger beats (HS trinket flash) ────────────────────────────────────
+#
+#  One funnel for "a relic visibly did its thing": the chip pops + flashes +
+#  rings on whichever rail owns it, and in skirmish the beat crosses the wire
+#  (EV_RELIC_FX) so the OPPONENT sees your relic fire on their foe rail. Wire
+#  new trigger sites through _relic_fired (local resource relics — each peer
+#  fires its own) or _relic_fired_for_side (host-authoritative board relics).
+
+## A LOCAL relic paid out on this machine (solo player or net local side).
+func _relic_fired(rid: String) -> void:
+	_pulse_relic_chip(rid, false)
+	if _is_net():
+		_net_send_relic_fx(rid, true)
+
+
+## Host-side hooks that resolve a relic for EITHER warband (the
+## _relic_active_for_side sites) report through here with the owner side.
+func _relic_fired_for_side(owner_is_enemy: bool, rid: String) -> void:
+	if not _is_net():
+		if not owner_is_enemy:
+			_pulse_relic_chip(rid, false)
+		return
+	# Net host: owner false = my relic (own rail, tell the client "foe relic
+	# fired"); owner true = the client's relic (my foe rail, tell the client
+	# "YOUR relic fired" so it pulses its own grid).
+	_pulse_relic_chip(rid, owner_is_enemy)
+	_net_send_relic_fx(rid, not owner_is_enemy)
+
+
+## Tell the opponent about a relic beat. `mine` is from the SENDER's view.
+## Host → event, client → intent — the EV_POTION_FX channel's shape.
+func _net_send_relic_fx(rid: String, mine: bool) -> void:
+	var msg := {"t": NetMatch.EV_RELIC_FX, "rid": rid, "mine": mine}
+	if _is_host():
+		NetMatch.send_to_client(msg)
+	else:
+		NetMatch.send_intent(msg)
+
+
+func _net_on_relic_fx(msg: Dictionary) -> void:
+	# mine is the sender's perspective: their relic → our FOE rail; the host
+	# saying mine=false means OUR board relic fired host-side → our own rail.
+	_pulse_relic_chip(String(msg.get("rid", "")), bool(msg.get("mine", true)))
+
+
+## The HS trinket flash on a relic chip: scale pop (back-eased), bright flash,
+## and an expanding gilt ring. `foe` picks the rail. Debounced per chip so a
+## multi-part trigger (Tome of Many's two draws, Bulwark over a wall) reads as
+## ONE beat. Foe triggers also float the relic's name — your own relics you
+## know by sight; theirs need the attribution.
+func _pulse_relic_chip(rid: String, foe: bool) -> void:
+	if rid == "":
+		return
+	var key := "%s|%d" % [rid, 1 if foe else 0]
+	var now := Time.get_ticks_msec()
+	if now - int(_relic_fx_gate.get(key, -10000)) < 450:
+		return
+	_relic_fx_gate[key] = now
+	var chip: Control = _net_foe_relic_chips.get(rid, null) if foe \
+		else _relic_chip_by_id.get(rid, null)
+	if chip == null or not is_instance_valid(chip):
+		return
+	if AudioBank != null:
+		AudioBank.play_sfx("relic_trigger", 0.05, -9.0, 1.3)
+	if foe:
+		# Attribution chip (self-centering callout). The rail hugs the screen
+		# edge, so clamp the anchor inward — a long relic name centered on the
+		# chip itself would run off the right side.
+		var r := RelicDB.get_relic(rid)
+		var anchor: Vector2 = chip.get_global_rect().get_center() + Vector2(0.0, -34.0)
+		anchor.x = clampf(anchor.x, 150.0, get_viewport_rect().size.x - 150.0)
+		spawn_keyword_callout(anchor, String(r.get("name", rid)).to_upper(),
+			GameTheme.GILT_BRIGHT, null)
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	chip.pivot_offset = chip.size * 0.5
+	var tw := create_tween()
+	tw.tween_property(chip, "scale", Vector2(1.4, 1.4), UserSettings.anim_time(0.14)) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(chip, "scale", Vector2.ONE, UserSettings.anim_time(0.26)) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	var fl := create_tween()
+	fl.tween_property(chip, "modulate", Color(1.8, 1.65, 1.25), UserSettings.anim_time(0.10))
+	fl.tween_property(chip, "modulate", Color.WHITE, UserSettings.anim_time(0.30))
+	_spawn_chip_burst(chip.get_global_rect().get_center(), chip.size.x * 0.72,
+		GameTheme.GILT_BRIGHT)
+
+
+## An expanding, fading ring — the "trigger burst" both the relic pulse and the
+## potion reveal use. Drawn as a border-only rounded panel scaled from within.
+func _spawn_chip_burst(center: Vector2, radius: float, color: Color) -> void:
+	if _hud_layer == null:
+		return
+	var ring := Panel.new()
+	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ring.z_index = 59
+	var st := StyleBoxFlat.new()
+	st.bg_color = Color(0, 0, 0, 0)
+	st.border_color = color
+	st.set_border_width_all(3)
+	st.set_corner_radius_all(int(radius))
+	ring.add_theme_stylebox_override("panel", st)
+	ring.size = Vector2(radius * 2.0, radius * 2.0)
+	ring.pivot_offset = ring.size * 0.5
+	ring.global_position = center - ring.size * 0.5
+	ring.scale = Vector2(0.55, 0.55)
+	_hud_layer.add_child(ring)
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(ring, "scale", Vector2(1.6, 1.6), UserSettings.anim_time(0.42)) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.tween_property(ring, "modulate:a", 0.0, UserSettings.anim_time(0.42)) \
+		.set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(ring.queue_free)
 
 
 ## Store the opponent's synced Command and refresh the foe's wax seal numeral.
@@ -19895,7 +23166,8 @@ func _net_build_opp_hand_ui() -> void:
 	_hud_layer.add_child(_net_opp_hand_box)
 
 	var label := Label.new()
-	label.text = "OPPONENT"
+	# Name the fan after the foe's chosen lord — "OPPONENT" was a placeholder.
+	label.text = String(HeroDB.get_hero(_foe_hero_id()).get("name", "Opponent")).to_upper()
 	label.add_theme_font_size_override("font_size", 16)
 	label.add_theme_color_override("font_color", Color(0.90, 0.80, 0.60, 0.7))
 	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
@@ -20007,7 +23279,7 @@ func _net_make_card_back(sz: Vector2) -> Control:
 ## entity registry is shared by eid) and play the telegraph. Fires before the board
 ## snapshot, so the target node is still alive even for a lethal spell.
 func _net_on_opp_spell_event(event: Dictionary) -> void:
-	var data := CardDB.get_card_data(String(event.get("id", "")))
+	var data := SkirmishState.skirmish_card_data(String(event.get("id", "")))
 	if data.is_empty():
 		return
 	var teid: int = int(event.get("target", -1))
@@ -20172,7 +23444,7 @@ func _net_recycle_spell(card: Control) -> void:
 	if card == null or not is_instance_valid(card) or card.deck_uid < 0:
 		return
 	if card.has_keyword("exhaust"):
-		_exhaust_pile.append(card.card_id)
+		_exhaust_pile.append(_pile_entry(card.card_id, card.deck_uid))
 	else:
 		_player_discard_pile.append(_pile_entry(card.card_id, card.deck_uid))
 
@@ -20207,6 +23479,7 @@ func _net_play_caster_local_spell(card: Control, cost: int) -> void:
 	var id: String = card.card_id
 	var sid: String = String(card.card_data.get("spell", {}).get("id", ""))
 	var plus_draw: int = int(card.card_data.get("extra_draw", 0))
+	var spell_start_global: Vector2 = card.global_position
 	_net_log_local_cast(card.card_data, null)   # "You cast X." (hand/pile spell)
 	# Spend Command + pull the card from hand up front (matches the generic path).
 	player_mana -= cost
@@ -20215,6 +23488,8 @@ func _net_play_caster_local_spell(card: Control, cost: int) -> void:
 	_hand.erase(card)
 	if card.get_parent() != null:
 		card.get_parent().remove_child(card)
+	_spawn_spell_cast_ghost(card.card_data, spell_start_global, null)
+	_play_spell_cast_vfx(card.card_data, null)
 	var board_n: int = 0          # board consequence to forward (War Chant / Mass Grave)
 	match sid:
 		"recycle":
@@ -20225,7 +23500,7 @@ func _net_play_caster_local_spell(card: Control, cost: int) -> void:
 					_hand.erase(rp)
 					if rp.get_parent() != null:
 						rp.get_parent().remove_child(rp)
-					_exhaust_pile.append(rp.card_id)
+					_exhaust_pile.append(_pile_entry(rp.card_id, rp.deck_uid))
 					rp.queue_free()
 					player_mana += rcost
 					for _i in plus_draw:
@@ -20304,13 +23579,16 @@ func _net_play_spell(card: Control, cost: int) -> void:
 	var targeting: String = String(data.get("targeting", "none"))
 	var uid: int = card.deck_uid
 	var id: String = card.card_id
+	var spell_start_global: Vector2 = card.global_position
 	player_mana -= cost
 	_pulse_mana_label(cost)
 	_first_spell_this_turn = true   # Witch's first-spell discount rests (parity w/ solo)
 	_hand.erase(card)
 	_hand_container.remove_child(card)
+	_spawn_spell_cast_ghost(data, spell_start_global, null)
 	if targeting == "none":
 		_net_log_local_cast(data, null)   # "You cast X." (non-targeted)
+		_play_spell_cast_vfx(data, null)
 		if _is_host():
 			_net_resolve_spell(data, -1, 0)
 			# Tell the client what we cast (no target) — sent before the board snapshot
@@ -20338,6 +23616,7 @@ func _net_cast_targeted(spell_card: Control, target: Control) -> void:
 	if target != null and is_instance_valid(target):
 		eid = int(target.entity_id)
 	_net_log_local_cast(spell_card.card_data, target)   # "You cast X on Y."
+	_play_spell_cast_vfx(spell_card.card_data, target)
 	if _is_host():
 		_net_resolve_spell(spell_card.card_data, eid, 0)
 		# Tell the client which target we pointed at — sent before the board snapshot
@@ -20360,7 +23639,7 @@ func _net_cast_targeted(spell_card: Control, target: Control) -> void:
 func _net_apply_remote_spell(intent: Dictionary) -> void:
 	if _net_active_index != 1:
 		return
-	var data := CardDB.get_card_data(String(intent.get("id", "")))
+	var data := SkirmishState.skirmish_card_data(String(intent.get("id", "")))
 	if data.is_empty() or not _net_spell_supported(data):
 		return
 	# Caster-local pile spells (War Chant / Mass Grave) resolve their hand part on the
@@ -20403,6 +23682,7 @@ func _net_resolve_spell(data: Dictionary, target_eid: int, caster_index: int) ->
 	if _relic_active_for_side(caster_is_enemy, "worn_spellbook") \
 			and stype in ["damage", "damage_face", "damage_all_enemies", "damage_all"]:
 		value += 1
+		_relic_fired_for_side(caster_is_enemy, "worn_spellbook")
 	var permanent: bool = bool(spell.get("permanent", false))
 	var target: Control = null
 	if target_eid >= 0:
@@ -20467,13 +23747,14 @@ func _net_resolve_spell(data: Dictionary, target_eid: int, caster_index: int) ->
 	for _sp in _all_friendly(caster_is_enemy):
 		match _sp.card_data.get("passive", ""):
 			"atk_per_spell":
-				_sp.current_atk += 1
+				_sp.temp_atk_buff += 1   # this round only (resets end of turn)
 				_sp.update_stat_display()
 			"ember_per_spell":
 				_hurt_opposing_hero(caster_is_enemy, 3 if bool(_sp.card_data.get("is_upgraded", false)) else 2)
 
 
 func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enemy: bool, data: Dictionary) -> void:
+	spell_id = _canonical_custom_spell_id(spell_id)
 	# Perspective-aware ports of the solo custom spells that need NO draw / pile /
 	# gold / Command-gain / sacrifice / Discover / hand-picker — those resolve wrong
 	# host-only and stay deferred until pile+draw sync lands. Keep this match in sync
@@ -20493,32 +23774,30 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 	# cataclysm / fuel_the_pyre (ATK-scaled), apocalypse (999), and self-face hits.
 	if _relic_active_for_side(caster_is_enemy, "worn_spellbook") and spell_id in [
 			"immolate", "inferno", "wildfire", "petard", "earthquake", "blood_tithe",
-			"flame_bolt", "ricochet", "quick_shot", "slash", "smite_spell"]:
+			"flame_bolt", "ricochet", "quick_shot", "slash", "smite_spell",
+			"ballista_bolt"]:
 		plus += 1
+		_relic_fired_for_side(caster_is_enemy, "worn_spellbook")
 	var plus_draw: int = int(data.get("extra_draw", 0))
 	var is_plus: bool = bool(data.get("is_upgraded", false))
 	var friendlies: Array = _all_friendly(caster_is_enemy)
 	var foes: Array = _all_friendly(not caster_is_enemy)
 	match spell_id:
 		"shove":
+			# Into-the-Breach flank push — mirrors the 2026-07-09 solo rework.
+			# _flank_push is side-agnostic (reads the node's own position), and
+			# "nearest flank" is symmetric, so no perspective flip is needed.
 			if target != null:
-				var net_shoved: bool = false
-				if target.current_row == ROW_FRONT:
-					net_shoved = _relocate_creature(target, not caster_is_enemy, ROW_BACK, target.current_lane)
-				if not net_shoved and is_instance_valid(target):
-					target.state.stunned = true
-					if target.has_method("_spawn_keyword_chip"):
-						target._spawn_keyword_chip("STUNNED", Color(0.85, 0.78, 0.45))
-					if plus > 0:
-						target.take_damage(plus)
+				if plus > 0:
+					target.take_damage(plus)
+				if is_instance_valid(target) and target.current_hp > 0:
+					_flank_push(target, 2)
+				_cleanup_dead()
+				_refresh_adjacency_buffs()
 		"hex":
 			if target != null:
-				var had_keywords: bool = not target.card_data.get("keywords", []).is_empty()
+				var had_keywords: bool = _strip_hex_keywords(target)
 				target.take_damage((4 if had_keywords else 1) + plus)
-				if is_instance_valid(target):
-					target.card_data["keywords"] = []
-					target.card_data.erase("sniper")
-					target.update_stat_display()
 		"second_wind":
 			if target != null:
 				target.current_hp = int(target.card_data.get("hp", target.current_hp))
@@ -20538,13 +23817,17 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 				# Upgraded Soul Swap: the promised "+ takes 2 damage" parting blow.
 				if plus > 0:
 					target.take_damage(plus)
-		"shield_wall":
-			if target != null:
-				var bandage: int = 4 + plus
-				target.current_hp += bandage
-				target.card_data.hp = int(target.card_data.get("hp", target.current_hp)) + bandage
-				target.set_meta("shield_wall_thorns", true)
-				target.update_stat_display()
+		"testudo":
+			# The caster's front line locks shields (both rows forged). Shield
+			# state ships in the board snapshot (shd), so the client renders it.
+			for tst_row in ([ROW_FRONT, ROW_BACK] if is_plus else [ROW_FRONT]):
+				for tst_c in _row_array(caster_is_enemy, tst_row):
+					if tst_c != null and is_instance_valid(tst_c) and tst_c.current_hp > 0 \
+							and not tst_c.state.has_shield:
+						tst_c.state.has_shield = true
+						if tst_c.has_method("_spawn_keyword_chip"):
+							tst_c._spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
+						tst_c.update_stat_display()
 		"barricade":
 			if target != null:
 				target.current_hp += 4
@@ -20553,16 +23836,20 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 					target.card_data.keywords.append("armored")
 				target.update_stat_display()
 		"censer_light":
-			if target != null:
-				if "lifelink" not in target.card_data.get("keywords", []):
-					target.card_data.keywords.append("lifelink")
-				if int(target.card_data.get("lifelink", 0)) < 1:
-					target.card_data["lifelink"] = 1
-				target.persistent_atk_buff += 1 + plus
-				target.persistent_atk_buff_rounds = 99
-				if target.has_method("_spawn_keyword_chip"):
-					target._spawn_keyword_chip("LIFELINK", Color(0.95, 0.35, 0.45))
-				target.update_stat_display()
+			# All the caster's ZEALOTS gain Lifesteal for the fight ("+" adds
+			# +1 ATK). Keyword + folded buff ride the board snapshot, so the
+			# client renders both.
+			for zc in friendlies:
+				if not is_instance_valid(zc) or String(zc.card_data.get("ctype", "")) != "zealot":
+					continue
+				if "lifelink" not in zc.card_data.get("keywords", []):
+					zc.card_data.keywords.append("lifelink")
+				if plus > 0:
+					zc.persistent_atk_buff += plus
+					zc.persistent_atk_buff_rounds = 99
+				if zc.has_method("_spawn_keyword_chip"):
+					zc._spawn_keyword_chip("LIFESTEAL", Color(0.95, 0.35, 0.45))
+				zc.update_stat_display()
 		"virulence":
 			# The caster's side attacks poisonously this round — the shared strike
 			# code reads the per-side flag, so it covers later plays too. Decays in
@@ -20636,6 +23923,62 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 							var pd_adj = pd_row[pd_lane]
 							if pd_adj != null and is_instance_valid(pd_adj) and pd_adj.current_hp > 0:
 								pd_adj.take_damage(pd_splash)
+		"sappers_charge":
+			# Mirrors solo (2026-07-10 all-physics rework): 1 scorch on the
+			# body, the throws carry the payload — crashes at 4 ("+" 6).
+			# _flank_push works on the node's own position, so the whole arm is
+			# side-agnostic — no perspective flip needed.
+			if target != null:
+				var keg_pos: Dictionary = _find_creature_position(target)
+				var keg_crash: int = 4 + plus
+				target.take_damage(1)
+				if not keg_pos.is_empty():
+					var keg_row = _row_array(bool(keg_pos.is_enemy), int(keg_pos.row))
+					for keg_dir in [-1, 1]:
+						var keg_lane: int = int(keg_pos.lane) + keg_dir
+						if keg_lane < 0 or keg_lane >= LANES_PER_ROW:
+							continue
+						var keg_adj = keg_row[keg_lane]
+						if keg_adj != null and is_instance_valid(keg_adj) and keg_adj.current_hp > 0:
+							_flank_push(keg_adj, keg_crash, keg_dir)
+				_cleanup_dead()
+				_refresh_adjacency_buffs()
+		"ballista_bolt":
+			# Mirrors solo punch-through; only the face hit needs the caster's
+			# perspective (the caster's ENEMY face takes the final spill).
+			if target != null:
+				var bb_pos: Dictionary = _find_creature_position(target)
+				var bb_force: int = 5 + plus
+				var bb_absorb: int = target.current_hp \
+					+ (1 if target.has_keyword("armored") else 0)
+				target.take_damage(bb_force)
+				var bb_spill: int = bb_force - bb_absorb
+				var bb_stopped: bool = is_instance_valid(target) and target.current_hp > 0
+				if bb_spill > 0 and not bb_stopped and not bb_pos.is_empty():
+					var bb_behind: Control = null
+					if int(bb_pos.row) == ROW_FRONT:
+						bb_behind = _row_array(bool(bb_pos.is_enemy), ROW_BACK)[int(bb_pos.lane)]
+					if bb_behind != null and is_instance_valid(bb_behind) \
+							and bb_behind.current_hp > 0 and not bb_behind.has_keyword("structure"):
+						var bb_absorb2: int = bb_behind.current_hp \
+							+ (1 if bb_behind.has_keyword("armored") else 0)
+						bb_behind.take_damage(bb_spill)
+						bb_spill -= bb_absorb2
+						bb_stopped = is_instance_valid(bb_behind) and bb_behind.current_hp > 0
+					if bb_spill > 0 and not bb_stopped:
+						_net_damage_hero(not caster_is_enemy, bb_spill)
+				_cleanup_dead()
+		"scatter_line":
+			# Blow the caster's FOES one lane toward their nearest flank —
+			# outer lanes first so inner bodies cascade, mirroring solo.
+			var sc_crash: int = 2 + plus
+			for sc_row in [ROW_FRONT, ROW_BACK]:
+				for sc_lane in [0, 1, 3, 2]:
+					var sc = _row_array(not caster_is_enemy, sc_row)[sc_lane]
+					if sc != null and is_instance_valid(sc) and sc.current_hp > 0:
+						_flank_push(sc, sc_crash)
+			_cleanup_dead()
+			_refresh_adjacency_buffs()
 		"dark_pact":
 			if target != null:
 				var dp_gain: int = 1 + plus
@@ -20660,30 +24003,27 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 			_net_damage_hero(not caster_is_enemy, 4 + plus)
 			_net_damage_hero(caster_is_enemy, 2)
 		"kings_command":
-			# Go-wide crown, mirroring the solo resolver: +1/+1 this fight per
-			# friendly creature ("+" adds +1/+1 more).
-			var kc_g: int = friendlies.size() + plus
+			# The king calls the charge, mirroring solo: +1 ATK THIS ROUND per
+			# friendly, to every friendly ("+" = cheaper call, not a bigger one).
+			# temp_atk_buff folds into the board snapshot's effective stats and
+			# _net_decay_side_states washes it after the owner's clash.
+			var kc_g: int = friendlies.size()
 			for c in friendlies:
-				c.current_atk += kc_g
-				c.current_hp += kc_g
-				c.card_data.hp = int(c.card_data.get("hp", c.current_hp)) + kc_g
-				c.update_stat_display()
-		"battle_hymn":
-			for c in friendlies:
-				c.temp_atk_buff += 1
-				c.current_hp += 1
-				c.card_data.hp = int(c.card_data.get("hp", c.current_hp)) + 1
+				c.temp_atk_buff += kc_g
 				c.update_stat_display()
 		"earthquake":
+			# Mirrors the 2026-07-09 solo reshape: the shake collapses BOTH
+			# front lines (the quake never took sides on damage either).
 			var quake_hit: int = 2 + plus
 			for c in _all_creatures_both_sides():
 				if c != null and is_instance_valid(c):
 					c.take_damage(quake_hit)
 			_cleanup_dead()
 			for quake_lane in range(LANES_PER_ROW):
-				var quake_foe = _row_array(not caster_is_enemy, ROW_FRONT)[quake_lane]
-				if quake_foe != null and is_instance_valid(quake_foe) and quake_foe.current_hp > 0:
-					_relocate_creature(quake_foe, not caster_is_enemy, ROW_BACK, quake_lane)
+				for quake_side in [true, false]:
+					var quake_c = _row_array(quake_side, ROW_FRONT)[quake_lane]
+					if quake_c != null and is_instance_valid(quake_c) and quake_c.current_hp > 0:
+						_relocate_creature(quake_c, quake_side, ROW_BACK, quake_lane)
 			_refresh_adjacency_buffs()
 		"war_cry":
 			# Swift-only rally ("+" adds +1 ATK while they charge) — mirrors solo.
@@ -20692,13 +24032,45 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 				if plus > 0:
 					c.temp_atk_buff += plus
 				c.update_stat_display()
-		"inspire":
-			for c in friendlies:
-				c.set_meta("war_cry_swift", true)
-				c.set_meta("inspire_piercing", true)
-				if plus > 0:
-					c.temp_atk_buff += plus
-				c.update_stat_display()
+		"turncoat":
+			# A caster foe of 3 ATK or less (4 forged) walks over: banish-style
+			# removal (entity exiled, no on-death) + a fresh body with the
+			# deserter's live stats, name and keywords on the caster's side —
+			# _net_place_token leaves entity_id -1 so the trailing board sync
+			# registers + ships it. Too strong / structure / full camp → it
+			# hesitates instead (stunned; honoured by _net_premark_skip_attack).
+			if target != null:
+				var tcn_gate: int = 4 if is_plus else 3
+				var tcn_spot: Dictionary = _pick_empty_for_summon(caster_is_enemy, ROW_FRONT)
+				if target.effective_atk() <= tcn_gate \
+						and not target.has_keyword("structure") and not tcn_spot.is_empty():
+					var tcn_name: String = String(target.card_data.get("name", "Deserter"))
+					var tcn_kws: Array = target.card_data.get("keywords", []).duplicate()
+					var tcn_atk: int = target.current_atk
+					var tcn_hp: int = target.current_hp
+					var tcn_eid: int = int(target.entity_id)
+					if tcn_eid >= 0:
+						_net_exiled_eids.append(tcn_eid)
+					for tcn_e in [false, true]:
+						for tcn_r in [ROW_FRONT, ROW_BACK]:
+							var tcn_arr = _row_array(tcn_e, tcn_r)
+							for tcn_ln in range(LANES_PER_ROW):
+								if tcn_arr[tcn_ln] == target:
+									tcn_arr[tcn_ln] = null
+									var tcn_slots = _slot_array(tcn_e, tcn_r)
+									if tcn_ln < tcn_slots.size():
+										_restore_slot_label(tcn_slots[tcn_ln], tcn_ln)
+					if tcn_eid >= 0:
+						NetMatch.unregister_entity(tcn_eid)
+					target.queue_free()
+					var tcn_new = _net_place_token(caster_is_enemy, tcn_atk, tcn_hp, tcn_name, tcn_kws)
+					if tcn_new != null and tcn_new.has_method("_spawn_keyword_chip"):
+						tcn_new._spawn_keyword_chip("DESERTED", Color(0.42, 0.75, 0.58))
+					_refresh_adjacency_buffs()
+				else:
+					target.state.stunned = true
+					if target.has_method("_spawn_keyword_chip"):
+						target._spawn_keyword_chip("STUNNED", Color(0.85, 0.78, 0.45))
 		"rout":
 			# Drive the caster's foes into their back row; they forfeit their swing
 			# this round. Mirrors solo; stun is honoured by
@@ -20718,11 +24090,6 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 			# Combo: ramps to 5 if the caster already cast a spell THIS turn.
 			var fb: int = (5 if _net_spells_this_turn >= 1 else 3) + plus
 			_net_damage_hero(not caster_is_enemy, fb)
-		"mending_light":
-			_net_heal_hero(caster_is_enemy, 5)
-			for c in friendlies:
-				c.current_hp = mini(c.current_hp + 2, int(c.card_data.get("hp", c.current_hp)))
-				c.update_stat_display()
 		"holy_smite":
 			# Execute scaling: hit for the target's missing HP, floored at 3 so it's
 			# never a dead draw on a healthy body.
@@ -20755,9 +24122,10 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 						summon_token(2, 1, pl, caster_is_enemy, prow)
 						prov_placed = true
 						break
-		"adrenaline":
-			_net_caster_gain_mana(caster_is_enemy, 2)
-			_net_caster_draw(caster_is_enemy, 1 + plus_draw)
+		"baggage_train":
+			# Next-turn Command is caster-local: the Mourner channel ships it
+			# (EV_MANA next=true) so the owner's own _start_round folds it in.
+			_battlecry_bonus_mana_next_turn(caster_is_enemy, 4 if is_plus else 3)
 		"coin":
 			# Going-second compensation: a one-time +1 Command (Hearthstone's Coin).
 			_net_caster_gain_mana(caster_is_enemy, 1)
@@ -20787,17 +24155,18 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 				target.take_damage(slash_dmg)
 				if is_instance_valid(target) and target.current_hp > 0 and can_blast_move:
 					_relocate_creature(target, not caster_is_enemy, ROW_BACK, target.current_lane)
-				if target.current_hp <= 0:
-					_net_caster_draw(caster_is_enemy, 1 + int(data.get("slay_draw", 0)))
 		"patch_up":
-			# Field Surgery — mirrors solo: full heal + a draw, patient sits the round out.
+			# Field Surgery — mirrors solo: full heal + Last Stand (the keyword
+			# rides card_data, so the board snapshot ships it like Barricade's
+			# Armored; a spent printed Last Stand is re-armed).
 			if target != null:
 				target.current_hp = int(target.card_data.get("hp", target.current_hp))
-				target.state.stunned = true
+				if "last_stand" not in target.card_data.get("keywords", []):
+					target.card_data.keywords.append("last_stand")
+				target.last_stand_used = false
 				if target.has_method("_spawn_keyword_chip"):
-					target._spawn_keyword_chip("RESTING", Color(0.85, 0.78, 0.45))
+					target._spawn_keyword_chip("LAST STAND", Color(1.0, 0.85, 0.20), "last_stand")
 				target.update_stat_display()
-				_net_caster_draw(caster_is_enemy, 1)
 		"smite_spell":
 			if target != null:
 				target.take_damage(6 + plus)
@@ -20919,7 +24288,7 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 					String(grave_gr.get("id", "")), int(grave_gr.get("uid", -1)))
 		"last_rites":
 			# Morbid removal, caster-side: 6 once one of the CASTER's creatures has
-			# fallen this fight (client deaths land in the enemy tally — see inspire).
+			# fallen this fight (client deaths land in the enemy tally).
 			if target != null:
 				var lr_fallen: int = _enemy_deaths_this_fight if caster_is_enemy else _friendly_deaths_this_fight
 				target.take_damage((6 if lr_fallen > 0 else 3) + plus)
@@ -21021,7 +24390,7 @@ func _heal_owner_hero(owner_is_enemy: bool, n: int) -> void:
 	elif player_hp < player_max_hp:
 		var healed: int = mini(n, player_max_hp - player_hp)
 		player_hp += healed
-		_show_lifelink_heal(healed)   # green +N at the HP medallion — any hero heal, not just Lifelink
+		_show_lifelink_heal(healed)   # green +N at the HP medallion — any hero heal, not just Lifesteal
 		_stoke_acolytes(false)
 		_update_hud()
 
@@ -21069,7 +24438,23 @@ func _net_caster_give_card(caster_is_enemy: bool, id: String, uid: int) -> void:
 func _net_give_card_local(id: String, uid: int) -> void:
 	if id == "":
 		return
-	_player_draw_pile.push_front(_pile_entry(id, uid))
+	# The corpse's entry may ALREADY be filed in a local pile (death → discard,
+	# maybe reshuffled to draw) — pull that exact entry out before re-adding,
+	# or the return leaves a duplicate uid and the deck grows for the fight.
+	# If it is NOT filed yet (on-death returns run before the death filing —
+	# host's own Griffin — or the client's EV_GIVE_CARD lands before the death
+	# snapshot), flag the uid so the upcoming filing skips it instead.
+	var entry := _pile_entry(id, uid)
+	var was_filed: bool = _player_discard_pile.has(entry) or _player_draw_pile.has(entry)
+	_player_discard_pile.erase(entry)
+	_player_draw_pile.erase(entry)
+	if uid >= 0:
+		for hc in _hand:
+			if is_instance_valid(hc) and hc.deck_uid == uid:
+				return   # already cycled back on its own — don't duplicate it
+		if not was_filed:
+			_pending_return_uids[uid] = true
+	_player_draw_pile.push_front(entry)
 	draw_one()
 	_layout_hand()
 	_net_broadcast_hand_count()
@@ -21136,8 +24521,7 @@ func _net_cast_random_spell_free(caster_is_enemy: bool) -> void:
 	var deny := {
 		"offering": true, "fuel_the_pyre": true, "bloodletting": true,
 		"unholy_bargain": true, "dark_pact": true, "blood_tithe": true,
-		"mass_grave": true, "apocalypse": true, "echo_spell": true,
-		"reanimate": true, "grave_robbery": true, "banish": true,
+		"apocalypse": true, "echo_spell": true,
 		# (grave_pact used to sit here when it armed a pile-return; its Last Rites
 		# redesign is a clean damage bolt, so the imp may sling it.)
 	}
@@ -21153,15 +24537,16 @@ func _net_cast_random_spell_free(caster_is_enemy: bool) -> void:
 			continue
 		if int(d.get("cost", 0)) > 1:   # cap the roll at cheap spells (no 4-cost blowout)
 			continue
+		if not bool(_net_random_spell_context_for(d, caster_is_enemy).get("ok", false)):
+			continue
 		candidates.append(id)
 	if candidates.is_empty():
 		return
 	var data: Dictionary = CardDB.get_card_data(candidates[randi() % candidates.size()])
-	var targeting: String = String(data.get("targeting", "none"))
-	var target_eid: int = _net_auto_target_for(targeting, caster_is_enemy)
-	# A targeted spell that finds no legal target just fizzles (never resolve wrong-side).
-	if targeting in ["enemy_creature", "friendly_creature", "any_creature", "any"] and target_eid < 0:
+	var cast_ctx: Dictionary = _net_random_spell_context_for(data, caster_is_enemy)
+	if not bool(cast_ctx.get("ok", false)):
 		return
+	var target_eid: int = int(cast_ctx.get("eid", -1))
 	_show_info("Chaos Imp casts %s!" % data.get("name", "a spell"))
 	_net_resolve_spell(data, target_eid, 1 if caster_is_enemy else 0)
 
@@ -21169,12 +24554,82 @@ func _net_cast_random_spell_free(caster_is_enemy: bool) -> void:
 ## Pick a random valid target ENTITY id for an auto-cast net spell, from the caster's
 ## perspective: enemy/any → a random foe creature; friendly → a random own creature.
 ## Structures are never valid targets. Returns -1 when no legal target exists.
+func _net_random_spell_context_for(data: Dictionary, caster_is_enemy: bool) -> Dictionary:
+	var targeting := String(data.get("targeting", "none"))
+	if targeting == "none":
+		return {
+			"ok": _net_untargeted_random_spell_can_resolve(data, caster_is_enemy),
+			"eid": -1,
+		}
+	var target_eid: int = _net_auto_target_for(targeting, caster_is_enemy)
+	if target_eid >= 0:
+		return {"ok": true, "eid": target_eid}
+	if targeting == "any":
+		return {"ok": true, "eid": -1}
+	return {"ok": false, "eid": -1}
+
+
+func _net_untargeted_random_spell_can_resolve(data: Dictionary, caster_is_enemy: bool) -> bool:
+	var spell: Dictionary = data.get("spell", {})
+	var stype := String(spell.get("type", ""))
+	var sid := String(spell.get("id", ""))
+	var friendlies: Array = _all_friendly(caster_is_enemy)
+	var foes: Array = _all_friendly(not caster_is_enemy)
+	match stype:
+		"damage_face", "draw":
+			return true
+		"damage_all_enemies":
+			return not foes.is_empty()
+		"damage_all":
+			return not _all_creatures_both_sides().is_empty()
+		"buff_all_atk":
+			return not friendlies.is_empty()
+	if stype != "custom":
+		return true
+	match sid:
+		"provision", "muster_fallen":
+			return _has_open_creature_slot(caster_is_enemy)
+		"reanimate":
+			return not _net_last_dead[1 if caster_is_enemy else 0].is_empty() \
+				and _has_open_creature_slot(caster_is_enemy)
+		"grave_robbery":
+			var grave: Dictionary = _net_last_dead[1 if caster_is_enemy else 0]
+			return not grave.is_empty() and int(grave.get("uid", -1)) >= 0
+		"mass_grave", "ricochet", "wildfire":
+			return not foes.is_empty()
+		"ambush":
+			return not foes.is_empty() or _has_swift_friendly(caster_is_enemy)
+		"plague_bell", "earthquake":
+			return not _all_creatures_both_sides().is_empty()
+		"war_cry", "virulence", "kings_command":
+			return not friendlies.is_empty()
+		"censer_light":
+			# The smoke needs a zealot to settle on — grey without one.
+			for cl_g in friendlies:
+				if is_instance_valid(cl_g) and String(cl_g.card_data.get("ctype", "")) == "zealot":
+					return true
+			return false
+		"testudo":
+			# Base writ reaches only the front row; the forged one takes any body.
+			if bool(data.get("is_upgraded", false)):
+				return not friendlies.is_empty()
+			for tst_g in _row_array(caster_is_enemy, ROW_FRONT):
+				if tst_g != null and is_instance_valid(tst_g):
+					return true
+			return false
+		"doubled_hour":
+			return true
+	return true
+
+
 func _net_auto_target_for(targeting: String, caster_is_enemy: bool) -> int:
 	var pool: Array = []
-	if targeting in ["enemy_creature", "any_creature", "any"]:
+	if targeting == "enemy_creature":
 		pool = _all_friendly(not caster_is_enemy)
 	elif targeting == "friendly_creature":
 		pool = _all_friendly(caster_is_enemy)
+	elif targeting in ["any_creature", "any"]:
+		pool = _all_friendly(not caster_is_enemy) + _all_friendly(caster_is_enemy)
 	var valid: Array = []
 	for c in pool:
 		if is_instance_valid(c) and not c.has_keyword("structure"):

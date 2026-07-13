@@ -43,6 +43,9 @@ var ui_scale: float = 1.0
 # downsampled — true 2D SSAA for crisp procedural draws/fonts. Applied via the
 # Supersample autoload. Costs ~scale² the GPU fill, so it's opt-in.
 var render_scale: float = 1.0
+# Keep the selected supersampling as a quality ceiling, but let sustained combat
+# pressure temporarily step it down. The temporary value is never persisted.
+var adaptive_render_scale: bool = true
 # Graphics quality preset. "auto" resolves to a concrete tier from the detected
 # GPU/CPU/RAM each launch (so it adapts if the hardware changes); "low"/"medium"/
 # "high"/"ultra" are fixed tiers that drive the heavy perf levers together;
@@ -148,6 +151,17 @@ func mark_combat_model_tutorial_seen() -> void:
 	combat_model_tutorial_seen = true
 	save()
 
+
+func reset_tutorials() -> void:
+	floop_tutorial_seen = false
+	sacrifice_tutorial_seen = false
+	banking_tutorial_seen = false
+	intents_tutorial_seen = false
+	pile_tutorial_seen = false
+	combat_model_tutorial_seen = false
+	dismiss_tutorial_seen = false
+	save()
+
 var _bus_music: int = -1
 var _bus_sfx: int = -1
 
@@ -168,6 +182,21 @@ func _ready() -> void:
 	if get_window() != null:
 		get_window().focus_entered.connect(func(): _on_main_window_focus_changed(true))
 		get_window().focus_exited.connect(func(): _on_main_window_focus_changed(false))
+
+
+func _unhandled_key_input(event: InputEvent) -> void:
+	# A lightweight global fullscreen shortcut. Using unhandled input keeps the
+	# key out of text fields and any screen/modal that deliberately owns it.
+	if event is InputEventKey \
+			and event.pressed \
+			and not event.echo \
+			and event.keycode == KEY_F \
+			and not event.alt_pressed \
+			and not event.ctrl_pressed \
+			and not event.meta_pressed \
+			and not event.shift_pressed:
+		toggle_fullscreen()
+		get_viewport().set_input_as_handled()
 
 
 func _get_usable_rect() -> Rect2i:
@@ -248,7 +277,15 @@ func _apply_vsync() -> void:
 
 func _apply_fps_cap() -> void:
 	# 0 = unlimited (Engine.max_fps convention).
-	Engine.max_fps = max(0, fps_cap)
+	var effective: int = maxi(0, fps_cap)
+	# Do not run Godot's sleep-based limiter on top of V-Sync when V-Sync is
+	# already the tighter/equal cap; two pacers at 60 Hz produce uneven waits.
+	if vsync and effective > 0:
+		var screen: int = DisplayServer.window_get_current_screen()
+		var refresh: float = DisplayServer.screen_get_refresh_rate(screen)
+		if refresh > 1.0 and effective >= int(round(refresh)):
+			effective = 0
+	Engine.max_fps = effective
 
 
 func _apply_ui_scale() -> void:
@@ -358,11 +395,16 @@ func _apply_particles_live() -> void:
 	if motes:
 		motes.emitting = particles
 		motes.visible = particles
+	for emitter in get_tree().get_nodes_in_group("ambient_particles"):
+		if emitter is CPUParticles2D or emitter is GPUParticles2D:
+			emitter.emitting = particles
+			emitter.visible = particles
 
 
 func set_vsync(val: bool) -> void:
 	vsync = val
 	_apply_vsync()
+	_apply_fps_cap()
 	save()
 
 
@@ -385,11 +427,17 @@ func set_render_scale(val: float) -> void:
 	save()
 
 
+func set_adaptive_render_scale(val: bool) -> void:
+	adaptive_render_scale = val
+	_apply_render_scale()
+	save()
+
+
 func _apply_render_scale() -> void:
 	# Supersample is an autoload; guard in case of early call ordering.
 	var ss = get_node_or_null("/root/Supersample")
 	if ss != null:
-		ss.apply_scale(render_scale)
+		ss.configure_scale(render_scale, adaptive_render_scale)
 
 
 # ── Graphics quality presets ─────────────────────────────────────────────────
@@ -416,6 +464,20 @@ func resolve_preset(name: String) -> String:
 	if name == "auto":
 		return detect_recommended_preset()
 	return name
+
+
+## Concrete quality tier for secondary render/cache budgets. Named presets and
+## Auto map directly; Custom is inferred from the two controls it can tune so
+## hand-card and map snapshots track the player's actual graphics cost.
+func effective_graphics_tier() -> String:
+	var tier := resolve_preset(graphics_preset)
+	if tier in GRAPHICS_PRESETS:
+		return tier
+	if render_scale >= 1.75:
+		return "ultra"
+	if render_scale > 1.0:
+		return "high"
+	return "medium" if particles else "low"
 
 
 ## Best-effort hardware match, cached for the session. Reads GPU name/type, CPU
@@ -552,6 +614,10 @@ func set_display_mode(val: String) -> void:
 	save()
 
 
+func toggle_fullscreen() -> void:
+	set_display_mode("windowed" if display_mode == "fullscreen" else "fullscreen")
+
+
 # Returns a scaled animation duration. Callers use:
 #   var t := UserSettings.anim_time(0.5)
 #   create_tween().tween_property(...).set_duration(t)
@@ -587,6 +653,7 @@ func save() -> void:
 		"fps_cap": fps_cap,
 		"ui_scale": ui_scale,
 		"render_scale": render_scale,
+		"adaptive_render_scale": adaptive_render_scale,
 		"graphics_preset": graphics_preset,
 		"brightness": brightness,
 		"anim_speed": anim_speed,
@@ -628,6 +695,7 @@ func load_settings() -> void:
 		fps_cap = int(parsed.get("fps_cap", 0))
 		ui_scale = float(parsed.get("ui_scale", 1.0))
 		render_scale = float(parsed.get("render_scale", 1.0))
+		adaptive_render_scale = bool(parsed.get("adaptive_render_scale", true))
 		# Saves that predate presets had hand-set graphics values, so default them
 		# to "custom" — never silently override a returning player's choices. Only
 		# a fresh install (no file at all → this block is skipped) keeps "auto".

@@ -485,6 +485,7 @@ const DIMMED         := Color(0.50, 0.50, 0.50, 0.70)
 const RARITY_COMMON  := Color(0.75, 0.75, 0.75, 1.0)
 const RARITY_UNCOMMON := Color(0.435, 0.576, 0.800, 1.0)  # hex #6F93CC — the v4 comment warns off the digital-cornflower; pulled this rarity-text blue (S58/V95) to match the muted MANA_BLUE family (S46/V80), hue held at 217° so it reads identically as "uncommon blue"
 const RARITY_RARE    := Color(0.95, 0.78, 0.22, 1.0)
+const RARITY_WHITE   := Color(0.92, 0.97, 1.0, 1.0)
 const RARITY_STARTER := Color(0.55, 0.55, 0.55, 1.0)
 
 # ── v4 procedural-frame palette ──
@@ -515,6 +516,7 @@ const GEM_STARTER     := Color(0.627, 0.627, 0.627, 1.0)   # #A0A0A0 muted grey
 const GEM_COMMON      := Color(0.95,  0.95,  0.95,  1.0)   # white
 const GEM_UNCOMMON    := Color(0.357, 0.525, 0.969, 1.0)   # #5B86F7
 const GEM_RARE        := Color(0.961, 0.784, 0.259, 1.0)   # #F5C842 (matches ATK)
+const GEM_WHITE       := Color(0.925, 0.980, 1.000, 1.0)   # cold white
 # Frame trim colours per rarity — four distinct hues so the frame itself
 # carries the rarity signal (Marvel-Snap-style). Combined with the small
 # rarity gem at the art/text boundary you get two redundant cues, which is
@@ -523,6 +525,7 @@ const FRAME_TRIM_STARTER  := Color(0.706, 0.631, 0.471, 1.0)  # #B4A178 warm bra
 const FRAME_TRIM_COMMON   := Color(0.831, 0.745, 0.541, 1.0)  # #D4BE8A bright gilt (was #B3A077)
 const FRAME_TRIM_UNCOMMON := Color(0.529, 0.667, 0.851, 1.0)  # #87AAD9 cool blue gilt (was #6E8AB0)
 const FRAME_TRIM_RARE     := Color(0.961, 0.784, 0.259, 1.0)  # #F5C842 bright gold (unchanged — already pops)
+const FRAME_TRIM_WHITE    := Color(0.900, 0.970, 1.000, 1.0)  # cold white-blue
 
 # ── Font Sizes ──
 # Tuned for the ~1920×1080 logical canvas: body text below ~16px is genuinely
@@ -1884,6 +1887,7 @@ func make_label(text: String, font_size: int = FONT_BODY, color: Color = IVORY,
 
 static func rarity_color(rarity: String) -> Color:
 	match rarity:
+		"white": return RARITY_WHITE
 		"common": return RARITY_COMMON
 		"uncommon": return RARITY_UNCOMMON
 		"rare": return RARITY_RARE
@@ -1898,6 +1902,7 @@ static func rarity_frame_trim(rarity: String) -> Color:
 	# without looking at the gem.
 	match rarity:
 		"starter":  return FRAME_TRIM_STARTER
+		"white":    return FRAME_TRIM_WHITE
 		"common":   return FRAME_TRIM_COMMON
 		"uncommon": return FRAME_TRIM_UNCOMMON
 		"rare":     return FRAME_TRIM_RARE
@@ -1919,6 +1924,7 @@ static func rarity_plate_bg(rarity: String) -> Color:
 	# (AAA WCAG) across every rarity, with the hue being the only variable.
 	match rarity:
 		"starter":  return Color(0.182, 0.135, 0.082, 0.97)  # brass-shadow
+		"white":    return Color(0.105, 0.132, 0.150, 0.97)  # cool blackened silver
 		"common":   return Color(0.165, 0.118, 0.075, 0.97)  # neutral walnut
 		"uncommon": return Color(0.082, 0.122, 0.220, 0.97)  # deep teal-blue
 		"rare":     return Color(0.235, 0.165, 0.057, 0.97)  # warm dark gold
@@ -1931,6 +1937,7 @@ static func rarity_plate_border(rarity: String) -> Color:
 	# supporting wash that ties the border to the rest of the card body.
 	match rarity:
 		"starter":  return Color(0.706, 0.631, 0.471, 0.95)  # brass
+		"white":    return Color(0.920, 0.980, 1.000, 1.00)  # cold white
 		"common":   return Color(0.831, 0.745, 0.541, 0.95)  # gilt
 		"uncommon": return Color(0.450, 0.700, 1.000, 1.00)  # bright sky
 		"rare":     return Color(1.000, 0.850, 0.260, 1.00)  # vivid gold
@@ -1944,6 +1951,7 @@ static func rarity_card_tint(rarity: String) -> Color:
 	# card has a temperature signal alongside the banner colour.
 	match rarity:
 		"starter":  return Color(0.706, 0.631, 0.471, 0.04)
+		"white":    return Color(0.720, 0.920, 1.000, 0.08)
 		"common":   return Color(1.000, 1.000, 1.000, 0.00)  # no wash
 		"uncommon": return Color(0.300, 0.500, 0.950, 0.07)
 		"rare":     return Color(1.000, 0.780, 0.220, 0.07)
@@ -2031,7 +2039,7 @@ func get_card_frame(card_data: Dictionary) -> Texture2D:
 	if CardDB.is_curse(String(card_data.get("id", ""))) or String(card_data.get("type", "")) == "curse":
 		return _new_frames.get("curse", tex_card_frame_ornate)
 	var rarity: String = String(card_data.get("rarity", "common"))
-	if rarity not in ["starter", "common", "uncommon", "rare"]:
+	if rarity not in ["starter", "common", "uncommon", "rare", "white"]:
 		rarity = "common"
 	var key = "%s_%s" % [ct, rarity]
 	return _new_frames.get(key, _new_frames.get("creature_common", tex_card_frame_ornate))
@@ -2607,6 +2615,246 @@ func pulse_label(lbl: Label, flash_color: Color = Color(1.0, 0.85, 0.30)) -> voi
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 
+# ── Shared motion kit (2026-07-11 animation pass) ─────────────────────────
+# Screen-agnostic entrance/choice motion for the shell screens (Reward, Shop,
+# Treasure, Wayside, Recruit, map HUD). deal_in / hover_lift / claim_pop
+# animate modulate + scale ONLY — never position or size — so container
+# layout is untouched. Everything gates on Reduce Motion.
+
+func deal_in(ctrl: Control, delay: float = 0.0) -> void:
+	# Entrance: the tile rises into place with a soft back-settle. Stagger the
+	# delay across a row so offers land like dealt cards, not a wall.
+	if ctrl == null or not is_instance_valid(ctrl):
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	ctrl.modulate.a = 0.0
+	ctrl.scale = Vector2(0.92, 0.92)
+	var tw := ctrl.create_tween()
+	tw.tween_interval(maxf(delay, 0.001))
+	# Pivot can only be centred once the container has sized the tile.
+	tw.tween_callback(func():
+		if is_instance_valid(ctrl):
+			ctrl.pivot_offset = ctrl.size * 0.5)
+	tw.tween_property(ctrl, "modulate:a", 1.0, 0.22).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(ctrl, "scale", Vector2.ONE, 0.34) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+func hover_lift(btn: Control, lift: float = 1.03) -> void:
+	# A small scale lift on hover — the stylebox swap says "interactive", the
+	# lift says "pick me up". Scale only, so row layout never reflows.
+	if btn == null or not is_instance_valid(btn):
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	btn.mouse_entered.connect(func():
+		if not is_instance_valid(btn):
+			return
+		btn.pivot_offset = btn.size * 0.5
+		var tw := btn.create_tween()
+		tw.tween_property(btn, "scale", Vector2(lift, lift), 0.12) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
+	btn.mouse_exited.connect(func():
+		if not is_instance_valid(btn):
+			return
+		var tw := btn.create_tween()
+		tw.tween_property(btn, "scale", Vector2.ONE, 0.14) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
+
+
+func claim_pop(ctrl: Control) -> void:
+	# The chosen tile flares bright and punches up, then settles — a pick
+	# reads as a physical grab (Combat's _punch_label language, tile-sized).
+	if ctrl == null or not is_instance_valid(ctrl):
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	ctrl.pivot_offset = ctrl.size * 0.5
+	var tw := ctrl.create_tween()
+	tw.tween_property(ctrl, "scale", Vector2(1.08, 1.08), 0.10) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(ctrl, "self_modulate",
+		Color(1.35, 1.28, 1.05), 0.10)
+	tw.tween_property(ctrl, "scale", Vector2.ONE, 0.18) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(ctrl, "self_modulate", Color.WHITE, 0.18)
+
+
+func pocket_away(ctrl: Control, to_global: Vector2, dur: float = 0.32) -> void:
+	# The bought/claimed tile detaches from its container and dives toward a
+	# destination point (the player's pack, the merchant's counter), shrinking
+	# and fading on the way. Awaitable — callers rebuild their UI after it
+	# lands. Reduce Motion collapses it to an instant return.
+	if ctrl == null or not is_instance_valid(ctrl):
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	var gp := ctrl.global_position
+	ctrl.top_level = true
+	ctrl.global_position = gp
+	ctrl.z_index = 220
+	ctrl.pivot_offset = ctrl.size * 0.5
+	ctrl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var tw := ctrl.create_tween()
+	tw.tween_property(ctrl, "scale", ctrl.scale * 1.06, 0.08) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(ctrl, "global_position", to_global - ctrl.size * 0.5, dur) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tw.parallel().tween_property(ctrl, "scale", Vector2(0.35, 0.35), dur) \
+		.set_ease(Tween.EASE_IN)
+	tw.parallel().tween_property(ctrl, "modulate:a", 0.0, dur) \
+		.set_ease(Tween.EASE_IN)
+	await tw.finished
+
+
+func tick_number(lbl: Label, from_val: int, to_val: int,
+		template: String = "%d", dur: float = 0.5) -> void:
+	# Rolls a numeric label from one value to another (gold counters, HP).
+	# Pairs with pulse_label for the change-flash; Reduce Motion snaps.
+	if lbl == null or not is_instance_valid(lbl):
+		return
+	if from_val == to_val or (UserSettings != null and UserSettings.reduce_motion):
+		lbl.text = template % to_val
+		return
+	var tw := lbl.create_tween()
+	tw.tween_method(func(v: float):
+		if is_instance_valid(lbl):
+			lbl.text = template % int(round(v)),
+		float(from_val), float(to_val), dur)
+	pulse_label(lbl, Color(1.0, 0.85, 0.30) if to_val > from_val \
+		else Color(1.0, 0.45, 0.20))
+
+
+func forge_strike(host: Control, target: Control) -> void:
+	# The forge set-piece: the tempered card flashes white-hot, anvil sparks
+	# shower off its base and FALL (unlike combat's rising embers — different
+	# material, deliberate), a shock ring pops, and the metal cools back to
+	# white. Awaitable (~0.6s); Reduce Motion / missing target = no beat.
+	if host == null or target == null \
+			or not is_instance_valid(host) or not is_instance_valid(target):
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	var center: Vector2 = target.global_position + target.size * 0.5
+	var base_pt: Vector2 = center + Vector2(0, target.size.y * 0.32)
+
+	# White-hot flash → cool. Scale punch rides the same beat.
+	target.pivot_offset = target.size * 0.5
+	var tw := target.create_tween()
+	tw.tween_property(target, "modulate", Color(2.1, 1.85, 1.35), 0.07) \
+		.set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(target, "scale", Vector2(1.07, 1.07), 0.07) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(target, "modulate", Color(1.30, 1.08, 0.86), 0.16)
+	tw.parallel().tween_property(target, "scale", Vector2.ONE, 0.22) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(target, "modulate", Color.WHITE, 0.30) \
+		.set_ease(Tween.EASE_OUT)
+
+	# Shock ring at the strike point.
+	_spawn_ring(host, base_pt, Color(1.0, 0.88, 0.55, 0.75), 18.0, 150.0, 0.34)
+
+	# Anvil sparks: spray up and out, then fall under gravity.
+	if (UserSettings == null or UserSettings.particles) \
+			and DisplayServer.get_name() != "headless":
+		var p := CPUParticles2D.new()
+		p.position = base_pt
+		p.z_index = 220
+		p.one_shot = true
+		p.explosiveness = 0.92
+		p.amount = 36
+		p.lifetime = 0.7
+		p.direction = Vector2(0, -1)
+		p.spread = 62.0
+		p.gravity = Vector2(0, 640.0)
+		p.initial_velocity_min = 180.0
+		p.initial_velocity_max = 360.0
+		p.scale_amount_min = 1.4
+		p.scale_amount_max = 3.0
+		var ramp := Gradient.new()
+		ramp.set_color(0, Color(1.0, 0.95, 0.72, 1.0))
+		ramp.set_color(1, Color(1.0, 0.42, 0.10, 0.0))
+		p.color_ramp = ramp
+		host.add_child(p)
+		p.emitting = true
+		host.get_tree().create_timer(p.lifetime + 0.3).timeout.connect(p.queue_free)
+
+	await host.get_tree().create_timer(0.60).timeout
+
+
+func rarity_reveal(ctrl: Control, rarity: String, delay: float = 0.0) -> void:
+	# One-shot engraved sunburst behind a freshly dealt card offer, scaled to
+	# the pull: uncommon = a cool silver ring-glint, rare = a gilt ray halo +
+	# a brightness kiss on the card itself. Commons/starters no-op — the shine
+	# must stay information ("this slate rolled well"), not wallpaper. Drawn as
+	# the burst Control's OWN geometry (draw signal) with show_behind_parent,
+	# so the rays sit behind the card face and above the screen background.
+	if ctrl == null or not is_instance_valid(ctrl):
+		return
+	if rarity != "uncommon" and rarity != "rare":
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	if DisplayServer.get_name() == "headless":
+		return
+	var is_rare := rarity == "rare"
+	var col: Color = Color(1.0, 0.83, 0.36) if is_rare else Color(0.74, 0.83, 0.94)
+	var burst := Control.new()
+	burst.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	burst.show_behind_parent = true
+	burst.modulate.a = 0.0
+	burst.scale = Vector2(0.55, 0.55)
+	ctrl.add_child(burst)
+	# Ray directions rolled once; geometry is drawn in the burst's local space
+	# around origin, so the tween animates transform + alpha only.
+	var rays: Array = []
+	var ray_n: int = 12 if is_rare else 7
+	for i in ray_n:
+		rays.append([Vector2.from_angle(
+			TAU * (float(i) + randf_range(-0.18, 0.18)) / float(ray_n)),
+			randf_range(0.85, 1.2)])
+	burst.draw.connect(func():
+		if not is_instance_valid(ctrl):
+			return
+		# Elliptical halo hugging the card's silhouette, rays ticking outward
+		# from just past its edge — an engraved sunburst, not a lens flare.
+		var rx: float = ctrl.size.x * 0.62
+		var ry: float = ctrl.size.y * 0.58
+		var ring := PackedVector2Array()
+		for i in range(57):
+			var a := TAU * float(i) / 56.0
+			ring.append(Vector2(cos(a) * rx, sin(a) * ry))
+		burst.draw_polyline(ring, Color(col.r, col.g, col.b, 0.80), 2.5, true)
+		if is_rare:
+			burst.draw_polyline(ring, Color(col.r, col.g, col.b, 0.35), 7.0, true)
+		for r in rays:
+			var d: Vector2 = r[0]
+			var p0 := Vector2(d.x * ctrl.size.x * 0.58, d.y * ctrl.size.y * 0.55)
+			var p1: Vector2 = p0 * (1.30 if is_rare else 1.18) * float(r[1])
+			burst.draw_line(p0, p1, Color(col.r, col.g, col.b, 0.75), 3.0, true))
+	var tw := ctrl.create_tween()
+	tw.tween_interval(maxf(delay, 0.001))
+	tw.tween_callback(func():
+		if is_instance_valid(burst) and is_instance_valid(ctrl):
+			burst.position = ctrl.size * 0.5
+			burst.queue_redraw())
+	tw.tween_property(burst, "modulate:a", 1.0, 0.12).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(burst, "scale", Vector2.ONE, 0.36) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(burst, "rotation", 0.12, 0.55)
+	if is_rare:
+		tw.parallel().tween_property(ctrl, "modulate",
+			Color(1.20, 1.14, 1.00), 0.14)
+	tw.chain().tween_property(burst, "modulate:a", 0.0, 0.46) \
+		.set_ease(Tween.EASE_IN)
+	if is_rare:
+		tw.parallel().tween_property(ctrl, "modulate", Color.WHITE, 0.30)
+	tw.chain().tween_callback(func():
+		if is_instance_valid(burst):
+			burst.queue_free())
+
+
 # ── The reroll flourish ────────────────────────────────────────────────
 # One expanding ring (a horn-blast / arcane pulse), drawn from a circular
 # StyleBox so it needs no texture or shader: a square Panel whose corner
@@ -2768,6 +3016,8 @@ func fade_out_then_change_scene(host: Node, target_scene: String,
 		0.0, 1.0, duration).set_ease(Tween.EASE_IN)
 	tw.tween_callback(func():
 		if host.get_tree() != null:
+			# Measure the actual scene load/settle, not this fixed ink-wipe tween.
+			PerformanceOverlay.begin_transition(target_scene)
 			host.get_tree().change_scene_to_file(target_scene)
 		if is_instance_valid(overlay):
 			overlay.queue_free()
@@ -2868,7 +3118,7 @@ func make_close_button(min_size: Vector2 = Vector2(44, 44)) -> Button:
 
 func show_confirm_dialog(host: Node, title: String, message: String,
 		confirm_label: String = "CONFIRM", cancel_label: String = "CANCEL",
-		on_confirm: Callable = Callable()) -> void:
+		on_confirm: Callable = Callable(), on_cancel: Callable = Callable()) -> void:
 	# Modal yes/no dialog. Centered panel with title + body text + two pill
 	# buttons. Backdrop dims the screen and absorbs clicks so the player can't
 	# act on what's behind. Calls on_confirm only if the player picks confirm.
@@ -2963,7 +3213,9 @@ func show_confirm_dialog(host: Node, title: String, message: String,
 
 	var cancel_btn := make_back_button(cancel_label, Vector2(150, 44))
 	cancel_btn.pressed.connect(func():
-		layer.queue_free())
+		layer.queue_free()
+		if on_cancel.is_valid():
+			on_cancel.call())
 	btn_row.add_child(cancel_btn)
 
 	var confirm_btn := make_themed_button(confirm_label,

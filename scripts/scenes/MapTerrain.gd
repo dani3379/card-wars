@@ -172,7 +172,7 @@ var _last_dress_mix := -1.0
 #  1. The whole plate is painted on _plate_item, a child canvas item that
 #     re-records ONLY when content changes. Zoom and pan just move its
 #     transform — view changes cost ~zero script time.
-#  2. Two offscreen 2× bakes collapse the plate to ONE textured quad:
+#  2. Two quality-scaled offscreen bakes collapse the plate to ONE textured quad:
 #     the GEOGRAPHY (ocean/terrain/coast/rivers/decorations — constant per
 #     act, ~22k primitives) bakes once per act and is cached; the COMPLETE
 #     plate (geo quad + the campaign ink: political wash, roads, chips,
@@ -186,7 +186,14 @@ var _last_dress_mix := -1.0
 #     plate bake re-records ink over the cached quad in a few frames.
 # The pipeline is fully seeded (run map + act), so clones bake
 # pixel-identical plates.
-const PLATE_BAKE_SCALE := 2.5
+# A 2x plate is already 3200x1800 at the project's 1600x900 design canvas.
+# Ultra keeps that target; lower tiers reduce readback/upload pixels and
+# transient memory without changing layout. Medium/High's 1.5x bake remains
+# comfortably above the native canvas for the map's normal zoom range.
+const PLATE_BAKE_SCALE_LOW := 1.0
+const PLATE_BAKE_SCALE_MID := 1.5
+const PLATE_BAKE_SCALE_ULTRA := 2.0
+var _plate_bake_scale := PLATE_BAKE_SCALE_ULTRA
 var _plate_item = null   # untyped: typed Control fails on script-only members
 var _paper_item = null   # live paper-fiber multiply layer (war-table mode)
 var _vignette_tex: GradientTexture2D = null   # lazy lamplight vignette
@@ -297,10 +304,13 @@ func _set_view(z: float, pan: Vector2) -> void:
 		if _paper_item != null:
 			_paper_item.position = _view_pan
 			_paper_item.scale = Vector2(_view_zoom, _view_zoom)
-		var mix := _campaign_mix()
-		if not is_equal_approx(mix, _last_dress_mix):
-			_last_dress_mix = mix
-			_plate_item.queue_redraw()
+		# SIMPLE_BACKDROP has one visual dress. Avoid re-recording its quad during
+		# every focus/zoom tween as if a second campaign texture existed.
+		if not SIMPLE_BACKDROP:
+			var mix := _campaign_mix()
+			if not is_equal_approx(mix, _last_dress_mix):
+				_last_dress_mix = mix
+				_plate_item.queue_redraw()
 	_on_view_changed()
 
 
@@ -336,6 +346,10 @@ func build_map() -> void:
 	# (2× texture minified without mips would shimmer). Vectors unaffected.
 	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	_act = clampi(RunState.get_act(), 1, 3)
+	# Freeze the quality for this build. A settings change may clear/replace the
+	# shared cache while a readback is in flight; cache writes below verify this
+	# identity before publishing, so an old-quality coroutine cannot poison it.
+	_plate_bake_scale = _resolve_plate_bake_scale()
 	_resolve_faction()
 	_rng.seed = 1207 + _act * 101
 	# _read_run_map rebuilds these by APPENDING on every open; on a fresh instance
@@ -345,6 +359,11 @@ func build_map() -> void:
 	# by _mesh_restore, so they don't need this.
 	_nodes.clear()
 	_edges.clear()
+	# A live instance can be rebuilt after a quality change by tooling/settings.
+	# Never let its prior-resolution quads survive into the new cache decision.
+	_geo_tex = null
+	_march_tex = null
+	_plate_tex = null
 	_build_geo()
 	if _plate_item == null:
 		# The plate's own canvas item: drawn behind the root item so the
@@ -398,11 +417,25 @@ void fragment() {
 		_read_run_map()
 		_resolve_kingdoms()
 		_derive_terrain_tags()
-		_geo_tex = cache.get("geo", null)
-		# Last open's campaign plate: at most one visit stale, which only
-		# shows for the ~150ms until this open's bakes land — a silent hold,
-		# never a pop.
-		_plate_tex = cache.get("plate_prev", null)
+		# Mesh geometry is resolution-independent and remains reusable across
+		# quality changes. Baked textures are not: accepting a 1x plate after
+		# switching to Ultra would make the map soft, while retaining a 2x plate
+		# on Low would defeat the tier's memory budget.
+		var texture_scale_matches := is_equal_approx(
+			float(cache.get("bake_scale", -1.0)), _plate_bake_scale)
+		if texture_scale_matches:
+			_geo_tex = cache.get("geo", null)
+			# Last open's campaign plate: at most one visit stale, which only
+			# shows briefly until this open's bakes land — a silent hold, never
+			# a pop.
+			_plate_tex = cache.get("plate_prev", null)
+		else:
+			_geo_tex = null
+			_plate_tex = null
+			cache.erase("geo")
+			cache.erase("plate_prev")
+			cache["bake_scale"] = _plate_bake_scale
+			RunState.map_plate_cache[_act] = cache
 		_redraw_plate()
 		if bake_mode == "":
 			_ensure_plate_bake()
@@ -423,8 +456,64 @@ void fragment() {
 	_redraw_plate()
 	if bake_mode != "":
 		return
-	RunState.map_plate_cache[_act] = {"mesh": _mesh_snapshot()}
+	RunState.map_plate_cache[_act] = {
+		"mesh": _mesh_snapshot(),
+		"bake_scale": _plate_bake_scale,
+	}
 	_ensure_plate_bake()
+
+
+## Resolve the plate's independent bake quality. The whole-screen render scale
+## is a separate cost; tying this cached texture to the effective preset avoids
+## paying Ultra's 4x pixel footprint on Low while keeping Ultra pixel-identical
+## to the former fixed 2x path.
+func _resolve_plate_bake_scale() -> float:
+	# Terrain probes deliberately build a detached map node, so resolve the
+	# autoload through the main loop instead of requiring `self` in the tree.
+	var settings: Node = null
+	var main_loop := Engine.get_main_loop()
+	if main_loop is SceneTree:
+		settings = (main_loop as SceneTree).root.get_node_or_null("UserSettings")
+	if settings == null:
+		return PLATE_BAKE_SCALE_ULTRA
+	var tier := "medium"
+	if settings.has_method("effective_graphics_tier"):
+		tier = str(settings.call("effective_graphics_tier"))
+	else:
+		# Safe fallback for isolated scene/script probes that may run before a
+		# newer UserSettings autoload is available.
+		tier = str(settings.get("graphics_preset"))
+		if tier == "auto" and settings.has_method("resolve_preset"):
+			tier = str(settings.call("resolve_preset", tier))
+		elif tier == "custom":
+			var screen_scale := float(settings.get("render_scale"))
+			if screen_scale >= 1.75:
+				tier = "ultra"
+			elif screen_scale > 1.0:
+				tier = "high"
+			else:
+				tier = "medium" if bool(settings.get("particles")) else "low"
+	match tier:
+		"low":
+			return PLATE_BAKE_SCALE_LOW
+		"ultra":
+			return PLATE_BAKE_SCALE_ULTRA
+		_:
+			return PLATE_BAKE_SCALE_MID
+
+
+## Publish a bake only if this act's cache still belongs to the quality this
+## map instance started with. This matters when Settings changes tier while an
+## asynchronous readback is between its render and upload frames.
+func _cache_baked_texture(key: String, texture: ImageTexture) -> void:
+	if not RunState.map_plate_cache.has(_act):
+		return
+	var cache: Dictionary = RunState.map_plate_cache[_act]
+	if not is_equal_approx(float(cache.get("bake_scale", -1.0)),
+			_plate_bake_scale):
+		return
+	cache[key] = texture
+	RunState.map_plate_cache[_act] = cache
 
 
 ## Content changed (build, bake landing, state flip) — re-record the plate
@@ -493,8 +582,7 @@ func _ensure_plate_bake() -> void:
 			return
 		if gen == _bake_gen and g != null:
 			_geo_tex = g
-			if RunState.map_plate_cache.has(_act):
-				RunState.map_plate_cache[_act]["geo"] = g
+			_cache_baked_texture("geo", g)
 			_redraw_plate()
 	if gen == _bake_gen:
 		var m: ImageTexture = await _bake_via_clone("march")
@@ -502,22 +590,27 @@ func _ensure_plate_bake() -> void:
 			return
 		if gen == _bake_gen and m != null:
 			_march_tex = m
+			if SIMPLE_BACKDROP:
+				# March and campaign clones execute the exact same draw branch in
+				# simple mode. Reuse this texture instead of rendering/readback/
+				# mipmapping/uploading an identical 3200x1800 plate again.
+				_plate_tex = m
+				_cache_baked_texture("plate_prev", m)
 			_redraw_plate()
 	if gen == _bake_gen:
 		_plate_bake_pending = false
 	plate_baked.emit()
-	if gen == _bake_gen:
+	if gen == _bake_gen and not SIMPLE_BACKDROP:
 		var p: ImageTexture = await _bake_via_clone("plate")
 		if not is_inside_tree():
 			return
 		if gen == _bake_gen and p != null:
 			_plate_tex = p
-			if RunState.map_plate_cache.has(_act):
-				RunState.map_plate_cache[_act]["plate_prev"] = p
+			_cache_baked_texture("plate_prev", p)
 			_redraw_plate()
 
 
-## Render this map once through an offscreen clone in a 2× SubViewport and
+## Render this map once through a quality-scaled offscreen SubViewport and
 ## return the readback as a mipmapped texture (null on failure). The clone
 ## hits the mesh/geo cache, so its build is cheap; "geo" mode paints the
 ## geography layers only, "plate" mode paints geo (quad if cached) + ink.
@@ -529,7 +622,9 @@ func _bake_via_clone(mode: String) -> ImageTexture:
 	if size.x < 4.0 or size.y < 4.0:
 		return null
 	var sub := SubViewport.new()
-	sub.size = Vector2i(size * PLATE_BAKE_SCALE)
+	sub.size = Vector2i(
+		roundi(size.x * _plate_bake_scale),
+		roundi(size.y * _plate_bake_scale))
 	sub.disable_3d = true
 	# DISABLED while the clone builds and records its canvas (CanvasItem _draw
 	# is CPU-side and runs regardless of target update mode), then flipped to
@@ -552,7 +647,7 @@ func _bake_via_clone(mode: String) -> ImageTexture:
 	# — Godot re-applies the stored value on enter so the bake still scaled, but
 	# the rejected call spammed an error on every single map open.
 	sub.canvas_transform = Transform2D().scaled(
-		Vector2(PLATE_BAKE_SCALE, PLATE_BAKE_SCALE))
+		Vector2(_plate_bake_scale, _plate_bake_scale))
 	# Clone _ready waits a frame, builds, paints the frame after — wait those
 	# out (plus margin), then read the render target back.
 	for _i in 4:
@@ -1961,6 +2056,10 @@ class PlateItem extends Control:
 		if map == null or map._nodes.is_empty() or map._polys.is_empty():
 			return
 		if map.bake_mode == "":
+			if map.SIMPLE_BACKDROP and map._march_tex != null:
+				draw_texture_rect(map._march_tex,
+					Rect2(Vector2.ZERO, map.size), false)
+				return
 			var mix: float = map._campaign_mix()
 			if map._march_tex != null:
 				draw_texture_rect(map._march_tex,
@@ -3792,7 +3891,7 @@ func _draw_ui() -> void:
 	var order_txt: String
 	var order_col: Color
 	if RunState.is_lord_gate_open():
-		order_txt = "The keep road is open — march on the lord"
+		order_txt = "Keep road open - lord now, or hardened holds"
 		order_col = Color(0.96, 0.84, 0.46)
 	else:
 		order_txt = "Break %d more %s to open the keep road" % [holds_left,

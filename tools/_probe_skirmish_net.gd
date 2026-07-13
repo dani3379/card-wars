@@ -106,6 +106,8 @@ func _run_host() -> void:
 	if not await _await_until(func(): return _both_ready, "both peers ready"):
 		return
 	_check(true, "ready handshake round-tripped (both ready)")
+	# host() resets the session and disables combat delivery; opt in after ready.
+	NM.attach_combat()
 	# 3. Start the match — pushes a shared seed to the client.
 	NM.start_match()
 	await create_timer(0.4).timeout
@@ -138,6 +140,8 @@ func _run_client() -> void:
 	if not await _await_until(func(): return _both_ready, "both peers ready"):
 		return
 	_check(true, "ready handshake round-tripped (both ready)")
+	# join() resets the session and disables combat delivery; opt in after ready.
+	NM.attach_combat()
 	# 3. Receive the shared match seed from the host.
 	if not await _await_until(func(): return _seed_from_host >= 0, "match-start seed"):
 		return

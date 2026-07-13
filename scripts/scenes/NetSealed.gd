@@ -87,8 +87,9 @@ func _regenerate_pool() -> void:
 	_rng.seed = _effective_seed()
 	_avail.clear()
 
-	var opened: Array[String] = SkirmishState.deal_unique_cards(
-		_legal, mini(SEALED_POOL_SIZE, _legal.size()), _rng)
+	var opened: Array[String] = SkirmishState.deal_weighted_cards(
+		_legal, mini(SEALED_POOL_SIZE, _legal.size()), _rng,
+		SkirmishState.SKIRMISH_DRAFT_WEIGHTS)
 	for opened_id in opened:
 		_avail[opened_id] = 1
 
@@ -242,7 +243,7 @@ func _rebuild_pool_ui() -> void:
 	for id in _sorted_avail_ids():
 		if gen != _pool_gen or not is_instance_valid(_pool_grid):
 			return
-		await CardTextureCache.bake(CardDB.get_card_data(id))
+		await CardTextureCache.bake(SkirmishState.skirmish_card_data(id))
 		if gen != _pool_gen or not is_instance_valid(_pool_grid):
 			return
 		_pool_grid.add_child(_build_pool_thumb(id))
@@ -338,7 +339,7 @@ func _refresh_deck_panel() -> void:
 		var n := int(_counts.get(id, 0))
 		if n <= 0:
 			continue
-		var d := CardDB.get_card_data(id)
+		var d := SkirmishState.skirmish_card_data(id)
 		var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
 		var badge := thumb["badge"] as Label
 		badge.text = "×%d" % n
@@ -416,7 +417,7 @@ func _on_ready_pressed() -> void:
 	NetMatch.send_draft_event({"t": "finished",
 		"cards": SkirmishState.local_slot().deck.duplicate()})
 	# Bake the sealed warband's textures behind the waiting screen (idle time).
-	ScenePreload.warm_card_ids(_deck)
+	ScenePreload.warm_card_ids(_deck, true)
 	if _ready_btn != null:
 		_ready_btn.text = "READY ✓"
 	_refresh_all()

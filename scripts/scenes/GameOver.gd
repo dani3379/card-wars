@@ -153,7 +153,9 @@ func _ready() -> void:
 		"vignette": 0.40,
 		"grad_outer": Color(0.02, 0.01, 0.03, 0.50),
 	})
+	GameTheme.fade_in(self, 0.26)
 	AudioBank.play_music("victory" if RunState.hero_hp > 0 else "defeat")
+	_spawn_run_end_flourish(RunState.hero_hp > 0)
 
 	# Apply display font to title
 	if GameTheme.font_display:
@@ -220,6 +222,48 @@ func _ready() -> void:
 	_animate_intro()
 
 
+func _spawn_run_end_flourish(won: bool) -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	if UserSettings != null and (not UserSettings.particles or UserSettings.reduce_motion):
+		return
+	var vp := get_viewport_rect().size
+	var p := CPUParticles2D.new()
+	p.name = "RunEndFlourish"
+	p.z_index = 8
+	p.one_shot = true
+	p.explosiveness = 0.55 if won else 0.28
+	p.amount = 58 if won else 36
+	p.lifetime = 1.7 if won else 2.2
+	p.position = Vector2(vp.x * 0.5, vp.y * (0.30 if won else 0.18))
+	p.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+	p.emission_rect_extents = Vector2(vp.x * 0.36, 12.0 if won else 20.0)
+	p.direction = Vector2(0, -1 if won else 1)
+	p.spread = 42.0 if won else 24.0
+	p.gravity = Vector2(0, 120.0 if won else 38.0)
+	p.initial_velocity_min = 60.0 if won else 18.0
+	p.initial_velocity_max = 190.0 if won else 54.0
+	p.angular_velocity_min = -90.0
+	p.angular_velocity_max = 90.0
+	p.scale_amount_min = 1.5
+	p.scale_amount_max = 3.6 if won else 4.8
+	var ramp := Gradient.new()
+	if won:
+		ramp.set_color(0, Color(1.0, 0.92, 0.52, 0.0))
+		ramp.add_point(0.15, Color(1.0, 0.84, 0.34, 0.88))
+		ramp.add_point(0.65, Color(0.95, 0.58, 0.18, 0.42))
+		ramp.set_color(1, Color(0.90, 0.38, 0.12, 0.0))
+	else:
+		ramp.set_color(0, Color(0.60, 0.52, 0.48, 0.0))
+		ramp.add_point(0.18, Color(0.42, 0.36, 0.34, 0.46))
+		ramp.add_point(0.72, Color(0.20, 0.16, 0.15, 0.26))
+		ramp.set_color(1, Color(0.08, 0.06, 0.055, 0.0))
+	p.color_ramp = ramp
+	add_child(p)
+	p.emitting = true
+	get_tree().create_timer(p.lifetime + 0.4).timeout.connect(p.queue_free)
+
+
 func _add_seed_chip() -> void:
 	# The run seed, bottom-left, click-to-copy. Daily marchers and seed-sharers
 	# need this number — it existed nowhere in the game until now. Frameless
@@ -244,9 +288,12 @@ func _add_seed_chip() -> void:
 	chip.offset_top = -42
 	chip.offset_bottom = -12
 	chip.pressed.connect(func():
+		GameTheme.claim_pop(chip)
 		DisplayServer.clipboard_set(str(RunState.run_seed))
 		chip.text = "Seed %d  ·  copied" % RunState.run_seed)
 	add_child(chip)
+	GameTheme.deal_in(chip, 1.02)
+	GameTheme.hover_lift(chip, 1.02)
 
 
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
@@ -435,14 +482,16 @@ func _build_run_summary() -> void:
 		18, INK_RUBRIC)
 	rematch.name = "RematchBtn"
 	_ink_button(rematch, Color(0.78, 0.16, 0.07))
-	rematch.pressed.connect(_march_again)
+	rematch.pressed.connect(_on_march_again_pressed.bind(rematch))
 	foot.add_child(rematch)
+	GameTheme.hover_lift(rematch, 1.03)
 	var styled := GameTheme.make_back_button("BACK TO MENU", Vector2(240, 46),
 		18, INK_DIM)
 	styled.name = "BackBtn"
 	_ink_button(styled, INK)
-	styled.pressed.connect(_back)
+	styled.pressed.connect(_on_back_pressed.bind(styled))
 	foot.add_child(styled)
+	GameTheme.hover_lift(styled, 1.03)
 
 	# The ledger keeps its own count — lifetime tally as the page's footnote.
 	var tally := _make_summary_label("Total runs %d  ·  victories %d" % [
@@ -450,6 +499,24 @@ func _build_run_summary() -> void:
 		Color(INK_DIM.r, INK_DIM.g, INK_DIM.b, 0.85))
 	tally.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(tally)
+
+	# The chronicle writes itself in: the page settles first, then each
+	# section's ink dries top-to-bottom. Without this the run's closing
+	# document just popped into existence fully printed.
+	if not (UserSettings != null and UserSettings.reduce_motion):
+		panel.modulate.a = 0.0
+		var ptw := panel.create_tween()
+		ptw.tween_property(panel, "modulate:a", 1.0, 0.30).set_ease(Tween.EASE_OUT)
+		var line_i := 0
+		for child in col.get_children():
+			if not (child is Control):
+				continue
+			var c := child as Control
+			c.modulate.a = 0.0
+			var tw := c.create_tween()
+			tw.tween_interval(0.18 + line_i * 0.07)
+			tw.tween_property(c, "modulate:a", 1.0, 0.30).set_ease(Tween.EASE_OUT)
+			line_i += 1
 
 
 ## Re-ink a shell button for parchment: the heavy dark outline that keeps
@@ -697,6 +764,26 @@ func _animate_intro() -> void:
 	tw.tween_property($Subtitle, "modulate:a", 1.0, 0.40).set_delay(0.45)
 	if summary != null:
 		tw.tween_property(summary, "modulate:a", 1.0, 0.50).set_delay(0.80)
+
+
+func _on_march_again_pressed(btn: Button) -> void:
+	if btn != null and is_instance_valid(btn) \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		GameTheme.claim_pop(btn)
+		await get_tree().create_timer(0.14).timeout
+	if not is_inside_tree():
+		return
+	_march_again()
+
+
+func _on_back_pressed(btn: Button) -> void:
+	if btn != null and is_instance_valid(btn) \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		GameTheme.claim_pop(btn)
+		await get_tree().create_timer(0.14).timeout
+	if not is_inside_tree():
+		return
+	_back()
 
 
 func _march_again() -> void:

@@ -17,6 +17,9 @@ var _is_elite_reward: bool = false
 # Mark still upgrades a random extra card on top — additive, still honest.)
 var _relic_taken: bool = false
 var _forge_done: bool = false
+var _forge_card_nodes: Array[Control] = []
+var _forge_picking: bool = false
+var _march_picking: bool = false
 
 
 func _ready() -> void:
@@ -57,6 +60,7 @@ func _ready() -> void:
 			RunState.upgrade_card(candidates[randi() % candidates.size()], "plus")
 
 	_build_ui()
+	GameTheme.fade_in(self, 0.22)
 	GameTheme.make_settings_gear(self)
 
 
@@ -69,6 +73,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _build_ui() -> void:
+	_forge_card_nodes.clear()
+	_forge_picking = false
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
@@ -90,11 +96,14 @@ func _build_ui() -> void:
 		"VICTORY  —  Province %d" % RunState.current_floor, GameTheme.GILT_BRIGHT,
 		GameTheme.FONT_TITLE)
 	outer.add_child(title)
+	GameTheme.deal_in(title, 0.03)
 
 	# Relic choices
 	if _is_elite_reward and _relic_choices.size() > 0 and not _relic_taken:
 		# Ruled cartouche subheader (matches Treasure / Event / Recruit).
-		outer.add_child(_make_section_header("Choose a Relic"))
+		var relic_header := _make_section_header("Choose a Relic")
+		outer.add_child(relic_header)
+		GameTheme.deal_in(relic_header, 0.08)
 
 		var relic_row = HBoxContainer.new()
 		relic_row.add_theme_constant_override("separation", 40)
@@ -102,6 +111,7 @@ func _build_ui() -> void:
 		relic_row.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		outer.add_child(relic_row)
 
+		var relic_i := 0
 		for id in _relic_choices:
 			# Chart-look tile: dark-ink PARCHMENT body → document tile (gilt rule,
 			# small corners) with the painted relic icon on top, not a flat slab.
@@ -113,15 +123,20 @@ func _build_ui() -> void:
 			# the card rack is gone, and HBox children stretch by default —
 			# without this the relic panels render as full-height columns.
 			btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-			btn.pressed.connect(_pick_relic.bind(id))
+			btn.pressed.connect(_pick_relic.bind(id, btn))
 			relic_row.add_child(btn)
+			GameTheme.deal_in(btn, 0.10 + relic_i * 0.08)
+			GameTheme.hover_lift(btn)
+			relic_i += 1
 
 	# The General's Forge — Generals only (bosses hand out the boss tier and
 	# an act transition; the forge is the elite ladder's own rung).
 	if RunState.current_node_type == "elite" and not _forge_done \
 			and _forge_candidates().size() > 0:
-		outer.add_child(_make_section_header(
-			"The General's Forge — temper one card"))
+		var forge_header := _make_section_header(
+			"The General's Forge — temper one card")
+		outer.add_child(forge_header)
+		GameTheme.deal_in(forge_header, 0.18)
 		var scroll := ScrollContainer.new()
 		scroll.custom_minimum_size = Vector2(0, 240)
 		scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -136,6 +151,9 @@ func _build_ui() -> void:
 			var wrapper := Control.new()
 			# 0.72-scale writ: full 225×300 cards overflow the reward column.
 			wrapper.custom_minimum_size = Vector2(162, 216)
+			wrapper.pivot_offset = wrapper.custom_minimum_size * 0.5
+			wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			_add_forge_candidate_halo(wrapper)
 			var card_node = CARD_SCENE.instantiate()
 			card_node.static_display = true
 			card_node.card_data = data
@@ -152,14 +170,86 @@ func _build_ui() -> void:
 			click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 			click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
 			click_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-			click_btn.pressed.connect(_show_forge_confirm.bind(i))
+			click_btn.mouse_entered.connect(_on_forge_card_hover.bind(wrapper, true))
+			click_btn.mouse_exited.connect(_on_forge_card_hover.bind(wrapper, false))
+			click_btn.button_down.connect(_on_forge_card_pressed.bind(wrapper, true))
+			click_btn.button_up.connect(_on_forge_card_pressed.bind(wrapper, false))
+			click_btn.pressed.connect(_pick_forge_candidate.bind(i, wrapper))
 			wrapper.add_child(click_btn)
 			grid.add_child(wrapper)
+			_forge_card_nodes.append(wrapper)
+			GameTheme.deal_in(wrapper, 0.22 + grid.get_child_count() * 0.035)
 
 	var skip_btn = GameTheme.make_back_button("Continue", Vector2(200, 52), 20)
 	skip_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	skip_btn.pressed.connect(_skip)
 	outer.add_child(skip_btn)
+	GameTheme.deal_in(skip_btn, 0.40)
+	GameTheme.hover_lift(skip_btn, 1.04)
+
+
+func _add_forge_candidate_halo(wrapper: Control) -> void:
+	var grad := Gradient.new()
+	grad.set_color(0, Color(1.0, 0.77, 0.30, 0.20))
+	grad.set_color(1, Color(1.0, 0.54, 0.12, 0.0))
+	var grad_tex := GradientTexture2D.new()
+	grad_tex.gradient = grad
+	grad_tex.fill = GradientTexture2D.FILL_RADIAL
+	grad_tex.fill_from = Vector2(0.5, 0.56)
+	grad_tex.fill_to = Vector2(1.0, 0.56)
+	grad_tex.width = 220
+	grad_tex.height = 260
+	var halo := TextureRect.new()
+	halo.texture = grad_tex
+	halo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	halo.stretch_mode = TextureRect.STRETCH_SCALE
+	halo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	halo.z_index = -1
+	halo.position = Vector2(-26, -22)
+	halo.size = Vector2(214, 260)
+	wrapper.add_child(halo)
+
+
+func _on_forge_card_hover(wrapper: Control, hovered: bool) -> void:
+	if wrapper == null or not is_instance_valid(wrapper) or _forge_picking:
+		return
+	wrapper.z_index = 4 if hovered else 0
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	var target := Vector2(1.045, 1.045) if hovered else Vector2.ONE
+	var tw := wrapper.create_tween()
+	tw.tween_property(wrapper, "scale", target, 0.11) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
+
+func _on_forge_card_pressed(wrapper: Control, pressed: bool) -> void:
+	if wrapper == null or not is_instance_valid(wrapper) or _forge_picking:
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	var target := Vector2(0.985, 0.985) if pressed else Vector2(1.045, 1.045)
+	var tw := wrapper.create_tween()
+	tw.tween_property(wrapper, "scale", target, 0.06) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+
+
+func _pick_forge_candidate(deck_index: int, wrapper: Control = null) -> void:
+	if _forge_picking:
+		return
+	_forge_picking = true
+	if AudioBank != null:
+		AudioBank.play_sfx("button_click")
+	if wrapper != null and is_instance_valid(wrapper) \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		GameTheme.claim_pop(wrapper)
+		for other in _forge_card_nodes:
+			if other != wrapper and other is Control and is_instance_valid(other):
+				var tw := other.create_tween()
+				tw.tween_property(other, "modulate:a", 0.0, 0.18) \
+					.set_ease(Tween.EASE_IN)
+		await get_tree().create_timer(0.20).timeout
+	_show_forge_confirm(deck_index)
+	_forge_picking = false
 
 
 ## Deck indices eligible for the General's Forge — same filter as the rest
@@ -189,6 +279,12 @@ func _show_forge_confirm(deck_index: int) -> void:
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(dim)
+	# The confirm sheet fades up instead of snapping into existence; the whole
+	# modal rides dim.modulate so one tween covers scrim + cards + buttons.
+	if not (UserSettings != null and UserSettings.reduce_motion):
+		dim.modulate.a = 0.0
+		dim.create_tween().tween_property(dim, "modulate:a", 1.0, 0.16) \
+			.set_ease(Tween.EASE_OUT)
 
 	var col := VBoxContainer.new()
 	col.set_anchors_preset(Control.PRESET_CENTER)
@@ -207,6 +303,10 @@ func _show_forge_confirm(deck_index: int) -> void:
 	for pair in [[base_data, false], [upgraded_data, true]]:
 		var wrapper := Control.new()
 		wrapper.custom_minimum_size = Vector2(225, 300)
+		if pair[1]:
+			# Named so the forge-strike set-piece can aim at the "+" card.
+			wrapper.name = "ForgedPreview"
+			_add_forge_preview_halo(wrapper)
 		var card_node = CARD_SCENE.instantiate()
 		card_node.static_display = true
 		card_node.card_data = pair[0]
@@ -216,10 +316,12 @@ func _show_forge_confirm(deck_index: int) -> void:
 			card_node.modulate = Color(1.06, 1.03, 0.94)
 		wrapper.add_child(card_node)
 		row.add_child(wrapper)
+		GameTheme.deal_in(wrapper, 0.08 if not pair[1] else 0.18)
 		if not pair[1]:
 			var arrow = GameTheme.make_label("→", 44, GameTheme.GILT_BRIGHT)
 			arrow.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 			row.add_child(arrow)
+			GameTheme.deal_in(arrow, 0.13)
 
 	var diff = GameTheme.make_label(
 		_forge_change_summary(base_data, upgraded_data), 17, GameTheme.IVORY)
@@ -236,6 +338,8 @@ func _show_forge_confirm(deck_index: int) -> void:
 		RunState.upgrade_card(deck_index, "plus")
 		AudioBank.play_sfx("upgrade_confirm")
 		_forge_done = true
+		# The strike lands on the "+" card, THEN the sheet closes.
+		await GameTheme.forge_strike(self, dim.find_child("ForgedPreview", true, false))
 		dim.queue_free()
 		_after_spoil_taken()
 	)
@@ -243,6 +347,28 @@ func _show_forge_confirm(deck_index: int) -> void:
 	var back = GameTheme.make_back_button("Back", Vector2(140, 48), 18)
 	back.pressed.connect(func(): dim.queue_free())
 	btns.add_child(back)
+
+
+func _add_forge_preview_halo(wrapper: Control) -> void:
+	var grad := Gradient.new()
+	grad.set_color(0, Color(0.95, 0.82, 0.42, 0.42))
+	grad.set_color(1, Color(0.95, 0.46, 0.10, 0.0))
+	var grad_tex := GradientTexture2D.new()
+	grad_tex.gradient = grad
+	grad_tex.fill = GradientTexture2D.FILL_RADIAL
+	grad_tex.fill_from = Vector2(0.5, 0.5)
+	grad_tex.fill_to = Vector2(1.0, 0.5)
+	grad_tex.width = 320
+	grad_tex.height = 360
+	var halo := TextureRect.new()
+	halo.texture = grad_tex
+	halo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	halo.stretch_mode = TextureRect.STRETCH_SCALE
+	halo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	halo.z_index = -1
+	halo.position = Vector2(-48, -42)
+	halo.size = Vector2(321, 384)
+	wrapper.add_child(halo)
 
 
 func _forge_change_summary(base: Dictionary, upgraded: Dictionary) -> String:
@@ -272,11 +398,24 @@ func _after_spoil_taken() -> void:
 		_proceed()
 
 
-func _pick_relic(id: String) -> void:
+func _pick_relic(id: String, tile: Control = null) -> void:
 	RunState.add_relic(id)
 	_relic_taken = true
 	if AudioBank != null:
 		AudioBank.play_sfx("coin")
+	# The claim beat: the chosen spoil flares and pops while its unpicked
+	# rivals bow out, THEN the screen moves on. Without it the tile vanished
+	# on the same frame it was clicked and the pick never registered as an event.
+	if tile != null and is_instance_valid(tile) \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		GameTheme.claim_pop(tile)
+		if tile.get_parent() != null:
+			for sib in tile.get_parent().get_children():
+				if sib != tile and sib is Control:
+					var stw := (sib as Control).create_tween()
+					stw.tween_property(sib, "modulate:a", 0.0, 0.22) \
+						.set_ease(Tween.EASE_IN)
+		await get_tree().create_timer(0.38).timeout
 	if id == "bottled_talisman":
 		await GameTheme.bind_bottled_talisman(self)
 	# Don't march off with the General's Forge still hot — the screen stays
@@ -321,8 +460,11 @@ func _show_march_choice(next_idx: int) -> void:
 	var title = GameTheme.make_screen_title("THE NEXT MARCH",
 		GameTheme.GILT_BRIGHT, GameTheme.FONT_HEADER)
 	outer.add_child(title)
+	GameTheme.deal_in(title, 0.04)
 
-	outer.add_child(_make_section_header("Choose whose kingdom burns next."))
+	var march_header := _make_section_header("Choose whose kingdom burns next.")
+	outer.add_child(march_header)
+	GameTheme.deal_in(march_header, 0.10)
 
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 36)
@@ -339,6 +481,8 @@ func _show_march_choice(next_idx: int) -> void:
 		var tile := _make_lord_tile(lord)
 		tile.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		row.add_child(tile)
+		GameTheme.deal_in(tile, 0.12 + (i - next_idx) * 0.10)
+		GameTheme.hover_lift(tile)
 
 
 func _make_lord_tile(lord: String) -> Button:
@@ -361,7 +505,7 @@ func _make_lord_tile(lord: String) -> Button:
 		GameTheme.GILT_BRIGHT, 1, 4, true, true)
 	btn.add_theme_stylebox_override("hover", hover)
 	btn.add_theme_stylebox_override("pressed", normal)
-	btn.pressed.connect(_pick_march.bind(lord))
+	btn.pressed.connect(_pick_march.bind(lord, btn))
 
 	var col := VBoxContainer.new()
 	col.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -466,7 +610,22 @@ func _make_section_header(text: String) -> HBoxContainer:
 	return row
 
 
-func _pick_march(lord: String) -> void:
+func _pick_march(lord: String, tile: Control = null) -> void:
+	if _march_picking:
+		return
+	_march_picking = true
+	if AudioBank != null:
+		AudioBank.play_sfx("button_click")
+	if tile != null and is_instance_valid(tile) \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		GameTheme.claim_pop(tile)
+		if tile.get_parent() != null:
+			for sib in tile.get_parent().get_children():
+				if sib != tile and sib is Control:
+					var tw := (sib as Control).create_tween()
+					tw.tween_property(sib, "modulate:a", 0.0, 0.22) \
+						.set_ease(Tween.EASE_IN)
+		await get_tree().create_timer(0.34).timeout
 	RunState.choose_next_rival(lord)
 	_go_to_map()
 

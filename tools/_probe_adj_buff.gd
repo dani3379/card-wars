@@ -110,6 +110,14 @@ func _run_test() -> void:
 	_check(other != null and other.adj_atk_buff == buff,
 		"the torchbearer's other neighbour (lane 3) is buffed too (adj_atk_buff=%d)" % (other.adj_atk_buff if other != null else -1))
 
+	# CANONICAL ADJACENCY (2026-07-10): "adjacent" now means row AND column. The
+	# seat directly BEHIND the torchbearer (same lane 2, back row) is its column-mate
+	# and must be buffed too — this is the seat the old row-only reading missed.
+	combat._place_enemy_card(CDB.get_card_data("brute").duplicate(true), 2, combat.ROW_BACK)
+	var mate = combat._row_array(true, combat.ROW_BACK)[2]
+	_check(mate != null and mate.adj_atk_buff == buff,
+		">>> COLUMN-MATE (back row, same lane) is buffed: adj_atk_buff=%d (+%d expected)" % [(mate.adj_atk_buff if mate != null else -1), buff])
+
 	# Kill the drummer → its neighbours lose the buff immediately.
 	var drummer = combat._row_array(true, FRONT)[2]
 	if drummer != null and is_instance_valid(drummer):
@@ -119,6 +127,29 @@ func _run_test() -> void:
 	var restored: int = (neighbour.effective_atk() if is_instance_valid(neighbour) else before)
 	_check(restored == before,
 		"after the drummer dies the neighbour drops back to base ATK (%d)" % restored)
+
+	# ── DIAGONAL CREST (player relic): "Diagonal friendlies count as adjacent." ──
+	# A plain column/row neighbour reading would NOT buff a diagonal; with the relic
+	# held, _adjacent_creatures must widen to the two diagonal seats too. Player side
+	# only (slot 0). Placed on the HOST's own side (is_enemy=false) so the not-is_enemy
+	# gate applies. A DIAGONAL vanilla (front lane 1 torch → back lane 2) is the seat.
+	SS.get_slot(0).relics.append("diagonal_crest")
+	# Vanilla on the player BACK row lane 2 — diagonal to a front-lane-1 torchbearer.
+	var pv = combat._net_spawn_creature(CDB.get_card_data("brute").duplicate(true), 91001, 2, combat.ROW_BACK, false, false)
+	await create_timer(0.1).timeout
+	var pv_before: int = pv.effective_atk() if is_instance_valid(pv) else 0
+	# Player torchbearer on FRONT lane 1 (its diagonals are back lanes 0 and 2).
+	combat._net_spawn_creature(CDB.get_card_data("torchbearer").duplicate(true), 91002, 1, combat.ROW_FRONT, false, false)
+	combat._refresh_adjacency_buffs()
+	await create_timer(0.1).timeout
+	_check(is_instance_valid(pv) and pv.adj_atk_buff == buff,
+		">>> DIAGONAL CREST: a DIAGONAL friendly is now buffed (adj_atk_buff=%d, +%d expected)" % [(pv.adj_atk_buff if is_instance_valid(pv) else -1), buff])
+	# And without the relic the same diagonal must NOT be buffed (prove the gate).
+	SS.get_slot(0).relics.erase("diagonal_crest")
+	combat._refresh_adjacency_buffs()
+	await create_timer(0.1).timeout
+	_check(is_instance_valid(pv) and pv.adj_atk_buff == 0,
+		"without Diagonal Crest the diagonal friendly is NOT buffed (adj_atk_buff=%d)" % (pv.adj_atk_buff if is_instance_valid(pv) else -1))
 
 	if _fails == 0:
 		print("[adj-buff] ALL PASS")

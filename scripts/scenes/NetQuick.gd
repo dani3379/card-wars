@@ -85,7 +85,8 @@ func _effective_seed() -> int:
 
 func _regenerate_deck() -> void:
 	_rng.seed = _effective_seed()
-	_local_deck = SkirmishState.deal_unique_cards(_pool, _target, _rng)
+	_local_deck = SkirmishState.deal_weighted_cards(_pool, _target, _rng,
+		SkirmishState.SKIRMISH_DRAFT_WEIGHTS)
 	if _local_deck.size() >= _target:
 		return
 
@@ -196,11 +197,11 @@ func _refresh_deck_ui() -> void:
 	for id in order:
 		if gen != _deck_gen or not is_instance_valid(_deck_box):
 			return
-		await CardTextureCache.bake(CardDB.get_card_data(id))
+		var d := SkirmishState.skirmish_card_data(id)
+		await CardTextureCache.bake(d)
 		if gen != _deck_gen or not is_instance_valid(_deck_box):
 			return
 		var n := int(counts[id])
-		var d := CardDB.get_card_data(id)
 		var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
 		var badge := thumb["badge"] as Label
 		badge.text = "×%d" % n
@@ -293,7 +294,7 @@ func _finish_and_handoff() -> void:
 	var my_deck: Array = SkirmishState.local_slot().deck.duplicate()
 	NetMatch.send_draft_event({"t": "finished", "cards": my_deck})
 	# Bake the sealed warband's textures behind the waiting screen (idle time).
-	ScenePreload.warm_card_ids(my_deck)
+	ScenePreload.warm_card_ids(my_deck, true)
 	_show_marching()
 	_maybe_begin_combat()
 

@@ -692,6 +692,9 @@ var entity_id: int = -1
 # name with the font renderer (MSDF) so it stays razor-sharp at any zoom, instead
 # of being a downscaled bitmap baked into the texture. Same StS model as the rules.
 @export var bake_strip_name: bool = false
+# Internal CardTextureCache mode: render only the compact field token's static
+# art/gradient/blank seals. Live cards overlay stats, statuses, Doom and effects.
+@export var compact_static_bake: bool = false
 # When true, _build_layout dispatches to _build_baked_overlay_layout instead
 # of the heavy v4 layout. That layout is just a TextureRect (pulled from
 # CardTextureCache) plus a handful of live overlay nodes (cost / atk / hp /
@@ -699,6 +702,10 @@ var entity_id: int = -1
 # _atk_label / _hp_label refs, so combat logic is unchanged. Falls back to
 # v4 silently if CardTextureCache hasn't pre-baked this card yet.
 @export var live_baked_mode: bool = false
+# Collection uses a native-resolution, non-mipmapped cache class. Keeping this
+# explicit prevents its cheap gallery snapshot from masquerading as a 3x hand
+# bake while letting the same lightweight overlay layout display either class.
+@export var gallery_baked_mode: bool = false
 # When true, a card whose card_data carries no `desc` (enemy-only creatures from
 # EncounterDB are terse — {name,atk,hp,kw}) synthesises its rules text from its
 # triggers + keywords so the face isn't blank. Opt-in: ONLY the battle-log hover
@@ -971,7 +978,7 @@ class CardCanvas extends Control:
 		var closed := silhouette.duplicate()
 		closed.append(silhouette[0])
 		draw_polyline(closed, trim_color, 1.6, true)
-		if rarity == "rare":
+		if rarity == "white" or rarity == "rare":
 			var inner := _rounded_rect(Rect2(Vector2(2, 2), Vector2(W - 4, H - 4)), 6.0)
 			var ic := inner.duplicate()
 			ic.append(inner[0])
@@ -1035,7 +1042,16 @@ var _compact_root: Control = null
 # mid-fight Shield / Frozen / war-school Armored is visible on the token.
 var _status_orbs: Array = []          # the roundel Panels currently on the rail
 var _status_rail_sig: String = ""     # last-rendered signature (dirty check)
-var _status_poll_accum: float = 0.0   # throttles the _process rail poll
+var _status_poll_accum: float = 0.0   # throttles the shared-clock rail poll
+# Passive battlefield visuals used to give every seated Card2D its own _process
+# callback. A full 4x4 board therefore ran 16 script callbacks and wrote 16
+# transforms every rendered frame just for the decorative breathe. Compact live
+# cards now share one 30 Hz clock. Weak refs keep this registry from owning cards;
+# the elected driver hands the timer to another survivor when it leaves the tree.
+const BATTLEFIELD_VISUAL_TICK_SEC := 1.0 / 30.0
+static var _battlefield_visual_refs: Array = []
+static var _battlefield_visual_driver: WeakRef = null
+var _battlefield_visual_timer: Timer = null
 # Battlefield cards render at ~73% size so 4 rows fit on screen without
 # clipping. Hand cards stay full size for readability. Set before _ready
 # (e.g. on instantiate) or via set_compact_mode() after.
@@ -1286,6 +1302,9 @@ func set_compact_mode(enabled: bool) -> void:
 	# have entirely different visual identities (full card vs art token).
 	if compact_mode == enabled:
 		return
+	if not enabled:
+		_idle_bob_enabled = false
+		_unregister_battlefield_visuals()
 	compact_mode = enabled
 	_apply_compact_layout()
 	# Null cached widget references first, then free children. Otherwise any
@@ -1310,6 +1329,42 @@ func set_compact_mode(enabled: bool) -> void:
 	_compact_root = null
 	for child in get_children():
 		child.free()
+	_build_layout()
+
+
+func rebuild_face() -> void:
+	# Re-render a HAND card whose card_data changed in place (Forgefire's
+	# in-combat "+"). Same teardown recipe as set_compact_mode: null every
+	# cached widget ref, free the children, rebuild from the live data. The
+	# baked frame/art is keyed by card id (unchanged); name, rules text and
+	# stats render live, so the forged numbers land on the rebuilt face.
+	_hide_detail_panel()
+	_name_label = null
+	_atk_label = null
+	_hp_label = null
+	_cost_label = null
+	_desc_label = null
+	_type_label = null
+	_floop_indicator = null
+	_type_plate = null
+	_rarity_strip = null
+	_art_rect = null
+	_cost_badge = null
+	_frame_tex = null
+	_atk_badge = null
+	_hp_badge = null
+	_doom_badge = null
+	_doom_label = null
+	_compact_root = null
+	_lift_shadow = null
+	_unplayable_veil = null
+	_discard_mark = null
+	for child in get_children():
+		child.free()
+	if is_creature():
+		current_hp = card_data.hp
+		current_atk = card_data.atk
+	_build_style()
 	_build_layout()
 
 
@@ -1343,6 +1398,38 @@ func has_keyword(kw: String) -> bool:
 	if not card_data.has("keywords"):
 		return false
 	return card_data.keywords.has(kw)
+
+
+## One-line spell footer (2026-07-10): "{contract} · {economy}".
+## Contract = the targeting mode, or an authored CardDB `scope` string on
+## untargeted board spells ("ALL ENEMIES"). Economy = EXHAUST / RETAIN — now
+## visible on targeted spells too (Banish, Offering, Cataclysm...), where the
+## old single-slot footer buried it in the prose. The "SPELL —" prefix was
+## dropped 2026-07-10 (a grid of spells all repeating it was pure noise, and
+## the footer line itself is spell-only furniture): the type word prints only
+## as the fallback when there is no contract and no economy to declare. The
+## retired INSTANT filler named a timing distinction this game doesn't have.
+func _spell_footer_text() -> String:
+	if CardDB.is_curse(String(card_data.get("id", ""))):
+		return "CURSE"
+	var contract := ""
+	match String(card_data.get("targeting", "none")):
+		"enemy_creature":    contract = "TARGET ENEMY"
+		"friendly_creature": contract = "TARGET ALLY"
+		"any_creature":      contract = "ANY CREATURE"
+		"any":               contract = "ANY TARGET"
+		_:                   contract = String(card_data.get("scope", ""))
+	var parts: Array[String] = []
+	if contract != "":
+		parts.append(contract)
+	var kws: Array = card_data.get("keywords", [])
+	if "exhaust" in kws:
+		parts.append("EXHAUST")
+	elif "retain" in kws:
+		parts.append("RETAIN")
+	if parts.is_empty():
+		return "SPELL"
+	return " · ".join(parts)
 
 
 func _spell_target_label() -> String:
@@ -1443,7 +1530,9 @@ func _build_layout() -> void:
 		# battlefield it switches to a token-style render that doesn't
 		# benefit from baking (already ~10 nodes total).
 		_build_compact_layout()
-	elif live_baked_mode and CardTextureCache.has(card_data):
+	elif live_baked_mode and (
+			CardTextureCache.has_gallery(card_data) if gallery_baked_mode
+			else CardTextureCache.has(card_data)):
 		# Only enter the fast path if the texture is actually cached. On a
 		# cache miss we fall through to the full layout — the next time the
 		# same card is drawn after CardTextureCache.bake_many runs, the
@@ -1481,6 +1570,23 @@ func _build_compact_layout() -> void:
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(root)
 	_compact_root = root
+	if not compact_static_bake:
+		var cached_background: Texture2D = \
+			CardTextureCache.get_battlefield_texture(card_data)
+		if cached_background != null:
+			_build_compact_cached_background(root, cached_background)
+			_build_compact_stat_layer(root, false)
+			_finish_compact_live_layout(root)
+			return
+		elif DisplayServer.get_name() != "headless":
+			# Synthetic summons can be authored at runtime and therefore miss all
+			# route/deck warmers. Render the normal face for two frames, request one
+			# shared snapshot, then swap this live token onto it when ready.
+			if not CardTextureCache.battlefield_texture_ready.is_connected(
+					_on_battlefield_texture_ready):
+				CardTextureCache.battlefield_texture_ready.connect(
+					_on_battlefield_texture_ready)
+			CardTextureCache.bake_battlefield(card_data)
 
 	var card_art: Texture2D = _find_card_art()
 	if card_art == null:
@@ -1541,27 +1647,31 @@ func _build_compact_layout() -> void:
 		# numerals — the verified battlefield-legibility setup — only the
 		# glossy sphere paint changed).
 		var token_metal := Color(0.62, 0.50, 0.26)
-		var c_atk := _chart_seal(GameTheme.ATK_GOLD_SHIELD, token_metal)
+		var c_atk := _chart_seal(GameTheme.ATK_GOLD_SHIELD, token_metal, true)
 		c_atk.anchor_left = 0.0; c_atk.anchor_right = 0.0
 		c_atk.anchor_top = 1.0;  c_atk.anchor_bottom = 1.0
 		c_atk.offset_left = 3;   c_atk.offset_right = 41
 		c_atk.offset_top = -41;  c_atk.offset_bottom = -3
 		root.add_child(c_atk)
 		_atk_base_color = Color(1, 0.98, 0.90)
-		_atk_label = _build_orb_number_label(str(current_atk), 18, true)
+		_atk_label = _build_orb_number_label(
+			"" if bake_strip_stats else str(current_atk), 18, true)
 		c_atk.add_child(_atk_label)
 		_atk_badge = null
 
-		var c_hp := _chart_seal(GameTheme.HEALTH_RED_DROP, token_metal)
+		var c_hp := _chart_seal(GameTheme.HEALTH_RED_DROP, token_metal, true)
 		c_hp.anchor_left = 1.0; c_hp.anchor_right = 1.0
 		c_hp.anchor_top = 1.0;  c_hp.anchor_bottom = 1.0
 		c_hp.offset_left = -41; c_hp.offset_right = -3
 		c_hp.offset_top = -41;  c_hp.offset_bottom = -3
 		root.add_child(c_hp)
 		_hp_base_color = Color(1, 0.97, 0.92)
-		_hp_label = _build_orb_number_label(str(current_hp), 18, true)
+		_hp_label = _build_orb_number_label(
+			"" if bake_strip_stats else str(current_hp), 18, true)
 		c_hp.add_child(_hp_label)
 		_hp_badge = null
+	if compact_static_bake:
+		return
 
 	# Floop indicator (only shown when the player has toggled floop on).
 	_floop_indicator = Label.new()
@@ -1588,11 +1698,11 @@ func _build_compact_layout() -> void:
 	# LIVE — a keyword or status gained mid-fight (war-school Armored, a granted
 	# Shield, Frozen/Stunned) re-renders it; see _refresh_status_rail.
 	_refresh_status_rail(true)
-	# The rail re-checks itself on a throttled _process poll (cheap signature
+	# The rail re-checks itself on a throttled shared-clock poll (cheap signature
 	# diff) so the ~30 keyword-mutation sites in Combat.gd don't each need an
-	# explicit refresh call. The idle bob normally arms _process anyway; arm it
-	# here too so the poll survives reduce-motion / no-bob paths.
-	set_process(true)
+	# explicit refresh call. Register even in reduce-motion / no-bob paths so the
+	# status fallback remains alive without a per-card frame callback.
+	_register_battlefield_visuals()
 
 	# Doom countdown badge — a big red disc in the TOP-LEFT (keyword orbs own
 	# top-right, ATK/HP own the bottom corners). THIS is the telegraph: a boss
@@ -1619,25 +1729,248 @@ func _build_compact_layout() -> void:
 # "is part of the card". Refresh triggers: update_stat_display (most mutation
 # sites already call it) + a throttled _process signature poll for the rest.
 
+func _build_compact_cached_background(root: Control, texture: Texture2D) -> void:
+	# The snapshot includes an 8 px logical gutter so edge shading and wax
+	# seals never clip. The live token keeps its 200x150 lane footprint.
+	var face := TextureRect.new()
+	face.texture = texture
+	face.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	face.stretch_mode = TextureRect.STRETCH_SCALE
+	face.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	face.set_anchors_preset(Control.PRESET_FULL_RECT)
+	face.offset_left = -8.0
+	face.offset_top = -8.0
+	face.offset_right = 8.0
+	face.offset_bottom = 8.0
+	face.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(face)
+	# Art is already flattened into the cached face.
+	_art_rect = null
+
+
+func _on_battlefield_texture_ready(key: String) -> void:
+	if not compact_mode or compact_static_bake or not is_inside_tree() \
+			or key != CardTextureCache.battlefield_cache_key(card_data):
+		return
+	if _compact_root == null or not is_instance_valid(_compact_root):
+		return
+	if CardTextureCache.battlefield_texture_ready.is_connected(
+			_on_battlefield_texture_ready):
+		CardTextureCache.battlefield_texture_ready.disconnect(
+			_on_battlefield_texture_ready)
+	# Replace only the compact face. Threat flags and other Combat-owned direct
+	# children remain intact while every cached widget reference is refreshed.
+	_compact_root.free()
+	_compact_root = null
+	_atk_label = null
+	_hp_label = null
+	_atk_badge = null
+	_hp_badge = null
+	_atk_caret = null
+	_floop_indicator = null
+	_status_orbs.clear()
+	_status_rail_sig = ""
+	_doom_badge = null
+	_doom_label = null
+	_build_compact_layout()
+	update_stat_display()
+
+
+func _build_compact_stat_layer(root: Control, paint_seals: bool) -> void:
+	if not is_creature():
+		return
+	var token_metal := Color(0.62, 0.50, 0.26)
+	var c_atk: Control
+	var c_hp: Control
+	if paint_seals:
+		c_atk = _chart_seal(GameTheme.ATK_GOLD_SHIELD, token_metal, true)
+		c_hp = _chart_seal(GameTheme.HEALTH_RED_DROP, token_metal, true)
+	else:
+		# Cached faces already contain the blank seals. These transparent
+		# anchors carry only live numerals, so buffs and damage stay cheap.
+		c_atk = Control.new()
+		c_hp = Control.new()
+		c_atk.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		c_hp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	c_atk.anchor_left = 0.0
+	c_atk.anchor_right = 0.0
+	c_atk.anchor_top = 1.0
+	c_atk.anchor_bottom = 1.0
+	c_atk.offset_left = 3
+	c_atk.offset_right = 41
+	c_atk.offset_top = -41
+	c_atk.offset_bottom = -3
+	root.add_child(c_atk)
+	_atk_base_color = Color(1, 0.98, 0.90)
+	_atk_label = _build_orb_number_label(str(current_atk), 18, true)
+	c_atk.add_child(_atk_label)
+	_atk_badge = null
+
+	c_hp.anchor_left = 1.0
+	c_hp.anchor_right = 1.0
+	c_hp.anchor_top = 1.0
+	c_hp.anchor_bottom = 1.0
+	c_hp.offset_left = -41
+	c_hp.offset_right = -3
+	c_hp.offset_top = -41
+	c_hp.offset_bottom = -3
+	root.add_child(c_hp)
+	_hp_base_color = Color(1, 0.97, 0.92)
+	_hp_label = _build_orb_number_label(str(current_hp), 18, true)
+	c_hp.add_child(_hp_label)
+	_hp_badge = null
+
+
+func _finish_compact_live_layout(root: Control) -> void:
+	# Floop intent, keyword/status roundels, and Doom all change during combat,
+	# so they deliberately remain outside the cached face.
+	_floop_indicator = Label.new()
+	_floop_indicator.text = "FLOOP"
+	if GameTheme.font_display:
+		_floop_indicator.add_theme_font_override("font", GameTheme.font_display)
+	_floop_indicator.add_theme_font_size_override("font_size", 10)
+	_floop_indicator.add_theme_color_override("font_color", GameTheme.FLOOP_BLUE)
+	_floop_indicator.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	_floop_indicator.add_theme_constant_override("outline_size", 4)
+	_floop_indicator.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_floop_indicator.anchor_left = 0.0
+	_floop_indicator.anchor_right = 1.0
+	_floop_indicator.anchor_top = 0.0
+	_floop_indicator.anchor_bottom = 0.0
+	_floop_indicator.offset_top = 30
+	_floop_indicator.offset_bottom = 46
+	_floop_indicator.visible = false
+	_floop_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(_floop_indicator)
+	_refresh_status_rail(true)
+	_register_battlefield_visuals()
+	if has_keyword("doom"):
+		_build_doom_badge(root)
+
+
 const _STATUS_RAIL_CAP := 5
 
 func _status_signature() -> String:
 	# Cheap change-detector for the rail. Anything that should alter the rail
 	# must be folded in here.
 	var parts: PackedStringArray = []
-	for kw in card_data.get("keywords", []):
-		parts.append(String(kw))
-	if state.has_shield:
-		parts.append("@shield")
-	if state.is_frozen:
-		parts.append("@frozen")
-	if state.stunned:
-		parts.append("@stunned")
-	if bool(get_meta("temp_armored", false)):
-		parts.append("@t_armored")
-	if int(get_meta("temp_thorns", 0)) > 0 or int(get_meta("bonus_thorns", 0)) > 0:
-		parts.append("@t_thorns")
+	for entry in _active_effect_entries(true):
+		parts.append("%s:%s" % [String(entry.get("id", "")), String(entry.get("display", ""))])
 	return ",".join(parts)
+
+
+func _active_effect_entries(include_badged: bool = true) -> Array:
+	var out: Array = []
+	var seen: Dictionary = {}
+	if state.has_shield:
+		_add_active_effect(out, seen, "shield")
+	if state.is_frozen:
+		_add_active_effect(out, seen, "frozen")
+	if state.stunned:
+		_add_active_effect(out, seen, "stunned")
+
+	var kws: Array = card_data.get("keywords", [])
+	if bool(get_meta("temp_armored", false)) and not kws.has("armored"):
+		_add_active_effect(out, seen, "armored", " (this round)")
+	if (bool(get_meta("temp_thorns", false)) or int(get_meta("bonus_thorns", 0)) > 0 \
+			or bool(get_meta("shield_wall_thorns", false))) and not kws.has("thorns"):
+		_add_active_effect(out, seen, "thorns", " (this round)")
+
+	for kw in kws:
+		var k := String(kw)
+		if seen.has(k):
+			continue
+		if k == "floop":
+			continue
+		if k == "doom" and not include_badged:
+			continue
+		if not _keyword_is_active_on_board(k):
+			continue
+		_add_active_effect(out, seen, k)
+	return out
+
+
+func _add_active_effect(out: Array, seen: Dictionary, id: String,
+		display_suffix: String = "") -> void:
+	if id == "" or seen.has(id):
+		return
+	var colors := _active_effect_colors(id)
+	var display := _active_effect_display(id) + display_suffix
+	out.append({
+		"id": id,
+		"display": display,
+		"desc": _active_effect_desc(id),
+		"tex": GameTheme.get_keyword_icon(id),
+		"glyph": colors["glyph"],
+		"rim": colors["rim"],
+	})
+	seen[id] = true
+
+
+func _keyword_is_active_on_board(id: String) -> bool:
+	match id:
+		"shield":
+			return state.has_shield
+		"last_stand":
+			return not last_stand_used
+		"summon", "on_enter", "sacrifice", "exhaust", "retain", "adjacent":
+			return false
+	return KeywordEffects.KEYWORDS.has(id)
+
+
+func _active_effect_display(id: String) -> String:
+	match id:
+		"frozen":
+			return "Frozen"
+		"stunned":
+			return "Stunned"
+		"doom":
+			return "Doom %d" % _live_doom_value()
+		"wither":
+			return "Wither %d" % int(card_data.get("wither", 0))
+	if KeywordEffects.KEYWORDS.has(id):
+		return str(KeywordEffects.KEYWORDS[id].get("display", id.capitalize()))
+	return id.capitalize()
+
+
+func _active_effect_desc(id: String) -> String:
+	match id:
+		"frozen":
+			return "Skips combat this round, then thaws."
+		"stunned":
+			return "Skips combat this round."
+	if KeywordEffects.KEYWORDS.has(id):
+		return str(KeywordEffects.KEYWORDS[id].get("desc", ""))
+	return ""
+
+
+func _active_effect_colors(id: String) -> Dictionary:
+	match id:
+		"shield":
+			return {"glyph": Color(0.65, 0.85, 1.0), "rim": Color(0.55, 0.75, 0.95, 0.9)}
+		"frozen":
+			return {"glyph": Color(0.78, 0.94, 1.0), "rim": Color(0.60, 0.85, 1.0, 0.9)}
+		"stunned":
+			return {"glyph": Color(1.0, 0.80, 0.32), "rim": Color(0.95, 0.72, 0.28, 0.9)}
+		"armored":
+			return {"glyph": Color(0.72, 0.82, 0.95), "rim": Color(0.60, 0.72, 0.90, 0.9)}
+		"thorns":
+			return {"glyph": Color(0.72, 0.92, 0.60), "rim": Color(0.58, 0.82, 0.50, 0.9)}
+	return {"glyph": GameTheme.GILT_BRIGHT, "rim": Color(0.62, 0.50, 0.26, 0.85)}
+
+
+func _live_doom_value() -> int:
+	if doom_counter != -999:
+		return doom_counter
+	return int(card_data.get("doom", 0))
+
+
+func _active_effect_tooltip(entry: Dictionary) -> String:
+	var display := String(entry.get("display", ""))
+	var desc := String(entry.get("desc", ""))
+	if desc == "":
+		return "Active now: %s" % display
+	return "Active now: %s\n%s" % [display, desc]
 
 
 func _refresh_status_rail(initial_build: bool = false) -> void:
@@ -1654,24 +1987,8 @@ func _refresh_status_rail(initial_build: bool = false) -> void:
 
 	# Collect rail entries — transient statuses FIRST (they're what the player
 	# must react to this turn), then printed/granted keywords.
-	var entries: Array = []
-	if state.has_shield:
-		entries.append({"tex": GameTheme.get_keyword_icon("shield"),
-			"glyph": Color(0.65, 0.85, 1.0), "rim": Color(0.55, 0.75, 0.95, 0.9)})
-	if state.is_frozen:
-		entries.append({"tex": GameTheme.get_keyword_icon("frozen"),
-			"glyph": Color(0.78, 0.94, 1.0), "rim": Color(0.60, 0.85, 1.0, 0.9)})
-	if state.stunned:
-		entries.append({"tex": GameTheme.get_keyword_icon("stunned"),
-			"glyph": Color(1.0, 0.80, 0.32), "rim": Color(0.95, 0.72, 0.28, 0.9)})
-	var kws: Array = card_data.get("keywords", [])
-	if bool(get_meta("temp_armored", false)) and not ("armored" in kws):
-		entries.append({"tex": GameTheme.get_keyword_icon("armored"),
-			"glyph": Color(0.72, 0.82, 0.95), "rim": Color(0.60, 0.72, 0.90, 0.9)})
-	if (int(get_meta("temp_thorns", 0)) > 0 or int(get_meta("bonus_thorns", 0)) > 0) \
-			and not ("thorns" in kws):
-		entries.append({"tex": GameTheme.get_keyword_icon("thorns"),
-			"glyph": Color(0.72, 0.92, 0.60), "rim": Color(0.58, 0.82, 0.50, 0.9)})
+	var entries: Array = _active_effect_entries(false)
+	var kws: Array = []
 	var seen: Dictionary = {}
 	for kw in kws:
 		var k := String(kw)
@@ -1716,7 +2033,8 @@ func _refresh_status_rail(initial_build: bool = false) -> void:
 		korb.offset_right = korb.offset_left + kw_orb
 		korb.offset_top = 4.0
 		korb.offset_bottom = 4.0 + kw_orb
-		korb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		korb.mouse_filter = Control.MOUSE_FILTER_PASS
+		korb.tooltip_text = _active_effect_tooltip(e)
 		_compact_root.add_child(korb)
 		var kglyph := TextureRect.new()
 		kglyph.texture = e["tex"]
@@ -1760,7 +2078,8 @@ func _build_baked_overlay_layout() -> void:
 	add_child(root)
 
 	# Pre-baked texture (cache hit guaranteed by _build_layout's gate).
-	var tex: Texture2D = CardTextureCache.get_texture(card_data)
+	var tex: Texture2D = CardTextureCache.get_gallery_texture(card_data) \
+		if gallery_baked_mode else CardTextureCache.get_texture(card_data)
 
 	var tex_rect := TextureRect.new()
 	tex_rect.texture = tex
@@ -1850,9 +2169,11 @@ func _build_baked_overlay_layout() -> void:
 	od_clip.anchor_left = 0.0; od_clip.anchor_right = 1.0
 	od_clip.anchor_top = 0.0; od_clip.anchor_bottom = 0.0
 	od_clip.offset_left = 17; od_clip.offset_right = -17
-	# MUST match _build_chart_proto's desc_clip (176→258) so the live text lands
-	# on the vellum panel baked underneath by chart_proto.
-	od_clip.offset_top = 176; od_clip.offset_bottom = 258
+	# MUST match _build_chart_proto's desc_clip (176 → rule_bot-2: 258, spells
+	# 265 since the one-line footer) so the live text lands on the vellum panel
+	# baked underneath by chart_proto.
+	od_clip.offset_top = 176
+	od_clip.offset_bottom = 265 if is_spell() else 258
 	root.add_child(od_clip)
 	var od_center := CenterContainer.new()
 	od_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1860,10 +2181,14 @@ func _build_baked_overlay_layout() -> void:
 	od_clip.add_child(od_center)
 	var od_rt := RichTextLabel.new()
 	od_rt.bbcode_enabled = true
+	od_rt.hint_underlined = false  # keyword hints hover-only, no underline ink
 	od_rt.fit_content = true
 	od_rt.scroll_active = false
 	od_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	od_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# PASS (not IGNORE): the [hint] glossary that used to live on the margin
+	# roundels now rides the keyword words — PASS lets hover reach the hints
+	# while clicks/drags still fall through to the card panel.
+	od_rt.mouse_filter = Control.MOUSE_FILTER_PASS
 	od_rt.custom_minimum_size = Vector2(170, 0)
 	# Match _build_chart_proto's tightened leading so wrapping/fit is identical.
 	od_rt.add_theme_constant_override("line_separation", -2)
@@ -1886,11 +2211,13 @@ func _build_baked_overlay_layout() -> void:
 	od_rt.add_theme_font_size_override("normal_font_size", od_sz)
 	od_rt.add_theme_font_size_override("bold_font_size", od_sz)
 	od_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
-	var od_bb := KeywordEffects.colorize_keywords(od_raw).replace(
+	# decorate_keywords = gild + inline device stamps + [hint] glossary. Stamp
+	# size keys to the ramp, mirroring the chart_proto desc block.
+	var od_bb := KeywordEffects.decorate_keywords(od_raw, od_sz - 3).replace(
 		KeywordEffects.KEYWORD_GOLD, "#7a4f10")
 	od_rt.text = "[center]%s[/center]" % od_bb
 	od_center.add_child(od_rt)
-	_fit_desc_to_box.call_deferred(od_rt, 80.0)
+	_fit_desc_to_box.call_deferred(od_rt, 87.0 if is_spell() else 80.0)
 
 	# ── Live overlay: NAME (StS model — drawn live over the baked cartouche) ──
 	# The bake paints the swallowtail banner but blanks the name (bake_strip_name);
@@ -2784,11 +3111,13 @@ void fragment() {
 	cost_orb.add_child(_cost_label)
 
 	# ── Layer 4b: rarity gem (top-right) — only uncommon / rare ──────────
-	if rarity == "uncommon" or rarity == "rare":
+	if rarity == "white" or rarity == "uncommon" or rarity == "rare":
 		# Rare's rarity_color is a lemon-gold that read cheap on the faceted
 		# gem; push it to a warm amber/topaz. Uncommon keeps its sapphire.
 		var gem_col: Color = glow_col
-		if rarity == "rare":
+		if rarity == "white":
+			gem_col = Color(0.92, 0.98, 1.0)
+		elif rarity == "rare":
 			gem_col = Color(0.949, 0.616, 0.137)
 		var gem := _make_stat_orb(gem_col, 0.0, false)
 		gem.anchor_left = 1.0; gem.anchor_right = 1.0
@@ -3261,6 +3590,7 @@ class InkCartouche extends Control:
 class WaxSeal extends Control:
 	var wax := Color(0.5, 0.15, 0.1)
 	var seed_text := "seal"
+	var simple_mode := false
 
 	func _ready() -> void:
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -3285,6 +3615,27 @@ class WaxSeal extends Control:
 			return
 		var center := size * 0.5
 		var base_r := min_dim * 0.5 - 1.5
+		if simple_mode:
+			# Battlefield seals are only 38px wide and up to 32 of them can be
+			# visible. Keep the same wax silhouette/pressed face in six commands;
+			# the second shadow, micro-nicks and double impression are sub-pixel
+			# there but otherwise replay every frame in GL Compatibility.
+			var simple_body := _blob(center, base_r, 18)
+			draw_colored_polygon(_blob(center + Vector2(0.4, 1.8),
+				base_r * 1.02, 18), Color(0, 0, 0, 0.28))
+			draw_colored_polygon(simple_body, wax)
+			var simple_closed := simple_body.duplicate()
+			simple_closed.append(simple_body[0])
+			draw_polyline(simple_closed,
+				Color(wax.r * 0.50, wax.g * 0.50, wax.b * 0.54, 0.85), 1.8, true)
+			var simple_ring := base_r * 0.70
+			draw_arc(center, simple_ring, 0, TAU, 24,
+				Color(wax.r * 0.42, wax.g * 0.42, wax.b * 0.46, 0.62), 1.5, true)
+			draw_circle(center, simple_ring - 2.0,
+				Color(0, 0, 0, 0.30), true, -1.0, true)
+			draw_arc(center, base_r * 0.54, PI * 1.02, PI * 1.50, 10,
+				Color(1.0, 0.96, 0.88, 0.12), 1.8, true)
+			return
 		# 1 — cast shadow: two stacked soft blobs anchor the seal to the page.
 		draw_colored_polygon(_blob(center + Vector2(0.6, 2.4), base_r * 1.03),
 			Color(0, 0, 0, 0.26))
@@ -3495,6 +3846,8 @@ class EmptyPlateSigil extends Control:
 func _chart_metal(rarity: String) -> Color:
 	if CardDB.is_curse(String(card_data.get("id", ""))):
 		return Color(0.55, 0.52, 0.45)            # weathered bone
+	if rarity == "white":
+		return Color(0.88, 0.96, 1.00)
 	# Widened separation so rarity reads at a glance: the warm metals (bronze/
 	# gold) used to sit too close. Rare is now the brightest + most saturated
 	# gold, uncommon the coolest silver-blue, starter the darkest pewter, common
@@ -3546,9 +3899,10 @@ func _chart_diamond(parent: Control, center: Vector2, size_px: float,
 ## hand card, 38px on the field token) and parents the numeral label onto
 ## it. The metal param is kept for call-site compatibility — real wax sits
 ## directly on the paper, no metal bezel.
-func _chart_seal(wax: Color, _metal: Color) -> Control:
+func _chart_seal(wax: Color, _metal: Color, simple: bool = false) -> Control:
 	var seal := WaxSeal.new()
 	seal.wax = wax
+	seal.simple_mode = simple
 	# Seed per card AND per stat color so the three seals on one card cool
 	# into three different blobs, but every bake of the same card matches.
 	seal.seed_text = String(card_data.get("id", "?")) + wax.to_html(false)
@@ -3700,9 +4054,12 @@ func _build_chart_proto() -> void:
 	# ── rarity glow halo (quieter than v6 — the metal carries rarity too) ─
 	var glow_size := 3
 	var glow_col: Color = GameTheme.rarity_color(rarity)
-	if rarity == "rare":
+	if rarity == "white":
+		glow_col = Color(0.86, 0.96, 1.0)
+	elif rarity == "rare":
 		glow_col = Color(0.95, 0.72, 0.25)
 	match rarity:
+		"white":    glow_size = 16
 		"rare":     glow_size = 13
 		"uncommon": glow_size = 8
 		"common":   glow_size = 3
@@ -3912,11 +4269,12 @@ func _build_chart_proto() -> void:
 	if not is_curse_card:
 		var gem_col: Color
 		match rarity:
+			"white":    gem_col = Color(0.92, 0.98, 1.00)   # cold white
 			"rare":     gem_col = Color(0.97, 0.72, 0.16)   # gold
 			"uncommon": gem_col = Color(0.36, 0.62, 0.96)   # sapphire
 			"starter":  gem_col = Color(0.55, 0.53, 0.49)   # pewter grey
 			_:          gem_col = Color(0.88, 0.90, 0.92)   # common — pale silver
-		var gem_r: float = 10.5 if (rarity == "rare" or rarity == "uncommon") else 8.5
+		var gem_r: float = 10.5 if (rarity == "white" or rarity == "rare" or rarity == "uncommon") else 8.5
 		_chart_diamond(root, Vector2(112.5, 7.5), gem_r + 6.0, Color(0.10, 0.082, 0.060))
 		_chart_diamond(root, Vector2(112.5, 7.5), gem_r, gem_col)
 		_chart_diamond(root, Vector2(112.5, 5.9), gem_r * 0.38,
@@ -3975,23 +4333,11 @@ func _build_chart_proto() -> void:
 		_chart_diamond(root, Vector2(21, 163), 5.0, forge_gilt)
 		_chart_diamond(root, Vector2(204, 163), 5.0, forge_gilt)
 
-	# ── keyword rail (chart roundels) ────────────────────────────────────
-	# Count ALL icon-bearing keywords (don't cap the count here) so the rail can
-	# render a "+N" overflow marker when a card carries more devices than fit.
-	var combat_meds: Array = []
-	var combat_kw_ids: Array = []
-	var kw_icon_total := 0
-	for k in card_data.get("keywords", []):
-		var k_str := String(k)
-		var icon_tex: Texture2D = GameTheme.get_keyword_icon(k_str)
-		if icon_tex == null or k_str == "floop":
-			continue
-		kw_icon_total += 1
-		if combat_meds.size() < 3:
-			combat_meds.append(icon_tex)
-			combat_kw_ids.append(k_str)
-	if not is_sp:
-		_kw_stamp_row(root, combat_meds, metal, kw_icon_total, combat_kw_ids)
+	# ── keyword devices ──────────────────────────────────────────────────
+	# The bottom-margin roundel row (_kw_stamp_row) was retired here 2026-07-10:
+	# it repeated the rules text an inch away, and its hover glossary moved onto
+	# the words themselves ([hint] via KeywordEffects.decorate_keywords below).
+	# Battlefield tokens keep their live icon rail — there it's the only display.
 
 	# ── clean inscribed-vellum panel under the rules text ────────────────
 	# The procedural ParchmentPlate ages the whole leaf with sepia washes +
@@ -4012,7 +4358,7 @@ func _build_chart_proto() -> void:
 		# ~8px higher and runs ~4px lower for ~13px more height, so the larger
 		# (17/16/15) ramp fits without shrinking on the typical card.
 		stock.offset_top = 175
-		stock.offset_bottom = 259
+		stock.offset_bottom = 266 if is_sp else 259
 		var sst := StyleBoxFlat.new()
 		sst.bg_color = Color(0.901, 0.843, 0.690, 0.62)  # clean warm vellum
 		sst.set_corner_radius_all(3)
@@ -4022,6 +4368,11 @@ func _build_chart_proto() -> void:
 	# ── ruled text region: the page itself carries the rules text. A fine
 	# ink hairline box with metal corner ticks — chart-legend language —
 	# instead of v7's floating tooltip-like well. ─────────────────────────
+	# Spells run the box ~7px lower: the footer collapsed to one line
+	# (2026-07-10 furniture pass) and the freed height goes to the rules text —
+	# exactly where long spell descs used to clip. MUST stay in lockstep with
+	# the baked-overlay clip below.
+	var rule_bot := 267 if is_sp else 260
 	var rulebox := Panel.new()
 	rulebox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	rulebox.anchor_left = 0.0
@@ -4031,7 +4382,7 @@ func _build_chart_proto() -> void:
 	rulebox.offset_left = 15
 	rulebox.offset_right = -15
 	rulebox.offset_top = 174
-	rulebox.offset_bottom = 260
+	rulebox.offset_bottom = rule_bot
 	var pst := StyleBoxFlat.new()
 	pst.draw_center = false
 	pst.border_color = Color(0.255, 0.188, 0.118, 0.80) if not is_curse_card \
@@ -4041,8 +4392,8 @@ func _build_chart_proto() -> void:
 	root.add_child(rulebox)
 	_chart_diamond(root, Vector2(15, 174), 3.6, metal_dim)
 	_chart_diamond(root, Vector2(210, 174), 3.6, metal_dim)
-	_chart_diamond(root, Vector2(15, 260), 3.6, metal_dim)
-	_chart_diamond(root, Vector2(210, 260), 3.6, metal_dim)
+	_chart_diamond(root, Vector2(15, rule_bot), 3.6, metal_dim)
+	_chart_diamond(root, Vector2(210, rule_bot), 3.6, metal_dim)
 
 	# ── description (dark ink written on the page) ───────────────────────
 	var desc_clip := Control.new()
@@ -4054,9 +4405,10 @@ func _build_chart_proto() -> void:
 	desc_clip.anchor_bottom = 0.0
 	desc_clip.offset_left = 17
 	desc_clip.offset_right = -17
-	# Text region grows with the band (was 184→255 = 71px → 176→258 = 82px).
+	# Text region grows with the band (was 184→255 = 71px → 176→258 = 82px;
+	# spells run to the taller rule_bot band since the one-line footer).
 	desc_clip.offset_top = 176
-	desc_clip.offset_bottom = 258
+	desc_clip.offset_bottom = rule_bot - 2
 	root.add_child(desc_clip)
 	var center_box := CenterContainer.new()
 	center_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -4064,6 +4416,9 @@ func _build_chart_proto() -> void:
 	desc_clip.add_child(center_box)
 	var desc_rt := RichTextLabel.new()
 	desc_rt.bbcode_enabled = true
+	# The [hint] glossary must not underline every keyword — that's reading
+	# noise on the parchment; hover still works.
+	desc_rt.hint_underlined = false
 	desc_rt.fit_content = true
 	desc_rt.scroll_active = false
 	desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -4107,15 +4462,17 @@ func _build_chart_proto() -> void:
 	desc_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
 	# The keyword gold (#e8b547) is tuned for dark wells and disappears on
 	# paper. Re-ink the same markup in dark bronze — keyword identity kept,
-	# document contrast won (~5.5:1 on the leaf).
-	var desc_bbcode := KeywordEffects.colorize_keywords(
-		raw_desc).replace(KeywordEffects.KEYWORD_GOLD, "#7a4f10")
+	# document contrast won (~5.5:1 on the leaf). decorate_keywords also
+	# ink-stamps each keyword's device inline before its first mention
+	# (2026-07-10 — replaces the bottom-margin roundel row).
+	var desc_bbcode := KeywordEffects.decorate_keywords(
+		raw_desc, dsz - 3).replace(KeywordEffects.KEYWORD_GOLD, "#7a4f10")
 	desc_rt.text = "[center]%s[/center]" % desc_bbcode
 	center_box.add_child(desc_rt)
 	# Shrink-to-fit safety net: once laid out, if the written text overflows the
-	# ~82px clip box, step the body size down (to the 14px floor) until it fits —
+	# clip box, step the body size down (to the 14px floor) until it fits —
 	# so a line is never cut top or bottom by the CenterContainer clip.
-	_fit_desc_to_box.call_deferred(desc_rt, 80.0)
+	_fit_desc_to_box.call_deferred(desc_rt, 87.0 if is_sp else 80.0)
 
 	# ── stats as wax seals OR the spell footer line ──────────────────────
 	var stat_font: Font = GameTheme.font_stat
@@ -4214,6 +4571,23 @@ func _build_chart_proto() -> void:
 			tally.tooltip_text = "%d kills on campaign" % vk_kills
 			tally.mouse_filter = Control.MOUSE_FILTER_PASS
 			root.add_child(tally)
+		# Creature type tag (2026-07-10): the letterpress footer slot carries
+		# the creature's type — the tag ctype effects read (Warchief's
+		# Soldiers, Siege Golem's Engines). No type, no filler.
+		var ct_id := String(card_data.get("ctype", ""))
+		if ct_id != "" and not bake_strip_name:
+			var ct_text := ct_id.to_upper()
+			var ct_spaced := ""
+			for ci in range(ct_text.length()):
+				ct_spaced += ct_text[ci]
+				if ci < ct_text.length() - 1:
+					ct_spaced += " "
+			var ct_lbl := _make_styled_label(ct_spaced, GameTheme.font_title if GameTheme.font_title != null else GameTheme.font_display, 12, Color(0.302, 0.224, 0.133, 0.85))
+			ct_lbl.add_theme_constant_override("outline_size", 0)
+			ct_lbl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.4))
+			ct_lbl.add_theme_constant_override("shadow_offset_y", 1)
+			_center_at_point(ct_lbl, Vector2(150, 374), Vector2(230, 24))
+			root.add_child(ct_lbl)
 	else:
 		# Spells still pay a cost — the seal stays; the bottom carries the
 		# letterspaced footer line instead of ATK/HP.
@@ -4242,58 +4616,42 @@ func _build_chart_proto() -> void:
 		_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		sp_cost.add_child(_cost_label)
 
-		var footer_text := "INSTANT"
-		var kws: Array = card_data.get("keywords", [])
-		if is_curse_card:
-			footer_text = "CURSE"
-		else:
-			match String(card_data.get("targeting", "none")):
-				"enemy_creature":    footer_text = "TARGET ENEMY"
-				"friendly_creature": footer_text = "TARGET ALLY"
-				"any_creature":      footer_text = "ANY CREATURE"
-				"any":               footer_text = "ANY TARGET"
-				_:
-					if "exhaust" in kws:
-						footer_text = "EXHAUST"
-					elif "retain" in kws:
-						footer_text = "RETAIN"
-		var spaced := ""
-		for ci in range(footer_text.length()):
-			spaced += footer_text[ci]
-			if ci < footer_text.length() - 1:
-				spaced += " "
+		# One honest line (2026-07-10): "SPELL — TARGET ENEMY · EXHAUST". The old
+		# two-line block (a spaced-out SPELL over the contract) hid Exhaust and
+		# Retain whenever the spell was targeted, and padded untargeted spells
+		# with INSTANT — a timing word this game has no timing system for. The
+		# freed line went to the rules band above (rule_bot). The explicit SPELL
+		# word survives on the line: creature-vs-spell must not be readable only
+		# by omission (3 seals vs 1).
+		var footer_text := _spell_footer_text()
+		# Short badges (SPELL / CURSE) keep the letterpress char-spacing; full
+		# contract lines are already wide and print plain.
+		if footer_text.length() <= 8:
+			var spaced := ""
+			for ci in range(footer_text.length()):
+				spaced += footer_text[ci]
+				if ci < footer_text.length() - 1:
+					spaced += " "
+			footer_text = spaced
+		# Fit by measure, not char count: the footer well is ~166 real px between
+		# the flanking diamonds; step the size down (floor 10) until it fits.
+		var foot_font: Font = GameTheme.font_title \
+			if GameTheme.font_title != null else GameTheme.font_display
+		var fsz := 14
+		while fsz > 10 and foot_font != null and foot_font.get_string_size(
+				footer_text, HORIZONTAL_ALIGNMENT_CENTER, -1, fsz).x > 166.0:
+			fsz -= 1
 		# Letterpress ink on the paper (the gilt-on-dark v7 color washes out
 		# against parchment).
 		var foot_col := Color(0.302, 0.224, 0.133, 0.95)
 		if is_curse_card:
 			foot_col = Color(0.318, 0.310, 0.255, 0.95)
-		var ftl := _make_styled_label(spaced, GameTheme.font_title \
-			if GameTheme.font_title != null else GameTheme.font_display,
-			14, foot_col)
+		var ftl := _make_styled_label(footer_text, foot_font, fsz, foot_col)
 		ftl.add_theme_constant_override("outline_size", 0)
 		ftl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.5))
 		ftl.add_theme_constant_override("shadow_offset_y", 1)
-		_center_at_point(ftl, Vector2(150, 374), Vector2(220, 24))
+		_center_at_point(ftl, Vector2(150, 374), Vector2(230, 24))
 		root.add_child(ftl)
-		# Explicit "SPELL" category word (P3): creature-vs-spell was read-only by
-		# omission (3 seals vs 1). Print the word above the targeting/timing
-		# footer so a spell is named, not merely inferred. Curses already label
-		# themselves "CURSE" in the footer and aren't cast, so skip them.
-		if not is_curse_card:
-			var sp_word := ""
-			for ci in range("SPELL".length()):
-				sp_word += "SPELL"[ci]
-				if ci < "SPELL".length() - 1:
-					sp_word += " "
-			var sp_lbl := _make_styled_label(sp_word, GameTheme.font_title \
-				if GameTheme.font_title != null else GameTheme.font_display,
-				12, Color(0.302, 0.224, 0.133, 0.95))
-			sp_lbl.add_theme_constant_override("outline_size", 0)
-			sp_lbl.add_theme_color_override("font_shadow_color",
-				Color(0, 0, 0, 0.5))
-			sp_lbl.add_theme_constant_override("shadow_offset_y", 1)
-			_center_at_point(sp_lbl, Vector2(150, 357), Vector2(220, 22))
-			root.add_child(sp_lbl)
 		_chart_diamond(root, Vector2(24, 280.5), 5.0, metal_dim)
 		_chart_diamond(root, Vector2(201, 280.5), 5.0, metal_dim)
 
@@ -4342,7 +4700,7 @@ func _build_full_layout_v4() -> void:
 	# Combined with the rarity-tinted name plate this is two redundant
 	# colour cues — enough to read rarity from across the table.
 	var outer_border_w := 2
-	if rarity == "rare":
+	if rarity == "white" or rarity == "rare":
 		outer_border_w = 5  # bumped from 4 — rares get a chunkier ring
 	elif rarity == "uncommon":
 		outer_border_w = 3
@@ -4379,7 +4737,7 @@ func _build_full_layout_v4() -> void:
 	# rare card adds another ~12 GPU blurs / frame to the gallery on
 	# top of the 5 per card we already cut. Gallery players see rare
 	# cards on hover (z_index pop) where pulse+halo can be re-enabled.
-	if rarity == "rare" and not static_display:
+	if (rarity == "white" or rarity == "rare") and not static_display:
 		var rare_halo := Panel.new()
 		rare_halo.anchor_left = 0.0; rare_halo.anchor_right = 1.0
 		rare_halo.anchor_top = 0.0; rare_halo.anchor_bottom = 1.0
@@ -4389,7 +4747,7 @@ func _build_full_layout_v4() -> void:
 		var halo_style := StyleBoxFlat.new()
 		halo_style.bg_color = Color(0, 0, 0, 0)  # invisible body
 		halo_style.set_corner_radius_all(17)  # matches outer 14 + 3 inset
-		halo_style.shadow_color = Color(1.0, 0.85, 0.26, 0.55)
+		halo_style.shadow_color = Color(0.86, 0.96, 1.0, 0.55) if rarity == "white" else Color(1.0, 0.85, 0.26, 0.55)
 		halo_style.shadow_size = 18
 		halo_style.shadow_offset = Vector2(0, 0)
 		rare_halo.add_theme_stylebox_override("panel", halo_style)
@@ -4402,7 +4760,7 @@ func _build_full_layout_v4() -> void:
 	# gold's apparent contrast (the AA-pixels on the gold's inner edge
 	# get a darker neighbour, so the gold reads more saturated than it
 	# is). Standard trick in jewelry rendering and AAA card frames.
-	if rarity == "rare":
+	if rarity == "white" or rarity == "rare":
 		var hairline := Panel.new()
 		hairline.anchor_left = 0.0; hairline.anchor_right = 1.0
 		hairline.anchor_top = 0.0; hairline.anchor_bottom = 1.0
@@ -4524,10 +4882,10 @@ func _build_full_layout_v4() -> void:
 		trim.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var trim_style := StyleBoxFlat.new()
 		trim_style.bg_color = Color(0, 0, 0, 0)
-		var trim_alpha: float = 0.85 if rarity == "rare" else 0.50
+		var trim_alpha: float = 0.85 if (rarity == "white" or rarity == "rare") else 0.50
 		trim_style.border_color = Color(trim_color.r, trim_color.g,
 			trim_color.b, trim_alpha)
-		trim_style.set_border_width_all(2 if rarity == "rare" else 1)
+		trim_style.set_border_width_all(2 if (rarity == "white" or rarity == "rare") else 1)
 		trim_style.set_corner_radius_all(11)
 		trim.add_theme_stylebox_override("panel", trim_style)
 		root.add_child(trim)
@@ -4613,7 +4971,7 @@ func _build_full_layout_v4() -> void:
 	# gold, uncommon = 2 px blue, common/starter = 1 px gilt. Reads as
 	# "more elaborate name plate = more important card".
 	var banner_border_w := 1
-	if rarity == "rare":
+	if rarity == "white" or rarity == "rare":
 		banner_border_w = 3
 	elif rarity == "uncommon":
 		banner_border_w = 2
@@ -6185,12 +6543,37 @@ func set_hand_target(pos: Vector2, rot: float, scl: Vector2 = Vector2.ONE) -> vo
 		# those interactions stay instant.
 		if _hand_tween != null and _hand_tween.is_valid():
 			_hand_tween.kill()
+		var deal_delay := 0.0
+		var deal_pop := false
+		if has_meta("hand_deal_delay"):
+			deal_delay = float(get_meta("hand_deal_delay"))
+			remove_meta("hand_deal_delay")
+		if has_meta("hand_deal_pop"):
+			deal_pop = bool(get_meta("hand_deal_pop"))
+			remove_meta("hand_deal_pop")
+		var dur := 0.24 if deal_pop else 0.17
 		_hand_tween = create_tween()
 		_hand_tween.set_parallel(true)
-		_hand_tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		_hand_tween.tween_property(self, "position", _hand_target_position, 0.17)
-		_hand_tween.tween_property(self, "rotation", _hand_target_rotation, 0.17)
-		_hand_tween.tween_property(self, "scale", _hand_target_scale, 0.17)
+		_hand_tween.set_trans(Tween.TRANS_CUBIC if deal_pop else Tween.TRANS_QUAD) \
+			.set_ease(Tween.EASE_OUT)
+		_hand_tween.tween_property(self, "position", _hand_target_position, dur) \
+			.set_delay(deal_delay)
+		_hand_tween.tween_property(self, "rotation", _hand_target_rotation, dur) \
+			.set_delay(deal_delay)
+		_hand_tween.tween_property(self, "scale", _hand_target_scale, dur) \
+			.set_delay(deal_delay)
+		if deal_pop:
+			modulate.a = 0.0
+			_hand_tween.tween_property(self, "modulate:a", 1.0, 0.16) \
+				.set_delay(deal_delay)
+		elif modulate.a < 0.999:
+			# The deal-in alpha ramp above rides _hand_tween, and hand_deal_pop is
+			# one-shot — so a relayout during the deal window (draw bursts, the net
+			# pre-deal, hand-count reflows) kills the fade and the replacement tween
+			# has no alpha track. The card strands translucent over the dark table,
+			# reading as permanently "dimmed". Whenever we own the reflow tween and
+			# the card isn't fully opaque, finish the fade.
+			_hand_tween.tween_property(self, "modulate:a", 1.0, 0.16)
 
 
 ## Lazily builds the elevation shadow used by the hand hover-lift: a soft
@@ -6274,7 +6657,7 @@ func _spawn_press_ring() -> void:
 
 
 ## True while this card's lunge or hit-recoil tween is mid-flight. The idle bob
-## (_process) checks this and yields position.y to the combat tween so the two
+## (shared visual tick) checks this and yields position.y to the combat tween so the two
 ## don't fight — see the note there. Scale-only tweens are intentionally excluded
 ## (the bob writes position.y, not scale, so they can't conflict).
 func _combat_tween_active() -> bool:
@@ -6601,12 +6984,131 @@ var _bob_amplitude: float = 3.0
 var _bob_freq: float = 1.6
 
 
+func _register_battlefield_visuals() -> void:
+	# Compact static bakes/previews deliberately stay inert. Real battlefield
+	# cards register automatically, including compact cards hosted outside Combat
+	# by focused probes or future board-like scenes.
+	if static_display or not compact_mode or not is_on_battlefield \
+			or not is_inside_tree():
+		return
+	var kept: Array = []
+	var already_registered := false
+	for ref_variant in _battlefield_visual_refs:
+		var ref = ref_variant as WeakRef
+		var card = ref.get_ref() if ref != null else null
+		if card == null or not is_instance_valid(card):
+			continue
+		kept.append(ref)
+		if card == self:
+			already_registered = true
+	_battlefield_visual_refs = kept
+	if not already_registered:
+		_battlefield_visual_refs.append(weakref(self))
+	# Card2D no longer owns a per-instance _process loop. Explicitly turn off any
+	# stale process flag left by a layout built before this card joined the clock.
+	set_process(false)
+	var driver = _battlefield_visual_driver.get_ref() \
+		if _battlefield_visual_driver != null else null
+	if driver == null or not is_instance_valid(driver) \
+			or not driver.is_inside_tree() or driver.is_queued_for_deletion():
+		_become_battlefield_visual_driver()
+
+
+func _become_battlefield_visual_driver() -> void:
+	if not is_inside_tree() or is_queued_for_deletion() \
+			or static_display or not compact_mode or not is_on_battlefield:
+		return
+	_battlefield_visual_driver = weakref(self)
+	if _battlefield_visual_timer != null \
+			and is_instance_valid(_battlefield_visual_timer):
+		_battlefield_visual_timer.stop()
+		_battlefield_visual_timer.queue_free()
+	_battlefield_visual_timer = Timer.new()
+	_battlefield_visual_timer.name = "BattlefieldVisualClock"
+	_battlefield_visual_timer.wait_time = BATTLEFIELD_VISUAL_TICK_SEC
+	_battlefield_visual_timer.one_shot = false
+	_battlefield_visual_timer.timeout.connect(_dispatch_battlefield_visual_tick)
+	add_child(_battlefield_visual_timer)
+	_battlefield_visual_timer.start()
+
+
+func _unregister_battlefield_visuals() -> void:
+	var kept: Array = []
+	for ref_variant in _battlefield_visual_refs:
+		var ref = ref_variant as WeakRef
+		var card = ref.get_ref() if ref != null else null
+		if card != null and is_instance_valid(card) and card != self:
+			kept.append(ref)
+	_battlefield_visual_refs = kept
+	var driver = _battlefield_visual_driver.get_ref() \
+		if _battlefield_visual_driver != null else null
+	if driver != self:
+		return
+	_battlefield_visual_driver = null
+	if _battlefield_visual_timer != null \
+			and is_instance_valid(_battlefield_visual_timer):
+		_battlefield_visual_timer.stop()
+		# During PREDELETE the timer is already leaving with its owner. Outside that
+		# path (e.g. compact mode disabled), release it explicitly.
+		if not is_queued_for_deletion():
+			_battlefield_visual_timer.queue_free()
+	_battlefield_visual_timer = null
+	_promote_battlefield_visual_driver()
+
+
+func _promote_battlefield_visual_driver() -> void:
+	for ref_variant in _battlefield_visual_refs:
+		var ref = ref_variant as WeakRef
+		var card = ref.get_ref() if ref != null else null
+		if card == null or not is_instance_valid(card) \
+				or not card.is_inside_tree() or card.is_queued_for_deletion():
+			continue
+		if card.static_display or not card.compact_mode or not card.is_on_battlefield:
+			continue
+		card._become_battlefield_visual_driver()
+		return
+
+
+func _dispatch_battlefield_visual_tick() -> void:
+	var kept: Array = []
+	var driver_survives := false
+	for ref_variant in _battlefield_visual_refs:
+		var ref = ref_variant as WeakRef
+		var card = ref.get_ref() if ref != null else null
+		if card == null or not is_instance_valid(card) \
+				or not card.is_inside_tree() or card.is_queued_for_deletion():
+			continue
+		if card.static_display or not card.compact_mode or not card.is_on_battlefield:
+			card._idle_bob_enabled = false
+			continue
+		kept.append(ref)
+		driver_survives = driver_survives or card == self
+		card._battlefield_visual_tick(BATTLEFIELD_VISUAL_TICK_SEC)
+	_battlefield_visual_refs = kept
+	if driver_survives:
+		return
+	# A card can leave battlefield mode without being freed. Hand the single clock
+	# over immediately so the remaining board never loses its status fallback.
+	_battlefield_visual_driver = null
+	if _battlefield_visual_timer != null \
+			and is_instance_valid(_battlefield_visual_timer):
+		_battlefield_visual_timer.stop()
+		_battlefield_visual_timer.queue_free()
+	_battlefield_visual_timer = null
+	_promote_battlefield_visual_driver()
+
+
 func enable_idle_bob() -> void:
 	# Battlefield-only subtle breathing/bob. Each card gets a randomized phase so
 	# the board doesn't move in lockstep — feels like several creatures alive on
 	# their own rhythms. The container that holds the card (CenterContainer in
 	# the slot cell) doesn't re-layout unless children change, so writing
-	# position.y each frame sticks.
+	# position.y on each shared visual tick sticks.
+	# Register BEFORE Reduce Motion exits. Player cards are compacted while
+	# detached from the hand tree, so their layout-time registration cannot take;
+	# the post-seat landing callback is the first in-tree opportunity to join the
+	# shared status clock even when the decorative bob itself stays disabled.
+	_register_battlefield_visuals()
 	if _idle_bob_enabled or static_display:
 		return
 	if UserSettings.reduce_motion:
@@ -6625,13 +7127,12 @@ func enable_idle_bob() -> void:
 	_bob_freq = 1.4 + randf_range(-0.3, 0.5)
 	_bob_amplitude = 2.5 + randf_range(-0.5, 1.5)
 	_bob_base_y = position.y
-	set_process(true)
 
 
-func _process(delta: float) -> void:
-	# Live status rail fallback poll: a cheap signature diff 4×/sec catches the
-	# keyword/status mutation sites that don't route through update_stat_display
-	# (there are ~30 spread across Combat.gd — polling beats chasing them all).
+func _battlefield_visual_tick(delta: float) -> void:
+	# Live status rail fallback poll: a cheap signature diff 4x/sec catches the
+	# keyword/status mutation sites that don't route through update_stat_display.
+	# All compact cards reach this method from one shared timer callback.
 	if is_on_battlefield and _compact_root != null:
 		_status_poll_accum += delta
 		if _status_poll_accum >= 0.25:
@@ -6785,6 +7286,11 @@ func _on_mouse_entered() -> void:
 		_hover_tween.tween_property(self, "position",
 			_hand_target_position + Vector2(0, -96), 0.11)
 		_hover_tween.tween_property(_lift_shadow, "modulate:a", 1.0, 0.13)
+		# Hover killed _hand_tween above — if that tween still owed this card the
+		# tail of its deal-in fade, finish it here so the lifted card is always
+		# fully opaque and readable.
+		if modulate.a < 0.999:
+			_hover_tween.tween_property(self, "modulate:a", 1.0, 0.11)
 	# Honour the tooltip delay setting — 0 = show instantly. The lift/scale
 	# still happens immediately; only the detail panel is deferred so brief
 	# cursor sweeps don't spam popup creation+free.
@@ -7130,7 +7636,8 @@ func _show_detail_panel() -> void:
 	# A battlefield creature that took damage or grew re-keys and rebuilds; a static
 	# hand card builds once and is reused for the whole turn. The panel docks at a
 	# FIXED screen position (see _wd_build tail), so a reused panel needs no move.
-	var key := str(card_data.hash()) + "|" + str(effective_atk()) + "|" + str(current_hp)
+	var key := str(card_data.hash()) + "|" + str(effective_atk()) + "|" \
+		+ str(current_hp) + "|" + _status_signature()
 	var reused: bool = _detail_cache != null and is_instance_valid(_detail_cache) \
 		and _detail_cache_key == key
 	if reused:
@@ -7188,6 +7695,7 @@ func _notification(what: int) -> void:
 	# free it explicitly when the card is deleted — otherwise every drawn-then-
 	# discarded card would orphan a hidden panel on that layer.
 	if what == NOTIFICATION_PREDELETE:
+		_unregister_battlefield_visuals()
 		if _detail_owner == self:
 			_detail_owner = null
 			_detail_popup = null
@@ -7280,12 +7788,29 @@ func _wd_build(cd: Dictionary) -> Control:
 			if ab.get("hp", 0) != 0: parts.append("+%d HP" % ab.hp)
 			if parts.size() > 0: ex.append("Adjacent: %s" % ", ".join(parts))
 		desc_text = "\n".join(ex)
-	var kw_lines := _wd_keyword_lines(cd)
+	var live_effect_readout := compact_mode and not static_display and is_creature_card
+	var active_lines: Array[String] = []
+	if live_effect_readout:
+		active_lines = _wd_active_effect_lines()
+		if active_lines.is_empty():
+			active_lines.append("None: no keyword or combat status is active.")
+	var kw_lines: Array[String] = []
+	if not live_effect_readout:
+		kw_lines = _wd_keyword_lines(cd)
+	var service_line := _wd_veteran_line(cd)
 
 	# ── pre-measure the writing so the slip grows to fit (no scrollbars) ──
 	var write_h := 0.0
+	if live_effect_readout:
+		write_h += _wd_wrapped_height("ACTIVE NOW", body_bold, KW_SZ, text_w) + 2.0
+		for ln in active_lines:
+			write_h += _wd_wrapped_height(ln, body_bold, KW_SZ, text_w) + 6.0
+		if desc_text != "":
+			write_h += 8.0 + _wd_wrapped_height("CARD TEXT", body_bold, KW_SZ, text_w)
 	if desc_text != "":
 		write_h += _wd_wrapped_height(desc_text, body_font, DESC_SZ, text_w)
+	if service_line != "":
+		write_h += 10.0 + _wd_wrapped_height(service_line, body_bold, KW_SZ, text_w)
 	if kw_lines.size() > 0:
 		write_h += 10.0
 		for ln in kw_lines:
@@ -7328,6 +7853,7 @@ func _wd_build(cd: Dictionary) -> Control:
 	# quiet rarity glow halo
 	var glow_size := 3
 	match rarity:
+		"white": glow_size = 13
 		"rare": glow_size = 11
 		"uncommon": glow_size = 7
 		"common": glow_size = 3
@@ -7340,7 +7866,9 @@ func _wd_build(cd: Dictionary) -> Control:
 	gs.bg_color = Color(0, 0, 0, 0.0)
 	gs.set_corner_radius_all(10)
 	var gcol: Color = metal
-	if rarity == "rare":
+	if rarity == "white":
+		gcol = Color(0.86, 0.96, 1.0)
+	elif rarity == "rare":
 		gcol = Color(0.95, 0.72, 0.25)
 	gs.shadow_color = Color(gcol.r, gcol.g, gcol.b, 0.50)
 	gs.shadow_size = glow_size
@@ -7383,11 +7911,12 @@ func _wd_build(cd: Dictionary) -> Control:
 	# ── rarity gem, top-center ──
 	var gem_col: Color
 	match rarity:
+		"white": gem_col = Color(0.92, 0.98, 1.00)
 		"rare": gem_col = Color(0.97, 0.72, 0.16)
 		"uncommon": gem_col = Color(0.36, 0.62, 0.96)
 		"starter": gem_col = Color(0.55, 0.53, 0.49)
 		_: gem_col = Color(0.88, 0.90, 0.92)
-	var gem_r: float = 9.0 if (rarity == "rare" or rarity == "uncommon") else 7.5
+	var gem_r: float = 9.0 if (rarity == "white" or rarity == "rare" or rarity == "uncommon") else 7.5
 	var cx := PW * 0.5
 	_wd_diamond(root, Vector2(cx, y_gem), gem_r + 5.0, Color(0.10, 0.082, 0.060))
 	_wd_diamond(root, Vector2(cx, y_gem), gem_r, gem_col)
@@ -7504,12 +8033,35 @@ func _wd_build(cd: Dictionary) -> Control:
 	vbox.size = Vector2(text_w, box_h - write_pad * 2.0)
 	root.add_child(vbox)
 
+	if live_effect_readout:
+		var live_head := _wd_section_heading("ACTIVE NOW", body_bold, KW_SZ, text_w,
+			Color(0.45, 0.19, 0.10))
+		vbox.add_child(live_head)
+		for ln in active_lines:
+			vbox.add_child(_wd_kw_label(ln, body_bold, KW_SZ, text_w))
+		if desc_text != "":
+			var live_div := ColorRect.new()
+			live_div.color = Color(metal.r, metal.g, metal.b, 0.22)
+			live_div.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			live_div.custom_minimum_size = Vector2(text_w, 1)
+			vbox.add_child(live_div)
+			vbox.add_child(_wd_section_heading("CARD TEXT", body_bold, KW_SZ, text_w,
+				Color(0.31, 0.22, 0.11)))
+
 	if desc_text != "":
 		var dl := _wd_label(desc_text, body_font, DESC_SZ, INK)
 		dl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		dl.custom_minimum_size = Vector2(text_w, 0)
 		dl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		vbox.add_child(dl)
+
+	if service_line != "":
+		var sdiv := ColorRect.new()
+		sdiv.color = Color(metal.r, metal.g, metal.b, 0.22)
+		sdiv.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		sdiv.custom_minimum_size = Vector2(text_w, 1)
+		vbox.add_child(sdiv)
+		vbox.add_child(_wd_kw_label(service_line, body_bold, KW_SZ, text_w))
 
 	if kw_lines.size() > 0:
 		var spacer := Control.new()
@@ -7535,6 +8087,18 @@ func _wd_build(cd: Dictionary) -> Control:
 # Keyword definition lines: "<display>: <desc>" — skip pure trigger-labels
 # (on_enter / on_death / adj_buff / adjacent) which the desc already spells out.
 # Doom / Wither show the card's live N.
+func _wd_active_effect_lines() -> Array[String]:
+	var out: Array[String] = []
+	for entry in _active_effect_entries(true):
+		var display := String(entry.get("display", ""))
+		var desc := String(entry.get("desc", ""))
+		if desc == "":
+			out.append("%s: active now." % display)
+		else:
+			out.append("%s: %s" % [display, desc])
+	return out
+
+
 func _wd_keyword_lines(cd: Dictionary) -> Array[String]:
 	var out: Array[String] = []
 	var skip := ["on_enter", "on_death", "adj_buff", "adjacent"]
@@ -7552,6 +8116,24 @@ func _wd_keyword_lines(cd: Dictionary) -> Array[String]:
 	return out
 
 
+func _wd_veteran_line(cd: Dictionary) -> String:
+	if String(cd.get("type", "")) != "creature":
+		return ""
+	var kills := int(cd.get("veteran_kills", 0))
+	if kills <= 0:
+		return ""
+	if kills < RunState.VETERAN_EPITHET_KILLS:
+		return "Campaign: %d kills, %d to an earned name." % [
+			kills, RunState.VETERAN_EPITHET_KILLS - kills]
+	if kills < RunState.VETERAN_RANK_KILLS:
+		return "Campaign: %d kills, %d to +1/+1." % [
+			kills, RunState.VETERAN_RANK_KILLS - kills]
+	if kills < RunState.VETERAN_SCHOOL_KILLS:
+		return "Campaign: %d kills, %d to war school." % [
+			kills, RunState.VETERAN_SCHOOL_KILLS - kills]
+	return "Campaign: %d kills, war school earned." % kills
+
+
 func _wd_label(text: String, font: Font, size: int, col: Color) -> Label:
 	var l := Label.new()
 	l.text = text
@@ -7565,6 +8147,13 @@ func _wd_label(text: String, font: Font, size: int, col: Color) -> Label:
 
 # A keyword line: bold paper-gold term, lighter brown definition body — one
 # RichTextLabel so the term reads as a heading without a second control.
+func _wd_section_heading(text: String, font: Font, size: int, w: float, col: Color) -> Label:
+	var l := _wd_label(text, font, size, col)
+	l.custom_minimum_size = Vector2(w, 0)
+	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	return l
+
+
 func _wd_kw_label(line: String, font: Font, size: int, w: float) -> RichTextLabel:
 	var rt := RichTextLabel.new()
 	rt.bbcode_enabled = true

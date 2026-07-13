@@ -1,9 +1,11 @@
 extends SceneTree
 ## Per-CARD power sweep (2026-07-01). Isolates each draftable card's combat impact
 ## by STACKING it: deck = COPIES copies of the test card + goblin filler (10 total),
-## run through a fixed 3-act gauntlet with the smart auto-pilot. Score per fight =
-## HP MARGIN (player_hp - enemy_hp) at game-over or a round cap — a continuous
-## strength signal that separates cards even when the binary win/loss is the same.
+## run through a fixed 3-act gauntlet with the smart auto-pilot. Fights run to an
+## ACTUAL death (a hero hits 0); MAX_ROUNDS only catches stalemates. Score per
+## fight = HP MARGIN (player_hp - enemy_hp), BUT a finish at or below NEAR_DEATH_HP
+## (4) takes a NEAR_DEATH_PENALTY (-15) — in a roguelike, dropping to 4 HP is a
+## run-ender, so a crippling "win" scores as a loss, not like a clean one.
 ##
 ## Read it as an OUTLIER detector: cards far ABOVE the pack are over-strong; cards
 ## near or below the 10-goblin BASELINE are under-strong (literally no better than
@@ -38,13 +40,31 @@ var _copies: int = COPIES
 # and the margin gap is attributable to the CARD, not luck. Combat's 98 global
 # randi()/shuffle() calls are otherwise unseeded (baseline swung +8..+15 run-to-run).
 const GAUNTLET := [["bandit_camp", 111], ["dragons_lair", 333]]   # act1 + act3 range
-const MAX_ROUNDS := 6
+# Fights now run to an ACTUAL death (2026-07-13, user-directed): the old 6-round
+# margin snapshot rewarded raw tempo and couldn't tell a clean win from barely
+# surviving. MAX_ROUNDS is just a stalemate safety net (two walls that can't
+# close) — real fights end when a hero hits 0 and the phase flips to GAME_OVER.
+const MAX_ROUNDS := 24
+# Roguelike scoring: HP is the RUN currency, so ending a fight at or below this
+# is a run-ender — scored as a loss even if the enemy died first. A crippling
+# "win" must never read like a clean one.
+const NEAR_DEATH_HP := 4
+const NEAR_DEATH_PENALTY := 15
 const TURN_WAIT_TICKS := 70
 const TICK := 0.1
 # Cards the headless bot can't play (open a pick UI / need special state).
 const MODAL := ["familiar", "scholar", "treasure_hunter", "adaptable", "copycat",
 	"doppelganger", "lost_tome", "war_council", "chaos_imp", "war_chant",
 	"gambit", "recycle", "reanimate", "grave_robbery"]
+
+# ── Pilot policies mined from real interactive playlogs (2026-07-13, 209
+# sessions): creatures land before spells; walls hold the front opposite the
+# biggest threat; snipers/siege engines shelter in the back row; sacrifice
+# outlets feed the cheapest body, never the best attacker; heals go to the
+# wounded veteran; army-wide support waits until there IS an army.
+const SAC_FODDER := ["dark_pact", "offering"]   # eat the least valuable body
+const SAC_CANNON := ["fuel_the_pyre"]           # hurl a heavy hitter that's dying anyway
+const HEAL_SPELLS := ["patch_up"]               # mend the wounded veteran
 
 var RS: Node
 var EDB: Node
@@ -111,7 +131,7 @@ func _run() -> void:
 	# --only wins: grade exactly the listed ids (any rarity), skipping the sweep.
 	var chunk: Array = _only if _only.size() > 0 else test_ids.slice(from_i, to_i)
 	print("[cardpow] shell=%s | testing %s over gauntlet %s (%d copies + %d filler, cap %d rounds)"
-		% [_filler, ("only " + str(_only) if _only.size() > 0 else "[%d..%d) of %d" % [from_i, to_i, test_ids.size()]), str(GAUNTLET), COPIES, FILL, MAX_ROUNDS])
+		% [_filler, ("only " + str(_only) if _only.size() > 0 else "[%d..%d) of %d" % [from_i, to_i, test_ids.size()]), str(GAUNTLET), _copies, 10 - _copies, MAX_ROUNDS])
 
 	# Baseline: a pure 10-filler deck — the reference line for THIS shell.
 	_baseline = await _score_deck([])
@@ -193,7 +213,14 @@ func _fight(enc_id: String, rng_seed: int, extra_ids: Array):
 		if not await _wait_turn(): break
 	var margin = null
 	if is_instance_valid(combat):
-		margin = maxi(0, int(combat.player_hp)) - maxi(0, int(combat.enemy_hp))
+		var php := int(combat.player_hp)
+		var ehp := int(combat.enemy_hp)
+		margin = maxi(0, php) - maxi(0, ehp)
+		# Death (php <= 0) is already a negative margin; the <= NEAR_DEATH_HP band
+		# also catches a "won but crippled" finish and drags it firmly into
+		# loss territory, so surviving at 3 HP never outscores a clean 20-HP win.
+		if php <= NEAR_DEATH_HP:
+			margin -= NEAR_DEATH_PENALTY
 	await _teardown()
 	return margin
 
@@ -210,48 +237,87 @@ func _wait_turn() -> bool:
 
 
 func _auto_play_turn() -> void:
+	# Human turn shape from the playlogs: creatures first, spells after (so
+	# removal/buffs see the real board), then one more creature pass in case a
+	# mana spell (Coin/Turbo/Offering) opened up another body.
+	await _play_creatures()
+	await _play_spells()
+	await _play_creatures()
+
+
+func _play_creatures() -> void:
 	for _pass in 4:
-		if not is_instance_valid(combat) or combat.phase != combat.Phase.PLAYER_TURN: return
+		if not _turn_live(): return
 		var played := false
 		for card in combat._hand.duplicate():
-			if not is_instance_valid(card) or not (card in combat._hand): continue
+			if not _card_live(card): continue
 			var cd: Dictionary = card.card_data
 			if String(cd.get("id", "")) in MODAL: continue
-			var cost: int = int(cd.get("cost", 0))
-			if int(combat.player_mana) < cost: continue
-			var ctype := String(cd.get("type", ""))
-			if ctype == "creature":
-				var slot = _empty_slot()
-				if slot == null: continue
-				card.global_position = slot.global_position + slot.size * 0.5 - card.size * 0.5
-				combat._on_card_played(card)
-				played = true
-				await create_timer(0.02).timeout
-			elif ctype == "spell":
-				var targeting := String(cd.get("targeting", "none"))
-				if targeting == "none":
-					combat._on_card_played(card)
-					played = true
-					await create_timer(0.02).timeout
-				else:
-					var target = _smart_target(cd)
-					if target == null or not is_instance_valid(target): continue
-					var lane: int = maxi(0, int(target.current_lane))
-					combat.player_mana -= cost
-					combat._first_spell_this_turn = true
-					combat._cards_played_this_turn += 1
-					combat._hand.erase(card)
-					if card.get_parent() != null: card.get_parent().remove_child(card)
-					await combat._resolve_spell(card.card_data, target, lane)
-					if is_instance_valid(card): combat._after_spell(card)
-					played = true
-					await create_timer(0.02).timeout
+			if String(cd.get("type", "")) != "creature": continue
+			if int(combat.player_mana) < int(cd.get("cost", 0)): continue
+			var slot = _pick_slot(cd)
+			if slot == null: continue
+			card.global_position = slot.global_position + slot.size * 0.5 - card.size * 0.5
+			combat._on_card_played(card)
+			played = true
+			await create_timer(0.02).timeout
 		if not played: return
 
 
+func _play_spells() -> void:
+	for _pass in 4:
+		if not _turn_live(): return
+		var played := false
+		for card in combat._hand.duplicate():
+			if not _card_live(card): continue
+			var cd: Dictionary = card.card_data
+			if String(cd.get("id", "")) in MODAL: continue
+			if String(cd.get("type", "")) != "spell": continue
+			var cost: int = int(cd.get("cost", 0))
+			if int(combat.player_mana) < cost: continue
+			var targeting := String(cd.get("targeting", "none"))
+			if targeting == "none":
+				# Army-wide support with no army = a wasted card; humans bank instead.
+				if String(cd.get("scope", "")) == "YOUR ARMY" \
+						and combat._all_player_creatures().is_empty():
+					continue
+				combat._on_card_played(card)
+				played = true
+				await create_timer(0.02).timeout
+			else:
+				var target = _smart_target(cd)
+				if target == null or not is_instance_valid(target): continue
+				var lane: int = maxi(0, int(target.current_lane))
+				combat.player_mana -= cost
+				combat._first_spell_this_turn = true
+				combat._cards_played_this_turn += 1
+				combat._hand.erase(card)
+				if card.get_parent() != null: card.get_parent().remove_child(card)
+				await combat._resolve_spell(card.card_data, target, lane)
+				if is_instance_valid(card): combat._after_spell(card)
+				played = true
+				await create_timer(0.02).timeout
+		if not played: return
+
+
+func _turn_live() -> bool:
+	return is_instance_valid(combat) and combat.phase == combat.Phase.PLAYER_TURN
+
+
+func _card_live(card) -> bool:
+	return is_instance_valid(card) and (card in combat._hand)
+
+
 func _smart_target(cd: Dictionary) -> Object:
+	var id := String(cd.get("id", ""))
 	var targeting := String(cd.get("targeting", "none"))
 	var spell: Dictionary = cd.get("spell", {})
+	# Intent beats targeting string: a sacrifice outlet wants the WORST body,
+	# a heal wants the wounded one — the old "highest ATK friendly" pick was
+	# the single biggest source of bogus low scores for these cards.
+	if id in SAC_FODDER: return _sac_fodder()
+	if id in SAC_CANNON: return _sac_cannon()
+	if id in HEAL_SPELLS: return _wounded_veteran()
 	var stype := String(spell.get("type", ""))
 	var supportive: bool = stype in ["buff_atk", "buff_hp", "heal", "shield", "regen", "buff_all_atk"] \
 		or targeting == "friendly_creature"
@@ -263,6 +329,44 @@ func _smart_target(cd: Dictionary) -> Object:
 	var e = _best_enemy(int(spell.get("value", 3)))
 	if e != null: return e
 	return combat._auto_target_for(targeting)
+
+
+func _sac_fodder() -> Object:
+	# Feed the knife the least valuable body — and never our only one.
+	var mine: Array = combat._all_player_creatures()
+	if mine.size() < 2: return null
+	var best: Object = null
+	var best_v := 9999
+	for c in mine:
+		if not is_instance_valid(c): continue
+		var v: int = c.effective_atk() * 2 + int(c.current_hp)
+		if v < best_v: best_v = v; best = c
+	return best
+
+
+func _sac_cannon() -> Object:
+	# Hurl the hardest hitter that is already dying; else fall back to fodder.
+	var mine: Array = combat._all_player_creatures()
+	if mine.size() < 2: return null
+	var best: Object = null
+	var best_a := -1
+	for c in mine:
+		if not is_instance_valid(c): continue
+		if int(c.current_hp) <= 2 and c.effective_atk() > best_a:
+			best_a = c.effective_atk(); best = c
+	return best if best != null else _sac_fodder()
+
+
+func _wounded_veteran() -> Object:
+	# Mend the damaged body with the most ATK still in it; nobody hurt = hold.
+	var best: Object = null
+	var best_s := 0
+	for c in combat._all_player_creatures():
+		if not is_instance_valid(c): continue
+		var missing: int = int(c.card_data.get("hp", c.current_hp)) - int(c.current_hp)
+		var s: int = missing * 2 + c.effective_atk()
+		if missing > 0 and s > best_s: best_s = s; best = c
+	return best
 
 
 func _best_enemy(dmg: int) -> Object:
@@ -285,12 +389,61 @@ func _best_friendly() -> Object:
 	return best
 
 
-func _empty_slot():
-	for row in [combat.ROW_FRONT, combat.ROW_BACK]:
-		for lane in range(combat.LANES_PER_ROW):
-			if combat._row_array(false, row)[lane] == null:
-				return combat._slot_array(false, row)[lane]
+func _pick_slot(cd: Dictionary):
+	# Placement policy from the human playlogs: walls hold the front opposite
+	# the biggest attacker; snipers/siege pieces shelter in back (front is
+	# struck first); attackers hunt a kill-trade, then an open road to the
+	# face, then block; everything overflows to back as queue when front fills.
+	var kws: Array = cd.get("keywords", [])
+	var atk := int(cd.get("atk", 0))
+	var hp := int(cd.get("hp", 1))
+	var is_wall: bool = ("guardian" in kws) or (atk <= 1 and hp >= 4)
+	var wants_back: bool = ("sniper" in kws) \
+		or String(cd.get("passive", "")) == "trebuchet_volley" \
+		or (atk == 0 and not ("guardian" in kws))
+	var front_free: Array = []
+	var back_free: Array = []
+	for lane in range(combat.LANES_PER_ROW):
+		if combat._row_array(false, combat.ROW_FRONT)[lane] == null: front_free.append(lane)
+		if combat._row_array(false, combat.ROW_BACK)[lane] == null: back_free.append(lane)
+	if wants_back and back_free.size() > 0:
+		var pick_b: int = back_free[0]
+		for l in back_free:   # prefer sheltering behind a held front lane
+			if combat._row_array(false, combat.ROW_FRONT)[l] != null:
+				pick_b = l
+				break
+		return combat._slot_array(false, combat.ROW_BACK)[pick_b]
+	if front_free.size() > 0:
+		var pick: int = front_free[0]
+		if is_wall:
+			var best_t := -1
+			for l in front_free:
+				var t := _lane_threat(l)
+				if t > best_t: best_t = t; pick = l
+		else:
+			var best_s := -999
+			for l in front_free:
+				var e = combat._row_array(true, combat.ROW_FRONT)[l]
+				var s := 0
+				if e != null and is_instance_valid(e):
+					if int(e.current_hp) <= atk: s = 100 + e.effective_atk()   # trade up
+					else: s = _lane_threat(l) - int(e.current_hp)              # block value
+				else:
+					s = 50   # open road to the face
+				if s > best_s: best_s = s; pick = l
+		return combat._slot_array(false, combat.ROW_FRONT)[pick]
+	if back_free.size() > 0:
+		return combat._slot_array(false, combat.ROW_BACK)[back_free[0]]
 	return null
+
+
+func _lane_threat(lane: int) -> int:
+	var t := 0
+	for row in [combat.ROW_FRONT, combat.ROW_BACK]:
+		var e = combat._row_array(true, row)[lane]
+		if e != null and is_instance_valid(e):
+			t += e.effective_atk()
+	return t
 
 
 func _teardown() -> void:

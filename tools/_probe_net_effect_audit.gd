@@ -25,6 +25,7 @@ const BROKEN_ON_DEATH := {
 	"debuff_all_player_atk": "was_enemy-gated: only fires for an enemy death",
 }
 const BROKEN_ON_PLAY := {
+	"fetch_spell": "reads the caster's discard pile (host-only; client no-op)",
 	"scry": "host-only picker (client no-op)",
 	"reorder_deck": "host-only picker (client no-op)",
 	"filter_draw": "host-only picker (client no-op)",

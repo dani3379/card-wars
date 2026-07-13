@@ -106,10 +106,12 @@ func _test_haul_moves_and_damages() -> void:
 func _test_vanguard_front_buff() -> void:
 	_clear_all()
 	var p = _place(2, 3, 0, false, combat.ROW_FRONT)
-	var atk0 := int(p.current_atk)
+	# 2026-07-09 duration pass moved this to temp_atk_buff ("this round") —
+	# read it through effective_atk(), the canonical live-ATK accessor.
+	var atk0 := int(p.effective_atk())
 	p.card_data["on_play"] = {"type": "vanguard_split", "value": 2}
 	await combat._resolve_on_play_ability(p, 0, false)
-	_assert("vanguard_split FRONT: +value ATK", int(p.current_atk) == atk0 + 2)
+	_assert("vanguard_split FRONT: +value ATK (this round)", int(p.effective_atk()) == atk0 + 2)
 
 
 func _test_vanguard_back_draw() -> void:

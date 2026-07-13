@@ -29,7 +29,13 @@ func build_deck(seed_val: int = 0) -> Array:
 	rng.seed = seed_val if seed_val != 0 else (int(Time.get_unix_time_from_system()) ^ randi())
 	var creatures: Array = []
 	var spells: Array = []
-	for id in SkirmishState.skirmish_legal_pool():
+	var legal_pool := SkirmishState.skirmish_legal_pool()
+	var source_pool := SkirmishState.deal_weighted_cards(legal_pool,
+		mini(legal_pool.size(), SkirmishState.DECK_TARGET * 3), rng,
+		SkirmishState.SKIRMISH_DRAFT_WEIGHTS)
+	if source_pool.size() < SkirmishState.DECK_TARGET:
+		source_pool = legal_pool
+	for id in source_pool:
 		var d := CardDB.get_card_data(id)
 		if int(d.get("cost", 99)) > 4:
 			continue

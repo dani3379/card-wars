@@ -66,6 +66,17 @@ project.godot~*
 tools/detail_redesign/
 tools/_textshot/
 tools/_kwprev_*
+tools/card_mockups/
+tools/field_study/
+tools/renders/
+tools/screen_mockups/
+tools/_card_dump.txt
+
+# External-tool probe logs + scratch dumped at repo root (regenerated per run)
+/_codex_*
+/scratch_combat_err.txt
+# Stray self-contained-mode engine userdata dir
+/Godot/
 # Orphan import sidecars for already-ignored screenshot PNGs
 _shot_*.png.import
 # Debug zoom crops (scratch, same family as _shot_*)

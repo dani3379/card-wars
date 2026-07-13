@@ -40,9 +40,13 @@ var _fps_cap_option: OptionButton
 var _colorblind_option: OptionButton
 var _ui_scale_option: OptionButton
 var _render_scale_option: OptionButton
+var _adaptive_render_toggle: Button
 var _graphics_preset_option: OptionButton
 var _gpu_info_label: Label
 var _particles_toggle: Button
+var _screen_shake_toggle: Button
+var _reduce_motion_toggle: Button
+var _combat_telegraph_toggle: Button
 var _brightness_slider: HSlider
 var _brightness_pct: Label
 var _anim_speed_option: OptionButton
@@ -205,6 +209,8 @@ func _build_overlay() -> void:
 		UserSettings.set_music_volume(v); _music_pct.text = "%d%%" % int(v * 100))
 	_sfx_slider.value_changed.connect(func(v: float):
 		UserSettings.set_sfx_volume(v); _sfx_pct.text = "%d%%" % int(v * 100))
+	_add_toggle_row(left_col, "Mute on Focus Loss", UserSettings.mute_on_focus_loss,
+		func(v: bool): UserSettings.set_mute_on_focus_loss(v))
 
 	_add_fancy_divider(left_col)
 
@@ -215,15 +221,10 @@ func _build_overlay() -> void:
 	_add_tooltip_delay_row(left_col)
 	_add_toggle_row(left_col, "End-Turn Warning", UserSettings.end_turn_warning,
 		func(v: bool): UserSettings.set_end_turn_warning(v))
-
-	_add_fancy_divider(left_col)
-
-	_add_section_label(left_col, "ACCESSIBILITY")
-	_add_spacer(left_col, 4)
-
-	_add_toggle_row(left_col, "Reduce Motion", UserSettings.reduce_motion,
-		func(v: bool): UserSettings.set_reduce_motion(v))
-	_add_colorblind_row(left_col)
+	_combat_telegraph_toggle = _add_toggle_row(left_col, "Attack Preview",
+		UserSettings.combat_telegraph,
+		func(v: bool): UserSettings.set_combat_telegraph(v))
+	_add_reset_tutorials_row(left_col)
 
 	# ── RIGHT COLUMN: Display ──
 	_add_section_label(right_col, "DISPLAY")
@@ -236,16 +237,33 @@ func _build_overlay() -> void:
 	_add_fps_cap_row(right_col)
 	_add_ui_scale_row(right_col)
 	_add_render_scale_row(right_col)
+	_adaptive_render_toggle = _add_toggle_row(right_col, "Adaptive Combat",
+		UserSettings.adaptive_render_scale,
+		func(v: bool): UserSettings.set_adaptive_render_scale(v))
+	_sync_adaptive_render_toggle()
 	_add_brightness_row(right_col)
-	_add_toggle_row(right_col, "Screen Shake", UserSettings.screen_shake,
-		func(v: bool): UserSettings.set_screen_shake(v))
 	_particles_toggle = _add_toggle_row(right_col, "Particles", UserSettings.particles,
 		func(v: bool):
 			UserSettings.set_particles(v)  # flips preset → custom
 			_sync_graphics_preset_dropdown()
 			_refresh_gpu_info_label())
-	_add_toggle_row(right_col, "Mute on Focus Loss", UserSettings.mute_on_focus_loss,
-		func(v: bool): UserSettings.set_mute_on_focus_loss(v))
+	_add_fancy_divider(right_col)
+
+	_add_section_label(right_col, "ACCESSIBILITY")
+	_add_spacer(right_col, 4)
+
+	_reduce_motion_toggle = _add_toggle_row(right_col, "Reduce Motion",
+		UserSettings.reduce_motion,
+		func(v: bool):
+			UserSettings.set_reduce_motion(v)
+			_sync_motion_dependent_toggles()
+			_refresh_graphics_controls()
+			_refresh_gpu_info_label())
+	_screen_shake_toggle = _add_toggle_row(right_col, "Screen Shake",
+		UserSettings.screen_shake,
+		func(v: bool): UserSettings.set_screen_shake(v))
+	_add_colorblind_row(right_col)
+	_sync_motion_dependent_toggles()
 
 	_add_fancy_divider(vbox)
 
@@ -287,6 +305,7 @@ func _rebuild_system_row() -> void:
 	if _system_row == null:
 		return
 	for child in _system_row.get_children():
+		_system_row.remove_child(child)
 		child.queue_free()
 
 	# An online / practice Skirmish has no campaign run to save or abandon — the
@@ -791,7 +810,8 @@ func _add_render_scale_row(parent: VBoxContainer) -> void:
 	_render_scale_option.item_selected.connect(func(idx: int):
 		UserSettings.set_render_scale(rscales[idx])  # flips preset → custom
 		_sync_graphics_preset_dropdown()
-		_refresh_gpu_info_label())
+		_refresh_gpu_info_label()
+		_sync_adaptive_render_toggle())
 	row.add_child(_render_scale_option)
 	parent.add_child(row)
 
@@ -887,7 +907,19 @@ func _refresh_graphics_controls() -> void:
 		_particles_toggle.button_pressed = UserSettings.particles
 		_particles_toggle.text = "ON" if UserSettings.particles else "OFF"
 		_style_toggle(_particles_toggle, UserSettings.particles)
+	_sync_adaptive_render_toggle()
 	_sync_graphics_preset_dropdown()
+
+
+func _sync_adaptive_render_toggle() -> void:
+	if _adaptive_render_toggle == null or not is_instance_valid(_adaptive_render_toggle):
+		return
+	_sync_toggle_button(_adaptive_render_toggle, UserSettings.adaptive_render_scale)
+	_adaptive_render_toggle.disabled = UserSettings.render_scale <= 1.001
+	_adaptive_render_toggle.tooltip_text = (
+		"Requires supersampling above native." if _adaptive_render_toggle.disabled
+		else "Temporarily lowers supersampling during sustained combat frame drops. " \
+			+ "Menus retain your selected quality.")
 
 
 func _add_brightness_row(parent: VBoxContainer) -> void:
@@ -970,6 +1002,26 @@ func _add_tooltip_delay_row(parent: VBoxContainer) -> void:
 	_tooltip_delay_slider.value_changed.connect(func(v: float):
 		UserSettings.set_tooltip_delay(v)
 		_tooltip_delay_pct.text = "%dms" % int(v * 1000))
+
+	_add_row_pad(row)
+	parent.add_child(row)
+
+
+func _add_reset_tutorials_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_add_row_pad(row)
+
+	var lbl := _make_row_label("Tutorial Tips", 160)
+	row.add_child(lbl)
+
+	var btn := GameTheme.make_themed_button("RESET",
+		Color(0.34, 0.22, 0.10), Vector2(120, 30), 14,
+		"Show first-time combat tips again.")
+	btn.pressed.connect(func():
+		UserSettings.reset_tutorials()
+		GameTheme.claim_pop(btn))
+	row.add_child(btn)
 
 	_add_row_pad(row)
 	parent.add_child(row)
@@ -1067,6 +1119,10 @@ func _style_toggle(btn: Button, is_on: bool) -> void:
 	btn.add_theme_stylebox_override("hover", hover)
 	btn.add_theme_stylebox_override("hover_pressed", hover)
 	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	var disabled := normal.duplicate() as StyleBoxFlat
+	disabled.bg_color = Color(0.11, 0.095, 0.08, 0.72)
+	disabled.border_color = Color(0.28, 0.24, 0.18, 0.50)
+	btn.add_theme_stylebox_override("disabled", disabled)
 
 	if GameTheme.font_body:
 		btn.add_theme_font_override("font", GameTheme.font_body)
@@ -1074,6 +1130,28 @@ func _style_toggle(btn: Button, is_on: bool) -> void:
 	btn.add_theme_color_override("font_color", text_color)
 	btn.add_theme_color_override("font_hover_color", text_color.lightened(0.2))
 	btn.add_theme_color_override("font_pressed_color", text_color)
+	btn.add_theme_color_override("font_disabled_color", Color(0.46, 0.42, 0.36))
+
+
+func _sync_toggle_button(btn: Button, is_on: bool) -> void:
+	if btn == null or not is_instance_valid(btn):
+		return
+	btn.set_pressed_no_signal(is_on)
+	btn.text = "ON" if is_on else "OFF"
+	_style_toggle(btn, is_on)
+
+
+func _sync_motion_dependent_toggles() -> void:
+	var quiet := UserSettings != null and UserSettings.reduce_motion
+	_sync_toggle_button(_reduce_motion_toggle, UserSettings.reduce_motion)
+	_sync_toggle_button(_screen_shake_toggle, UserSettings.screen_shake)
+	_sync_toggle_button(_particles_toggle, UserSettings.particles)
+	if _screen_shake_toggle != null and is_instance_valid(_screen_shake_toggle):
+		_screen_shake_toggle.disabled = quiet
+		_screen_shake_toggle.tooltip_text = "Reduce Motion is on." if quiet else ""
+	if _particles_toggle != null and is_instance_valid(_particles_toggle):
+		_particles_toggle.disabled = quiet
+		_particles_toggle.tooltip_text = "Reduce Motion is on." if quiet else ""
 
 
 # ═══════════════════════════════════════════════════
@@ -1185,6 +1263,8 @@ func _open() -> void:
 	# first-boot auto-config, or a preset applied on a previous open).
 	_refresh_graphics_controls()
 	_refresh_gpu_info_label()
+	_sync_motion_dependent_toggles()
+	_sync_toggle_button(_combat_telegraph_toggle, UserSettings.combat_telegraph)
 
 	_master_slider.value = UserSettings.master_volume
 	_music_slider.value = UserSettings.music_volume
