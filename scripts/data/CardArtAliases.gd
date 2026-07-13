@@ -50,11 +50,6 @@ const ALIASES: Dictionary = {
 	"grave_clutch":         "corpse_eater",
 	"pressed_man":          "militia",
 	"the_undying":          "vengeful_spirit",
-	"blood_kin":            "pikeman",       # rank-and-file kin
-	"pit_brawler":          "sellsword",     # a brawling merc
-	"farmers_son":          "wolf_c",        # the moon side of him
-	"whisper_widow":        "the_crone",     # hooded widow
-	"quartermaster":        "hall_watcher",  # the armored official
 	# Placeholder rescues — these had NO alias and rendered a blank gradient.
 	"carrion_priest":       "risen_lich",   # Carrion Priest — undead death-priest
 	"gravecaller":          "hall_watcher",  # Oathkeeper — armored oath-knight (own art, not Paladin's)
@@ -681,9 +676,6 @@ const SPELL_ALIASES: Dictionary = {
 	"wolf_pits": "ambush",             # death waiting under cover
 	"informer": "inspire",             # Turncoat's bought-man painting, reshared
 	"forgefire": "scrap",              # orphaned smith-pile painting
-	"grand_melee": "charge_spell",     # the whole line surges
-	"giantfall": "smite_spell",        # one great blow from above
-	"great_bombard": "cataclysm",      # the field erupts
 }
 
 

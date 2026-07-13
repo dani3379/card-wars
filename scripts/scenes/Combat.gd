@@ -1717,29 +1717,6 @@ func _desert_enemy_to_player(target: Control) -> bool:
 	return true
 
 
-## Pit Brawler (HS Grim Patron): a struck, surviving brawler calls a FRESH copy
-## into an open adjacent seat. The copy carries the passive, so a line of
-## brawlers under enemy fire multiplies — capped by open seats and its own HP.
-func _pit_brawler_split(brawler: Control) -> void:
-	if _is_net() or brawler == null or not is_instance_valid(brawler):
-		return
-	if brawler.is_opponent:
-		return
-	var seats: Array = _adjacent_empty_seats(false, brawler.current_row, brawler.current_lane)
-	if seats.is_empty():
-		return
-	var seat: Dictionary = seats[0]
-	var data: Dictionary = CardDB.get_card_data("pit_brawler").duplicate(true)
-	if bool(brawler.card_data.get("is_upgraded", false)):
-		data = RunState._apply_plus_upgrade(data)
-	var copy = _spawn_player_body(data, seat.lane, seat.row,
-		int(data.get("atk", 1)), int(data.get("hp", 4)))
-	_play_landing_pop(copy)
-	spawn_trigger_callout(_card_center(brawler) + Vector2(0, -14), "ANOTHER JOINS", false)
-	_log_event("%s roars — another brawler jumps into the pit." % _log_card_ref(brawler),
-		_log_data(brawler), _log_side(brawler))
-
-
 func _deck_is_highlander() -> bool:
 	# The Long Roll: true when no two cards in the RUN deck share an id (ids
 	# map 1:1 to names). The fight's piles are the same list shuffled, and
@@ -1786,11 +1763,6 @@ func _untargeted_random_spell_can_resolve(data: Dictionary) -> bool:
 			return not _enemy_deck.is_empty() or not _reinforcement.is_empty()
 		"informer":
 			return not _enemy_deck.is_empty()
-		"grand_melee":
-			# The X-cost is the whole point — 0 Command means a 0-damage cast.
-			return player_mana > 0 and not _all_enemy_creatures().is_empty()
-		"giantfall":
-			return not _all_enemy_creatures().is_empty()
 		"forgefire":
 			for fg_c in _hand:
 				if is_instance_valid(fg_c) and String(fg_c.card_data.get("id", "")) != "forgefire" \
@@ -2498,51 +2470,6 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 							t2.state.stunned = true
 							if t2.has_method("_spawn_keyword_chip"):
 								t2._spawn_keyword_chip("STUNNED", Color(0.85, 0.78, 0.45))
-			"muster_kin":
-				# Blood Kin (Gwent Muster): every other copy still in the draw
-				# pile charges to the hand at a discount — dupe-drafting's payoff,
-				# the honest opposite of The Long Roll's highlander.
-				if not is_enemy:
-					var mk_id: String = String(card.card_data.get("id", ""))
-					var mk_n := 0
-					var mk_i := 0
-					while mk_i < _player_draw_pile.size():
-						if _entry_id(_player_draw_pile[mk_i]) == mk_id \
-								and _hand.size() < MAX_HAND_SIZE:
-							var mk_entry: String = _player_draw_pile[mk_i]
-							_player_draw_pile.remove_at(mk_i)
-							_draw_card(mk_entry)
-							var mk_kin = _hand[_hand.size() - 1] if not _hand.is_empty() else null
-							if mk_kin != null and is_instance_valid(mk_kin) \
-									and mk_kin.card_id == mk_id:
-								mk_kin.card_data["cost"] = maxi(0,
-									int(mk_kin.card_data.get("cost", 0)) - 1)
-							mk_n += 1
-						else:
-							mk_i += 1
-					if mk_n > 0:
-						_show_info("%d Blood Kin answer the call." % mk_n)
-						_log_event("The kin answer — [color=#f2e6c8]%d[/color] charge from the draw pile." % mk_n)
-						_refresh_hand_affordability()
-			"hand_discount":
-				# The Quartermaster (HS Emperor Thaurissan): everything currently
-				# held is requisitioned cheaper — permanent for this fight. Cards
-				# drawn later pay full price.
-				if not is_enemy:
-					var qd_v: int = int(floop_data.get("value", 1))
-					var qd_n := 0
-					for qd_c in _hand:
-						if not is_instance_valid(qd_c) or CardDB.is_curse(qd_c.card_id):
-							continue
-						if int(qd_c.card_data.get("cost", 0)) <= 0:
-							continue
-						qd_c.card_data["cost"] = maxi(0,
-							int(qd_c.card_data.get("cost", 0)) - qd_v)
-						qd_n += 1
-					if qd_n > 0:
-						_show_info("The quartermaster requisitions — %d cards cost %d less." % [qd_n, qd_v])
-						_log_event("The quartermaster's ledger opens — [color=#f2e6c8]%d[/color] held cards cost %d less this fight." % [qd_n, qd_v])
-						_refresh_hand_affordability()
 			"vanguard_split":
 				# Vanguard: placement is the decision. Played to the FRONT row it
 				# gains +value ATK for the round; played to the BACK row it draws a
@@ -3752,10 +3679,6 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 	if atk > 0:
 		_apply_struck_survivor_passives(defender, attacker_is_enemy)
 
-	# Pit Brawler: a struck survivor calls a fresh copy into an adjacent seat.
-	if defender.current_hp > 0 and defender.card_data.get("passive", "") == "pit_brawler" and atk > 0:
-		_pit_brawler_split(defender)
-
 	# Bodkin Points: every killing blow by a player creature punches through the
 	# column, as if Piercing (rides the same overflow machinery + callout).
 	if defender.current_hp <= 0 and (attacker.has_keyword("piercing") or (attacker_is_enemy and _has_encounter_passive_keyword(attacker, "piercing")) or attacker.get_meta("inspire_piercing", false) or (not attacker_is_enemy and _has_relic("piercing_crown"))):
@@ -4161,9 +4084,6 @@ func _sniper_fire(card: Control, lane_idx: int, is_enemy: bool) -> void:
 			target.update_stat_display()
 		if is_instance_valid(target) and target.current_hp > 0 and atk > 0:
 			_apply_struck_survivor_passives(target, is_enemy)
-		if is_instance_valid(target) and target.current_hp > 0 \
-				and target.card_data.get("passive", "") == "pit_brawler" and atk > 0:
-			_pit_brawler_split(target)
 		if killed and (card.has_keyword("piercing") or (is_enemy and _has_encounter_passive_keyword(card, "piercing")) or card.get_meta("inspire_piercing", false) or (not is_enemy and _has_relic("piercing_crown"))):
 			_apply_piercing_overflow(card, target, target_lane, is_enemy, t_pos)
 		_apply_combat_strike_riders(card, shot_dmg, killed, is_enemy)
@@ -4594,41 +4514,6 @@ func _has_passive_on_field(passive_name: String) -> bool:
 ## state-derived type_buff path 2026-07-10.)
 func _apply_start_round_passives(owner_is_enemy: bool) -> void:
 	var mine: Array = _all_friendly(owner_is_enemy)
-	# The Farmer's Son (moon_flip): round parity turns the moon — ATK swings
-	# between the printed 1 and 4 (5 forged). Applied as a RELATIVE delta so
-	# drummer auras and permanent gains survive the flip.
-	for _mf in mine:
-		if not is_instance_valid(_mf) or _mf.card_data.get("passive", "") != "moon_flip":
-			continue
-		var mf_delta: int = 4 if bool(_mf.card_data.get("is_upgraded", false)) else 3
-		if bool(_mf.get_meta("moon_high", false)):
-			_mf.current_atk = maxi(0, _mf.current_atk - mf_delta)
-			_mf.set_meta("moon_high", false)
-			log_status(_mf, "the moon wanes — a farmhand again")
-		else:
-			_mf.current_atk += mf_delta
-			_mf.set_meta("moon_high", true)
-			log_status(_mf, "the moon takes him")
-		_mf.update_stat_display()
-	# The Great Bombard: player-cast fuses tick at the start of the PLAYER's
-	# round; at zero the shot lands on every enemy creature. Solo-only card.
-	if not owner_is_enemy and not _bombard_fuses.is_empty():
-		var bf_i := 0
-		while bf_i < _bombard_fuses.size():
-			var fuse: Dictionary = _bombard_fuses[bf_i]
-			fuse["left"] = int(fuse.get("left", 1)) - 1
-			if int(fuse["left"]) <= 0:
-				_bombard_fuses.remove_at(bf_i)
-				var bf_dmg: int = int(fuse.get("dmg", 10))
-				screen_shake(10.0)
-				if AudioBank != null:
-					AudioBank.play_sfx("spell_cast", 0.04, 3.0, 0.6)
-				_show_info("The great bombard fires!")
-				_log_event("The great bombard fires — [color=#f2e6c8]%d[/color] damage across the enemy line." % bf_dmg)
-				for bf_e in _all_enemy_creatures():
-					bf_e.take_damage(bf_dmg)
-			else:
-				bf_i += 1
 	for _rf in mine:
 		if _rf.card_data.get("passive", "") == "riteforge_ramp":
 			var rf_gain: int = 2 if bool(_rf.card_data.get("is_upgraded", false)) else 1
@@ -4762,11 +4647,6 @@ func _apply_play_time_passives(card: Control, owner_is_enemy: bool) -> void:
 			_net_fx_text(card, "+%d/+%d" % [ok_fallen, ok_fallen], Color(1.0, 0.84, 0.35))
 	# Hexblade (atk_per_spell) scales THIS ROUND only now (temp_atk_buff, applied
 	# per cast in the spell hook) — no fight-long catch-up on a late entrance.
-	if card.card_data.get("passive", "") == "warchief_aura":
-		card.current_atk = 2 + maxi(0, _all_friendly(owner_is_enemy).size() - 1)
-		if bool(card.card_data.get("is_upgraded", false)):
-			card.current_atk += 1
-		card.update_stat_display()
 	# Paladin (paladin_rally): wire its Last Stand moment to the rally handler,
 	# owner-side bound (Card2D emits last_stand_fired when Last Stand saves it).
 	if card.card_data.get("passive", "") == "paladin_rally" and card.has_signal("last_stand_fired"):
@@ -5520,9 +5400,6 @@ var _poisoned_rations_fired: bool = false
 # Wolf-Pits spell: pending trap charges — each entry is the damage one arrival
 # takes as it lands. Casts stack (two pits per cast, FIFO).
 var _pit_traps: Array[int] = []
-# The Great Bombard: lit fuses — {left: rounds until it fires, dmg: the shot}.
-# Ticked at the start of the player's round in _apply_start_round_passives.
-var _bombard_fuses: Array[Dictionary] = []
 
 func _place_enemy_card(data: Dictionary, lane_idx: int, row: int = ROW_FRONT,
 		arc_in: bool = false) -> void:
@@ -7366,40 +7243,6 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				_show_info("The forge breathes — %d cards take their +." % ff_hits)
 				_log_event("Forgefire: [color=#f2e6c8]%d[/color] cards in hand are forged for this fight." % ff_hits)
 				_refresh_hand_affordability()
-		"grand_melee":
-			# StS Whirlwind, the X-cost: the card costs 0 — its price is EVERY
-			# point of Command you still hold, 1 AoE damage per point (forged:
-			# the enemy face bleeds the same). The gate blocks a 0-point cast.
-			var gm_pts: int = player_mana
-			player_mana = 0
-			if gm_pts > 0:
-				_pulse_mana_label(gm_pts)
-				for gm_e in _all_enemy_creatures():
-					gm_e.take_damage(gm_pts)
-				if is_plus:
-					damage_enemy_hero(gm_pts)
-				_log_event("Grand melee — every point of Command spends itself: [color=#f2e6c8]%d[/color] damage across the line." % gm_pts)
-				_update_hud()
-		"giantfall":
-			# Gwent Scorch: the tallest head comes off. Deterministic — the
-			# highest effective ATK on the enemy side dies outright (its
-			# On-Death fires; that is the Gwent rule too).
-			var gf_best: Control = null
-			for gf_e in _all_enemy_creatures():
-				if not is_instance_valid(gf_e):
-					continue
-				if gf_best == null or gf_e.effective_atk() > gf_best.effective_atk():
-					gf_best = gf_e
-			if gf_best != null:
-				_log_event("Giantfall — %s is cut down." % _log_card_ref(gf_best),
-					_log_data(gf_best), _log_side(gf_best))
-				gf_best.take_damage(999)
-		"great_bombard":
-			# StS The Bomb as a siege gun: a 2-round fuse, then the whole enemy
-			# line takes the shot. Fuses tick in _apply_start_round_passives.
-			_bombard_fuses.append({"left": 2, "dmg": 10 + plus_dmg})
-			_show_info("The great bombard is loaded — it fires in 2 rounds.")
-			_log_event("The great bombard is loaded and laid — [color=#f2e6c8]%d[/color] damage, 2 rounds out." % (10 + plus_dmg))
 		"coin":
 			# The Coin (going-second compensation). Solo never grants it, but keep a
 			# resolver arm so it's never a dead card if a future effect hands it over.
@@ -18803,10 +18646,6 @@ func _forecast_creature_impact(attacker: Control, target: Control, base_atk: int
 			hit_gain = 3 if bool(target.card_data.get("is_upgraded", false)) else 2
 		if hit_gain > 0:
 			text += "\nGAINS +%d ATK" % hit_gain
-		if target.card_data.get("passive", "") == "pit_brawler" and not _is_net() \
-				and not target.is_opponent \
-				and not _adjacent_empty_seats(false, target.current_row, target.current_lane).is_empty():
-			text += "\nSPAWNS ANOTHER BRAWLER"
 	var counter_gain := hit_gain
 	if bool(state.get("shield_break", false)) \
 			and target.card_data.get("passive", "") == "shield_rage":
@@ -18990,14 +18829,13 @@ func _forecast_return_outcome(defender: Control, attacker: Control,
 	if defender.current_hp <= 0:
 		return {"text": "", "survives": true}
 	var defender_is_friendly: bool = attacker_is_enemy
-	var has_thorns: bool = not bool(attacker.card_data.get("unstoppable", false)) \
-		and (defender.has_keyword("thorns") \
+	var has_thorns: bool = defender.has_keyword("thorns") \
 		or (not attacker_is_enemy and _has_encounter_passive_keyword(defender, "thorns")) \
 		or bool(defender.get_meta("shield_wall_thorns", false)) \
 		or (defender_is_friendly and _has_relic("bridge_watcher") \
 			and defender.current_lane in [1, 2]) \
 		or (defender_is_friendly and _has_relic("corner_stone") \
-			and defender.current_lane in [0, LANES_PER_ROW - 1]))
+			and defender.current_lane in [0, LANES_PER_ROW - 1])
 	var will_counter: bool = kind == "standard" and _is_net() and _net_active_index >= 0 \
 		and _defender_will_counter(defender)
 	if not has_thorns and not will_counter and extra_bypass <= 0:

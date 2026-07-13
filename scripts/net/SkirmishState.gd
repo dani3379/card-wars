@@ -91,9 +91,6 @@ const SKIRMISH_DENYLIST: Array[String] = [
 	# mutates hand-local card data the host can't rebuild for the client.
 	# (Grave Clutch stays net-legal — a plain on-death summon, same as Husk.)
 	"pressed_man", "the_undying", "long_roll", "wolf_pits", "informer", "forgefire",
-	# (Wave 2 of the same slate — grand_melee / giantfall / blood_kin /
-	# pit_brawler / farmers_son / great_bombard / whisper_widow / quartermaster —
-	# was REVERTED from CardDB 2026-07-13; its denylist entries left with it.)
 	# Anvil archetype (2026-07-13): the struck-survivor passives (strike_burn /
 	# anvil_heal / anvil_spawn / bulwark_lord) + endure_grow fire only in the solo
 	# combat paths so far — no net mirror at the struck-and-survives hook yet.
