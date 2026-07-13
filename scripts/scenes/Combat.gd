@@ -9,6 +9,11 @@ const REWARD_SCENE = "res://scenes/reward.tscn"
 const GAMEOVER_SCENE = "res://scenes/game_over.tscn"
 const MAP_SCENE = "res://scenes/map.tscn"
 
+# Board painters (scripts/ui/painters/, extracted 2026-07-14): the war-chart
+# station brackets + the inked table surface. Names match the old inner classes.
+const StationMark := preload("res://scripts/ui/painters/StationMark.gd")
+const TablePlate := preload("res://scripts/ui/painters/TablePlate.gd")
+
 enum Phase { PLAYER_TURN, RESOLVING, GAME_OVER }
 var phase := Phase.PLAYER_TURN
 var round_number := 0
@@ -11818,179 +11823,6 @@ func _summon_enemy_token_with_keyword(atk: int, hp: int, keyword: String) -> voi
 #  BOARD LAYOUT
 # =====================================================================
 
-## A unit station drawn ON the war chart: corner brackets, a hairline
-## rule, a faint ownership wash, and a small center cross — positions
-## marked on the map, not holes carved into it. Replaces the old full-size
-## dark wells, which covered nearly the whole table and turned the board
-## into 16 voids. The drawn marks stay quiet when empty and disappear
-## behind a creature when filled; Highlight/ContactShadow/Cell (the slot's
-## behavioral children) are untouched.
-class StationMark extends Control:
-	var warm := true       # enemy half (warm) vs player half (cool) wash
-	var strong := true     # front row reads stronger than back
-
-	func _ready() -> void:
-		mouse_filter = Control.MOUSE_FILTER_IGNORE
-
-	func _draw() -> void:
-		if size.x < 20.0 or size.y < 20.0:
-			return
-		# Front and back rows now read as TWO DISTINCT station kinds rather than
-		# the same mark at two opacities — the old back-row a_mul=0.62 just made
-		# the rear line fade into the dark table. Front = a solid mustered post
-		# (filled bracket corners, full wash, survey cross). Back = a reserve
-		# bay drawn the same strength but as a dashed inset frame, so it reads as
-		# "staging ground, not the firing line" by SHAPE, not by faintness.
-		# Both are emphatic enough to parse the whole 4×4 grid before a fight.
-		var wash := Color(0.52, 0.15, 0.10, 0.20) if warm \
-			else Color(0.14, 0.27, 0.48, 0.20)
-		var ink := Color(0.84, 0.68, 0.40)   # gilt rule ink
-		draw_rect(Rect2(Vector2(3, 3), size - Vector2(6, 6)), wash, true)
-		# Hairline inset rule — the station footprint.
-		draw_rect(Rect2(Vector2(3.5, 3.5), size - Vector2(7, 7)),
-			Color(ink.r, ink.g, ink.b, 0.35), false, 1.0, true)
-		if strong:
-			# FRONT — corner brackets, the drawn firing-line post.
-			var bk := Color(ink.r, ink.g, ink.b, 0.85)
-			var L := 17.0
-			for cx in [0.0, 1.0]:
-				for cy in [0.0, 1.0]:
-					var corner := Vector2(cx * size.x, cy * size.y)
-					var dx := 1.0 if cx == 0.0 else -1.0
-					var dy := 1.0 if cy == 0.0 else -1.0
-					draw_line(corner + Vector2(0, dy * 1.5),
-						corner + Vector2(dx * L, dy * 1.5), bk, 2.5, true)
-					draw_line(corner + Vector2(dx * 1.5, 0),
-						corner + Vector2(dx * 1.5, dy * L), bk, 2.5, true)
-			# Survey cross — where this unit will stand.
-			var c := size * 0.5
-			var fc := Color(ink.r, ink.g, ink.b, 0.30)
-			draw_line(c - Vector2(9, 0), c + Vector2(9, 0), fc, 1.5, true)
-			draw_line(c - Vector2(0, 9), c + Vector2(0, 9), fc, 1.5, true)
-		else:
-			# BACK — a dashed reserve bay. Same ink weight as the front so it
-			# stays legible, but the broken line says "staging, not line".
-			var dash := Color(ink.r, ink.g, ink.b, 0.55)
-			var rect := Rect2(Vector2(7, 7), size - Vector2(14, 14))
-			var step := 11.0
-			# Top + bottom dashed edges.
-			var x := rect.position.x
-			while x < rect.end.x:
-				var x2: float = minf(x + 6.0, rect.end.x)
-				draw_line(Vector2(x, rect.position.y), Vector2(x2, rect.position.y), dash, 1.5, true)
-				draw_line(Vector2(x, rect.end.y), Vector2(x2, rect.end.y), dash, 1.5, true)
-				x += step
-			# Left + right dashed edges.
-			var y := rect.position.y
-			while y < rect.end.y:
-				var y2: float = minf(y + 6.0, rect.end.y)
-				draw_line(Vector2(rect.position.x, y), Vector2(rect.position.x, y2), dash, 1.5, true)
-				draw_line(Vector2(rect.end.x, y), Vector2(rect.end.x, y2), dash, 1.5, true)
-				y += step
-
-
-## The war-table surface: a faded campaign chart inked straight onto the
-## scorched table the battle is fought across — a double-ruled coast with
-## sea hatching, dashed march routes, site rings, a compass, cup stains,
-## and the burn creeping in along the clash band and the edges (heavier in
-## later acts: the war eats the map). Seeded per encounter+act, so every
-## fight's table is its own document but stable across rebuilds. Drawn
-## once; static — sits between the dark substrate and the lane tracks.
-class TablePlate extends Control:
-	var seed_text := "table"
-	var act := 1
-
-	func _ready() -> void:
-		mouse_filter = Control.MOUSE_FILTER_IGNORE
-
-	func _coast_y(t: float, y0: float, amp: float, ph1: float, ph2: float) -> float:
-		return y0 + sin(t * 4.2 + ph1) * amp * 0.55 + sin(t * 9.7 + ph2) * amp * 0.30
-
-	func _draw() -> void:
-		if size.x < 80.0 or size.y < 80.0:
-			return
-		var rng := RandomNumberGenerator.new()
-		rng.seed = hash(seed_text)
-		var ink := Color(0.74, 0.58, 0.34)
-		# 1 — the coast: a double-ruled wandering line (the chart idiom).
-		var ph1 := rng.randf() * TAU
-		var ph2 := rng.randf() * TAU
-		var y0 := size.y * (0.30 + rng.randf() * 0.40)
-		var amp := size.y * 0.14
-		var coast := PackedVector2Array()
-		var n := 26
-		for i in range(n + 1):
-			var t := float(i) / float(n)
-			coast.append(Vector2(t * size.x, _coast_y(t, y0, amp, ph1, ph2)))
-		draw_polyline(coast, Color(ink.r, ink.g, ink.b, 0.15), 2.2, true)
-		var coast2 := PackedVector2Array()
-		for p in coast:
-			coast2.append(p + Vector2(0, 6))
-		draw_polyline(coast2, Color(ink.r, ink.g, ink.b, 0.09), 1.1, true)
-		# Sea hatching seaward of the coast.
-		for i in range(26):
-			var t := rng.randf()
-			var hy := _coast_y(t, y0, amp, ph1, ph2) + 12.0 + rng.randf() * 46.0
-			if hy > size.y - 8.0:
-				continue
-			draw_line(Vector2(t * size.x, hy),
-				Vector2(t * size.x + 10.0 + rng.randf() * 8.0, hy),
-				Color(ink.r, ink.g, ink.b, 0.055 + rng.randf() * 0.04), 1.0, true)
-		# 2 — march routes: two dashed tracks wandering across the land.
-		for r in range(2):
-			var ry := size.y * (0.12 + rng.randf() * 0.66)
-			var rph := rng.randf() * TAU
-			var seg_on := true
-			var x := rng.randf() * 40.0
-			while x < size.x - 12.0:
-				var x2 := minf(x + 14.0, size.x - 8.0)
-				if seg_on:
-					var ya := ry + sin(x / size.x * 5.0 + rph) * size.y * 0.05
-					var yb := ry + sin(x2 / size.x * 5.0 + rph) * size.y * 0.05
-					draw_line(Vector2(x, ya), Vector2(x2, yb),
-						Color(ink.r, ink.g, ink.b, 0.115), 1.4, true)
-				seg_on = not seg_on
-				x = x2
-		# 3 — site rings: held positions marked on the chart.
-		for i in range(5):
-			var p := Vector2(rng.randf() * size.x, rng.randf() * size.y)
-			draw_arc(p, 4.0 + rng.randf() * 5.0, 0, TAU, 18,
-				Color(ink.r, ink.g, ink.b, 0.13), 1.2, true)
-			draw_circle(p, 1.2, Color(ink.r, ink.g, ink.b, 0.16), true, -1.0, true)
-		# 4 — compass cross, upper-right quadrant.
-		var cp := Vector2(size.x * (0.74 + rng.randf() * 0.16),
-			size.y * (0.12 + rng.randf() * 0.14))
-		var cr := 16.0 + rng.randf() * 8.0
-		draw_arc(cp, cr, 0, TAU, 26, Color(ink.r, ink.g, ink.b, 0.125), 1.0, true)
-		draw_line(cp + Vector2(0, -cr * 1.45), cp + Vector2(0, cr * 1.45),
-			Color(ink.r, ink.g, ink.b, 0.125), 1.0, true)
-		draw_line(cp + Vector2(-cr * 1.45, 0), cp + Vector2(cr * 1.45, 0),
-			Color(ink.r, ink.g, ink.b, 0.125), 1.0, true)
-		# 5 — cup ring stains: someone set their drink on the orders.
-		for i in range(2):
-			var sp := Vector2(rng.randf() * size.x, rng.randf() * size.y)
-			var a0 := rng.randf() * TAU
-			draw_arc(sp, 13.0 + rng.randf() * 9.0, a0, a0 + TAU * 0.8, 30,
-				Color(0.30, 0.20, 0.10, 0.10), 2.6, true)
-		# 6 — the burn: scorch along the clash band + creeping from the
-		# top/bottom edges; later acts burn hotter.
-		var burn := Color(0.04, 0.02, 0.012)
-		for i in range(7 + act * 3):
-			var bp: Vector2
-			if rng.randf() < 0.55:
-				bp = Vector2(rng.randf() * size.x,
-					size.y * 0.5 + (rng.randf() - 0.5) * size.y * 0.16)
-			else:
-				bp = Vector2(rng.randf() * size.x,
-					size.y * (0.04 + 0.92 * float(rng.randi() % 2)) \
-					+ (rng.randf() - 0.5) * size.y * 0.07)
-			var br := 14.0 + rng.randf() * 34.0
-			draw_circle(bp, br, Color(burn.r, burn.g, burn.b,
-				0.09 + rng.randf() * 0.11), true, -1.0, true)
-			draw_circle(bp, br * 0.55, Color(burn.r, burn.g, burn.b,
-				0.08 + rng.randf() * 0.10), true, -1.0, true)
-
-
 func _build_board() -> void:
 	# Layout strategy (anchor-based, no competing VBox shares):
 	#
@@ -13068,8 +12900,6 @@ func _on_card_destroyed(card: Control) -> void:
 				if ally != card and not ally.card_data.keywords.has(spread_kw):
 					ally.card_data.keywords.append(spread_kw)
 					ally.update_stat_display()
-
-
 
 
 func _nearest_player_slot(screen_pos: Vector2) -> Dictionary:
