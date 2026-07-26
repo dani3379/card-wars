@@ -8,7 +8,44 @@ class_name CardArtAliases
 ## fire 2-3 ResourceLoader.exists() stats.
 
 const ALIASES: Dictionary = {
+	# ── SET-PIECE bodies (2026-07-20) ────────────────────────────────────
+	# Named-action scenarios author their creatures inline (SetPieceDB), so
+	# these resolve by NAME through Card2D._find_card_art's name_id path, not
+	# by card id — the ids are synthetic (`enc_<name>_<counter>`). Stand-in
+	# art until bespoke paintings land; without an entry every body on a
+	# scenario board falls back to the same fire placeholder, which is exactly
+	# how the first shot of The Sunken Road came out.
+	"ditch_raider":         "skirmisher",     # light, fast, in the cut
+	"bank_climber":         "e_brute",        # heavier body coming over the top
+	"road_breaker":         "breaker",        # its own name, its own art
+	"long_knife":           "assassin",
+	"road_agent":           "e_enforcer",     # highwayman muscle
+	"cart_breaker":         "brute",
+	"whistler":             "e_archer",       # the Sniper on the column
+	"wheel_cutter":         "duelist",
+	"paymasters_cart":      "mule",           # the only draught animal in the set
+	"the_bearer":           "doom_knight",    # a dead man still carrying it
+	"fourth_legion_dead":   "e_bone_knight",  # the Fourth, ninety years on
+	"cornicen":             "battle_drummer", # the horn-player of the legion
+	"unpaid_optio":         "ironclad_veteran",
+
 	# ── Player-side near-duplicates ──────────────────────────────────────
+	# Type keystones (2026-07-15) — stand-in art until bespoke paintings land.
+	"bloodmoon_alpha":      "wolf_c",       # pack alpha borrows the distinct wolf
+	"warden_sergeant":      "royal_guard",  # a line-holding sergeant
+	"gravepact":            "corpse_eater", # grim dead, raises wights
+	"coven_mother":         "archmage",     # Warlock keystone — the coven's head
+	"siegewright":          "iron_bastion", # Bastion keystone — a great wall-engine
+	"kingpin":              "sellsword",    # Stray keystone (Free Company Captain) — the crew's boss
+	"deserter":             "skirmisher",   # Stray common — a soldier who ran
+	"sellsword_outrider":   "duelist",      # Stray uncommon — the dancing flanker
+	# Rarity-floor vanillas (2026-07-16) — stand-ins until bespoke art lands.
+	"man_at_arms":          "militia",
+	"war_boar":             "e_bog_lurker",
+	"grave_levy":           "e_bone_knight",
+	"hexwright":            "crow_witch",
+	"curtain_wall":         "hall_watcher",
+	"freelance":            "mirror_knight",
 	"bloodhound":           "hound",
 	"warding_stone":        "stone_sentinel",  # own stone-golem art, not shared iron_bastion
 	"crystal_sentry":       "sentinel",         # armored sentry fits better than a novice
@@ -22,7 +59,6 @@ const ALIASES: Dictionary = {
 	"husk":                 "corpse_eater",
 	"warchief":             "iron_bastion",
 	"mana_sprite":          "sprite",
-	"stone_wall":           "iron_bastion",
 	"ironclad_veteran":     "pikeman",  # Old Campaigner — a soldier with a record
 	"familiar":             "stray_cat",
 	"vengeance":            "vengeful_spirit",
@@ -50,6 +86,18 @@ const ALIASES: Dictionary = {
 	"grave_clutch":         "corpse_eater",
 	"pressed_man":          "militia",
 	"the_undying":          "vengeful_spirit",
+	# 2026-07-16 interest slate.
+	"sword_on_credit":      "sellsword",
+	"crew_mangonel":        "trebuchet",
+	"pay_wagon":            "mule",
+	"pallbearers":          "the_crone",
+	"body_snatcher":        "gravedigger",
+	"scapegoat":            "mule",
+	"understudy":           "sellsword",
+	"drill_serjeant":       "royal_guard",
+	"wheeling_lancer":      "lancer",
+	"rolling_tower":        "siege_golem",
+	"hook_and_chain":       "iron_bastion",
 	# Placeholder rescues — these had NO alias and rendered a blank gradient.
 	"carrion_priest":       "risen_lich",   # Carrion Priest — undead death-priest
 	"gravecaller":          "hall_watcher",  # Oathkeeper — armored oath-knight (own art, not Paladin's)
@@ -480,7 +528,7 @@ static func release_card_art(card_data: Dictionary) -> void:
 	var cid := String(card_data.get("id", ""))
 	var name_id := String(card_data.get("name", "")).to_lower() \
 		.replace(" ", "_").replace("'", "")
-	if String(card_data.get("type", "creature")) == "spell":
+	if String(card_data.get("type", "creature")) in ["spell", "armament"]:
 		_release_spell_art_key(cid)
 		_release_spell_art_key(name_id)
 	else:
@@ -600,7 +648,7 @@ static func prewarm_card_art(card_data: Dictionary) -> Texture2D:
 	var name_id := String(card_data.get("name", "")).to_lower() \
 		.replace(" ", "_").replace("'", "")
 	var tex: Texture2D = null
-	if String(card_data.get("type", "creature")) == "spell":
+	if String(card_data.get("type", "creature")) in ["spell", "armament"]:
 		tex = await prewarm_spell_art(cid)
 		if tex == null and name_id != "":
 			tex = await prewarm_spell_art(name_id)
@@ -676,6 +724,19 @@ const SPELL_ALIASES: Dictionary = {
 	"wolf_pits": "ambush",             # death waiting under cover
 	"informer": "inspire",             # Turncoat's bought-man painting, reshared
 	"forgefire": "scrap",              # orphaned smith-pile painting
+	# 2026-07-16 interest slate.
+	"gallows_writ": "banish",
+	"salted_ground": "ambush",
+	"mentioned_dispatches": "charge_spell",
+	"crossed_orders": "soul_swap",
+	"flanking_order": "reposition",
+	# Armaments use item/action paintings until bespoke equipment art lands.
+	"hooked_pike": "venom_tip",
+	"tower_shield": "shield_wall",
+	"grave_bell": "plague_bell",
+	"witchbrand": "hex",
+	"forked_spear": "cataclysm",
+	"repeating_arbalest": "reposition",
 }
 
 

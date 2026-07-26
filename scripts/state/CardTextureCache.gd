@@ -383,7 +383,14 @@ func bake_battlefield(card_data: Dictionary) -> Texture2D:
 		BATTLEFIELD_TEX_H * BATTLEFIELD_SUPERSAMPLE)
 
 	var card = CARD_SCENE.instantiate()
-	card.card_data = card_data.duplicate(true)
+	var bake_data := card_data.duplicate(true)
+	# Spawn-name prewarms pass art-only dicts ({name, type}) with no stats;
+	# the bake strips stats anyway, but Card2D._ready reads hp/atk directly.
+	if not bake_data.has("hp"):
+		bake_data["hp"] = 1
+	if not bake_data.has("atk"):
+		bake_data["atk"] = 0
+	card.card_data = bake_data
 	card.card_id = card_data.get("id", "")
 	card.is_on_battlefield = true
 	card.compact_mode = true
@@ -417,8 +424,7 @@ func bake_battlefield(card_data: Dictionary) -> Texture2D:
 func bake_battlefield_many(card_datas: Array) -> void:
 	var seen := {}
 	for cd in card_datas:
-		if not (cd is Dictionary) \
-				or String(cd.get("type", "creature")) != "creature":
+		if not (cd is Dictionary) 				or String(cd.get("type", "creature")) != "creature":
 			continue
 		var key := battlefield_cache_key(cd)
 		if seen.has(key):
@@ -434,6 +440,7 @@ func bake_many(card_datas: Array) -> void:
 	# only the cards that are new (rewards picked up since last fight).
 	for cd in card_datas:
 		await bake(cd)
+
 
 
 func clear() -> void:

@@ -138,11 +138,27 @@ func _process(_dt: float) -> void:
 ## Lives on this autoload so leaving the map mid-queue can't kill the coroutine
 ## (the bake simply finishes behind whatever screen comes next).
 var _deck_warm_busy := false
+var _deck_warm_cancel := false
+
+
+## Stand the idle deck warm down — a fight has begun and wants the bake
+## viewport. MEASURED (2026-07-25): CardTextureCache serializes every baker
+## through _bake_busy, so a player who commits to a node WHILE this warm is
+## still baking made the fight's own art prewarm queue behind the remaining
+## deck cards — board-visible went 0.49 s -> 1.61 s and time-to-playable
+## 1.98 s -> 3.10 s. The warm is speculative; the fight is on screen, and its
+## _prebake_hand_textures covers the SAME card list, so standing down costs
+## nothing and the cards still get baked (behind the fight's intro instead).
+func cancel_deck_warm() -> void:
+	if _deck_warm_busy:
+		_deck_warm_cancel = true
+
 
 func warm_run_deck() -> void:
 	if _deck_warm_busy or DisplayServer.get_name() == "headless":
 		return
 	_deck_warm_busy = true
+	_deck_warm_cancel = false
 	# Give the map's own open (plate bake, focus glide) the first frames.
 	await get_tree().create_timer(1.0).timeout
 	var datas: Array = []
@@ -156,11 +172,20 @@ func warm_run_deck() -> void:
 			continue
 		seen[key] = true
 		datas.append(cd)
+	# Both loops are inlined (rather than bake_many / bake_battlefield_many) for
+	# ONE reason: a per-card cancellation check. The batch helpers run to
+	# completion, which is exactly what made a mid-warm commit expensive.
 	for cd in datas:
+		if _deck_warm_cancel:
+			break
 		await CardArtAliases.prewarm_card_art(cd)
-	await CardTextureCache.bake_many(datas)
-	await CardTextureCache.bake_battlefield_many(datas)
+		await CardTextureCache.bake(cd)
+	for cd in datas:
+		if _deck_warm_cancel:
+			break
+		await CardTextureCache.bake_battlefield(cd)
 	_deck_warm_busy = false
+	_deck_warm_cancel = false
 
 
 ## Same idle-time bake for an explicit card-id list — the net deck-builders
