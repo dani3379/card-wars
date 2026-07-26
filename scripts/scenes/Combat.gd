@@ -962,7 +962,26 @@ func _combat_seed() -> int:
 		^ (int(RunState.current_floor) * 7919)
 
 
+## OPENING-COST TRACE. Silent unless the process was launched with
+## `--combat_trace` (after a bare `--`). The opening is a chain of very
+## different costs — a threaded art warm, one big synchronous build block, a
+## scripted banner, an animated muster — and only a per-milestone stamp can say
+## which one the player is actually waiting on. Cost when off: one array scan
+## per combat entry.
+var _trace_open := false
+var _trace_t0 := 0
+
+
+func _trace(label: String) -> void:
+	if not _trace_open:
+		return
+	print("[combat-open] %8.1f ms  %s" % [
+		float(Time.get_ticks_usec() - _trace_t0) / 1000.0, label])
+
+
 func _ready() -> void:
+	_trace_open = OS.get_cmdline_user_args().has("--combat_trace")
+	_trace_t0 = Time.get_ticks_usec()
 	set_process(false)
 	# Re-arm the hand-play gate every combat: a skirmish that locked the hand on
 	# the foe's turn must not leak that lock into a later solo fight (statics live
@@ -985,7 +1004,9 @@ func _ready() -> void:
 	_combat_model_tutorial_shown = UserSettings.combat_model_tutorial_seen
 	_dismiss_tutorial_shown = UserSettings.dismiss_tutorial_seen
 	_swap_background_for_act()
+	_trace("background swapped")
 	_setup_fight_state()
+	_trace("fight state set up")
 	# Stand the map's idle deck warm down before we ask for the bake viewport.
 	# CardTextureCache serializes bakers through _bake_busy, so committing to a
 	# node mid-warm used to park this fight's art prewarm behind the rest of the
@@ -998,6 +1019,7 @@ func _ready() -> void:
 	# "bought" its smaller worst-stall only by hiding the work inside a block that
 	# renders nothing. Keep the prewarm EARLY.
 	await _prewarm_enemy_art()
+	_trace("enemy art warmed")
 	# Music: every fight class rotates a pool (the picker excludes the
 	# currently-playing track, and play_music resumes saved positions). Acts
 	# escalate to heavier books. AudioBank no-ops if a file is missing.
@@ -1043,17 +1065,33 @@ func _ready() -> void:
 					3: pool = ["combat_act3", "combat_act3_b", "combat_act3_c", "combat_act3_d"]
 					_: pool = ["combat", "combat_act1_b", "combat_act1_c", "combat_act1_d"]
 				AudioBank.play_music_random(pool)
+	_trace("music started")
+	# THE OPENING BUILD IS INTERLEAVED (2026-07-26). Board + ambient FX + grade +
+	# HUD + decks is ~340 ms of contiguous main-thread work, and run in one block
+	# it renders NO frame for that whole time: the player stares at a bare arena,
+	# frozen, then everything pops in at once. Handing the frame back between the
+	# stages turns that single stall into a fast, live build-up. The order is
+	# unchanged (each stage still reads what the previous one made) — only the
+	# frames in between are new, and nothing here is interactive yet.
 	_build_board()
+	_trace("board built")
+	await get_tree().process_frame
 	_build_ambient_fx()
 	# Cinematic per-act/per-encounter grade — must follow _build_ambient_fx so
 	# the CombatBg / Vignette / HearthGlow / StageLight / AmbientEmbers nodes it
 	# re-tones already exist.
 	_build_grade_overlay()
 	_apply_combat_mood()
-	_build_hud()
+	_trace("ambient fx + grade built")
+	await get_tree().process_frame
+	await _build_hud()
+	_trace("HUD built")
+	await get_tree().process_frame
 	_init_decks()
+	_trace("decks initialised")
 	if not _is_net():
 		_place_starting_board()   # no AI enemy in skirmish — the opponent is a player
+	_trace("starting board placed")
 	# Living Antagonist makes its entrance once the board is set.
 	get_tree().create_timer(0.45).timeout.connect(presence_enter)
 	# Pre-bake static-display textures for every unique card in the draw pile so
@@ -1066,6 +1104,7 @@ func _ready() -> void:
 	# lands hit the v4 live fallback inside _build_layout — slower but visually
 	# identical — and pick up the baked texture on the next draw.
 	_prebake_hand_textures()
+	_trace("hand prebake kicked off")
 	var supersample := get_node_or_null("/root/Supersample")
 	if supersample != null:
 		supersample.begin_adaptive_scope(self)
@@ -1089,6 +1128,7 @@ func _ready() -> void:
 	# stays a single entry point for "stuff that fires once when the fight
 	# begins, after enemies are placed but before round 1 draws".
 	_apply_combat_start_relics()
+	_trace("combat-start relics applied — intro banner begins")
 	# Boss / elite encounters get a dramatic intro banner (name + passive)
 	# before the first round begins. Normal fights get a quick one only when
 	# there is something to announce — a fight passive, a mutator, or a
@@ -1108,7 +1148,9 @@ func _ready() -> void:
 		await _show_encounter_intro(false, true)
 	else:
 		await _show_encounter_intro(false, true)
+	_trace("intro banner done")
 	_start_round()
+	_trace("round 1 started")
 	# THE OPENING MUSTER (2026-07-25) — the hold forms its line as a visible act
 	# at the top of round 1 instead of being pre-seated by _place_starting_board.
 	#
@@ -1122,6 +1164,7 @@ func _ready() -> void:
 	#     met by a front line instead of an empty field.
 	if _opening_muster_pending:
 		await _run_opening_muster()
+	_trace("opening muster done — PLAYABLE")
 
 
 func _exit_tree() -> void:
@@ -1347,6 +1390,7 @@ func _prewarm_enemy_art() -> void:
 	var roster: Array = _enemy_deck.duplicate()
 	if not _reinforcement.is_empty():
 		roster.append(_reinforcement)
+	var to_warm: Array = []
 	var seen := {}
 	for cd in roster:
 		if typeof(cd) != TYPE_DICTIONARY or cd.is_empty():
@@ -1355,7 +1399,7 @@ func _prewarm_enemy_art() -> void:
 		if seen.has(cid):
 			continue
 		seen[cid] = true
-		await _prewarm_one_art(cd)
+		to_warm.append(cd)
 	# Named MID-FIGHT spawns are the remaining decode hitch: fight-passive waves
 	# ("Alpha Wolf"), amalgam transition summons ("Star-Reader"), reactive spawns,
 	# and on-death bequests all synthesize card data on the fly, so their painting
@@ -1371,16 +1415,32 @@ func _prewarm_enemy_art() -> void:
 	for n in names:
 		if not seen.has(n):
 			seen[n] = true
-			await _prewarm_one_art({"name": n, "type": "creature"})
+			to_warm.append({"name": n, "type": "creature"})
+	# ONE parallel decode wave for every painting the fight can show. This used
+	# to be a serial `await` per creature — a full main-thread round trip each,
+	# with the loader's worker pool mostly idle and the table still blank.
+	var paths: Array[String] = []
+	for cd in to_warm:
+		var p := CardArtAliases.card_art_path(cd)
+		if p != "":
+			paths.append(p)
 	if _encounter_id != "":
 		var enc: Dictionary = EncounterDB.get_encounter(_encounter_id)
 		var enc_type := String(enc.get("type", ""))
 		if enc_type == "boss" or enc_type == "elite":
-			await CardArtAliases.prewarm_texture_path(
-				"res://assets/portraits/boss_%s.png" % _encounter_id)
+			paths.append("res://assets/portraits/boss_%s.png" % _encounter_id)
 		if enc_type == "boss":
-			await CardArtAliases.prewarm_texture_path(
+			paths.append(
 				"res://assets/portraits/boss_act%d.png" % RunState.get_act())
+	await CardArtAliases.prewarm_texture_paths(paths)
+	# Bind each card to its resolved painting. Cache hits after the wave above,
+	# so this loop no longer yields a frame per creature.
+	for cd in to_warm:
+		await CardArtAliases.prewarm_card_art(cd)
+	# ONE batched pass for the flattened compact backgrounds. Baking these one at
+	# a time cost two vsync frames plus a full GPU readback stall PER CREATURE —
+	# the single biggest reason a fight sat on an empty table before opening.
+	await CardTextureCache.bake_battlefield_many(to_warm)
 
 
 ## Recursively collect every "name"/"id" string inside nested dicts/arrays —
@@ -1399,11 +1459,6 @@ func _collect_spawn_names(v, out: Dictionary) -> void:
 		TYPE_ARRAY:
 			for item in v:
 				_collect_spawn_names(item, out)
-
-
-func _prewarm_one_art(cd: Dictionary) -> void:
-	await CardArtAliases.prewarm_card_art(cd)
-	await CardTextureCache.bake_battlefield(cd)
 
 
 # =====================================================================
@@ -2928,9 +2983,13 @@ func _deal_opening_muster() -> void:
 			AudioBank.play_sfx("card_play", 0.05, -3.0, 0.96)
 		# Deal the opening one body at a time (windowed only) so the line
 		# visibly forms up instead of appearing all at once — the same beat
-		# _enemy_place_creatures uses for a reinforcement wave.
+		# _enemy_place_creatures uses for a reinforcement wave. Rushable, and
+		# once rushed the rest of the line seats at speed.
 		if placed < starting_count and DisplayServer.get_name() != "headless":
-			await _short_pause(0.16)
+			if _muster_rushed:
+				await get_tree().process_frame
+			elif await _rushable_pause(0.16):
+				_muster_rushed = true
 
 
 func _evenly_spread_lanes(n: int) -> Array:
@@ -8235,6 +8294,69 @@ func _has_playable_action() -> bool:
 				continue
 			return true
 	return false
+
+
+## A pause the player can cut short. Same scaling as _short_pause; returns true
+## if the player asked for it to end early. Holding the mouse fast-forwards, so
+## a player who wants the whole opening now can lean on the button through it.
+func _rushable_pause(duration: float) -> bool:
+	if DisplayServer.get_name() == "headless":
+		await _short_pause(duration)
+		return false
+	var scaled: float = duration
+	if UserSettings != null and UserSettings.anim_speed > 0.01:
+		scaled = duration / UserSettings.anim_speed
+	var deadline := Time.get_ticks_msec() + int(maxf(scaled, 0.0) * 1000.0)
+	while Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+		if _rush_requested():
+			return true
+	return false
+
+
+## "Get on with it." Level-triggered on purpose (a held button keeps rushing).
+func _rush_requested() -> bool:
+	if DisplayServer.get_name() == "headless":
+		return false
+	return Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) \
+		or Input.is_action_pressed("ui_accept") \
+		or Input.is_action_pressed("ui_cancel")
+
+
+## Wait out a cinematic tween, but let the player dismiss it. This is the house
+## answer to "the opening feels slow": the beat keeps its full length for the
+## fight you have never seen, and costs nothing on the hundredth. `skip_surface`
+## is the cinematic's own full-screen dimmer — it already stops mouse input, so
+## it is the only thing that can hear the click.
+##
+## Skipping FAST-FORWARDS the tween rather than killing it: the chain's
+## tween_callbacks are what free the banner's nodes, and a kill() would leave
+## them on screen forever.
+func _await_cinematic(tw: Tween, skip_surface: Control,
+		guard_sec: float = 0.35) -> void:
+	if tw == null or not tw.is_valid():
+		return
+	if DisplayServer.get_name() == "headless":
+		await tw.finished
+		return
+	var state := {"done": false, "click": false}
+	tw.finished.connect(func() -> void: state["done"] = true)
+	if skip_surface != null and is_instance_valid(skip_surface):
+		skip_surface.gui_input.connect(func(ev: InputEvent) -> void:
+			if ev is InputEventMouseButton and ev.pressed:
+				state["click"] = true)
+	# A short guard so the very click that COMMITTED to this fight cannot also
+	# dismiss the banner it just opened.
+	var opened := Time.get_ticks_msec()
+	while not state["done"]:
+		await get_tree().process_frame
+		if not tw.is_valid():
+			return
+		if Time.get_ticks_msec() - opened < int(guard_sec * 1000.0):
+			continue
+		if state["click"] or _rush_requested():
+			tw.custom_step(9999.0)
+			return
 
 
 func _short_pause(duration: float) -> void:
@@ -15706,10 +15828,18 @@ static func _card_has_hidden_rules(cd: Dictionary) -> bool:
 ## Informational under the Reduce Motion contract — it carries state the player
 ## cannot otherwise read — so it is NOT gated off, only stripped of flourish by
 ## _reveal_cast_card itself.
+## Set once the player asks the opening line to hurry up — the rest of the
+## muster then seats without its card reveals. Per-fight; nothing reads it after
+## the opening, so it is deliberately not saved.
+var _muster_rushed := false
+
+
 func _announce_enemy_muster(card_data: Dictionary) -> void:
 	if _is_net():
 		return   # skirmish already reveals the foe's plays on its own paths
 	if DisplayServer.get_name() == "headless":
+		return
+	if _muster_rushed:
 		return
 	if not _card_has_hidden_rules(card_data):
 		return
@@ -15719,7 +15849,12 @@ func _announce_enemy_muster(card_data: Dictionary) -> void:
 	# screen centre, and a multi-body wave would otherwise print two faces on
 	# top of each other. Slightly under the 1.23s total so the next reveal's
 	# fade-in laps the previous fade-out instead of leaving a dead gap.
-	await _short_pause(0.95)
+	#
+	# RUSHABLE: this is the fight's longest repeated beat (once per hidden-rules
+	# body, and the opening muster deals up to four). A player who already knows
+	# the kit can hold the button through the whole line.
+	if await _rushable_pause(0.95):
+		_muster_rushed = true
 
 
 ## Show a spell card the player did NOT play by hand — Chaos Imp's random cast,
@@ -17692,16 +17827,26 @@ func _reset_card_after_drag(card: Control) -> void:
 # =====================================================================
 
 func _build_hud() -> void:
+	# Interleaved like the rest of the opening build (see _ready): the whole HUD
+	# is ~170 ms of Control construction and, run as one block, it was the single
+	# worst frozen frame of the fight's opening. Each sub-builder is independent
+	# and nothing here is interactive until round 1, so handing the frame back
+	# between them costs nothing but makes the HUD assemble live instead of
+	# arriving after a stall. Callers MUST await this.
 	_hud_layer = CanvasLayer.new()
 	_hud_layer.layer = 12
 	add_child(_hud_layer)
-	_build_left_info_column()
+	await _build_left_info_column()
+	_trace("  hud: left info column")
 	_build_end_turn_button()
 	_build_glossary_button()
 	_build_emote_button()
+	await get_tree().process_frame
 	_build_settings_gear_button()
 	_build_targeting_arrow()
 	_build_combat_telegraph()
+	_trace("  hud: buttons + telegraph")
+	await get_tree().process_frame
 
 	_info_label = _make_text_label("", 22, Color(1, 0.78, 0.40))
 	_info_label.set_anchors_preset(Control.PRESET_CENTER)
@@ -17714,6 +17859,8 @@ func _build_hud() -> void:
 	_hud_layer.add_child(_info_label)
 
 	_build_relic_display()
+	_trace("  hud: relic display")
+	await get_tree().process_frame
 	_build_battle_log()
 
 
@@ -18149,11 +18296,18 @@ func _build_left_info_column() -> void:
 	# the update flow keeps working unchanged: _phase_label, _floor_label,
 	# _enemy_hp_label, _player_hp_label, _mana_label, _deck_count_label,
 	# _discard_count_label, _turn_label.
+	# Interleaved (2026-07-26): the two painted banners alone are ~120 ms of
+	# Control + painter construction, and this whole column was the single worst
+	# frozen frame in the fight's opening. Handing the frame back between the
+	# instruments lets the corner furniture assemble live. Callers MUST await.
 	_build_enemy_banner_diegetic()
+	await get_tree().process_frame
 	_build_player_banner_diegetic()
+	await get_tree().process_frame
 	_build_encounter_scroll_diegetic()
 	_build_mana_post_diegetic()
 	_build_piles_diegetic()
+	await get_tree().process_frame
 	_build_gold_chip_diegetic()
 	_build_potion_bar_diegetic()
 	_build_incoming_damage_chip()
@@ -25630,7 +25784,8 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 	tw.parallel().tween_callback(top_rule.queue_free)
 	tw.parallel().tween_callback(bottom_rule.queue_free)
 	tw.parallel().tween_callback(holder.queue_free)
-	await tw.finished
+	# Dismissable — `dim` is the full-screen scrim that already stops mouse input.
+	await _await_cinematic(tw, dim)
 
 	# ★9 — the banner lifts, colour floods back, and the army PRESENTS.
 	if grade_moment and _grade_mat != null:

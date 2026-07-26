@@ -606,6 +606,84 @@ static func prewarm_texture_path(path: String) -> Texture2D:
 	return tex
 
 
+## Every file `prewarm_card_art` could resolve this card to, in the exact order
+## it would try them. Exposed so a caller can pre-resolve a whole roster.
+static func card_art_candidates(card_data: Dictionary) -> Array[String]:
+	var cid := String(card_data.get("id", ""))
+	var name_id := String(card_data.get("name", "")).to_lower() \
+		.replace(" ", "_").replace("'", "")
+	var out: Array[String] = []
+	if String(card_data.get("type", "creature")) in ["spell", "armament"]:
+		for k in [cid, name_id]:
+			if k == "":
+				continue
+			out.append("res://assets/spells/%s.png" % k)
+			if SPELL_ALIASES.has(k):
+				out.append("res://assets/spells/%s.png" % String(SPELL_ALIASES[k]))
+		return out
+	var keys: Array[String] = [cid, name_id]
+	if name_id != "":
+		keys.append("e_" + name_id)
+	for k in keys:
+		if k == "":
+			continue
+		out.append("res://assets/creatures/%s.png" % k)
+		out.append("res://assets/creatures/%s.jpg" % k)
+		if ALIASES.has(k):
+			var alias := String(ALIASES[k])
+			out.append("res://assets/creatures/%s.png" % alias)
+			out.append("res://assets/creatures/%s.jpg" % alias)
+	return out
+
+
+## The ONE painting this card will actually resolve to, or "" if it has none.
+static func card_art_path(card_data: Dictionary) -> String:
+	for path in card_art_candidates(card_data):
+		if ResourceLoader.exists(path):
+			return path
+	return ""
+
+
+## Decode a whole list of paintings in PARALLEL: fire every ResourceLoader
+## request first, then join them. The serial shape (`for p in paths: await
+## prewarm_texture_path(p)`) pays a full main-thread round trip per file — with
+## a fight's roster that was ~400 ms of blank table before anything got built,
+## while the loader's worker pool sat mostly idle.
+static func prewarm_texture_paths(paths: Array) -> void:
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return
+	var requested: Array[String] = []
+	for path_v in paths:
+		var path := String(path_v)
+		if path == "" or requested.has(path):
+			continue
+		if _threaded_path_cache.has(path) or _threaded_path_busy.has(path):
+			continue
+		if not ResourceLoader.exists(path) or ResourceLoader.has_cached(path):
+			continue
+		if ResourceLoader.load_threaded_request(path, "Texture2D") != OK:
+			continue
+		# Claim it so a concurrent prewarm_texture_path joins our request via its
+		# busy-wait instead of issuing a competing one.
+		_threaded_path_busy[path] = true
+		requested.append(path)
+	for path in requested:
+		while ResourceLoader.load_threaded_get_status(path) \
+				== ResourceLoader.THREAD_LOAD_IN_PROGRESS:
+			await tree.process_frame
+		var tex: Texture2D = null
+		if ResourceLoader.load_threaded_get_status(path) \
+				== ResourceLoader.THREAD_LOAD_LOADED:
+			tex = ResourceLoader.load_threaded_get(path) as Texture2D
+		if tex == null:
+			# Same graceful fallback prewarm_texture_path keeps: a loader
+			# rejection becomes a plain load, never a missing painting.
+			tex = load(path) as Texture2D
+		_threaded_path_busy.erase(path)
+		_remember_texture_path(path, tex)
+
+
 static func prewarm_creature_art(card_id: String) -> Texture2D:
 	if _creature_art_cache.has(card_id):
 		_touch_lru(_creature_art_lru, card_id)

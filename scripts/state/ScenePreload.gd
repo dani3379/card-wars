@@ -172,18 +172,18 @@ func warm_run_deck() -> void:
 			continue
 		seen[key] = true
 		datas.append(cd)
-	# Both loops are inlined (rather than bake_many / bake_battlefield_many) for
-	# ONE reason: a per-card cancellation check. The batch helpers run to
-	# completion, which is exactly what made a mid-warm commit expensive.
+	# Paintings FIRST, for all of them: a card baked before its art decodes bakes
+	# without one, and the batched bake below renders many cards in a single pass.
 	for cd in datas:
 		if _deck_warm_cancel:
 			break
 		await CardArtAliases.prewarm_card_art(cd)
-		await CardTextureCache.bake(cd)
-	for cd in datas:
-		if _deck_warm_cancel:
-			break
-		await CardTextureCache.bake_battlefield(cd)
+	# bake_many / bake_battlefield_many poll this between render passes, so a
+	# fight that commits mid-warm waits out at most ONE pass (a few frames)
+	# instead of the rest of the deck.
+	var still_wanted := func() -> bool: return not _deck_warm_cancel
+	await CardTextureCache.bake_many(datas, still_wanted)
+	await CardTextureCache.bake_battlefield_many(datas, still_wanted)
 	_deck_warm_busy = false
 	_deck_warm_cancel = false
 
