@@ -2299,14 +2299,34 @@ func _fit_desc_to_box(rt_obj: Variant, max_h: float) -> void:
 	# every card in the pool that currently overruns. If a card still overflows
 	# at -5 it is genuinely too wordy and belongs in front of a copy editor, not
 	# a smaller font — so we stop, and it clips loudly enough to be noticed.
+	# ORDER MATTERS: spend the free budget first, the costly one last.
+	#   1. LEADING, -2 down to -5. Costs nothing legible — this is whitespace
+	#      between lines, not letterform size.
+	#   2. Then, and only then, ONE font step 18 -> 17.
+	#
+	# That single step is a deliberate, narrow exception to the 18px reading
+	# floor, taken because the alternative is worse by any measure: a clipped
+	# card conveys NOTHING, while a 17px card conveys everything slightly
+	# smaller. 17 still sits inside COPY_STYLE §11's 15-17 caption band and far
+	# above the 14px hard floor that _probe_text_floor enforces, so no gate is
+	# weakened. It is capped at one step precisely so it can never become the
+	# old 15/14/13 ramp that was the #1 "too small to read" complaint.
+	#
+	# Anything still overflowing after both is genuinely over-written and wants
+	# a copy editor, not a smaller font — so we stop and let it clip loudly.
 	var guard := 0
-	while guard < 3:
+	while guard < 6:
 		if rt.get_content_height() <= max_h:
 			return
 		var lead := int(rt.get_theme_constant("line_separation"))
-		if lead <= -5:
-			return
-		rt.add_theme_constant_override("line_separation", lead - 1)
+		if lead > -5:
+			rt.add_theme_constant_override("line_separation", lead - 1)
+		else:
+			var cur := int(rt.get_theme_font_size("normal_font_size"))
+			if cur <= 17:
+				return
+			rt.add_theme_font_size_override("normal_font_size", cur - 1)
+			rt.add_theme_font_size_override("bold_font_size", cur - 1)
 		guard += 1
 
 

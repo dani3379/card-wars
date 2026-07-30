@@ -2712,17 +2712,12 @@ func make_section_divider(text: String, color: Color = GILT,
 	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(left)
 
-	var diamond_tex := tex_icon_diamond
-	if diamond_tex != null:
-		var dl := TextureRect.new()
-		dl.texture = diamond_tex
-		dl.custom_minimum_size = Vector2(8, 8)
-		dl.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		dl.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		dl.modulate = Color(color.r, color.g, color.b, 0.55)
-		dl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		dl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_child(dl)
+	# The two flanking diamonds are retired (2026-07-30). This device already
+	# says "section" three times over — a rule on the left, a rule on the right,
+	# and a centred caps label between them. The glyphs were a fourth statement
+	# of the same thing, in the same shape the settings panel, every screen
+	# title and every card corner was already printing. rule - LABEL - rule is
+	# the clean form and reads as deliberate rather than decorated.
 
 	var lbl := Label.new()
 	lbl.text = text
@@ -2736,17 +2731,6 @@ func make_section_divider(text: String, color: Color = GILT,
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(lbl)
-
-	if diamond_tex != null:
-		var dr := TextureRect.new()
-		dr.texture = diamond_tex
-		dr.custom_minimum_size = Vector2(8, 8)
-		dr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		dr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		dr.modulate = Color(color.r, color.g, color.b, 0.55)
-		dr.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		dr.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_child(dr)
 
 	var right := ColorRect.new()
 	right.custom_minimum_size = Vector2(rule_width, 1)
