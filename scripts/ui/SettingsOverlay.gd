@@ -219,7 +219,7 @@ func _build_overlay() -> void:
 
 	# Title + divider span the full panel width.
 	_add_title(vbox)
-	_add_fancy_divider(vbox)
+	_add_section_break(vbox)
 
 	# Headline graphics control spans the full width, above the two columns.
 	# A thin spacer (not a full divider) keeps the panel height in budget — it was
@@ -279,7 +279,7 @@ func _build_overlay() -> void:
 	_add_toggle_row(left_col, "Mute on Focus Loss", UserSettings.mute_on_focus_loss,
 		func(v: bool): UserSettings.set_mute_on_focus_loss(v))
 
-	_add_fancy_divider(left_col, 280.0)
+	_add_section_break(left_col, 280.0)
 
 	_add_section_label(left_col, "GAMEPLAY")
 	_add_spacer(left_col, 4)
@@ -316,7 +316,7 @@ func _build_overlay() -> void:
 			UserSettings.set_particles(v)  # flips preset → custom
 			_sync_graphics_preset_dropdown()
 			_refresh_gpu_info_label())
-	_add_fancy_divider(right_col, 280.0)
+	_add_section_break(right_col, 280.0)
 
 	_add_section_label(right_col, "ACCESSIBILITY")
 	_add_spacer(right_col, 4)
@@ -334,7 +334,7 @@ func _build_overlay() -> void:
 	_add_colorblind_row(right_col)
 	_sync_motion_dependent_toggles()
 
-	_add_fancy_divider(vbox)
+	_add_section_break(vbox)
 
 	# ── Buttons ──
 	var btn_row := HBoxContainer.new()
@@ -466,46 +466,29 @@ func _add_title(parent: VBoxContainer) -> void:
 #  DIVIDER
 # ═══════════════════════════════════════════════════
 
-func _add_fancy_divider(parent: VBoxContainer, width: float = 380.0) -> void:
-	# The house section-break: hairline · diamond · hairline (same device as the
-	# main-menu column). Replaces a Kenney divider PNG whose fade pattern read
-	# as a broken slider widget at this size.
-	_add_spacer(parent, 5)
-	var row := HBoxContainer.new()
-	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	row.add_theme_constant_override("separation", 10)
-	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	for side in 2:
-		if side == 1:
-			if GameTheme.tex_icon_diamond != null:
-				var diamond := TextureRect.new()
-				diamond.texture = GameTheme.tex_icon_diamond
-				diamond.custom_minimum_size = Vector2(10, 10)
-				diamond.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-				diamond.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-				diamond.modulate = Color(GameTheme.GILT.r, GameTheme.GILT.g,
-					GameTheme.GILT.b, 0.75)
-				diamond.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-				diamond.mouse_filter = Control.MOUSE_FILTER_IGNORE
-				row.add_child(diamond)
-			else:
-				var dot := ColorRect.new()
-				dot.custom_minimum_size = Vector2(7, 7)
-				dot.rotation = PI / 4
-				dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-				dot.color = Color(GameTheme.GILT.r, GameTheme.GILT.g,
-					GameTheme.GILT.b, 0.75)
-				dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
-				row.add_child(dot)
-		var line := ColorRect.new()
-		line.custom_minimum_size = Vector2(width * 0.5 - 18.0, 1)
-		line.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		line.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.30)
-		line.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_child(line)
-	parent.add_child(row)
-	_add_spacer(parent, 5)
+func _add_section_break(parent: VBoxContainer, _width: float = 380.0) -> void:
+	# WAS: hairline - diamond - hairline, four times on one panel.
+	#
+	# Cut 2026-07-30. Two reasons, and the second is the real one:
+	#
+	# 1. It was redundant. _add_section_label already gives every section a
+	#    chiseled gilt header WITH a trailing hairline out to the column edge —
+	#    the hierarchy was fully carried before this drew a pixel. NN/g's
+	#    aesthetic-and-minimalist heuristic is explicit that whitespace is the
+	#    first tool for grouping and that borders/rules are the fallback used
+	#    sparingly; we were paying the fallback on top of a heading that worked.
+	#
+	# 2. THE DIAMOND WAS DOING SIX JOBS AT ONCE. On this one panel it was the
+	#    section break, the dropdown marker, the slider thumb, the toggle knob,
+	#    the panel corner tack and the title flourish. A shape that means
+	#    everything means nothing — the same quantity problem RULE_FX_PASS
+	#    diagnosed for combat callouts. Spending it on decoration is what made
+	#    it stop reading as a control.
+	#
+	# Kept as a function (not deleted at the call sites) because the RHYTHM was
+	# load-bearing even though the ornament wasn't: the panel needs this breath
+	# between blocks, it just doesn't need a glyph in it.
+	_add_spacer(parent, 14)
 
 
 func _add_spacer(parent: VBoxContainer, h: float) -> void:
@@ -766,21 +749,51 @@ var _dropdown_arrow_tex: ImageTexture = null
 func _get_dropdown_arrow() -> Texture2D:
 	if _dropdown_arrow_tex != null:
 		return _dropdown_arrow_tex
-	var side := 11
+	# A CHEVRON, not the house diamond (2026-07-30).
+	#
+	# The diamond arrived here for a GOOD reason and solved a real problem:
+	# OptionButton has no arrow-tint theme slot, so the stock light-grey chevron
+	# was the last unthemed pixel on these controls. But it fixed the COLOUR by
+	# discarding the SIGNIFIER. A chevron is the near-universal "this opens a
+	# list" cue — remove it and a control reads as not-actionable — whereas the
+	# diamond is the same glyph this panel prints as its section break, slider
+	# thumb, toggle knob and corner tack, so on a dropdown it said only
+	# "ornament". Ten dropdowns on one screen carried no affordance at all.
+	#
+	# Drawn gilt from the same palette, so the theming win it bought is kept and
+	# the convention comes back with it.
+	var side := 13
 	var img := Image.create(side, side, false, Image.FORMAT_RGBA8)
-	var c := (side - 1) / 2.0
-	var rad := c + 0.5
+	var mid := float(side - 1) * 0.5
+	# Two strokes meeting at the bottom: a downward chevron.
+	var left := Vector2(mid - 3.6, mid - 1.9)
+	var apex := Vector2(mid, mid + 1.9)
+	var right := Vector2(mid + 3.6, mid - 1.9)
+	var stroke := 1.25
 	for y in side:
 		for x in side:
-			var d := absf(x - c) + absf(y - c)  # manhattan distance = diamond
-			if d <= rad - 1.0:
+			var p := Vector2(float(x), float(y))
+			var d: float = minf(_seg_distance(p, left, apex),
+				_seg_distance(p, apex, right))
+			if d <= stroke:
 				img.set_pixel(x, y, GameTheme.GILT)
-			elif d <= rad:
-				var a := (rad - d) * GameTheme.GILT.a
+			elif d <= stroke + 1.0:
+				var a := (stroke + 1.0 - d) * GameTheme.GILT.a
 				img.set_pixel(x, y, Color(GameTheme.GILT.r, GameTheme.GILT.g,
 					GameTheme.GILT.b, a))
 	_dropdown_arrow_tex = ImageTexture.create_from_image(img)
 	return _dropdown_arrow_tex
+
+
+## Shortest distance from `p` to the segment a-b. Used to rasterise the chevron
+## with a soft edge — the stroke is a distance test, so it antialiases for free.
+static func _seg_distance(p: Vector2, a: Vector2, b: Vector2) -> float:
+	var ab := b - a
+	var len_sq := ab.length_squared()
+	if len_sq <= 0.0001:
+		return p.distance_to(a)
+	var t: float = clampf((p - a).dot(ab) / len_sq, 0.0, 1.0)
+	return p.distance_to(a + ab * t)
 
 
 func _make_popup_hover_style() -> StyleBoxFlat:

@@ -264,7 +264,7 @@ func _rebuild_menu() -> void:
 	# ── Ornament: gilt line with central rosette glyph (a diamond, NOT a triangle).
 	# This is the "card-game opening flourish" — it sells the screen as a deck-
 	# builder rather than a generic Godot template. Left-flush to match the column.
-	col.add_child(_make_ornament_row(260.0, true))
+	col.add_child(_make_ornament_row(260.0, true, true))   # the one glyphed row
 
 	# Spacer pushes the buttons down so the title has breathing room.
 	var spacer := Control.new()
@@ -692,7 +692,22 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 	return row
 
 
-func _make_ornament_row(width: float, left_aligned: bool = false) -> Control:
+func _make_ornament_row(width: float, left_aligned: bool = false,
+		glyph: bool = false) -> Control:
+	# 2026-07-30 — THE GLYPH IS NOW OPT-IN, AND EXACTLY ONE CALLER TAKES IT.
+	#
+	# The defence written below is real: this flourish is what stops the title
+	# screen looking like a generic Godot template. But it was on TWELVE rows
+	# across the menu, the run setup, the hero roster and the blessing pick, and
+	# a flourish that appears twelve times is wallpaper, not a flourish. Nine of
+	# those sat directly under a heading that already announced its own section,
+	# so the diamond was restating something the type had said better.
+	#
+	# The rule now: the glyph marks the TITLE COLUMN and nothing else. Every
+	# other row keeps the gilt rule — the grouping was doing honest work — and
+	# drops the ornament. Scarcity is what makes the one that survives read as
+	# deliberate. (NN/g's aesthetic-and-minimalist heuristic: cut what carries
+	# no information so what remains can carry some.)
 	# A horizontal gold line broken by a central diamond — the "section break"
 	# flourish you see in fantasy books. Previously used the U+25C6 unicode
 	# character in a font that doesn't ship that glyph, so it rendered as a
@@ -718,6 +733,18 @@ func _make_ornament_row(width: float, left_aligned: bool = false) -> Control:
 	row.add_child(left)
 
 	var diamond_tex := GameTheme.tex_icon_diamond
+	if not glyph:
+		# No ornament: the rule runs unbroken. Rejoin the two halves so the row
+		# doesn't print as two stubs with a 10px hole where the diamond was.
+		left.custom_minimum_size = Vector2(
+			20.0 if left_aligned else width * 0.45, 2)
+		var solo := ColorRect.new()
+		solo.custom_minimum_size = Vector2(width * 0.45, 2)
+		solo.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		solo.color = Color(GILT.r, GILT.g, GILT.b, 0.55)
+		solo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		row.add_child(solo)
+		return row
 	if diamond_tex != null:
 		var diamond := TextureRect.new()
 		diamond.texture = diamond_tex
