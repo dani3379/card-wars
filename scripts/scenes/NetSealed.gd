@@ -315,12 +315,12 @@ func _refresh_deck_panel() -> void:
 	_clear_hover_preview_under(_deck_box)   # a previewed deck tile may be freed below
 	for c in _deck_box.get_children():
 		c.queue_free()
-	if _counts.is_empty():
-		var hint := GameTheme.make_label(
-			"Click cards you opened to enlist them.", 14, ASH)
-		hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		_deck_box.add_child(hint)
+	# (The "Click cards you opened to enlist them" hint lived here. It was an
+	# EXPAND_FILL label inside an HFlowContainer, so once the ghost slots below
+	# existed it did not claim a clean row — it shouldered the first two slots
+	# off to the right and broke the grid. The instruction is already on screen
+	# one line above, in the header: "Build 20 from the cards you opened." The
+	# twenty vacant slots say the rest without a sentence.)
 	for id in _sorted_avail_ids():
 		var n := int(_counts.get(id, 0))
 		if n <= 0:
@@ -338,6 +338,39 @@ func _refresh_deck_panel() -> void:
 		else:
 			btn.pressed.connect(_on_remove.bind(id))
 		_deck_box.add_child(thumb["root"])
+	# ── GHOST SLOTS (2026-07-30) ─────────────────────────────────────────
+	# At 0/20 this panel was ~75% empty: a heading, one line of grey hint, a
+	# large void, and a Command Curve with an axis and no bars. It read as a
+	# screen that had failed to load rather than as a deck you haven't built.
+	#
+	# An empty state should show the SHAPE OF THE TASK. Twenty vacant slots say
+	# "twenty" spatially and instantly — no counting, no reading — and they fill
+	# in as you draft, so the panel becomes a progress bar made of the thing it
+	# is measuring. It also gives the curve below something to sit under instead
+	# of floating in the middle of nowhere.
+	#
+	# The empty-writ idiom already exists in this game (the Collection's
+	# ghost-of-writ for uncollected cards), so this reads as house language
+	# rather than a new device.
+	var missing: int = maxi(_target - _deck.size(), 0)
+	for _i in missing:
+		_deck_box.add_child(_make_ghost_slot())
+
+
+## A vacant warband slot: the silhouette of a card that isn't there yet. Sized
+## from the same THUMB_SCALE the real tiles use, so a filled row and an empty
+## row line up exactly.
+func _make_ghost_slot() -> Control:
+	var slot := Panel.new()
+	slot.custom_minimum_size = Vector2(225.0, 300.0) * THUMB_SCALE
+	slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.055, 0.045, 0.035, 0.55)
+	sb.border_color = Color(0.52, 0.42, 0.22, 0.30)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(3)
+	slot.add_theme_stylebox_override("panel", sb)
+	return slot
 
 
 func _update_ready() -> void:
