@@ -4233,7 +4233,7 @@ func _die() -> void:
 	# _lunge_hold_active must clear too, or _combat_tween_active() keeps reporting
 	# true against a corpse — hold_lunge_apex only lowers it from a timer callback
 	# that a freed node will never see.
-	for tw in [_lunge_tween, _lunge_scale_tween, _recoil_tween]:
+	for tw in [_lunge_tween, _lunge_scale_tween, _recoil_tween, _brace_tween]:
 		if tw != null and tw.is_valid():
 			tw.kill()
 	_lunge_hold_active = false
@@ -4505,6 +4505,11 @@ func play_attack_lunge(strength: float = 1.0) -> void:
 	# the strike stays perfectly clean instead of fighting the breathe each frame.
 	if static_display or not is_inside_tree():
 		return
+	# A brace may still be easing home — it owns `position` until it isn't, and
+	# reading position mid-brace would capture a leaned pose as this tween's
+	# "rest" and walk the card out of its slot. See play_defend_brace.
+	if _brace_tween != null and _brace_tween.is_valid():
+		_brace_tween.kill()
 	var dir := 1.0 if is_opponent else -1.0
 	var rest := position
 	var rest_scale := scale
@@ -4581,6 +4586,46 @@ func hold_lunge_apex(extra: float) -> void:
 			tw_scale.play())
 
 
+var _brace_tween: Tween = null
+
+## THE BRACE (docs/STRIKE_DESIGN_20260730.md §2.1) — the defender leans INTO the
+## blow during the attacker's wind-up.
+##
+## The clash's wind-up was a monologue: 90ms in which exactly one card moved 7px
+## while the body about to be hit sat perfectly inert until after it had been
+## hit. That is the mechanical source of the "damage from nowhere" read — only
+## one of the two parties in a trade was ever identified before the blow landed.
+## This is the cheapest fix in the whole design because it spends NO time: it
+## fills a window that already exists.
+##
+## IT MUST BE HOME BEFORE CONTACT. The lean completes and returns inside
+## ~140ms against a LUNGE_APEX of 180, so the card is back at true rest when
+## play_hit_recoil (or the counter's play_attack_lunge) captures `position` as
+## its own rest. Getting this wrong is the documented drift bug — a tween that
+## captures a mid-move point as "rest" walks the card out of its slot and
+## compounds over every trade — which is also why both of those functions now
+## kill this tween before reading position.
+##
+## Decorative by the reduce-motion contract: the lunge already says who is
+## swinging, and the numeral says what it did.
+func play_defend_brace(from_below: bool) -> void:
+	if static_display or not is_inside_tree():
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	if _brace_tween != null and _brace_tween.is_valid():
+		_brace_tween.kill()
+	var dir := 1.0 if from_below else -1.0
+	var rest := position
+	_brace_tween = create_tween()
+	# Toward the attacker, not away — a body setting itself, not flinching.
+	_brace_tween.tween_property(self, "position", rest + Vector2(0, dir * 4.0),
+			Motion.time(0.07)) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_brace_tween.tween_property(self, "position", rest, Motion.time(0.07)) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+
+
 func play_hit_recoil(push_down: bool) -> void:
 	# The struck creature snaps back along the hit axis (away from the attacker)
 	# and pops slightly, then settles — the second half of the "collision" the
@@ -4588,6 +4633,9 @@ func play_hit_recoil(push_down: bool) -> void:
 	# coexists with idle bob the same proven way; restores to the captured rest.
 	if static_display or not is_inside_tree():
 		return
+	# Same single-writer guard as play_attack_lunge — see play_defend_brace.
+	if _brace_tween != null and _brace_tween.is_valid():
+		_brace_tween.kill()
 	var dir := 1.0 if push_down else -1.0
 	var rest := position
 	var rest_scale := scale

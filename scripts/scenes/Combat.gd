@@ -6165,7 +6165,15 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 	if attacker.has_method("play_attack_lunge"):
 		attacker.play_attack_lunge(
 			_lunge_strength(_effective_attack(attacker, lane_idx, attacker_is_enemy)))
-	_net_log_lunge(attacker)
+	# THE BRACE — the defender sets itself INTO the blow while the attacker winds
+	# up, so BOTH parties in a trade are identified before contact rather than
+	# one. Costs no time: it runs inside the wind-up that already exists, and is
+	# home well before LUNGE_APEX so it can't fight the recoil for `position`.
+	# (docs/STRIKE_DESIGN_20260730.md §2.1)
+	if defender != null and is_instance_valid(defender) \
+			and defender.has_method("play_defend_brace"):
+		defender.play_defend_brace(not attacker_is_enemy)
+	_net_log_lunge(attacker, defender)
 	await _short_pause(LUNGE_APEX)
 	if not is_instance_valid(attacker) or not is_instance_valid(defender):
 		return
@@ -30181,8 +30189,8 @@ func _net_on_done_placing() -> void:
 	net._net_on_done_placing()
 
 
-func _net_log_lunge(attacker: Control) -> void:
-	net._net_log_lunge(attacker)
+func _net_log_lunge(attacker: Control, defender: Control = null) -> void:
+	net._net_log_lunge(attacker, defender)
 
 
 func _net_arm_face_hit_source(attacker: Control, lane_idx: int, power: int = -1) -> void:

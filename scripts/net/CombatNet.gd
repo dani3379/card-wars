@@ -1246,7 +1246,7 @@ func _net_on_done_placing() -> void:
 # Solo/sealed are already simultaneous, so this stays false there.
 
 
-func _net_log_lunge(attacker: Control) -> void:
+func _net_log_lunge(attacker: Control, defender: Control = null) -> void:
 	if not combat._net_clash_recording:
 		return
 	if attacker == null or not is_instance_valid(attacker) or int(attacker.entity_id) < 0:
@@ -1255,6 +1255,12 @@ func _net_log_lunge(attacker: Control) -> void:
 	# drive (effective_atk is close enough to the host's lane-aware value for a
 	# purely cosmetic scale).
 	var entry := {"l": int(attacker.entity_id)}
+	# "dt" = who is about to be hit. The client otherwise learns the target only
+	# at the {d} entry, which lands AFTER contact — too late to brace. Carrying
+	# it here is what lets both peers show the same wind-up instead of the host
+	# alone. (docs/STRIKE_DESIGN_20260730.md §8)
+	if defender != null and is_instance_valid(defender) and int(defender.entity_id) >= 0:
+		entry["dt"] = int(defender.entity_id)
 	if attacker.has_method("effective_atk"):
 		entry["latk"] = int(attacker.effective_atk())
 	combat._net_clash_log.append(entry)
@@ -2017,6 +2023,12 @@ func _net_replay_clash(ev: Dictionary) -> void:
 			var lunger = NetMatch.get_entity(int(s.get("l", -1)))
 			if lunger != null and is_instance_valid(lunger) and lunger.has_method("play_attack_lunge"):
 				lunger.play_attack_lunge(combat._lunge_strength(int(s.get("latk", 2))))
+			# Mirror the brace so the client sees the same collision, not a
+			# one-sided swing. Host-named target; the client never guesses it.
+			if int(s.get("dt", -1)) >= 0:
+				var braced = NetMatch.get_entity(int(s.get("dt", -1)))
+				if braced != null and is_instance_valid(braced) 						and braced.has_method("play_defend_brace"):
+					braced.play_defend_brace(not bool(braced.is_opponent))
 			await combat._short_pause(combat.LUNGE_APEX)
 		elif s.has("cap"):    # a mid-clash phase caption (THE DOUBLED HOUR)
 			combat._set_phase_caption(String(s.get("cap", "")))
