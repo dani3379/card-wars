@@ -5296,7 +5296,7 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool) -> void:
 		_net_log_hit(card, opponent, swift_hp_before)
 		var was_lethal: bool = opponent.current_hp <= 0
 		if is_instance_valid(card) and is_instance_valid(opponent):
-			_spawn_impact_burst(_card_center(opponent),
+			_spawn_impact_burst(_strike_contact_point(card, opponent),
 				_card_center(opponent) - _card_center(card), float(atk), was_lethal)
 		if was_lethal:
 			_apply_piercing_overflow(card, opponent, lane_idx, is_enemy, {},
@@ -5342,6 +5342,34 @@ func _apply_cleave_splash(attacker: Control, lane_idx: int, is_enemy: bool) -> v
 ## themselves? Piercing (printed, encounter-granted, or Inspire-lent) and Bodkin
 ## Points buy that; a plain OVERKILL spill stops at the body behind. One helper so
 ## the three strike paths — clash, Swift, sniper — can never drift apart.
+## WHERE THE BLOW ACTUALLY LANDS (2026-07-30, STRIKE_DESIGN §2.3).
+##
+## There was no contact point anywhere in the strike path: _spawn_impact_burst
+## was handed _card_center(defender), so the spark erupted from the MIDDLE OF THE
+## PAINTING — the one surface ★4's ink spatter was reverted for touching. The
+## blow said "it landed somewhere inside this card" when the whole point of a
+## contact spark is to say "it landed HERE".
+##
+## Returns the point where the attacker->defender segment crosses the defender's
+## rect boundary, so it is orientation-agnostic by construction: a Guardian
+## redirect that pulls the hit a lane sideways, or a back-row body reaching over
+## its own front rank, both land on the correct edge without special cases.
+func _strike_contact_point(attacker: Control, defender: Control) -> Vector2:
+	if defender == null or not is_instance_valid(defender):
+		return Vector2.ZERO
+	var d: Vector2 = _card_center(defender)
+	if attacker == null or not is_instance_valid(attacker):
+		return d
+	var dir: Vector2 = d - _card_center(attacker)
+	if dir.length_squared() < 1.0:
+		return d
+	var n: Vector2 = dir.normalized()
+	var half: Vector2 = defender.size * defender.scale * 0.5
+	var tx: float = 1e9 if absf(n.x) < 0.0001 else half.x / absf(n.x)
+	var ty: float = 1e9 if absf(n.y) < 0.0001 else half.y / absf(n.y)
+	return d - n * minf(tx, ty)
+
+
 func _strike_reaches_face(attacker: Control, attacker_is_enemy: bool) -> bool:
 	if attacker == null or not is_instance_valid(attacker):
 		return false
@@ -6230,7 +6258,7 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 	# Contact-point spark at the defender's struck edge, same visual beat as the
 	# tracer/recoil above (sub-frame ordering, invisible to the player).
 	if is_instance_valid(attacker) and is_instance_valid(defender):
-		_spawn_impact_burst(_card_center(defender),
+		_spawn_impact_burst(_strike_contact_point(attacker, defender),
 			_card_center(defender) - _card_center(attacker), float(atk), was_lethal)
 
 	# Audio: the kill cue fires HERE, at the impact beat, not seconds later when
@@ -6857,7 +6885,7 @@ func _sniper_fire(card: Control, lane_idx: int, is_enemy: bool) -> void:
 		_net_log_hit(card, target, hp_before)
 		var killed: bool = not is_instance_valid(target) or target.current_hp <= 0
 		if is_instance_valid(card) and is_instance_valid(target):
-			_spawn_impact_burst(_card_center(target),
+			_spawn_impact_burst(_strike_contact_point(card, target),
 				_card_center(target) - _card_center(card), float(atk), killed)
 		if shot_dmg > 0 and killed and is_instance_valid(target) and not target._dead:
 			target.death_cue_played = true

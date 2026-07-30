@@ -4233,7 +4233,8 @@ func _die() -> void:
 	# _lunge_hold_active must clear too, or _combat_tween_active() keeps reporting
 	# true against a corpse — hold_lunge_apex only lowers it from a timer callback
 	# that a freed node will never see.
-	for tw in [_lunge_tween, _lunge_scale_tween, _recoil_tween, _brace_tween]:
+	for tw in [_lunge_tween, _lunge_scale_tween, _recoil_tween, _brace_tween,
+			_lunge_arc_tween]:
 		if tw != null and tw.is_valid():
 			tw.kill()
 	_lunge_hold_active = false
@@ -4527,9 +4528,17 @@ func play_attack_lunge(strength: float = 1.0) -> void:
 	# Strike: drive forward into the target. `strength` scales the drive so a
 	# heavy blow visibly travels deeper before snapping back (Combat passes
 	# _lunge_strength(atk); 1.0 = the historical 26px).
+	#
+	# EXPO-out, not QUAD-out (2026-07-30, STRIKE_DESIGN §2.2). QUAD-out means the
+	# blow is at its SLOWEST when it lands, which is the most common feel error in
+	# the medium — the strike decelerates into the target like a cushion. EXPO
+	# front-loads the distance so the last ~20ms covers only a few pixels: the
+	# card is effectively STOPPED at the contact frame. That reads as an impact
+	# instead of an arrival, and it buys a perceived hitstop on every blow for
+	# zero milliseconds and no freeze.
 	_lunge_tween.tween_property(self, "position", rest + Vector2(0, dir * 26.0 * strength),
 			Motion.time(Motion.LUNGE_STRIKE)) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		.set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	# Settle home.
 	_lunge_tween.tween_property(self, "position", rest, Motion.time(Motion.LUNGE_SETTLE)) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
@@ -4547,6 +4556,63 @@ func play_attack_lunge(strength: float = 1.0) -> void:
 			Motion.time(Motion.LUNGE_APEX)) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	_lunge_scale_tween.tween_property(self, "scale", rest_scale, Motion.time(0.17)) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+	# ── THE ARC AND THE ROLL (STRIKE_DESIGN §3) ─────────────────────────────
+	# The lunge was a straight vertical translate. Everything in animation says a
+	# blow travels an ARC and rotates into it — and `rotation` turns out to be
+	# unowned on a battlefield token (the lean driver's only call sites are
+	# _start_drag and a hover handler guarded by `if not is_on_battlefield:`;
+	# every other writer is an EXIT, and the one arrival writer, Combat's
+	# _play_landing_pop, is separated from striking by the MUSTER DELAY — a body
+	# that lands in round N cannot swing until N+1).
+	#
+	# Two axes on different easings is what bends the path: no Bezier, no path
+	# object, just longitudinal (EXPO, above) against lateral (SINE) while the
+	# roll runs to +0.07. At 0.055 rad the leading corner travels ~27% further
+	# than the trailing one, which IS the lever read the material lens wanted
+	# without touching pivot_offset (shared by six paths; changing it mid-flight
+	# teleports the node by half its size).
+	#
+	# Lateral sign converges the four lanes INWARD on the seam, so the front
+	# reads as a line collapsing on the point of contact rather than four
+	# independent twitches. Roll sign flips by side — yours rear up from below,
+	# theirs bear down from above — which is a geometric, colourblind-safe side
+	# cue. Its own tween, like the scale twin, so it can never perturb the
+	# position timing the conductor awaits.
+	if _lunge_arc_tween != null and _lunge_arc_tween.is_valid():
+		_lunge_arc_tween.kill()
+	# Decorative by the contract: under Reduce Motion the strike degrades to the
+	# straight vertical lunge, which is a shipped, legible motion — informational
+	# content (who swung, how hard) lives in the drive and the numeral, not here.
+	var arc: float = 0.0 if (UserSettings != null and UserSettings.reduce_motion) else 1.0
+	var lane_sign := signf(1.5 - float(current_lane)) * arc
+	if lane_sign == 0.0 and arc != 0.0:
+		lane_sign = 1.0
+	var rest_x := position.x
+	var rest_rot := rotation
+	var roll := 0.055 * clampf(strength, 0.6, 1.4) * arc
+	_lunge_arc_tween = create_tween()
+	_lunge_arc_tween.tween_property(self, "position:x",
+			rest_x + lane_sign * 7.0 * strength, Motion.time(Motion.LUNGE_ANTICIPATION)) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	_lunge_arc_tween.parallel().tween_property(self, "rotation",
+			rest_rot - dir * roll, Motion.time(Motion.LUNGE_ANTICIPATION)) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	_lunge_arc_tween.chain().tween_property(self, "position:x",
+			rest_x - lane_sign * 5.0 * strength, Motion.time(Motion.LUNGE_STRIKE)) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_lunge_arc_tween.parallel().tween_property(self, "rotation",
+			rest_rot + dir * roll * 1.3, Motion.time(Motion.LUNGE_STRIKE)) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_lunge_arc_tween.chain().tween_property(self, "position:x", rest_x,
+			Motion.time(Motion.LUNGE_SETTLE)) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	# The roll comes home 40ms AFTER the position does. That lag is the
+	# follow-through — the angle trailing the body is what makes the return read
+	# as recovery rather than rewind.
+	_lunge_arc_tween.parallel().tween_property(self, "rotation", rest_rot,
+			Motion.time(Motion.LUNGE_SETTLE + 0.04)) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 
@@ -4586,6 +4652,7 @@ func hold_lunge_apex(extra: float) -> void:
 			tw_scale.play())
 
 
+var _lunge_arc_tween: Tween = null
 var _brace_tween: Tween = null
 
 ## THE BRACE (docs/STRIKE_DESIGN_20260730.md §2.1) — the defender leans INTO the
@@ -4633,9 +4700,13 @@ func play_hit_recoil(push_down: bool) -> void:
 	# coexists with idle bob the same proven way; restores to the captured rest.
 	if static_display or not is_inside_tree():
 		return
-	# Same single-writer guard as play_attack_lunge — see play_defend_brace.
+	# Same single-writer guard as play_attack_lunge — see play_defend_brace. The
+	# arc tween owns position:x and rotation, so it must go too or it will fight
+	# the recoil for the same node.
 	if _brace_tween != null and _brace_tween.is_valid():
 		_brace_tween.kill()
+	if _lunge_arc_tween != null and _lunge_arc_tween.is_valid():
+		_lunge_arc_tween.kill()
 	var dir := 1.0 if push_down else -1.0
 	var rest := position
 	var rest_scale := scale

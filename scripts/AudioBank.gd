@@ -174,13 +174,50 @@ func play_sfx(event_name: String, pitch_jitter: float = 0.06, volume_db: float =
 	var streams: Array = _sfx_streams[key]
 	if streams.is_empty():
 		return
-	var stream: AudioStream = streams[randi() % streams.size()]
+	var stream: AudioStream = _draw_variant(key, streams)
 	var player := _sfx_pool[_sfx_pool_idx]
 	_sfx_pool_idx = (_sfx_pool_idx + 1) % _sfx_pool.size()
 	player.stream = stream
 	player.pitch_scale = pitch_base * (1.0 + randf_range(-pitch_jitter, pitch_jitter))
 	player.volume_db = volume_db
 	player.play()
+
+
+## Shuffle-bag variant selection (2026-07-30) — the cheapest audio win in the repo.
+##
+## This was `streams[randi() % streams.size()]`. Most cues ship TWO clips, so
+## that is a 50% chance of playing the same clip twice in a row — the single most
+## fatiguing arrangement possible, and it fires 8-13 times a round in a clash. It
+## is a large part of why combat reads as "samey but wobbly": the variation was
+## random pitch on a repeating sample rather than an actually different sample.
+##
+## A bag holds one of each variant, draws without replacement, and refills when
+## empty — so with 2 clips you get strict alternation, with 4 you get all four
+## before any repeat. On refill the last-played clip is excluded from the first
+## draw, which is the one seam where a bag can still stutter.
+##
+## The precedent is already in this file: play_music_random excludes the current
+## track for exactly this reason. The idea simply never reached play_sfx.
+var _sfx_bag: Dictionary = {}
+var _sfx_last: Dictionary = {}
+
+func _draw_variant(key: String, streams: Array) -> AudioStream:
+	if streams.size() <= 1:
+		return streams[0]
+	var bag: Array = _sfx_bag.get(key, [])
+	if bag.is_empty():
+		for i in streams.size():
+			bag.append(i)
+		bag.shuffle()
+		# Don't let a refill hand back the clip we just played.
+		if bag.size() > 1 and _sfx_last.has(key) and bag[0] == _sfx_last[key]:
+			var swap: int = bag[0]
+			bag[0] = bag[bag.size() - 1]
+			bag[bag.size() - 1] = swap
+	var idx: int = int(bag.pop_front())
+	_sfx_bag[key] = bag
+	_sfx_last[key] = idx
+	return streams[clampi(idx, 0, streams.size() - 1)]
 
 
 func has_sfx(event_name: String) -> bool:
