@@ -2637,41 +2637,44 @@ func make_screen_title(text: String, color: Color = GILT_BRIGHT,
 	# (title + rule); this presses the WORD onto the page inside it.
 	Motion.stamp_in(title, 0.06, Color(color.r * 1.20, color.g * 1.14, color.b * 0.92))
 
-	# ── diamond separator — texture-based so it renders even if the display
-	# font is missing the U+25C6 glyph.
-	var sep := HBoxContainer.new()
-	sep.alignment = BoxContainer.ALIGNMENT_CENTER
-	sep.add_theme_constant_override("separation", 6)
-	sep.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# ── THE HEADLINE RULE (2026-07-30 — was line · diamond · line).
+	#
+	# This one function underlines EVERY screen title in the game, so the diamond
+	# it used to set was the single most-repeated glyph in the build — the same
+	# shape the settings panel spent on section breaks, dropdown markers, slider
+	# thumbs and toggle knobs. Repeated that widely it stopped reading as an
+	# ornament and started reading as furniture.
+	#
+	# What replaces it is not a deletion but a better device: a hairline that
+	# FADES OUT at both ends instead of stopping dead. A hard-ended bar declares
+	# two arbitrary endpoints and fights the centred title above it; a rule that
+	# dissolves into the page has no endpoints to argue with, which is exactly why
+	# engraved frontispieces have used it for centuries. It also costs one texture
+	# instead of three nodes, and it suits a game whose whole visual fiction is a
+	# document.
+	var line_col := Color(color.r, color.g, color.b, 0.52)
+	var grad := Gradient.new()
+	grad.set_offset(0, 0.0)
+	grad.set_color(0, Color(color.r, color.g, color.b, 0.0))
+	grad.set_offset(1, 1.0)
+	grad.set_color(1, Color(color.r, color.g, color.b, 0.0))
+	grad.add_point(0.5, line_col)
 
-	var line_col := Color(color.r, color.g, color.b, 0.30)
-	var left := ColorRect.new()
-	left.custom_minimum_size = Vector2(50, 1)
-	left.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	left.color = line_col
-	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	sep.add_child(left)
+	var gtex := GradientTexture2D.new()
+	gtex.gradient = grad
+	gtex.width = 190
+	gtex.height = 1
+	gtex.fill_from = Vector2(0.0, 0.0)
+	gtex.fill_to = Vector2(1.0, 0.0)
 
-	var diamond_tex := tex_icon_diamond
-	if diamond_tex != null:
-		var diamond := TextureRect.new()
-		diamond.texture = diamond_tex
-		diamond.custom_minimum_size = Vector2(10, 10)
-		diamond.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		diamond.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		diamond.modulate = Color(color.r, color.g, color.b, 0.55)
-		diamond.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		diamond.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		sep.add_child(diamond)
+	var rule := TextureRect.new()
+	rule.texture = gtex
+	rule.custom_minimum_size = Vector2(190, 1)
+	rule.stretch_mode = TextureRect.STRETCH_SCALE
+	rule.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-	var right := ColorRect.new()
-	right.custom_minimum_size = Vector2(50, 1)
-	right.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	right.color = line_col
-	right.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	sep.add_child(right)
-
-	vbox.add_child(sep)
+	vbox.add_child(rule)
 	return vbox
 
 
