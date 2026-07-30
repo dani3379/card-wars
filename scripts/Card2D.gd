@@ -4616,6 +4616,40 @@ func play_attack_lunge(strength: float = 1.0) -> void:
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 
+## THE STRIKE STOP (STRIKE_DESIGN §2.4) — a REAL freeze, not a scheduler wait.
+##
+## Combat's "hold" was `await _short_pause(...)`, which suspends the COROUTINE
+## while every tween keeps playing. So the 186ms comprehension window on a chip
+## hit was 186ms of the attacker sliding home over a number that had finished
+## rendering on frame one. Nothing was ever held.
+##
+## This pauses the running tweens instead — the same idiom hold_lunge_apex uses
+## for the fight-ending blow, so the lunge stays the sole owner of `position`
+## and time simply stops for it. Called on BOTH bodies, because a freeze on the
+## attacker alone reads as a stutter and on the defender alone as a hitch; the
+## world stopping is what reads as impact.
+##
+## INFORMATIONAL, and deliberately the opposite call from hold_lunge_apex, which
+## gates itself off under Reduce Motion because the verdict banner carries that
+## information independently. Here the freeze IS the comprehension window — the
+## same reasoning that reclassified ClashLaneFocus and _lane_dwell on 2026-07-28.
+## Write that difference down or someone will "fix" it.
+func hold_strike_frame(seconds: float) -> void:
+	if seconds <= 0.0 or not is_inside_tree():
+		return
+	var held: Array[Tween] = []
+	for tw in [_lunge_tween, _lunge_scale_tween, _lunge_arc_tween, _recoil_tween]:
+		if tw != null and tw.is_valid() and tw.is_running():
+			tw.pause()
+			held.append(tw)
+	if held.is_empty():
+		return
+	get_tree().create_timer(Motion.time(seconds)).timeout.connect(func():
+		for tw in held:
+			if tw != null and tw.is_valid():
+				tw.play())
+
+
 func hold_lunge_apex(extra: float) -> void:
 	# ★8 (docs/ANIMATION_COOL_PITCH_20260717.md §5b): the blow that ends the
 	# fight holds the killer at FULL EXTENSION while the world stops. This

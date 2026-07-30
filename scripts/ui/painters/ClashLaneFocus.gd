@@ -28,7 +28,17 @@ func _ready() -> void:
 func focus_lane(rect: Rect2, enemy_strike: bool) -> void:
 	if rect.size.x <= 0.0 or rect.size.y <= 0.0:
 		return
-	_focus_rect = rect
+	# THE SPOTLIGHT TRAVELS INSTEAD OF CUTTING (2026-07-30, STRIKE_DESIGN §5).
+	#
+	# This rect IS the camera — with no Camera2D in the game it is the only thing
+	# on screen that says where to look. It used to be ASSIGNED outright, so the
+	# serialized clash presented as eight hard cuts down the line and the eye had
+	# to re-find the action at each one. Tweening it does three jobs at once: it
+	# leads the eye with a saccade it can follow, it converts part of the lane
+	# dwell from stillness into motion (the condemned 100-500ms band forbids EMPTY
+	# windows, not occupied ones), and eight cuts become one sweep down the front.
+	var prev: Rect2 = _focus_rect
+	var travels: bool = prev.size.x > 0.0 and prev.size.y > 0.0 and _strength > 0.05
 	_accent = Color(0.72, 0.20, 0.13) if enemy_strike \
 		else Color(0.96, 0.76, 0.30)
 	if _focus_tween != null and _focus_tween.is_valid():
@@ -36,12 +46,26 @@ func focus_lane(rect: Rect2, enemy_strike: bool) -> void:
 	# Informational: Reduce Motion gets the mark, just without the ramp. Snapping
 	# to the end state is the house pattern for a cue that carries game state.
 	if UserSettings != null and UserSettings.reduce_motion:
+		_focus_rect = rect
 		_set_strength(1.0)
 		return
 	var start := _strength
 	_focus_tween = create_tween()
-	_focus_tween.tween_method(_set_strength, start, 1.0, 0.07) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	if travels:
+		var from_r: Rect2 = prev
+		var to_r: Rect2 = rect
+		_focus_tween.tween_method(func(t: float):
+				_focus_rect = Rect2(from_r.position.lerp(to_r.position, t),
+					from_r.size.lerp(to_r.size, t))
+				queue_redraw(),
+				0.0, 1.0, 0.14) \
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+		_focus_tween.parallel().tween_method(_set_strength, start, 1.0, 0.07) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	else:
+		_focus_rect = rect
+		_focus_tween.tween_method(_set_strength, start, 1.0, 0.07) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 
 func clear_focus() -> void:

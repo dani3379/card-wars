@@ -5303,10 +5303,16 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool) -> void:
 				_strike_reaches_face(card, is_enemy))
 		# Keyword riders: Lifesteal (heal = damage dealt) + Rampage (+ATK on kill).
 		_apply_combat_strike_riders(card, swift_dmg, was_lethal, is_enemy, opponent)
-		# Same comprehension window as the clash — see _impact_hold. The Swift
-		# phase used to punctuate on the old two-valued 130/260 split.
+		# Same punctuation as the clash — see _strike_stop / _strike_read.
 		# (Shake is owned by _deal_creature_strike_damage — see the clash path.)
-		await _short_pause(_impact_hold(atk, was_lethal))
+		var sw_stop: float = _strike_stop(atk, was_lethal)
+		if sw_stop > 0.0:
+			if is_instance_valid(card) and card.has_method("hold_strike_frame"):
+				card.hold_strike_frame(sw_stop)
+			if is_instance_valid(opponent) and opponent.has_method("hold_strike_frame"):
+				opponent.hold_strike_frame(sw_stop)
+			await _short_pause(sw_stop)
+		await _short_pause(_strike_read(atk, was_lethal))
 	else:
 		# Nothing standing in the column — same live read as the clash path, and
 		# for the same reason (see _resolve_column_attack's face arm). The Swift
@@ -6324,7 +6330,17 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 		# _deal_creature_strike_damage — which knows what actually landed and
 		# whether it killed. The explicit kill/heavy impulses that used to sit
 		# here were the second half of a double-count; see that function.
-		await _short_pause(_impact_hold(atk, was_lethal))
+		#
+		# THE WORLD STOPS, then breathes. The freeze pauses both bodies' tweens
+		# so the frame is genuinely held; the read is the still window after it.
+		var _stop: float = _strike_stop(atk, was_lethal)
+		if _stop > 0.0:
+			if is_instance_valid(attacker) and attacker.has_method("hold_strike_frame"):
+				attacker.hold_strike_frame(_stop)
+			if is_instance_valid(defender) and defender.has_method("hold_strike_frame"):
+				defender.hold_strike_frame(_stop)
+			await _short_pause(_stop)
+		await _short_pause(_strike_read(atk, was_lethal))
 
 
 ## Can this defender answer a hit with a counter right now? Shared gate so the strike's
@@ -10052,6 +10068,38 @@ func _short_pause(duration: float) -> void:
 ##
 ## A lethal blow always takes the ceiling: it is the one beat in the clash the
 ## player most needs to attribute, and the corpse is about to leave the board.
+## THE PUNCTUATION OF A BLOW, BY CLASS (STRIKE_DESIGN §2.4).
+##
+## _impact_hold returned a flat 150-230ms of SCHEDULER WAIT for every blow — and
+## since the tweens ran straight through it, a 2-damage plink bought 186ms in
+## which nothing changed on screen. That is where this pass is funded from: the
+## chip stop goes to ZERO and the saving is spent on the blows that earn one.
+##
+## Hitstop is a CONTRAST device — it means "this one was different". A freeze on
+## every blow makes it a property of the engine rather than of the blow, and then
+## heavy and lethal have nothing to be heavier than. Same argument that killed the
+## uniform slowdown. The chip blow still reads as stopped, because the drive's
+## EXPO-out curve leaves it effectively stationary at contact for free.
+func _strike_stop(damage: int, was_lethal: bool) -> float:
+	# Headless has nothing to look at and no frames to hold — same early-out
+	# _lane_dwell takes, and it keeps probe runs from paying a freeze per blow.
+	if DisplayServer.get_name() == "headless":
+		return 0.0
+	if was_lethal:
+		return 0.17
+	return 0.11 if damage >= HEAVY_HIT_DAMAGE else 0.0
+
+
+## The breath AFTER the stop — the window in which the numeral, the new HP and
+## the corpse are all on screen and still. Chip fuses at 70ms (below the
+## condemned band, so strike and number read as ONE event); heavier blows
+## separate.
+func _strike_read(damage: int, was_lethal: bool) -> float:
+	if was_lethal:
+		return 0.11
+	return 0.09 if damage >= HEAVY_HIT_DAMAGE else 0.07
+
+
 func _impact_hold(damage: int, was_lethal: bool) -> float:
 	if was_lethal:
 		return IMPACT_HOLD_MAX
