@@ -2,7 +2,15 @@
 
 Four-lens design pass (material/staging · motion/camera · FX/audio · systems/legibility)
 on the single most-repeated beat in the game: one creature striking another.
-Every claim below was re-verified against live code. **Nothing here is built.**
+Every claim below was re-verified against live code.
+
+**STATUS: specced, not built — EXCEPT §2.1's BRACE, which shipped 2026-07-30.**
+It went first on its own argument: it costs zero milliseconds (it fills a window
+that already existed) and it is the half of the fix that makes a trade read as a
+collision rather than two solos. `Card2D.play_defend_brace`, called from
+`_creature_attacks_creature`; the `{l}` clash-log entry gained `dt` so the client
+braces from the host's naming rather than deriving the target. The five bugs in
+§11 are also fixed — see that section.
 
 Read with: `docs/ANIMATION_COOL_PITCH_20260717.md` (★1–★13, and the ★3/★4 reverts,
 which are the hard constraints), `docs/COMBAT_LEGIBILITY_20260728.md`,
