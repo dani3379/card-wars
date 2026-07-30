@@ -2002,7 +2002,8 @@ func _build_baked_overlay_layout() -> void:
 	# roundels now rides the keyword words — PASS lets hover reach the hints
 	# while clicks/drags still fall through to the card panel.
 	od_rt.mouse_filter = Control.MOUSE_FILTER_PASS
-	od_rt.custom_minimum_size = Vector2(170, 0)
+	# Lockstep twin of the chart-proto width — see the note at desc_rt.
+	od_rt.custom_minimum_size = Vector2(182, 0)
 	# Match _build_chart_proto's tightened leading so wrapping/fit is identical.
 	od_rt.add_theme_constant_override("line_separation", -2)
 	var od_font: Font = GameTheme.font_card_body if GameTheme.font_card_body != null \
@@ -2278,16 +2279,34 @@ func _fit_desc_to_box(rt_obj: Variant, max_h: float) -> void:
 	var rt := rt_obj as RichTextLabel
 	if rt == null:
 		return
+	# 2026-07-30 — THIS FUNCTION HAD NEVER ONCE SHRUNK ANYTHING.
+	#
+	# Every card sets dsz = 18, and the loop's own first act was `if cur <= 18:
+	# return`, so it bailed on iteration one, every time, on every card. The
+	# "shrink-to-fit safety net" was decorative; long rules text simply clipped
+	# (measured on Fuse Tender in the Collection, which ends mid-sentence at
+	# "this fight and 1 round").
+	#
+	# The 18px floor it was protecting is CORRECT and stays absolute — COPY_STYLE
+	# §11 sets the reading floor at 18 and `tools/_probe_text_floor.gd` enforces
+	# it. But that floor governs GLYPH SIZE, which is what legibility depends on.
+	# LEADING is a separate budget, and this card is already running -2 against
+	# Alegreya's generous default. Tightening it further is free vertical space
+	# that costs no readability, so overflow now buys height there instead of
+	# stealing it from the letterforms.
+	#
+	# -2 → -5 over three steps claws back ~9px on a four-line card, which covers
+	# every card in the pool that currently overruns. If a card still overflows
+	# at -5 it is genuinely too wordy and belongs in front of a copy editor, not
+	# a smaller font — so we stop, and it clips loudly enough to be noticed.
 	var guard := 0
-	# Ramp top is 17 → 14 floor is 3 steps; the guard is generous headroom.
-	while guard < 8:
+	while guard < 3:
 		if rt.get_content_height() <= max_h:
 			return
-		var cur := int(rt.get_theme_font_size("normal_font_size"))
-		if cur <= 18:
+		var lead := int(rt.get_theme_constant("line_separation"))
+		if lead <= -5:
 			return
-		rt.add_theme_font_size_override("normal_font_size", cur - 1)
-		rt.add_theme_font_size_override("bold_font_size", cur - 1)
+		rt.add_theme_constant_override("line_separation", lead - 1)
 		guard += 1
 
 
@@ -2646,6 +2665,22 @@ func _build_chart_proto() -> void:
 	# exactly where long spell descs used to clip. MUST stay in lockstep with
 	# the baked-overlay clip below.
 	var rule_bot := 267 if is_sp else 260
+	# DOES THIS CARD ACTUALLY HAVE RULES? (2026-07-30)
+	#
+	# A ruled box with metal corner ticks drawn around NOTHING reads as a card
+	# that failed to load, not as a card with no abilities — Curtain Wall and
+	# Hexwright both shipped a big empty frame (11 entries carry an empty desc;
+	# the other 9 are enemy-only and never wear this layout). MTG's vanilla
+	# creatures are the precedent: the text area simply isn't there, and the
+	# blank field reads as deliberate.
+	#
+	# Deliberately keyed off card_data, NOT the stripped `raw_desc` below —
+	# bake_strip_desc blanks the text for the bake while the live overlay draws
+	# it, so testing the stripped value would delete the box from every baked
+	# card in the game.
+	var _own_desc: String = String(card_data.get("desc", "")).strip_edges()
+	var has_rules: bool = _own_desc != "" \
+		or (synth_desc_if_empty and _synthesized_rules_text().strip_edges() != "")
 	var rulebox := Panel.new()
 	rulebox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	rulebox.anchor_left = 0.0
@@ -2662,11 +2697,14 @@ func _build_chart_proto() -> void:
 		else Color(0.255, 0.275, 0.180, 0.85)
 	pst.set_border_width_all(1)
 	rulebox.add_theme_stylebox_override("panel", pst)
-	root.add_child(rulebox)
-	_chart_diamond(root, Vector2(15, 174), 3.6, metal_dim)
-	_chart_diamond(root, Vector2(210, 174), 3.6, metal_dim)
-	_chart_diamond(root, Vector2(15, rule_bot), 3.6, metal_dim)
-	_chart_diamond(root, Vector2(210, rule_bot), 3.6, metal_dim)
+	if has_rules:
+		root.add_child(rulebox)
+		_chart_diamond(root, Vector2(15, 174), 3.6, metal_dim)
+		_chart_diamond(root, Vector2(210, 174), 3.6, metal_dim)
+		_chart_diamond(root, Vector2(15, rule_bot), 3.6, metal_dim)
+		_chart_diamond(root, Vector2(210, rule_bot), 3.6, metal_dim)
+	else:
+		rulebox.queue_free()
 
 	# ── description (dark ink written on the page) ───────────────────────
 	var desc_clip := Control.new()
@@ -2696,7 +2734,16 @@ func _build_chart_proto() -> void:
 	desc_rt.scroll_active = false
 	desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	desc_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	desc_rt.custom_minimum_size = Vector2(170, 0)
+	# 182, not 170 (2026-07-30). desc_clip spans offset 17 → -17 on a natively
+	# 225px card, i.e. 191px of usable line — the label was pinned 21px narrower
+	# than its own container and had been for the life of the layout. That
+	# wasted ~11% of every line in the game and is what pushed wordy cards
+	# (Fuse Tender) onto an extra line and off the bottom of the band. Widening
+	# costs no glyph size, no geometry and no readability; it just stops
+	# throwing the width away. Leaves ~4.5px inside the clip and ~6.5px inside
+	# the ruled border, so the text still never touches the rule.
+	# MUST stay in lockstep with the baked-overlay path (od_rt, ~line 2005).
+	desc_rt.custom_minimum_size = Vector2(182, 0)
 	# Tighten Alegreya's generous default leading so the larger ramp still fits
 	# the band. -2px/line claws back ~6px on a 4-line card without touching
 	# legibility. Keep identical in the baked-overlay path below.
