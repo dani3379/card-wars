@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://tools/_shot_shop_hover.gd" id="1"]
+
+[node name="ShopHoverShot" type="Node"]
+script = ExtResource("1")

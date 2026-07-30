@@ -50,7 +50,21 @@ tools/_crop_*
 # Clarity-verification scratch (2026-06-21): combat/map/card render harnesses,
 # their PNG outputs, and the zoomed crops used to eyeball the UI changes.
 /_shot_*.png
-tools/_shot_*
+# 2026-07-30: this used to be a blanket `tools/_shot_*`, which ignored the
+# HARNESSES as well as their output. That contradicted CLAUDE.md, which tells
+# contributors to run tools/_shot_battle_log.tscn, _shot_creature_fx.tscn,
+# _shot_event_pass.tscn and friends to verify their work — instructions naming
+# files nobody else could have. It also meant harness fixes silently evaporated:
+# the settle timings were found to be capturing mid-animation (manufacturing
+# phantom bugs in the Recruit audit) and the correction could not be committed.
+# Track the sources; keep ignoring the pictures.
+tools/_shot_*.png
+tools/_shot_*.png.import
+tools/_shot_*.log
+# Output DIRECTORIES too (tools/_shot_ev/ alone is 244MB of captures) — the
+# trailing slash is what keeps this from matching _shot_foo.gd.
+tools/_shot_*/
+tools/screenshot/
 tools/_render_*
 tools/_v_*
 # Headless parse-check / probe run logs (regenerated on every run)

@@ -1,0 +1,12 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://tools/_shot_card_gilt.gd" id="1_gilt"]
+
+[node name="ShotCardGilt" type="Node2D"]
+script = ExtResource("1_gilt")
+
+[node name="Backdrop" type="ColorRect" parent="."]
+offset_right = 1152.0
+offset_bottom = 648.0
+color = Color(0.11, 0.09, 0.07, 1)
+z_index = -10
