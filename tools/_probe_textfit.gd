@@ -45,8 +45,19 @@ func _run() -> void:
 		US.anim_speed = 3.0
 		US.end_turn_warning = false
 	print("[textfit] canvas = %.0f x %.0f" % [W, H])
+	if OS.get_environment("BURNING_MEADOW_TEXTFIT_ONLY") == "run_setup":
+		await _audit_main_menu_overlays()
+		print("[textfit] targeted run-setup hits : %d" % _hits)
+		quit(1 if _hits > 0 else 0)
+		return
 
 	await _audit_simple("main_menu", "res://scenes/main_menu.tscn")
+	await _audit_main_menu_overlays()
+	await _audit_simple("net_lobby", "res://scenes/net_lobby.tscn")
+	await _audit_simple("net_draft", "res://scenes/net_draft.tscn")
+	await _audit_simple("net_constructed", "res://scenes/net_constructed.tscn")
+	await _audit_simple("net_quick", "res://scenes/net_quick.tscn")
+	await _audit_simple("net_sealed", "res://scenes/net_sealed.tscn")
 	await _audit_simple("collection", "res://scenes/collection.tscn")
 	await _audit_simple("credits", "res://scenes/credits.tscn")
 
@@ -55,7 +66,7 @@ func _run() -> void:
 	await _audit_simple("map", "res://scenes/map.tscn")
 
 	# Combat (the HUD is the prime suspect — encounter names, banners).
-	await _audit_combat()
+	await _audit_all_combats()
 
 	# Reward / Shop / Rest / Treasure / Recruit / Wayside / Event / GameOver.
 	_new_run("rich"); RS.current_node_type = "elite"; RS.current_floor = 3
@@ -72,11 +83,14 @@ func _run() -> void:
 		_new_run("rich")
 		RS.current_wayside_id = verb
 		await _audit_simple("wayside:%s" % verb, "res://scenes/wayside.tscn")
-	# A spread of events — long descriptions + many choices are the classic overflow.
-	for ev_id in ["butcher", "the_bone_pit", "woodcutter", "sin_eater", "strangers_hand",
-			"dark_altar", "the_chrysalis", "pawnbrokers_window", "thrice_blessed_spring"]:
+	# Every event root screen. Nested result text is covered by copy_lint; this
+	# catches the title/description/choice composition for the full live pool.
+	var EvScript = load("res://scripts/scenes/Event.gd")
+	var event_ids: Array = EvScript.EVENTS.keys()
+	event_ids.sort()
+	for ev_id in event_ids:
 		_new_run("rich")
-		await _audit_event(ev_id)
+		await _audit_event(String(ev_id))
 	_new_run("default"); RS.hero_hp = 0
 	await _audit_simple("game_over", "res://scenes/game_over.tscn")
 
@@ -92,7 +106,34 @@ func _run() -> void:
 	print("[textfit] screens scanned : %d" % _scenes)
 	print("[textfit] off-canvas / overflow text hits : %d" % _hits)
 	print("[textfit] DONE")
-	quit(0)
+	quit(1 if _hits > 0 else 0)
+
+
+func _audit_main_menu_overlays() -> void:
+	var node = load("res://scenes/main_menu.tscn").instantiate()
+	root.add_child(node)
+	for _i in 6:
+		await process_frame
+
+	node._show_hero_select()
+	for _i in 8:
+		await process_frame
+	_scan(node, "main_menu:run_setup")
+
+	node._show_how_to_play()
+	for _i in 4:
+		await process_frame
+	var how_to = node.get_node_or_null("HowToPlayOverlay")
+	if how_to != null:
+		_scan(how_to, "main_menu:how_to_play")
+
+	_new_run("rich")
+	node._show_blessing_select()
+	for _i in 8:
+		await process_frame
+	_scan(node, "main_menu:starting_gift")
+	node.free()
+	await process_frame
 
 
 func _new_run(kind: String) -> void:
@@ -133,27 +174,27 @@ func _audit_event(ev_id: String) -> void:
 	ev.free()
 
 
-func _audit_combat() -> void:
-	_new_run("default")
-	# A real act-1 fight with a longish name if possible.
-	var enc_id := ""
+func _audit_all_combats() -> void:
 	var EDB = root.get_node_or_null("EncounterDB")
-	if EDB != null:
-		for id in EDB.ENCOUNTERS.keys():
-			var d: Dictionary = EDB.ENCOUNTERS[id]
-			if int(d.get("act", 1)) == 1 and String(d.get("type", "combat")) == "combat":
-				enc_id = String(id)
-				break
-	if enc_id != "":
+	if EDB == null:
+		print("[textfit] combat : (no EncounterDB)")
+		return
+	var encounter_ids: Array = EDB.ENCOUNTERS.keys()
+	encounter_ids.sort()
+	var first := true
+	for id_value in encounter_ids:
+		var enc_id := String(id_value)
+		_new_run("default")
 		RS.current_encounter_id = enc_id
-	RS.current_node_type = "combat"
-	var node = load("res://scenes/combat.tscn").instantiate()
-	root.add_child(node)
-	for _i in 30:    # combat _ready awaits the prebake; give it room
+		RS.current_node_type = String(EDB.ENCOUNTERS[id_value].get("type", "combat"))
+		var node = load("res://scenes/combat.tscn").instantiate()
+		root.add_child(node)
+		for _i in (30 if first else 12):
+			await process_frame
+		first = false
+		_scan(node, "combat:%s" % enc_id)
+		node.free()
 		await process_frame
-	_scan(node, "combat")
-	node.free()
-
 
 # ── The scan ─────────────────────────────────────────────────────────────────
 
@@ -200,7 +241,7 @@ func _audit_card_tooltips() -> void:
 	var bad := 0
 	for id in ids:
 		var d: Dictionary = CDB.CARD_POOL[id]
-		if String(d.get("type", "")) not in ["creature", "spell"]:
+		if String(d.get("type", "")) not in ["creature", "spell", "armament"]:
 			continue
 		if String(d.get("rarity", "")) == "enemy" or CDB.is_curse(String(id)):
 			continue
@@ -250,8 +291,9 @@ func _scan(node: Node, scene: String, quiet: bool = false) -> void:
 		if verdict != "":
 			found += 1
 			_hits += 1
-			print("[textfit] %s | %s | \"%s\" | %s" % [
-				scene, c.get_class(), _short(txt), verdict])
+			print("[textfit] %s | %s | \"%s\" | %s | path=%s rect=%s" % [
+				scene, c.get_class(), _short(txt), verdict,
+				str(c.get_path()), str(c.get_global_rect())])
 	if found == 0 and not quiet:
 		print("[textfit] %s : ok" % scene)
 
@@ -299,11 +341,20 @@ func _check(c: Control, txt: String) -> String:
 	var autowrap := false
 	if c is Label:
 		autowrap = (c as Label).autowrap_mode != TextServer.AUTOWRAP_OFF
+	# An overrun-trimmed label/button (TRIM/ELLIPSIS) elides its string to the
+	# rect — it never paints past its box, so "wider than box" is a false hit
+	# (2026-07-20: the Collection placeholder-tile names). Content hidden behind
+	# the ellipsis is a design choice (hover shows the full card), not overflow.
+	var elided := false
+	if c is Label:
+		elided = (c as Label).text_overrun_behavior != TextServer.OVERRUN_NO_TRIMMING
+	elif c is Button:
+		elided = (c as Button).text_overrun_behavior != TextServer.OVERRUN_NO_TRIMMING
 	var ts := font.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, fs)
 	var msgs: Array = []
 	# Overflow of own box — LOCAL units on both sides (ts is unscaled; c.size
 	# is the local rect), so scaled card previews measure the same as at 1×.
-	if not autowrap and ts.x > c.size.x + TOL:
+	if not autowrap and not elided and ts.x > c.size.x + TOL:
 		var clip := (c is Label and (c as Label).clip_text)
 		msgs.append("text wider than box by %.0fpx%s" % [ts.x - c.size.x, " (clipped)" if clip else ""])
 	if _in_clipper(c):
@@ -312,7 +363,7 @@ func _check(c: Control, txt: String) -> String:
 	# An autowrapped label folds to its rect, so its landing is the rect itself;
 	# only unwrapped text can poke past its box onto (or off) the canvas.
 	var sc := c.get_global_transform().get_scale()
-	var tsg := minf(ts.x * sc.x, g.size.x) if autowrap else ts.x * sc.x
+	var tsg := minf(ts.x * sc.x, g.size.x) if (autowrap or elided) else ts.x * sc.x
 	var halign := HORIZONTAL_ALIGNMENT_LEFT
 	if c is Label:
 		halign = (c as Label).horizontal_alignment

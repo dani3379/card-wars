@@ -116,7 +116,7 @@ const MUTATORS: Dictionary = {
 	},
 	"doomed": {
 		"name": "Doomed",
-		"desc": "Enemy front-liners enter with Doom 3. Kill them before the clock runs out, or the blast hits your face.",
+		"desc": "Enemy front-row creatures enter with Doom 3. When their Doom reaches 0, they deal face damage.",
 		"icon": "skull",
 		"on_enemy_enter": {"kind": "grant_doom", "value": 3},
 		"gold_bonus": 25,
@@ -124,7 +124,7 @@ const MUTATORS: Dictionary = {
 	},
 	"overgrown": {
 		"name": "Overgrown",
-		"desc": "Enemy creatures enter with +2 HP and Regenerate. Whatever you don't finish knits itself back together.",
+		"desc": "Enemy creatures enter with +2 HP and Regenerate.",
 		"icon": "shield",
 		"on_enemy_enter": {"kind": "buff_hp_regen", "value": 2},
 		"gold_bonus": 30,
@@ -174,7 +174,7 @@ const MUTATORS: Dictionary = {
 	},
 	"vampiric": {
 		"name": "Vampiric",
-		"desc": "Your creatures have Lifesteal. Every drop they spill flows back to you.",
+		"desc": "Your creatures have Lifesteal this fight.",
 		"icon": "heart",
 		"on_player_creature_enter": {"kind": "grant_player_keyword", "value": "lifelink"},
 		"gold_bonus": 0,
@@ -182,7 +182,7 @@ const MUTATORS: Dictionary = {
 	},
 	"bloodthirsty": {
 		"name": "Bloodthirsty",
-		"desc": "Your creatures have Rampage — every kill they land makes them permanently stronger this fight.",
+		"desc": "Your creatures have Rampage this fight.",
 		"icon": "sword",
 		"on_player_creature_enter": {"kind": "grant_player_keyword", "value": "rampage"},
 		"gold_bonus": 0,

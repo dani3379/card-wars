@@ -2,16 +2,117 @@ extends CanvasLayer
 ## SettingsOverlay.gd — settings popup accessible from every screen via gear icon
 ## in the top HUD bar. Lives as child of UserSettings autoload.
 
-const GEAR_PATH = "res://assets/icons/kenney_game-icons/PNG/White/2x/gear.png"
-const AUDIO_ON_PATH = "res://assets/icons/kenney_game-icons/PNG/White/2x/audioOn.png"
-const DIVIDER_PATH = "res://assets/ui/kenney_fantasy-ui-borders/PNG/Double/Divider Fade/divider-fade-003.png"
-const PANEL_9P_PATH = "res://assets/ui/kenney_fantasy-ui-borders/PNG/Double/Panel/panel-009.png"
+## Ink-and-gilt slide switch — replaces the old green ON/OFF pill, which was the
+## one Material-Design note in an otherwise parchment/gilt interface. A capsule
+## track cut into the ink with a gilt diamond thumb (the house ornament) that
+## slides right for ON; the state word is drawn beside it so the switch never
+## reads by color alone. Extends Button so every existing call site
+## (button_pressed / set_pressed_no_signal / disabled / toggled) keeps working.
+class InkSwitch extends Button:
+	const TRACK_W := 46.0
+	const TRACK_H := 20.0
+	var _t := 0.0  # thumb position 0 (off) → 1 (on)
+	var _hovered := false
+	var _tw: Tween
+
+	func _init() -> void:
+		toggle_mode = true
+		focus_mode = Control.FOCUS_NONE
+		custom_minimum_size = Vector2(100, 30)
+		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		var empty := StyleBoxEmpty.new()
+		for st in ["normal", "hover", "pressed", "focus", "disabled", "hover_pressed"]:
+			add_theme_stylebox_override(st, empty)
+		toggled.connect(func(pressed: bool): _animate_to(1.0 if pressed else 0.0))
+		mouse_entered.connect(func(): _hovered = true; queue_redraw())
+		mouse_exited.connect(func(): _hovered = false; queue_redraw())
+
+	func _ready() -> void:
+		_t = 1.0 if button_pressed else 0.0
+		queue_redraw()
+
+	## For set_pressed_no_signal callers — snaps the thumb to the real state.
+	func sync_visual() -> void:
+		if _tw and _tw.is_valid():
+			_tw.kill()
+		_t = 1.0 if button_pressed else 0.0
+		queue_redraw()
+
+	func _animate_to(target: float) -> void:
+		if _tw and _tw.is_valid():
+			_tw.kill()
+		var us = Engine.get_main_loop().root.get_node_or_null("UserSettings") \
+			if Engine.get_main_loop() != null else null
+		if us != null and us.reduce_motion:
+			_t = target
+			queue_redraw()
+			return
+		_tw = create_tween()
+		_tw.tween_method(func(v: float):
+			_t = v
+			queue_redraw(), _t, target, 0.14) \
+			.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+
+	func _draw() -> void:
+		var dim := 0.45 if disabled else 1.0
+		var ty := (size.y - TRACK_H) / 2.0
+		var rad := TRACK_H / 2.0
+		var cy := size.y / 2.0
+
+		# Track — a capsule inset into the ink; warms toward ember-gilt as it turns on.
+		var border := Color(0.46, 0.37, 0.20, 0.85 * dim)
+		if _hovered and not disabled:
+			border = Color(0.72, 0.58, 0.28, 0.95)
+		var well := Color(0.045, 0.036, 0.030, 0.95 * dim)
+		var fill := well.lerp(Color(0.34, 0.24, 0.09, 0.95 * dim), _t)
+		_capsule(Rect2(0, ty, TRACK_W, TRACK_H), border)
+		_capsule(Rect2(1, ty + 1, TRACK_W - 2, TRACK_H - 2), fill)
+
+		# Thumb — the house diamond, gilt when on, bone when off.
+		var cx := lerpf(rad, TRACK_W - rad, _t)
+		var s := 7.0 + 1.0 * _t
+		var thumb := Color(0.44, 0.40, 0.33, dim).lerp(
+			Color(1.0, 0.88, 0.35, dim), _t)
+		if _hovered and not disabled:
+			var halo := PackedVector2Array([
+				Vector2(cx, cy - s - 3), Vector2(cx + s + 3, cy),
+				Vector2(cx, cy + s + 3), Vector2(cx - s - 3, cy)])
+			draw_colored_polygon(halo, Color(thumb.r, thumb.g, thumb.b, 0.22 * dim))
+		var quad := PackedVector2Array([
+			Vector2(cx, cy - s), Vector2(cx + s, cy),
+			Vector2(cx, cy + s), Vector2(cx - s, cy)])
+		draw_colored_polygon(quad, thumb)
+		var edge := quad.duplicate()
+		edge.append(quad[0])
+		draw_polyline(edge, Color(0.06, 0.04, 0.02, 0.8 * dim), 1.0, true)
+
+		# State word — never color-only.
+		var f: Font = GameTheme.font_display if GameTheme.font_display != null \
+			else get_theme_default_font()
+		if f != null:
+			var fs := 18
+			var word := "ON" if button_pressed else "OFF"
+			var col := Color(0.55, 0.50, 0.42, dim).lerp(
+				Color(0.90, 0.76, 0.40, dim), _t)
+			var th := f.get_ascent(fs) + f.get_descent(fs)
+			var base := Vector2(TRACK_W + 10.0, (size.y - th) / 2.0 + f.get_ascent(fs))
+			draw_string_outline(f, base, word, HORIZONTAL_ALIGNMENT_LEFT, -1, fs,
+				3, Color(0, 0, 0, 0.55 * dim))
+			draw_string(f, base, word, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
+
+	func _capsule(r: Rect2, col: Color) -> void:
+		var cr := r.size.y / 2.0
+		draw_circle(Vector2(r.position.x + cr, r.position.y + cr), cr, col)
+		draw_circle(Vector2(r.end.x - cr, r.position.y + cr), cr, col)
+		draw_rect(Rect2(r.position.x + cr, r.position.y, r.size.x - cr * 2.0, r.size.y), col)
 
 # 1280×720 removed: the combat board's fixed-width lanes need a ≥~1360px-wide
 # canvas, so 720p windows overflow the play area and overlap the side UI.
 # 1366×768 is the floor (tight but the lanes stay on screen). See UserSettings
 # MIN_RES for the underlying constraint.
 const RESOLUTIONS := [
+	Vector2i(1024, 576),
+	Vector2i(1280, 720),
 	Vector2i(1366, 768),
 	Vector2i(1600, 900),
 	Vector2i(1920, 1080),
@@ -50,6 +151,7 @@ var _combat_telegraph_toggle: Button
 var _brightness_slider: HSlider
 var _brightness_pct: Label
 var _anim_speed_option: OptionButton
+var _clash_dwell_option: OptionButton
 var _tooltip_delay_slider: HSlider
 var _tooltip_delay_pct: Label
 var _pending_res: Vector2i
@@ -77,46 +179,11 @@ func _ready() -> void:
 
 
 # ═══════════════════════════════════════════════════
-#  GEAR BUTTON  (top HUD bar, far right — matches
-#  MapView HUD row at y=14, icon size 40×40)
-# ═══════════════════════════════════════════════════
-
-func _build_gear_button() -> void:
-	_gear_btn = TextureButton.new()
-	var tex = load(GEAR_PATH) as Texture2D
-	_gear_btn.texture_normal = tex
-	# ignore_texture_size lets custom_minimum_size win — otherwise the button
-	# inherits the PNG's native size (which is ~100px) and ignores our setting.
-	_gear_btn.ignore_texture_size = true
-	_gear_btn.custom_minimum_size = Vector2(48, 48)
-	_gear_btn.stretch_mode = TextureButton.STRETCH_KEEP_ASPECT_CENTERED
-	_gear_btn.modulate = Color(0.82, 0.66, 0.30, 0.55)
-	# Top-right corner, 48×48 to visually match the heart icon, with ~22px
-	# padding from the right edge — Slay-the-Spire style.
-	_gear_btn.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	_gear_btn.offset_left = -70
-	_gear_btn.offset_top = 14
-	_gear_btn.offset_right = -22
-	_gear_btn.offset_bottom = 62
-	_gear_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	_gear_btn.pressed.connect(_toggle)
-	_gear_btn.mouse_entered.connect(func():
-		if _gear_tween and _gear_tween.is_valid():
-			_gear_tween.kill()
-		_gear_tween = create_tween()
-		_gear_tween.tween_property(_gear_btn, "modulate", Color(1.0, 0.88, 0.35, 1.0), 0.12))
-	_gear_btn.mouse_exited.connect(func():
-		if not _is_open:
-			if _gear_tween and _gear_tween.is_valid():
-				_gear_tween.kill()
-			_gear_tween = create_tween()
-			_gear_tween.tween_property(_gear_btn, "modulate", Color(0.82, 0.66, 0.30, 0.55), 0.12))
-	add_child(_gear_btn)
-
-
-# ═══════════════════════════════════════════════════
 #  OVERLAY  (backdrop + centered panel)
 # ═══════════════════════════════════════════════════
+# (The old top-right gear TextureButton builder is gone — every scene places
+# its own top-left gear via GameTheme.make_settings_gear. `_gear_btn` stays
+# declared so the null-guarded modulate syncs in _open/_close remain valid.)
 
 func _build_overlay() -> void:
 	_backdrop = ColorRect.new()
@@ -193,7 +260,7 @@ func _build_overlay() -> void:
 	cols.add_child(right_col)
 
 	# ── LEFT COLUMN: Audio + Gameplay + Accessibility ──
-	_add_section_label(left_col, "AUDIO", AUDIO_ON_PATH)
+	_add_section_label(left_col, "AUDIO")
 	_add_spacer(left_col, 4)
 
 	var master_row: Array = _add_slider_row(left_col, "Master", UserSettings.master_volume)
@@ -212,18 +279,20 @@ func _build_overlay() -> void:
 	_add_toggle_row(left_col, "Mute on Focus Loss", UserSettings.mute_on_focus_loss,
 		func(v: bool): UserSettings.set_mute_on_focus_loss(v))
 
-	_add_fancy_divider(left_col)
+	_add_fancy_divider(left_col, 280.0)
 
 	_add_section_label(left_col, "GAMEPLAY")
 	_add_spacer(left_col, 4)
 
 	_add_anim_speed_row(left_col)
+	_add_clash_dwell_row(left_col)
 	_add_tooltip_delay_row(left_col)
 	_add_toggle_row(left_col, "End-Turn Warning", UserSettings.end_turn_warning,
 		func(v: bool): UserSettings.set_end_turn_warning(v))
 	_combat_telegraph_toggle = _add_toggle_row(left_col, "Attack Preview",
 		UserSettings.combat_telegraph,
 		func(v: bool): UserSettings.set_combat_telegraph(v))
+	_add_field_style_row(left_col)
 	_add_reset_tutorials_row(left_col)
 
 	# ── RIGHT COLUMN: Display ──
@@ -247,7 +316,7 @@ func _build_overlay() -> void:
 			UserSettings.set_particles(v)  # flips preset → custom
 			_sync_graphics_preset_dropdown()
 			_refresh_gpu_info_label())
-	_add_fancy_divider(right_col)
+	_add_fancy_divider(right_col, 280.0)
 
 	_add_section_label(right_col, "ACCESSIBILITY")
 	_add_spacer(right_col, 4)
@@ -273,7 +342,7 @@ func _build_overlay() -> void:
 	btn_row.add_theme_constant_override("separation", 16)
 	btn_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-	var apply_btn := GameTheme.make_themed_button("APPLY", Color(0.18, 0.35, 0.14),
+	var apply_btn := GameTheme.make_themed_button("APPLY", Color(0.58, 0.44, 0.16),
 		Vector2(140, 40), 16)
 	apply_btn.pressed.connect(_apply_and_close)
 	btn_row.add_child(apply_btn)
@@ -353,24 +422,18 @@ func _rebuild_system_row() -> void:
 
 
 func _apply_panel_style(panel: PanelContainer) -> void:
-	var panel_tex = load(PANEL_9P_PATH) as Texture2D
-	if panel_tex:
-		var sb := StyleBoxTexture.new()
-		sb.texture = panel_tex
-		for prop in ["texture_margin_left", "texture_margin_right",
-				"texture_margin_top", "texture_margin_bottom"]:
-			sb.set(prop, 18)
-		sb.content_margin_left = 28
-		sb.content_margin_right = 28
-		sb.content_margin_top = 22
-		sb.content_margin_bottom = 22
-		sb.modulate_color = Color(0.14, 0.11, 0.08, 0.97)
-		sb.axis_stretch_horizontal = StyleBoxTexture.AXIS_STRETCH_MODE_TILE_FIT
-		sb.axis_stretch_vertical = StyleBoxTexture.AXIS_STRETCH_MODE_TILE_FIT
-		panel.add_theme_stylebox_override("panel", sb)
-	else:
-		panel.add_theme_stylebox_override("panel",
-			GameTheme.make_panel_style(GameTheme.PARCHMENT, GameTheme.PARCHMENT_BORDER))
+	# House document kit — the same chamfered ink plate with metal double-rule
+	# and corner tacks the run dossier and shop tiles wear. Replaces the old
+	# tiled 9-patch texture, whose repeating stud pattern read as polka dots
+	# stretched across a panel this large.
+	var sb := GameTheme.make_panel_style(
+		Color(0.082, 0.066, 0.050, 0.975), Color(0.62, 0.52, 0.33, 0.95),
+		1, 6, true, true)
+	sb.content_margin_left = 34
+	sb.content_margin_right = 34
+	sb.content_margin_top = 24
+	sb.content_margin_bottom = 22
+	panel.add_theme_stylebox_override("panel", sb)
 
 
 # ═══════════════════════════════════════════════════
@@ -378,74 +441,70 @@ func _apply_panel_style(panel: PanelContainer) -> void:
 # ═══════════════════════════════════════════════════
 
 func _add_title(parent: VBoxContainer) -> void:
-	var row := HBoxContainer.new()
-	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.add_theme_constant_override("separation", 12)
-	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-
-	var tex = load(GEAR_PATH) as Texture2D
-	for i in 2:
-		var icon := TextureRect.new()
-		if tex:
-			icon.texture = tex
-			icon.custom_minimum_size = Vector2(26, 26)
-			icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			icon.modulate = GameTheme.GILT_BRIGHT
-			icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		if i == 0:
-			row.add_child(icon)
-
+	# Just the chiseled word — the ornament row below it (line · diamond · line)
+	# is the flourish. The old flanking gear PNGs rendered at their ~100px
+	# native size (TextureRect ignores custom_minimum_size without
+	# EXPAND_IGNORE_SIZE) and read as clip-art either way.
 	var lbl := Label.new()
 	# Title is context-aware: during an active run the overlay acts as the
 	# pause menu, so call it "PAUSED" — on the main menu / out of a run it's
 	# just configuration so call it "SETTINGS". Updated on every _open().
 	lbl.text = "PAUSED" if RunState.run_active else "SETTINGS"
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	if GameTheme.font_display:
 		lbl.add_theme_font_override("font", GameTheme.font_display)
-	lbl.add_theme_font_size_override("font_size", 28)
+	lbl.add_theme_font_size_override("font_size", 30)
 	lbl.add_theme_color_override("font_color", GameTheme.GILT_BRIGHT)
 	lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.5))
 	lbl.add_theme_constant_override("outline_size", 3)
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(lbl)
+	parent.add_child(lbl)
 	_title_label = lbl
-
-	var icon2 := TextureRect.new()
-	if tex:
-		icon2.texture = tex
-		icon2.custom_minimum_size = Vector2(26, 26)
-		icon2.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		icon2.modulate = GameTheme.GILT_BRIGHT
-		icon2.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(icon2)
-
-	parent.add_child(row)
 
 
 # ═══════════════════════════════════════════════════
 #  DIVIDER
 # ═══════════════════════════════════════════════════
 
-func _add_fancy_divider(parent: VBoxContainer) -> void:
+func _add_fancy_divider(parent: VBoxContainer, width: float = 380.0) -> void:
+	# The house section-break: hairline · diamond · hairline (same device as the
+	# main-menu column). Replaces a Kenney divider PNG whose fade pattern read
+	# as a broken slider widget at this size.
 	_add_spacer(parent, 5)
-	var center := CenterContainer.new()
-	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var div_tex = load(DIVIDER_PATH) as Texture2D
-	if div_tex:
-		var tex_rect := TextureRect.new()
-		tex_rect.texture = div_tex
-		tex_rect.custom_minimum_size = Vector2(420, 8)
-		tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		tex_rect.modulate = Color(0.82, 0.66, 0.30, 0.45)
-		tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		center.add_child(tex_rect)
-	else:
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	row.add_theme_constant_override("separation", 10)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	for side in 2:
+		if side == 1:
+			if GameTheme.tex_icon_diamond != null:
+				var diamond := TextureRect.new()
+				diamond.texture = GameTheme.tex_icon_diamond
+				diamond.custom_minimum_size = Vector2(10, 10)
+				diamond.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				diamond.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				diamond.modulate = Color(GameTheme.GILT.r, GameTheme.GILT.g,
+					GameTheme.GILT.b, 0.75)
+				diamond.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+				diamond.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				row.add_child(diamond)
+			else:
+				var dot := ColorRect.new()
+				dot.custom_minimum_size = Vector2(7, 7)
+				dot.rotation = PI / 4
+				dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+				dot.color = Color(GameTheme.GILT.r, GameTheme.GILT.g,
+					GameTheme.GILT.b, 0.75)
+				dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				row.add_child(dot)
 		var line := ColorRect.new()
-		line.custom_minimum_size = Vector2(420, 1)
-		line.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.2)
+		line.custom_minimum_size = Vector2(width * 0.5 - 18.0, 1)
+		line.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		line.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.30)
 		line.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		center.add_child(line)
-	parent.add_child(center)
+		row.add_child(line)
+	parent.add_child(row)
 	_add_spacer(parent, 5)
 
 
@@ -459,25 +518,17 @@ func _add_spacer(parent: VBoxContainer, h: float) -> void:
 #  SECTION LABEL
 # ═══════════════════════════════════════════════════
 
-func _add_section_label(parent: VBoxContainer, text: String, icon_path: String = "") -> void:
+func _add_section_label(parent: VBoxContainer, text: String, _icon_path: String = "") -> void:
+	# Chiseled gilt header with a trailing hairline that runs out to the column
+	# edge — the AAA settings-sheet device (Hades / StS). The old clip-art
+	# speaker icon is gone; `_icon_path` is kept for call-site compatibility.
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
+	row.add_theme_constant_override("separation", 12)
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	var pad := Control.new()
 	pad.custom_minimum_size = Vector2(8, 0)
 	row.add_child(pad)
-
-	if icon_path != "":
-		var icon := TextureRect.new()
-		var tex = load(icon_path) as Texture2D
-		if tex:
-			icon.texture = tex
-			icon.custom_minimum_size = Vector2(20, 20)
-			icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			icon.modulate = GameTheme.GILT
-			icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			row.add_child(icon)
 
 	var lbl := Label.new()
 	lbl.text = text
@@ -489,6 +540,18 @@ func _add_section_label(parent: VBoxContainer, text: String, icon_path: String =
 	lbl.add_theme_constant_override("outline_size", 2)
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(lbl)
+
+	var rule := ColorRect.new()
+	rule.custom_minimum_size = Vector2(24, 1)
+	rule.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	rule.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	rule.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.22)
+	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(rule)
+
+	var pad2 := Control.new()
+	pad2.custom_minimum_size = Vector2(8, 0)
+	row.add_child(pad2)
 	parent.add_child(row)
 
 
@@ -559,9 +622,11 @@ func _style_slider(slider: HSlider) -> void:
 	filled_hl.bg_color = Color(0.82, 0.66, 0.30, 1.0)
 	slider.add_theme_stylebox_override("grabber_area_highlight", filled_hl)
 
-	slider.add_theme_icon_override("grabber", _make_circle_texture(12, GameTheme.GILT_BRIGHT))
-	slider.add_theme_icon_override("grabber_highlight", _make_circle_texture(14, Color(1.0, 0.92, 0.55)))
-	slider.add_theme_icon_override("grabber_disabled", _make_circle_texture(12, GameTheme.DIMMED))
+	# Diamond grabber — the house ornament, matching the InkSwitch thumb and
+	# the dropdown arrows (was a plain circle).
+	slider.add_theme_icon_override("grabber", _make_diamond_texture(9, GameTheme.GILT_BRIGHT))
+	slider.add_theme_icon_override("grabber_highlight", _make_diamond_texture(11, Color(1.0, 0.92, 0.55)))
+	slider.add_theme_icon_override("grabber_disabled", _make_diamond_texture(9, GameTheme.DIMMED))
 
 
 # ═══════════════════════════════════════════════════
@@ -628,27 +693,40 @@ func _update_res_option_display(mode: String) -> void:
 
 
 func _style_option_button(opt: OptionButton) -> void:
-	var normal := StyleBoxFlat.new()
-	normal.bg_color = Color(0.10, 0.08, 0.06, 0.9)
-	normal.border_color = Color(0.40, 0.30, 0.15, 0.7)
-	for prop in ["border_width_top", "border_width_bottom",
-			"border_width_left", "border_width_right"]:
-		normal.set(prop, 1)
-	for prop in ["corner_radius_top_left", "corner_radius_top_right",
-			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
-		normal.set(prop, 6)
+	# House chamfered ink chip (make_btn_style → ChartPanelStyle) instead of a
+	# rounded StyleBoxFlat, so form controls wear the same document kit as
+	# every other panel in the game.
+	var normal := GameTheme.make_btn_style(
+		Color(0.075, 0.060, 0.048, 0.94), Color(0.45, 0.36, 0.19, 0.85))
 	normal.content_margin_left = 10
 	normal.content_margin_right = 10
 	normal.content_margin_top = 4
 	normal.content_margin_bottom = 4
-
 	opt.add_theme_stylebox_override("normal", normal)
-	var hover := normal.duplicate() as StyleBoxFlat
-	hover.border_color = GameTheme.GILT_BRIGHT
-	hover.bg_color = Color(0.14, 0.11, 0.08, 0.95)
+
+	var hover := GameTheme.make_btn_style(
+		Color(0.115, 0.092, 0.068, 0.96), GameTheme.GILT_BRIGHT)
+	hover.content_margin_left = 10
+	hover.content_margin_right = 10
+	hover.content_margin_top = 4
+	hover.content_margin_bottom = 4
 	opt.add_theme_stylebox_override("hover", hover)
 	opt.add_theme_stylebox_override("pressed", hover)
+	var disabled_sb := GameTheme.make_btn_style(
+		Color(0.062, 0.052, 0.044, 0.80), Color(0.32, 0.27, 0.18, 0.55))
+	disabled_sb.content_margin_left = 10
+	disabled_sb.content_margin_right = 10
+	disabled_sb.content_margin_top = 4
+	disabled_sb.content_margin_bottom = 4
+	opt.add_theme_stylebox_override("disabled", disabled_sb)
 	opt.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+
+	# The dropdown marker: a small gilt diamond (the house ornament) baked into
+	# a texture — the stock light-gray chevron was the one unthemed pixel left
+	# on these controls (OptionButton has no arrow-tint theme slot).
+	var arrow := _get_dropdown_arrow()
+	if arrow != null:
+		opt.add_theme_icon_override("arrow", arrow)
 
 	if GameTheme.font_body:
 		opt.add_theme_font_override("font", GameTheme.font_body)
@@ -657,15 +735,21 @@ func _style_option_button(opt: OptionButton) -> void:
 	opt.add_theme_color_override("font_hover_color", GameTheme.GILT_BRIGHT)
 	_make_text_legible(opt)
 
-	# Style the popup list
+	# Style the popup list — built standalone (the button styles above are
+	# ChartPanelStyle now; deriving via `duplicate() as StyleBoxFlat` would
+	# silently produce null — the panel-kit trap).
 	var popup := opt.get_popup()
 	if popup:
-		var popup_style := normal.duplicate() as StyleBoxFlat
-		popup_style.bg_color = Color(0.10, 0.08, 0.06, 0.97)
+		var popup_style := StyleBoxFlat.new()
+		popup_style.bg_color = Color(0.082, 0.066, 0.050, 0.98)
 		popup_style.border_color = GameTheme.GILT
 		for prop in ["border_width_top", "border_width_bottom",
 				"border_width_left", "border_width_right"]:
-			popup_style.set(prop, 2)
+			popup_style.set(prop, 1)
+		popup_style.content_margin_left = 10
+		popup_style.content_margin_right = 10
+		popup_style.content_margin_top = 6
+		popup_style.content_margin_bottom = 6
 		popup.add_theme_stylebox_override("panel", popup_style)
 		popup.add_theme_stylebox_override("hover", _make_popup_hover_style())
 		if GameTheme.font_body:
@@ -673,6 +757,30 @@ func _style_option_button(opt: OptionButton) -> void:
 		popup.add_theme_font_size_override("font_size", GameTheme.MIN_LABEL_SIZE)
 		popup.add_theme_color_override("font_color", GameTheme.IVORY)
 		popup.add_theme_color_override("font_hover_color", Color(1, 0.95, 0.8))
+
+
+var _dropdown_arrow_tex: ImageTexture = null
+
+## The OptionButton arrow icon, as a small gilt diamond. Tint is baked into the
+## pixels because the theme exposes no arrow-modulate slot.
+func _get_dropdown_arrow() -> Texture2D:
+	if _dropdown_arrow_tex != null:
+		return _dropdown_arrow_tex
+	var side := 11
+	var img := Image.create(side, side, false, Image.FORMAT_RGBA8)
+	var c := (side - 1) / 2.0
+	var rad := c + 0.5
+	for y in side:
+		for x in side:
+			var d := absf(x - c) + absf(y - c)  # manhattan distance = diamond
+			if d <= rad - 1.0:
+				img.set_pixel(x, y, GameTheme.GILT)
+			elif d <= rad:
+				var a := (rad - d) * GameTheme.GILT.a
+				img.set_pixel(x, y, Color(GameTheme.GILT.r, GameTheme.GILT.g,
+					GameTheme.GILT.b, a))
+	_dropdown_arrow_tex = ImageTexture.create_from_image(img)
+	return _dropdown_arrow_tex
 
 
 func _make_popup_hover_style() -> StyleBoxFlat:
@@ -904,9 +1012,7 @@ func _refresh_graphics_controls() -> void:
 				_render_scale_option.selected = i
 				break
 	if _particles_toggle != null:
-		_particles_toggle.button_pressed = UserSettings.particles
-		_particles_toggle.text = "ON" if UserSettings.particles else "OFF"
-		_style_toggle(_particles_toggle, UserSettings.particles)
+		_sync_toggle_button(_particles_toggle, UserSettings.particles)
 	_sync_adaptive_render_toggle()
 	_sync_graphics_preset_dropdown()
 
@@ -962,20 +1068,61 @@ func _add_anim_speed_row(parent: VBoxContainer) -> void:
 	_anim_speed_option = OptionButton.new()
 	_anim_speed_option.custom_minimum_size = Vector2(170, 30)
 	_anim_speed_option.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	var speeds := [0.5, 1.0, 1.5, 3.0]
-	var speed_labels := ["Slow", "Normal", "Fast", "Instant"]
-	var current_speed := UserSettings.anim_speed
-	var selected := 1
-	for i in speeds.size():
+	_anim_speed_option.tooltip_text = "How fast every animation in the game plays." \
+		+ " Does not change the Clash Pause."
+	# "Deliberate" (2026-07-28) is the slow end — the old floor of 0.5 capped the
+	# choice at 2x, which is not enough to follow the clash lane by lane while you
+	# are still learning it. The stops themselves live on UserSettings so this row
+	# and the load-time clamp can never disagree about what is on offer.
+	var speeds: Array = UserSettings.ANIM_SPEED_STEPS
+	var speed_labels := ["Deliberate", "Slow", "Normal", "Fast", "Instant"]
+	for i in mini(speeds.size(), speed_labels.size()):
 		_anim_speed_option.add_item(speed_labels[i], i)
-		if abs(speeds[i] - current_speed) < 0.01:
-			selected = i
-	_anim_speed_option.selected = selected
+	# Nearest stop, never a fixed guess. This used to default to index 1 ("Slow")
+	# whenever the stored value matched no stop exactly, so a save carrying any
+	# other value showed the wrong word AND left the value untouched — the row
+	# lied, and nothing on screen could reveal it. UserSettings snaps on load and
+	# anim_speed_step_index() picks the nearest stop regardless, so the word shown
+	# always names the state in force.
+	_anim_speed_option.selected = UserSettings.anim_speed_step_index()
 	_style_option_button(_anim_speed_option)
 	_anim_speed_option.item_selected.connect(func(idx: int):
-		UserSettings.set_anim_speed(speeds[idx]))
+		UserSettings.set_anim_speed(float(speeds[idx])))
 	row.add_child(_anim_speed_option)
 	parent.add_child(row)
+
+
+func _add_clash_dwell_row(parent: VBoxContainer) -> void:
+	# The clash resolves one lane at a time; this is how long it HOLDS on each
+	# lane before the spotlight moves on. Separate from Animation Speed on
+	# purpose — see the CLASH_DWELL_STEPS comment in UserSettings.gd. Short
+	# version: animation speed is "how fast does this move", clash pause is "how
+	# long do I get to read", and players answer those two differently.
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_add_row_pad(row)
+
+	var lbl := _make_row_label("Clash Pause", 160)
+	row.add_child(lbl)
+
+	_clash_dwell_option = OptionButton.new()
+	_clash_dwell_option.custom_minimum_size = Vector2(170, 30)
+	_clash_dwell_option.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	_clash_dwell_option.tooltip_text = "The clash resolves one lane at a time." \
+		+ " This is how long it waits on each lane before moving to the next," \
+		+ " so you can read what happened. Set apart from Animation Speed."
+	var dwells: Array = UserSettings.CLASH_DWELL_STEPS
+	var dwell_labels := ["Off", "Brief", "Normal", "Long", "Study"]
+	for i in mini(dwells.size(), dwell_labels.size()):
+		_clash_dwell_option.add_item(dwell_labels[i], i)
+	_clash_dwell_option.selected = UserSettings.clash_dwell_step_index()
+	_style_option_button(_clash_dwell_option)
+	_clash_dwell_option.item_selected.connect(func(idx: int):
+		UserSettings.set_clash_dwell_scale(float(dwells[idx])))
+	row.add_child(_clash_dwell_option)
+	parent.add_child(row)
+
+	_add_row_hint(parent, "How long each lane of the clash holds.")
 
 
 func _add_tooltip_delay_row(parent: VBoxContainer) -> void:
@@ -1051,6 +1198,32 @@ func _add_colorblind_row(parent: VBoxContainer) -> void:
 	parent.add_child(row)
 
 
+func _add_field_style_row(parent: VBoxContainer) -> void:
+	# Combat battlefield ground — the four shippable field treatments (war
+	# table / meadow / obsidian / battle-plan). Applies at board build, so it
+	# takes effect from the next fight.
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_add_row_pad(row)
+
+	var lbl := _make_row_label("Battlefield", 160)
+	row.add_child(lbl)
+
+	var opt := OptionButton.new()
+	opt.custom_minimum_size = Vector2(170, 30)
+	opt.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	opt.tooltip_text = "The ground the battle is fought on. Takes effect from the next fight."
+	var style_labels := ["War Table", "The Meadow", "Obsidian Slate", "Battle-Plan"]
+	for i in style_labels.size():
+		opt.add_item(style_labels[i], i)
+	opt.selected = clampi(UserSettings.field_style, 0, style_labels.size() - 1)
+	_style_option_button(opt)
+	opt.item_selected.connect(func(idx: int):
+		UserSettings.set_field_style(idx))
+	row.add_child(opt)
+	parent.add_child(row)
+
+
 func _make_pct_label(text: String) -> Label:
 	var pct := Label.new()
 	pct.text = text
@@ -1078,17 +1251,9 @@ func _add_toggle_row(parent: VBoxContainer, label_text: String, initial: bool,
 	var lbl := _make_row_label(label_text, 160)
 	row.add_child(lbl)
 
-	var toggle_btn := Button.new()
-	toggle_btn.custom_minimum_size = Vector2(70, 30)
-	toggle_btn.toggle_mode = true
+	var toggle_btn := InkSwitch.new()
 	toggle_btn.button_pressed = initial
-	toggle_btn.text = "ON" if initial else "OFF"
-	toggle_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	_style_toggle(toggle_btn, initial)
-
 	toggle_btn.toggled.connect(func(pressed: bool):
-		toggle_btn.text = "ON" if pressed else "OFF"
-		_style_toggle(toggle_btn, pressed)
 		callback.call(pressed))
 
 	row.add_child(toggle_btn)
@@ -1096,48 +1261,16 @@ func _add_toggle_row(parent: VBoxContainer, label_text: String, initial: bool,
 	return toggle_btn
 
 
-func _style_toggle(btn: Button, is_on: bool) -> void:
-	var bg_color := Color(0.20, 0.50, 0.18, 0.9) if is_on else Color(0.15, 0.12, 0.10, 0.9)
-	var border_color := Color(0.35, 0.70, 0.30, 0.8) if is_on else Color(0.30, 0.22, 0.15, 0.6)
-	var text_color := Color(0.7, 1.0, 0.6) if is_on else Color(0.5, 0.45, 0.4)
-
-	var normal := StyleBoxFlat.new()
-	normal.bg_color = bg_color
-	normal.border_color = border_color
-	for prop in ["border_width_top", "border_width_bottom",
-			"border_width_left", "border_width_right"]:
-		normal.set(prop, 2)
-	for prop in ["corner_radius_top_left", "corner_radius_top_right",
-			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
-		normal.set(prop, 15)
-
-	btn.add_theme_stylebox_override("normal", normal)
-	btn.add_theme_stylebox_override("pressed", normal)
-	var hover := normal.duplicate() as StyleBoxFlat
-	hover.bg_color = bg_color.lightened(0.15)
-	hover.border_color = GameTheme.GILT_BRIGHT
-	btn.add_theme_stylebox_override("hover", hover)
-	btn.add_theme_stylebox_override("hover_pressed", hover)
-	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
-	var disabled := normal.duplicate() as StyleBoxFlat
-	disabled.bg_color = Color(0.11, 0.095, 0.08, 0.72)
-	disabled.border_color = Color(0.28, 0.24, 0.18, 0.50)
-	btn.add_theme_stylebox_override("disabled", disabled)
-
-	if GameTheme.font_body:
-		btn.add_theme_font_override("font", GameTheme.font_body)
-	btn.add_theme_font_size_override("font_size", GameTheme.MIN_LABEL_SIZE)  # ON/OFF pill
-	btn.add_theme_color_override("font_color", text_color)
-	btn.add_theme_color_override("font_hover_color", text_color.lightened(0.2))
-	btn.add_theme_color_override("font_pressed_color", text_color)
-	btn.add_theme_color_override("font_disabled_color", Color(0.46, 0.42, 0.36))
+func _style_toggle(btn: Button, _is_on: bool) -> void:
+	# Kept for call-site compatibility: the InkSwitch draws its own state.
+	if btn is InkSwitch:
+		btn.sync_visual()
 
 
 func _sync_toggle_button(btn: Button, is_on: bool) -> void:
 	if btn == null or not is_instance_valid(btn):
 		return
 	btn.set_pressed_no_signal(is_on)
-	btn.text = "ON" if is_on else "OFF"
 	_style_toggle(btn, is_on)
 
 
@@ -1202,18 +1335,59 @@ func _add_row_pad(row: HBoxContainer) -> void:
 	row.add_child(pad)
 
 
-func _make_circle_texture(radius: int, color: Color) -> ImageTexture:
-	var size := radius * 2
+## A dim subordinate line under a settings row, for a control whose name cannot
+## carry its own meaning. Indented past the row label so it reads as belonging
+## to the row above rather than as a row of its own.
+##
+## Sized 16, NOT routed through _make_text_legible: that helper bumps anything
+## under GameTheme.MIN_LABEL_SIZE up to 18, which would make the hint the same
+## size as the row label it is subordinate to and flatten the hierarchy. 16 is
+## the COPY_STYLE §11 caption register (15–17, one breath, short) and clears the
+## 14px hard floor; the outline/shadow treatment is applied by hand here so the
+## text still reads solid on the mottled panel. Keep hints under ~40 characters
+## — the column is ~460px wide and a wrap here looks like a layout bug.
+func _add_row_hint(parent: VBoxContainer, text: String) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 0)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var pad := Control.new()
+	pad.custom_minimum_size = Vector2(24, 0)
+	row.add_child(pad)
+
+	var lbl := Label.new()
+	lbl.text = text
+	if GameTheme.font_body:
+		lbl.add_theme_font_override("font", GameTheme.font_body)
+	lbl.add_theme_font_size_override("font_size", 16)
+	lbl.add_theme_color_override("font_color", GameTheme.DESC_DIM)
+	lbl.add_theme_color_override("font_outline_color", Color(0.05, 0.03, 0.02, 0.92))
+	lbl.add_theme_constant_override("outline_size", 2)
+	lbl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.45))
+	lbl.add_theme_constant_override("shadow_offset_x", 0)
+	lbl.add_theme_constant_override("shadow_offset_y", 1)
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(lbl)
+	parent.add_child(row)
+
+
+func _make_diamond_texture(radius: int, color: Color) -> ImageTexture:
+	# A filled diamond with a 1px dark keyline so the grabber reads as a set
+	# stone, not a floating blob. Antialiased by manhattan-distance falloff.
+	var size := radius * 2 + 2
 	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
-	var c := Vector2(radius, radius)
+	var c := (size - 1) / 2.0
+	var edge := Color(0.10, 0.07, 0.03, color.a)
 	for x in range(size):
 		for y in range(size):
-			var dist := Vector2(x, y).distance_to(c)
-			if dist <= radius - 1:
+			var d := absf(x - c) + absf(y - c)
+			if d <= radius - 1.6:
 				img.set_pixel(x, y, color)
-			elif dist <= radius:
-				var alpha := 1.0 - (dist - (radius - 1))
-				img.set_pixel(x, y, Color(color.r, color.g, color.b, color.a * alpha))
+			elif d <= radius - 0.6:
+				img.set_pixel(x, y, edge.lerp(color, clampf(radius - 0.6 - d, 0.0, 1.0)))
+			elif d <= radius + 0.4:
+				var a := clampf(radius + 0.4 - d, 0.0, 1.0)
+				img.set_pixel(x, y, Color(edge.r, edge.g, edge.b, edge.a * a))
 	return ImageTexture.create_from_image(img)
 
 
@@ -1265,6 +1439,14 @@ func _open() -> void:
 	_refresh_gpu_info_label()
 	_sync_motion_dependent_toggles()
 	_sync_toggle_button(_combat_telegraph_toggle, UserSettings.combat_telegraph)
+	# Both speed dials re-read the live value on every open. The overlay is built
+	# once at boot and lives for the whole session, so anything that moved a
+	# setting since then (settings reloaded, a headless harness, a future
+	# defaults-reset) would otherwise leave a stale word sitting on the row.
+	if _anim_speed_option != null and is_instance_valid(_anim_speed_option):
+		_anim_speed_option.selected = UserSettings.anim_speed_step_index()
+	if _clash_dwell_option != null and is_instance_valid(_clash_dwell_option):
+		_clash_dwell_option.selected = UserSettings.clash_dwell_step_index()
 
 	_master_slider.value = UserSettings.master_volume
 	_music_slider.value = UserSettings.music_volume
@@ -1379,7 +1561,7 @@ func _quit_game() -> void:
 	if RunState.run_active:
 		GameTheme.show_confirm_dialog(self,
 			"QUIT GAME?",
-			"Your current run will be lost. Quit to desktop?",
+			"Your latest map checkpoint is saved. Progress inside the current room will restart. Quit to desktop?",
 			"YES, QUIT",
 			"KEEP PLAYING",
 			Callable(self, "_do_quit"))

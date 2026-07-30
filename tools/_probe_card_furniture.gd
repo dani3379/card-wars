@@ -17,6 +17,7 @@ extends SceneTree
 const ACCEPTED: Dictionary = {
 	"torchbearer:adj_buff": "prose 'Adjacent friendlies +1 ATK'; the Adjacent word gilds+hints",
 	"ironclad_veteran:on_enter": "prose 'Enters with...' carries the timing",
+	"gallows_writ:exhaust": "the authored EXHAUST footer carries the keyword; exact rules prose stays uncluttered",
 }
 
 var _fails: Array = []
@@ -58,6 +59,10 @@ func _footer_for(data: Dictionary) -> String:
 		"friendly_creature": contract = "TARGET ALLY"
 		"any_creature":      contract = "ANY CREATURE"
 		"any":               contract = "ANY TARGET"
+		"lane":              contract = "TARGET LANE"
+		"friendly_then_enemy": contract = "ALLY · ENEMY"
+		"two_enemies":       contract = "TWO ENEMIES"
+		"friendly_lane":     contract = "ALLY · LANE"
 		_:                   contract = String(data.get("scope", ""))
 	var parts: Array[String] = []
 	if contract != "":
@@ -107,6 +112,13 @@ func _run() -> void:
 				_fails.append("FOOTER_LONG %s: \"%s\" (%d chars)" % [cid, foot, foot.length()])
 			if data.has("scope") and String(data.get("targeting", "none")) != "none":
 				_fails.append("SCOPE_ON_TARGETED %s" % cid)
+		elif String(data.get("type", "")) == "armament":
+			var arm_foot := "ARMAMENT · ALLY · EXHAUST"
+			if arm_foot.length() > 31:
+				_fails.append("FOOTER_LONG %s: \"%s\" (%d chars)" % [cid, arm_foot, arm_foot.length()])
+			if String(data.get("targeting", "")) != "friendly_creature" \
+					or data.get("armament", {}).is_empty():
+				_fails.append("BAD_ARMAMENT_CONTRACT %s" % cid)
 		elif data.has("scope"):
 			_fails.append("SCOPE_ON_CREATURE %s" % cid)
 

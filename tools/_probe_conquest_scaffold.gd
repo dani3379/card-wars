@@ -374,6 +374,13 @@ func _test_recruit_nodes() -> void:
 	var swift_s: int = rec._affinity(
 		{"keywords": ["swift"], "type": "creature", "cost": 2}, "last_wall")
 	_check(armored_s > swift_s, "last_wall affinity prefers armored over swift")
+	var plain_s: int = rec._affinity(
+		{"keywords": [], "type": "spell", "cost": 1}, "last_wall")
+	var tagged_s: int = rec._affinity(
+		{"keywords": [], "type": "spell", "cost": 1,
+			"affinities": ["last_wall"]}, "last_wall")
+	_check(tagged_s == plain_s + 4,
+		"explicit card affinity adds the intended +4 muster weight")
 	rec.free()
 
 

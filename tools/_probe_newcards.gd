@@ -5,6 +5,15 @@
 ## Condottiere, Necromancer, Last Rites, Unclean Blessing/Virulence, The Doubled
 ## Hour, Rout) and the reworks (Witch, Hydra, Warchief, Paladin, Summoner, Harpy,
 ## Ember Warden, Carrion Priest, Basilisk, Fuel the Pyre, War Cry, Griffin).
+## The 2026-07-14 replacement pass is covered here too: Mourner, Countermarch,
+## Rain of Blows, Offering, Frenzy, Salvage, The Black Contract, and Leyline Conduit.
+##
+## 2026-07-28 repair: three cards had been reworked out from under their tests.
+## Mourner banks Command instead of drawing, and Cinder Acolyte / Ember Warden
+## traded grows_on_heal / grows_on_burn for spark_on_spell / shield_on_spell in
+## the 2026-07-15 interest slate. Those sections now assert the LIVE contracts
+## (and the retired triggers' silence). Same pass: the muster delay was blinding
+## every strike scenario — see _seat_data.
 ##
 ## Run: Godot_console.exe --headless --path "D:\Godot" --script res://tools/_probe_newcards.gd
 
@@ -16,6 +25,7 @@ var _done := false
 var _pass := 0
 var _fail := 0
 var _c2d: GDScript = null
+var _probe_draw_uid := -910000
 
 
 func _process(_d: float) -> bool:
@@ -68,25 +78,51 @@ func _run() -> void:
 	var scene = load("res://scenes/combat.tscn")
 	combat = scene.instantiate()
 	root.add_child(combat)
+	# Phase.PLAYER_TURN is enum 0 AND `phase`'s declared default, so waiting on
+	# the phase alone returns on the first poll — against a combat whose
+	# interleaved _ready has not finished building. round_number only leaves 0
+	# once _start_round() has really run, so gate on that.
 	var ok := false
 	for _i in 40:
 		await create_timer(0.1).timeout
 		if not is_instance_valid(combat):
 			break
-		if combat.phase == combat.Phase.PLAYER_TURN:
+		if int(combat.round_number) >= 1 and combat.phase == combat.Phase.PLAYER_TURN:
 			ok = true
 			break
 	if not ok:
-		print("[newcards] FATAL: never reached PLAYER_TURN"); _finish(1); return
-	print("[newcards] combat booted")
+		print("[newcards] FATAL: never reached a started PLAYER_TURN"); _finish(1); return
+	# The opening deal is STAGGERED (_start_round fires draw_one on 0.08s timers
+	# so the hand fans in one card at a time), so round_number hits 1 while cards
+	# are still arriving. Every hand-size assertion below would otherwise race
+	# the deal: a scenario could "draw a card" simply by standing still. Wait for
+	# two consecutive polls with an unchanged, non-empty hand.
+	var settled := -1
+	for _i in 20:
+		var now: int = combat._hand.size()
+		if now > 0 and now == settled:
+			break
+		settled = now
+		await create_timer(0.1).timeout
+	print("[newcards] combat booted (hand settled at %d)" % combat._hand.size())
 
 	await _t_war_cry()
 	await _t_last_rites()
+	await _t_mass_grave()
+	await _t_mourner()
+	await _t_countermarch()
+	await _t_rain_of_blows()
+	await _t_offering()
+	await _t_frenzy()
+	await _t_salvage()
+	await _t_black_contract()
+	await _t_leyline()
 	await _t_virulence()
 	await _t_rout()
 	await _t_doubled_hour()
 	await _t_headhunter()
 	await _t_witch()
+	await _t_targeted_refund()
 	await _t_necromancer()
 	await _t_summoner()
 	await _t_paladin()
@@ -129,6 +165,10 @@ func _clear() -> void:
 	combat._friendly_deaths_this_fight = 0
 	combat._virulence_active = [false, false]
 	combat._doubled_hour = [false, false]
+	combat._black_contract_active = false
+	combat._black_contract_last_round = -1
+	combat._black_contract_token_size = 2
+	combat._spells_cast_this_turn = 0
 	combat.enemy_hp = 60
 	combat.player_hp = 20
 	combat.player_max_hp = 25
@@ -148,6 +188,14 @@ func _seat_data(data: Dictionary, is_enemy: bool, lane: int, row: int = 0):
 	combat._slot_set_card(slot, card)
 	card.current_hp = int(data.get("hp", 1))
 	card.current_atk = int(data.get("atk", 0))
+	# THE MUSTER DELAY (2026-07-21) defaults ready_to_swing to FALSE on every new
+	# body, and Card2D.can_attack() gates every strike path on it. _start_round()
+	# is what sweeps the board ready in real play; a fixture seated straight onto
+	# the board never sees that sweep, so without this line every strike-based
+	# scenario below (Rain of Blows, Virulence, The Doubled Hour, Basilisk,
+	# Hydra) failed for one reason that had nothing to do with the card it tests.
+	# Same repair as tools/_probe_combat_telegraph.gd.
+	card.state.ready_to_swing = true
 	if data.get("keywords", []).has("shield"):
 		card.state.has_shield = true
 	card.destroyed.connect(combat._on_card_destroyed.bind(card))
@@ -173,6 +221,46 @@ func _cast(spell_card_id: String, target) -> void:
 	await combat._resolve_custom_spell(String(data.get("spell", {}).get("id", "")), target, -1, data)
 
 
+## Free at least `n` slots in the hand. A full hand legitimately refuses new
+## cards, so any scenario whose assertion is "a card arrived in hand" has to
+## guarantee the room first or it measures the hand cap instead of the card.
+func _make_hand_room(n: int) -> void:
+	while combat._hand.size() > combat.MAX_HAND_SIZE - n:
+		var trimmed = combat._hand.pop_back()
+		if trimmed != null and is_instance_valid(trimmed):
+			if trimmed.get_parent() != null:
+				trimmed.get_parent().remove_child(trimmed)
+			trimmed.queue_free()
+
+
+func _seed_local_draws(n: int, card_id: String = "spark") -> void:
+	# Draw assertions must not depend on however many cards the booted fight dealt.
+	# Trim only when necessary, then put known synthetic entries on top of the pile.
+	_make_hand_room(n)
+	for _i in n:
+		combat._player_draw_pile.push_front(combat._pile_entry(card_id, _probe_draw_uid))
+		_probe_draw_uid -= 1
+
+
+func _loose_spell(card_id: String):
+	var card = combat.CARD_SCENE.instantiate()
+	card.card_id = card_id
+	card.card_data = CDB.get_card_data(card_id)
+	card.deck_uid = _probe_draw_uid
+	_probe_draw_uid -= 1
+	combat.add_child(card)
+	return card
+
+
+func _named_token_count(token_name: String) -> int:
+	var total := 0
+	for c in combat._all_player_creatures():
+		if is_instance_valid(c) and c.is_token \
+				and String(c.card_data.get("name", "")) == token_name:
+			total += 1
+	return total
+
+
 const NONE4: Array[bool] = [false, false, false, false]
 
 
@@ -183,7 +271,7 @@ func _t_war_cry() -> void:
 	_clear()
 	var p = _seat_plain(false, 0, 2, 3)
 	await _cast("war_cry", null)
-	_ck("grants war_cry_swift meta", p.get_meta("war_cry_swift", false) == true)
+	_ck("grants typed war_cry_swift state", p.state.war_cry_swift)
 	_ck("no base ATK buff (swift-only now)", p.temp_atk_buff == 0, "temp=%d" % p.temp_atk_buff)
 
 
@@ -196,6 +284,236 @@ func _t_last_rites() -> void:
 	combat._friendly_deaths_this_fight = 1
 	await _cast("grave_pact", e)
 	_ck("deals 6 once a friendly has fallen", e.current_hp == 3, "hp=%d" % e.current_hp)
+
+
+func _t_mass_grave() -> void:
+	print("\n[newcards] === Mass Grave: 1 to all enemies per fallen friendly ===")
+	_clear()
+	var front = _seat_plain(true, 0, 0, 6)
+	var back = _seat_plain(true, 2, 0, 4, [], 1)
+	combat._friendly_deaths_this_fight = 3
+	await _cast("mass_grave", null)
+	_ck("front foe took the fallen count (3)", is_instance_valid(front) and front.current_hp == 3,
+		"hp=%d" % (front.current_hp if is_instance_valid(front) else -99))
+	_ck("back foe took the fallen count (3)", is_instance_valid(back) and back.current_hp == 1,
+		"hp=%d" % (back.current_hp if is_instance_valid(back) else -99))
+
+
+func _t_mourner() -> void:
+	# The funeral dues. Mourner briefly drew a card on death; the live card banks
+	# Command for NEXT turn (on_death type bonus_mana_next_turn), which is what
+	# both its printed text and _probe_interest_slate assert. This section tested
+	# the retired draw and had been failing for that reason alone.
+	print("\n[newcards] === Mourner: On-Death banks Command for next turn ===")
+	_clear()
+	var hand_before: int = combat._hand.size()
+	var mana_before: int = combat.player_mana
+	var banked_before: int = combat._bonus_mana_next_turn
+	var mourner = _seat_id("mourner", false, 0)
+	mourner.take_damage(999)
+	await process_frame
+	_ck("death banked exactly 1 Command for next turn",
+		combat._bonus_mana_next_turn == banked_before + 1,
+		"banked %d->%d" % [banked_before, combat._bonus_mana_next_turn])
+	_ck("death paid nothing into THIS turn's pool", combat.player_mana == mana_before,
+		"mana %d->%d" % [mana_before, combat.player_mana])
+	_ck("death drew no card", combat._hand.size() == hand_before,
+		"hand %d->%d" % [hand_before, combat._hand.size()])
+
+
+func _t_countermarch() -> void:
+	print("\n[newcards] === Countermarch: change rows, then Shield ===")
+	_clear()
+	var ordered = _seat_plain(false, 1, 2, 4)
+	await _cast("adrenaline", ordered)
+	_ck("base order moved front to back", ordered.current_row == combat.ROW_BACK,
+		"row=%d" % ordered.current_row)
+	_ck("base order Shielded its target", ordered.state.has_shield)
+
+	_clear()
+	var left = _seat_plain(false, 0, 1, 3, [], combat.ROW_BACK)
+	var forged_target = _seat_plain(false, 1, 2, 4)
+	var right = _seat_plain(false, 2, 1, 3, [], combat.ROW_BACK)
+	var bystander = _seat_plain(false, 3, 1, 3)
+	var RS = root.get_node_or_null("RunState")
+	var forged: Dictionary = RS.preview_plus_upgrade(CDB.get_card_data("adrenaline"))
+	await combat._resolve_custom_spell("baggage_train", forged_target, -1, forged)
+	_ck("forged order moved its target", forged_target.current_row == combat.ROW_BACK)
+	_ck("forged order Shielded target and row-neighbours",
+		forged_target.state.has_shield and left.state.has_shield and right.state.has_shield)
+	_ck("forged order did not Shield a non-adjacent body", not bystander.state.has_shield)
+
+
+func _t_rain_of_blows() -> void:
+	print("\n[newcards] === Rain of Blows: arm exactly one extra strike ===")
+	_clear()
+	var ordered = _seat_plain(false, 0, 2, 5)
+	var defender = _seat_plain(true, 0, 0, 10)
+	await _cast("smite_spell", ordered)
+	_ck("target carries the second-strike arm",
+		ordered.state.battle_order_second_strike)
+	await combat._resolve_column_attack(0, combat.ROW_FRONT, false, NONE4)
+	_ck("target made its ordinary strike first", defender.current_hp == 8,
+		"hp=%d" % defender.current_hp)
+	await combat._run_battle_order_strikes(NONE4, NONE4)
+	_ck("Rain of Blows made exactly one additional strike", defender.current_hp == 6,
+		"hp=%d" % defender.current_hp)
+	_ck("second-strike arm was consumed",
+		not ordered.state.battle_order_second_strike)
+
+
+func _t_offering() -> void:
+	print("\n[newcards] === Offering: one extra repeatable On-Death; forged draw ===")
+	_clear()
+	var mourner = _seat_id("mourner", false, 0)
+	# Mourner's repeatable On-Death now banks Command for next turn rather than
+	# drawing; the thing under test is still "Offering adds exactly one extra
+	# copy of a repeatable On-Death", read off the bank instead of the hand.
+	var banked_before: int = combat._bonus_mana_next_turn
+	var mana_before: int = combat.player_mana
+	# Sacrifice is a death condition: neither one-hit survival gate may turn
+	# Offering into a free trigger while leaving its target alive.
+	mourner.state.has_shield = true
+	mourner.card_data["keywords"].append("last_stand")
+	await _cast("offering", mourner)
+	await process_frame
+	_ck("Offering sacrificed its target", not is_instance_valid(mourner) or mourner.current_hp <= 0)
+	_ck("Mourner's repeatable On-Death fired twice",
+		combat._bonus_mana_next_turn == banked_before + 2,
+		"banked %d->%d" % [banked_before, combat._bonus_mana_next_turn])
+	_ck("Offering no longer grants Command", combat.player_mana == mana_before,
+		"mana %d->%d" % [mana_before, combat.player_mana])
+
+	_clear()
+	_seed_local_draws(1)
+	var plain = _seat_plain(false, 0, 1, 2)
+	var RS = root.get_node_or_null("RunState")
+	var forged: Dictionary = RS.preview_plus_upgrade(CDB.get_card_data("offering"))
+	var forged_hand_before: int = combat._hand.size()
+	await combat._resolve_custom_spell("offering", plain, -1, forged)
+	await process_frame
+	_ck("Offering+ drew its authored extra card", combat._hand.size() == forged_hand_before + 1,
+		"hand %d->%d" % [forged_hand_before, combat._hand.size()])
+
+
+func _t_frenzy() -> void:
+	print("\n[newcards] === Frenzy: round ATK, arm Doom, then detonate ===")
+	_clear()
+	var fuse = _seat_plain(false, 0, 2, 4)
+	await _cast("turbo", fuse)
+	_ck("first cast granted +3 ATK this round", fuse.temp_atk_buff == 3,
+		"temp=%d" % fuse.temp_atk_buff)
+	_ck("first cast armed Doom 2", fuse.has_keyword("doom") and fuse.doom_counter == 2,
+		"doom=%d" % fuse.doom_counter)
+	var expected_blast: int = fuse.effective_atk() + 3
+	var face_before: int = combat.enemy_hp
+	fuse.state.has_shield = true
+	fuse.card_data["keywords"].append("last_stand")
+	await _cast("turbo", fuse)
+	await process_frame
+	_ck("second cast detonated the existing Doom", not is_instance_valid(fuse) or fuse.current_hp <= 0)
+	_ck("detonation used the twice-buffed effective ATK",
+		combat.enemy_hp == face_before - expected_blast,
+		"expected=%d face %d->%d" % [expected_blast, face_before, combat.enemy_hp])
+
+
+func _t_salvage() -> void:
+	print("\n[newcards] === Salvage: cost-based draw contract ===")
+	var data: Dictionary = CDB.get_card_data("recycle")
+	var RS = root.get_node_or_null("RunState")
+	var forged: Dictionary = RS.preview_plus_upgrade(data)
+	_ck("base Salvage exhausts and names cost-based draw",
+		int(data.get("cost", -1)) == 1 and data.get("keywords", []).has("exhaust") \
+		and String(data.get("desc", "")).contains("Draw cards equal to its cost"))
+	_ck("Salvage+ carries the one-card draw rider", int(forged.get("extra_draw", 0)) == 1)
+
+
+func _t_black_contract() -> void:
+	print("\n[newcards] === The Black Contract: debt + bounded non-token death engine ===")
+	_clear()
+	var RS = root.get_node_or_null("RunState")
+	var deck_before: int = RS.deck.size()
+	var debts_before: int = RS.deck.count("war_debt")
+	await _cast("unholy_bargain", null)
+	_ck("cast added exactly one War-Debt",
+		RS.deck.size() == deck_before + 1 and RS.deck.count("war_debt") == debts_before + 1)
+	_ck("cast armed a 2/2 Contract", combat._black_contract_active \
+		and combat._black_contract_token_size == 2)
+	_seed_local_draws(2)
+	var repeat_hand_before: int = combat._hand.size()
+	var repeat_deck_before: int = RS.deck.size()
+	await _cast("unholy_bargain", null)
+	_ck("a further Contract drew 2 instead of adding another debt",
+		combat._hand.size() == repeat_hand_before + 2 \
+		and RS.deck.size() == repeat_deck_before \
+		and RS.deck.count("war_debt") == debts_before + 1,
+		"hand %d->%d deck %d->%d debts=%d" % [repeat_hand_before,
+			combat._hand.size(), repeat_deck_before, RS.deck.size(), RS.deck.count("war_debt")])
+
+	var disposable_token = _seat_plain(false, 0, 1, 1)
+	disposable_token.is_token = true
+	disposable_token.card_data["is_token"] = true
+	disposable_token.take_damage(999)
+	await process_frame
+	_ck("a token death did not muster a Debtor", _named_token_count("Debtor") == 0 \
+		and combat._black_contract_last_round == -1)
+
+	var casualty = _seat_plain(false, 1, 1, 1)
+	casualty.take_damage(999)
+	await process_frame
+	var debtor = null
+	for c in combat._all_player_creatures():
+		if is_instance_valid(c) and c.is_token \
+				and String(c.card_data.get("name", "")) == "Debtor":
+			debtor = c
+			break
+	_ck("first real death mustered one Debtor", _named_token_count("Debtor") == 1)
+	_ck("Debtor is the promised 2/2 token", debtor != null \
+		and debtor.current_atk == 2 and debtor.current_hp == 2)
+	var second_casualty = _seat_plain(false, 2, 1, 1)
+	second_casualty.take_damage(999)
+	await process_frame
+	_ck("a second real death in the round did not loop", _named_token_count("Debtor") == 1)
+
+	# The contract mutates the campaign deck by design; restore the probe run so
+	# later scenarios still exercise the original boot deck.
+	if RS.deck.size() > deck_before:
+		RS.remove_card_at(RS.deck.size() - 1)
+
+
+func _t_leyline() -> void:
+	print("\n[newcards] === Leyline Conduit: first-spell column Shield ===")
+	_clear()
+	var conduit = _seat_id("leyline_conduit", false, 1)
+	var mate = _seat_plain(false, 1, 2, 4, [], combat.ROW_BACK)
+	var bystander = _seat_plain(false, 3, 2, 4)
+	combat._spells_cast_this_turn = 0
+	combat._after_spell(_loose_spell("spark"))
+	await process_frame
+	_ck("first spell Shielded the conduit and column-mate",
+		conduit.state.has_shield and mate.state.has_shield)
+	_ck("first spell did not Shield an unrelated body", not bystander.state.has_shield)
+	conduit.state.has_shield = false
+	mate.state.has_shield = false
+	combat._after_spell(_loose_spell("spark"))
+	await process_frame
+	_ck("second spell did not retrigger Leyline",
+		not conduit.state.has_shield and not mate.state.has_shield \
+		and combat._spells_cast_this_turn == 2)
+
+	_clear()
+	conduit = _seat_id("leyline_conduit", false, 1)
+	mate = _seat_plain(false, 1, 2, 4, [], combat.ROW_BACK)
+	var hexblade = _seat_id("hexblade", false, 0)
+	var emberwright = _seat_id("emberwright", false, 3)
+	var face_before: int = combat.enemy_hp
+	combat._after_generated_spell()
+	_ck("a generated spell fed Leyline and the spell-board engines",
+		conduit.state.has_shield and mate.state.has_shield \
+		and hexblade.temp_atk_buff == 1 and combat.enemy_hp == face_before - 2 \
+		and combat._spells_cast_this_turn == 1,
+		"hex=%d face %d->%d count=%d" % [hexblade.temp_atk_buff,
+			face_before, combat.enemy_hp, combat._spells_cast_this_turn])
 
 
 func _t_virulence() -> void:
@@ -238,15 +556,15 @@ func _t_doubled_hour() -> void:
 
 
 func _t_headhunter() -> void:
-	print("\n[newcards] === Headhunter: Slay в†’ draw ===")
+	print("\n[newcards] === Headhunter: Slay -> heal ===")
 	_clear()
+	combat.player_hp = 10
 	var _p = _seat_id("skirmisher", false, 0)
 	var _e = _seat_plain(true, 0, 0, 1)
-	var hand_before: int = combat._hand.size()
 	await combat._resolve_column_attack(0, 0, false, NONE4)
 	combat._cleanup_dead()
-	_ck("kill drew a card", combat._hand.size() == hand_before + 1,
-		"hand %dв†’%d" % [hand_before, combat._hand.size()])
+	_ck("kill healed the hero 2", combat.player_hp == 12,
+		"hp=%d" % combat.player_hp)
 
 
 func _t_witch() -> void:
@@ -255,7 +573,7 @@ func _t_witch() -> void:
 	_seat_id("witch", false, 0)
 	var spell = combat.CARD_SCENE.instantiate()
 	spell.card_id = "smite_spell"
-	spell.card_data = CDB.get_card_data("smite_spell")   # base cost 2
+	spell.card_data = CDB.get_card_data("smite_spell")   # Rain of Blows, base cost 2
 	combat._first_spell_this_turn = false
 	var c1: int = combat._effective_cost(spell)
 	combat._first_spell_this_turn = true
@@ -263,6 +581,27 @@ func _t_witch() -> void:
 	_ck("first spell discounted", c1 == 1, "cost=%d" % c1)
 	_ck("later spells full price", c2 == 2, "cost=%d" % c2)
 	spell.free()
+
+
+func _t_targeted_refund() -> void:
+	print("\n[newcards] === Targeted spell cancel: refund the amount actually paid ===")
+	_clear()
+	var spell = combat.CARD_SCENE.instantiate()
+	spell.card_id = "smite_spell"
+	spell.card_data = CDB.get_card_data("smite_spell")
+	spell.deck_uid = _probe_draw_uid
+	_probe_draw_uid -= 1
+	combat._hand_container.add_child(spell)
+	combat._hand.append(spell)
+	combat.player_mana = 3
+	combat._play_spell(spell, 1) # printed 2, discounted to 1
+	_ck("discounted targeted spell paid exactly 1", combat.player_mana == 2)
+	combat._cancel_targeting()
+	_ck("cancel refunded exactly 1, not the printed 2",
+		combat.player_mana == 3 and combat._hand.has(spell) \
+		and not combat._first_spell_this_turn,
+		"mana=%d in_hand=%s first=%s" % [combat.player_mana,
+			str(combat._hand.has(spell)), str(combat._first_spell_this_turn)])
 
 
 func _t_necromancer() -> void:
@@ -308,25 +647,60 @@ func _t_paladin() -> void:
 
 
 func _t_acolyte() -> void:
-	print("\n[newcards] === Cinder Acolyte: grows on heal ===")
+	# 2026-07-15 interest slate: the old grows_on_heal stoke was replaced by
+	# spark_on_spell (Combat._record_spell_cast_board_payoffs), so the retired
+	# hero-heal contract this section used to assert can never pass again. The
+	# card's live promise is positional: her lane chooses the victim.
+	print("\n[newcards] === Cinder Acolyte: every cast sparks the body across ===")
 	_clear()
+	_seat_id("cinder_acolyte", false, 0)
+	var across = _seat_plain(true, 0, 0, 5)
+	var unopposed = _seat_plain(true, 2, 0, 5)
 	combat.player_hp = 10
-	var a = _seat_id("cinder_acolyte", false, 0)
 	combat._heal_owner_hero(false, 2)
-	_ck("heal stoked +1 ATK", a.current_atk == 2, "atk=%d" % a.current_atk)
-	combat.player_hp = combat.player_max_hp
-	combat._heal_owner_hero(false, 2)
-	_ck("heal at full HP does nothing", a.current_atk == 2, "atk=%d" % a.current_atk)
+	_ck("a hero heal no longer stokes her (retired grows_on_heal)",
+		across.current_hp == 5, "hp=%d" % across.current_hp)
+	combat._after_spell(_loose_spell("spark"))
+	await process_frame
+	_ck("the cast sparked 1 into the enemy she faces", across.current_hp == 4,
+		"hp=%d" % across.current_hp)
+	_ck("the cast spared a lane she does not face", unopposed.current_hp == 5,
+		"hp=%d" % unopposed.current_hp)
+
+	# Positional cost: standing across from nothing sparks nothing (and must not
+	# spill onto the face or another lane).
+	_clear()
+	_seat_id("cinder_acolyte", false, 1)
+	var offside = _seat_plain(true, 3, 0, 5)
+	var face_before: int = combat.enemy_hp
+	combat._after_spell(_loose_spell("spark"))
+	await process_frame
+	_ck("an empty opposing lane sparks nothing at all",
+		offside.current_hp == 5 and combat.enemy_hp == face_before,
+		"hp=%d face %d->%d" % [offside.current_hp, face_before, combat.enemy_hp])
 
 
 func _t_warden() -> void:
-	print("\n[newcards] === Ember Warden: grows on effect burn ===")
+	# 2026-07-15 interest slate: grows_on_burn was replaced by shield_on_spell,
+	# so the retired face-burn stoke this section used to assert is unreachable.
+	print("\n[newcards] === Ember Warden: every cast wraps her in Shield ===")
 	_clear()
 	var w = _seat_id("ember_warden", false, 0)
-	combat.damage_enemy_hero(2)          # effect
-	_ck("effect burn stoked +1 ATK", w.current_atk == 2, "atk=%d" % w.current_atk)
-	combat.damage_enemy_hero(2, false)   # plain creature strike
-	_ck("strike damage does NOT stoke", w.current_atk == 2, "atk=%d" % w.current_atk)
+	var ally = _seat_plain(false, 2, 1, 3)
+	combat.damage_enemy_hero(2)          # effect burn — the retired trigger
+	_ck("effect burn no longer stokes her (retired grows_on_burn)",
+		not w.state.has_shield and w.temp_atk_buff == 0,
+		"shield=%s temp=%d" % [str(w.state.has_shield), w.temp_atk_buff])
+	combat._after_spell(_loose_spell("spark"))
+	await process_frame
+	_ck("the cast wrapped the warden in Shield", w.state.has_shield)
+	_ck("the cast did not shield an unrelated body", not ally.state.has_shield)
+	# Shield is binary: a repeat cast while shielded must not bank a second one.
+	w.state.has_shield = false
+	combat._after_spell(_loose_spell("spark"))
+	await process_frame
+	_ck("a later cast re-shields her once the first Shield is spent",
+		w.state.has_shield)
 
 
 func _t_basilisk() -> void:
@@ -351,15 +725,15 @@ func _t_condottiere() -> void:
 
 
 func _t_harpy() -> void:
-	print("\n[newcards] === Harpy: haul + wind the target ===")
+	print("\n[newcards] === Harpy: clean back-to-front haul ===")
 	_clear()
 	var e = _seat_plain(true, 0, 2, 4, [], 1)   # back row
 	var h = _seat_id("harpy", false, 0)
 	combat._resolve_on_play_ability(h, 0, false)
 	await process_frame
 	_ck("back enemy hauled to front", e.current_row == 0, "row=%d" % e.current_row)
-	_ck("took 2 on the way", e.current_hp == 2, "hp=%d" % e.current_hp)
-	_ck("winded (stunned)", e.state.stunned == true)
+	_ck("haul dealt no hidden damage", e.current_hp == 4, "hp=%d" % e.current_hp)
+	_ck("haul added no hidden stun", not e.state.stunned)
 
 
 func _t_hydra() -> void:
@@ -442,11 +816,15 @@ func _t_random_spell_autotarget() -> void:
 
 	_clear()
 	var mass_data: Dictionary = CDB.get_card_data("mass_grave")
+	combat._friendly_deaths_this_fight = 1
 	ctx = combat._random_spell_context_for(mass_data)
 	_ck("untargeted enemy-board spell skips empty enemy board", not bool(ctx.get("ok", false)))
 	_seat_plain(true, 2, 1, 4)
 	ctx = combat._random_spell_context_for(mass_data)
 	_ck("untargeted enemy-board spell enters pool with enemies", bool(ctx.get("ok", false)))
+	combat._friendly_deaths_this_fight = 0
+	ctx = combat._random_spell_context_for(mass_data)
+	_ck("mass grave stays out of the pool with no fallen", not bool(ctx.get("ok", false)))
 
 
 func _t_carrion() -> void:
@@ -492,6 +870,9 @@ func _t_griffin() -> void:
 	_clear()
 	var g = _seat_id("griffin", false, 0)
 	g.deck_uid = 4242
+	# The return needs a free slot: a hand at MAX_HAND_SIZE refuses it by design,
+	# and by this point in the run the scenarios above have filled it.
+	_make_hand_room(1)
 	var hand_before: int = combat._hand.size()
 	g.take_damage(999)
 	await process_frame
@@ -500,17 +881,23 @@ func _t_griffin() -> void:
 
 
 func _t_warchief() -> void:
-	print("\n[newcards] === Warchief: ATK is ALWAYS 2 + others ===")
+	print("\n[newcards] === Warchief: buffs other Soldiers, never itself ===")
 	_clear()
 	var w = _seat_id("warchief", false, 0)
-	var a1 = _seat_plain(false, 1, 1, 1)
-	_seat_plain(false, 2, 1, 1)
+	var a1 = _seat_id("pikeman", false, 1)
+	var a2 = _seat_id("skirmisher", false, 2)
 	combat._refresh_adjacency_buffs()
-	_ck("2 allies в†’ 4 ATK", w.current_atk == 4, "atk=%d" % w.current_atk)
-	a1.take_damage(999)
+	_ck("Warchief kept its printed 2 ATK", w.effective_atk() == 2,
+		"atk=%d" % w.effective_atk())
+	_ck("other Soldiers each gained +1 ATK",
+		a1.effective_atk() == 3 and a2.effective_atk() == 4,
+		"pikeman=%d headhunter=%d" % [a1.effective_atk(), a2.effective_atk()])
+	w.take_damage(999)
 	await process_frame
 	combat._cleanup_dead()
-	_ck("ally fell в†’ drops to 3 live", w.current_atk == 3, "atk=%d" % w.current_atk)
+	_ck("aura vanished with the Warchief",
+		a1.effective_atk() == 2 and a2.effective_atk() == 3,
+		"pikeman=%d headhunter=%d" % [a1.effective_atk(), a2.effective_atk()])
 
 
 

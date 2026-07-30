@@ -39,9 +39,7 @@ const SKIRMISH_DRAFT_WEIGHTS: Array[int] = [55, 36, 8, 1] # common/uncommon/rare
 ## draft / quick / sealed treat them as the new White tier because their downside
 ## is materially softer in skirmish than campaign. Keep this list tiny: White is
 ## for "broken in MP, fine in solo", not for generically strong cards.
-const SKIRMISH_RARITY_OVERRIDES: Dictionary = {
-	"turbo": "white",  # Frenzy: +2 Command for a Curse; curse draw stings are solo-only.
-}
+const SKIRMISH_RARITY_OVERRIDES: Dictionary = {}
 
 ## Mode registry: id → display name, deck-acquisition scene, and a one-line blurb.
 ## The lobby builds its picker from this and routes to `scene` on START. A mode is
@@ -63,19 +61,24 @@ const MODE_DEFS: Array = [
 ## pile mutation that the client must mirror, or Discover-style hand enrichment;
 ## see plan §13.3). Curated 2026-06-16; grow as pile-sync lands post-v1.
 const SKIRMISH_DENYLIST: Array[String] = [
-	# Gold economy — no shop/gold in skirmish v1.
-	"scavenger", "pillage",
+	# Gold economy — no shop/gold in skirmish v1. (Kingpin joined 2026-07-15:
+	# his Stray aura reads the run's purse.)
+	"scavenger", "pillage", "kingpin",
 	# Draw / discard / exhaust pile mutation that still lacks a net port.
-	# (unholy_bargain came off via the EV_DRAW channel; gambit / mass_grave / turbo
-	# came off via the caster-local pile path — see NET_SPELL_CUSTOMS. gravedigger +
+	# (gambit / recycle / mass_grave came off via the caster-local pile path;
+	# Frenzy is now host-resolved — see NET_SPELL_CUSTOMS. gravedigger +
 	# bloodhound came off 2026-07-09: their draw routes through the same host→owner
 	# EV_DRAW channel via _battlecry_draw, so the owner draws on its own machine.)
 	# Discover / tutor — injects arbitrary cards into hand; needs pool coordination.
 	"familiar", "scholar", "lost_tome", "war_council", "treasure_hunter",
-	"unholy_bargain",  # local-resource Command surge + end-of-turn bill (SP pacing)
+	"unholy_bargain",  # campaign-only persistent consequence has no net mirror
 	# Solo campaign systems: Old Campaigner reads the run's kill ledger and
 	# Sin-Eater eats Curses — neither exists in skirmish.
 	"ironclad_veteran", "sin_eater",
+	# 2026-07-30 COUNTERORDERS slate: all three pay off an enemy INTENT badge, and
+	# a human opponent has no intent cycle to read. Denylisted rather than left to
+	# silently no-op — a card whose whole text is inert reads as a bug.
+	"counterorders", "order_breaker", "the_interpreter",
 	# 2026-07-07 fun slate: The Volunteer rides the dismissal (hand-local in
 	# net — its muster wouldn't sync), Muster the Fallen reads the run's Roll
 	# of the Fallen, and Slow Match / Trebuchet lack net resolver ports
@@ -91,13 +94,22 @@ const SKIRMISH_DENYLIST: Array[String] = [
 	# mutates hand-local card data the host can't rebuild for the client.
 	# (Grave Clutch stays net-legal — a plain on-death summon, same as Husk.)
 	"pressed_man", "the_undying", "long_roll", "wolf_pits", "informer", "forgefire",
-	# Anvil archetype (2026-07-13): the struck-survivor passives (strike_burn /
-	# anvil_heal / anvil_spawn / bulwark_lord) + endure_grow fire only in the solo
-	# combat paths so far — no net mirror at the struck-and-survives hook yet.
-	"ironhide_anvil", "oathwall", "bramble_stockade", "heartwood_elder", "bastion_lord",
+	# Lookout (2026-07-15 rework): its back-row scout reads the solo encounter
+	# deck — same class as The Informer; a human foe's hand can't be scried.
+	"lookout",
+	# Bastion Lord's global struck-survivor volley remains campaign-only. The
+	# three wall-cycle reactions now resolve host-side for both owners and are
+	# net-legal (Iron Rampart reflection / Oathwall heal / Stockade summon).
+	"bastion_lord",
 	# Close Ranks (2026-07-13): lateral funnel via _flank_push — net-portable
 	# (mirrors Scatter's net arm) but no net resolver added yet.
 	"close_ranks",
+	# 2026-07-16 interest slate: bespoke solo movement, delayed-lane, economy,
+	# Roll, and multi-click effects do not yet have authoritative net mirrors.
+	"sword_on_credit", "crew_mangonel", "pay_wagon", "pallbearers",
+	"gallows_writ", "salted_ground", "body_snatcher", "scapegoat",
+	"understudy", "mentioned_dispatches", "drill_serjeant", "crossed_orders",
+	"wheeling_lancer", "rolling_tower", "flanking_order", "hook_and_chain",
 ]
 
 ## Draftable rarities for skirmish. Mirrors CardDB's draftable convention (starter
@@ -106,28 +118,35 @@ const SKIRMISH_DENYLIST: Array[String] = [
 const DRAFTABLE_RARITIES: Array[String] = ["starter", "common", "uncommon", "rare"]
 
 ## Battle relics legal in the skirmish draft. Two kinds qualify:
-##   1. RESOURCE-LOCAL — touches only the owner's hand refill / Command / banking /
-##      card cost, which each peer computes for itself inside its own _start_round
-##      (net turns route through it). Combat._has_relic reads the local slot.
+##   1. PRIVATE RESOURCE — touches hand refill / Command / banking / card cost.
+##      The host computes its own through Combat and the client's through
+##      NetPlayerState; the client only renders the resulting private snapshot.
 ##   2. BOARD/HP, HOST-AUTHORITATIVE (2026-07-09) — the effect mutates the board or
 ##      a hero's HP at a hook that already runs per-side on the host, gated through
 ##      Combat._relic_active_for_side(owner_is_enemy, id). The host applies the
 ##      owner's relic to the owner's side and the board snapshot animates it on the
 ##      client. To add one: wire the hook to _relic_active_for_side, then list it here.
 ## Still OUT: gold/map/reward/deck-upgrade relics (no such systems in skirmish) and
-## pile/draw relics owned by the client (need caster-local routing like the draw spells).
+## bespoke pile-order relics that do not yet have a NetPlayerState implementation.
 const NET_RELIC_POOL: Array[String] = [
 	"ember_crown",
 	"pact_of_embers",
 	"last_breath",
 	"cavalry_sigil",
 	"spell_tome",
-	"mana_drunkard",
+	# mana_drunkard dropped 2026-07-25 for the same reason as ice_cream below:
+	# Forced March was reshaped from a NetPlayerState resource streak into a
+	# creature_played keyword GRANT, and a granted keyword has to ride the board
+	# snapshot to reach the other peer. No port yet.
 	"snecko_eye",
 	"marathoners_sash",
 	"deep_satchel",   # hand refills to 6 instead of 5
-	"ice_cream",      # Miser's Coffer — banking uncapped
-	"lantern",        # +1 Command on turn 1
+	# ice_cream dropped 2026-07-25: reshaped from Miser's Coffer (banking, a pure
+	# NetPlayerState resource tweak) into Iron Rations, a start-of-round BOARD
+	# heal. Board effects need per-side host-authoritative plumbing that this
+	# relic has no port for yet — same reason lantern sits out below.
+	# lantern dropped 2026-07-16: reshaped into The Burnt Dispatches (caster-local
+	# discard-pile manipulation, no net port yet — same class as the pile spells).
 	"couriers_bag",   # +1 refill on turn 1
 	"tome_of_many",   # +2 draw/turn (deck is 20, so always on — reads _ctx_deck)
 	# 2026-07-08: happy_flower + mana_tide dropped here too, to match the solo relic
@@ -141,14 +160,13 @@ const NET_RELIC_POOL: Array[String] = [
 	"worn_spellbook",   # your damage spells deal +1 (net spell resolver, per caster)
 ]
 
-## Battle potions legal in the skirmish draft. Command and draw are pure
-## caster-local (each peer owns its hand/Command); every board/HP effect is
-## host-authoritative, routed through IN_USE_POTION → _net_apply_host_potion and
-## board-synced back. TARGETED bottles came in 2026-07-09: the caster ships the
-## picked creature to the host as an entity_id (the same handle targeted spells
-## use), so friendly buffs / enemy strikes / sacrifices all resolve for both peers
-## with animation. Combat reads the drafted potion(s) from the local slot
-## (_ctx_potions) and consumes them there. Only grave_diggers_nip stays out — it
+## Battle potions legal in the skirmish draft. The host owns both players'
+## remaining potions and resolves Command, draw, board, and HP effects. A client
+## sends only IN_USE_POTION {pid,target?}; accepted results return in its private
+## state plus the public board snapshot. Targeted bottles send the picked creature
+## as an entity_id (the same handle targeted spells use), so friendly buffs,
+## enemy strikes, and sacrifices resolve once with animation.
+## Only grave_diggers_nip stays out — it
 ## purges Curses, which skirmish decks never carry, so it would drink for nothing.
 const NET_POTION_POOL: Array[String] = [
 	"inferno_vial",
@@ -167,6 +185,19 @@ const NET_POTION_POOL: Array[String] = [
 	"doomsday_draught",# detonate all your Doom creatures (non-targeted)
 ]
 
+## Relics the PRACTICE BOT drafts from (2026-07-16, arsenal stage): only the
+## host-authoritative BOARD/HP relics — they apply via slot reads on the host,
+## so they work without the bot's turn machine honoring them (it runs flat
+## 3+bank2 Command and never reads resource-local relics). The bot drafts NO
+## potions: it never drinks, and an inert bottle on the foe rail would be a
+## lying threat display.
+const BOT_RELIC_POOL: Array[String] = [
+	"bulwark_engine",
+	"gravewardens_pact",
+	"rear_guard_charm",
+	"worn_spellbook",
+]
+
 ## ── Net-playable spells (single source of truth) ────────────────────────────
 ## A spell is draftable in skirmish ONLY if the host can resolve it over the wire,
 ## so the draft never offers a card the player then can't play. Combat.gd reads the
@@ -179,10 +210,9 @@ const NET_SPELL_TYPES: Array[String] = [
 	"buff_atk", "buff_hp", "heal", "buff_all_atk",
 ]
 ## type:"custom" spell ids playable over the wire. Most resolve host-authoritatively
-## in Combat._net_resolve_custom_spell; draw/Command spells use the EV_DRAW/EV_MANA
-## caster channel; grave spells use per-side death tracking + EV_GIVE_CARD; and the
-## caster-local pile/hand spells resolve on the caster's own machine via
-## _net_play_caster_local_spell. Still OUT: gold economy (no shop) and Discover/tutor
+## in Combat._net_resolve_custom_spell; draw/Command/grave/pile/hand consequences
+## for the client mutate the host-owned private state and return as EV_HAND_SET.
+## Still OUT: gold economy (no shop) and Discover/tutor
 ## (needs shared-pool coordination) — see SKIRMISH_DENYLIST.
 const NET_SPELL_CUSTOMS: Array[String] = [
 	# NOTE: these are SPELL ids (card_data.spell.id), not card ids — the 2026-07-02
@@ -196,7 +226,7 @@ const NET_SPELL_CUSTOMS: Array[String] = [
 	"sappers_charge", "ballista_bolt", "scatter_line",
 	"dark_pact", "apocalypse", "blood_tithe", "kings_command", "war_cry",
 	"turncoat", "rout", "flame_bolt",
-	# Board / utility spells — pure damage / summon / face / Command resolved with the
+	# Board / utility spells — damage, summon, face, and formation effects resolved with the
 	# primitives the net engine already has. Last Rites is plain conditional damage.
 	"holy_smite", "ricochet", "provision", "baggage_train", "last_rites",
 	# Temp-state spells: the net attack resolver honours freeze/stun/charge/poison and
@@ -204,26 +234,26 @@ const NET_SPELL_CUSTOMS: Array[String] = [
 	# expires them at the end of the owning side's turn and the board snapshot ships
 	# frz/stn/shd so the client renders the state.
 	"doubled_hour", "frost_bolt", "hoarfrost", "venom_tip", "charge_spell",
-	# Draw / Command spells — resolved via the host→caster EV_DRAW / EV_MANA channel
-	# (the caster draws/gains on its OWN client). No hand-picker or pile reads needed.
+	# Targeted tactical spells. Board effects stay host-authoritative; Quick Shot's
+	# conditional draw returns through EV_DRAW to the caster's own machine.
 	# (reckless_charge left this list 2026-07-05 — its Penance rework reads the
 	# caster's hand for Curses, which skirmish decks never carry. unholy_bargain
 	# left 2026-07-11: its rework pays the end-of-turn bill at the SOLO commit
 	# only, so in net the surge would never be billed — it is SKIRMISH_DENYLISTed
 	# and must not be declared net-playable.)
-	"quick_shot", "slash", "patch_up", "smite_spell",
-	# Sacrifice spells — kill the caster's own target (the inert relic/reactive hooks
-	# solo's sacrifice path fires don't exist in skirmish, so a plain kill is faithful).
+	"quick_shot", "slash", "patch_up", "smite_spell", "turbo",
+	# Sacrifice spells — kill the caster's own target. Offering marks its repeatable
+	# on-death effect for one extra resolution before the host-authoritative kill.
 	"offering", "fuel_the_pyre",
 	# Grave / exile spells — host-authoritative. Banish exiles (no on-death, no
 	# discard); Reanimate raises the caster's last corpse; Grave Robbery returns a
 	# corpse to the caster's hand (per-side death tracking + the EV_GIVE_CARD caster
 	# channel); Echo re-resolves the caster's last host-resolved spell.
 	"banish", "reanimate", "grave_robbery", "echo_spell",
-	# Caster-local pile / hand spells — the hand, piles, Command and draw resolve on
+	# Caster-local pile / hand spells — the hand, piles, and draws resolve on
 	# the caster's OWN machine (_net_play_caster_local_spell); War Chant / Mass Grave
-	# also forward a board consequence (Soldier count / discard size) to the host.
-	"recycle", "gambit", "turbo", "war_chant", "mass_grave",
+	# also forward a board consequence (Soldier count / fallen count) to the host.
+	"recycle", "gambit", "war_chant", "mass_grave",
 ]
 
 
@@ -437,7 +467,9 @@ func opponent_index() -> int:
 
 ## The curated set of CardDB ids legal to draft in skirmish v1. Every draftable
 ## creature/spell (DRAFTABLE_RARITIES), minus SKIRMISH_DENYLIST, minus curses and
-## anything that isn't a creature/spell. The host and client both call this to
+## anything that isn't a creature/spell. Armaments stay campaign-only until the
+## net intent/replay protocol has an explicit equip action. The host and client
+## both call this to
 ## build identical triplet pools from the shared seed, so the order MUST be
 ## stable across machines — get_pool_by_rarity walks an unordered Dictionary, so
 ## we sort the final list.
@@ -459,6 +491,63 @@ func skirmish_legal_pool() -> Array:
 				pool.append(id)
 	pool.sort()
 	return pool
+
+
+## Validate the only peer-supplied persistent combat input: its finished deck
+## and arsenal.  The UI constrains these already; this is the authority boundary
+## for modified clients and malformed relay traffic.
+func validate_loadout_event(event: Dictionary, mode: int = -1) -> String:
+	if typeof(event.get("cards", null)) != TYPE_ARRAY:
+		return "loadout_cards_type"
+	if typeof(event.get("relics", [])) != TYPE_ARRAY \
+			or typeof(event.get("potions", [])) != TYPE_ARRAY:
+		return "loadout_arsenal_type"
+	var cards: Array = event.get("cards", [])
+	var loadout_relics: Array = event.get("relics", [])
+	var loadout_potions: Array = event.get("potions", [])
+	if cards.size() != DECK_TARGET:
+		return "loadout_deck_size"
+	if loadout_relics.size() > 3 or loadout_potions.size() > 2:
+		return "loadout_arsenal_size"
+
+	var legal: Dictionary = {}
+	for legal_id in skirmish_legal_pool():
+		legal[String(legal_id)] = true
+	var counts: Dictionary = {}
+	for raw_id in cards:
+		if typeof(raw_id) != TYPE_STRING:
+			return "loadout_card_type"
+		var id := String(raw_id)
+		if not legal.has(id):
+			return "loadout_card_illegal"
+		counts[id] = int(counts.get(id, 0)) + 1
+	var copy_cap := 0
+	if mode in [MatchMode.CONSTRUCTED, MatchMode.QUICK]:
+		copy_cap = 2
+	elif mode == MatchMode.SEALED:
+		copy_cap = 3
+	if copy_cap > 0:
+		for count in counts.values():
+			if int(count) > copy_cap:
+				return "loadout_copy_cap"
+
+	var seen: Dictionary = {}
+	for raw_relic in loadout_relics:
+		if typeof(raw_relic) != TYPE_STRING:
+			return "loadout_relic_type"
+		var relic_id := String(raw_relic)
+		if relic_id not in NET_RELIC_POOL or seen.has(relic_id):
+			return "loadout_relic_illegal"
+		seen[relic_id] = true
+	seen.clear()
+	for raw_potion in loadout_potions:
+		if typeof(raw_potion) != TYPE_STRING:
+			return "loadout_potion_type"
+		var potion_id := String(raw_potion)
+		if potion_id not in NET_POTION_POOL or seen.has(potion_id):
+			return "loadout_potion_illegal"
+		seen[potion_id] = true
+	return ""
 
 
 ## Deterministic bag helpers for skirmish card generation. The old generated

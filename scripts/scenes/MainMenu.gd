@@ -11,6 +11,8 @@ const SHOP_SCENE = "res://scenes/shop.tscn"
 const REST_SCENE = "res://scenes/rest.tscn"
 const EVENT_SCENE = "res://scenes/event.tscn"
 const TREASURE_SCENE = "res://scenes/treasure.tscn"
+const RECRUIT_SCENE = "res://scenes/recruit.tscn"
+const WAYSIDE_SCENE = "res://scenes/wayside.tscn"
 const COLLECTION_SCENE = "res://scenes/collection.tscn"
 const CREDITS_SCENE = "res://scenes/credits.tscn"
 const SKIRMISH_SCENE = "res://scenes/net_lobby.tscn"
@@ -70,9 +72,46 @@ var _picker_commit_locked := false
 var _deck_preview: Control = null
 
 
+# One-screen Muster state. Every choice stays local and reversible until TAKE
+# THE FIELD; only then are pending fields handed to RunState and consumed.
+var _selected_banner_tribe: String = BannerDB.DEFAULT_BANNER
+var _selected_writ_id: String = ""
+var _muster_random_seed: int = 1
+var _muster_writ_slate: Array = []
+var _muster_banner_buttons: Dictionary = {}
+var _muster_writ_buttons: Dictionary = {}
+var _muster_writ_row: HBoxContainer = null
+var _muster_campaign_label: Label = null
+var _muster_setup_preset: Dictionary = {}
+var _writ_resolution_rng: RandomNumberGenerator = null
+
+
+## The dotted run between a dossier caption and its figure — the leader a
+## ledger or a printed dispatch uses to carry the eye across to the number.
+## Expands to eat whatever width is left between the two labels.
+class DotLeader extends Control:
+	func _ready() -> void:
+		custom_minimum_size = Vector2(24, 6)
+		size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_RESIZED:
+			queue_redraw()
+
+	func _draw() -> void:
+		var y := size.y * 0.5 + 3.0
+		var x := 3.0
+		while x < size.x - 3.0:
+			draw_circle(Vector2(x, y), 0.9, Color(0.72, 0.62, 0.42, 0.40),
+				true, -1.0, true)
+			x += 6.0
+
+
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "main_menu")
-	AudioBank.play_music_random(["main_menu", "main_menu_b"])
+	AudioBank.play_music_random(["main_menu", "main_menu_b", "main_menu_c"])
 	_rebuild_menu()
 	_setup_bg_parallax()
 	_add_menu_embers()
@@ -101,7 +140,33 @@ func _start_rematch() -> void:
 	_selected_ascension = clampi(int(req.get("ascension", 0)),
 		0, MetaState.unlocked_ascension)
 	_daily_pick = false
-	_begin_run_with(String(req.get("hero", "")))
+	# Restore the muster picks the ended run marched with. A rematch never runs
+	# _focus_hero, so these flags would otherwise sit at their declaration
+	# default of false and quietly hand back the hero's DEFAULT relic and deck.
+	var hero_id := String(req.get("hero", ""))
+	var hero_def: Dictionary = HeroDB.HEROES.get(hero_id, {})
+	# A pre-mastery rematch may restore only the authored bound doctrine. A4+
+	# mastery restores the two axes independently.
+	# Same restore for the banner: it is a declaration, not an unlock, so there is
+	# no gate to check — normalize and carry it. A missing key (an old save-era
+	# request) falls back to the default banner rather than to "" so the opener is
+	# always exactly 11 cards.
+	_selected_banner_tribe = BannerDB.normalize(String(req.get("banner_tribe", "")))
+	var was_relic := String(req.get("signature_relic", ""))
+	var was_deck := String(req.get("deck_variant", ""))
+	var alt_relic := String(hero_def.get("relic_alt", ""))
+	var wants_alt_relic := alt_relic != "" and was_relic == alt_relic
+	var wants_alt_deck := was_deck == "alt"
+	_muster_alt_relic = false
+	_muster_alt_deck = false
+	if _bound_doctrine_unlocked(hero_id):
+		if _doctrine_mastery_unlocked(hero_id):
+			_muster_alt_relic = wants_alt_relic
+			_muster_alt_deck = wants_alt_deck
+		elif wants_alt_relic and wants_alt_deck:
+			_muster_alt_relic = true
+			_muster_alt_deck = true
+	_begin_run_with(hero_id)
 
 
 func _rebuild_menu() -> void:
@@ -135,6 +200,35 @@ func _rebuild_menu() -> void:
 	col.offset_right = 720
 	col.offset_top = -320
 	col.offset_bottom = 320
+
+	# ── Legibility scrim ──
+	# The main-menu fire art is bright/busy behind the left column, washing out
+	# the epigraph/subtitle/stats. A warm-dark horizontal gradient — opaque at
+	# the left edge, clear by mid-screen — seats the text without touching the
+	# hero splash on the center-right. Added before the column so it renders
+	# behind it (and above the preserved Background/Atmosphere). Warm-black, not
+	# pure black, so it stays inside the sepia world.
+	var scrim := TextureRect.new()
+	scrim.name = "MenuScrim"
+	scrim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scrim.stretch_mode = TextureRect.STRETCH_SCALE
+	var grad := Gradient.new()
+	grad.offsets = PackedFloat32Array([0.0, 0.42, 0.70])
+	grad.colors = PackedColorArray([
+		Color(0.03, 0.015, 0.0, 0.66),
+		Color(0.03, 0.015, 0.0, 0.44),
+		Color(0.0, 0.0, 0.0, 0.0),
+	])
+	var gtex := GradientTexture2D.new()
+	gtex.gradient = grad
+	gtex.width = 256
+	gtex.height = 8
+	gtex.fill_from = Vector2(0, 0)
+	gtex.fill_to = Vector2(1, 0)
+	scrim.texture = gtex
+	add_child(scrim)
+
 	add_child(col)
 
 	# ── Title ──
@@ -159,7 +253,7 @@ func _rebuild_menu() -> void:
 	# re-casting); "they always are" lands the roguelike loop as a tonal promise,
 	# not a spoiler. Left-flush + autowrapped to the column width.
 	var epigraph := _make_display_label(
-		"You lit the first flame so long ago you've forgotten it was you. The road remembers. Everything on it is already expecting you — they always are.",
+		"You started this fire long ago. Now the road is waiting for you.",
 		17, IVORY)
 	epigraph.name = "Epigraph"
 	epigraph.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
@@ -211,9 +305,9 @@ func _rebuild_menu() -> void:
 		preview.custom_minimum_size = Vector2(600, 0)
 		col.add_child(preview)
 
-	var begin_label: String = "NEW MARCH"
+	var begin_label: String = "NEW RUN"
 	if MetaState.unlocked_ascension > 0:
-		begin_label = "NEW MARCH — ASC %d" % _selected_ascension
+		begin_label = "NEW RUN — ASC %d" % _selected_ascension
 	var btn_start := _make_menu_button(begin_label,
 		Color(0.18, 0.36, 0.18), MENU_FONT, MENU_H)
 	btn_start.pressed.connect(_on_new_run)
@@ -270,7 +364,7 @@ func _rebuild_menu() -> void:
 	var credits_btn := Button.new()
 	credits_btn.text = "credits"
 	credits_btn.flat = true
-	credits_btn.focus_mode = Control.FOCUS_NONE
+	credits_btn.focus_mode = Control.FOCUS_ALL
 	credits_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	credits_btn.custom_minimum_size = Vector2(0, 26)
 	credits_btn.add_theme_font_size_override("font_size", GameTheme.MIN_LABEL_SIZE)
@@ -287,9 +381,19 @@ func _rebuild_menu() -> void:
 	# restart, then F5). Debug builds only — exported releases don't ship a
 	# work-log line on the title screen.
 	if OS.is_debug_build():
-		var build_stamp := GameTheme.make_label(
-			"build 2026-07-07 · polish + hardening (map/HUD/cards/saves)", 13,
-			Color(0.82, 0.66, 0.32))
+		# Stamped from the SOURCE's own modification time, not a hand-typed
+		# date. The whole point of this line is to prove the running code is
+		# current — a literal string can't do that job, and this one had read
+		# "build 2026-07-07 · polish + hardening" for a fortnight while the
+		# game moved on underneath it. Nothing left to remember to bump.
+		var src := "res://scripts/scenes/MainMenu.gd"
+		var mtime := FileAccess.get_modified_time(src)
+		var stamp_text := "dev build"
+		if mtime > 0:
+			stamp_text = "dev build · source %s" % \
+				Time.get_datetime_string_from_unix_time(int(mtime)).left(10)
+		var build_stamp := GameTheme.make_label(stamp_text, 13,
+			Color(0.82, 0.66, 0.32, 0.62))
 		build_stamp.name = "BuildStamp"
 		build_stamp.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		col.add_child(build_stamp)
@@ -346,7 +450,7 @@ func _make_display_label(text: String, size: int, color: Color) -> Label:
 	# unified. Uses font_display (Cinzel SemiBold) so titles look chiseled.
 	var lbl := Label.new()
 	lbl.text = text
-	lbl.add_theme_font_size_override("font_size", size)
+	lbl.add_theme_font_size_override("font_size", maxi(size, GameTheme.MIN_LABEL_SIZE))
 	lbl.add_theme_color_override("font_color", color)
 	if GameTheme.font_display:
 		lbl.add_theme_font_override("font", GameTheme.font_display)
@@ -364,7 +468,7 @@ func _make_menu_button(text: String, _bg: Color, font_size: int, height: int) ->
 	var btn := Button.new()
 	btn.custom_minimum_size = Vector2(0, height)
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	btn.focus_mode = Control.FOCUS_NONE
+	btn.focus_mode = Control.FOCUS_ALL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	# Transparent in every state — kill the default Godot button rectangle.
 	var empty := StyleBoxEmpty.new()
@@ -418,6 +522,8 @@ func _make_menu_button(text: String, _bg: Color, font_size: int, height: int) ->
 
 	btn.mouse_entered.connect(_on_menu_btn_hover.bind(inner, lbl, flames, rule, true))
 	btn.mouse_exited.connect(_on_menu_btn_hover.bind(inner, lbl, flames, rule, false))
+	btn.focus_entered.connect(_on_menu_btn_hover.bind(inner, lbl, flames, rule, true))
+	btn.focus_exited.connect(_on_menu_btn_hover.bind(inner, lbl, flames, rule, false))
 	return btn
 
 
@@ -472,11 +578,15 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 
 	var summary := RunState.get_slot_summary(slot)
 	var has_save: bool = summary.get("has_save", false)
+	var unreadable: bool = summary.get("unreadable", false)
+	var occupied := has_save or unreadable
 	# Overwrite mode tints filled slots red-ish to telegraph the destructive
 	# action; normal mode uses the warm gold "continue" treatment.
 	var bg: Color
-	if overwrite_mode and has_save:
+	if overwrite_mode and occupied:
 		bg = Color(0.36, 0.18, 0.14)
+	elif unreadable:
+		bg = Color(0.30, 0.16, 0.14)
 	elif has_save:
 		bg = Color(0.32, 0.26, 0.14)
 	else:
@@ -485,7 +595,7 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 	var btn := Button.new()
 	btn.custom_minimum_size = Vector2(0, 58)
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	btn.focus_mode = Control.FOCUS_NONE
+	btn.focus_mode = Control.FOCUS_ALL
 	btn.add_theme_color_override("font_color", IVORY)
 	btn.add_theme_color_override("font_hover_color", Color(1.0, 0.95, 0.80))
 	btn.add_theme_color_override("font_pressed_color", Color(0.92, 0.85, 0.65))
@@ -500,6 +610,7 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 	hover.shadow_size = 10
 	hover.shadow_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.35)
 	btn.add_theme_stylebox_override("hover", hover)
+	btn.add_theme_stylebox_override("focus", hover)
 	var pressed := normal.duplicate() as GameTheme.ChartPanelStyle
 	pressed.bg_color = bg.darkened(0.18)
 	pressed.border_color = bg.lightened(0.25)
@@ -515,7 +626,10 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 	btn.add_child(inner)
 	var title_text: String
 	var sub_text: String
-	if has_save:
+	if unreadable:
+		title_text = "SLOT %d  ·  Run Unavailable" % (slot + 1)
+		sub_text = "Incompatible or damaged — files kept; delete explicitly."
+	elif has_save:
 		if overwrite_mode:
 			title_text = "SLOT %d  ·  Overwrite This Run" % (slot + 1)
 		else:
@@ -535,12 +649,16 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	inner.add_child(title_lbl)
-	var sub_lbl := _make_display_label(sub_text, 14, Color(0.74, 0.70, 0.62) if not has_save else Color(0.90, 0.83, 0.62))
+	var sub_color := Color(0.90, 0.58, 0.48) if unreadable else (
+		Color(0.74, 0.70, 0.62) if not has_save else Color(0.90, 0.83, 0.62))
+	var sub_lbl := _make_display_label(sub_text, 14, sub_color)
 	sub_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	sub_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	inner.add_child(sub_lbl)
 
-	if overwrite_mode or not has_save:
+	if unreadable and not overwrite_mode:
+		btn.disabled = true
+	elif overwrite_mode or not has_save:
 		btn.pressed.connect(_begin_new_in_slot.bind(slot))
 	else:
 		btn.pressed.connect(_load_slot_into_game.bind(slot))
@@ -549,13 +667,13 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 	# Delete button — only meaningful on filled slots, and only in normal load
 	# mode (in overwrite mode the whole button is already destructive, so a
 	# second delete affordance would just be confusing).
-	if has_save and not overwrite_mode:
+	if occupied and not overwrite_mode:
 		var del := Button.new()
 		# Plain Latin X — the U+2715 multiplication-x glyph isn't in every
 		# display font, so it sometimes rendered as a tofu rectangle here.
 		del.text = "X"
 		del.custom_minimum_size = Vector2(44, 58)
-		del.focus_mode = Control.FOCUS_NONE
+		del.focus_mode = Control.FOCUS_ALL
 		if GameTheme.font_display:
 			del.add_theme_font_override("font", GameTheme.font_display)
 		del.add_theme_font_size_override("font_size", 18)
@@ -568,6 +686,7 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 		del_hover.bg_color = del_bg.lightened(0.20)
 		del_hover.border_color = Color(0.95, 0.45, 0.30)
 		del.add_theme_stylebox_override("hover", del_hover)
+		del.add_theme_stylebox_override("focus", del_hover)
 		del.pressed.connect(_on_slot_delete.bind(slot))
 		row.add_child(del)
 	return row
@@ -635,16 +754,16 @@ func _stats_text() -> String:
 	]
 	# fastest_victory_floors was tracked from day one but shown nowhere.
 	if MetaState.fastest_victory_floors > 0:
-		text += "  •  Fastest march %d provinces" % MetaState.fastest_victory_floors
+		text += "  •  Best run: %d provinces" % MetaState.fastest_victory_floors
 	return text
 
 
 func _continue_preview_line(slot: int, verbose: bool = false) -> String:
 	if slot < 0:
-		return "No active march."
+		return "No run in progress."
 	var s := RunState.get_slot_summary(slot)
 	if not bool(s.get("has_save", false)):
-		return "No active march."
+		return "No run in progress."
 	var asc := ""
 	if int(s.get("ascension", 0)) > 0:
 		asc = " - Asc %d" % int(s.get("ascension", 0))
@@ -678,7 +797,11 @@ func _build_command_dossier(has_any_save: bool) -> void:
 	panel.offset_left = -500.0
 	panel.offset_right = -112.0
 	panel.offset_top = 170.0
-	panel.offset_bottom = 520.0
+	# Height comes from the content. It used to be pinned to 350px with an
+	# EXPAND_FILL spacer inside, so a two-line dossier printed its footer at
+	# the bottom of a mostly-empty box — a hole in the middle of the title
+	# screen, parked over the best of the painted art.
+	panel.offset_bottom = 170.0
 	var st := GameTheme.make_panel_style(
 		Color(0.045, 0.034, 0.027, 0.78),
 		Color(0.70, 0.58, 0.35, 0.58),
@@ -707,43 +830,62 @@ func _build_command_dossier(has_any_save: bool) -> void:
 	var title := _make_display_label(title_text, 26, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	hstack.add_child(title)
-	var sub_text := "saved progress" if has_any_save else "begin a new campaign"
+	var sub_text := "saved progress" if has_any_save else "begin a new run"
 	var sub := _make_display_label(sub_text, 14,
 		Color(0.82, 0.74, 0.58))
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	hstack.add_child(sub)
 
-	if has_any_save:
-		var s := RunState.get_slot_summary(_most_recent_slot())
-		root.add_child(_make_dossier_section("CONTINUE",
-			"Act %d, Province %d" % [
-				int(s.get("act", 1)), int(s.get("floor", 0))],
-			Color(0.92, 0.78, 0.46)))
-		root.add_child(_make_dossier_section("STATUS",
-			"HP %d/%d - Gold %d" % [
-				int(s.get("hp", 0)),
-				int(s.get("max_hp", 30)),
-				int(s.get("gold", 0))],
-			Color(0.86, 0.76, 0.58)))
-	else:
-		root.add_child(_make_dossier_section("NEW MARCH",
-			"Choose a hero, build a deck, and fight across 3 acts.",
-			Color(0.92, 0.78, 0.46)))
-		root.add_child(_make_dossier_section("FIRST STEP",
-			"Press NEW MARCH. The next screen explains hero choice.",
-			Color(0.86, 0.76, 0.58)))
+	root.add_child(_make_ornament_row(340.0, true))
 
-	var spacer := Control.new()
-	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	root.add_child(spacer)
+	if has_any_save:
+		# Ruled figures, not nested boxes: a dispatch prints a value against a
+		# dotted leader. The old two-panels-inside-a-panel stack read as UI
+		# furniture stacked on UI furniture, and buried the numbers a returning
+		# player actually opens the game to see.
+		var s := RunState.get_slot_summary(_most_recent_slot())
+		_dossier_row(root, "ACT", str(int(s.get("act", 1))), GILT_BRIGHT)
+		_dossier_row(root, "PROVINCE", str(int(s.get("floor", 0))), GILT_BRIGHT)
+		_dossier_row(root, "HEALTH", "%d / %d" % [
+			int(s.get("hp", 0)), int(s.get("max_hp", 30))],
+			Color(0.92, 0.62, 0.52))
+		_dossier_row(root, "GOLD", "%dg" % int(s.get("gold", 0)),
+			Color(0.92, 0.78, 0.46))
+	else:
+		var pitch := _make_display_label(
+			"Choose a hero, build a deck, and fight across three acts.",
+			16, IVORY)
+		pitch.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		pitch.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		root.add_child(pitch)
+
+	root.add_child(_make_ornament_row(340.0, true))
 
 	var foot_text := "Press CONTINUE to resume." if has_any_save \
-		else "Press NEW MARCH to begin."
+		else "Press NEW RUN to begin."
 	var foot := _make_display_label(foot_text,
 		15, Color(0.78, 0.72, 0.60))
 	foot.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	root.add_child(foot)
+
+
+## One ruled figure in the dossier: caption left, value right, joined by a
+## dotted leader.
+func _dossier_row(parent: VBoxContainer, caption: String, value: String,
+		accent: Color) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var cap := _make_display_label(caption, 15, Color(0.74, 0.66, 0.52))
+	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	row.add_child(cap)
+	row.add_child(DotLeader.new())
+	var val := _make_display_label(value, 19, accent)
+	val.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	row.add_child(val)
+	parent.add_child(row)
 
 
 func _dossier_icon(path: String, sz: float, tint: Color) -> TextureRect:
@@ -756,30 +898,6 @@ func _dossier_icon(path: String, sz: float, tint: Color) -> TextureRect:
 	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return icon
 
-
-func _make_dossier_section(title_text: String, body: String, accent: Color) -> PanelContainer:
-	var box := PanelContainer.new()
-	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var st := GameTheme.make_panel_style(
-		Color(0.028, 0.021, 0.016, 0.70),
-		Color(accent.r, accent.g, accent.b, 0.40),
-		1, 4, false)
-	st.content_margin_left = 14
-	st.content_margin_right = 14
-	st.content_margin_top = 10
-	st.content_margin_bottom = 10
-	box.add_theme_stylebox_override("panel", st)
-	var root := VBoxContainer.new()
-	root.add_theme_constant_override("separation", 5)
-	box.add_child(root)
-	var title := _make_display_label(title_text, 14, accent)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	root.add_child(title)
-	var lbl := _make_display_label(body, 16, IVORY)
-	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	root.add_child(lbl)
-	return box
 
 
 # ---------------------------------------------------------------------------
@@ -851,9 +969,9 @@ func _on_load_game() -> void:
 
 func _load_slot_into_game(slot: int) -> void:
 	if not RunState.load_run(slot):
-		# Save was corrupt or version-mismatched — wipe and rebuild the menu.
-		RunState.clear_save(slot)
-		_rebuild_menu()
+		# Keep corrupt, incompatible, or temporarily unreadable files recoverable.
+		# The load screen labels the slot and leaves deletion to an explicit X.
+		_show_load_screen(false)
 		return
 	# If the save was written while the player was mid-room (visit_node committed
 	# them to a node but they quit before reaching the map again), drop them back
@@ -865,7 +983,9 @@ func _load_slot_into_game(slot: int) -> void:
 		"shop": target = SHOP_SCENE
 		"rest": target = REST_SCENE
 		"event": target = EVENT_SCENE
-		"treasure": target = TREASURE_SCENE
+		"treasure", "reliquary", "arsenal": target = TREASURE_SCENE
+		"recruit": target = RECRUIT_SCENE
+		"wayside": target = WAYSIDE_SCENE
 	GameTheme.fade_out_then_change_scene(self, target, 0.45)
 
 
@@ -949,6 +1069,583 @@ func _show_load_screen(overwrite_mode: bool) -> void:
 
 func _show_hero_select() -> void:
 	_set_subscreen_motion_obscured(true)
+	_remove_command_dossier()
+	var menu := get_node_or_null("Menu")
+	if menu == null:
+		return
+	for child in menu.get_children():
+		child.queue_free()
+	_hide_deck_preview()
+	_hero_cards.clear()
+	_hero_portraits.clear()
+	_muster_banner_buttons.clear()
+	_muster_writ_buttons.clear()
+	_selected_hero = ""
+	_daily_pick = false
+	_daily_btn = null
+	_seed_edit = null
+	_asc_label = null
+	_asc_rules_label = null
+	_run_commit_locked = false
+	_blessing_commit_locked = false
+	_picker_commit_locked = false
+	_writ_resolution_rng = null
+	var preset: Dictionary = _muster_setup_preset.duplicate(true)
+	_muster_setup_preset.clear()
+	_selected_banner_tribe = BannerDB.normalize(String(
+		preset.get("banner_tribe", BannerDB.DEFAULT_BANNER)))
+	_muster_random_seed = randi()
+	if _muster_random_seed == 0:
+		_muster_random_seed = 1
+
+	_center_menu_for_subscreen(1540.0, 878.0)
+	menu.add_theme_constant_override("separation", 8)
+	var title := _make_display_label(WritDB.muster_copy("title"), 31, GILT_BRIGHT)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	menu.add_child(title)
+	var instruction := _make_display_label(
+		WritDB.muster_copy("subtitle"), 16, IVORY)
+	instruction.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	menu.add_child(instruction)
+
+	var main_row := HBoxContainer.new()
+	main_row.custom_minimum_size = Vector2(0, 414)
+	main_row.add_theme_constant_override("separation", 16)
+	main_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	menu.add_child(main_row)
+
+	var host := _make_muster_section(main_row,
+		WritDB.muster_copy("host_head_text"), 350.0)
+	host.add_theme_constant_override("separation", 3)
+	for hid in HeroDB.HERO_ORDER:
+		var row := _make_muster_host_row(hid)
+		host.add_child(row)
+		GameTheme.hover_lift(row, 1.012)
+
+	var roll := _make_muster_section(main_row,
+		WritDB.muster_copy("column_head_text"), 760.0)
+	roll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_hero_detail = VBoxContainer.new()
+	_hero_detail.add_theme_constant_override("separation", 6)
+	_hero_detail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	roll.add_child(_hero_detail)
+
+	var banners := _make_muster_section(main_row,
+		WritDB.muster_copy("banner_head_text"), 300.0)
+	banners.add_theme_constant_override("separation", 6)
+	for bid in BannerDB.BANNER_ORDER:
+		var chip := _make_muster_banner_chip(bid)
+		banners.add_child(chip)
+		_muster_banner_buttons[bid] = chip
+
+	var writ_head := HBoxContainer.new()
+	writ_head.add_theme_constant_override("separation", 14)
+	menu.add_child(writ_head)
+	writ_head.add_child(_make_display_label(
+		WritDB.muster_copy("terms_head_text"), 19, GILT_BRIGHT))
+	var writ_rule := _make_display_label(
+		WritDB.muster_copy("terms_rule_text"), 15, Color(0.76, 0.69, 0.56))
+	writ_rule.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	writ_head.add_child(writ_rule)
+
+	_muster_writ_row = HBoxContainer.new()
+	_muster_writ_row.custom_minimum_size = Vector2(0, 120)
+	_muster_writ_row.add_theme_constant_override("separation", 10)
+	_muster_writ_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	menu.add_child(_muster_writ_row)
+
+	_build_muster_footer(menu)
+
+	var first_hero := String(preset.get("hero", HeroDB.HERO_ORDER[0]))
+	if not HeroDB.has_hero(first_hero):
+		first_hero = HeroDB.HERO_ORDER[0]
+	_focus_hero(first_hero)
+	if not preset.is_empty():
+		_muster_alt_relic = bool(preset.get("alt_relic", false))
+		_muster_alt_deck = bool(preset.get("alt_deck", false))
+		_normalize_muster_doctrine(first_hero)
+		_build_muster_roll(first_hero)
+	_refresh_muster_banner_styles()
+	_refresh_muster_deals()
+	_refresh_muster_campaign()
+	_animate_subscreen_reveal(menu)
+
+
+func _make_muster_section(parent: Container, heading: String,
+		minimum_width: float) -> VBoxContainer:
+	var frame := PanelContainer.new()
+	frame.custom_minimum_size = Vector2(minimum_width, 0)
+	frame.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var style := GameTheme.make_panel_style(
+		Color(0.045, 0.032, 0.038, 0.78), Color(0.60, 0.51, 0.34, 0.42), 1, 5, false)
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 8
+	style.content_margin_bottom = 8
+	frame.add_theme_stylebox_override("panel", style)
+	parent.add_child(frame)
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 6)
+	frame.add_child(content)
+	var label := _make_display_label(heading, 18, GILT_BRIGHT)
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	content.add_child(label)
+	content.add_child(_make_ornament_row(minimum_width - 42.0, true))
+	return content
+
+
+func _make_muster_host_row(hid: String) -> Button:
+	var hero := HeroDB.get_hero(hid)
+	var btn := Button.new()
+	btn.custom_minimum_size = Vector2(320, 70)
+	btn.focus_mode = Control.FOCUS_ALL
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	for state in ["normal", "hover", "pressed", "focus"]:
+		btn.add_theme_stylebox_override(state, StyleBoxEmpty.new())
+	var row := HBoxContainer.new()
+	row.set_anchors_preset(Control.PRESET_FULL_RECT)
+	row.offset_left = 5
+	row.offset_right = -5
+	row.offset_top = 3
+	row.offset_bottom = -3
+	row.add_theme_constant_override("separation", 8)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(row)
+	var portrait_path := "res://assets/portraits/hero_portrait_%s.png" % hid
+	var portrait: Control
+	if ResourceLoader.exists(portrait_path):
+		var tex := TextureRect.new()
+		tex.texture = load(portrait_path)
+		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		portrait = tex
+	else:
+		var plate := PanelContainer.new()
+		plate.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
+			Color(0.10, 0.08, 0.09, 0.95), Color(GILT.r, GILT.g, GILT.b, 0.45), 1, 3, false))
+		var monogram := _make_display_label(String(hero.get("name", hid)).left(1), 28, GILT_BRIGHT)
+		monogram.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		monogram.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		plate.add_child(monogram)
+		portrait = plate
+	portrait.custom_minimum_size = Vector2(46, 62)
+	portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(portrait)
+	_hero_portraits[hid] = portrait
+	var copy := VBoxContainer.new()
+	copy.add_theme_constant_override("separation", 0)
+	copy.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	copy.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(copy)
+	var name_label := _make_display_label(String(hero.get("name", hid)), 18, GILT_BRIGHT)
+	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	copy.add_child(name_label)
+	var tag := _make_display_label(String(hero.get("tagline", "")), 14, Color(0.98, 0.83, 0.58))
+	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	tag.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	copy.add_child(tag)
+	var pitch := _make_display_label(String(hero.get("desc", "")), 14, Color(0.70, 0.66, 0.58))
+	pitch.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	pitch.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	pitch.tooltip_text = String(hero.get("desc", ""))
+	copy.add_child(pitch)
+	btn.mouse_entered.connect(_focus_hero.bind(hid))
+	btn.focus_entered.connect(_focus_hero.bind(hid))
+	btn.pressed.connect(_focus_hero.bind(hid))
+	_hero_cards[hid] = btn
+	return btn
+
+
+func _make_muster_banner_chip(bid: String) -> Button:
+	var data := BannerDB.get_banner(bid)
+	var btn := Button.new()
+	btn.custom_minimum_size = Vector2(270, 48)
+	btn.focus_mode = Control.FOCUS_ALL
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	for state in ["normal", "hover", "pressed", "focus"]:
+		btn.add_theme_stylebox_override(state, StyleBoxEmpty.new())
+	var copy := VBoxContainer.new()
+	copy.set_anchors_preset(Control.PRESET_FULL_RECT)
+	copy.offset_left = 10
+	copy.offset_right = -8
+	copy.offset_top = 3
+	copy.offset_bottom = -3
+	copy.add_theme_constant_override("separation", 0)
+	copy.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(copy)
+	var accent: Color = data.get("color", GILT)
+	var name_label := _make_display_label(String(data.get("name", bid)), 18,
+		accent.lerp(IVORY, 0.45))
+	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	copy.add_child(name_label)
+	var line := _make_display_label(String(data.get("line_text", "")), 15, IVORY)
+	line.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	copy.add_child(line)
+	btn.tooltip_text = "%s adds %s to the opening roll." % [
+		String(data.get("tribe", bid)),
+		String(CardDB.get_card_data(String(data.get("card_id", ""))).get(
+			"name", WritDB.muster_copy("banner_card_fallback_text")))]
+	btn.pressed.connect(_select_muster_banner.bind(bid))
+	return btn
+
+
+func _select_muster_banner(bid: String) -> void:
+	if not BannerDB.has_banner(bid):
+		return
+	_selected_banner_tribe = bid
+	_refresh_muster_banner_styles()
+	if _selected_hero != "":
+		_build_muster_roll(_selected_hero)
+	_refresh_muster_campaign()
+
+
+func _refresh_muster_banner_styles() -> void:
+	for bid in _muster_banner_buttons:
+		var btn: Button = _muster_banner_buttons[bid]
+		if not is_instance_valid(btn):
+			continue
+		var selected := String(bid) == _selected_banner_tribe
+		var style: StyleBox = _hero_focus_box() if selected else StyleBoxEmpty.new()
+		for state in ["normal", "hover", "pressed"]:
+			btn.add_theme_stylebox_override(state, style)
+
+
+func _build_muster_roll(hid: String) -> void:
+	if _hero_detail == null or not is_instance_valid(_hero_detail):
+		return
+	_hide_deck_preview()
+	for child in _hero_detail.get_children():
+		child.queue_free()
+	var hero := HeroDB.get_hero(hid)
+	var heading := _make_display_label(String(hero.get("name", hid)), 22, _faction_accent(hid))
+	heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_hero_detail.add_child(heading)
+	var pitch := _make_display_label(String(hero.get("desc", "")), 15, IVORY)
+	pitch.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	pitch.custom_minimum_size = Vector2(0, 36)
+	_hero_detail.add_child(pitch)
+	var opener: Array[String] = RunState.opening_deck_for(
+		hid, _muster_alt_deck, _selected_banner_tribe)
+	var banner_card := BannerDB.card_id(_selected_banner_tribe)
+	var banner_name := String(CardDB.get_card_data(banner_card).get("name", banner_card))
+	var roll_line := _make_display_label("%d cards  ·  %s adds %s" % [
+		opener.size(), BannerDB.display_name(_selected_banner_tribe), banner_name],
+		15, Color(0.76, 0.69, 0.56))
+	roll_line.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_hero_detail.add_child(roll_line)
+	_warm_deck_strip(opener, hid)
+	_hero_detail.add_child(_make_muster_deck_strip(opener))
+	_build_muster_doctrine_row(_hero_detail, hid, hero)
+
+
+func _make_muster_deck_strip(deck: Array) -> Control:
+	var counts: Dictionary = {}
+	var order: Array[String] = []
+	for cid in deck:
+		var id := String(cid)
+		if not counts.has(id):
+			counts[id] = 0
+			order.append(id)
+		counts[id] += 1
+	var strip := HBoxContainer.new()
+	strip.add_theme_constant_override("separation", 9)
+	strip.tree_exiting.connect(_hide_deck_preview)
+	for id in order:
+		strip.add_child(_make_deck_mini(id, int(counts[id])))
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(700, ceil(300.0 * DECK_MINI_SCALE) + 16.0)
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.add_child(strip)
+	return scroll
+
+
+func _build_muster_doctrine_row(parent: VBoxContainer, hid: String,
+		hero: Dictionary) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	parent.add_child(row)
+	var relic_id := String(hero.get("relic_alt", "")) if _muster_alt_relic \
+		else String(hero.get("relic", ""))
+	var relic := RelicDB.get_relic(relic_id)
+	var relic_label := _make_display_label("SIGNATURE: %s" % String(
+		relic.get("name", relic_id)), 15, GILT)
+	relic_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	relic_label.tooltip_text = String(relic.get("desc", ""))
+	row.add_child(relic_label)
+	if not _bound_doctrine_unlocked(hid):
+		return
+	if not _doctrine_mastery_unlocked(hid):
+		var alt: Dictionary = hero.get("deck_alt", {})
+		var doctrine_name := String(alt.get("name", "Alternate")) \
+			if _muster_alt_deck else "Standard Doctrine"
+		var toggle := _make_menu_button(doctrine_name, Color(0.22, 0.17, 0.14), 15, 32)
+		toggle.custom_minimum_size = Vector2(218, 32)
+		toggle.pressed.connect(_set_bound_doctrine.bind(hid, not _muster_alt_deck))
+		row.add_child(toggle)
+		return
+	var deck_btn := _make_menu_button(
+		"ALT DECK" if _muster_alt_deck else "STANDARD DECK",
+		Color(0.22, 0.17, 0.14), 14, 32)
+	deck_btn.custom_minimum_size = Vector2(154, 32)
+	deck_btn.pressed.connect(_toggle_muster_deck.bind(hid))
+	row.add_child(deck_btn)
+	var relic_btn := _make_menu_button(
+		"ALT RELIC" if _muster_alt_relic else "STANDARD RELIC",
+		Color(0.22, 0.17, 0.14), 14, 32)
+	relic_btn.custom_minimum_size = Vector2(164, 32)
+	relic_btn.pressed.connect(_toggle_muster_relic.bind(hid))
+	row.add_child(relic_btn)
+
+
+func _toggle_muster_deck(hid: String) -> void:
+	if hid != _selected_hero or not _doctrine_mastery_unlocked(hid):
+		return
+	_muster_alt_deck = not _muster_alt_deck
+	_build_muster_roll(hid)
+
+
+func _toggle_muster_relic(hid: String) -> void:
+	if hid != _selected_hero or not _doctrine_mastery_unlocked(hid):
+		return
+	_muster_alt_relic = not _muster_alt_relic
+	_build_muster_roll(hid)
+
+
+func _build_muster_footer(parent: VBoxContainer) -> void:
+	var footer := VBoxContainer.new()
+	footer.add_theme_constant_override("separation", 5)
+	parent.add_child(footer)
+	_muster_campaign_label = _make_display_label("", 15, Color(0.72, 0.80, 0.66))
+	_muster_campaign_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_muster_campaign_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	footer.add_child(_muster_campaign_label)
+
+	var setup := HBoxContainer.new()
+	setup.alignment = BoxContainer.ALIGNMENT_CENTER
+	setup.add_theme_constant_override("separation", 12)
+	footer.add_child(setup)
+	var asc_unlocked: int = MetaState.unlocked_ascension
+	var minus := _make_menu_button("-", Color(0.20, 0.16, 0.14), 17, 34)
+	minus.custom_minimum_size = Vector2(36, 34)
+	minus.disabled = asc_unlocked <= 0
+	minus.pressed.connect(_change_ascension.bind(-1))
+	setup.add_child(minus)
+	_asc_label = _make_display_label("Ascension %d / %d" % [
+		_selected_ascension, asc_unlocked], 15, IVORY)
+	_asc_label.custom_minimum_size = Vector2(154, 34)
+	_asc_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_asc_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	setup.add_child(_asc_label)
+	var plus := _make_menu_button("+", Color(0.20, 0.16, 0.14), 17, 34)
+	plus.custom_minimum_size = Vector2(36, 34)
+	plus.disabled = asc_unlocked <= 0
+	plus.pressed.connect(_change_ascension.bind(1))
+	setup.add_child(plus)
+
+	var daily_text := "DAILY MARCH: OFF"
+	var daily_blocked := false
+	var today_daily: Dictionary = MetaState.todays_daily()
+	if not today_daily.is_empty():
+		match String(today_daily.get("result", "")):
+			"won":
+				daily_text = "DAILY MARCH: WON"
+				daily_blocked = true
+			"lost":
+				daily_text = "DAILY MARCH: LOST"
+				daily_blocked = true
+			_:
+				daily_text = "CONTINUE DAILY MARCH" \
+					if _daily_resume_slot(today_daily) >= 0 else "DAILY MARCH: UNAVAILABLE"
+				daily_blocked = _daily_resume_slot(today_daily) < 0
+	_daily_btn = _make_menu_button(daily_text, Color(0.30, 0.24, 0.34), 15, 34)
+	_daily_btn.custom_minimum_size = Vector2(238, 34)
+	_daily_btn.tooltip_text = _daily_tooltip()
+	_daily_btn.disabled = daily_blocked
+	_daily_btn.pressed.connect(_on_daily_button_pressed)
+	setup.add_child(_daily_btn)
+
+	_seed_edit = LineEdit.new()
+	_seed_edit.placeholder_text = "seed (optional)"
+	_seed_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_seed_edit.add_theme_font_size_override("font_size", 16)
+	_seed_edit.add_theme_color_override("font_color", IVORY)
+	_seed_edit.add_theme_color_override("font_placeholder_color", Color(0.55, 0.50, 0.42))
+	_seed_edit.custom_minimum_size = Vector2(188, 34)
+	_seed_edit.tooltip_text = WritDB.muster_copy("seed_tooltip_text")
+	if GameTheme.font_display:
+		_seed_edit.add_theme_font_override("font", GameTheme.font_display)
+	var well := StyleBoxFlat.new()
+	well.bg_color = Color(0.02, 0.015, 0.01, 0.85)
+	well.border_color = Color(0.60, 0.51, 0.34, 0.75)
+	well.set_border_width_all(1)
+	well.set_corner_radius_all(3)
+	well.content_margin_left = 8
+	well.content_margin_right = 8
+	_seed_edit.add_theme_stylebox_override("normal", well)
+	var well_focus := well.duplicate() as StyleBoxFlat
+	well_focus.border_color = GILT_BRIGHT
+	_seed_edit.add_theme_stylebox_override("focus", well_focus)
+	_seed_edit.text_changed.connect(_on_muster_seed_changed)
+	setup.add_child(_seed_edit)
+
+	_asc_rules_label = _make_display_label("", 14, Color(0.70, 0.64, 0.53))
+	_asc_rules_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_asc_rules_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	footer.add_child(_asc_rules_label)
+	_update_asc_rules_text()
+
+	var actions := HBoxContainer.new()
+	actions.add_theme_constant_override("separation", 18)
+	footer.add_child(actions)
+	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 17, 46)
+	back.custom_minimum_size = Vector2(180, 46)
+	back.pressed.connect(_abandon_muster)
+	actions.add_child(back)
+	var take := _make_begin_button()
+	take.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	actions.add_child(take)
+
+
+func _make_muster_writ_tile(entry: Dictionary) -> Button:
+	var id := String(entry.get("id", ""))
+	var btn := Button.new()
+	btn.custom_minimum_size = Vector2(350, 116)
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.focus_mode = Control.FOCUS_ALL
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	btn.tooltip_text = String(entry.get("desc", ""))
+	var copy := VBoxContainer.new()
+	copy.set_anchors_preset(Control.PRESET_FULL_RECT)
+	copy.offset_left = 12
+	copy.offset_right = -12
+	copy.offset_top = 7
+	copy.offset_bottom = -7
+	copy.add_theme_constant_override("separation", 2)
+	copy.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(copy)
+	var slot := String(entry.get("slot", ""))
+	var slot_label := _make_display_label("%s — %s" % [
+		String(WritDB.SLOT_LABELS.get(slot, "")),
+		String(WritDB.SLOT_HINTS.get(slot, ""))], 15,
+		Color(0.88, 0.48, 0.40) if bool(entry.get("is_pact", false)) else GILT)
+	slot_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	copy.add_child(slot_label)
+	var name_label := _make_display_label(String(entry.get("name", "")), 19, IVORY)
+	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	copy.add_child(name_label)
+	var desc := _make_display_label(String(entry.get("desc", "")), 15, GameTheme.DESC_DIM)
+	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc.max_lines_visible = 2
+	desc.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	copy.add_child(desc)
+	btn.pressed.connect(_select_muster_writ.bind(id))
+	return btn
+
+
+func _select_muster_writ(id: String) -> void:
+	if not _muster_writ_buttons.has(id):
+		return
+	_selected_writ_id = id
+	_refresh_muster_writ_styles()
+
+
+func _refresh_muster_writ_styles() -> void:
+	for id in _muster_writ_buttons:
+		var btn: Button = _muster_writ_buttons[id]
+		if not is_instance_valid(btn):
+			continue
+		var selected := String(id) == _selected_writ_id
+		var bg: Color = Color(0.12, 0.085, 0.065, 0.92) if selected \
+			else Color(0.035, 0.025, 0.03, 0.70)
+		var width: int = 2 if selected else 1
+		var normal := GameTheme.make_panel_style(bg,
+			GILT_BRIGHT if selected else Color(0.50, 0.43, 0.31, 0.38),
+			width, 4, false)
+		btn.add_theme_stylebox_override("normal", normal)
+		btn.add_theme_stylebox_override("pressed", normal)
+		# Build the hover variant by asking the kit again rather than by
+		# `normal.duplicate() as StyleBoxFlat` — make_panel_style returns a
+		# ChartPanelStyle, so that cast yielded NULL and every muster screen build
+		# threw "Invalid assignment ... on a base object of type 'Nil'", leaving the
+		# four tiles with no hover state at all. This is the documented panel-kit
+		# trap: never cast a kit style to StyleBoxFlat.
+		var hover := GameTheme.make_panel_style(bg, GILT_BRIGHT, width, 4, false)
+		btn.add_theme_stylebox_override("hover", hover)
+		btn.add_theme_stylebox_override("focus", hover)
+
+
+func _refresh_muster_deals() -> void:
+	if _muster_writ_row == null or not is_instance_valid(_muster_writ_row):
+		return
+	var rng := RandomNumberGenerator.new()
+	rng.seed = _pending_run_seed() ^ 0x57524954
+	_muster_writ_slate = WritDB.roll_slate(rng)
+	var still_present := false
+	for entry in _muster_writ_slate:
+		if String(entry.get("id", "")) == _selected_writ_id:
+			still_present = true
+	if not still_present:
+		_selected_writ_id = String(_muster_writ_slate[0].get("id", "")) \
+			if not _muster_writ_slate.is_empty() else ""
+	for child in _muster_writ_row.get_children():
+		child.queue_free()
+	_muster_writ_buttons.clear()
+	for entry in _muster_writ_slate:
+		var tile := _make_muster_writ_tile(entry)
+		_muster_writ_row.add_child(tile)
+		_muster_writ_buttons[String(entry.get("id", ""))] = tile
+	_refresh_muster_writ_styles()
+
+
+func _pending_run_seed() -> int:
+	if _daily_pick:
+		return RunState.daily_seed()
+	if _seed_edit != null and is_instance_valid(_seed_edit):
+		var typed := _seed_edit.text.strip_edges().to_lower()
+		if typed != "":
+			return RunState.seed_from_string(typed)
+	return _muster_random_seed
+
+
+func _refresh_muster_campaign() -> void:
+	if _muster_campaign_label == null or not is_instance_valid(_muster_campaign_label) \
+			or _selected_hero == "":
+		return
+	var seed_value := _pending_run_seed()
+	var tribes := RunState.preview_season_tribes(seed_value, _selected_banner_tribe)
+	var deal := RunState.preview_rival_deal(_selected_hero, seed_value)
+	var rival_names: Array[String] = []
+	for hid in deal.get("rival_lords", []):
+		rival_names.append(String(HeroDB.get_hero(String(hid)).get("name", hid)))
+	var final_id := String(deal.get("finale_rival", ""))
+	var final_name := String(HeroDB.get_hero(final_id).get("name", final_id)) \
+		if final_id != "" else "unknown"
+	_muster_campaign_label.text = "%s\nRoad lords: %s. Last claimant: %s." % [
+		RunState.season_line_for(tribes),
+		" · ".join(PackedStringArray(rival_names)), final_name]
+
+
+func _on_muster_seed_changed(_new_text: String) -> void:
+	if _daily_pick:
+		return
+	_refresh_muster_deals()
+	_refresh_muster_campaign()
+
+
+func _abandon_muster() -> void:
+	RunState.pending_signature_relic = ""
+	RunState.pending_deck_variant = ""
+	RunState.pending_banner_tribe = ""
+	_muster_setup_preset.clear()
+	_selected_writ_id = ""
+	_muster_writ_slate.clear()
+	_rebuild_menu()
+
+func _show_hero_select_legacy() -> void:
+	_set_subscreen_motion_obscured(true)
 	# Cast-lineup hero pick (StS/Hades pattern): a row of frameless portrait cards
 	# over the burning-meadow background. Each card stays down to portrait + name +
 	# tagline; hovering a hero spotlights it and fills the shared detail pane below
@@ -976,7 +1673,11 @@ func _show_hero_select() -> void:
 	# hover/click to FOCUS, never to commit — beside a war-dossier pane that
 	# showcases the focused hero at size: portrait, pitch, the opening deck as
 	# real cards, relic, and the run settings living WITH the BEGIN button.
-	_center_menu_for_subscreen(1500.0, 850.0)
+	# 872, not 850: the readable deck strip plus the always-present ascension
+	# readout spend the pane's old slack, and TAKE THE FIELD is the control that
+	# must never be the one pushed under the fold. 872 in a 900-tall canvas
+	# still leaves a margin top and bottom.
+	_center_menu_for_subscreen(1500.0, 872.0)
 
 	var main_row := HBoxContainer.new()
 	main_row.add_theme_constant_override("separation", 34)
@@ -986,7 +1687,7 @@ func _show_hero_select() -> void:
 	# ── Left: the roster ──
 	var roster := VBoxContainer.new()
 	roster.custom_minimum_size = Vector2(370, 0)
-	roster.add_theme_constant_override("separation", 10)
+	roster.add_theme_constant_override("separation", 8)
 	main_row.add_child(roster)
 
 	var title := _make_display_label("CHOOSE YOUR HERO", 27, GILT_BRIGHT)
@@ -1022,8 +1723,8 @@ func _show_hero_select() -> void:
 		Color(0.05, 0.035, 0.045, 0.66), Color(0.60, 0.51, 0.34, 0.38), 1, 6, false)
 	detail_bg.content_margin_left = 30
 	detail_bg.content_margin_right = 30
-	detail_bg.content_margin_top = 22
-	detail_bg.content_margin_bottom = 22
+	detail_bg.content_margin_top = 12
+	detail_bg.content_margin_bottom = 12
 	detail_frame.add_theme_stylebox_override("panel", detail_bg)
 	detail_frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	main_row.add_child(detail_frame)
@@ -1034,7 +1735,7 @@ func _show_hero_select() -> void:
 	detail_frame.add_child(dossier)
 
 	_hero_detail = VBoxContainer.new()
-	_hero_detail.add_theme_constant_override("separation", 9)
+	_hero_detail.add_theme_constant_override("separation", 7)
 	_hero_detail.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	dossier.add_child(_hero_detail)
 
@@ -1057,7 +1758,12 @@ func _update_asc_rules_text() -> void:
 	if _asc_rules_label == null or not is_instance_valid(_asc_rules_label):
 		return
 	if _selected_ascension <= 0:
-		_asc_rules_label.text = "The war as first written — no added rules."
+		if MetaState.unlocked_ascension <= 0:
+			# Nothing unlocked yet: name the ladder rather than leaving a
+			# disabled stepper unexplained. One line — the footer has no slack.
+			_asc_rules_label.text = "No added rules. Take a keep to open the next tier."
+		else:
+			_asc_rules_label.text = "The war as first written — no added rules."
 		return
 	var lines: Array[String] = []
 	for tier in range(1, _selected_ascension + 1):
@@ -1087,43 +1793,68 @@ func _build_dossier_footer(parent: VBoxContainer) -> void:
 	parent.add_child(footer)
 
 	footer.add_child(_make_ornament_row(320.0, true))
-	footer.add_child(_make_display_label("MARCH ORDERS", 16, GILT_BRIGHT))
+	footer.add_child(_make_display_label("RUN SETUP", 16, GILT_BRIGHT))
 
-	# One quiet row: ascension stepper (only when a tier is unlocked) · daily
-	# toggle · seed field. Left-packed to sit under the left-aligned dossier.
+	# One quiet row: ascension stepper · daily toggle · seed field. Left-packed
+	# to sit under the left-aligned dossier.
 	var setup_row := HBoxContainer.new()
 	setup_row.alignment = BoxContainer.ALIGNMENT_BEGIN
 	setup_row.add_theme_constant_override("separation", 22)
 	footer.add_child(setup_row)
 
-	if MetaState.unlocked_ascension > 0:
-		var asc_box := HBoxContainer.new()
-		asc_box.alignment = BoxContainer.ALIGNMENT_CENTER
-		asc_box.add_theme_constant_override("separation", 10)
-		var minus := _make_menu_button("−", Color(0.20, 0.16, 0.14), 18, 36)
-		minus.custom_minimum_size = Vector2(40, 36)
-		minus.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		minus.pressed.connect(_change_ascension.bind(-1))
-		asc_box.add_child(minus)
-		_asc_label = _make_display_label("Ascension %d / %d" % [
-			_selected_ascension, MetaState.unlocked_ascension], 16, IVORY)
-		_asc_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		_asc_label.custom_minimum_size = Vector2(168, 36)
-		_asc_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		asc_box.add_child(_asc_label)
-		var plus := _make_menu_button("+", Color(0.20, 0.16, 0.14), 18, 36)
-		plus.custom_minimum_size = Vector2(40, 36)
-		plus.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		plus.pressed.connect(_change_ascension.bind(1))
-		asc_box.add_child(plus)
-		setup_row.add_child(asc_box)
+	# The stepper ALWAYS renders, even at tier 0 with nothing unlocked. It used
+	# to be gated on `unlocked_ascension > 0`, which meant a fresh profile never
+	# saw the control at all and never learned the ladder existed — the section
+	# heading promised march orders and delivered a daily toggle and a seed box.
+	# An explained, disabled zero teaches the axis; an absent control cannot.
+	var asc_unlocked: int = MetaState.unlocked_ascension
+	var asc_box := HBoxContainer.new()
+	asc_box.alignment = BoxContainer.ALIGNMENT_CENTER
+	asc_box.add_theme_constant_override("separation", 10)
+	var minus := _make_menu_button("−", Color(0.20, 0.16, 0.14), 18, 36)
+	minus.custom_minimum_size = Vector2(40, 36)
+	minus.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	minus.disabled = asc_unlocked <= 0
+	minus.pressed.connect(_change_ascension.bind(-1))
+	asc_box.add_child(minus)
+	_asc_label = _make_display_label("Ascension %d / %d" % [
+		_selected_ascension, asc_unlocked], 16, IVORY)
+	_asc_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_asc_label.custom_minimum_size = Vector2(168, 36)
+	_asc_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	asc_box.add_child(_asc_label)
+	var plus := _make_menu_button("+", Color(0.20, 0.16, 0.14), 18, 36)
+	plus.custom_minimum_size = Vector2(40, 36)
+	plus.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	plus.disabled = asc_unlocked <= 0
+	plus.pressed.connect(_change_ascension.bind(1))
+	asc_box.add_child(plus)
+	setup_row.add_child(asc_box)
 
-	_daily_btn = _make_menu_button("DAILY MARCH: OFF",
+	var daily_text := "DAILY MARCH: OFF"
+	var daily_blocked := false
+	var today_daily: Dictionary = MetaState.todays_daily()
+	if not today_daily.is_empty():
+		match String(today_daily.get("result", "")):
+			"won":
+				daily_text = "DAILY MARCH: WON"
+				daily_blocked = true
+			"lost":
+				daily_text = "DAILY MARCH: LOST"
+				daily_blocked = true
+			_:
+				if _daily_resume_slot(today_daily) >= 0:
+					daily_text = "CONTINUE DAILY MARCH"
+				else:
+					daily_text = "DAILY MARCH: UNAVAILABLE"
+					daily_blocked = true
+	_daily_btn = _make_menu_button(daily_text,
 		Color(0.30, 0.24, 0.34), 16, 36)
-	_daily_btn.custom_minimum_size = Vector2(224, 36)
+	_daily_btn.custom_minimum_size = Vector2(260, 36)
 	_daily_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	_daily_btn.tooltip_text = _daily_tooltip()
-	_daily_btn.pressed.connect(_toggle_daily_pick)
+	_daily_btn.disabled = daily_blocked
+	_daily_btn.pressed.connect(_on_daily_button_pressed)
 	setup_row.add_child(_daily_btn)
 
 	_seed_edit = LineEdit.new()
@@ -1133,7 +1864,7 @@ func _build_dossier_footer(parent: VBoxContainer) -> void:
 	_seed_edit.add_theme_color_override("font_color", IVORY)
 	_seed_edit.add_theme_color_override("font_placeholder_color", Color(0.55, 0.50, 0.42))
 	_seed_edit.custom_minimum_size = Vector2(210, 36)
-	_seed_edit.tooltip_text = "Same seed, same map — share one with a friend for a head-to-head march."
+	_seed_edit.tooltip_text = "Same seed, same map — share one with a friend and compare runs."
 	if GameTheme.font_display:
 		_seed_edit.add_theme_font_override("font", GameTheme.font_display)
 	# Ink-well recess (the NetLobby text-entry convention) — the default OS
@@ -1155,15 +1886,14 @@ func _build_dossier_footer(parent: VBoxContainer) -> void:
 	setup_row.add_child(_seed_edit)
 
 	# The ascension RULES readout: the stepper number is meaningless unless the
-	# player can see what each tier adds. Cumulative list, dimmed ink, hidden
-	# at Ascension 0 and while nothing is unlocked.
-	if MetaState.unlocked_ascension > 0:
-		_asc_rules_label = _make_display_label("", 15, Color(0.72, 0.64, 0.52))
-		_asc_rules_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-		_asc_rules_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		_asc_rules_label.custom_minimum_size = Vector2(560, 0)
-		footer.add_child(_asc_rules_label)
-		_update_asc_rules_text()
+	# player can see what each tier adds. Cumulative list, dimmed ink. Always
+	# built (see the stepper note above) — at tier 0 it explains the zero.
+	_asc_rules_label = _make_display_label("", 15, Color(0.72, 0.64, 0.52))
+	_asc_rules_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_asc_rules_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_asc_rules_label.custom_minimum_size = Vector2(560, 0)
+	footer.add_child(_asc_rules_label)
+	_update_asc_rules_text()
 
 	var gap := Control.new()
 	gap.custom_minimum_size = Vector2(0, 4)
@@ -1178,7 +1908,7 @@ func _make_begin_button() -> Control:
 	var btn := Button.new()
 	btn.custom_minimum_size = Vector2(0, 56)
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	btn.focus_mode = Control.FOCUS_NONE
+	btn.focus_mode = Control.FOCUS_ALL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	for st in ["normal", "hover", "pressed", "focus"]:
 		btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
@@ -1233,12 +1963,14 @@ func _make_begin_button() -> Control:
 			tw.tween_property(f, "modulate:a", 0.0, 0.18)
 		tw.tween_property(rule, "modulate:a", 0.7, 0.18)
 		tw.tween_property(inner, "position:x", 0.0, 0.18))
+	btn.focus_entered.connect(func() -> void: btn.mouse_entered.emit())
+	btn.focus_exited.connect(func() -> void: btn.mouse_exited.emit())
 	btn.pressed.connect(_on_take_field_pressed.bind(btn))
 	return btn
 
 
 func _on_take_field_pressed(btn: Control) -> void:
-	if _run_commit_locked or _selected_hero == "":
+	if _run_commit_locked or _selected_hero == "" or _selected_writ_id == "":
 		return
 	_run_commit_locked = true
 	GameTheme.claim_pop(btn)
@@ -1255,8 +1987,8 @@ func _make_roster_row(hid: String) -> Button:
 	# the current master-detail screen needs five heroes to fit in one column.
 	var hero := HeroDB.get_hero(hid)
 	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(350, 92)
-	btn.focus_mode = Control.FOCUS_NONE
+	btn.custom_minimum_size = Vector2(350, 78)
+	btn.focus_mode = Control.FOCUS_ALL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	for state in ["normal", "hover", "pressed", "focus"]:
 		btn.add_theme_stylebox_override(state, StyleBoxEmpty.new())
@@ -1272,7 +2004,7 @@ func _make_roster_row(hid: String) -> Button:
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	btn.add_child(row)
 
-	var port_size := Vector2(62, 82)
+	var port_size := Vector2(52, 68)
 	var portrait_path := "res://assets/portraits/hero_portrait_%s.png" % hid
 	var portrait: Control = null
 	if ResourceLoader.exists(portrait_path):
@@ -1321,99 +2053,8 @@ func _make_roster_row(hid: String) -> Button:
 	# one deliberate act of the TAKE THE FIELD button in the dossier footer, so a
 	# player browsing the roster can never trip into a run they didn't mean to.
 	btn.mouse_entered.connect(_focus_hero.bind(hid))
+	btn.focus_entered.connect(_focus_hero.bind(hid))
 	btn.pressed.connect(_focus_hero.bind(hid))
-	_hero_cards[hid] = btn
-	return btn
-
-
-func _make_hero_card(hid: String) -> Button:
-	# One frameless portrait card. The clickable Button has empty styleboxes in
-	# every state (no boxy rectangle); the focus spotlight + gilt underline are
-	# applied in _focus_hero. All children are MOUSE_FILTER_IGNORE so hover/click
-	# fall through to the Button.
-	var hero := HeroDB.get_hero(hid)
-	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(216, 340)
-	btn.focus_mode = Control.FOCUS_NONE
-	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
-	btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
-	btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
-
-	var col := VBoxContainer.new()
-	col.set_anchors_preset(Control.PRESET_FULL_RECT)
-	col.add_theme_constant_override("separation", 6)
-	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	btn.add_child(col)
-
-	# Portrait (or a color-wash fallback if its art isn't painted yet). Stored so
-	# _focus_hero can brighten the spotlighted hero and dim the rest.
-	# Box aspect (192/255 = 0.753) is matched to the source art aspect
-	# (928×1232 = 0.753) so KEEP_ASPECT_COVERED fills it with ZERO crop — the old
-	# 168×210 box shaved ~13px off the top/bottom of every face ("portraits not in
-	# frame"). Grown to fill more of the reframed, larger hero-select screen.
-	var port_size := Vector2(192, 255)
-	var portrait_path := "res://assets/portraits/hero_portrait_%s.png" % hid
-	if ResourceLoader.exists(portrait_path):
-		var portrait := TextureRect.new()
-		portrait.texture = load(portrait_path)
-		portrait.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		portrait.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		portrait.custom_minimum_size = port_size
-		portrait.clip_contents = true
-		portrait.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		# Idle portraits stay bright enough to read across a room — the old 0.70
-		# wash made all five faces murky. _focus_hero lifts the picked one.
-		portrait.modulate = Color(0.88, 0.86, 0.84)
-		col.add_child(portrait)
-		_hero_portraits[hid] = portrait
-	else:
-		# No painted portrait yet (e.g. the Kindler) — render an intentional
-		# crest plate instead of a bare color block so the card never reads as
-		# "broken / missing asset". A framed parchment panel with the hero's
-		# monogram + a small "portrait to come" note degrades gracefully and
-		# still occupies the exact portrait footprint so the row stays aligned.
-		var plate := PanelContainer.new()
-		plate.custom_minimum_size = port_size
-		plate.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var pstyle := GameTheme.make_panel_style(
-			Color(0.10, 0.085, 0.11, 0.92),
-			Color(GILT.r, GILT.g, GILT.b, 0.55), 1, 4, false)
-		plate.add_theme_stylebox_override("panel", pstyle)
-		var pcol := VBoxContainer.new()
-		pcol.alignment = BoxContainer.ALIGNMENT_CENTER
-		pcol.add_theme_constant_override("separation", 6)
-		pcol.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		plate.add_child(pcol)
-		var mono := _make_display_label(
-			String(hero.get("name", hid)).strip_edges().left(1).to_upper(),
-			96, Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.85))
-		mono.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		pcol.add_child(mono)
-		var coming := _make_display_label("portrait to come", 15, ASH)
-		coming.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		pcol.add_child(coming)
-		col.add_child(plate)
-		plate.modulate = Color(0.88, 0.86, 0.84)
-		_hero_portraits[hid] = plate
-
-	var name_lbl := _make_display_label(String(hero.get("name", hid)), 27, GILT_BRIGHT)
-	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(name_lbl)
-
-	var tag_lbl := _make_display_label(String(hero.get("tagline", "")), 17, Color(1.0, 0.88, 0.62))
-	tag_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	tag_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	tag_lbl.custom_minimum_size = Vector2(192, 0)
-	tag_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(tag_lbl)
-
-	btn.mouse_entered.connect(_focus_hero.bind(hid))
-	btn.pressed.connect(_begin_run_with.bind(hid))
 	_hero_cards[hid] = btn
 	return btn
 
@@ -1422,6 +2063,38 @@ func _make_hero_card(hid: String) -> Button:
 # toggle can never leak onto another lord's run).
 var _muster_alt_relic := false
 var _muster_alt_deck := false
+
+
+## The first victory unlocks one authored alternate doctrine: its deck package
+## and signature relic travel together. Ascension 4 is mastery, where the two
+## axes may finally be mixed independently.
+func _bound_doctrine_unlocked(hid: String) -> bool:
+	var hero: Dictionary = HeroDB.get_hero(hid)
+	return MetaState.hero_wins(hid) >= 1 \
+		and not (hero.get("deck_alt", {}) as Dictionary).is_empty() \
+		and String(hero.get("relic_alt", "")) != ""
+
+
+func _doctrine_mastery_unlocked(hid: String) -> bool:
+	return _bound_doctrine_unlocked(hid) and MetaState.hero_best_asc(hid) >= 4
+
+
+## Collapse stale or legacy one-axis picks back to Standard before mastery.
+## After A4 both booleans remain independent and represent the four legal mixes.
+func _normalize_muster_doctrine(hid: String) -> void:
+	if not _bound_doctrine_unlocked(hid):
+		_muster_alt_deck = false
+		_muster_alt_relic = false
+	elif not _doctrine_mastery_unlocked(hid):
+		var bound_alt := _muster_alt_deck and _muster_alt_relic
+		_muster_alt_deck = bound_alt
+		_muster_alt_relic = bound_alt
+
+
+func _set_bound_doctrine(hid: String, use_alt: bool) -> void:
+	_muster_alt_deck = use_alt
+	_muster_alt_relic = use_alt
+	_build_muster_roll(hid)
 
 
 func _focus_hero(hid: String) -> void:
@@ -1444,7 +2117,8 @@ func _focus_hero(hid: String) -> void:
 			b.add_theme_stylebox_override("normal", box)
 			b.add_theme_stylebox_override("hover", box)
 			b.add_theme_stylebox_override("pressed", box)
-	_build_hero_detail(hid)
+	_build_muster_roll(hid)
+	_refresh_muster_campaign()
 
 
 func _hero_focus_box() -> StyleBoxFlat:
@@ -1461,6 +2135,70 @@ func _hero_focus_box() -> StyleBoxFlat:
 	sb.shadow_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.28)
 	sb.shadow_size = 10
 	return sb
+
+
+## Ambient life for the focused lord's portrait well: a slow Ken Burns push on
+## the painting plus an additive lamp biased to the top third, breathing.
+## Mirrors the skirmish lobby's banner plates ([[MP menus polish]]) so the
+## campaign's own hero pick isn't the deadest portrait in the game.
+##
+## Both beats are decorative, so both gate on Reduce Motion. The portrait's
+## size is 0 at build time, so the push is armed a frame later.
+func _light_hero_well(well: Control, port: Control, accent: Color) -> void:
+	var glow := TextureRect.new()
+	glow.name = "WellLamp"
+	glow.texture = _lamp_glow_texture()
+	glow.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	glow.stretch_mode = TextureRect.STRETCH_SCALE
+	glow.set_anchors_preset(Control.PRESET_FULL_RECT)
+	glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	glow.modulate = Color(1.0, 0.86, 0.62, 0.16)
+	var mat := CanvasItemMaterial.new()
+	mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	glow.material = mat
+	well.add_child(glow)
+
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	_arm_well_life.call_deferred(port, glow)
+
+
+func _arm_well_life(port: Control, glow: Control) -> void:
+	if not is_instance_valid(port) or not is_instance_valid(glow):
+		return
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if not is_instance_valid(port) or not is_instance_valid(glow):
+		return
+	if port.size.x > 1.0:
+		GameTheme.ken_burns(port, port.size * 0.5, 1.05, 16.0)
+	var tw := glow.create_tween().set_loops()
+	tw.set_trans(Tween.TRANS_SINE)
+	tw.tween_property(glow, "modulate:a", 0.24, 3.1)
+	tw.tween_property(glow, "modulate:a", 0.11, 3.1)
+
+
+## Shared radial lamp texture for the portrait wells — pooled on first use so
+## five hero picks don't each bake their own gradient.
+var _lamp_tex: GradientTexture2D = null
+
+func _lamp_glow_texture() -> GradientTexture2D:
+	if _lamp_tex != null:
+		return _lamp_tex
+	var grad := Gradient.new()
+	grad.offsets = PackedFloat32Array([0.0, 0.55, 1.0])
+	grad.colors = PackedColorArray([
+		Color(1.0, 0.90, 0.68, 0.85),
+		Color(1.0, 0.72, 0.40, 0.28),
+		Color(0.9, 0.55, 0.25, 0.0)])
+	_lamp_tex = GradientTexture2D.new()
+	_lamp_tex.gradient = grad
+	_lamp_tex.fill = GradientTexture2D.FILL_RADIAL
+	_lamp_tex.fill_from = Vector2(0.5, 0.30)
+	_lamp_tex.fill_to = Vector2(1.05, 0.30)
+	_lamp_tex.width = 192
+	_lamp_tex.height = 192
+	return _lamp_tex
 
 
 func _build_hero_detail(hid: String) -> void:
@@ -1489,8 +2227,17 @@ func _build_hero_detail(hid: String) -> void:
 	plate.alignment = BoxContainer.ALIGNMENT_BEGIN
 	_hero_detail.add_child(plate)
 
+	# The lord's well. Sized 236×210 — this is the single most committing
+	# choice in the campaign, and it was staged at 176×232 and dead still,
+	# which left the SKIRMISH lobby's practice-bot seat (236×296, breathing,
+	# lamplit) with more presence than the run you actually keep. Same
+	# treatment here: a slow Ken Burns push and a lamp that breathes over the
+	# top third. Both decorative — gated off under Reduce Motion.
 	var port_frame := PanelContainer.new()
-	port_frame.custom_minimum_size = Vector2(176, 232)
+	# 236x250, not 310 tall: the readable deck strip and the always-present
+	# ascension readout both grew the pane, and TAKE THE FIELD was the thing
+	# pushed off the bottom. The portrait had the most slack.
+	port_frame.custom_minimum_size = Vector2(236, 184)
 	port_frame.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 	port_frame.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
 		Color(0.08, 0.065, 0.06, 0.90),
@@ -1502,9 +2249,10 @@ func _build_hero_detail(hid: String) -> void:
 		tex.texture = load(portrait_path)
 		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		tex.custom_minimum_size = Vector2(174, 230)
+		tex.custom_minimum_size = Vector2(234, 182)
 		tex.clip_contents = true
 		port_frame.add_child(tex)
+		_light_hero_well(port_frame, tex, accent)
 	else:
 		# No painted portrait — a monogram plate keeps the footprint (graceful).
 		var mono := _make_display_label(
@@ -1578,28 +2326,56 @@ func _build_hero_detail(hid: String) -> void:
 	# summary line nobody can picture. Hovering a mini floats the full card.
 	# The strip always shows the SELECTED muster (default or unlocked alternate).
 	var alt_deck: Dictionary = hero.get("deck_alt", {})
-	var deck_unlocked: bool = not alt_deck.is_empty() and MetaState.hero_best_asc(hid) >= 4
+	var doctrine_unlocked := _bound_doctrine_unlocked(hid)
+	var mastery_unlocked := _doctrine_mastery_unlocked(hid)
+	_normalize_muster_doctrine(hid)
+	var deck_unlocked: bool = doctrine_unlocked
 	var deck_for_display: Array = hero.get("deck", [])
 	if _muster_alt_deck and deck_unlocked:
 		deck_for_display = alt_deck.get("deck", deck_for_display)
 
-	var band := HBoxContainer.new()
-	band.add_theme_constant_override("separation", 30)
+	# The deck strip and the relic block STACK now, they no longer sit side by
+	# side. At a readable card scale the strip needs the pane's full width (six
+	# uniques ≈ 890px against ~1036px of inner pane), so the old horizontal band
+	# pushed the relic column off the right edge. Vertical costs ~70px of height,
+	# which the shortened portrait below pays for.
+	var band := VBoxContainer.new()
+	band.add_theme_constant_override("separation", 12)
 	band.alignment = BoxContainer.ALIGNMENT_BEGIN
 	_hero_detail.add_child(band)
 
+
+	# Before mastery the package is one decision: deck and relic are authored as
+	# a pair. At A4 these rows disappear and the independent controls below open.
+	if doctrine_unlocked and not mastery_unlocked:
+		var doctrine_col := VBoxContainer.new()
+		doctrine_col.add_theme_constant_override("separation", 4)
+		band.add_child(doctrine_col)
+		doctrine_col.add_child(_make_display_label("DOCTRINE", 18, GILT_BRIGHT))
+		var doctrine_std := _make_muster_row("Standard Doctrine",
+			not _muster_alt_deck, _set_bound_doctrine.bind(hid, false))
+		doctrine_std.custom_minimum_size = Vector2(910.0, 28)
+		doctrine_col.add_child(doctrine_std)
+		var doctrine_alt := _make_muster_row("%s - %s" % [
+			String(alt_deck.get("name", "Alternate Doctrine")),
+			String(alt_deck.get("tagline", "alternate doctrine"))],
+			_muster_alt_deck, _set_bound_doctrine.bind(hid, true))
+		doctrine_alt.custom_minimum_size = Vector2(910.0, 28)
+		doctrine_col.add_child(doctrine_alt)
+		band.add_child(_make_ornament_row(260.0, true))
 	var deck_col := VBoxContainer.new()
 	deck_col.add_theme_constant_override("separation", 5)
 	deck_col.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 	band.add_child(deck_col)
 	deck_col.add_child(_make_display_label("DECK", 18, GILT_BRIGHT))
+	_warm_deck_strip(deck_for_display, hid)
 	deck_col.add_child(_make_deck_strip(deck_for_display))
 
 	# Muster toggle / locked hint for the alternate deck. Options, not stats:
 	# the unlock widens the choice of how this lord starts, never their power.
-	if deck_unlocked:
+	if mastery_unlocked:
 		var std_row := _make_muster_row(
-			"The Host of the March — standard muster", not _muster_alt_deck,
+			"Standard deck", not _muster_alt_deck,
 			func():
 				_muster_alt_deck = false
 				_build_hero_detail(hid))
@@ -1607,23 +2383,20 @@ func _build_hero_detail(hid: String) -> void:
 		deck_col.add_child(std_row)
 		var alt_row := _make_muster_row(
 			"%s — %s" % [String(alt_deck.get("name", "Alternate")),
-				String(alt_deck.get("tagline", "alternate muster"))],
+				String(alt_deck.get("tagline", "alternate deck"))],
 			_muster_alt_deck,
 			func():
 				_muster_alt_deck = true
 				_build_hero_detail(hid))
 		alt_row.custom_minimum_size = Vector2(470.0, 28)
 		deck_col.add_child(alt_row)
-	elif not alt_deck.is_empty():
-		var deck_lock := _make_display_label(
-			"%s — locked. Win a march at Ascension 4 or higher." \
-			% String(alt_deck.get("name", "Alternate muster")),
-			15, Color(0.62, 0.58, 0.50))
-		deck_lock.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-		deck_col.add_child(deck_lock)
+	# No "locked" hint line. The pane's prime real estate is for the deck the
+	# player is choosing RIGHT NOW; two lines advertising variants they cannot
+	# have pushed the readable deck strip down and taught nothing actionable.
+	# The unlock announces itself on the victory screen, where it is earned.
 
 	var alt_relic := String(hero.get("relic_alt", ""))
-	var relic_unlocked: bool = alt_relic != "" and MetaState.hero_wins(hid) >= 1
+	var relic_unlocked: bool = doctrine_unlocked
 	var relic_id := String(hero.get("relic", ""))
 	if _muster_alt_relic and relic_unlocked:
 		relic_id = alt_relic
@@ -1654,7 +2427,7 @@ func _build_hero_detail(hid: String) -> void:
 		relic_col.add_child(relic_row)
 
 	# Muster toggle / locked hint for the alternate signature relic.
-	if relic_unlocked:
+	if mastery_unlocked:
 		var def_rd := RelicDB.get_relic(String(hero.get("relic", "")))
 		var alt_rd := RelicDB.get_relic(alt_relic)
 		var sig_row := _make_muster_row(
@@ -1673,14 +2446,7 @@ func _build_hero_detail(hid: String) -> void:
 				_build_hero_detail(hid))
 		vet_row.custom_minimum_size = Vector2(356.0, 28)
 		relic_col.add_child(vet_row)
-	elif alt_relic != "":
-		var relic_lock := _make_display_label(
-			"Alternate signature relic — locked. Win a march with this lord.",
-			15, Color(0.62, 0.58, 0.50))
-		relic_lock.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-		relic_lock.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		relic_lock.custom_minimum_size = Vector2(356.0, 0)
-		relic_col.add_child(relic_lock)
+	# No "locked" hint line here either — see the deck note above.
 
 	# Campaign ledger line — this hero's record across all runs. Quiet ink;
 	# absent entirely until the hero has marched at least once.
@@ -1688,7 +2454,7 @@ func _build_hero_detail(hid: String) -> void:
 	var wins: int = int(hs.get("wins", 0))
 	var losses: int = int(hs.get("losses", 0))
 	if wins + losses > 0:
-		var ledger_text := "Campaigns: %d won · %d lost" % [wins, losses]
+		var ledger_text := "Runs: %d won · %d lost" % [wins, losses]
 		var best: int = int(hs.get("best_asc", -1))
 		if best > 0:
 			ledger_text += " · highest victory at Ascension %d" % best
@@ -1735,7 +2501,7 @@ func _animate_hero_detail_reveal() -> void:
 func _make_muster_row(text: String, selected: bool, on_pick: Callable) -> Button:
 	var btn := Button.new()
 	btn.flat = true
-	btn.focus_mode = Control.FOCUS_NONE
+	btn.focus_mode = Control.FOCUS_ALL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	for state in ["normal", "hover", "pressed", "focus"]:
 		btn.add_theme_stylebox_override(state, StyleBoxEmpty.new())
@@ -1754,11 +2520,47 @@ func _make_muster_row(text: String, selected: bool, on_pick: Callable) -> Button
 
 
 # ── Deck strip (hero select): the opening ten as REAL cards ─────────────────
-const DECK_MINI_SCALE := 0.36
+# 0.62, not the old 0.36. At 0.36 a 14px rules line renders at ~5px — well under
+# the 14px hard floor in COPY_STYLE §11 — so the player could not actually READ
+# the deck at the moment they were asked to commit to it. The strip is the
+# subject of this screen; it has to be legible without a hover.
+const DECK_MINI_SCALE := 0.62
+
+## Warm every distinct card in one hero's opener in a SINGLE batched pass.
+##
+## This replaced a per-card `CardTextureCache.bake()` fired from _make_deck_mini.
+## That call is a coroutine holding a global `_bake_busy` mutex and costing two
+## `await RenderingServer.frame_post_draw` plus a synchronous `get_image()` GPU
+## flush; called un-awaited once per card it did not run in parallel, it QUEUED —
+## and because _focus_hero is bound to `mouse_entered`, sweeping the cursor down
+## the five-lord roster stacked up to 25-40 of them, each about a frame.
+##
+## `validity` is polled between passes, so a warm whose hero is no longer
+## spotlighted stands itself down mid-job instead of finishing work nobody will
+## see (the ScenePreload.cancel_deck_warm pattern).
+func _warm_deck_strip(deck: Array, hid: String) -> void:
+	var seen: Dictionary = {}
+	var datas: Array = []
+	for cid in deck:
+		var id: String = String(cid)
+		if seen.has(id):
+			continue
+		seen[id] = true
+		datas.append(CardDB.get_card_data(id))
+	if datas.is_empty():
+		return
+	CardTextureCache.bake_many(datas,
+		func() -> bool: return is_inside_tree() and _selected_hero == hid)
+
 
 ## The hero's opening deck as a row of mini Card2D nodes — one per unique card,
 ## first-seen order preserved (the deck leads with its heaviest cards), each
 ## wearing a ×N count chip. Hovering a mini floats a full-size readable copy.
+##
+## The BAKES ARE BATCHED at the call site (`_build_hero_detail`), not fired per
+## card here: `CardTextureCache.bake()` costs two `frame_post_draw` waits behind
+## a global mutex, so a per-card loop off `mouse_entered` queued 25-40 serialized
+## bakes when the cursor swept the roster. See CLAUDE.md's batched-path note.
 func _make_deck_strip(deck: Array) -> Control:
 	var counts: Dictionary = {}
 	var order: Array[String] = []
@@ -1775,7 +2577,17 @@ func _make_deck_strip(deck: Array) -> Control:
 	strip.tree_exiting.connect(_hide_deck_preview)
 	for id in order:
 		strip.add_child(_make_deck_mini(id, int(counts[id])))
-	return strip
+	# Nine distinct cards no longer fit in the dossier's width at a readable
+	# scale. Keep the cards legible and make width navigable instead of shrinking
+	# their rules text back under the copy floor.
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(910.0,
+		ceil(300.0 * DECK_MINI_SCALE) + 20.0)
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.add_child(strip)
+	return scroll
 
 
 func _make_deck_mini(id: String, count: int) -> Control:
@@ -1788,7 +2600,8 @@ func _make_deck_mini(id: String, count: int) -> Control:
 	card.card_id = id
 	card.is_on_battlefield = true   # static display — no hand-drag behaviour
 	card.live_baked_mode = true
-	CardTextureCache.bake(card.card_data)
+	# No bake call here — the whole strip is warmed in ONE batched, cancellable
+	# pass by _warm_deck_strip() before this runs.
 	card.scale = Vector2(DECK_MINI_SCALE, DECK_MINI_SCALE)
 	card.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	slot.add_child(card)
@@ -1842,11 +2655,61 @@ func _hide_deck_preview() -> void:
 
 
 func _begin_run_with(hero_id: String) -> void:
+	var seed_to_use := _pending_run_seed()
+	if _daily_pick and not MetaState.todays_daily().is_empty():
+		_daily_pick = false
+		_run_commit_locked = false
+		return
+
+	var hero_data := HeroDB.get_hero(hero_id)
+	RunState.pending_signature_relic = ""
+	RunState.pending_deck_variant = ""
+	RunState.pending_banner_tribe = _selected_banner_tribe
+	if _bound_doctrine_unlocked(hero_id):
+		if _doctrine_mastery_unlocked(hero_id):
+			if _muster_alt_relic:
+				RunState.pending_signature_relic = String(hero_data.get("relic_alt", ""))
+			if _muster_alt_deck:
+				RunState.pending_deck_variant = "alt"
+		elif _muster_alt_relic and _muster_alt_deck:
+			RunState.pending_signature_relic = String(hero_data.get("relic_alt", ""))
+			RunState.pending_deck_variant = "alt"
+
+	RunState.start_new_run(hero_id, _selected_ascension, seed_to_use)
+	if _daily_pick:
+		RunState.is_daily_run = true
+		RunState.daily_date = MetaState.today_str()
+		RunState.daily_mutator_id = RunState.daily_mutator_id_for_today()
+
+	# The final button commits both halves. Follow-up card/relic pickers happen
+	# after this boundary; BACK on THE MUSTER never starts or rolls a run.
+	_writ_resolution_rng = RandomNumberGenerator.new()
+	_writ_resolution_rng.seed = int(RunState.run_seed) ^ 0x57524954 ^ 0x5245534F
+	var chosen: Dictionary = {}
+	for entry in _muster_writ_slate:
+		if String(entry.get("id", "")) == _selected_writ_id:
+			chosen = entry
+			break
+	if chosen.is_empty() and not _muster_writ_slate.is_empty():
+		chosen = _muster_writ_slate[0]
+	if chosen.is_empty():
+		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
+		return
+	_pick_blessing(chosen)
+
+
+func _begin_run_with_legacy(hero_id: String) -> void:
 	# Seed comes from the setup row on the hero-select screen: DAILY MARCH
 	# locks today's deterministic seed (same map for everyone), a typed seed
 	# hashes to a custom one, otherwise 0 = roll fresh.
 	var seed_to_use := 0
 	if _daily_pick:
+		# Second guard behind the disabled/status button: a record created after
+		# this setup screen opened must not be overwritten by a second attempt.
+		if not MetaState.todays_daily().is_empty():
+			_daily_pick = false
+			_run_commit_locked = false
+			return
 		seed_to_use = RunState.daily_seed()
 	elif _seed_edit != null and is_instance_valid(_seed_edit):
 		var s: String = _seed_edit.text.strip_edges().to_lower()
@@ -1858,18 +2721,23 @@ func _begin_run_with(hero_id: String) -> void:
 	var hero_data := HeroDB.get_hero(hero_id)
 	RunState.pending_signature_relic = ""
 	RunState.pending_deck_variant = ""
-	if _muster_alt_relic and MetaState.hero_wins(hero_id) >= 1:
-		RunState.pending_signature_relic = String(hero_data.get("relic_alt", ""))
-	if _muster_alt_deck and MetaState.hero_best_asc(hero_id) >= 4 \
-			and hero_data.has("deck_alt"):
-		RunState.pending_deck_variant = "alt"
+	if _bound_doctrine_unlocked(hero_id):
+		if _doctrine_mastery_unlocked(hero_id):
+			if _muster_alt_relic:
+				RunState.pending_signature_relic = String(hero_data.get("relic_alt", ""))
+			if _muster_alt_deck:
+				RunState.pending_deck_variant = "alt"
+		elif _muster_alt_relic and _muster_alt_deck:
+			# First-win doctrine: both halves cross the start boundary together.
+			RunState.pending_signature_relic = String(hero_data.get("relic_alt", ""))
+			RunState.pending_deck_variant = "alt"
 	RunState.start_new_run(hero_id, _selected_ascension, seed_to_use)
 	# Daily March: arm today's omen (run-wide mutator) and stamp the ledger —
 	# start_new_run just reset both flags, so this must come after it.
 	if _daily_pick:
 		RunState.is_daily_run = true
+		RunState.daily_date = MetaState.today_str()
 		RunState.daily_mutator_id = RunState.daily_mutator_id_for_today()
-		MetaState.record_daily_start(hero_id)
 	# After the hero is locked in, offer the run's opening provisioning — 3
 	# safe tiles (one per reward family) + 1 risky tile (real cost, bigger
 	# payoff). Skipping is allowed and routes straight to the map.
@@ -1886,6 +2754,39 @@ func _change_ascension(delta: int) -> void:
 	_update_asc_rules_text()
 
 
+func _on_daily_button_pressed() -> void:
+	var today: Dictionary = MetaState.todays_daily()
+	if not today.is_empty():
+		if String(today.get("result", "")) == "marching":
+			var slot := _daily_resume_slot(today)
+			if slot >= 0:
+				_load_slot_into_game(slot)
+		return
+	_toggle_daily_pick()
+
+
+func _daily_resume_slot(record: Dictionary) -> int:
+	var date := String(record.get("date", ""))
+	var candidates: Array[int] = []
+	var preferred := int(record.get("slot", -1))
+	if preferred >= 0 and preferred < RunState.SAVE_SLOTS:
+		candidates.append(preferred)
+	for slot in range(RunState.SAVE_SLOTS):
+		if not candidates.has(slot):
+			candidates.append(slot)
+	for slot in candidates:
+		var summary := RunState.get_slot_summary(slot)
+		if not bool(summary.get("has_save", false)) \
+				or not bool(summary.get("is_daily_run", false)):
+			continue
+		var saved_date := String(summary.get("daily_date", ""))
+		# Empty is the pre-daily_date save shape; the single matching marching
+		# ledger is its only possible origin.
+		if saved_date == "" or saved_date == date:
+			return slot
+	return -1
+
+
 func _toggle_daily_pick() -> void:
 	# DAILY MARCH locks the run to today's deterministic seed; the free-seed
 	# field goes quiet while it's on (the two would fight over the same roll).
@@ -1899,6 +2800,8 @@ func _toggle_daily_pick() -> void:
 		var lbl := _menu_button_label(_daily_btn)
 		if lbl != null:
 			lbl.text = "DAILY MARCH: ON" if _daily_pick else "DAILY MARCH: OFF"
+	_refresh_muster_deals()
+	_refresh_muster_campaign()
 
 
 func _daily_tooltip() -> String:
@@ -2015,12 +2918,17 @@ func _animate_subscreen_reveal(menu: Control) -> void:
 		return
 	if UserSettings != null and UserSettings.reduce_motion:
 		return
-	for child in menu.get_children():
-		child.modulate.a = 0.0
+	# Skip children the caller just queue_free'd (subscreens rebuild the Menu
+	# in place, so the dying column is still in the tree here) — staggering
+	# over them added ~0.7s of dead air before the first REAL element faded
+	# in, and their tweeners died with them at frame end.
 	var tw := create_tween()
 	tw.set_parallel(true)
 	var delay := 0.0
 	for child in menu.get_children():
+		if child.is_queued_for_deletion():
+			continue
+		child.modulate.a = 0.0
 		tw.tween_property(child, "modulate:a", 1.0, 0.25).set_delay(delay)
 		delay += 0.045
 
@@ -2271,7 +3179,7 @@ func _show_blessing_select() -> void:
 	GameTheme.deal_in(ornament, 0.06)
 
 	var hint := _make_display_label(
-		"Every march is provisioned before it moves. Three gifts are honest — one asks a price.",
+		"Take one commission. Each moves a different part of the march.",
 		17, IVORY)
 	hint.name = "BlessingHint"
 	hint.set_anchors_preset(Control.PRESET_TOP_LEFT)
@@ -2288,20 +3196,45 @@ func _show_blessing_select() -> void:
 	add_child(hint)
 	GameTheme.deal_in(hint, 0.10)
 
+	# Season winds: announce the run's dealt tribes before the first road is
+	# picked, so the muster lean downstream reads as weather the player was
+	# told about, never as a rigged slate.
+	var season_text: String = RunState.season_line()
+	if season_text != "":
+		var season := _make_display_label(season_text, 16, Color(0.64, 0.74, 0.60))
+		season.name = "BlessingSeason"
+		season.set_anchors_preset(Control.PRESET_TOP_LEFT)
+		season.offset_left = COLUMN_LEFT
+		season.offset_top = 240
+		season.offset_right = COLUMN_LEFT + COLUMN_WIDTH
+		season.offset_bottom = 240 + 30
+		season.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+		season.add_theme_constant_override("outline_size", 3)
+		season.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.85))
+		season.add_theme_constant_override("shadow_offset_x", 0)
+		season.add_theme_constant_override("shadow_offset_y", 2)
+		add_child(season)
+		GameTheme.deal_in(season, 0.13)
+
 	# Frameless gem-prefixed choices, stacked bottom-left like the in-run event
 	# screen. Same composition as Event.gd: the choice ladder is the focal point,
 	# the description floats above, the skip is tucked beneath.
 	var num_choices := 4
-	var choice_h := 84
-	var stack_h := num_choices * choice_h + (num_choices - 1) * 8
+	# 112, not 84: each tile now carries THREE lines (slot rule / name / clause),
+	# and at 84 the next tile's slot label butted against the previous tile's
+	# clause — so "II · THE ARSENAL" read as part of the ROLL entry above it,
+	# which is exactly the grouping the slot labels exist to prevent.
+	var choice_h := 112
+	var gap := 18
+	var stack_h := num_choices * choice_h + (num_choices - 1) * gap
 	var choices_vbox := VBoxContainer.new()
 	choices_vbox.name = "BlessingChoices"
 	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	choices_vbox.offset_left = COLUMN_LEFT
 	choices_vbox.offset_right = COLUMN_LEFT + COLUMN_WIDTH
 	choices_vbox.offset_top = -(stack_h + 120)
-	choices_vbox.offset_bottom = -120
-	choices_vbox.add_theme_constant_override("separation", 8)
+	choices_vbox.offset_bottom = -96
+	choices_vbox.add_theme_constant_override("separation", gap)
 	add_child(choices_vbox)
 
 	var blessings := _roll_blessings()
@@ -2313,18 +3246,10 @@ func _show_blessing_select() -> void:
 		GameTheme.hover_lift(choice, 1.014)
 		choice_i += 1
 
-	var skip := _make_menu_button("SKIP — MARCH UNPROVISIONED",
-		Color(0.22, 0.16, 0.14), 16, 40)
-	skip.name = "BlessingSkip"
-	skip.pressed.connect(_on_skip_blessing_pressed.bind(skip))
-	skip.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	skip.offset_left = COLUMN_LEFT
-	skip.offset_right = COLUMN_LEFT + 360
-	skip.offset_top = -82
-	skip.offset_bottom = -36
-	add_child(skip)
-	GameTheme.deal_in(skip, 0.40)
-	GameTheme.hover_lift(skip, 1.02)
+	# NO SKIP. It was audited as never correct — all the honest tiles were free,
+	# so skipping was strictly dominated and taxed only the players who did not
+	# know that. Under the four-slot writ model there is no "none of these" case
+	# by construction: the slots are four axes, and every run wants one moved.
 
 
 # Roll the displayed tiles: 3 distinct honest entries + 1 priced entry.
@@ -2334,90 +3259,67 @@ func _show_blessing_select() -> void:
 # and every priced entry is a real pact, so the first decision of the run is a
 # direction, not a coin pickup.
 func _roll_blessings() -> Array:
-	var honest_pool: Array[String] = [
-		"gold", "upgrade", "transform2", "recruit", "max_hp", "potions", "relic",
-	]
-	honest_pool.shuffle()
-	var picked_honest := honest_pool.slice(0, 3)
-
-	var priced_pool: Array[String] = [
-		"black_ledger", "widows_coin", "butchers_kindness", "hollow_levy",
-	]
-	var picked_priced: String = priced_pool[randi() % priced_pool.size()]
-
-	var entries: Array = []
-	for id in picked_honest:
-		entries.append(_blessing_entry(id, false))
-	entries.append(_blessing_entry(picked_priced, true))
-	# Shuffle so the priced tile isn't always the last cell.
-	entries.shuffle()
-	return entries
+	# Deals the four-slot writ slate (WritDB): one tile from THE ROLL, THE
+	# ARSENAL and THE PURSE, plus THE PACT as the escalated twin of whichever
+	# ROLL or PURSE tile is already on screen.
+	#
+	# SEEDED off the run seed. The old roll used the global shuffle()/randi(),
+	# so two players on the same Daily March seed got the same map and DIFFERENT
+	# opening gifts — the one screen in the run that was not reproducible.
+	# start_new_run has already assigned run_seed by the time this screen opens.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = int(RunState.run_seed) ^ 0x57524954  # "WRIT"
+	return WritDB.roll_slate(rng)
 
 
-func _blessing_entry(id: String, risky: bool) -> Dictionary:
-	# Centralised description / tint per blessing. Effects are applied in
-	# _apply_blessing (or routed to a picker in _pick_blessing) — keeping
-	# render data and effect logic separate so a typo in copy can't
-	# accidentally double-pay the player.
-	var safe_color := Color(0.18, 0.30, 0.20)   # green-leaning for "honest"
-	var risk_color := Color(0.36, 0.18, 0.22)   # deep wine for "priced"
-	var color: Color = risk_color if risky else safe_color
-	var data := {"id": id, "risky": risky, "color": color}
-	match id:
-		# ── Honest ──
-		"gold":
-			data["name"] = "The Paymaster's Advance"
-			data["desc"] = "Gain 75 gold."
-		"upgrade":
-			data["name"] = "The Whetstone Cart"
-			data["desc"] = "Choose 1 card. Forge its + version."
-		"transform2":
-			data["name"] = "The Remount Line"
-			data["desc"] = "Choose 2 cards. Each becomes a random card of the same rarity."
-		"recruit":
-			data["name"] = "The Muster Tent"
-			data["desc"] = "Pick 1 of 3 uncommon cards for your deck."
-		"max_hp":
-			data["name"] = "The Iron Ration"
-			data["desc"] = "Gain +7 max HP."
-		"potions":
-			data["name"] = "The Vivandière's Crate"
-			data["desc"] = "Gain 2 random potions."
-		"relic":
-			data["name"] = "The Vanguard's Trinket"
-			data["desc"] = "Gain a random combat relic."
-		# ── Priced ──
-		"black_ledger":
-			data["name"] = "The Black Ledger"
-			data["desc"] = "Gain a boss relic. Add 2 Curses to your deck."
-		"widows_coin":
-			data["name"] = "The Widow's Coin"
-			data["desc"] = "Gain 150 gold. Lose 6 max HP."
-		"butchers_kindness":
-			data["name"] = "The Butcher's Kindness"
-			data["desc"] = "Choose 1 creature. It permanently gains +2 ATK and Wither 1."
-		"hollow_levy":
-			data["name"] = "The Hollow Levy"
-			data["desc"] = "Remove 2 chosen cards. Add 1 Curse to your deck."
-		_:
-			data["name"] = id
-			data["desc"] = ""
-	return data
+## The stream every writ RESOLUTION rolls against, as opposed to the stream that
+## dealt the slate. Both hang off run_seed, so a Daily March reproduces the four
+## tiles AND whatever each tile then offers — an Enlist slate, a Remount result,
+## THE ARSENAL's 1-of-3. Those three sites used the global `shuffle()`/`randi()`
+## until 2026-07-30, which meant two players on the same seed saw the same four
+## tiles and then different consequences, i.e. the reproducibility was cosmetic.
+##
+## Lazily built so the legacy entry point and any probe that drives _pick_blessing
+## directly still get a seeded stream instead of a null crash.
+func _writ_rng() -> RandomNumberGenerator:
+	if _writ_resolution_rng == null:
+		_writ_resolution_rng = RandomNumberGenerator.new()
+		_writ_resolution_rng.seed = int(RunState.run_seed) ^ 0x57524954 ^ 0x5245534F
+	return _writ_resolution_rng
+
+
+## Fisher-Yates against a local stream — Array.shuffle() only ever uses the
+## global RNG, so it cannot be used anywhere a roll must be reproducible.
+func _seeded_shuffle(arr: Array, rng: RandomNumberGenerator) -> void:
+	for i in range(arr.size() - 1, 0, -1):
+		var j: int = rng.randi() % (i + 1)
+		var tmp = arr[i]
+		arr[i] = arr[j]
+		arr[j] = tmp
 
 
 func _make_blessing_choice(entry: Dictionary, height: int) -> Button:
 	# Frameless gem-prefixed choice — mirrors the in-run Event.gd choice style
-	# (gem on the left, headline + body to its right, no panel chrome). Risky
-	# entries get a wine-tinted gem and a "RISKY" chip beside the headline so
-	# the player can read the warning without a separate panel color.
-	var risky: bool = bool(entry.get("risky", false))
+	# (gem on the left, headline + body to its right, no panel chrome).
+	#
+	# The SLOT LABEL ("I · THE ROLL") is the load-bearing piece of furniture on
+	# this screen, not decoration. Four tiles without it are four unrelated
+	# nouns and the player has to price a relic against gold against max HP;
+	# with it they answer one question they can actually answer at minute one —
+	# which axis of the run do I want moved? The pact keeps a wine gem and a
+	# price chip, but it is now labelled by its ROLE (IV · THE PACT) rather than
+	# by the word "RISKY", which the audit showed was pointing at the wrong tile.
+	var risky: bool = bool(entry.get("is_pact", false))
+	var slot: String = String(entry.get("slot", ""))
+	var slot_text: String = String(WritDB.SLOT_LABELS.get(slot, ""))
+	var slot_hint: String = String(WritDB.SLOT_HINTS.get(slot, ""))
 	var name_text: String = String(entry.get("name", ""))
 	var desc_text: String = String(entry.get("desc", ""))
 
 	var btn := Button.new()
 	btn.flat = true
 	btn.custom_minimum_size = Vector2(560, height)
-	btn.focus_mode = Control.FOCUS_NONE
+	btn.focus_mode = Control.FOCUS_ALL
 	btn.size_flags_horizontal = Control.SIZE_FILL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 
@@ -2462,7 +3364,21 @@ func _make_blessing_choice(entry: Dictionary, height: int) -> Button:
 	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(vbox)
 
-	# Headline row: name on the left, optional RISKY chip on the right.
+	# Slot rule: the axis this tile moves, in small gilt caps above the name.
+	if slot_text != "":
+		var slot_lbl := Label.new()
+		slot_lbl.text = "%s — %s" % [slot_text, slot_hint]
+		slot_lbl.add_theme_font_size_override("font_size", 15)
+		slot_lbl.add_theme_color_override("font_color",
+			Color(0.85, 0.45, 0.38) if risky else Color(GILT.r, GILT.g, GILT.b, 0.92))
+		slot_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+		slot_lbl.add_theme_constant_override("outline_size", 3)
+		if GameTheme.font_display:
+			slot_lbl.add_theme_font_override("font", GameTheme.font_display)
+		slot_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		vbox.add_child(slot_lbl)
+
+	# Headline row: name, then the price chip IMMEDIATELY beside it.
 	var headline_row := HBoxContainer.new()
 	headline_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	headline_row.add_theme_constant_override("separation", 12)
@@ -2481,12 +3397,19 @@ func _make_blessing_choice(entry: Dictionary, height: int) -> Button:
 	if GameTheme.font_display:
 		headline.add_theme_font_override("font", GameTheme.font_display)
 	headline.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	headline.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# SHRINK_BEGIN, not EXPAND_FILL: with expand, the price chip was shoved to
+	# the far edge of the 760px column and floated orphaned in the middle of the
+	# screen, visually detached from the row it labels. The chip has to touch
+	# the name it prices.
+	headline.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	headline_row.add_child(headline)
 
 	if risky:
+		# The price, stated as a number in one fixed currency. Every pact costs
+		# the same 6 max HP, so this chip is the whole comparison: the player
+		# reads one number against the escalation on the twin tile beside it.
 		var chip := Label.new()
-		chip.text = "RISKY"
+		chip.text = "− %d MAX HP" % WritDB.PACT_COST_MAX_HP
 		chip.add_theme_font_size_override("font_size", 16)
 		chip.add_theme_color_override("font_color", Color(1.0, 0.55, 0.42))
 		chip.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
@@ -2496,6 +3419,11 @@ func _make_blessing_choice(entry: Dictionary, height: int) -> Button:
 		chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		headline_row.add_child(chip)
+
+	var head_pad := Control.new()
+	head_pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head_pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	headline_row.add_child(head_pad)
 
 	var body := Label.new()
 	body.text = desc_text
@@ -2537,59 +3465,92 @@ func _on_blessing_choice_pressed(btn: Control, entry: Dictionary) -> void:
 
 
 func _pick_blessing(entry: Dictionary) -> void:
-	var id := String(entry.get("id", ""))
-	# The card-touching blessings open a pick-a-card grid — the tile names
-	# the effect, the player names the card. Everything else applies and goes.
-	match id:
-		"upgrade":
-			var candidates := _blessing_upgrade_candidates()
-			if candidates.is_empty():
-				GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
-				return
-			_show_blessing_card_picker("Sharpen which card?", candidates,
-				func(i: int):
-					RunState.upgrade_card(i, "plus")
-					GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45))
+	# Resolve one writ. THE PACT bills its price first — the cost is signed
+	# before the goods are handed over, which is also the order the tile reads
+	# in. Every pact costs the same 6 max HP, so there is exactly one number
+	# here and no per-entry pricing logic to drift.
+	if bool(entry.get("is_pact", false)):
+		RunState.hero_max_hp = maxi(1,
+			RunState.hero_max_hp - WritDB.PACT_COST_MAX_HP)
+		RunState.hero_hp = mini(RunState.hero_hp, RunState.hero_max_hp)
+
+	var effect := String(entry.get("effect", ""))
+	var value: int = int(entry.get("value", 1))
+	match effect:
+		"forge":
+			_writ_forge_step(value, [])
 			return
-		"butchers_kindness":
-			var creatures := _blessing_creature_candidates()
-			if creatures.is_empty():
-				GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
-				return
-			_show_blessing_card_picker("Feed which creature?  (+2 ATK, Wither 1)",
-				creatures,
-				func(i: int):
-					RunState.upgrade_card(i, "butcher")
-					GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45))
+		"remove":
+			_blessing_remove_step(value)
 			return
-		"transform2":
-			_blessing_transform_step(2)
+		"remount":
+			_blessing_transform_step(value)
 			return
-		"recruit":
-			var pool: Array = CardDB.cards_of_rarity("uncommon")
-			pool.shuffle()
-			var offered: Array = pool.slice(0, mini(3, pool.size()))
+		"enlist":
+			_writ_enlist_step(1, value)
+			return
+		"enlist2":
+			_writ_enlist_step(2, value)
+			return
+		"arsenal":
+			var offered: Array[String] = RelicDB.roll_foundation_relics(
+				value, RunState.relics, RunState.current_hero_id, _writ_rng())
 			if offered.is_empty():
 				GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 				return
-			_show_blessing_offer_picker("Enlist which recruit?", offered,
-				func(cid: String):
-					RunState.add_card(cid)
+			_show_writ_relic_picker("Draw which relic from the arsenal?", offered,
+				func(rid: String) -> void:
+					RunState.add_relic(rid)
 					GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45))
 			return
-		"hollow_levy":
-			# The Curse lands first (the cost is signed before the muster), then
-			# the player picks the 2 leavers.
-			RunState.add_card(CardDB.random_curse_id())
-			_blessing_remove_step(2)
-			return
-	_apply_blessing(id)
+		"purse":
+			RunState.add_relic(String(entry.get("relic", "")))
+		"purse2":
+			RunState.add_relic(String(entry.get("relic", "")))
+			RunState.add_relic(String(entry.get("relic2", "")))
 	GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 
 
-# Sequential pickers for the multi-step blessings. Each step rebuilds the
-# grid from the LIVE deck (indices shift after a removal), and each bottoms
-# out on the map transition so the run can never strand on an empty grid.
+## Forge N cards, one grid at a time. `taken` carries the deck_uids already
+## forged this writ so a two-card forge cannot re-offer the card it just
+## sharpened — _blessing_upgrade_candidates filters on has_upgrade_path("plus"),
+## which only drops a card AFTER the mod lands, so without this the second grid
+## would still list the first pick on the same frame.
+func _writ_forge_step(remaining: int, taken: Array) -> void:
+	var candidates: Array = []
+	for i in _blessing_upgrade_candidates():
+		if not (int(i) in taken):
+			candidates.append(i)
+	if remaining <= 0 or candidates.is_empty():
+		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
+		return
+	var suffix: String = "  (%d left)" % remaining if remaining > 1 else ""
+	_show_blessing_card_picker("Forge which card?" + suffix, candidates,
+		func(i: int) -> void:
+			RunState.upgrade_card(i, "plus")
+			var next_taken: Array = taken.duplicate()
+			next_taken.append(i)
+			_writ_forge_step(remaining - 1, next_taken))
+
+
+## Enlist `picks` cards, each chosen from a fresh slate of `width` uncommons.
+func _writ_enlist_step(picks: int, width: int) -> void:
+	if picks <= 0:
+		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
+		return
+	var pool: Array = CardDB.cards_of_rarity("uncommon")
+	_seeded_shuffle(pool, _writ_rng())
+	var offered: Array = pool.slice(0, mini(width, pool.size()))
+	if offered.is_empty():
+		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
+		return
+	var suffix: String = "  (%d left)" % picks if picks > 1 else ""
+	_show_blessing_offer_picker("Enlist which recruit?" + suffix, offered,
+		func(cid: String) -> void:
+			RunState.add_card(cid)
+			_writ_enlist_step(picks - 1, width))
+
+
 
 func _blessing_transform_step(remaining: int) -> void:
 	var eligible: Array = []
@@ -2600,27 +3561,34 @@ func _blessing_transform_step(remaining: int) -> void:
 		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 		return
 	var suffix: String = "  (%d left)" % remaining if remaining > 1 else ""
-	_show_blessing_card_picker("Trade in which card?" + suffix, eligible,
+	_show_blessing_card_picker("Transform which card?" + suffix, eligible,
 		func(i: int):
 			_blessing_transform_at(i)
 			_blessing_transform_step(remaining - 1))
 
 
-# Same transform rule as the in-run Remount Fair (Event.gd): starters and
-# enemy-rarity cards hatch into commons, everything else keeps its weight
-# class, and the roll never returns the same card.
+# The Remount Line rolls one rarity HIGHER, floored at uncommon. It used to
+# roll same-rarity like the in-run Remount Fair, which made the writ a genuine
+# step-up for four lords and a PURE LATERAL COIN-FLIP for the Kindler, whose
+# opener is all common-rarity — his commons rolled into other commons. The
+# in-run Fair keeps its own same-rarity rule; this is the paid opening version.
 func _blessing_transform_at(deck_index: int) -> void:
 	var old_id: String = RunState.deck[deck_index]
 	var rarity: String = String(CardDB.get_card_data(old_id).get("rarity", "common"))
-	if rarity == "starter" or rarity == "enemy":
-		rarity = "common"
+	match rarity:
+		"starter", "enemy", "common":
+			rarity = "uncommon"
+		"uncommon":
+			rarity = "rare"
+		_:
+			rarity = "rare"
 	var pool: Array = CardDB.cards_of_rarity(rarity)
 	pool.erase(old_id)
 	if pool.is_empty():
 		pool = CardDB.cards_of_rarity("common")
 		pool.erase(old_id)
 	RunState.remove_card_at(deck_index)
-	RunState.add_card(pool[randi() % pool.size()])
+	RunState.add_card(pool[_writ_rng().randi() % pool.size()])
 
 
 func _blessing_remove_step(remaining: int) -> void:
@@ -2631,26 +3599,14 @@ func _blessing_remove_step(remaining: int) -> void:
 	for i in RunState.deck.size():
 		all_idx.append(i)
 	var suffix: String = "  (%d left)" % remaining if remaining > 1 else ""
-	_show_blessing_card_picker("Muster out which card?" + suffix, all_idx,
+	_show_blessing_card_picker("Remove which card?" + suffix, all_idx,
 		func(i: int):
 			RunState.remove_card_at(i)
 			_blessing_remove_step(remaining - 1))
 
 
-func _skip_blessing() -> void:
-	GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 
 
-func _on_skip_blessing_pressed(btn: Control) -> void:
-	if _blessing_commit_locked:
-		return
-	_blessing_commit_locked = true
-	GameTheme.claim_pop(btn)
-	if UserSettings == null or not UserSettings.reduce_motion:
-		await get_tree().create_timer(0.11).timeout
-	if not is_inside_tree():
-		return
-	_skip_blessing()
 
 
 func _blessing_upgrade_candidates() -> Array:
@@ -2724,7 +3680,7 @@ func _show_blessing_card_picker(title_text: String, indices: Array,
 		wrapper.add_child(card_node)
 		var click_btn := Button.new()
 		click_btn.flat = true
-		click_btn.focus_mode = Control.FOCUS_NONE
+		click_btn.focus_mode = Control.FOCUS_ALL
 		click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
 		click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
 		click_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -2753,7 +3709,7 @@ func _on_blessing_card_pick_pressed(target: Control, on_pick: Callable,
 	on_pick.call(picked)
 
 
-# The Muster Tent variant: pick from OFFERED card ids (cards not yet in the
+# The Recruit Tent variant: pick from OFFERED card ids (cards not yet in the
 # deck), where _show_blessing_card_picker picks from live deck indices. Same
 # grid, same click semantics; the callback receives the card id string.
 func _show_blessing_offer_picker(title_text: String, ids: Array,
@@ -2799,7 +3755,7 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 		wrapper.add_child(card_node)
 		var click_btn := Button.new()
 		click_btn.flat = true
-		click_btn.focus_mode = Control.FOCUS_NONE
+		click_btn.focus_mode = Control.FOCUS_ALL
 		click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
 		click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
 		click_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -2815,45 +3771,102 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 		pick_i += 1
 
 
-# Applies the picked blessing's mutation to RunState. Effects sample from the
-# live DBs (relics/potions/cards/upgrades) at apply time so the tile copy
-# stays evergreen — and so the player can't peek at the exact roll. Every
-# branch is intentionally self-contained: no shared "reward bundle" helper,
-# because the families don't actually overlap (a card add doesn't compose
-# with a relic add for this screen) and inlining is easier to audit.
-# ("upgrade", "butchers_kindness", "transform2", "recruit" and "hollow_levy"
-# never reach here — _pick_blessing routes them through pickers.)
-func _apply_blessing(id: String) -> void:
-	match id:
-		# ── Honest ──
-		"gold":
-			RunState.gain_gold(75)
-		"max_hp":
-			# The march starts at full HP, so the raise carries the heal with it.
-			RunState.hero_max_hp += 7
-			RunState.hero_hp += 7
-		"relic":
-			var pool: Array[String] = RelicDB.roll_relic_reward(
-				"combat", RunState.relics, RunState.current_hero_id)
-			if not pool.is_empty():
-				RunState.add_relic(pool[0])
-		"potions":
-			for _i in 2:
-				if RunState.can_add_potion():
-					RunState.add_potion(PotionDB.roll_random_potion())
-		# ── Priced ──
-		"black_ledger":
-			# Roll a rare relic from the boss pool — these are the strongest
-			# in the game, justifying the Curse tax. Two Curses, not three,
-			# because this fires on round 1 with a fresh deck (no upgrades to
-			# soak the dilution yet).
-			var bosses: Array[String] = RelicDB.roll_boss_relics(
-				RunState.relics, RunState.current_hero_id)
-			if not bosses.is_empty():
-				RunState.add_relic(bosses[0])
-			for _i in 2:
-				RunState.add_card(CardDB.random_curse_id())
-		"widows_coin":
-			RunState.gain_gold(150)
-			RunState.hero_max_hp = maxi(1, RunState.hero_max_hp - 6)
-			RunState.hero_hp = mini(RunState.hero_hp, RunState.hero_max_hp)
+## THE ARSENAL's picker: choose 1 of N relics. Modelled on the card offer
+## picker above (same title, same row, same click semantics) but rendering relic
+## plates, because a relic has no Card2D. The callback receives the relic id.
+##
+## Offering a CHOICE here is not just presentation — it is what retires the
+## dead-roll problem the old blind "gain a random Combat relic" tile had. The
+## Burnt Dispatches needs an exhausted spell and is inert for four of the five
+## lords; when it is one of three on screen, nobody is forced to take it.
+func _show_writ_relic_picker(title_text: String, ids: Array,
+		on_pick: Callable) -> void:
+	_set_subscreen_motion_obscured(true)
+	for child in get_children():
+		var cname: String = child.name
+		if cname in ["Background", "Atmosphere", "Menu"]:
+			continue
+		child.queue_free()
+	_picker_commit_locked = false
+
+	var title := _make_display_label(title_text, 30, GILT_BRIGHT)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	title.offset_top = 36
+	title.offset_bottom = 88
+	title.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	title.add_theme_constant_override("outline_size", 5)
+	add_child(title)
+	GameTheme.deal_in(title, 0.02)
+
+	var row := HBoxContainer.new()
+	row.set_anchors_preset(Control.PRESET_CENTER)
+	var tile_w := 300
+	var total_w: int = ids.size() * tile_w + (ids.size() - 1) * 40
+	row.offset_left = -total_w / 2
+	row.offset_right = total_w / 2
+	row.offset_top = -150
+	row.offset_bottom = 150
+	row.add_theme_constant_override("separation", 40)
+	add_child(row)
+
+	var pick_i := 0
+	for rid_v in ids:
+		var rid := String(rid_v)
+		var rd: Dictionary = RelicDB.get_relic(rid)
+		var wrapper := PanelContainer.new()
+		wrapper.custom_minimum_size = Vector2(tile_w, 250)
+		var plate := GameTheme.make_panel_style(
+			Color(0.06, 0.045, 0.05, 0.88), Color(0.60, 0.51, 0.34, 0.55), 1, 5, false)
+		plate.content_margin_left = 20
+		plate.content_margin_right = 20
+		plate.content_margin_top = 18
+		plate.content_margin_bottom = 18
+		wrapper.add_theme_stylebox_override("panel", plate)
+
+		var col := VBoxContainer.new()
+		col.add_theme_constant_override("separation", 10)
+		col.alignment = BoxContainer.ALIGNMENT_CENTER
+		col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wrapper.add_child(col)
+
+		var icon_path := "res://assets/icons/relics/%s.png" % rid
+		if ResourceLoader.exists(icon_path):
+			var icon := TextureRect.new()
+			icon.texture = load(icon_path)
+			icon.custom_minimum_size = Vector2(72, 72)
+			icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			icon.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+			icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			col.add_child(icon)
+
+		var nm := _make_display_label(String(rd.get("name", rid)), 21, GILT_BRIGHT)
+		nm.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		nm.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		nm.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		col.add_child(nm)
+
+		var body := _make_display_label(String(rd.get("desc", "")), 18,
+			GameTheme.DESC_DIM)
+		body.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		body.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		col.add_child(body)
+
+		var click_btn := Button.new()
+		click_btn.flat = true
+		click_btn.focus_mode = Control.FOCUS_ALL
+		click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
+		click_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
+		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
+		click_btn.pressed.connect(_on_blessing_card_pick_pressed.bind(
+			wrapper, on_pick, rid))
+		wrapper.add_child(click_btn)
+		row.add_child(wrapper)
+		GameTheme.deal_in(wrapper, 0.08 + pick_i * 0.055)
+		GameTheme.hover_lift(wrapper, 1.025)
+		pick_i += 1

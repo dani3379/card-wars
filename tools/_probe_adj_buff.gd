@@ -142,14 +142,24 @@ func _run_test() -> void:
 	combat._net_spawn_creature(CDB.get_card_data("torchbearer").duplicate(true), 91002, 1, combat.ROW_FRONT, false, false)
 	combat._refresh_adjacency_buffs()
 	await create_timer(0.1).timeout
-	_check(is_instance_valid(pv) and pv.adj_atk_buff == buff,
-		">>> DIAGONAL CREST: a DIAGONAL friendly is now buffed (adj_atk_buff=%d, +%d expected)" % [(pv.adj_atk_buff if is_instance_valid(pv) else -1), buff])
-	# And without the relic the same diagonal must NOT be buffed (prove the gate).
+	# THIS IS A NET FIXTURE, AND DIAGONAL CREST IS DELIBERATELY NET-INERT.
+	# Combat._adjacent_creatures says so in as many words: the relic is not in
+	# NET_RELIC_POOL, so `_has_relic` is false in skirmish and BOTH PEERS read the
+	# plain row+column set — which is the whole point, since a widened adjacency
+	# on one peer only would desync every adjacency verb in the game.
+	# This block used to assert the buff LANDED here, i.e. it demanded the exact
+	# behaviour the design forbids, and had been failing ever since. Flipped to
+	# lock the real contract: holding the relic must change NOTHING in net.
+	# (The relic's actual widening is solo behaviour and belongs in a solo probe.)
+	_check(is_instance_valid(pv) and pv.adj_atk_buff == 0,
+		">>> DIAGONAL CREST is NET-INERT: the diagonal stays unbuffed in skirmish even while the relic is held (adj_atk_buff=%d)" \
+			% (pv.adj_atk_buff if is_instance_valid(pv) else -1))
+	# Dropping it must likewise change nothing — no hidden net path reads it.
 	SS.get_slot(0).relics.erase("diagonal_crest")
 	combat._refresh_adjacency_buffs()
 	await create_timer(0.1).timeout
 	_check(is_instance_valid(pv) and pv.adj_atk_buff == 0,
-		"without Diagonal Crest the diagonal friendly is NOT buffed (adj_atk_buff=%d)" % (pv.adj_atk_buff if is_instance_valid(pv) else -1))
+		"...and dropping the relic is equally inert (adj_atk_buff=%d)" % (pv.adj_atk_buff if is_instance_valid(pv) else -1))
 
 	if _fails == 0:
 		print("[adj-buff] ALL PASS")

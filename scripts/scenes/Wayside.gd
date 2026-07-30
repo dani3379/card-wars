@@ -190,7 +190,17 @@ func _make_tile(headline: String, payload: String, on_press: Callable,
 			tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			icon_box.add_child(tex)
 	else:
-		var glyph := GameTheme.make_label(headline.left(1), 38, Color(0.82, 0.74, 0.56), true)
+		# Illuminated drop-cap of the headline's first MEANINGFUL letter. Strip a
+		# leading article first — otherwise "A banner case" / "A captain's
+		# dispatches" / "A freelance's arms" all print the same "A" and it reads
+		# as a broken/placeholder icon rather than a flourish.
+		var cap_src := headline
+		for article in ["The ", "An ", "A "]:
+			if cap_src.begins_with(article):
+				cap_src = cap_src.substr(article.length())
+				break
+		var glyph := GameTheme.make_label(cap_src.left(1).to_upper(), 38,
+			Color(0.82, 0.74, 0.56), true)
 		glyph.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		glyph.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		glyph.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -228,6 +238,11 @@ func _make_tile(headline: String, payload: String, on_press: Callable,
 	return btn
 
 
+## The centered tile stack, kept so the walk-away line can sit under it rather
+## than in a screen corner. Null on the sub-screens that build their own layout.
+var _tile_stack: Control = null
+
+
 ## Stack tiles down the screen center, below the header band.
 func _add_tile_stack(tiles: Array) -> void:
 	var vbox := VBoxContainer.new()
@@ -240,6 +255,7 @@ func _add_tile_stack(tiles: Array) -> void:
 	vbox.offset_top = -h / 2 + 40
 	vbox.offset_bottom = h / 2 + 40
 	add_child(vbox)
+	_tile_stack = vbox
 	var i := 0
 	for t in tiles:
 		vbox.add_child(t)
@@ -253,15 +269,37 @@ func _add_tile_stack(tiles: Array) -> void:
 
 func _add_leave_button(label: String = "March on") -> void:
 	var btn = GameTheme.make_back_button(label, Vector2(180, 42))
-	btn.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	btn.offset_left = 40
-	btn.offset_top = -70
-	btn.offset_right = 220
-	btn.offset_bottom = -28
+	# Centered under the tile stack, not pinned to the bottom-left corner. Every
+	# sibling stop puts its walk-away directly beneath the choices (the Shop's
+	# "Leave the Wagon", Recruit's "Turn Them Away", Treasure's "Take gold
+	# instead"); the road's stops were the one place the dismiss sat diagonally
+	# across the screen from the thing it dismissed. (Screen audit 2026-07-21.)
+	btn.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	btn.offset_left = -90
+	btn.offset_right = 90
+	btn.offset_top = 0
+	btn.offset_bottom = 42
 	btn.pressed.connect(_go_to_map)
 	add_child(btn)
+	_seat_leave_button.call_deferred(btn)
 	GameTheme.deal_in(btn, 0.12)
 	GameTheme.hover_lift(btn, 1.04)
+
+
+## Park the walk-away just below the tile stack once the stack has a real size.
+## Falls back to a bottom-centered seat on the sub-screens that have no stack.
+func _seat_leave_button(btn: Control) -> void:
+	if btn == null or not is_instance_valid(btn):
+		return
+	var y: float = size.y - 96.0
+	if _tile_stack != null and is_instance_valid(_tile_stack):
+		y = _tile_stack.position.y + _tile_stack.size.y + 34.0
+	y = minf(y, size.y - 70.0)
+	btn.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	btn.offset_left = size.x * 0.5 - 90.0
+	btn.offset_right = size.x * 0.5 + 90.0
+	btn.offset_top = y
+	btn.offset_bottom = y + 42.0
 
 
 func _go_to_map() -> void:
@@ -387,21 +425,28 @@ func _spawn_result_seal(accent: Color, bad: bool = false) -> void:
 
 # ── Card picker grid (Event.gd's picker, compacted) ─────────────────────
 
-func _make_card_grid(title_text: String) -> GridContainer:
+func _make_card_grid(title_text: String, count: int = 6) -> GridContainer:
 	_clear_ui()
-	var title = GameTheme.make_label(title_text, 22, GameTheme.KEYWORD_GOLD)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.position = Vector2(300, 30)
-	title.size = Vector2(1000, 40)
-	add_child(title)
+	# Proper header (the verb's name over the instruction), matching every other
+	# wayside stop — was a lone 22px label floating at the top.
+	_add_header(_result_title(), title_text)
+
+	# Center the grid instead of left-packing it at x=80: a small picker (two
+	# banner donors) used to cling to the top-left with the whole screen empty
+	# beside it. Columns shrink to the card count so few cards stay centered.
+	var cols: int = clampi(count, 1, 6)
+	var cell_w := 180  # 225·0.8 — cards scale to fit their cells (see _add_card_to_grid)
+	var h_sep := 18
+	var grid_w := cols * cell_w + (cols - 1) * h_sep
 	var scroll = ScrollContainer.new()
-	scroll.position = Vector2(80, 80)
-	scroll.size = Vector2(1440, 660)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size = Vector2(grid_w + 24, 600)  # +24 leaves room for the v-scrollbar
+	scroll.position = Vector2((1600.0 - float(grid_w + 24)) * 0.5, 188)
 	add_child(scroll)
 	var grid = GridContainer.new()
-	grid.columns = 6
-	grid.add_theme_constant_override("h_separation", 16)
-	grid.add_theme_constant_override("v_separation", 16)
+	grid.columns = cols
+	grid.add_theme_constant_override("h_separation", h_sep)
+	grid.add_theme_constant_override("v_separation", 18)
 	scroll.add_child(grid)
 	return grid
 
@@ -412,13 +457,19 @@ func _add_card_to_grid(grid: GridContainer, data: Dictionary,
 		callback: Callable, footer: String = "") -> void:
 	var slot := VBoxContainer.new()
 	slot.add_theme_constant_override("separation", 4)
+	slot.alignment = BoxContainer.ALIGNMENT_CENTER
+	# 0.8-scale writ fits its cell exactly (225·0.8=180, 300·0.8=240) — full-size
+	# cards overflowed the old 210×280 cell and touched their neighbours.
 	var wrapper := Control.new()
-	wrapper.custom_minimum_size = Vector2(210, 280)
+	wrapper.custom_minimum_size = Vector2(180, 240)
+	wrapper.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	wrapper.pivot_offset = wrapper.custom_minimum_size * 0.5
 	var card_node = CARD_SCENE.instantiate()
 	card_node.static_display = true
 	card_node.card_data = data
 	card_node.live_baked_mode = true
 	CardTextureCache.bake(data)
+	card_node.scale = Vector2(0.8, 0.8)
 	wrapper.add_child(card_node)
 	var click_btn := Button.new()
 	click_btn.flat = true
@@ -480,7 +531,7 @@ func _build_drill_intro() -> void:
 		RunState.gain_gold(20)
 		_show_drill_consolation()
 		return
-	var grid = _make_card_grid("Pick a creature to drill (+1/+1).")
+	var grid = _make_card_grid("Pick a creature to drill (+1/+1).", eligible.size())
 	for i in eligible:
 		var data = RunState.get_upgraded_card_data(i)
 		_add_card_to_grid(grid, data, _on_drill_pick.bind(i))
@@ -607,8 +658,8 @@ func _sell_price(card_id: String) -> int:
 
 func _build_scales() -> void:
 	_clear_ui()
-	_add_header("THE QUARTERMASTER'S SCALES",
-		"He weighs, he doesn't haggle. One trade per visit.")
+	_add_header("THE TRADING SCALES",
+		"Choose one trade.")
 	var tiles: Array = []
 	tiles.append(_make_tile("Sell a card by weight",
 		"Remove a card. He pays 15 gold + 12 per Command it costs.",
@@ -619,7 +670,7 @@ func _build_scales() -> void:
 		potion_note = "Potion belt is full."
 	elif RunState.gold < SCALE_POTION_COST:
 		potion_note = "Costs %d gold." % SCALE_POTION_COST
-	tiles.append(_make_tile("Buy a draught", potion_note,
+	tiles.append(_make_tile("Buy a potion", potion_note,
 		_on_scales_potion, can_potion))
 	var can_meal: bool = RunState.gold >= SCALE_MEAL_COST \
 		and RunState.hero_hp < RunState.hero_max_hp
@@ -635,7 +686,8 @@ func _build_scales() -> void:
 
 
 func _build_scales_sell() -> void:
-	var grid = _make_card_grid("Lay one on the pan. He pays by weight.")
+	var grid = _make_card_grid("Choose one card to sell.",
+		RunState.deck.size())
 	for i in range(RunState.deck.size()):
 		var data = RunState.get_upgraded_card_data(i)
 		_add_card_to_grid(grid, data, _on_scales_sell_pick.bind(i),
@@ -752,7 +804,7 @@ func _build_banner_donor() -> void:
 		add_child(lbl)
 		_add_leave_button("Continue")
 		return
-	var grid = _make_card_grid("Choose who gives up a keyword.")
+	var grid = _make_card_grid("Choose who gives up a keyword.", valid.size())
 	for i in valid:
 		var data = RunState.get_upgraded_card_data(i)
 		_add_card_to_grid(grid, data, _on_banner_donor_pick.bind(i))
@@ -792,9 +844,10 @@ func _build_banner_receiver() -> void:
 	var info: Dictionary = KeywordEffects.KEYWORDS.get(_banner_kw, {})
 	var disp: String = String(info.get("display", _banner_kw))
 	var donor = CardDB.get_card_data(RunState.deck[_banner_from])
+	var receivers := _banner_receivers(_banner_from, _banner_kw)
 	var grid = _make_card_grid("%s gives up %s. Choose who takes it." \
-		% [String(donor.get("name", "The creature")), disp])
-	for i in _banner_receivers(_banner_from, _banner_kw):
+		% [String(donor.get("name", "The creature")), disp], receivers.size())
+	for i in receivers:
 		var data = RunState.get_upgraded_card_data(i)
 		_add_card_to_grid(grid, data, _on_banner_receiver_pick.bind(i))
 	var back = GameTheme.make_back_button("Choose another", Vector2(200, 42))
@@ -834,10 +887,10 @@ func _on_banner_receiver_pick(deck_index: int) -> void:
 func _build_cache() -> void:
 	_clear_ui()
 	_add_header("THE SUPPLY CACHE",
-		"A buried strongpoint from a war nobody finished. Carry one thing away.")
+		"Choose one supply from the abandoned strongpoint.")
 	var pool: Array = [
-		{"id": "levy", "head": "A levy's kit",
-			"note": "Next fight: start with a 2/4 Levy Spearman in front."},
+		{"id": "levy", "head": "A militia kit",
+			"note": "Next fight: start with a 2/4 Militia Spearman in front."},
 		{"id": "free_lance", "head": "A freelance's arms",
 			"note": "Next fight: start with a 3/2 Free Lance in front."},
 		{"id": "dispatches", "head": "A captain's dispatches",
@@ -864,21 +917,21 @@ func _on_cache_take(id: String) -> void:
 			RunState.next_combat_gift_creature = {
 				"name": "Free Lance", "atk": 3, "hp": 2, "kw": [],
 			}
-			_show_result("A lance, oiled mail, and no questions kept. A Free Lance rides in your next fight.")
+			_show_result("A Free Lance joins your front row in the next fight.")
 		"commission":
 			var pool_u = CardDB.cards_of_rarity("uncommon")
 			if pool_u.is_empty():
-				_show_result("The seal is cracked and the page is blank. Some commissions outlive their ink.")
+				_show_result("The commission is blank. No card was added.")
 				return
 			pool_u.shuffle()
 			RunState.add_card(pool_u[0])
-			_show_result("An officer's commission, never delivered. %s answers it." \
+			_show_result("Added %s to your deck." \
 				% CardDB.get_card_data(pool_u[0]).name)
 		"levy":
 			RunState.next_combat_gift_creature = {
-				"name": "Levy Spearman", "atk": 2, "hp": 4, "kw": [],
+				"name": "Militia Spearman", "atk": 2, "hp": 4, "kw": [],
 			}
-			_show_result("Helmet and spear. A Levy Spearman joins your next fight.")
+			_show_result("A Militia Spearman joins your front row in the next fight.")
 		"dispatches":
 			RunState.next_combat_mana_bonus += 1
 			_show_result("A captain's orders. +1 max Command next fight.")

@@ -2,7 +2,7 @@ extends SceneTree
 ## Longer-act map probe (2026-07-07). Verifies the 18-row / 7-combat skeleton
 ## generates cleanly across many seeds: the acceptance loop converges into the
 ## 24-36 site window, fights land at rows [0,3,9,15], BOTH elite bands (R6,R12)
-## yield exactly one General each, the two guaranteed treasures + two musters
+## yield exactly one General each, one Reliquary + one Arsenal + two musters
 ## are placed, a shop always exists, rest=R16 / boss=R17, and every route still
 ## clears the lord gate.
 ##
@@ -48,6 +48,7 @@ func _run() -> void:
 	var elite_bad := 0
 	var warroad_bad := 0
 	var treasure_bad := 0
+	var arsenal_bad := 0
 	var recruit_bad := 0
 	var shop_bad := 0
 	var gate_bad := 0
@@ -96,9 +97,11 @@ func _run() -> void:
 				or (flat[12] as Array).size() >= 2
 			if not (wr_ok and band_wide):
 				warroad_bad += 1
-			# Two guaranteed treasures, two musters, at least one shop
-			if int(by_type.get("treasure", 0)) < 2:
+			# Current reward structure: one Reliquary, one Arsenal, two musters.
+			if int(by_type.get("treasure", 0)) < 1:
 				treasure_bad += 1
+			if int(by_type.get("arsenal", 0)) < 1:
+				arsenal_bad += 1
 			if int(by_type.get("recruit", 0)) < 2:
 				recruit_bad += 1
 			if int(by_type.get("shop", 0)) < 1:
@@ -126,7 +129,8 @@ func _run() -> void:
 		"%d bad" % elite_bad)
 	_ck("war-road General avoidable + a dodgeable band", warroad_bad == 0,
 		"%d bad" % warroad_bad)
-	_ck("every act has >=2 treasures", treasure_bad == 0, "%d bad" % treasure_bad)
+	_ck("every act has a Reliquary", treasure_bad == 0, "%d bad" % treasure_bad)
+	_ck("every act has an Arsenal", arsenal_bad == 0, "%d bad" % arsenal_bad)
 	_ck("every act has >=2 musters", recruit_bad == 0, "%d bad" % recruit_bad)
 	_ck("every act has >=1 shop", shop_bad == 0, "%d bad" % shop_bad)
 	_ck("boss at R17 + rest at R16", bossrow_bad == 0, "%d bad" % bossrow_bad)

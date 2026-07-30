@@ -1,0 +1,218 @@
+BURNING MEADOW - THIRD-PARTY SOFTWARE AND ASSET NOTICES
+
+This file consolidates the licenses and attributions for third-party material
+distributed with Burning Meadow. The per-file and per-track source mappings are
+maintained in these project ledgers and form part of this notice:
+
+  CREDITS.md
+  assets/audio/SFX_CREDITS.md
+  assets/audio/music/MUSIC_CREDITS.md
+  assets/spells/painterly-3/README.txt
+  assets/spells/painterly-4/README.txt
+
+Where this summary and a source ledger differ, preserve the more specific
+attribution. Do not remove the in-game Credits screen when distributing builds.
+
+
+1. GODOT ENGINE
+===============
+
+Burning Meadow is made with the Godot Engine.
+https://godotengine.org/
+
+Copyright (c) 2014-present Godot Engine contributors.
+Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+2. CREATIVE COMMONS ATTRIBUTION 4.0 INTERNATIONAL (CC BY 4.0)
+================================================================
+
+License: https://creativecommons.org/licenses/by/4.0/
+
+Music by Scott Buckley and Alexander Nakarada (CreatorChords) is used under
+CC BY 4.0. Exact titles, filenames, authors, source pages, and attribution
+formats are listed in assets/audio/music/MUSIC_CREDITS.md and in the in-game
+Credits screen. The distributed tracks may be trimmed, looped, normalized, or
+otherwise adapted for use in the game.
+
+
+3. CREATIVE COMMONS ATTRIBUTION 3.0 UNPORTED (CC BY 3.0)
+================================================================
+
+License: https://creativecommons.org/licenses/by/3.0/
+
+The following material is used under CC BY 3.0:
+
+  - game-icons.net artwork by Lorc, Delapouite, willdabeast, sbed, and
+    quoting. Icons are used for map sites, relics, keyword medallions, and
+    potions. Some were renamed, cropped, had backgrounds removed, recolored,
+    or tinted at runtime. Exact icon-to-author mappings are in CREDITS.md.
+    Source: https://game-icons.net/
+
+  - "Fantasy RPG Icons" by pbmojART. The Runestone and Sword icons are used
+    for card cost and attack displays. Exact files and source URL are in
+    CREDITS.md.
+
+  - "Painterly Spell Icons" by J. W. Bjerk (eleazzaar), adapted as spell-card
+    art. Source and bundled pack notices are identified in CREDITS.md and the
+    two assets/spells/painterly-* README files listed above.
+
+  - "Heroic Demise" and "The Dark Amulet" by Matthew Pablo, used as music.
+    Exact filenames and source URLs are in assets/audio/music/MUSIC_CREDITS.md.
+
+
+4. CC0 1.0 UNIVERSAL / PUBLIC-DOMAIN DEDICATIONS
+=================================================
+
+License: https://creativecommons.org/publicdomain/zero/1.0/
+
+The following material is used under CC0 1.0 or an equivalent public-domain
+dedication. Attribution is not required by CC0, but is retained in thanks:
+
+  - Kenney Interface Sounds, Fantasy UI Borders, Board Game Icons, and Game
+    Icons. Exact uses and the sound-file mapping are in CREDITS.md and
+    assets/audio/SFX_CREDITS.md.
+
+  - "RPG Sound Pack" by artisticdude, from OpenGameArt. Exact cue mappings are
+    in CREDITS.md.
+
+  - "Fireplace Sound Loop" by PagDev, from OpenGameArt. Exact use is in
+    assets/audio/SFX_CREDITS.md.
+
+  - Music in the Medieval series by RandomMind. Exact titles, filenames, and
+    source URLs are in assets/audio/music/MUSIC_CREDITS.md.
+
+  - "Large Parchment Texture" from OpenGameArt. Exact use and source URL are
+    in CREDITS.md.
+
+
+5. PUBLIC-DOMAIN FINE ART
+=========================
+
+Some card and creature illustrations adapt reproductions of public-domain
+works by artists including Gustave Dore, Mikhail Vrubel, Henry Fuseli,
+Francisco Goya, Pieter Bruegel, and Hieronymus Bosch. These artists are also
+credited in the in-game Credits screen. Public-domain status can vary by
+country and by reproduction; release provenance should retain the source
+record for every included image.
+
+
+6. SIL OPEN FONT LICENSE 1.1
+============================
+
+The following bundled fonts are licensed under the SIL Open Font License 1.1:
+
+  - Inter - Rasmus Andersson
+  - Kreon - Julia Petretta
+  - Marcellus - Astigmatic
+  - Nunito - Vernon Adams
+
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership with
+others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The fonts,
+including any derivative works, can be bundled, embedded, redistributed
+and/or sold with any software provided that any reserved names are not used
+by derivative works. The fonts and derivatives, however, cannot be released
+under any other type of license. The requirement for fonts to remain under
+this license does not apply to any document created using the fonts or their
+derivatives.
+
+DEFINITIONS
+"Copyright Holder" refers to whoever is named in the copyright or copyrights
+for the Font Software.
+
+"Font Software" refers to the set of files released by the Copyright Holder(s)
+under this license and clearly marked as such. This may include source files,
+build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the copyright
+statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting, or
+substituting -- in part or in whole -- any of the components of the Original
+Version, by changing formats or by porting the Font Software to a new
+environment.
+
+"Author" refers to any designer, engineer, programmer, technical writer or
+other person who contributed to the Font Software.
+
+PERMISSION & CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of the Font Software, to use, study, copy, merge, embed, modify, redistribute,
+and sell modified and unmodified copies of the Font Software, subject to the
+following conditions:
+
+1) Neither the Font Software nor any of its individual components, in Original
+or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy contains
+the above copyright notice and this license. These can be included either as
+stand-alone text files, human-readable headers or in the appropriate
+machine-readable metadata fields within text or binary files as long as those
+fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font Name(s)
+unless explicit written permission is granted by the corresponding Copyright
+Holder. This restriction only applies to the primary font name as presented to
+the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font Software
+shall not be used to promote, endorse or advertise any Modified Version,
+except to acknowledge the contribution(s) of the Copyright Holder(s) and the
+Author(s) or with their explicit written permission.
+
+5) The Font Software, modified or unmodified, in part or in whole, must be
+distributed entirely under this license, and must not be distributed under
+any other license. The requirement for fonts to remain under this license does
+not apply to any document created using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR
+ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL,
+INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE
+THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE FONT SOFTWARE.
+
+
+7. RELEASE NOTE
+===============
+
+This notice covers the third-party material identified by the repository's
+current source ledgers. A release build should be checked against those
+ledgers after any asset is added, replaced, or removed.

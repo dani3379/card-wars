@@ -1,37 +1,199 @@
 ## CombatNet.gd — Combat's online-skirmish layer, extracted verbatim from
 ## Combat.gd (backend restructure 2026-07-14). Bodies are unchanged except
 ## that Combat members are reached through `combat` (the ctx — KeywordEffects
-## precedent). All net STATE still lives on Combat (probes and saves read it
-## there); Combat keeps thin same-name delegators for every function here, so
+## precedent). Shared net STATE still lives on Combat (probes and saves read it
+## there); only the sealed per-caster spell-step ledger is private here. Combat
+## keeps thin same-name delegators for every function here, so
 ## probes, KeywordEffects ctx calls, and core call sites are unchanged.
 ## Instantiated as a plain child Node of Combat (see Combat._init), so signal
 ## connections and the Card2D.net_last_stand_cb hook die with the scene.
 extends Node
 
+const NetPlayerStateScript = preload("res://scripts/net/NetPlayerState.gd")
+## The Old King's coinage — the same prop the gambling events spin. Reused here
+## so the match's toss is physically the same coin the world already uses.
+const COIN_PROP = preload("res://scripts/ui/painters/CoinProp.gd")
+
 var combat  # the Combat scene (untyped: Combat.gd has no class_name)
+var _remote_state = null # NetPlayerState, allocated only by the real-network host
+
+# Sealed Orders gives each side a separate spell step inside the same round.
+# Keep its combo/Echo ledger side-indexed here, while mirroring whichever side is
+# active into Combat's legacy scalar fields for existing UI/probe call sites.
+var _sealed_spell_counts: Array[int] = [0, 0]
+var _sealed_last_spell_data: Array[Dictionary] = [{}, {}]
+var _sealed_last_spell_targets: Array[int] = [-1, -1]
+var _sealed_remote_ghosts: Dictionary = {} # "row:lane" -> true, host validation
+var _pending_remote_choices: Dictionary = {} # entity id -> choice kind
+
+
+func _net_init_remote_authority() -> bool:
+	if not combat._is_host() or SkirmishState.vs_bot:
+		return false
+	var slot: SkirmishState.PlayerSlot = SkirmishState.get_slot(1)
+	if slot == null:
+		return false
+	_remote_state = NetPlayerStateScript.new()
+	var authority_seed := int(SkirmishState.rng_seed) ^ 0x51A7E \
+		^ (int(SkirmishState.series_game) * 0x9E3779B1)
+	if not _remote_state.setup(slot.deck, slot.deck_uids, slot.relics,
+			slot.potions, authority_seed, slot.base_max_mana,
+			Callable(SkirmishState, "skirmish_card_data")):
+		_remote_state = null
+		return false
+	return true
+
+
+func _net_remote_empty_edge_columns() -> int:
+	var count := 0
+	for lane in [0, combat.LANES_PER_ROW - 1]:
+		if combat._enemy_field[lane] == null and combat._enemy_back[lane] == null:
+			count += 1
+	return count
+
+
+func _net_remote_has_first_spell_discount() -> bool:
+	for card in combat._all_friendly(true):
+		if is_instance_valid(card) \
+				and String(card.card_data.get("passive", "")) == "first_spell_discount":
+			return true
+	return false
+
+
+func _net_send_private_state(reason: String = "") -> void:
+	if _remote_state == null or not combat._is_host() or SkirmishState.vs_bot:
+		return
+	var event: Dictionary = _remote_state.state_payload()
+	event["t"] = NetMatch.EV_HAND_SET
+	if reason != "":
+		event["reason"] = reason
+	NetMatch.send_to_client(event)
+	combat._net_opp_hand_count = _remote_state.hand.size()
+	_net_refresh_opp_hand()
+	_net_set_opp_mana(_remote_state.mana, _remote_state.max_mana)
+
+
+func _net_reject_remote(reason: String) -> void:
+	_net_send_private_state(reason)
+
+
+func _net_remote_field_card_left(card: Control, was_enemy: bool,
+		exiled: bool = false) -> void:
+	if not was_enemy or _remote_state == null or card == null \
+			or not is_instance_valid(card):
+		return
+	_pending_remote_choices.erase(int(card.entity_id))
+	if int(card.deck_uid) < 0:
+		return
+	_remote_state.field_card_left(int(card.deck_uid), String(card.card_id), exiled)
+	_net_send_private_state()
+
+
+func _net_payload_entries(entries: Array) -> Array[String]:
+	var out: Array[String] = []
+	for raw_entry in entries:
+		if not (raw_entry is Dictionary):
+			continue
+		var entry: Dictionary = raw_entry
+		var id := String(entry.get("id", ""))
+		var uid := int(entry.get("uid", -1))
+		if not SkirmishState.skirmish_card_data(id).is_empty() or id == "coin":
+			out.append(combat._pile_entry(id, uid))
+	return out
+
+
+func _net_apply_private_state(event: Dictionary) -> void:
+	if not combat._is_client():
+		return
+	var rejection_reason := String(event.get("reason", ""))
+	if rejection_reason != "" and _is_sealed() and combat._sorcery_active < 0:
+		_sealed_clear_pending_local()
+	for key in ["hand", "draw", "discard", "exhaust", "potions"]:
+		if typeof(event.get(key, null)) != TYPE_ARRAY:
+			return
+	var wanted: Dictionary = {}
+	for raw_entry in event.get("hand", []):
+		if not (raw_entry is Dictionary):
+			return
+		var entry: Dictionary = raw_entry
+		var id := String(entry.get("id", ""))
+		var uid := int(entry.get("uid", -2))
+		if (SkirmishState.skirmish_card_data(id).is_empty() and id != "coin") \
+				or wanted.has(uid):
+			return
+		wanted[uid] = entry
+
+	for card in combat._hand.duplicate():
+		if card == null or not is_instance_valid(card):
+			combat._hand.erase(card)
+			continue
+		if not wanted.has(int(card.deck_uid)) \
+				or String(wanted[int(card.deck_uid)].get("id", "")) != String(card.card_id):
+			combat._hand.erase(card)
+			if card.get_parent() != null:
+				card.get_parent().remove_child(card)
+			card.queue_free()
+
+	var existing: Dictionary = {}
+	for card in combat._hand:
+		if card != null and is_instance_valid(card):
+			existing[int(card.deck_uid)] = card
+	for raw_entry in event.get("hand", []):
+		var entry: Dictionary = raw_entry
+		var uid := int(entry.get("uid", -1))
+		var board_copy = NetMatch.get_entity(uid)
+		if board_copy != null and is_instance_valid(board_copy) \
+				and not bool(board_copy.is_opponent):
+			combat._pending_return_uids[uid] = true
+		var card: Control = existing.get(uid, null)
+		if card == null or not is_instance_valid(card):
+			combat._draw_card(combat._pile_entry(String(entry.get("id", "")), uid))
+			card = combat._hand.back() if not combat._hand.is_empty() else null
+		if card != null and is_instance_valid(card):
+			card.card_data["cost"] = maxi(0, int(entry.get("cost", card.card_data.get("cost", 0))))
+			card.state.pact_of_embers_zero = bool(entry.get("pact_zero", false))
+			if card.has_method("update_stat_display"):
+				card.update_stat_display()
+
+	combat._player_draw_pile = _net_payload_entries(event.get("draw", []))
+	combat._player_discard_pile = _net_payload_entries(event.get("discard", []))
+	combat._exhaust_pile = _net_payload_entries(event.get("exhaust", []))
+	combat.player_mana = maxi(0, int(event.get("mana", 0)))
+	combat.player_max_mana = maxi(0, int(event.get("max_mana", 0)))
+	var slot := SkirmishState.local_slot()
+	if slot != null:
+		slot.potions = event.get("potions", []).duplicate()
+	combat._layout_hand()
+	combat._refresh_hand_affordability()
+	combat._rebuild_potion_bar()
+	combat._update_hud()
+	if rejection_reason != "":
+		combat._show_info("Action rejected: " + rejection_reason.replace("_", " "))
+		if _is_sealed() and combat._sorcery_active < 0:
+			combat._sealed_await_foe = false
+			Card2D.hand_interactive = true
+			if combat._end_turn_btn != null:
+				combat._end_turn_btn.disabled = false
+				combat._set_primary_action("seal")
 
 
 # ═════════════════════════════════════════════════════════════════════════
 #  ONLINE SKIRMISH — combat networking (docs/MULTIPLAYER_SKIRMISH_PLAN.md §12-13)
 #
-#  Architecture (v1): HOST-AUTHORITATIVE with FULL BOARD-SNAPSHOT SYNC.
-#   • Draw + Command are local per side (each player draws their own deck on
-#     their own turn — the existing _start_round machinery, with all relic /
-#     mutator / encounter branches inert in net mode).
-#   • Placement, on-enter / on-death effects, and the attack clash are computed
-#     ONLY on the host. After every authoritative mutation the host pushes a full
-#     board snapshot (_net_sync_board); the client reconciles its board to it.
-#   • The client never resolves combat — it sends intents and renders snapshots.
-#   • Turn model: FULL-ALTERNATING. One active player at a time; on ATTACK the
-#     active side strikes the other side one direction, then the turn passes.
+#  Architecture: HOST-AUTHORITATIVE with public board snapshots + private state.
+#   • The host owns both decks, hands, piles, Command pools, consumables, RNG
+#     consequences, public board state, and all combat resolution.
+#   • The client receives its own private zone membership (draw order redacted)
+#     and a count for the foe, sends bounded intents, and renders the host's
+#     board snapshots / paced strike log. It never resolves game state.
+#   • Alternating style lets both sides place in sequence, then resolves the
+#     simultaneous clash. Sealed style commits both creature bundles privately,
+#     reveals them together, then opens the two sequential sorcery steps.
 #   • entity_id == the card's deck uid for drafted creatures (both machines agree
 #     without negotiation); tokens get host-issued ids above any uid.
 #
-#  v1 scope: CREATURES (place + on-enter + Swift/column/Ranged clash + on-death),
-#  SPELLS (curated set, perspective-aware host resolver), match-over, mid-match
-#  disconnect, coarse client clash animation. DEFERRED: combat-time floop toggles
-#  + reposition (board interaction stays off), exotic pile/draw/Discover spells
-#  (denylisted in draft), per-strike clash replay, a dedicated opp-hand widget.
+#  DEFERRED: combat-time floop toggles, unsupported Discover/economy spells,
+#  reconnect/resume, and neutral-server competitive authority.
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -49,10 +211,14 @@ func _net_issue_token_id() -> int:
 func _net_begin_combat() -> void:
 	if combat._net_signals_wired:
 		return
+	_pending_remote_choices.clear()
 	combat._net_signals_wired = true
 	NetMatch.combat_event_received.connect(_on_net_event)
 	if combat._is_host():
 		NetMatch.combat_intent_received.connect(_on_net_intent)
+		if not SkirmishState.vs_bot and not _net_init_remote_authority():
+			combat._show_info("The opponent's submitted deck could not be verified.")
+			return
 		# Last Stand mirror: the flare fires inside Card2D.take_damage, which only
 		# ever runs on the host — install the hook so the save ships to the client
 		# via the eid-anchored fx channel (rides the next board sync).
@@ -60,8 +226,11 @@ func _net_begin_combat() -> void:
 	# Mid-match disconnect: bail to the menu rather than hang (plan §15).
 	NetMatch.peer_left.connect(func(_id): _net_on_peer_lost())
 	NetMatch.host_closed.connect(_net_on_peer_lost)
-	# Open-hand spectating: build the face-up "opponent's hand" strip up top now so
-	# it's ready when the first EV_HAND_COUNT (which now carries the cards) lands.
+	# The foe's hand fan: build the FACE-DOWN strip of card backs up top now so it's
+	# ready when the first EV_HAND_COUNT lands. That event carries {n, mana, maxmana}
+	# — a count and their Command, never the identities. (This comment used to claim
+	# open-hand face-up spectating; that was never true and was drift, corrected
+	# 2026-07-27. Hands stay hidden — see feedback_enemy_is_real_opponent.)
 	_net_build_opp_hand_ui()
 	# Foe's Command seal (mirror of the player's): seed its max from the opponent's
 	# slot so it reads "0 / <base>" until their first turn-begin sync, then build it.
@@ -74,28 +243,18 @@ func _net_begin_combat() -> void:
 	# HS trinkets (the picks crossed the wire in NetDraft's deck handoff).
 	_net_build_foe_arsenal()
 	combat.phase = combat.Phase.PLAYER_TURN
-	# ── SEALED ORDERS style: no opener, no Coin — both sides give orders blind,
-	# so there is nothing to compensate. Initiative (reveal order + sorcery
-	# opener) starts on the seed coin flip and alternates per round. ──
-	if _is_sealed():
-		combat._net_initiative = combat._net_first_player()
-		combat._show_info("Sealed Orders — both lines are set in secret.")
-		# Listeners are wired and the scene is built — replay any opening messages
-		# the peer sent while we were still booting (see NetMatch.attach_combat).
-		NetMatch.attach_combat()
-		if combat._is_host():
-			if SkirmishState.vs_bot:
-				_bot_refill_hand()
-				_bot_sync_hand_display()
-				_net_prebake_bot_textures()
-			await combat.get_tree().create_timer(0.6).timeout
-			_sealed_begin_round(1)
-		return
-	# ── THE TOSS (2026-07-11): the seed coin flip now decides who CHOOSES the
-	# ground, not who marches first. The winner picks MARCH FIRST (dictate the
-	# opening line, act first every round) or HOLD BACK (see the foe's line,
-	# keep the Coin, and your very first turn STRIKES — the second player's
-	# opening turn is de facto turn 2, so it fights like one). The pick lands in
+	# ── THE TOSS (2026-07-11; extended to EVERY format 2026-07-21): the seed coin
+	# flip decides who CHOOSES, not who takes it. Both formats have something for
+	# the winner to pick, so both show the toss:
+	#   ALTERNATING — who takes the first turn (loser keeps the Coin).
+	#   SEALED      — who holds the initiative in round 1 (reveal + sorcery
+	#                 order). Nothing to compensate there, because initiative
+	#                 cuts both ways: you resolve first, but you also cast first.
+	# Sealed needs no extra plumbing — its `_net_initiative = _net_first_player()`
+	# reads the same override this block writes. The winner picks GO FIRST (takes the first turn and
+	# every turn after) or GO SECOND (sees the foe's line before committing, and
+	# keeps the Coin — the second player's opening turn is de facto turn 2, so it
+	# fights like one). The pick lands in
 	# _net_first_player_override on BOTH machines, so everything downstream
 	# (pre-deal, Coin, button labels, the host's turn loop) keys off the settled
 	# order. Probes pre-set the override and skip the toss; headless resolves to
@@ -120,7 +279,7 @@ func _net_begin_combat() -> void:
 					NetMatch.send_intent({"t": NetMatch.IN_ORDER_PICK,
 						"first": combat._net_first_player_override})
 		else:
-			combat._show_info("The foe won the toss — they are choosing the ground…")
+			combat._show_info("The foe won the toss — they are choosing…")
 			# Wait for the pick to cross the wire; a generous timeout falls back
 			# to the raw flip so a dropped message can never soft-lock the match.
 			var toss_waited := 0.0
@@ -130,9 +289,33 @@ func _net_begin_combat() -> void:
 				toss_waited += 0.2
 			if combat._net_first_player_override < 0:
 				combat._net_first_player_override = combat._net_first_player()
+	# ── SEALED ORDERS style: no opener, no Coin — both sides give orders blind,
+	# so there is nothing to COMPENSATE. There is still something to DECIDE:
+	# initiative (reveal order + the sorcery opener), which alternates per round
+	# after the first. The toss above already settled it — _net_first_player()
+	# reads the override, so this line inherits the winner's pick for free. ──
+	if _is_sealed():
+		combat._net_initiative = combat._net_first_player()
+		combat._show_info("Sealed Orders — both lines are set in secret.")
+		if combat._is_host():
+			if SkirmishState.vs_bot:
+				_bot_refill_hand()
+				_bot_sync_hand_display()
+				_net_prebake_bot_textures()
+			await combat.get_tree().create_timer(0.6).timeout
+			_sealed_begin_round(1)
+		return
 	# The opening experience keys off going first / second, not host / client —
 	# both roles are identical and swap with the settled order.
 	var first_index: int = combat._net_first_player()
+	if combat._is_host() and not SkirmishState.vs_bot and _remote_state != null:
+		# Slot 1's private opening hand comes from the host authority.
+		if first_index == 0:
+			var remote_predeal: int = combat.HAND_REFILL_TARGET
+			if _remote_state.relics.has("deep_satchel"):
+				remote_predeal += 1
+			_remote_state.predeal(remote_predeal, true)
+		_net_send_private_state()
 	var i_go_first: bool = first_index == NetMatch.local_player_index
 	if i_go_first:
 		# Going first: the opening turn is place-only (no free attack into an empty
@@ -149,19 +332,20 @@ func _net_begin_combat() -> void:
 		# The pre-deal honours the drafted battle relic (Deep Satchel) — without
 		# this, the going-second player's skip-draw flag would push its +1 refill
 		# to turn 2 while the going-first player enjoys it from turn 1.
-		var predeal: int = combat.HAND_REFILL_TARGET
-		if combat._has_relic("deep_satchel"):
-			predeal += int(RelicDB.get_relic("deep_satchel").get("value", 1))
-		for _i in predeal:
-			combat.draw_one()
+		if not combat._is_client():
+			var predeal: int = combat.HAND_REFILL_TARGET
+			if combat._has_relic("deep_satchel"):
+				predeal += int(RelicDB.get_relic("deep_satchel").get("value", 1))
+			for _i in predeal:
+				combat.draw_one()
 		# _draw_card adds the Coin as a synthetic hand card (uid -1) so it never enters
 		# a draw/discard pile or reshuffles — it just vanishes once cast.
-		combat._draw_card("coin")
-		combat._net_skip_draw_this_round = true
-		combat._layout_hand()
+			combat._draw_card("coin")
+			combat._net_skip_draw_this_round = true
+			combat._layout_hand()
 		# Share the pre-dealt opening hand so the opponent's foe-readout is correct.
-		_net_broadcast_hand_count()
-		combat._show_info("Skirmish — the foe marches first. Your opening turn will STRIKE.")
+			_net_broadcast_hand_count()
+		combat._show_info("The foe goes first. You go second — you keep The Coin, and your first turn attacks.")
 	# (attach_combat already ran ahead of the toss above — the buffered-message
 	# replay that used to live here rides that earlier call; see NetMatch.attach_combat.)
 	# Only the HOST drives the authoritative turn machine — but it opens the match for
@@ -182,38 +366,73 @@ func _net_begin_combat() -> void:
 
 
 
-## The toss modal: the coin-flip winner picks the ground. Awaitable; returns
-## true = MARCH FIRST, false = HOLD BACK (go second). Mouse-only like the rest
-## of the game; lives on its own CanvasLayer so it sits above board and hand.
+## The toss modal: the coin-flip winner picks who goes first. Awaitable; returns
+## true = go first, false = go second. Mouse-only like the rest of the game; lives
+## on its own CanvasLayer so it sits above board and hand.
+##
+## Copy rule: this is a RULES screen, so it says what it means. It used to read
+## "MARCH FIRST" / "HOLD BACK" / "Choose the ground", which made the player decode
+## a metaphor to answer a question about turn order. Flavour belongs in the
+## fiction, not on the buttons.
 func _net_show_order_choice() -> bool:
 	var layer := CanvasLayer.new()
 	layer.layer = 30
 	combat.add_child(layer)
 	var dim := ColorRect.new()
-	dim.color = Color(0, 0, 0, 0.74)
+	dim.color = Color(0, 0, 0, 0.0)
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	layer.add_child(dim)
+	if UserSettings != null and UserSettings.reduce_motion:
+		dim.color = Color(0, 0, 0, 0.80)
+	else:
+		var dim_tw := dim.create_tween()
+		dim_tw.tween_property(dim, "color", Color(0, 0, 0, 0.80), 0.35)
+
+	# ── The toss itself: the Old King's coin, spun on its edge. ───────────────
+	var coin = COIN_PROP.new()
+	coin.seed_text = "toss_%d" % SkirmishState.rng_seed
+	coin.custom_minimum_size = Vector2(150, 150)
+	coin.size = Vector2(150, 150)
+	coin.set_anchors_preset(Control.PRESET_CENTER)
+	coin.position = Vector2(-75, -280)
+	coin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(coin)
+	await _net_play_coin_toss(coin)
+
 	var col := VBoxContainer.new()
 	col.set_anchors_preset(Control.PRESET_CENTER)
 	col.offset_left = -330
 	col.offset_right = 330
-	col.offset_top = -240
-	col.offset_bottom = 240
-	col.alignment = BoxContainer.ALIGNMENT_CENTER
-	col.add_theme_constant_override("separation", 14)
-	dim.add_child(col)
+	col.offset_top = -150
+	col.offset_bottom = 300
+	col.alignment = BoxContainer.ALIGNMENT_BEGIN
+	col.add_theme_constant_override("separation", 12)
+	layer.add_child(col)
 	var title = GameTheme.make_label("YOU WON THE TOSS", 34, GameTheme.GILT_BRIGHT, true)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(title)
-	var sub = GameTheme.make_label("Choose the ground.", 18, GameTheme.DESC_DIM)
+	# The two formats decide DIFFERENT things, so the modal asks the actual
+	# question rather than a generic one. In Alternating, going first is plainly
+	# better and the loser is paid in the Coin. In Sealed nothing needs paying,
+	# because initiative genuinely cuts both ways — you resolve first, but you
+	# also commit your spell first.
+	var sealed_toss: bool = _is_sealed()
+	var sub = GameTheme.make_label(
+		"Do you want the initiative?" if sealed_toss
+			else "Do you want to go first or second?",
+		18, GameTheme.DESC_DIM)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(sub)
 	var picked: Array = [-1]
-	for opt in [
-		["MARCH FIRST", "Dictate the opening line — you act first every round.", 1],
-		["HOLD BACK", "See their line before yours, keep the Coin — and your first turn STRIKES.", 0],
-	]:
+	var choices: Array = [
+		["TAKE INITIATIVE", "Your creatures arrive first. Your spells also resolve first, before you see the opponent's spells.", 1],
+		["LET THEM LEAD", "They reveal and cast first. You answer the spell step already knowing what they played.", 0],
+	] if sealed_toss else [
+		["GO FIRST", "You take the first turn, and every turn after it.", 1],
+		["GO SECOND", "You see their line before you commit yours, and you start with The Coin (+1 Command, once).", 0],
+	]
+	for opt in choices:
 		var btn = GameTheme.make_themed_button(String(opt[0]),
 			Color(0.14, 0.10, 0.05), Vector2(560, 64), 22)
 		btn.pressed.connect(func():
@@ -228,11 +447,47 @@ func _net_show_order_choice() -> bool:
 		col.add_child(line)
 		GameTheme.hover_lift(btn)
 	GameTheme.deal_in(col, 0.05)
+	GameTheme.stamp_in(title, 0.10)
 	while picked[0] < 0:
 		await combat.get_tree().process_frame
 	return picked[0] == 1
 
 
+## The coin goes up, turns on its edge, and comes down. `face_t` is the honest
+## way to spin a CoinProp (1.0 face-on -> 0.0 edge-on), so the thin moment
+## genuinely flashes the milled edge instead of a scaled-down face. Reduce Motion
+## skips straight to the settled coin with a reading pause.
+func _net_play_coin_toss(coin) -> void:
+	if UserSettings != null and UserSettings.reduce_motion:
+		coin.face_t = 1.0
+		await combat.get_tree().create_timer(0.45).timeout
+		return
+	var rest_y: float = coin.position.y
+	coin.face_t = 1.0
+	coin.modulate.a = 0.0
+	var tw: Tween = coin.create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(coin, "modulate:a", 1.0, 0.12)
+	# Up and down once — a real arc, not a hover.
+	tw.tween_property(coin, "position:y", rest_y - 90.0, 0.34) 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.chain().tween_property(coin, "position:y", rest_y, 0.30) 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	# Five half-turns over the arc, each one passing through edge-on.
+	var spin: Tween = coin.create_tween()
+	for i in 5:
+		spin.tween_property(coin, "face_t", 0.06, 0.064) 			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+		spin.tween_callback(func():
+			if is_instance_valid(coin):
+				coin.tails = not coin.tails)
+		spin.tween_property(coin, "face_t", 1.0, 0.064) 			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	await combat.get_tree().create_timer(0.64).timeout
+	if AudioBank != null:
+		AudioBank.play_sfx("coin_pour", 0.04, -3.0)
+	if is_instance_valid(coin):
+		GameTheme.add_trauma(0.10)
+		var land: Tween = coin.create_tween()
+		land.tween_property(coin, "scale", Vector2(1.12, 0.90), 0.07)
+		land.tween_property(coin, "scale", Vector2.ONE, 0.16) 			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	await combat.get_tree().create_timer(0.26).timeout
 
 
 ## HOST: open a new combat ROUND. Both players take a placement turn (opener first,
@@ -271,6 +526,62 @@ func _is_sealed() -> bool:
 
 
 
+## Reset BOTH sealed spell steps at the round boundary. A single scalar reset lets
+## initiative-side casts leak Flame Bolt/Leyline/Echo state into the second caster.
+func _net_reset_sealed_spell_state() -> void:
+	for side in 2:
+		_sealed_spell_counts[side] = 0
+		_sealed_last_spell_data[side] = {}
+		_sealed_last_spell_targets[side] = -1
+	combat._net_spells_this_turn = 0
+	combat._net_last_spell_data = {}
+	combat._net_last_spell_target_eid = -1
+
+
+func _net_spell_count_for(caster_index: int) -> int:
+	if _is_sealed() and caster_index >= 0 and caster_index < 2:
+		return _sealed_spell_counts[caster_index]
+	return combat._net_spells_this_turn
+
+
+func _net_last_spell_for(caster_index: int) -> Dictionary:
+	if _is_sealed() and caster_index >= 0 and caster_index < 2:
+		return _sealed_last_spell_data[caster_index]
+	return combat._net_last_spell_data
+
+
+func _net_last_spell_target_for(caster_index: int) -> int:
+	if _is_sealed() and caster_index >= 0 and caster_index < 2:
+		return _sealed_last_spell_targets[caster_index]
+	return combat._net_last_spell_target_eid
+
+
+func _net_store_last_spell_for(caster_index: int, data: Dictionary, target_eid: int) -> void:
+	var stored := data.duplicate(true)
+	if _is_sealed() and caster_index >= 0 and caster_index < 2:
+		_sealed_last_spell_data[caster_index] = stored
+		_sealed_last_spell_targets[caster_index] = target_eid
+	combat._net_last_spell_data = stored
+	combat._net_last_spell_target_eid = target_eid
+
+
+func _net_increment_spell_count_for(caster_index: int) -> void:
+	if _is_sealed() and caster_index >= 0 and caster_index < 2:
+		_sealed_spell_counts[caster_index] += 1
+		combat._net_spells_this_turn = _sealed_spell_counts[caster_index]
+	else:
+		combat._net_spells_this_turn += 1
+
+
+func _sealed_load_spell_state(who: int) -> void:
+	if who < 0 or who >= 2:
+		return
+	combat._net_spells_this_turn = _sealed_spell_counts[who]
+	combat._net_last_spell_data = _sealed_last_spell_data[who].duplicate(true)
+	combat._net_last_spell_target_eid = _sealed_last_spell_targets[who]
+
+
+
 
 func _sealed_in_orders() -> bool:
 	return _is_sealed() and combat.phase == combat.Phase.PLAYER_TURN \
@@ -289,10 +600,14 @@ func _sealed_begin_round(round_no: int) -> void:
 	else:
 		combat._net_initiative = 1 - combat._net_initiative
 	combat._sealed_bundles.clear()
+	_sealed_remote_ghosts.clear()
 	combat._sorcery_active = -1
 	combat._sorcery_passes = 0
 	combat._net_active_index = -1   # nobody "has the turn" — the existing turn gates
 							 # (client creature/spell paths) block by construction
+	if not SkirmishState.vs_bot and _remote_state != null:
+		_remote_state.begin_turn(round_no, _net_remote_empty_edge_columns())
+		_net_send_private_state()
 	NetMatch.send_to_client({"t": NetMatch.EV_ORDERS_PHASE,
 		"round": round_no, "init": combat._net_initiative})
 	# Host-authoritative per-round passives for the CLIENT side (its local
@@ -313,14 +628,21 @@ func _sealed_open_orders_local() -> void:
 	combat._sealed_await_foe = false
 	combat._sorcery_active = -1
 	combat._moves_used_this_turn = 0
-	combat._net_spells_this_turn = 0
-	combat._start_round()
+	_net_reset_sealed_spell_state()
+	if not combat._is_client():
+		# NOT awaited, and must stay that way. _start_round is a coroutine solo-side
+		# (it paces its visible groups apart — see Combat._round_beat), but
+		# _round_beat returns synchronously whenever _is_net(), so it never suspends
+		# here and this call behaves exactly as it did before. Do not add an
+		# unconditional await inside _start_round without making this chain async.
+		combat._start_round()
 	Card2D.board_interactive = false   # no reposition drags in sealed v1
 	Card2D.hand_interactive = true     # both sides give orders at once
 	combat._refresh_hand_affordability()
 	if combat._end_turn_btn != null:
 		combat._end_turn_btn.disabled = false
-		combat._end_turn_btn.text = "SEAL ORDERS  [E]"
+		combat._set_primary_action("seal")
+	combat._update_hud()
 	var init_line: String = "You hold the initiative." \
 		if combat._net_initiative == NetMatch.local_player_index else "The foe holds the initiative."
 	combat._show_combat_banner("SEALED ORDERS", "Set your line in secret — " + init_line,
@@ -356,7 +678,7 @@ func _sealed_commit_creature(card: Control, cost: int, lane_idx: int, row: int) 
 	stand.card_data = data
 	stand.current_lane = lane_idx
 	stand.current_row = row
-	stand.set_meta("sealed_pending", true)
+	stand.state.sealed_pending = true
 	combat._row_array(false, row)[lane_idx] = stand
 	combat._slot_set_card(combat._slot_array(false, row)[lane_idx], stand)
 	combat._play_landing_pop(stand)
@@ -376,6 +698,8 @@ func _sealed_commit_creature(card: Control, cost: int, lane_idx: int, row: int) 
 ## The foe committed an order at {lane,row} — show a face-down card back there.
 func _sealed_show_ghost(lane: int, row: int) -> void:
 	if lane < 0 or lane >= combat.LANES_PER_ROW or row < combat.ROW_FRONT or row > combat.ROW_BACK:
+		if not SkirmishState.vs_bot:
+			_net_reject_remote("illegal_slot")
 		return
 	if combat._net_card_back_tex == null:
 		combat._net_card_back_tex = load("res://assets/ui/card_back.png") as Texture2D
@@ -398,6 +722,24 @@ func _sealed_show_ghost(lane: int, row: int) -> void:
 	combat._sealed_ghosts.append(g)
 
 
+func _sealed_accept_remote_ghost(lane: int, row: int) -> void:
+	if not combat._is_host() or not _is_sealed() or combat._sealed_bundles.has(1):
+		return
+	if combat.phase != combat.Phase.PLAYER_TURN or combat._sorcery_active >= 0:
+		_net_reject_remote("orders_phase_closed")
+		return
+	if lane < 0 or lane >= combat.LANES_PER_ROW \
+			or row < combat.ROW_FRONT or row > combat.ROW_BACK:
+		return
+	var key := "%d:%d" % [row, lane]
+	if _sealed_remote_ghosts.has(key) or _sealed_remote_ghosts.size() >= 8:
+		return
+	if combat._row_array(true, row)[lane] != null:
+		return
+	_sealed_remote_ghosts[key] = true
+	_sealed_show_ghost(lane, row)
+
+
 
 
 ## The button in sealed play: SEAL ORDERS during the orders phase, PASS in sorcery.
@@ -408,18 +750,27 @@ func _sealed_on_button() -> void:
 		if combat._sorcery_active != NetMatch.local_player_index:
 			return
 		# Cards marked during the open spell step discard as we pass.
+		var sorcery_discards: Array = []
+		for card in combat._hand:
+			if card != null and is_instance_valid(card) and card.marked_for_discard:
+				sorcery_discards.append(int(card.deck_uid))
 		combat._flush_marked_discards()
 		if combat._end_turn_btn != null:
 			combat._end_turn_btn.disabled = true
 		if combat._is_host():
 			_sealed_sorcery_pass(0)
 		else:
-			NetMatch.send_intent({"t": NetMatch.IN_SORCERY_PASS})
+			NetMatch.send_intent({"t": NetMatch.IN_SORCERY_PASS,
+				"discards": sorcery_discards})
 		return
 	if combat._sealed_await_foe or combat.phase != combat.Phase.PLAYER_TURN:
 		return
 	# Marked discards leave with the sealed orders (hand-local, so the foe
 	# learns the count — never the faces — via the fx beat inside the flush).
+	var order_discards: Array = []
+	for card in combat._hand:
+		if card != null and is_instance_valid(card) and card.marked_for_discard:
+			order_discards.append(int(card.deck_uid))
 	combat._flush_marked_discards()
 	combat._sealed_await_foe = true
 	# Orders committed — lock the hand until the reveal / your spell step.
@@ -427,7 +778,8 @@ func _sealed_on_button() -> void:
 	combat._refresh_hand_affordability()
 	if combat._end_turn_btn != null:
 		combat._end_turn_btn.disabled = true
-		combat._end_turn_btn.text = "AWAITING THE FOE"
+		combat._set_primary_action("waiting")
+	combat._update_hud()
 	var list: Array = []
 	for p in combat._sealed_pending:
 		list.append({"id": p.id, "uid": p.uid, "lane": p.lane, "row": p.row})
@@ -435,17 +787,81 @@ func _sealed_on_button() -> void:
 	if combat._is_host():
 		_sealed_store_bundle(0, list, combat.player_mana)
 	else:
-		NetMatch.send_intent({"t": NetMatch.IN_ORDERS, "list": list, "mana": combat.player_mana})
+		NetMatch.send_intent({"t": NetMatch.IN_ORDERS, "list": list,
+			"discards": order_discards})
 
 
 
 
 ## HOST: hold a side's sealed bundle; reveal once both are in.
-func _sealed_store_bundle(side: int, list: Array, unspent: int) -> void:
-	if not combat._is_host() or combat._net_match_over:
+func _sealed_store_bundle(side: int, list_value: Variant, unspent: int,
+		discards_value: Variant = []) -> void:
+	if not combat._is_host() or combat._net_match_over or not _is_sealed():
 		return
 	if combat._sealed_bundles.has(side):
 		return   # duplicate seal — ignore
+	if typeof(list_value) != TYPE_ARRAY or typeof(discards_value) != TYPE_ARRAY:
+		if side == 1 and not SkirmishState.vs_bot:
+			_net_reject_remote("illegal_orders_shape")
+		return
+	var list: Array = list_value
+	var discards: Array = discards_value
+	if side == 1 and not SkirmishState.vs_bot:
+		if combat.phase != combat.Phase.PLAYER_TURN or combat._sorcery_active >= 0:
+			_net_reject_remote("orders_phase_closed")
+			return
+		if _remote_state == null or list.size() > 8 or discards.size() > 10:
+			_net_reject_remote("illegal_orders")
+			return
+		var seen_uids: Dictionary = {}
+		var seen_slots: Dictionary = {}
+		var total_cost := 0
+		for raw_order in list:
+			if not (raw_order is Dictionary):
+				_net_reject_remote("illegal_order_shape")
+				return
+			var order: Dictionary = raw_order
+			var uid := int(order.get("uid", -2))
+			var id := String(order.get("id", ""))
+			var lane := int(order.get("lane", -1))
+			var row := int(order.get("row", -1))
+			var slot_key := "%d:%d" % [row, lane]
+			var entry: Dictionary = _remote_state.hand_entry(uid)
+			var data := SkirmishState.skirmish_card_data(id)
+			if entry.is_empty() or String(entry.get("id", "")) != id \
+					or String(data.get("type", "")) != "creature" \
+					or seen_uids.has(uid) or seen_slots.has(slot_key) \
+					or lane < 0 or lane >= combat.LANES_PER_ROW \
+					or row < combat.ROW_FRONT or row > combat.ROW_BACK \
+					or combat._row_array(true, row)[lane] != null \
+					or not _sealed_remote_ghosts.has(slot_key):
+				_net_reject_remote("illegal_order_card")
+				return
+			seen_uids[uid] = true
+			seen_slots[slot_key] = true
+			total_cost += _remote_state.effective_cost(entry, data,
+				_net_remote_has_first_spell_discount())
+		if seen_slots.size() != _sealed_remote_ghosts.size() or total_cost > _remote_state.mana:
+			_net_reject_remote("illegal_order_total")
+			return
+		for raw_discard in discards:
+			if seen_uids.has(int(raw_discard)):
+				_net_reject_remote("ordered_card_discarded")
+				return
+		var discard_result: Dictionary = _remote_state.discard_cards(discards)
+		if not bool(discard_result.get("ok", false)):
+			_net_reject_remote(String(discard_result.get("reason", "illegal_discard")))
+			return
+		for raw_order in list:
+			var order: Dictionary = raw_order
+			var check: Dictionary = _remote_state.validate_play(int(order.get("uid", -2)),
+				String(order.get("id", "")), _net_remote_has_first_spell_discount())
+			if not bool(check.get("ok", false)) \
+					or _remote_state.commit_play(check, true).is_empty():
+				_net_reject_remote("order_commit_failed")
+				return
+		unspent = _remote_state.mana
+		_net_send_private_state()
 	combat._sealed_bundles[side] = {"list": list, "mana": unspent}
 	if combat._sealed_bundles.size() >= 2:
 		await _sealed_reveal()
@@ -461,7 +877,10 @@ func _sealed_reveal() -> void:
 		return
 	combat.phase = combat.Phase.RESOLVING
 	NetMatch.send_to_client({"t": NetMatch.EV_REVEAL})
-	_sealed_clear_pending_local()
+	# The backs turn edge-on (★5); the real cards open out of them below. This
+	# is the one moment in the game that has earned a flip, and it used to be a
+	# texture swap: the ghosts vanished and the cards popped in.
+	_sealed_clear_pending_local(true)
 	combat._show_combat_banner("THE ORDERS BREAK OPEN", "", Color(1.0, 0.78, 0.35))
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play", 0.04, 2.0, 0.62)
@@ -484,6 +903,16 @@ func _sealed_reveal() -> void:
 			if combat._row_array(side == 1, row)[lane] != null:
 				continue   # conflicting/stale order — dropped (host is authoritative)
 			combat._net_cards_played[side] += 1
+			# NOTE (★5): the card deliberately does NOT flip in here. It arrives
+			# on the WAX PRESS — _net_spawn_creature → _play_landing_pop →
+			# play_wax_press, which owns `scale` outright and defers a frame to
+			# let the slot's CenterContainer lay out first. A Motion.flip_in
+			# would be a second writer on the same property and the press would
+			# clobber it regardless. The press is also the better beat: it's the
+			# house's established "an order is STAMPED onto the board" language,
+			# where a flip is generic. So the reveal's turn-over lives entirely
+			# in the ghost going edge-on above; giving the card its own half
+			# needs the landing-pop-vs-flip ownership settled first.
 			_net_spawn_creature(data, int(o.get("uid", _net_issue_token_id())),
 				lane, row, side == 1, true)
 			await combat._short_pause(0.12)
@@ -498,10 +927,19 @@ func _sealed_reveal() -> void:
 
 ## BOTH machines: drop my pending stand-ins + the foe's ghosts. The authoritative
 ## board arrives via the reveal spawns (host) / trailing snapshot (client).
-func _sealed_clear_pending_local() -> void:
+##
+## `flip` is opt-in and belongs to the REVEAL only (★5): the face-down backs
+## turn edge-on so the real cards can open out of them a beat later. Every other
+## caller — rejection, round teardown, a closed orders phase — is an ERROR or
+## bookkeeping path where the ghosts must simply be gone, and a flourish there
+## would dress up a failure as a reveal.
+func _sealed_clear_pending_local(flip: bool = false) -> void:
 	for g in combat._sealed_ghosts:
 		if g != null and is_instance_valid(g):
-			g.queue_free()
+			if flip:
+				Motion.flip_out(g)
+			else:
+				g.queue_free()
 	combat._sealed_ghosts.clear()
 	for p in combat._sealed_pending:
 		var n = p.get("node")
@@ -537,13 +975,14 @@ func _sealed_set_sorcery(who: int) -> void:
 	combat._sorcery_active = who
 	combat.phase = combat.Phase.PLAYER_TURN
 	combat._net_active_index = who   # the existing "not your turn" spell gates now work
+	_sealed_load_spell_state(who)
 	var mine: bool = who == NetMatch.local_player_index
 	# Only the caster whose spell step is open may play from hand.
 	Card2D.hand_interactive = mine
 	combat._refresh_hand_affordability()
 	if combat._end_turn_btn != null:
 		combat._end_turn_btn.disabled = not mine
-		combat._end_turn_btn.text = "PASS  [E]"
+		combat._set_primary_action("pass" if mine else "waiting")
 	if mine:
 		combat._set_phase_caption("YOUR SPELL STEP")
 		combat._show_info("Your spell step — cast freely over the revealed lines, then pass.")
@@ -631,6 +1070,9 @@ func _net_open_placement(active_index: int) -> void:
 	# Per-turn passive counters for the side whose turn is opening (Ironclad's cards-
 	# this-turn).
 	combat._net_cards_played[active_index] = 0
+	if active_index == 1 and not SkirmishState.vs_bot and _remote_state != null:
+		_remote_state.begin_turn(combat._net_turn_round, _net_remote_empty_edge_columns())
+		_net_send_private_state()
 	NetMatch.send_to_client({
 		"t": NetMatch.EV_TURN_BEGIN, "active": active_index, "round": combat._net_turn_round,
 	})
@@ -690,6 +1132,9 @@ func _net_local_turn_begin() -> void:
 		AudioBank.play_sfx("turn_start", 0.03, -2.0)
 	# _start_round = the per-turn draw + Command + banking. Its solo-only tail
 	# (enemy intents on the mirrored opponent, waves, boss phases) is inert here.
+	# NOT awaited, and must stay that way: it is a coroutine solo-side (paced
+	# groups — see Combat._round_beat), but _round_beat returns synchronously
+	# whenever _is_net(), so it never suspends here.
 	combat._start_round()
 	# The active player may reposition this turn — _start_round already re-enabled
 	# board_interactive.
@@ -700,7 +1145,7 @@ func _net_local_turn_begin() -> void:
 	if combat._end_turn_btn != null:
 		var will_strike: bool = combat._net_turn_round > 1 \
 			or combat._net_goes_second(NetMatch.local_player_index)
-		combat._end_turn_btn.text = "STRIKE  [E]" if will_strike else "DONE  [E]"
+		combat._set_primary_action("clash" if will_strike else "end_turn")
 	_net_broadcast_hand_count()
 
 
@@ -711,7 +1156,19 @@ func _net_client_turn_begin(active: int, rnd: int) -> void:
 	combat._net_active_index = active
 	combat._net_turn_round = rnd
 	if active == NetMatch.local_player_index:
-		_net_local_turn_begin()
+		# Slot 1's draw, piles and Command were already applied from EV_HAND_SET.
+		# Only the host-side local player still runs Combat._start_round directly.
+		if combat._is_client():
+			_net_set_local_active(true)
+			combat._show_combat_banner("YOUR TURN", "", Color(0.98, 0.86, 0.55))
+			if AudioBank != null:
+				AudioBank.play_sfx("turn_start", 0.03, -2.0)
+			if combat._end_turn_btn != null:
+				var will_strike: bool = combat._net_turn_round > 1 \
+					or combat._net_goes_second(NetMatch.local_player_index)
+				combat._set_primary_action("clash" if will_strike else "end_turn")
+		else:
+			_net_local_turn_begin()
 	else:
 		_net_set_local_active(false)
 		combat._show_info(_net_opp_turn_msg())
@@ -733,6 +1190,9 @@ func _net_set_local_active(active: bool) -> void:
 		combat._end_turn_btn.disabled = not active
 	if active:
 		combat.phase = combat.Phase.PLAYER_TURN
+	if active or (combat._net_active_index >= 0
+			and combat._net_active_index != NetMatch.local_player_index):
+		combat._update_hud()
 
 
 
@@ -752,6 +1212,10 @@ func _net_on_done_placing() -> void:
 		return
 	# Marked discards cash out as the turn is committed (hand-local; the foe
 	# gets the EV_DISCARD_FX beat + hand-count tick from inside the flush).
+	var discard_uids: Array = []
+	for card in combat._hand:
+		if card != null and is_instance_valid(card) and card.marked_for_discard:
+			discard_uids.append(int(card.deck_uid))
 	combat._flush_marked_discards()
 	if combat._net_turn_round > 1 or combat._net_goes_second(NetMatch.local_player_index):
 		combat._play_clash_commit_vfx()
@@ -759,8 +1223,10 @@ func _net_on_done_placing() -> void:
 		_net_finish_placement(0)
 	else:
 		_net_set_local_active(false)
+		combat._set_primary_action("waiting")
+		combat._set_phase_caption("AWAITING FOE")
 		combat._show_info("Ready — waiting for the clash…")
-		NetMatch.send_intent({"t": NetMatch.IN_END_ACTIONS})
+		NetMatch.send_intent({"t": NetMatch.IN_END_ACTIONS, "discards": discard_uids})
 
 
 
@@ -863,14 +1329,44 @@ func _net_log_caption(text: String) -> void:
 ## Log a piercing kill's skewer so the client draws the same lance. Both eids survive
 ## the beat (attacker lives through a pierce; victim isn't flushed until the snapshot),
 ## so the client can reconstruct the lance from its own card centres.
-func _net_log_pierce(attacker: Control, victim: Control) -> void:
+##
+## THE TERMINUS IS HOST-AUTHORITATIVE (2026-07-30). The entry used to carry only the
+## two ends of the KILL and let the client work out where the mark went, which is the
+## one thing a client may never do: it may compute WHERE, never WHETHER. The client's
+## `_pierce_body_behind` returned null for any back-row victim AND — because a live
+## body behind makes the host spill to it instead — for every `reach_face` mark as
+## well, so it fell back to a fixed 156 px stub into bare table while the host drew a
+## ~400 px stroke to the hero plate. The plate terminus, which is piercing's whole
+## absolute tell, never once rendered on the client.
+##
+## `pr` = the receiver's eid, or -1. `pf` = the OWNER INDEX of the plate the mark ends
+## on (same convention as the face-hit entries' `f`), or -1 when it ends on a body.
+## With both absent the client draws nothing — the honest failure, and the one the
+## host itself performs when nothing carried.
+func _net_log_pierce(attacker: Control, victim: Control,
+		receiver: Control = null, face_owner: int = -1,
+		is_pierce: bool = true) -> void:
 	if not combat._net_clash_recording:
 		return
 	if attacker == null or not is_instance_valid(attacker) or int(attacker.entity_id) < 0:
 		return
 	if victim == null or not is_instance_valid(victim) or int(victim.entity_id) < 0:
 		return
-	combat._net_clash_log.append({"pl": int(attacker.entity_id), "pv": int(victim.entity_id)})
+	var recv_eid: int = -1
+	if receiver != null and is_instance_valid(receiver):
+		recv_eid = int(receiver.entity_id)
+	# `pp` is the host's own `reach_face` — the KEYWORD flag that picks the stroke's
+	# material. It is deliberately separate from `pf`: a piercing attacker whose
+	# spill lands on the body behind still draws the piercing mark, so "ends on a
+	# plate" and "is a piercing mark" are different questions and the client must
+	# not infer one from the other.
+	combat._net_clash_log.append({
+		"pl": int(attacker.entity_id),
+		"pv": int(victim.entity_id),
+		"pr": recv_eid,
+		"pf": face_owner,
+		"pp": is_pierce,
+	})
 
 
 
@@ -967,9 +1463,12 @@ func _net_run_clash(attacking_side: int = -1) -> void:
 	# creatures trade and both fall — matching solo's simultaneous clash instead of
 	# handing the turn player a free first-strike kill. Each defender counters ONCE
 	# per clash (its single swing); reset the per-clash latch here.
+	# Lives on c.state (see the decay note in _net_decay_side_states): this was a
+	# dead remove_meta, so the latch never cleared and a creature counter-attacked
+	# exactly ONCE per match instead of once per clash.
 	for c in combat._all_creatures_both_sides():
 		if is_instance_valid(c):
-			c.remove_meta("counter_spent_this_clash")
+			c.state.counter_spent_this_clash = false
 	# Snapshot which columns had a front-row blocker at clash start (face-damage rule).
 	# is_enemy=false is the HOST/player side (0); is_enemy=true is the CLIENT side (1).
 	var player_front_empty: Array[bool] = []
@@ -993,14 +1492,14 @@ func _net_run_clash(attacking_side: int = -1) -> void:
 	Card2D.defer_deaths = true
 	for lane_idx in range(combat.LANES_PER_ROW):
 		if host_strikes:
-			await combat._resolve_swift_attack(lane_idx, combat.ROW_FRONT, false, enemy_front_empty)
+			await combat._resolve_swift_attack(lane_idx, combat.ROW_FRONT, false)
 		if client_strikes:
-			await combat._resolve_swift_attack(lane_idx, combat.ROW_FRONT, true, player_front_empty)
+			await combat._resolve_swift_attack(lane_idx, combat.ROW_FRONT, true)
 	for lane_idx in range(combat.LANES_PER_ROW):
 		if host_strikes:
-			await combat._resolve_swift_attack(lane_idx, combat.ROW_BACK, false, enemy_front_empty)
+			await combat._resolve_swift_attack(lane_idx, combat.ROW_BACK, false)
 		if client_strikes:
-			await combat._resolve_swift_attack(lane_idx, combat.ROW_BACK, true, player_front_empty)
+			await combat._resolve_swift_attack(lane_idx, combat.ROW_BACK, true)
 	Card2D.defer_deaths = false
 	combat._cleanup_dead()
 	_net_send_clash_log()   # ship the Swift beats AHEAD of their outcome snapshot
@@ -1040,6 +1539,10 @@ func _net_run_clash(attacking_side: int = -1) -> void:
 	await combat._run_twinblade_swings(player_front_empty, enemy_front_empty)
 	# Ranged archers reach over the line (side_filter -1 = everyone).
 	await combat._resolve_ranged_attacks(attacking_side)
+	# Rain of Blows resolves after the normal ranged volley so an ordered Sniper has
+	# completed its first strike before the shared helper considers its second.
+	await combat._run_battle_order_strikes(player_front_empty, enemy_front_empty,
+		attacking_side)
 	await combat._run_doubled_hour_snipe()
 	if attacking_side >= 0:
 		combat._doubled_hour[1 - attacking_side] = _dh_stash
@@ -1113,12 +1616,19 @@ func _net_decay_side_states(is_enemy: bool) -> void:
 			continue
 		c.state.stunned = false
 		c.state.is_frozen = false
-		if c.get_meta("temp_poison", false):
+		# These four live on CreatureInstance (c.state), NOT as node metadata.
+		# They were node meta before the CreatureInstance migration and these
+		# lines were left as remove_meta calls afterwards — no set_meta call for
+		# any of these keys exists anywhere, so the decay was a silent no-op and
+		# net had NO reset at all (solo is covered by tick_end_of_round). That
+		# left Charge! and Rain of Blows firing every clash for the rest of the
+		# match. Write the fields.
+		if c.state.temp_poison:
 			c.card_data.keywords.erase("poison")
-			c.remove_meta("temp_poison")
+			c.state.temp_poison = false
 			c.update_stat_display()
-		if c.has_meta("charges_this_turn"):
-			c.remove_meta("charges_this_turn")
+		c.state.charges_this_turn = false
+		c.state.battle_order_second_strike = false
 
 
 
@@ -1175,6 +1685,7 @@ func _net_show_result(winner_index: int) -> void:
 		if AudioBank != null:
 			AudioBank.play_sfx("victory" if series_won else "defeat")
 		_net_build_result_panel(sverdict)
+		combat._play_killing_blow_moment(series_won)  # ★8: same world-stop as solo
 		combat._show_battle_verdict(series_won, 0, false, true)
 		return
 
@@ -1193,6 +1704,7 @@ func _net_show_result(winner_index: int) -> void:
 	# of auto-dropping to the menu. The connection is held open until someone leaves.
 	_net_build_result_panel(verdict)
 	if winner_index >= 0:
+		combat._play_killing_blow_moment(winner_index == me)  # ★8: same world-stop as solo
 		combat._show_battle_verdict(winner_index == me, 0, false, true)
 
 
@@ -1228,8 +1740,11 @@ func _net_show_series_interstitial(winner_index: int) -> void:
 	# Hold the standing on screen, then advance. The host only relaunches once BOTH
 	# sides have signalled, so a small clock skew between the two timers is harmless.
 	await combat.get_tree().create_timer(2.2).timeout
-	if not combat._net_match_over:
-		return   # peer left during the pause; _net_on_peer_lost already handled it
+	# Was a dead guard: _net_match_over is set TRUE by _net_show_result before we
+	# run, and _net_on_peer_lost never clears it, so this could never be true and
+	# the stated protection never once fired. Test the peer-lost latch instead.
+	if combat._net_peer_lost_handled:
+		return   # peer left during the pause; _net_on_peer_lost owns the teardown
 	combat._net_rematch_local = true
 	if combat._is_host():
 		NetMatch.send_to_client({"t": NetMatch.EV_REMATCH})
@@ -1354,7 +1869,7 @@ func _net_sync_board() -> void:
 					continue
 				# Sealed-orders stand-ins are PRIVATE commitments — shipping one
 				# in a snapshot would leak the order to the foe before the reveal.
-				if c.get_meta("sealed_pending", false):
+				if c.state.sealed_pending:
 					continue
 				if c.entity_id < 0:
 					c.entity_id = _net_issue_token_id()
@@ -1370,6 +1885,9 @@ func _net_sync_board() -> void:
 					"kw": c.card_data.get("keywords", []),
 					"floop": bool(c.will_floop),
 					"token": bool(c.is_token),
+					# Versioned, Variant-only runtime contract. Viewer-relative
+					# ownership/position and folded ATK remain the fields above.
+					"state": c.state.to_replication_snapshot(),
 					# Temp combat states (freeze/stun/shield) — so the client can render
 					# WHY one of its creatures isn't swinging, not just that it didn't.
 					"frz": bool(c.state.is_frozen),
@@ -1503,7 +2021,8 @@ func _net_replay_clash(ev: Dictionary) -> void:
 		elif s.has("cap"):    # a mid-clash phase caption (THE DOUBLED HOUR)
 			combat._set_phase_caption(String(s.get("cap", "")))
 		elif s.has("pl"):     # a piercing kill's skewer
-			_net_replay_pierce(int(s.get("pl", -1)), int(s.get("pv", -1)))
+			_net_replay_pierce(int(s.get("pl", -1)), int(s.get("pv", -1)),
+				int(s.get("pr", -1)), int(s.get("pf", -1)), bool(s.get("pp", true)))
 		elif s.has("f"):      # a hero took the blow
 			await _net_replay_face_hit(s)
 		elif s.has("d"):      # a creature took the blow
@@ -1594,7 +2113,8 @@ func _net_replay_creature_hit(s: Dictionary) -> void:
 ## alive on the board here (the victim is mortally struck but not flushed until the
 ## trailing snapshot), so the client reconstructs the same skewer + spark from its own
 ## card centres — the world coords the host drew at are meaningless on a mirrored board.
-func _net_replay_pierce(attacker_eid: int, victim_eid: int) -> void:
+func _net_replay_pierce(attacker_eid: int, victim_eid: int,
+		recv_eid: int = -1, face_owner: int = -1, is_pierce: bool = true) -> void:
 	var attacker = NetMatch.get_entity(attacker_eid)
 	var victim = NetMatch.get_entity(victim_eid)
 	if attacker == null or not is_instance_valid(attacker) \
@@ -1603,10 +2123,42 @@ func _net_replay_pierce(attacker_eid: int, victim_eid: int) -> void:
 	var a = combat._card_center(attacker)
 	var v = combat._card_center(victim)
 	var lance_dir = v - a
-	if lance_dir.length() > 1.0:
-		var beyond = v + lance_dir.normalized() * 130.0
-		combat._play_pierce_lance(a, beyond)
-		combat.spawn_ash_burst(beyond, Color(1.0, 0.86, 0.46), 14)
+	if lance_dir.length() <= 1.0:
+		return
+	# The mark runs FROM the slain body onward — a consequence, not a reach. WHERE it
+	# ends is the host's ruling, carried in the entry (see _net_log_pierce); the
+	# client only looks the terminus up. It used to re-derive it and got it wrong in
+	# every reach_face case.
+	var recv: Control = null
+	if recv_eid >= 0:
+		var node = NetMatch.get_entity(recv_eid)
+		if node != null and is_instance_valid(node):
+			recv = node
+	var beyond := Vector2.ZERO
+	if recv != null:
+		beyond = combat._card_center(recv)
+	elif face_owner >= 0:
+		# Same owner→plate mapping the face-hit replay uses, so a mirrored board
+		# resolves to the correct hero on either peer.
+		var mine: bool = face_owner == NetMatch.local_player_index
+		var plate: Label = combat._player_hp_label if mine else combat._enemy_hp_label
+		if plate == null or not is_instance_valid(plate):
+			return
+		beyond = plate.get_global_rect().get_center()
+	else:
+		# Nothing carried (or a host too old to say). Draw nothing — the host draws
+		# nothing here too, and a stub into bare table taught that something had
+		# carried when nothing had.
+		return
+	combat._play_rubric_stroke(victim, beyond, recv, is_pierce)
+	combat.spawn_ash_burst(beyond, Color(1.0, 0.86, 0.46), 14)
+
+
+## (`_pierce_body_behind` lived here until 2026-07-30. It let the client work out
+## the spill target off its own board, which is exactly the re-derivation that made
+## the two peers draw different marks for one blow. The receiver now rides the clash
+## log — see _net_log_pierce — and there is deliberately no local fallback: a client
+## that cannot name the terminus draws nothing rather than guessing.)
 
 
 
@@ -1704,6 +2256,8 @@ func _net_display_data_from_sync(cd: Dictionary) -> Dictionary:
 	for k in ["frz", "stn", "shd"]:
 		if cd.has(k):
 			data[k] = cd[k]
+	if cd.get("state", null) is Dictionary:
+		data["state"] = cd["state"]
 	return data
 
 
@@ -1763,18 +2317,21 @@ func _net_update_creature(node: Control, cd: Dictionary) -> void:
 
 
 
-## CLIENT: mirror a creature's temp combat states (freeze / stun / shield) from a
-## host snapshot, and pop a one-shot chip when freeze or stun NEWLY turns on so the
-## player sees why their creature is about to forfeit a swing. Absent keys preserve
-## the current value (host-side spawns omit them — a fresh body defaults to clear).
+## CLIENT: apply the host's versioned runtime state and pop a one-shot chip when
+## freeze or stun newly turns on. The short keys remain as a compatibility path for
+## peers from before the typed-state snapshot was introduced.
 func _net_apply_creature_states(node: Control, cd: Dictionary) -> void:
 	if node == null or not is_instance_valid(node):
 		return
 	var was_frozen: bool = node.state.is_frozen
 	var was_stunned: bool = node.state.stunned
-	node.state.is_frozen = bool(cd.get("frz", node.state.is_frozen))
-	node.state.stunned = bool(cd.get("stn", node.state.stunned))
-	node.state.has_shield = bool(cd.get("shd", node.state.has_shield))
+	var runtime = cd.get("state", null)
+	if runtime is Dictionary:
+		node.state.apply_snapshot(runtime)
+	else:
+		node.state.is_frozen = bool(cd.get("frz", node.state.is_frozen))
+		node.state.stunned = bool(cd.get("stn", node.state.stunned))
+		node.state.has_shield = bool(cd.get("shd", node.state.has_shield))
 	if node.has_method("_spawn_keyword_chip"):
 		if node.state.is_frozen and not was_frozen:
 			node._spawn_keyword_chip("FROZEN", Color(0.55, 0.80, 1.0))
@@ -1908,6 +2465,8 @@ func _net_spawn_creature(data: Dictionary, entity_id: int, lane: int, row: int,
 		KeywordEffects.dispatch_on_enter(card, lane, is_enemy_side, combat)
 		if card.card_data.has("on_play"):
 			combat._resolve_on_play_ability(card, lane, is_enemy_side)
+		combat._maybe_beast_encore(card, is_enemy_side)   # Bloodmoon Alpha doubles a Beast's arrival
+		combat._maybe_stampede(card, is_enemy_side)      # The Dire Alpha charges the pack in
 		# Enter-with-a-bonus passives for this side (Ironclad / Hexblade / Warchief /
 		# Tallow / Standard Bearer) — run for the client's creatures too, reading the
 		# client's per-side counters (the solo path only ran them for the host's plays).
@@ -1960,6 +2519,9 @@ func _on_net_intent(sender_id: int, intent: Dictionary) -> void:
 func _net_process_intent(intent: Dictionary) -> void:
 	match String(intent.get("t", "")):
 		NetMatch.IN_PLAY_CREATURE:
+			if _is_sealed() and not SkirmishState.vs_bot:
+				_net_reject_remote("creature_outside_orders")
+				return
 			# animate=true — a human opponent's play arcs from the foe's hand fan,
 			# the same ceremony the bot already had. The ghost bails headless, so
 			# probe-driven intents resume synchronously.
@@ -1967,30 +2529,81 @@ func _net_process_intent(intent: Dictionary) -> void:
 		NetMatch.IN_PLAY_SPELL:
 			_net_apply_remote_spell(intent)
 		NetMatch.IN_REPOSITION:
+			if _is_sealed():
+				_net_reject_remote("move_not_allowed_in_sealed")
+				return
 			_net_apply_remote_reposition(intent)
+		NetMatch.IN_SNIPER_AIM:
+			if _is_sealed():
+				_net_reject_remote("aim_not_allowed_in_sealed")
+				return
+			_net_apply_remote_sniper_aim(intent)
 		NetMatch.IN_USE_POTION:
-			# The client drank a host-authoritative potion. Apply it to the
-			# client's side (enemy side from the host's view) + re-sync. A targeted
-			# bottle carries its target as an entity_id.
+			if _is_sealed() and combat._sorcery_active != 1:
+				_net_reject_remote("potion_outside_sorcery")
+				return
 			var pid := String(intent.get("pid", ""))
-			if pid != "":
-				var pot_target: Control = null
-				var pot_eid: int = int(intent.get("target", -1))
-				if pot_eid >= 0:
-					var pn = NetMatch.get_entity(pot_eid)
-					if pn != null and is_instance_valid(pn):
-						pot_target = pn
+			var potion_data := PotionDB.get_potion(pid)
+			if combat._net_active_index != 1 or _remote_state == null \
+					or potion_data.is_empty() or not _remote_state.potions.has(pid):
+				_net_reject_remote("illegal_potion")
+				return
+			var pot_target: Control = null
+			var pot_eid: int = int(intent.get("target", -1))
+			if pot_eid >= 0:
+				var pn = NetMatch.get_entity(pot_eid)
+				if pn != null and is_instance_valid(pn) and pn is Control:
+					pot_target = pn
+			var targeting := String(potion_data.get("targeting", "none"))
+			var target_ok := targeting == "none" and pot_target == null
+			if targeting == "friendly_creature":
+				target_ok = pot_target != null and bool(pot_target.is_opponent) \
+					and pot_target.is_creature() and not pot_target.has_keyword("structure")
+			elif targeting == "enemy_creature":
+				target_ok = pot_target != null and not bool(pot_target.is_opponent) \
+					and pot_target.is_creature() and not pot_target.has_keyword("structure")
+			elif targeting in ["any_creature", "any"]:
+				target_ok = pot_target != null and pot_target.is_creature() \
+					and not pot_target.has_keyword("structure")
+			if not target_ok or not _remote_state.consume_potion(pid):
+				_net_reject_remote("illegal_potion_target")
+				return
+			var effect := String(potion_data.get("effect", ""))
+			if effect == "gain_mana":
+				_remote_state.gain_mana(2)
+			elif effect == "draw":
+				_remote_state.draw_cards(3)
+			elif effect == "sacrifice_for_command":
+				_remote_state.gain_mana(3)
+			if _net_potion_needs_host(effect):
 				_net_apply_host_potion(pid, true, pot_target)
-				_net_sync_board()
-			elif String(intent.get("effect", "")) == "heal_hp":
-				# Legacy payload shape from the first net-potion pass.
-				_net_heal_hero(true, int(intent.get("value", 8)))
-				_net_sync_board()
+			elif effect not in ["gain_mana", "draw"]:
+				_net_reject_remote("unsupported_potion")
+				return
+			_net_show_foe_potion_fx(pid)
+			_net_send_private_state()
+			_net_sync_board()
 		NetMatch.IN_ORDER_PICK:
 			# The client won the toss — its settled order binds the host too.
-			combat._net_first_player_override = int(intent.get("first", 0))
+			var settled := int(intent.get("first", -1))
+			if combat._net_first_player_override < 0 and combat._net_first_player() == 1 \
+					and settled in [0, 1]:
+				combat._net_first_player_override = settled
 		NetMatch.IN_END_ACTIONS:
+			if _is_sealed():
+				_net_reject_remote("alternating_commit_in_sealed")
+				return
 			if combat._net_active_index == 1:
+				var discard_result: Dictionary = _remote_state.discard_cards(intent.get("discards", [])) \
+					if _remote_state != null else {"ok": false, "reason": "authority_unavailable"}
+				if not bool(discard_result.get("ok", false)):
+					_net_reject_remote(String(discard_result.get("reason", "illegal_discard")))
+					return
+				var discard_count := int(discard_result.get("count", 0))
+				if discard_count > 0:
+					_net_show_foe_discard_fx(discard_count)
+				_remote_state.end_turn()
+				_net_send_private_state()
 				_net_finish_placement(1)
 		NetMatch.IN_CHOICE:
 			# The client picked an option for its own Copycat / Adaptable — apply + sync.
@@ -1998,22 +2611,34 @@ func _net_process_intent(intent: Dictionary) -> void:
 		NetMatch.IN_ORDERS:
 			# Sealed style: the client's whole creature bundle. Awaited so the
 			# reveal (once both bundles are in) sequences ahead of queued intents.
-			await _sealed_store_bundle(1, intent.get("list", []), int(intent.get("mana", 0)))
+			await _sealed_store_bundle(1, intent.get("list", []), 0,
+				intent.get("discards", []))
 		NetMatch.IN_ORDER_GHOST:
-			_sealed_show_ghost(int(intent.get("lane", -1)), int(intent.get("row", 0)))
+			_sealed_accept_remote_ghost(int(intent.get("lane", -1)),
+				int(intent.get("row", 0)))
 		NetMatch.IN_SORCERY_PASS:
+			if not _is_sealed() or combat._sorcery_active != 1:
+				_net_reject_remote("sorcery_phase_closed")
+				return
+			var pass_discards: Dictionary = _remote_state.discard_cards(intent.get("discards", [])) \
+				if _remote_state != null else {"ok": false, "reason": "authority_unavailable"}
+			if not bool(pass_discards.get("ok", false)):
+				_net_reject_remote(String(pass_discards.get("reason", "illegal_discard")))
+				return
+			_remote_state.end_turn()
+			_net_send_private_state()
 			_sealed_sorcery_pass(1)
 		NetMatch.EV_HAND_COUNT:
-			combat._net_opp_hand_count = int(intent.get("n", 0))
-			_net_refresh_opp_hand()
-			_net_set_opp_mana(int(intent.get("mana", combat._net_opp_mana)),
-				int(intent.get("maxmana", combat._net_opp_max_mana)))
+			if _remote_state != null:
+				combat._net_opp_hand_count = _remote_state.hand.size()
+				_net_refresh_opp_hand()
+				_net_set_opp_mana(_remote_state.mana, _remote_state.max_mana)
 		NetMatch.EV_DISCARD_FX:
 			# The client threw cards away at its turn commit — show the beat.
-			_net_show_foe_discard_fx(int(intent.get("n", 0)))
+			pass
 		NetMatch.EV_POTION_FX:
 			# The client drank a potion — show the drink beat over its portrait.
-			_net_show_foe_potion_fx(String(intent.get("pid", "")))
+			pass
 		NetMatch.EV_RELIC_FX:
 			# The client's resource relic paid out on its machine — pulse its
 			# chip on our foe-arsenal rail (HS trinket beat).
@@ -2022,7 +2647,7 @@ func _net_process_intent(intent: Dictionary) -> void:
 			# The client sent an emote — float their line over the enemy plate.
 			combat._net_show_foe_emote(int(intent.get("idx", -1)))
 		_:
-			pass
+			_net_reject_remote("unknown_intent")
 
 
 
@@ -2030,18 +2655,37 @@ func _net_process_intent(intent: Dictionary) -> void:
 ## HOST: seat the client's creature on the host's ENEMY side, run its on-enter
 ## authoritatively, then snapshot the new board to the client.
 func _net_apply_remote_creature(intent: Dictionary, animate: bool = false) -> void:
+	if _is_sealed() and not SkirmishState.vs_bot:
+		_net_reject_remote("creature_outside_orders")
+		return
 	if combat._net_active_index != 1:
+		if not SkirmishState.vs_bot:
+			_net_reject_remote("not_your_turn")
 		return   # not the client's turn
 	var lane: int = int(intent.get("lane", -1))
 	var row: int = int(intent.get("row", combat.ROW_FRONT))
 	if lane < 0 or lane >= combat.LANES_PER_ROW or row < combat.ROW_FRONT or row > combat.ROW_BACK:
 		return
 	if combat._row_array(true, row)[lane] != null:
+		if not SkirmishState.vs_bot:
+			_net_reject_remote("slot_occupied")
 		return   # slot occupied — drop the play (client mis-synced)
 	var data := SkirmishState.skirmish_card_data(String(intent.get("id", "")))
-	if data.is_empty():
+	if data.is_empty() or String(data.get("type", "")) != "creature":
+		if not SkirmishState.vs_bot:
+			_net_reject_remote("card_not_creature")
 		return
 	var uid: int = int(intent.get("uid", _net_issue_token_id()))
+	var authority_check: Dictionary = {}
+	if not SkirmishState.vs_bot:
+		if _remote_state == null:
+			_net_reject_remote("authority_unavailable")
+			return
+		authority_check = _remote_state.validate_play(uid, String(intent.get("id", "")),
+			_net_remote_has_first_spell_discount())
+		if not bool(authority_check.get("ok", false)):
+			_net_reject_remote(String(authority_check.get("reason", "illegal_play")))
+			return
 	if animate:
 		# Foe play (bot or human opponent): throw the card from the foe's hand
 		# into the slot before seating it.
@@ -2051,12 +2695,19 @@ func _net_apply_remote_creature(intent: Dictionary, animate: bool = false) -> vo
 			return
 		if combat._row_array(true, row)[lane] != null:
 			return
+	if not SkirmishState.vs_bot:
+		if _remote_state.commit_play(authority_check, true).is_empty():
+			_net_reject_remote("play_commit_failed")
+			return
 	combat._net_cards_played[1] += 1   # client's per-side card tally (Ironclad Veteran), pre-spawn
 	# The client stamps its unspent Command (post-payment) on the intent so
 	# play-time passives that scale off the caster's pool (Condottiere) read the
 	# CLIENT's pool, not the host's. Bot intents omit it → 0 (vanilla body).
-	combat._net_client_unspent_mana = int(intent.get("mana", 0))
+	combat._net_client_unspent_mana = int(intent.get("mana", 0)) if SkirmishState.vs_bot \
+		else _remote_state.mana
 	_net_spawn_creature(data, uid, lane, row, true, true)
+	if not SkirmishState.vs_bot:
+		_net_send_private_state()
 	_net_sync_board()
 
 
@@ -2157,6 +2808,61 @@ func _net_apply_remote_reposition(intent: Dictionary) -> void:
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play")
 	_net_sync_board()
+
+
+# ── Take Aim over the wire (2026-07-21 sniper rework) ───────────────────────
+# The HOST's _sniper_marks is authoritative for the clash. Each peer aims only
+# its OWN snipers: the host writes directly; the client sets a local mark for
+# its thread/telegraph and ships an IN_SNIPER_AIM intent. A foe's order is
+# NEVER surfaced on your screen (applied silently, no thread, no log) — the
+# same information rule as the hidden hand. Sealed style seals aim too: the
+# drill fires unaimed there, matching its no-reposition rule.
+
+func _net_sniper_aim_dropped(card: Control, quarry: Control) -> void:
+	var active_local: bool = combat._net_active_index == NetMatch.local_player_index
+	if not active_local or combat.phase != combat.Phase.PLAYER_TURN or combat._net_match_over:
+		return
+	if _is_sealed():
+		combat._show_info("Sealed orders — no aiming.")
+		return
+	combat._set_sniper_mark(card, quarry)
+	if not combat._is_host():
+		NetMatch.send_intent({
+			"t": NetMatch.IN_SNIPER_AIM, "eid": int(card.entity_id),
+			"tgt": int(quarry.entity_id),
+		})
+
+
+func _net_sniper_aim_clear(card: Control) -> void:
+	var active_local: bool = combat._net_active_index == NetMatch.local_player_index
+	if not active_local or combat.phase != combat.Phase.PLAYER_TURN or combat._net_match_over:
+		return
+	combat._clear_sniper_mark(card)
+	if not combat._is_host():
+		NetMatch.send_intent({
+			"t": NetMatch.IN_SNIPER_AIM, "eid": int(card.entity_id), "tgt": -1,
+		})
+
+
+## HOST: validate + apply the client's aim order (its snipers sit on the host's
+## ENEMY side, its quarry on the host side). Silent — the order is hidden intel.
+func _net_apply_remote_sniper_aim(intent: Dictionary) -> void:
+	if combat._net_active_index != 1:
+		return   # not the client's turn
+	var node = NetMatch.get_entity(int(intent.get("eid", -1)))
+	if node == null or not is_instance_valid(node) or not node.is_opponent:
+		return   # unknown entity or not the client's own creature
+	if not combat._is_sniper(node, true, int(node.current_row)):
+		return
+	var tgt_id: int = int(intent.get("tgt", -1))
+	if tgt_id < 0:
+		combat._clear_sniper_mark(node, false)
+		return
+	var quarry = NetMatch.get_entity(tgt_id)
+	if quarry == null or not is_instance_valid(quarry) or quarry.is_opponent \
+			or quarry.current_hp <= 0:
+		return   # quarry must be a living host-side creature
+	combat._set_sniper_mark(node, quarry, false)
 
 
 
@@ -2434,6 +3140,8 @@ func _net_process_event(event: Dictionary) -> void:
 			combat._net_first_player_override = int(event.get("first", 0))
 		NetMatch.EV_TURN_BEGIN:
 			_net_client_turn_begin(int(event.get("active", 0)), int(event.get("round", 0)))
+		NetMatch.EV_HAND_SET:
+			_net_apply_private_state(event)
 		NetMatch.EV_ORDERS_PHASE:
 			combat._net_turn_round = int(event.get("round", 1))
 			combat._net_initiative = int(event.get("init", 0))
@@ -2489,9 +3197,8 @@ func _net_process_event(event: Dictionary) -> void:
 			_net_give_card_local(String(event.get("id", "")), int(event.get("uid", -1)))
 		NetMatch.EV_MANA:
 			if bool(event.get("next", false)):
-				# Next-turn max-Command grant (Mourner's on-death). Our own
-				# _start_round folds it in at the next turn-begin, above the
-				# banking cap — same as the host's side of the same effect.
+				# Compatibility path for a next-turn max-Command grant. Our own
+				# _start_round folds it in at turn-begin, above the banking cap.
 				combat._bonus_mana_next_turn += int(event.get("n", 0))
 			else:
 				# A spell we cast granted us Command on our own side.
@@ -2512,20 +3219,18 @@ func _net_process_event(event: Dictionary) -> void:
 
 
 
-## Tell the opponent our hand SIZE (a number; never the cards — they only see how
-## many we hold, as face-down backs). Host → event, client → intent; the receiver
-## stores it in _net_opp_hand_count and refreshes the face-down fan up top.
+## HOST: tell the client the host hand's public size/Command so its foe rail stays
+## current. The client never claims its own count or Command; the host's private
+## remote-state ledger already knows and publishes those values locally.
 func _net_broadcast_hand_count() -> void:
 	# The hand count rides with our live Command (current + max) so the opponent's
 	# foe-Command seal tracks what we can afford. This fires on every hand/mana
 	# change (turn-begin refill, each play, spell draw/Command rewards), so the
 	# foe's readout stays current without a separate channel.
-	var msg = {"t": NetMatch.EV_HAND_COUNT, "n": combat._hand.size(),
-		"mana": combat.player_mana, "maxmana": combat.player_max_mana}
-	if combat._is_host():
-		NetMatch.send_to_client(msg)
-	else:
-		NetMatch.send_intent(msg)
+	if not combat._is_host():
+		return
+	NetMatch.send_to_client({"t": NetMatch.EV_HAND_COUNT, "n": combat._hand.size(),
+		"mana": combat.player_mana, "maxmana": combat.player_max_mana})
 
 
 
@@ -2540,8 +3245,7 @@ func _net_send_discard_fx(n: int) -> void:
 	var msg := {"t": NetMatch.EV_DISCARD_FX, "n": n}
 	if combat._is_host():
 		NetMatch.send_to_client(msg)
-	else:
-		NetMatch.send_intent(msg)
+	# Client discard faces travel as validated uid lists on the enclosing commit.
 
 
 
@@ -2580,12 +3284,18 @@ func _net_show_foe_discard_fx(n: int) -> void:
 
 
 
-## Skirmish potion resolution. Command and draw resolve on the caster's machine;
-## HP/board effects route through the host, targeted bottles send an entity_id,
-## then the local belt consumes the potion and the foe gets a drink beat.
+## Skirmish potion resolution. Host drinks resolve locally. A client sends only
+## its potion id/target intent; the host validates the remaining private loadout,
+## consumes it, and resolves resource and board effects authoritatively.
 func _net_use_potion(pid: String, index: int, target: Control = null) -> void:
 	var data: Dictionary = PotionDB.get_potion(pid)
 	var effect := String(data.get("effect", ""))
+	if combat._is_client():
+		var request := {"t": NetMatch.IN_USE_POTION, "pid": pid}
+		if target != null and is_instance_valid(target):
+			request["target"] = int(target.entity_id)
+		NetMatch.send_intent(request)
+		return
 	# Caster-local resource rider: Butcher's Dram's +3 Command lands on the
 	# drinker's OWN machine (each peer owns its Command); its accompanying
 	# sacrifice is the host-side board mutation routed below.
@@ -2644,6 +3354,11 @@ func _net_potion_needs_host(effect: String) -> bool:
 
 func _net_apply_host_potion(pid: String, caster_is_enemy: bool, target: Control = null) -> void:
 	var data: Dictionary = PotionDB.get_potion(pid)
+	# The Apothecary (tonic_vigor) drinks along on the DRINKER's side — host-
+	# authoritative board mutation, rides the snapshot to the client. (Caster-
+	# local potions that never reach the host — gain_mana / draw — don't feed
+	# her in net; every board-touching drink does.)
+	combat._apply_tonic_vigor(caster_is_enemy)
 	match String(data.get("effect", "")):
 		"heal_hp":
 			var heal: int = int(data.get("value", 8)) if data.has("value") else 8
@@ -2660,7 +3375,7 @@ func _net_apply_host_potion(pid: String, caster_is_enemy: bool, target: Control 
 				var pool := _net_side_creatures(not caster_is_enemy)
 				if pool.is_empty():
 					break
-				var pick: Control = pool[randi() % pool.size()]
+				var pick: Control = combat._combat_ops.pick(pool)
 				pick.take_damage(2)
 				if pick.current_hp <= 0:
 					combat._cleanup_dead()
@@ -2733,11 +3448,10 @@ func _net_apply_host_potion(pid: String, caster_is_enemy: bool, target: Control 
 			_net_heal_hero(caster_is_enemy, 4)
 		"sacrifice_for_command":
 			# Butcher's Dram: kill the caster's own target (the +3 Command already
-			# landed caster-side in _net_use_potion). The 999 mirrors the Offering
-			# spell; solo's relic/reactive sacrifice hooks don't exist in skirmish,
-			# so a plain kill is faithful.
+			# landed caster-side in _net_use_potion). Like Offering, this is a paid
+			# sacrifice rather than damage, so Shield / Last Stand cannot retain it.
 			if target != null and is_instance_valid(target) and target.is_creature():
-				target.take_damage(999)
+				combat._force_destroy_creature(target)
 				combat._cleanup_dead()
 		"detonate_doom_all":
 			# Doomsday Draught: fire every one of the caster's own Doom creatures
@@ -2766,15 +3480,11 @@ func _net_side_creatures(is_enemy: bool) -> Array:
 
 
 
-## Tell the opponent we drank potion `pid` so their side shows a drink beat (the
-## potion never touches THEIR state — this is presentation only, the mirror of
-## our own drink). Host → event, client → intent, like the discard beat.
+## HOST: tell the client that the host drank `pid`. Client drinks are announced
+## by the same host path after their IN_USE_POTION intent is accepted.
 func _net_send_potion_fx(pid: String) -> void:
-	var msg := {"t": NetMatch.EV_POTION_FX, "pid": pid}
 	if combat._is_host():
-		NetMatch.send_to_client(msg)
-	else:
-		NetMatch.send_intent(msg)
+		NetMatch.send_to_client({"t": NetMatch.EV_POTION_FX, "pid": pid})
 
 
 
@@ -2929,9 +3639,12 @@ func _net_build_foe_arsenal() -> void:
 	# Right rail, directly under the foe's Command seal (which ends at y 556),
 	# spanning the enemy column's full plate width. The glossary "?" orb
 	# (bottom-anchored, x -72..-24, y ~598 at 900px) stays clear of the
-	# centered chip row (2 chips end at x -84).
-	const CHIP := 44
-	const GAP := 8
+	# centered chip row. With the 2026-07-16 arsenal stage the rail can carry
+	# up to 5 chips (3 relics + 2 potions) — chips shrink so the full row
+	# stays inside the 236px column (5×38 + 4×6 = 214 ≤ 236).
+	var total_chips: int = rids.size() + pids.size()
+	var CHIP: int = 44 if total_chips <= 4 else 38
+	var GAP: int = 8 if total_chips <= 4 else 6
 	var root := Control.new()
 	root.name = "NetFoeArsenal"
 	root.anchor_left = 1.0
@@ -2946,7 +3659,7 @@ func _net_build_foe_arsenal() -> void:
 	root.z_index = 5
 	combat._hud_layer.add_child(root)
 	combat._net_foe_rail_root = root
-	var caption = combat._make_rail_caption("FOE'S ARSENAL")
+	var caption = combat._make_rail_caption("FOE'S LOADOUT")
 	caption.anchor_left = 0.0
 	caption.anchor_right = 1.0
 	caption.offset_top = 0
@@ -3060,10 +3773,13 @@ func _pulse_relic_chip(rid: String, foe: bool) -> void:
 		return
 	chip.pivot_offset = chip.size * 0.5
 	var tw = combat.create_tween()
+	# House grammar: QUAD-out out, BACK-out home. It used to overshoot on the way
+	# out and ease flat on the way back — the inverse of Motion.punch, which is
+	# what every other impact in the game reads like.
 	tw.tween_property(chip, "scale", Vector2(1.4, 1.4), UserSettings.anim_time(0.14)) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	tw.tween_property(chip, "scale", Vector2.ONE, UserSettings.anim_time(0.26)) \
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	var fl = combat.create_tween()
 	fl.tween_property(chip, "modulate", Color(1.8, 1.65, 1.25), UserSettings.anim_time(0.10))
 	fl.tween_property(chip, "modulate", Color.WHITE, UserSettings.anim_time(0.30))
@@ -3074,30 +3790,15 @@ func _pulse_relic_chip(rid: String, foe: bool) -> void:
 
 
 ## An expanding, fading ring — the "trigger burst" both the relic pulse and the
-## potion reveal use. Drawn as a border-only rounded panel scaled from within.
+## potion reveal use. Motion.ring is the one ring engine since R5.
 func _spawn_chip_burst(center: Vector2, radius: float, color: Color) -> void:
 	if combat._hud_layer == null:
 		return
-	var ring := Panel.new()
-	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	ring.z_index = 59
-	var st := StyleBoxFlat.new()
-	st.bg_color = Color(0, 0, 0, 0)
-	st.border_color = color
-	st.set_border_width_all(3)
-	st.set_corner_radius_all(int(radius))
-	ring.add_theme_stylebox_override("panel", st)
-	ring.size = Vector2(radius * 2.0, radius * 2.0)
-	ring.pivot_offset = ring.size * 0.5
-	ring.global_position = center - ring.size * 0.5
-	ring.scale = Vector2(0.55, 0.55)
-	combat._hud_layer.add_child(ring)
-	var tw = combat.create_tween().set_parallel(true)
-	tw.tween_property(ring, "scale", Vector2(1.6, 1.6), UserSettings.anim_time(0.42)) \
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	tw.tween_property(ring, "modulate:a", 0.0, UserSettings.anim_time(0.42)) \
-		.set_ease(Tween.EASE_IN)
-	tw.chain().tween_callback(ring.queue_free)
+	Motion.ring(combat._hud_layer, center, color, {
+		"radius": radius, "start_scale": 0.55, "end_scale": 1.6,
+		"duration": 0.42, "width": 3.0, "z_index": 59,
+		"trans": Tween.TRANS_CUBIC, "scale_time": true,
+	})
 
 
 
@@ -3390,16 +4091,25 @@ func _net_flash_arrow(from: Vector2, to: Vector2) -> void:
 ## the result screen), which the plain _net_match_over guard would otherwise eat.
 func _net_on_peer_lost() -> void:
 	if combat._net_match_over:
-		# Already on the result screen: the opponent left rather than rematch.
+		# Past a game's end. TWO states reach here: the result screen (Bo1, or a
+		# decided series), which HAS a panel — and the between-games interstitial
+		# of a LIVE Bo3, which builds no panel at all (_net_show_result returns
+		# early into _net_show_series_interstitial). The teardown used to sit
+		# INSIDE the panel null-check, so a drop during the interstitial was
+		# swallowed whole: no notice, no menu return, no timeout, and the survivor
+		# then waited forever on a rematch handshake the departed peer never sends.
+		if combat._net_peer_lost_handled:
+			return
+		combat._net_peer_lost_handled = true
 		if combat._net_result_panel != null and is_instance_valid(combat._net_result_panel):
 			combat._net_result_panel.queue_free()
 			combat._net_result_panel = null
-			if combat._phase_label != null:
-				combat._phase_label.text = "OPPONENT LEFT"
-			combat._show_info("Opponent left — returning to menu…")
-			combat.get_tree().create_timer(2.0).timeout.connect(func():
-				NetMatch.leave()
-				GameTheme.fade_out_then_change_scene(combat, "res://scenes/main_menu.tscn", 0.5))
+		if combat._phase_label != null:
+			combat._phase_label.text = "OPPONENT LEFT"
+		combat._show_info("Opponent left — returning to menu…")
+		combat.get_tree().create_timer(2.0).timeout.connect(func():
+			NetMatch.leave()
+			GameTheme.fade_out_then_change_scene(combat, "res://scenes/main_menu.tscn", 0.5))
 		return
 	combat._net_match_over = true
 	combat.phase = combat.Phase.GAME_OVER
@@ -3457,8 +4167,9 @@ func _net_recycle_spell(card: Control) -> void:
 
 
 ## Spells whose hand / pile / Command / draw effects resolve on the CASTER's own
-## machine (those resources never leave the caster). War Chant & Mass Grave also
-## forward a board consequence to the host; the rest are fully caster-local.
+## machine (those resources never leave the caster). Every cast still notifies the
+## host for spell counters and board passives; War Chant & Mass Grave additionally
+## forward a numeric board consequence.
 
 
 ## Pitch one hand card to the caster's own discard (a card the player chose to
@@ -3476,10 +4187,10 @@ func _net_pitch_card(c: Control) -> void:
 
 
 
-## Caster-LOCAL pile/hand spells. The hand, piles, Command and draw all live on the
-## caster's machine, so the caster resolves those here (with its own picker UI)
+## Caster-LOCAL pile/hand spells. The hand, piles, and resulting draws all live on
+## the caster's machine, so the caster resolves those here (with its own picker UI)
 ## rather than round-tripping the host. War Chant / Mass Grave forward only their
-## BOARD consequence (Soldier count / discard size) for the host to apply. Mirrors
+## BOARD consequence (Soldier count / fallen count) for the host to apply. Mirrors
 ## the solo resolver branches, kept compact so no solo-only spell state is dragged in.
 func _net_play_caster_local_spell(card: Control, cost: int) -> void:
 	var id: String = card.card_id
@@ -3497,19 +4208,20 @@ func _net_play_caster_local_spell(card: Control, cost: int) -> void:
 	combat._spawn_spell_cast_ghost(card.card_data, spell_start_global, null)
 	combat._play_spell_cast_vfx(card.card_data, null)
 	var board_n: int = 0          # board consequence to forward (War Chant / Mass Grave)
+	var picked_uids: Array = []   # private choices; the host validates each uid
 	match sid:
 		"recycle":
 			if combat._hand.size() > 0:
 				var rp: Control = await combat._show_recycle_modal()
 				if rp != null and is_instance_valid(rp):
+					picked_uids.append(int(rp.deck_uid))
 					var rcost: int = int(rp.card_data.get("cost", 0))
 					combat._hand.erase(rp)
 					if rp.get_parent() != null:
 						rp.get_parent().remove_child(rp)
 					combat._exhaust_pile.append(combat._pile_entry(rp.card_id, rp.deck_uid))
 					rp.queue_free()
-					combat.player_mana += rcost
-					for _i in plus_draw:
+					for _i in rcost + plus_draw:
 						combat.draw_one()
 		"gambit":
 			var gmax: int = mini(3, combat._hand.size())
@@ -3517,36 +4229,42 @@ func _net_play_caster_local_spell(card: Control, cost: int) -> void:
 				var gp: Array = await combat._show_discard_picker(gmax,
 					"Gambit — discard up to %d, draw that many" % gmax, true)
 				for c in gp:
+					picked_uids.append(int(c.deck_uid))
 					_net_pitch_card(c)
+				# Draw once per discarded card (the loop lives OUTSIDE the
+				# per-card loop, or a 3-discard would draw 9).
 				for _gi in gp.size():
 					combat.draw_one()
-		"turbo":
-			combat.player_mana += 2
-			for _i in plus_draw:
-				combat.draw_one()
-			combat._player_discard_pile.append(CardDB.random_curse_id())
 		"war_chant":
 			var wmax: int = mini(3, combat._hand.size())
 			if wmax > 0:
 				var wp: Array = await combat._show_discard_picker(wmax,
-					"War Chant — discard up to %d to muster that many Soldiers" % wmax, true)
+					"War Chant — discard up to %d to summon that many Soldiers" % wmax, true)
 				for c in wp:
+					picked_uids.append(int(c.deck_uid))
 					_net_pitch_card(c)
 				board_n = wp.size()
 		"mass_grave":
-			board_n = combat._player_discard_pile.size()
-	# Forward the board consequence: host resolves locally + syncs; client ships the
-	# count as an IN_PLAY_SPELL the host applies via _net_resolve_custom_spell.
-	if sid == "war_chant" or sid == "mass_grave":
-		if combat._is_host():
-			var hdata: Dictionary = card.card_data.duplicate(true)
+			# Caster's own fallen count — mirrored on both machines, but ship the
+			# number anyway so resolution never leans on counter sync.
+			board_n = combat._friendly_deaths_this_fight
+	# Every caster-local spell still gets a host-authoritative empty board arm. That
+	# is where the ordinary spell counter, Hexblade/Emberwright and Leyline Conduit
+	# live; Recycle/Gambit simply have no custom board case. War Chant / Mass Grave
+	# attach the one numeric consequence calculated from the caster's private piles.
+	if combat._is_host():
+		var hdata: Dictionary = card.card_data.duplicate(true)
+		if sid == "war_chant" or sid == "mass_grave":
 			hdata["_net_picks"] = board_n
-			_net_resolve_spell(hdata, -1, 0)
-			NetMatch.send_to_client({"t": NetMatch.EV_SPELL, "id": id, "target": -1})
-			_net_sync_board()
-		else:
-			NetMatch.send_intent({"t": NetMatch.IN_PLAY_SPELL, "uid": card.deck_uid,
-				"id": id, "target": -1, "n": board_n})
+		_net_resolve_spell(hdata, -1, 0)
+		NetMatch.send_to_client({"t": NetMatch.EV_SPELL, "id": id, "target": -1})
+		_net_sync_board()
+	else:
+		var intent := {"t": NetMatch.IN_PLAY_SPELL, "uid": card.deck_uid,
+			"id": id, "target": -1, "picks": picked_uids}
+		if sid == "war_chant" or sid == "mass_grave":
+			intent["n"] = board_n
+		NetMatch.send_intent(intent)
 	# Recycle the spell card itself, then refresh the local UI / hand count.
 	_net_recycle_spell(card)
 	if is_instance_valid(card):
@@ -3611,6 +4329,7 @@ func _net_play_spell(card: Control, cost: int) -> void:
 		combat._update_hud()
 	else:
 		# Hold the card in targeting mode; _net_cast_targeted finishes the cast.
+		combat._targeting_paid_cost = cost
 		combat._targeting_spell = card
 		combat._targeting_data = data
 		combat._show_info("Click a target...")
@@ -3647,19 +4366,109 @@ func _net_cast_targeted(spell_card: Control, target: Control) -> void:
 
 
 
+## HOST: validate the target carried by a remote spell intent against the
+## authoritative CardDB targeting contract. The client sits on the host's enemy
+## side, but keep the caster-side parameter explicit so the ownership rule stays
+## readable: friendly targets share that side; enemy targets do not.
+func _net_remote_spell_target_valid(data: Dictionary, target_eid: int,
+		caster_is_enemy: bool) -> bool:
+	var targeting: String = String(data.get("targeting", "none"))
+	if targeting == "none":
+		return target_eid == -1
+	# `any` alone may point at the opposing hero. A null target is how that face
+	# choice crosses the wire; every other targeted mode requires a creature.
+	if targeting == "any" and target_eid == -1:
+		return true
+	if target_eid < 0:
+		return false
+	var node = NetMatch.get_entity(target_eid)
+	if node == null or not is_instance_valid(node) or not (node is Control):
+		return false
+	if not node.has_method("is_creature") or not node.is_creature():
+		return false
+	if not node.has_method("has_keyword") or node.has_keyword("structure"):
+		return false
+	# Membership in the authoritative board arrays proves both that this is a
+	# seated combat creature and which side owns it. Do not trust a peer-supplied
+	# id (or even a loose node property) to establish ownership.
+	var target_is_enemy_side := false
+	if combat._all_friendly(true).has(node):
+		target_is_enemy_side = true
+	elif not combat._all_friendly(false).has(node):
+		return false
+	match targeting:
+		"friendly_creature":
+			return target_is_enemy_side == caster_is_enemy
+		"enemy_creature":
+			return target_is_enemy_side != caster_is_enemy
+		"any_creature", "any":
+			return true
+	return false
+
+
+
 ## HOST: apply the client's spell intent (caster perspective = index 1).
 func _net_apply_remote_spell(intent: Dictionary) -> void:
 	if combat._net_active_index != 1:
+		_net_reject_remote("not_your_turn")
 		return
-	var data := SkirmishState.skirmish_card_data(String(intent.get("id", "")))
-	if data.is_empty() or not _net_spell_supported(data):
+	if _remote_state == null:
+		_net_reject_remote("authority_unavailable")
+		return
+	var id := String(intent.get("id", ""))
+	var uid := int(intent.get("uid", -2))
+	var data := SkirmishState.skirmish_card_data(id)
+	if data.is_empty() or String(data.get("type", "")) != "spell" \
+			or not _net_spell_supported(data):
+		_net_reject_remote("card_not_spell")
+		return
+	var authority_check: Dictionary = _remote_state.validate_play(uid, id,
+		_net_remote_has_first_spell_discount())
+	if not bool(authority_check.get("ok", false)):
+		_net_reject_remote(String(authority_check.get("reason", "illegal_play")))
+		return
+	var target_eid: int = int(intent.get("target", -1))
+	if not _net_remote_spell_target_valid(data, target_eid, true):
+		_net_reject_remote("illegal_target")
 		return
 	# Caster-local pile spells (War Chant / Mass Grave) resolve their hand part on the
 	# client and forward only the board consequence as a pick/size count.
-	if intent.has("n"):
+	var sid := String(data.get("spell", {}).get("id", ""))
+	var picks: Array = intent.get("picks", []) if intent.get("picks", []) is Array else []
+	var max_picks := 0
+	if sid == "recycle":
+		max_picks = 1
+	elif sid in ["gambit", "war_chant"]:
+		max_picks = 3
+	if picks.size() > max_picks or (max_picks == 0 and not picks.is_empty()):
+		_net_reject_remote("illegal_private_choice")
+		return
+	var seen_picks: Dictionary = {}
+	for raw_pick in picks:
+		var pick_uid := int(raw_pick)
+		if pick_uid == uid or seen_picks.has(pick_uid) \
+				or _remote_state.hand_entry(pick_uid).is_empty():
+			_net_reject_remote("private_choice_not_in_hand")
+			return
+		seen_picks[pick_uid] = true
+	if _remote_state.commit_play(authority_check, false).is_empty():
+		_net_reject_remote("play_commit_failed")
+		return
+	if sid == "recycle" and not picks.is_empty():
+		var recycled: Dictionary = _remote_state.hand_entry(int(picks[0]))
+		var recycle_draw := int(recycled.get("cost", 0)) + int(data.get("extra_draw", 0))
+		_remote_state.move_hand_cards(picks, true)
+		_remote_state.draw_cards(recycle_draw)
+	elif sid == "gambit":
+		_remote_state.discard_cards(picks)
+		_remote_state.draw_cards(picks.size())
+	elif sid == "war_chant":
+		_remote_state.discard_cards(picks)
 		data = data.duplicate(true)
-		data["_net_picks"] = int(intent.get("n", 0))
-	var target_eid: int = int(intent.get("target", -1))
+		data["_net_picks"] = picks.size()
+	elif sid == "mass_grave":
+		data = data.duplicate(true)
+		data["_net_picks"] = combat._enemy_deaths_this_fight
 	# Capture the target's screen position BEFORE resolving — _net_resolve_spell
 	# runs _cleanup_dead, which can free the node a lethal spell just killed.
 	var tnode: Control = null
@@ -3675,6 +4484,7 @@ func _net_apply_remote_spell(intent: Dictionary) -> void:
 	# The host is the watcher of the client's spell — show its arrow + thrown card.
 	_net_spell_telegraph(data, tcenter, has_t,
 		tnode if (tnode != null and is_instance_valid(tnode)) else null)
+	_net_send_private_state()
 	_net_sync_board()
 
 
@@ -3690,13 +4500,25 @@ func _net_resolve_spell(data: Dictionary, target_eid: int, caster_index: int) ->
 	var spell: Dictionary = data.get("spell", {})
 	var stype: String = String(spell.get("type", ""))
 	var value: int = int(spell.get("value", 0))
-	# Worn Spellbook (board relic, host-authoritative): the caster's damage spells
-	# deal +1. Built-in damage types here; custom damage spells fold it into `plus`
-	# in _net_resolve_custom_spell. Mirrors the solo path (see _resolve_spell).
-	if combat._relic_active_for_side(caster_is_enemy, "worn_spellbook") \
-			and stype in ["damage", "damage_face", "damage_all_enemies", "damage_all"]:
-		value += 1
+	# Worn Spellbook (board relic, host-authoritative). The card reads: "When you
+	# cast a spell already cast this fight: draw 1; if it deals damage, it deals
+	# +2." The old net arm honoured NONE of that — it had no repeat gate (it fired
+	# on every damage spell), no draw, and a hardcoded +1 instead of the relic's
+	# printed value. Resolve the repeat ONCE here, for the caster's own side, and
+	# let both the built-in arm below and the custom arm in _net_resolve_custom_spell
+	# read the result out of _net_spellbook_bonus.
+	var spell_key: String = String(data.get("id", spell.get("id", data.get("name", ""))))
+	var sb_seen: Dictionary = combat._net_spell_names_fight[caster_index]
+	var sb_repeat: bool = int(sb_seen.get(spell_key, 0)) > 0
+	sb_seen[spell_key] = int(sb_seen.get(spell_key, 0)) + 1
+	var sb_bonus: int = 0
+	if sb_repeat and combat._relic_active_for_side(caster_is_enemy, "worn_spellbook"):
+		_net_caster_draw(caster_is_enemy, 1)
+		sb_bonus = int(RelicDB.get_relic("worn_spellbook").get("value", 2))
 		_relic_fired_for_side(caster_is_enemy, "worn_spellbook")
+	if sb_bonus > 0 \
+			and stype in ["damage", "damage_face", "damage_all_enemies", "damage_all"]:
+		value += sb_bonus
 	var permanent: bool = bool(spell.get("permanent", false))
 	var target: Control = null
 	if target_eid >= 0:
@@ -3741,17 +4563,22 @@ func _net_resolve_spell(data: Dictionary, target_eid: int, caster_index: int) ->
 					c.temp_atk_buff += value
 				c.update_stat_display()
 		"custom":
-			_net_resolve_custom_spell(String(spell.get("id", "")), target, caster_is_enemy, data)
+			_net_resolve_custom_spell(String(spell.get("id", "")), target, caster_is_enemy, data, sb_bonus)
 	combat._cleanup_dead()
 	# Remember the last host-resolved spell (and its target) for Echo — but never
 	# Echo itself, so a chain of Echoes can't form. Caster-local pile spells don't
 	# pass through here, so Echo only ever copies a board/damage/buff spell.
 	if String(spell.get("id", "")) != "echo_spell":
-		combat._net_last_spell_data = data.duplicate(true)
-		combat._net_last_spell_target_eid = target_eid
+		_net_store_last_spell_for(caster_index, data, target_eid)
+	# Leyline Conduit shields its column after its owner's first resolved spell.
+	if _net_spell_count_for(caster_index) == 0:
+		combat._trigger_first_spell_column_shields(caster_is_enemy)
+	# The Magister's Ledger (warlock MOMENT) — host-side, per caster, reading the
+	# count BEFORE this cast, exactly as the solo site does.
+	combat._maybe_pay_ledger(caster_is_enemy, _net_spell_count_for(caster_index))
 	# Count this cast for the active side's combo spells (flame_bolt). Incremented
 	# AFTER resolution so a combo spell reads the count of PRIOR spells this turn.
-	combat._net_spells_this_turn += 1
+	_net_increment_spell_count_for(caster_index)
 	# Per-spell passives for the CASTER's side (the solo spell path's Hexblade /
 	# Emberwright loops never run over the wire). Hexblade grows +1 ATK per spell;
 	# Emberwright pings the caster's enemy face. The per-side fight tally lets a
@@ -3765,11 +4592,39 @@ func _net_resolve_spell(data: Dictionary, target_eid: int, caster_index: int) ->
 				_sp.update_stat_display()
 			"ember_per_spell":
 				_hurt_opposing_hero(caster_is_enemy, 3 if bool(_sp.card_data.get("is_upgraded", false)) else 2)
+			"coven_spell":
+				# Coven Mother — every spell permanently grows the caster's Warlocks
+				# +1 ATK for the fight (forged also heals its hero 1). Host-side per
+				# side; the folded buff rides the board snapshot to the client.
+				for _wl in combat._all_friendly(caster_is_enemy):
+					if not is_instance_valid(_wl) or String(_wl.card_data.get("ctype", "")) != "warlock":
+						continue
+					_wl.persistent_atk_buff += 1
+					_wl.persistent_atk_buff_rounds = 99
+					_wl.update_stat_display()
+				if bool(_sp.card_data.get("is_upgraded", false)):
+					combat._heal_owner_hero(caster_is_enemy, 1)
+			"spark_on_spell":
+				# Cinder Acolyte, host-side per caster: sparks the enemy opposing
+				# her lane (2 forged) — the solo loop's perspective-aware twin.
+				var _spk = combat.get_opposing_card(_sp.current_lane, caster_is_enemy)
+				if _spk != null and is_instance_valid(_spk) and _spk.current_hp > 0:
+					_spk.take_damage(2 if bool(_sp.card_data.get("is_upgraded", false)) else 1)
+			"shield_on_spell":
+				# Ember Warden, host-side per caster: Shield on every cast
+				# (forged: her column-mate shields too). Shield state rides the
+				# board snapshot like Leyline's column shields.
+				combat._grant_combat_shield(_sp)
+				if bool(_sp.card_data.get("is_upgraded", false)):
+					var _ewr: int = combat.ROW_BACK if _sp.current_row == combat.ROW_FRONT else combat.ROW_FRONT
+					var _ewm = combat._row_array(caster_is_enemy, _ewr)[_sp.current_lane]
+					if _ewm != null and is_instance_valid(_ewm):
+						combat._grant_combat_shield(_ewm)
 
 
 
 
-func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enemy: bool, data: Dictionary) -> void:
+func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enemy: bool, data: Dictionary, spellbook_bonus: int = 0) -> void:
 	spell_id = combat._canonical_custom_spell_id(spell_id)
 	# Perspective-aware ports of the solo custom spells that need NO draw / pile /
 	# gold / Command-gain / sacrifice / Discover / hand-picker — those resolve wrong
@@ -3788,12 +4643,13 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 	# damage expressions (never an ATK/heal/buff line). Mirrors the solo
 	# spell_dmg_bonus inclusion set: excludes hex (debuff), holy_smite (execute),
 	# cataclysm / fuel_the_pyre (ATK-scaled), apocalypse (999), and self-face hits.
-	if combat._relic_active_for_side(caster_is_enemy, "worn_spellbook") and spell_id in [
+	# The repeat gate, the draw and the chip pulse were all resolved once in
+	# _net_resolve_spell (our only caller) — this arm just spends the bonus it left.
+	if spellbook_bonus > 0 and spell_id in [
 			"immolate", "inferno", "wildfire", "petard", "earthquake", "blood_tithe",
-			"flame_bolt", "ricochet", "quick_shot", "slash", "smite_spell",
+			"flame_bolt", "ricochet", "quick_shot", "slash",
 			"ballista_bolt"]:
-		plus += 1
-		_relic_fired_for_side(caster_is_enemy, "worn_spellbook")
+		plus += spellbook_bonus
 	var plus_draw: int = int(data.get("extra_draw", 0))
 	var is_plus: bool = bool(data.get("is_upgraded", false))
 	var friendlies: Array = combat._all_friendly(caster_is_enemy)
@@ -3852,11 +4708,11 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 					target.card_data.keywords.append("armored")
 				target.update_stat_display()
 		"censer_light":
-			# All the caster's ZEALOTS gain Lifesteal for the fight ("+" adds
+			# All the caster's DEAD gain Lifesteal for the fight ("+" adds
 			# +1 ATK). Keyword + folded buff ride the board snapshot, so the
 			# client renders both.
 			for zc in friendlies:
-				if not is_instance_valid(zc) or String(zc.card_data.get("ctype", "")) != "zealot":
+				if not is_instance_valid(zc) or String(zc.card_data.get("ctype", "")) != "dead":
 					continue
 				if "lifelink" not in zc.card_data.get("keywords", []):
 					zc.card_data.keywords.append("lifelink")
@@ -3998,7 +4854,7 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 		"dark_pact":
 			if target != null:
 				var dp_gain: int = 1 + plus
-				target.take_damage(999)
+				combat._force_destroy_creature(target)
 				for c in friendlies:
 					if c == target or not is_instance_valid(c) or c.current_hp <= 0:
 						continue
@@ -4044,10 +4900,11 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 		"war_cry":
 			# Swift-only rally ("+" adds +1 ATK while they charge) — mirrors solo.
 			for c in friendlies:
-				c.set_meta("war_cry_swift", true)
+				c.state.war_cry_swift = true
 				if plus > 0:
 					c.temp_atk_buff += plus
 				c.update_stat_display()
+				combat.spawn_keyword_callout_kw(c, "granted_swift")
 		"turncoat":
 			# A caster foe of 3 ATK or less (4 forged) walks over: banish-style
 			# removal (entity exiled, no on-death) + a fresh body with the
@@ -4078,6 +4935,7 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 										combat._restore_slot_label(tcn_slots[tcn_ln], tcn_ln)
 					if tcn_eid >= 0:
 						NetMatch.unregister_entity(tcn_eid)
+					_net_remote_field_card_left(target, bool(target.is_opponent), true)
 					target.queue_free()
 					var tcn_new = _net_place_token(caster_is_enemy, tcn_atk, tcn_hp, tcn_name, tcn_kws)
 					if tcn_new != null and tcn_new.has_method("_spawn_keyword_chip"):
@@ -4104,7 +4962,8 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 			combat._refresh_adjacency_buffs()
 		"flame_bolt":
 			# Combo: ramps to 5 if the caster already cast a spell THIS turn.
-			var fb: int = (5 if combat._net_spells_this_turn >= 1 else 3) + plus
+			var fb_caster: int = 1 if caster_is_enemy else 0
+			var fb: int = (5 if _net_spell_count_for(fb_caster) >= 1 else 3) + plus
 			_net_damage_hero(not caster_is_enemy, fb)
 		"holy_smite":
 			# Execute scaling: hit for the target's missing HP, floored at 3 so it's
@@ -4123,7 +4982,7 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 					victim.take_damage(rc_back_hit)
 					rc_hit_any = true
 			if not rc_hit_any and foes.size() > 0:
-				foes[randi() % foes.size()].take_damage(rc_fallback_hit)
+				combat._combat_ops.pick(foes).take_damage(rc_fallback_hit)
 			combat._cleanup_dead()
 		"provision":
 			# Muster a 2/1 body in the caster's first open lane (front, then back).
@@ -4139,9 +4998,7 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 						prov_placed = true
 						break
 		"baggage_train":
-			# Next-turn Command is caster-local: the Mourner channel ships it
-			# (EV_MANA next=true) so the owner's own _start_round folds it in.
-			combat._battlecry_bonus_mana_next_turn(caster_is_enemy, 4 if is_plus else 3)
+			combat._apply_reserve_orders(target, is_plus)
 		"coin":
 			# Going-second compensation: a one-time +1 Command (Hearthstone's Coin).
 			_net_caster_gain_mana(caster_is_enemy, 1)
@@ -4151,7 +5008,7 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 			var bl_fallen: int = combat._enemy_deaths_this_fight if caster_is_enemy else combat._friendly_deaths_this_fight
 			if bl_fallen > 0:
 				_net_caster_draw(caster_is_enemy, 1)
-		# ── Draw / Command spells (use the EV_DRAW / EV_MANA caster channel) ──
+		# ── Targeted tactical spells ───────────────────────────────────────────
 		"quick_shot":
 			var qs_slay: bool = false
 			if target != null:
@@ -4184,34 +5041,31 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 					target._spawn_keyword_chip("LAST STAND", Color(1.0, 0.85, 0.20), "last_stand")
 				target.update_stat_display()
 		"smite_spell":
-			if target != null:
-				target.take_damage(6 + plus)
-				if target.current_hp <= 0:
-					_net_caster_gain_mana(caster_is_enemy, 1 + int(data.get("slay_mana", 0)))
-					_net_caster_draw(caster_is_enemy, 1 + int(data.get("slay_draw", 0)))
+			combat._arm_battle_order(target)
+		"turbo":
+			combat._apply_frenzy(target, is_plus)
 		"unholy_bargain":
-			var ub_fallen: int = combat._enemy_deaths_this_fight if caster_is_enemy else combat._friendly_deaths_this_fight
-			var ub_draws: int = 2 + int(data.get("extra_draw", 0)) + (1 if ub_fallen > 0 else 0)
-			_net_caster_draw(caster_is_enemy, ub_draws)
-			_net_damage_hero(caster_is_enemy, 2)
-		# ── Sacrifice spells (kill the caster's own target = take_damage 999) ──
+			# Campaign-only and denylisted in SkirmishState; retain a safe no-op arm
+			# so stale peers cannot invoke its retired net behavior.
+			pass
+		# ── Sacrifice spells (forced death bypasses Shield / Last Stand) ───────
 		"offering":
 			if target != null:
-				target.take_damage(999)
-				_net_caster_gain_mana(caster_is_enemy, 2)
+				target.state.offering_extra_on_death = 1
+				combat._force_destroy_creature(target)
 				_net_caster_draw(caster_is_enemy, plus_draw)
 		"fuel_the_pyre":
 			if target != null:
 				var fp_atk: int = target.effective_atk()
 				var fp_lane: int = target.current_lane
-				target.take_damage(999)
+				combat._force_destroy_creature(target)
 				# Deterministic revenge (mirrors solo): hit whatever stands across
 				# the victim's lane; only an empty column scatters the flame.
 				var fp_opp: Control = combat.get_opposing_card(fp_lane, caster_is_enemy)
 				if fp_opp != null:
 					fp_opp.take_damage(fp_atk + plus)
 				elif foes.size() > 0:
-					foes[randi() % foes.size()].take_damage(fp_atk + plus)
+					combat._combat_ops.pick(foes).take_damage(fp_atk + plus)
 				else:
 					_net_damage_hero(not caster_is_enemy, fp_atk + plus)
 		# ── Temp-state spells (freeze / stun / poison / charge) ──────────────
@@ -4249,17 +5103,21 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 						hf_opp._spawn_keyword_chip("FROZEN", Color(0.55, 0.80, 1.0))
 		"venom_tip":
 			# Grant Poison to a friendly for this round (decayed via temp_poison).
+			# temp_poison is the erase order the decay obeys — raise it ONLY on a
+			# body this cast envenomed, or a printed Poison is stripped for good.
+			# Mirrors the solo fix; see Combat.gd's venom_tip arm.
 			if target != null:
 				if not target.card_data.keywords.has("poison"):
 					target.card_data.keywords.append("poison")
-				target.set_meta("temp_poison", true)
+					target.state.temp_poison = true
 				target.update_stat_display()
 				combat.spawn_keyword_callout_kw(target, "poison")
 		"charge_spell":
 			# Target friendly strikes every opposing lane on the caster's turn
 			# (the strike pass reads charges_this_turn; decay clears it after).
 			if target != null:
-				target.set_meta("charges_this_turn", true)
+				target.state.charges_this_turn = true
+				combat.spawn_keyword_callout_kw(target, "charging")
 		# ── Pile / grave / exile spells (host-authoritative; see Phase B) ─────
 		"banish":
 			if target != null:
@@ -4279,6 +5137,7 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 										combat._restore_slot_label(b_slots[b_ln], b_ln)
 					if beid >= 0:
 						NetMatch.unregister_entity(beid)
+					_net_remote_field_card_left(target, bool(target.is_opponent), true)
 					target.queue_free()
 					combat._refresh_adjacency_buffs()
 				else:
@@ -4311,9 +5170,10 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 		"echo_spell":
 			# Re-resolve the caster's last host-resolved spell this turn, same target.
 			# (Echo isn't recorded as last-spell, so it can't echo an echo.)
-			if not combat._net_last_spell_data.is_empty():
-				_net_resolve_spell(combat._net_last_spell_data, combat._net_last_spell_target_eid,
-					1 if caster_is_enemy else 0)
+			var echo_caster: int = 1 if caster_is_enemy else 0
+			var echo_data := _net_last_spell_for(echo_caster)
+			if not echo_data.is_empty():
+				_net_resolve_spell(echo_data, _net_last_spell_target_for(echo_caster), echo_caster)
 		"war_chant":
 			# The caster pitched _net_picks cards on its own machine; muster one Soldier
 			# per pitch (2/1, or 3/2 upgraded) on the caster's side.
@@ -4325,8 +5185,8 @@ func _net_resolve_custom_spell(spell_id: String, target: Control, caster_is_enem
 					break
 				combat.summon_token(wc_atk, wc_hp, wc_s.lane, caster_is_enemy, wc_s.row)
 		"mass_grave":
-			# Damage every caster foe by the caster's discard size (sent as _net_picks).
-			var mg_dmg: int = maxi(1, int(data.get("_net_picks", 0))) + plus
+			# Damage every caster foe by the caster's fallen count (sent as _net_picks).
+			var mg_dmg: int = int(data.get("_net_picks", 0)) + plus
 			for c in foes:
 				c.take_damage(mg_dmg)
 
@@ -4368,10 +5228,7 @@ func _net_place_token(is_enemy: bool, atk: int, hp: int, tname: String, keywords
 ## Damage a hero by host-side: is_enemy_side true → the host's enemy (client),
 ## false → the host's own hero. Lets a spell hit "the caster's enemy face."
 func _net_damage_hero(is_enemy_side: bool, value: int) -> void:
-	if is_enemy_side:
-		combat.damage_enemy_hero(value)
-	else:
-		combat.damage_player_hero(value)
+	combat._combat_ops.damage_hero(combat, is_enemy_side, value)
 
 
 
@@ -4379,17 +5236,7 @@ func _net_damage_hero(is_enemy_side: bool, value: int) -> void:
 ## Heal a hero by host-side, capped at the skirmish starting HP. is_enemy_side
 ## true → the host's enemy (client) hero; false → the host's own hero.
 func _net_heal_hero(is_enemy_side: bool, value: int) -> void:
-	var cap: int = SkirmishState.START_HP
-	if is_enemy_side:
-		var nb_e: int = combat.enemy_hp
-		combat.enemy_hp = mini(combat.enemy_hp + value, cap)
-		if combat.enemy_hp > nb_e:
-			combat._stoke_acolytes(true)
-	else:
-		var nb_p: int = combat.player_hp
-		combat.player_hp = mini(combat.player_hp + value, cap)
-		if combat.player_hp > nb_p:
-			combat._stoke_acolytes(false)
+	combat._combat_ops.heal_hero(combat, is_enemy_side, value, SkirmishState.START_HP)
 
 
 
@@ -4413,11 +5260,12 @@ func _heal_owner_hero(owner_is_enemy: bool, n: int) -> void:
 		return
 	if combat._is_net():
 		_net_heal_hero(owner_is_enemy, n)
-	elif combat.player_hp < combat.player_max_hp:
-		var healed: int = mini(n, combat.player_max_hp - combat.player_hp)
-		combat.player_hp += healed
+	else:
+		var healed: int = combat._combat_ops.heal_hero(
+			combat, false, n, combat.player_max_hp)
+		if healed <= 0:
+			return
 		combat._show_lifelink_heal(healed)   # green +N at the HP medallion — any hero heal, not just Lifesteal
-		combat._stoke_acolytes(false)
 		combat._update_hud()
 
 
@@ -4426,10 +5274,7 @@ func _heal_owner_hero(owner_is_enemy: bool, n: int) -> void:
 func _hurt_opposing_hero(owner_is_enemy: bool, n: int) -> void:
 	if n <= 0:
 		return
-	if combat._is_net():
-		_net_damage_hero(not owner_is_enemy, n)
-	else:
-		combat.damage_enemy_hero(n)
+	combat._combat_ops.damage_opposing_hero(combat, owner_is_enemy, n)
 
 
 
@@ -4441,7 +5286,11 @@ func _net_caster_draw(caster_is_enemy: bool, n: int) -> void:
 	if n <= 0:
 		return
 	if caster_is_enemy:
-		NetMatch.send_to_client({"t": NetMatch.EV_DRAW, "n": n})
+		if _remote_state != null:
+			_remote_state.draw_cards(n)
+			_net_send_private_state()
+		else:
+			NetMatch.send_to_client({"t": NetMatch.EV_DRAW, "n": n})
 	else:
 		for _i in n:
 			combat.draw_one()
@@ -4460,7 +5309,11 @@ func _net_caster_give_card(caster_is_enemy: bool, id: String, uid: int) -> void:
 	if id == "":
 		return
 	if caster_is_enemy:
-		NetMatch.send_to_client({"t": NetMatch.EV_GIVE_CARD, "id": id, "uid": uid})
+		if _remote_state != null:
+			_remote_state.give_card(id, uid)
+			_net_send_private_state()
+		else:
+			NetMatch.send_to_client({"t": NetMatch.EV_GIVE_CARD, "id": id, "uid": uid})
 	else:
 		_net_give_card_local(id, uid)
 
@@ -4503,7 +5356,11 @@ func _net_caster_gain_mana(caster_is_enemy: bool, n: int) -> void:
 	if n <= 0:
 		return
 	if caster_is_enemy:
-		NetMatch.send_to_client({"t": NetMatch.EV_MANA, "n": n})
+		if _remote_state != null:
+			_remote_state.gain_mana(n)
+			_net_send_private_state()
+		else:
+			NetMatch.send_to_client({"t": NetMatch.EV_MANA, "n": n})
 	else:
 		combat.player_mana += n
 		combat._update_hud()
@@ -4584,7 +5441,7 @@ func _net_cast_random_spell_free(caster_is_enemy: bool) -> void:
 		candidates.append(id)
 	if candidates.is_empty():
 		return
-	var data: Dictionary = CardDB.get_card_data(candidates[randi() % candidates.size()])
+	var data: Dictionary = CardDB.get_card_data(String(combat._combat_ops.pick(candidates)))
 	var cast_ctx: Dictionary = _net_random_spell_context_for(data, caster_is_enemy)
 	if not bool(cast_ctx.get("ok", false)):
 		return
@@ -4641,7 +5498,13 @@ func _net_untargeted_random_spell_can_resolve(data: Dictionary, caster_is_enemy:
 		"grave_robbery":
 			var grave: Dictionary = combat._net_last_dead[1 if caster_is_enemy else 0]
 			return not grave.is_empty() and int(grave.get("uid", -1)) >= 0
-		"mass_grave", "ricochet", "wildfire":
+		"mass_grave":
+			# Greyed until the caster's own side has a fallen (forged + 2 stays live).
+			var mg_fallen: int = combat._enemy_deaths_this_fight if caster_is_enemy \
+				else combat._friendly_deaths_this_fight
+			return not foes.is_empty() \
+				and (mg_fallen > 0 or bool(data.get("is_upgraded", false)))
+		"ricochet", "wildfire":
 			return not foes.is_empty()
 		"ambush":
 			return not foes.is_empty() or combat._has_swift_friendly(caster_is_enemy)
@@ -4650,9 +5513,9 @@ func _net_untargeted_random_spell_can_resolve(data: Dictionary, caster_is_enemy:
 		"war_cry", "virulence", "kings_command":
 			return not friendlies.is_empty()
 		"censer_light":
-			# The smoke needs a zealot to settle on — grey without one.
+			# The smoke needs one of your Dead to settle on — grey without one.
 			for cl_g in friendlies:
-				if is_instance_valid(cl_g) and String(cl_g.card_data.get("ctype", "")) == "zealot":
+				if is_instance_valid(cl_g) and String(cl_g.card_data.get("ctype", "")) == "dead":
 					return true
 			return false
 		"testudo":
@@ -4684,7 +5547,7 @@ func _net_auto_target_for(targeting: String, caster_is_enemy: bool) -> int:
 			valid.append(c)
 	if valid.is_empty():
 		return -1
-	return int(valid[randi() % valid.size()].entity_id)
+	return int(combat._combat_ops.pick(valid).entity_id)
 
 
 
@@ -4697,6 +5560,9 @@ func _net_auto_target_for(targeting: String, caster_is_enemy: bool) -> int:
 func _net_request_client_choice(card, kind: String) -> void:
 	if not combat._is_host() or card == null or not is_instance_valid(card):
 		return
+	if kind not in ["keyword", "copy_friendly"]:
+		return
+	_pending_remote_choices[int(card.entity_id)] = kind
 	NetMatch.send_to_client({"t": NetMatch.EV_CHOICE, "eid": int(card.entity_id), "kind": kind})
 
 
@@ -4708,10 +5574,16 @@ func _net_apply_client_choice(intent: Dictionary) -> void:
 	if not combat._is_host() or combat._net_active_index != 1:
 		return
 	var eid: int = int(intent.get("eid", -1))
+	var kind := String(intent.get("kind", ""))
+	if String(_pending_remote_choices.get(eid, "")) != kind:
+		_net_reject_remote("choice_not_pending")
+		return
+	_pending_remote_choices.erase(eid)
 	var node = NetMatch.get_entity(eid)
 	if node == null or not is_instance_valid(node) or not node.is_opponent:
+		_net_reject_remote("choice_entity_invalid")
 		return
-	match String(intent.get("kind", "")):
+	match kind:
 		"keyword":
 			var kw: String = String(intent.get("pick", ""))
 			if kw in ["swift", "piercing", "armored", "thorns"]:

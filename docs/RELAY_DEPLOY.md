@@ -2,15 +2,15 @@
 
 This is how online Skirmish works **without players installing Tailscale or
 forwarding ports**. Both players connect *outward* to a small relay you run; the
-relay pairs them by a 4-character room code and forwards packets between them.
+relay pairs them by a 6-character room code and forwards packets between them.
 Outbound connections punch through any home router (including CGNAT), so the only
 machine that needs a reachable address is the relay.
 
 ```
   Player A  ──out──▶  ┌───────────┐  ◀──out──  Player B
   (Varna)             │   RELAY   │            (Balchik)
-  "HOST ONLINE"       │  room: AB23│            "JOIN ONLINE: AB23"
-  gets code AB23      └───────────┘            paired → fight
+  "HOST ONLINE"       │ room: AB23CD│           "JOIN ONLINE: AB23CD"
+  gets code AB23CD    └───────────┘            paired → fight
 ```
 
 The relay is the **same Godot project** run headless with one script
@@ -165,8 +165,11 @@ generation and the envelope dispatch table.
 
 - The relay only ever forwards a player's envelope to its **one** room partner
   (`server_relay` is off — the engine never auto-broadcasts). No cross-room leak.
-- It's an open relay (anyone with the address can open a room). For a 1.0 launch
-  that's fine; if abused, add a max-rooms cap or a shared secret in
-  `_rpc_create_room` / `_rpc_join_room`.
+- Every forwarded message is a versioned, session-bound, increasing-sequence
+  envelope. The relay rejects stale/duplicate traffic, unsafe or oversized
+  payload shapes, and host/client direction violations before forwarding.
+- The service caps open rooms and per-peer control/message/byte rates; unpaired
+  rooms and idle paired rooms expire automatically. It is still an open relay:
+  add deployment-level admission/authentication only if public abuse warrants it.
 - Packets are not encrypted in transit. For a card game that's acceptable; if you
   ever carry sensitive data, run ENet's DTLS or terminate behind WireGuard.

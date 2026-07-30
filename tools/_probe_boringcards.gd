@@ -1,8 +1,8 @@
 extends SceneTree
 ## Targeted probe for the 2026-07-03 boring-card overhaul:
-##   Drillmaster (squire_captain)  — buff_row_atk battlecry buffs the row
+##   Oathbound Squire (squire_captain) — bodyguard ward redirects the column-mate's damage
 ##   Plague Rat                    — haul_front pulls the back-row enemy forward
-##   Oathkeeper (gravecaller)      — atk_hp_per_fallen reads its side's ledger
+##   Oathkeeper (gravecaller)      — atk_hp_per_fallen reads its side's ROUND tally
 ##   Battle Drummer                — drummer_swift meta grant on adjacency refresh
 ##   Siege Golem                   — unstoppable skips Guardian redirect + Thorns
 ##   Old Bones                     — diminishing on-death summon chain 3/3→2/2→1/1
@@ -81,29 +81,37 @@ func _run_test() -> void:
 	var FRONT = combat.ROW_FRONT
 	var BACK = combat.ROW_BACK
 
-	# ── 1. Drillmaster: +1 ATK THIS ROUND to the OTHER creatures in its row ──
-	# (The buff moved to the this-round bucket — temp_atk_buff — in the
-	# this-round-vs-this-fight pass; read effective_atk, not current_atk.)
-	print("— Drillmaster (buff_row_atk)")
+	# ── 1. Oathbound Squire (2026-07-15 rework): damage its column-mate would
+	# take strikes the Squire instead. State-derived ward — refresh, hit the
+	# mate, and the Squire bleeds. Board layout matters downstream: the drummer
+	# test reads front[1] as its neighbour and front[0] as the far lane, and the
+	# Siege Golem test reuses front[0] — keep the brute at lane 0 + a goblin at
+	# lane 1, like the old Drillmaster fixture did.
+	print("— Oathbound Squire (bodyguard)")
 	combat._place_enemy_card(CDB.get_card_data("brute").duplicate(true), 0, FRONT)
-	combat._place_enemy_card(CDB.get_card_data("goblin").duplicate(true), 3, FRONT)
-	var mate0 = combat._row_array(true, FRONT)[0]
-	var mate3 = combat._row_array(true, FRONT)[3]
-	var m0_before: int = mate0.effective_atk()
-	var m3_before: int = mate3.effective_atk()
-	combat._place_enemy_card(CDB.get_card_data("squire_captain").duplicate(true), 1, FRONT)
-	var dm = combat._row_array(true, FRONT)[1]
+	var ward_mate = combat._row_array(true, FRONT)[0]
+	combat._place_enemy_card(CDB.get_card_data("goblin").duplicate(true), 1, FRONT)
+	combat._place_enemy_card(CDB.get_card_data("squire_captain").duplicate(true), 0, BACK)
+	var sq = combat._row_array(true, BACK)[0]
 	await create_timer(0.2).timeout
-	_check(mate0.effective_atk() == m0_before + 1, "row-mate lane 0 got +1 ATK this round (%d -> %d)" % [m0_before, mate0.effective_atk()])
-	_check(mate3.effective_atk() == m3_before + 1, "row-mate lane 3 got +1 ATK this round (non-adjacent, same row)")
-	_check(dm.effective_atk() == int(CDB.get_card_data("squire_captain").atk), "Drillmaster did not buff itself")
+	combat._refresh_adjacency_buffs()
+	var wm_hp: int = int(ward_mate.current_hp)
+	var sq_hp: int = int(sq.current_hp)
+	ward_mate.take_damage(2)
+	_check(int(ward_mate.current_hp) == wm_hp, "bodyguard: the column-mate took nothing")
+	_check(int(sq.current_hp) == sq_hp - 2, "bodyguard: the Squire took the 2 instead (%d -> %d)" % [sq_hp, sq.current_hp])
+	sq.take_damage(99)   # clear the ward; a kill-convention hit always lands
+	await create_timer(0.2).timeout
+	combat._refresh_adjacency_buffs()
+	ward_mate.take_damage(1)
+	_check(int(ward_mate.current_hp) == wm_hp - 1, "bodyguard: the ward died, the mate bleeds again")
 
 	# (Plague Rat was reverted to plain "Poison." — simple commons are a
 	# feature, not a bug; no on-play test needed.)
 
-	# ── 2. Oathkeeper: +1/+1 per fallen friendly on its own side ─────────────
+	# ── 2. Oathkeeper: +1/+1 per friendly fallen THIS ROUND on its own side ──
 	print("— Oathkeeper (atk_hp_per_fallen)")
-	combat._enemy_deaths_this_fight = 3
+	combat._enemy_deaths_this_round = 3
 	var ok_data = CDB.get_card_data("gravecaller").duplicate(true)
 	combat._place_enemy_card(ok_data, 3, BACK)
 	var ok = combat._row_array(true, BACK)[3]
@@ -111,7 +119,7 @@ func _run_test() -> void:
 	await create_timer(0.15).timeout
 	_check(ok.current_atk == int(ok_data.atk) + 3, "Oathkeeper ATK %d (+3 from 3 fallen)" % ok.current_atk)
 	_check(ok.current_hp == int(CDB.get_card_data("gravecaller").hp) + 3, "Oathkeeper HP grew +3 too")
-	combat._enemy_deaths_this_fight = 0
+	combat._enemy_deaths_this_round = 0
 
 	# ── 4. Battle Drummer: adjacent friendlies hold Swift while it beats ─────
 	print("— Battle Drummer (drummer_swift)")
@@ -120,25 +128,27 @@ func _run_test() -> void:
 	combat._refresh_adjacency_buffs()
 	var neigh = combat._row_array(true, FRONT)[1]   # the Drillmaster, lane 1
 	var far = combat._row_array(true, FRONT)[0]     # lane 0 — NOT adjacent
-	_check(bool(neigh.get_meta("drummer_swift", false)), "adjacent creature holds drummer Swift")
+	_check(neigh.state.drummer_swift, "adjacent creature holds drummer Swift")
 	_check(combat._is_swift_attacker(neigh), "_is_swift_attacker sees the granted Swift")
-	_check(not bool(far.get_meta("drummer_swift", false)), "two lanes away: no Swift")
+	_check(not far.state.drummer_swift, "two lanes away: no Swift")
 	drum.take_damage(99)
 	await create_timer(0.3).timeout
 	combat._refresh_adjacency_buffs()
-	_check(not bool(neigh.get_meta("drummer_swift", false)), "drum dies -> the Swift grant dies with it")
+	_check(not neigh.state.drummer_swift, "drum dies -> the Swift grant dies with it")
 
 	# ── 5. Siege Golem: On-Enter — its fellow Engines gain Thorns ────────────
 	# (The old "unstoppable ram" design left in the 2026-07-10 rare rework; the
 	# golem is the engine-line armorer now — grant sharpened Armored→Thorns
 	# 2026-07-13, since half the engine line already prints Armored.)
 	print("— Siege Golem (engine armorer)")
-	var eng_ally = CDB.get_card_data("stone_wall").duplicate(true)
+	# Wall-cycle cards now print Thorns; Crystal Sentry is the clean no-Thorns
+	# Bastion fixture for testing Siege Golem's grant.
+	var eng_ally = CDB.get_card_data("crystal_sentry").duplicate(true)
 	combat._place_enemy_card(eng_ally, 2, FRONT)
 	var eng_wall = combat._row_array(true, FRONT)[2]
 	var beast_ally = combat._row_array(true, FRONT)[0]   # the lane-0 brute from test 1
 	_check(eng_wall != null and not eng_wall.has_keyword("thorns"),
-		"the engine wall starts without Thorns")
+		"the Bastion starts without Thorns")
 	var golem_data = CDB.get_card_data("siege_golem").duplicate(true)
 	combat._place_enemy_card(golem_data, 0, BACK)
 	var golem = combat._row_array(true, BACK)[0]

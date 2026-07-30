@@ -13,8 +13,8 @@ extends SceneTree
 # of these would be a regression): copy_last_dead, cast_random_spell, choose_keyword,
 # copy_friendly (all on_enter) and return_to_hand_once (on_death). See Combat's
 # "CLIENT-OWNED CREATURE EFFECTS" block + the EV_CHOICE/IN_CHOICE picker.
-# FIXED 2026-07-06: bonus_mana (on_death, Mourner) — routes through
-# Combat._battlecry_bonus_mana_next_turn (EV_MANA next=true for the client).
+# FIXED 2026-07-14: draw (on_death, Mourner) routes through
+# Combat._battlecry_draw (EV_DRAW for the client owner).
 const BROKEN_ON_ENTER := {
 	"look_top": "host-only (client no-op): scry the caster's pile",
 	"discover": "host-only picker (client no-op) — needs Discover net infra",

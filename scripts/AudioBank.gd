@@ -32,6 +32,28 @@ const SFX_FALLBACKS := {
 	"upgrade_confirm": "coin",
 	"doom_tick": "button_click",
 	"boss_intro": "turn_start",
+	# Event gamble stage (2026-07-18): knucklebone cast/settle, coin pours
+	# into the pot, the spinner finally falling flat. Real clips auto-win
+	# once assets/audio/sfx/<name>/ lands.
+	"bone_cast": "card_play",
+	"bone_settle": "button_click",
+	"coin_pour": "coin",
+	"coin_fall": "hit",
+	# The 2026-07-18 second wave: shell-game passes, the drawn lot, the
+	# candle guttering out.
+	"helm_slide": "card_play",
+	"paper_draw": "card_draw",
+	"candle_out": "button_click",
+	# Take Aim (2026-07-21 sniper rework): the marksman accepting a standing
+	# order. A real bolt-nock / bowstring-creak clip auto-wins once
+	# assets/audio/sfx/sniper_aim/ lands.
+	"sniper_aim": "button_click",
+	# THE REFUSAL CUE (2026-07-28). "error" was the ONLY sound any refusal in the
+	# game played, and it had neither a clip dir nor an alias — so the one refusal
+	# that bothered to make a noise made none, and tools/_probe_audio_cues.gd was
+	# failing on it. A dry click stands in until a real short scrape lands; it must
+	# never be a sting, because a refusal is not an impact.
+	"refused": "button_click",
 }
 
 # event_name -> Array[AudioStream]

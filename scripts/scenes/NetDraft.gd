@@ -30,11 +30,9 @@ var _buckets: Dictionary = {}   # rarity → Array[String] of legal ids
 var _bags: Dictionary = {}      # rarity → shuffled Array[String] (drawn down)
 var _picks_made: int = 0
 var _remote_picks: int = 0
-# The opening flow is two one-pick stages before the card triplets: a battle
-# RELIC slate, then a battle POTION slate (pick 1 of 3 or decline on each — see
-# SkirmishState.NET_RELIC_POOL / NET_POTION_POOL). The 20 card picks follow.
-var _relic_stage: bool = true
-var _potion_stage: bool = false
+# The opening flow is the shared ARSENAL stage (NetDeckBuilder._begin_arsenal —
+# 3 battle-relic picks + 2 battle-potion picks, 1-of-3 each, pass allowed per
+# slate) before the card triplets. The 20 card picks follow.
 
 # Card-triplet rerolls. Each player gets a fixed budget for the whole draft;
 # spending one re-deals the current triplet from the local salted stream. Purely
@@ -74,7 +72,7 @@ var _row_fade_tex: GradientTexture2D = null  # one shared bg→clear fade, built
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "reward")
-	AudioBank.play_music_random(["map_c", "map_d", "rest_c"])  # muster pool
+	AudioBank.play_music_random(["net_lobby", "net_lobby_b", "rest_c"])  # muster pool
 
 	# Safety: the draft is only reachable with a live peer. If someone lands here
 	# cold (e.g. scene opened directly), bounce to the menu.
@@ -103,8 +101,15 @@ func _ready() -> void:
 
 	_build_scaffold()
 	_build_ledger()
-	_present_relic_slate()
+	_begin_arsenal(_arsenal_finished)
 	_install_net_chrome()
+
+
+## The arsenal overlay closed — surface the picks on the ledger, then open the
+## card draft proper.
+func _arsenal_finished() -> void:
+	_rebuild_ledger()
+	_present_triplet()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -121,10 +126,6 @@ func _roll_triplet() -> Array[String]:
 		SkirmishState.SKIRMISH_DRAFT_WEIGHTS)
 
 
-## 3 distinct battle relics off the net-safe pool. Rolled from the same salted
-## per-player stream as the card triplets — each player sees their own slate.
-func _roll_relic_slate() -> Array[String]:
-	return SkirmishState.deal_unique_cards(SkirmishState.NET_RELIC_POOL, 3, _rng)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -168,144 +169,6 @@ func _build_scaffold() -> void:
 	_root.add_child(_reroll_btn)
 
 
-## The opening stage: one battle relic to fight with — or none. Relics here are
-## resource-local by construction (see SkirmishState.NET_RELIC_POOL), so each
-## side's pick works over the wire without host resolution.
-func _present_relic_slate() -> void:
-	_clear_card_row()
-	_header.text = "Choose a battle relic — it fights beside your warband"
-	_update_progress()
-
-	var idx := 0
-	for rid in _roll_relic_slate():
-		var r := RelicDB.get_relic(rid)
-		var slot := VBoxContainer.new()
-		slot.add_theme_constant_override("separation", 10)
-		slot.alignment = BoxContainer.ALIGNMENT_CENTER
-		slot.custom_minimum_size = Vector2(230, 0)
-		_card_row.add_child(slot)
-
-		var chip := GameTheme.make_relic_chip(rid, 96)
-		chip.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		slot.add_child(chip)
-
-		var name_lbl := GameTheme.make_label(String(r.get("name", rid)), 20, GILT_BRIGHT)
-		name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		slot.add_child(name_lbl)
-
-		var desc_lbl := GameTheme.make_label(String(r.get("desc", "")), 16, IVORY)
-		desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		desc_lbl.custom_minimum_size = Vector2(220, 64)
-		slot.add_child(desc_lbl)
-
-		var pick_btn := GameTheme.make_themed_button("CHOOSE",
-			Color(0.18, 0.36, 0.18), Vector2(140, 38), 16)
-		pick_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		pick_btn.pressed.connect(_on_relic_pick.bind(rid))
-		slot.add_child(pick_btn)
-
-		_animate_card_reveal(slot, pick_btn, idx)
-		idx += 1
-
-	# The decline column — fighting unadorned is a legitimate choice, not an error.
-	var skip_slot := VBoxContainer.new()
-	skip_slot.add_theme_constant_override("separation", 10)
-	skip_slot.alignment = BoxContainer.ALIGNMENT_CENTER
-	_card_row.add_child(skip_slot)
-	var skip_btn := GameTheme.make_themed_button("FIGHT WITHOUT ONE",
-		Color(0.24, 0.20, 0.16), Vector2(210, 38), 16)
-	skip_btn.pressed.connect(_on_relic_pick.bind(""))
-	skip_slot.add_child(skip_btn)
-
-
-func _on_relic_pick(rid: String) -> void:
-	if _local_finished or not _relic_stage:
-		return
-	_relic_stage = false
-	if rid != "":
-		var slot := SkirmishState.local_slot()
-		if slot != null:
-			slot.relics.append(rid)
-		if AudioBank != null:
-			AudioBank.play_sfx("card_play")
-	_rebuild_ledger()
-	# The potion slate follows the relic — one draught to fight with, or none.
-	_potion_stage = true
-	_present_potion_slate()
-
-
-## 3 distinct battle potions off the net-safe pool (same salted per-player stream
-## as the relic slate and card triplets — each side sees its own three).
-func _roll_potion_slate() -> Array[String]:
-	return SkirmishState.deal_unique_cards(SkirmishState.NET_POTION_POOL, 3, _rng)
-
-
-## The second opening stage: one battle potion to fight with — or none. Every
-## potion here is non-targeted and caster-resolved (SkirmishState.NET_POTION_POOL),
-## so each side's pick works over the wire like the relic.
-## Host-side board/HP bottles are now handled by Combat's net potion resolver.
-## Current rule: targeted and host-authoritative potions are allowed when Combat
-## has an explicit net resolver for their effect.
-func _present_potion_slate() -> void:
-	_clear_card_row()
-	_header.text = "Choose a battle potion — one draught for the fight"
-	_update_progress()
-
-	var idx := 0
-	for pid in _roll_potion_slate():
-		var p := PotionDB.get_potion(pid)
-		var slot := VBoxContainer.new()
-		slot.add_theme_constant_override("separation", 10)
-		slot.alignment = BoxContainer.ALIGNMENT_CENTER
-		slot.custom_minimum_size = Vector2(230, 0)
-		_card_row.add_child(slot)
-
-		var chip := GameTheme.make_potion_chip(pid, 96)
-		chip.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		slot.add_child(chip)
-
-		var name_lbl := GameTheme.make_label(String(p.get("name", pid)), 20, GILT_BRIGHT)
-		name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		slot.add_child(name_lbl)
-
-		var desc_lbl := GameTheme.make_label(String(p.get("desc", "")), 16, IVORY)
-		desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		desc_lbl.custom_minimum_size = Vector2(220, 64)
-		slot.add_child(desc_lbl)
-
-		var pick_btn := GameTheme.make_themed_button("CHOOSE",
-			Color(0.18, 0.36, 0.18), Vector2(140, 38), 16)
-		pick_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		pick_btn.pressed.connect(_on_potion_pick.bind(pid))
-		slot.add_child(pick_btn)
-
-		_animate_card_reveal(slot, pick_btn, idx)
-		idx += 1
-
-	var skip_slot := VBoxContainer.new()
-	skip_slot.add_theme_constant_override("separation", 10)
-	skip_slot.alignment = BoxContainer.ALIGNMENT_CENTER
-	_card_row.add_child(skip_slot)
-	var skip_btn := GameTheme.make_themed_button("FIGHT WITHOUT ONE",
-		Color(0.24, 0.20, 0.16), Vector2(210, 38), 16)
-	skip_btn.pressed.connect(_on_potion_pick.bind(""))
-	skip_slot.add_child(skip_btn)
-
-
-func _on_potion_pick(pid: String) -> void:
-	if _local_finished or not _potion_stage:
-		return
-	_potion_stage = false
-	if pid != "":
-		var slot := SkirmishState.local_slot()
-		if slot != null:
-			slot.potions.append(pid)
-		if AudioBank != null:
-			AudioBank.play_sfx("card_play")
-	_rebuild_ledger()
-	_present_triplet()
 
 
 func _present_triplet() -> void:
@@ -321,21 +184,36 @@ func _present_triplet() -> void:
 		slot.alignment = BoxContainer.ALIGNMENT_CENTER
 		_card_row.add_child(slot)
 
+		# Plain-Control wrapper, exactly as the campaign muster slate builds it
+		# (Recruit._present_choices): the rarity shine parents itself to the node
+		# it decorates and centres on it, so that node must NOT be a Container —
+		# a Container re-fits its children every layout pass and would drag the
+		# sunburst back to the corner.
+		var card_wrap := Control.new()
+		card_wrap.custom_minimum_size = Vector2(Card2D.CARD_W, Card2D.CARD_H)
+		card_wrap.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		card_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		card_wrap.pivot_offset = card_wrap.custom_minimum_size * 0.5
+		slot.add_child(card_wrap)
+
 		var card = CARD_SCENE.instantiate()
 		card.card_data = data.duplicate(true)
 		card.card_id = id
 		card.is_on_battlefield = true
 		card.live_baked_mode = true
 		CardTextureCache.bake(data)
-		slot.add_child(card)
+		card_wrap.add_child(card)
 
+		# Ember, not the old olive green — the commit action wears the same
+		# warm tile as every other commit in the game. (Audit 2026-07-21.)
 		var pick_btn := GameTheme.make_themed_button("CHOOSE",
-			Color(0.18, 0.36, 0.18), Vector2(140, 38), 16)
+			Color(0.34, 0.22, 0.08), Vector2(140, 38), 16)
 		pick_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		pick_btn.pressed.connect(_on_pick.bind(id))
 		slot.add_child(pick_btn)
 
-		_animate_card_reveal(card, pick_btn, idx)
+		_animate_card_reveal(card_wrap, pick_btn, idx,
+			String(data.get("rarity", "")))
 		idx += 1
 
 	_refresh_reroll_btn()
@@ -346,22 +224,33 @@ func _present_triplet() -> void:
 func _refresh_reroll_btn() -> void:
 	if _reroll_btn == null:
 		return
-	var can := not _local_finished and not _relic_stage and not _potion_stage \
+	var can := not _local_finished and not arsenal_active() \
 		and _rerolls_left > 0
 	_reroll_btn.visible = can
 	if can:
 		_reroll_btn.disabled = false
-		_reroll_btn.text = "Reroll these three  (%d left)" % _rerolls_left
+		_reroll_btn.text = "REROLL THESE THREE  (%d left)" % _rerolls_left
 
 
 ## The three live Card2D nodes in the current triplet (one per slot column).
 func _current_triplet_cards() -> Array:
+	# The card sits inside a plain-Control wrapper (which the rarity shine
+	# parents to), so the search descends one level past the slot.
 	var out: Array = []
 	for slot in _card_row.get_children():
+		var found: Node = null
 		for c in slot.get_children():
 			if "card_id" in c:
-				out.append(c)
+				found = c
 				break
+			for gc in c.get_children():
+				if "card_id" in gc:
+					found = gc
+					break
+			if found != null:
+				break
+		if found != null:
+			out.append(found)
 	return out
 
 
@@ -370,7 +259,7 @@ func _current_triplet_cards() -> Array:
 ## or resolves it. Guarded so a double-click or a click landed after finishing
 ## can't over-draw the budget; _rerolling blocks re-entry during the sweep.
 func _on_reroll_triplet() -> void:
-	if _rerolling or _local_finished or _relic_stage or _potion_stage \
+	if _rerolling or _local_finished or arsenal_active() \
 			or _rerolls_left <= 0:
 		return
 	_rerolling = true
@@ -386,17 +275,13 @@ func _on_reroll_triplet() -> void:
 	_rerolling = false
 
 
-func _animate_card_reveal(card: Control, pick_btn: Control, idx: int) -> void:
-	card.modulate.a = 0.0
-	card.scale = Vector2(0.6, 0.6)
-	pick_btn.modulate.a = 0.0
-	var delay := 0.10 + float(idx) * 0.10
-	var tw := create_tween()
-	tw.set_parallel(true)
-	tw.tween_property(card, "modulate:a", 1.0, 0.24).set_delay(delay)
-	tw.tween_property(card, "scale", Vector2.ONE, 0.30) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(delay)
-	tw.tween_property(pick_btn, "modulate:a", 1.0, 0.20).set_delay(delay + 0.14)
+func _animate_card_reveal(card: Control, pick_btn: Control, idx: int,
+		rarity: String = "") -> void:
+	# The kit's shared card_reveal verb; the PICK button rides in as the
+	# companion, fading up just after the card lands. The rarity shine rides it
+	# too — a drafted rare should announce itself here exactly as it does on the
+	# campaign muster slate (uncommons glint silver, rares erupt in gilt).
+	GameTheme.card_reveal(card, 0.10 + float(idx) * 0.10, rarity, pick_btn)
 
 
 func _clear_card_row() -> void:
@@ -449,6 +334,7 @@ func _build_ledger() -> void:
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	GameTheme.style_thin_scrollbar(scroll)
 	col.add_child(scroll)
 
 	_ledger_list = VBoxContainer.new()
@@ -470,33 +356,37 @@ func _rebuild_ledger() -> void:
 	var slot := SkirmishState.local_slot()
 	var deck: Array = slot.deck if slot != null else []
 
-	# The chosen battle relic leads the roll — chip + name on one line.
-	if slot != null and not slot.relics.is_empty():
-		var rid := String(slot.relics[0])
-		var rrow := HBoxContainer.new()
-		rrow.add_theme_constant_override("separation", 8)
-		rrow.mouse_filter = Control.MOUSE_FILTER_PASS
-		rrow.add_child(GameTheme.make_relic_chip(rid, 30))
-		var rname := GameTheme.make_label(
-			String(RelicDB.get_relic(rid).get("name", rid)), 16, GILT_BRIGHT)
-		rname.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		rname.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-		rrow.add_child(rname)
-		_ledger_list.add_child(rrow)
-
-	# The chosen battle potion sits just under the relic — same chip + name line.
-	if slot != null and not slot.potions.is_empty():
-		var ppid := String(slot.potions[0])
-		var prow := HBoxContainer.new()
-		prow.add_theme_constant_override("separation", 8)
-		prow.mouse_filter = Control.MOUSE_FILTER_PASS
-		prow.add_child(GameTheme.make_potion_chip(ppid, 30))
-		var pname := GameTheme.make_label(
-			String(PotionDB.get_potion(ppid).get("name", ppid)), 16, GILT_BRIGHT)
-		pname.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		pname.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-		prow.add_child(pname)
-		_ledger_list.add_child(prow)
+	# The drafted arsenal leads the roll — one chip + name line per relic, then
+	# per potion (up to 3 + 2 from the arsenal stage).
+	if slot != null:
+		for rid_v in slot.relics:
+			var rid := String(rid_v)
+			var rrow := HBoxContainer.new()
+			rrow.add_theme_constant_override("separation", 8)
+			rrow.mouse_filter = Control.MOUSE_FILTER_PASS
+			rrow.add_child(GameTheme.make_relic_chip(rid, 30))
+			var rname := GameTheme.make_label(
+				String(RelicDB.get_relic(rid).get("name", rid)), 16, GILT_BRIGHT)
+			rname.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			# EXPAND_FILL is load-bearing: a trim-ellipsis label reports ~0 min
+			# width, so without it the HBox gives the name no room at all.
+			rname.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			rname.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+			rrow.add_child(rname)
+			_ledger_list.add_child(rrow)
+		for pid_v in slot.potions:
+			var ppid := String(pid_v)
+			var prow := HBoxContainer.new()
+			prow.add_theme_constant_override("separation", 8)
+			prow.mouse_filter = Control.MOUSE_FILTER_PASS
+			prow.add_child(GameTheme.make_potion_chip(ppid, 30))
+			var pname := GameTheme.make_label(
+				String(PotionDB.get_potion(ppid).get("name", ppid)), 16, GILT_BRIGHT)
+			pname.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			pname.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			pname.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+			prow.add_child(pname)
+			_ledger_list.add_child(prow)
 
 	var counts: Dictionary = {}
 	var order: Array[String] = []
@@ -565,6 +455,13 @@ func _make_ledger_row(id: String, count: int) -> Control:
 		strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		strip.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
 		strip.offset_left = -ROW_ART_W
+		# Knock the band back before the gradient touches it. The fade below only
+		# darkens the band's LEFT edge (it reaches zero alpha at the right), so a
+		# cold, saturated painting — the teals and blood-reds in this pool — hit
+		# the row's right edge at full strength and read as a colour bar bleeding
+		# through the list rather than as card art behind a name. Hearthstone's
+		# deck list keeps the name the hero; so should this. (Audit 2026-07-21.)
+		strip.modulate = Color(0.70, 0.68, 0.66, 0.80)
 		row.add_child(strip)
 
 		var fade := TextureRect.new()
@@ -733,7 +630,7 @@ func _on_pick(id: String) -> void:
 		AudioBank.play_sfx("card_play")
 	_rebuild_ledger()
 	_picks_made += 1
-	NetMatch.send_draft_event({"t": "pick", "n": _picks_made})
+	NetMatch.send_draft_event({"t": "pick", "n": _picks_made, "id": id})
 	if _picks_made >= _target:
 		_finish_draft()
 	else:
@@ -819,7 +716,7 @@ func _build_waiting_ui() -> void:
 	_clear_card_row()
 	if _reroll_btn != null:
 		_reroll_btn.visible = false
-	_header.text = "Warband sealed — 20 cards."
+	_header.text = "Warband sealed — %d cards." % _target
 	_update_progress()
 	var note := GameTheme.make_label("Waiting for your opponent to finish drafting…",
 		16, ASH)
@@ -846,7 +743,7 @@ func _on_peer_lost(_id: int = 0) -> void:
 	_clear_card_row()
 	if _reroll_btn != null:
 		_reroll_btn.visible = false
-	_header.text = "Opponent disconnected."
+	_header.text = "Opponent disconnected — the match is off."
 	_header.add_theme_color_override("font_color", Color(0.90, 0.45, 0.35))
 	_progress.text = ""
 	var back := GameTheme.make_themed_button("BACK TO MENU",

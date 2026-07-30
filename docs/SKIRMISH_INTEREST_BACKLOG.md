@@ -75,8 +75,10 @@ id to `SkirmishState.NET_SPELL_CUSTOMS` (the `_probe_skirmish` parity check enfo
   `draw_on_ally_death` / `damage_opposing_draw` through it → **frees `gravedigger` + `bloodhound`** from
   the denylist (the best draw-engine creatures; glue for go-wide/aristocrats).
 - **Port `adrenaline` + `bloodletting`** (trivial, use the proven `_net_caster_gain_mana`) → un-thins Ramp.
-- Later: discard-count field → revive `mass_grave`; a remote-hand-pick round-trip → `war_chant`/`gambit`/`scrap`/`recycle`;
-  per-owner last-dead → reanimator spells; Discover is the hardest, defer.
+- Later: a remote-hand-pick round-trip → `scrap`; Discover is the hardest, defer. (Since done:
+  `mass_grave`/`war_chant`/`gambit`/`recycle` went caster-local; reanimator spells ride per-side death
+  tracking. `mass_grave` stopped reading the discard entirely — reworked 2026-07-14 to scale on the
+  caster's fallen-this-fight count.)
 - **Curation hygiene:** audit `mule`/`witch`/`mana_sprite`/`leyline_conduit` — their gain/discount may
   resolve host-only; fix routing per-owner or deny honestly.
 

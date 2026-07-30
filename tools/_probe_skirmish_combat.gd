@@ -24,6 +24,9 @@ var CDB: Node
 var SS: Node
 var NM: Node
 var combat: Node
+var _probe_draw_uid: int = -920000
+var _client_creature_uid: int = -1
+const NetPlayerStateScript = preload("res://scripts/net/NetPlayerState.gd")
 
 
 func _check(cond: bool, label: String) -> void:
@@ -32,6 +35,32 @@ func _check(cond: bool, label: String) -> void:
 	else:
 		_fails += 1
 		print("  FAIL  ", label)
+
+
+func _seed_local_draws(n: int, card_id: String = "goblin") -> void:
+	# Keep owner-draw assertions independent of the live turn's hand size and pile
+	# order. These synthetic negative uids never enter either player's real deck.
+	while combat._hand.size() > combat.MAX_HAND_SIZE - n:
+		var trimmed = combat._hand.pop_back()
+		if trimmed != null and is_instance_valid(trimmed):
+			if trimmed.get_parent() != null:
+				trimmed.get_parent().remove_child(trimmed)
+			trimmed.queue_free()
+	for _i in n:
+		combat._player_draw_pile.push_front(combat._pile_entry(card_id, _probe_draw_uid))
+		_probe_draw_uid -= 1
+
+
+func _purge_seeded_local_draws() -> void:
+	# Focused owner-draw checks must not leave synthetic cards filling the shared
+	# harness hand and starving later return-to-hand assertions.
+	for c in combat._hand.duplicate():
+		if c != null and is_instance_valid(c) and int(c.deck_uid) <= -920000:
+			combat._hand.erase(c)
+			if c.get_parent() != null:
+				c.get_parent().remove_child(c)
+			c.queue_free()
+	combat._layout_hand()
 
 
 # ── Battle-log inspection helpers (used by _test_net_battle_log) ──────────────
@@ -137,6 +166,8 @@ func _run_test() -> void:
 	await _test_net_client_board_relic()
 	await _test_net_worn_spellbook()
 	await _test_net_new_board_spells()
+	await _test_net_replacement_spells()
+	await _test_net_sealed_spell_isolation()
 	await _test_net_spell_magnitudes()
 	await _test_net_temp_state_spells()
 	await _test_net_phase_b_spells()
@@ -156,8 +187,6 @@ func _run_test() -> void:
 	await _run_client_reconcile_test()
 	# Parity: a locally-cast spell recycles into the discard pile too.
 	await _test_net_spell_recycle()
-	# Caster-local pile spell end-to-end (no UI): Frenzy through the real play path.
-	await _test_net_caster_local_turbo()
 	# Phase 4: rematch (HP refresh + handshake flags).
 	_test_rematch_logic()
 
@@ -184,43 +213,66 @@ func _setup_state() -> void:
 	SS.rng_seed = 12345
 
 	# Force NetMatch to look like a connected host (no real socket).
+	#
+	# EVERY term of NetMatch.is_connected_to_peer() must be set here, and the
+	# failure when one is missed is SILENT AND TOTAL: Combat reads that predicate
+	# to pick its mode, so a half-built fixture boots the scene in SOLO and then
+	# every net assertion in this file fails for a reason none of them name.
+	# `_compatibility_confirmed` is the version-handshake term; it was added to
+	# the predicate after this fixture was written and cost the whole suite —
+	# 96 failures that said nothing about the net layer. If a fourth term ever
+	# joins is_connected_to_peer(), it belongs here the same day.
 	NM.is_host = true
 	NM.local_player_index = 0
 	NM._connected = true
 	NM.remote_present = true
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0   # 0 => send_to_client no-ops, no rpc on a null peer
 	NM.entities.clear()
 	NM._next_entity_id = 1
 
 
 ## Foe Command seal — the opponent's mana mirror. Built during _net_begin_combat
-## (same builder as the player's seal), seeded from the opponent slot, and fed by the
-## client's EV_HAND_COUNT, which now carries the client's live Command. Verifies the
-## host reads that into the foe seal with the player's exact numeral formatting
-## (including the banked "(+N)" overflow).
+## (same builder as the player's seal), seeded from the opponent slot, and fed only
+## by the host-owned remote state. A forged EV_HAND_COUNT must not alter it.
 func _test_opp_mana_seal() -> void:
-	print("— foe Command seal: built, seeded from the opponent slot, tracks synced Command")
+	print("— foe Command seal: host-owned state drives the mirrored Command")
 	_check(combat._net_opp_mana_post != null and is_instance_valid(combat._net_opp_mana_post),
 		"opponent Command seal instrument was built")
 	_check(combat._net_opp_mana_label != null and is_instance_valid(combat._net_opp_mana_label),
 		"opponent Command numeral label exists")
 	_check(int(combat._net_opp_max_mana) == SS.BASE_MAX_MANA,
 		"opp max Command seeded from the opponent slot (%d)" % int(combat._net_opp_max_mana))
-	# A client hand-count intent now carries the client's live Command; the host
-	# reads it into the foe seal.
+	# Presentation-only client claims are ignored.
 	combat._on_net_intent(2, {"t": NM.EV_HAND_COUNT, "n": 4, "mana": 2, "maxmana": 4})
 	await create_timer(0.1).timeout
+	_check(int(combat._net_opp_mana) == 0 and int(combat._net_opp_max_mana) == SS.BASE_MAX_MANA,
+		"forged client Command was ignored")
+	# The host's private-state ledger is the only source of truth.
+	combat.net._remote_state.mana = 2
+	combat.net._remote_state.max_mana = 4
+	combat.net._net_send_private_state()
 	_check(int(combat._net_opp_mana) == 2 and int(combat._net_opp_max_mana) == 4,
-		"host stored the client's synced Command (%d/%d)" % [int(combat._net_opp_mana), int(combat._net_opp_max_mana)])
-	_check(combat._net_opp_mana_label.text == "2 / 4",
-		"foe seal numeral reads '2 / 4' (got '%s')" % combat._net_opp_mana_label.text)
+		"host published authoritative client Command (%d/%d)" % [int(combat._net_opp_mana), int(combat._net_opp_max_mana)])
+	# The seal prints the CURRENT pool only. _set_seal_readout truncates at the
+	# "/" on purpose and the player's own seal is written as bare str(player_mana),
+	# so both sides read alike; this expectation used to be "2 / 4", written when
+	# the seal still carried its maximum. What the test is actually for is
+	# unchanged: the numeral must track the HOST's ledger, not the forged client
+	# value rejected above.
+	_check(combat._net_opp_mana_label.text == "2",
+		"foe seal numeral tracks the host ledger — '2' (got '%s')" % combat._net_opp_mana_label.text)
 	# Banked carryover (current > max): the seal shows the raw pool, mirroring
 	# the player seal — the 2026-07-06 layout-fit pass CUT the "(+N)" annotation
 	# (current > max IS the overflow read).
-	combat._on_net_intent(2, {"t": NM.EV_HAND_COUNT, "n": 4, "mana": 5, "maxmana": 3})
-	await create_timer(0.1).timeout
-	_check(combat._net_opp_mana_label.text == "5 / 3",
-		"foe seal shows the banked pool '5 / 3' (got '%s')" % combat._net_opp_mana_label.text)
+	combat.net._remote_state.mana = 5
+	combat.net._remote_state.max_mana = 3
+	combat.net._net_send_private_state()
+	_check(combat._net_opp_mana_label.text == "5",
+		"foe seal shows the banked pool '5' (got '%s')" % combat._net_opp_mana_label.text)
+	_check(int(combat._net_opp_max_mana) == 3,
+		"...and the banked maximum is still carried in state (got %d)" \
+			% int(combat._net_opp_max_mana))
 
 
 ## The opener is a COIN FLIP from the shared seed — never "the host" — and alternates
@@ -328,10 +380,20 @@ func _host_finishes_placing() -> void:
 func _client_places_a_creature() -> void:
 	print("— client places a creature via a play intent")
 	var enemy_before: int = combat._all_enemy_creatures().size()
-	# Slot-1 uid space (deterministic): SkirmishState slot 1 starts at STRIDE.
-	var uid: int = SS.UID_SLOT_STRIDE + 0
+	var entry: Dictionary = {}
+	for candidate in combat.net._remote_state.hand:
+		var data: Dictionary = SS.skirmish_card_data(String(candidate.get("id", "")))
+		if String(data.get("type", "")) == "creature":
+			entry = candidate
+			break
+	if entry.is_empty():
+		_check(false, "authoritative client hand contained a creature")
+		return
+	var uid := int(entry.get("uid", -1))
+	var id := String(entry.get("id", ""))
+	_client_creature_uid = uid
 	combat._on_net_intent(2, {
-		"t": NM.IN_PLAY_CREATURE, "uid": uid, "id": "brute",
+		"t": NM.IN_PLAY_CREATURE, "uid": uid, "id": id,
 		"lane": 1, "row": combat.ROW_FRONT,
 	})
 	await create_timer(0.3).timeout
@@ -344,7 +406,7 @@ func _client_places_a_creature() -> void:
 ## host's ENEMY side; moving it to an empty enemy slot must update the board arrays.
 func _test_host_applies_reposition() -> void:
 	print("— host applies the client's reposition intent (client's turn, active=1)")
-	var eid: int = SS.UID_SLOT_STRIDE + 0
+	var eid: int = _client_creature_uid
 	var node = NM.get_entity(eid)
 	if node == null or not is_instance_valid(node):
 		_check(false, "client creature present to reposition")
@@ -497,6 +559,7 @@ func _test_net_one_directional() -> void:
 	# and the freeze must SURVIVE (decay is striking-side-only) — a Frost Bolt denies
 	# both the foe's next swing AND its counter this turn.
 	client_c.state.is_frozen = true
+	_muster_board()
 	await combat._net_run_clash(0)   # HOST strikes only
 	var client_struck: bool = (not is_instance_valid(client_c)) \
 		or int(client_c.current_hp) < client_hp0
@@ -512,6 +575,7 @@ func _test_net_one_directional() -> void:
 	# one-directional pass), and the host creature (a LIVE, thawed defender) counters
 	# straight back, finishing the client attacker.
 	if is_instance_valid(client_c) and is_instance_valid(host_c):
+		_muster_board()
 		await combat._net_run_clash(1)   # CLIENT strikes only — host defends + counters
 		_check((not is_instance_valid(host_c)) or int(host_c.current_hp) < host_hp0,
 			"client pass answered on its own turn (host creature struck)")
@@ -868,13 +932,69 @@ func _test_net_custom_spell_perspective() -> void:
 
 
 func _client_casts_a_spell() -> void:
-	print("— client casts a damage spell at a host creature")
+	print("— remote spell targets: host rejects forged targets, accepts a legal one")
 	var targets = combat._all_player_creatures()
 	if targets.is_empty():
 		_check(false, "a host creature exists to target")
 		return
 	var target = targets[0]
 	var eid: int = int(target.entity_id)
+	var client_targets = combat._all_enemy_creatures()
+	if client_targets.is_empty():
+		_check(false, "a client creature exists for remote target validation")
+	else:
+		# Breach Bomb is enemy_creature. From the remote client's perspective its
+		# own board is friendly, even though it is the host's enemy-side array.
+		var own_target = client_targets[0]
+		var own_hp_before: int = int(own_target.current_hp)
+		var wrong_side_count: int = int(combat._net_spells_this_turn)
+		combat._on_net_intent(2, {
+			"t": NM.IN_PLAY_SPELL, "uid": SS.UID_SLOT_STRIDE + 40,
+			"id": "slash", "target": int(own_target.entity_id),
+		})
+		await create_timer(0.12).timeout
+		_check(is_instance_valid(own_target) and int(own_target.current_hp) == own_hp_before,
+			"host rejected an enemy-only spell aimed at the remote caster's own creature")
+		_check(int(combat._net_spells_this_turn) == wrong_side_count,
+			"wrong-side target did not count as a resolved spell")
+
+	# A required creature target cannot be omitted, and a non-targeted spell cannot
+	# smuggle an entity id into the authoritative resolver.
+	var rejected_count: int = int(combat._net_spells_this_turn)
+	combat._on_net_intent(2, {
+		"t": NM.IN_PLAY_SPELL, "uid": SS.UID_SLOT_STRIDE + 41,
+		"id": "slash", "target": -1,
+	})
+	await create_timer(0.12).timeout
+	_check(int(combat._net_spells_this_turn) == rejected_count,
+		"host rejected a targeted spell with no target")
+	var host_face_before: int = int(combat.player_hp)
+	combat._on_net_intent(2, {
+		"t": NM.IN_PLAY_SPELL, "uid": SS.UID_SLOT_STRIDE + 42,
+		"id": "flame_bolt", "target": eid,
+	})
+	await create_timer(0.12).timeout
+	_check(int(combat.player_hp) == host_face_before \
+			and int(combat._net_spells_this_turn) == rejected_count,
+		"host rejected a creature id attached to a non-targeted spell")
+
+	# Registered ids are not automatically legal card targets: the object must be
+	# a live creature seated in one of the authoritative board arrays.
+	var fake_target := Control.new()
+	combat.add_child(fake_target)
+	var fake_eid := 99090
+	NM.register_entity(fake_eid, fake_target)
+	combat._on_net_intent(2, {
+		"t": NM.IN_PLAY_SPELL, "uid": SS.UID_SLOT_STRIDE + 43,
+		"id": "strike", "target": fake_eid,
+	})
+	await create_timer(0.12).timeout
+	_check(int(combat._net_spells_this_turn) == rejected_count,
+		"host rejected a registered non-creature as a spell target")
+	NM.unregister_entity(fake_eid)
+	fake_target.queue_free()
+
+	# Control: the same remote path still resolves a legal CardDB target.
 	var hp_before: int = int(target.current_hp)
 	combat._on_net_intent(2, {
 		"t": NM.IN_PLAY_SPELL, "uid": SS.UID_SLOT_STRIDE + 4,
@@ -903,25 +1023,48 @@ func _client_finishes_placing() -> void:
 		_check(int(combat._net_active_index) == 0, "round 2 opens for the fixed opener (active=0)")
 
 
-## Sacrifice (offering): the host sacrifices its OWN fresh creature and gains Command.
-## Self-contained — spawns the victim so it doesn't disturb the other board tests.
+## Offering: sacrifice the host's OWN creature, repeat a value-based On-Death once,
+## and carry the forged draw rider through the caster-owner draw channel.
 func _test_net_sacrifice_spell() -> void:
-	print("— host casts offering: sacrifices its own creature, gains Command")
+	print("— Offering: own sacrifice + extra repeatable On-Death + forged draw")
 	if combat._net_match_over:
 		_check(true, "match already over before sacrifice test (skipped, acceptable)")
 		return
-	var victim = combat._net_spawn_creature(CDB.get_card_data("brute"), 90003, 0, combat.ROW_BACK, false, false)
+	_seed_local_draws(2)
+	var victim = combat._net_spawn_creature(CDB.get_card_data("mourner"), 90003, 0, combat.ROW_BACK, false, false)
 	await create_timer(0.2).timeout
 	if not is_instance_valid(victim):
 		_check(false, "spawned a host creature to sacrifice")
 		return
+	# Sacrifice is a death condition, not damage: neither survival gate may keep
+	# the body while still paying the doubled On-Death reward.
+	victim.state.has_shield = true
+	if not victim.card_data.get("keywords", []).has("last_stand"):
+		victim.card_data["keywords"].append("last_stand")
+	victim.last_stand_used = false
+	var bank_before: int = int(combat._bonus_mana_next_turn)
 	var mana_before: int = int(combat.player_mana)
-	combat._net_resolve_spell({"spell": {"type": "custom", "id": "offering"}}, int(victim.entity_id), 0)
+	combat._net_resolve_spell(CDB.get_card_data("offering"), int(victim.entity_id), 0)
 	await create_timer(0.2).timeout
 	_check(not is_instance_valid(victim) or int(victim.current_hp) <= 0,
-		"offering sacrificed the host's own creature")
-	_check(int(combat.player_mana) >= mana_before + 2,
-		"host gained Command from offering (%d -> %d)" % [mana_before, int(combat.player_mana)])
+		"Offering bypassed Shield / Last Stand and sacrificed its target")
+	_check(int(combat._bonus_mana_next_turn) == bank_before + 2,
+		"Offering repeated Mourner's On-Death once (2 Command banked)")
+	_check(int(combat.player_mana) == mana_before,
+		"Offering did not grant stale Command")
+
+	_seed_local_draws(1)
+	var plain = combat._net_spawn_creature(CDB.get_card_data("brute"), 90004, 0, combat.ROW_BACK, false, false)
+	await create_timer(0.15).timeout
+	if is_instance_valid(plain):
+		var RS = root.get_node_or_null("RunState")
+		var offering_plus: Dictionary = RS.preview_plus_upgrade(CDB.get_card_data("offering"))
+		var plus_hand_before: int = combat._hand.size()
+		combat._net_resolve_spell(offering_plus, int(plain.entity_id), 0)
+		await create_timer(0.2).timeout
+		_check(combat._hand.size() == plus_hand_before + 1,
+			"Offering+ drew its authored extra card for the host caster")
+	_purge_seeded_local_draws()
 
 
 ## Targeted + board potions (2026-07-09): the host-authoritative resolvers must
@@ -1007,12 +1150,15 @@ func _test_net_client_board_relic() -> void:
 	await create_timer(0.1).timeout
 
 
-## Worn Spellbook (board relic, 2026-07-09): the CASTER's damage spells deal +1,
-## host-authoritative and per-side (gated by _relic_active_for_side). Covers a
-## built-in damage type and a custom damage spell, and proves the host (no book)
-## still deals base — so the relic is owner-scoped, not global.
+## Worn Spellbook (board relic), host-authoritative and per-side. The PRINTED
+## contract is "when you cast a spell already cast this fight: draw 1; if it deals
+## damage, it deals +2" — this probe used to assert a flat +1 on EVERY damage
+## spell, which is what the net resolver wrongly did (no repeat gate, no draw,
+## hardcoded 1). It therefore passed green on the bug and pinned it in place.
+## Now: first cast is base, the REPEAT carries the relic's printed value, and the
+## host (no book) stays base throughout — so the relic is owner-scoped, not global.
 func _test_net_worn_spellbook() -> void:
-	print("— Worn Spellbook (board relic): the caster's damage spells deal +1")
+	print("— Worn Spellbook (board relic): a REPEATED spell draws and hits harder")
 	if combat._net_match_over:
 		_check(true, "match already over before spellbook test (skipped, acceptable)")
 		return
@@ -1022,36 +1168,58 @@ func _test_net_worn_spellbook() -> void:
 		return
 	if not slot1.relics.has("worn_spellbook"):
 		slot1.relics.append("worn_spellbook")
-	# Built-in damage spell (value 3) cast by the CLIENT → target takes 4 (3 + book).
+	# Fetch through the tree like every other autoload here: a --script SceneTree
+	# probe compiles before autoloads register, so a bare `RelicDB` fails to load.
+	var RDB = root.get_node_or_null("RelicDB")
+	var book_val: int = 2
+	if RDB != null:
+		book_val = int(RDB.get_relic("worn_spellbook").get("value", 2))
+	# Everything below goes through _net_resolve_spell — the REAL entry point, and
+	# the only one that owns the repeat ledger. (Calling _net_resolve_custom_spell
+	# directly is what let the old probe miss the gate entirely.)
+	var bolt := {"id": "probe_bolt", "spell": {"type": "damage", "value": 3}}
+	var qshot := {"id": "quick_shot", "spell": {"type": "custom", "id": "quick_shot"}}
+	# FIRST cast of a built-in damage spell by the CLIENT: not a repeat → base 3.
 	var t1 = combat._net_spawn_creature(CDB.get_card_data("brute"), 90070, 0, combat.ROW_FRONT, false, false)
 	await create_timer(0.2).timeout
 	if is_instance_valid(t1):
 		t1.card_data["hp"] = 20
 		t1.current_hp = 20
-		combat._net_resolve_spell({"spell": {"type": "damage", "value": 3}}, int(t1.entity_id), 1)
+		combat._net_resolve_spell(bolt, int(t1.entity_id), 1)
 		await create_timer(0.15).timeout
-		_check(is_instance_valid(t1) and int(t1.current_hp) == 16,
-			"built-in damage spell +1 from Worn Spellbook (20 -> 16)")
-	# Custom damage spell (Smite, 6 base) cast by the CLIENT → 7 with the book.
+		_check(is_instance_valid(t1) and int(t1.current_hp) == 17,
+			"first cast is NOT a repeat — base 3 damage, no book bonus (20 -> 17)")
+		# SECOND cast of the SAME spell: the book fires → 3 + printed value.
+		combat._net_resolve_spell(bolt, int(t1.entity_id), 1)
+		await create_timer(0.15).timeout
+		_check(is_instance_valid(t1) and int(t1.current_hp) == 17 - (3 + book_val),
+			"repeat cast carries the book's printed +%d (-> %d)" % [book_val, 17 - (3 + book_val)])
+	# Custom damage spell (Quick Shot, 1 base). Same shape: base, then base + book.
 	var t2 = combat._net_spawn_creature(CDB.get_card_data("brute"), 90071, 1, combat.ROW_FRONT, false, false)
 	await create_timer(0.2).timeout
 	if is_instance_valid(t2):
 		t2.card_data["hp"] = 20
 		t2.current_hp = 20
-		combat._net_resolve_custom_spell("smite_spell", t2, true, {})
+		combat._net_resolve_spell(qshot, int(t2.entity_id), 1)
 		await create_timer(0.15).timeout
-		_check(is_instance_valid(t2) and int(t2.current_hp) == 13,
-			"custom damage spell (Smite 6+1) from Worn Spellbook (20 -> 13)")
-	# Per-side gating: the HOST has no book, so its Smite deals base 6.
+		_check(is_instance_valid(t2) and int(t2.current_hp) == 19,
+			"custom Quick Shot first cast is base 1 (20 -> 19)")
+		combat._net_resolve_spell(qshot, int(t2.entity_id), 1)
+		await create_timer(0.15).timeout
+		_check(is_instance_valid(t2) and int(t2.current_hp) == 19 - (1 + book_val),
+			"custom Quick Shot repeat carries +%d (-> %d)" % [book_val, 19 - (1 + book_val)])
+	# Per-side gating: the HOST has no book, so even a REPEAT stays base.
 	var t3 = combat._net_spawn_creature(CDB.get_card_data("brute"), 90072, 2, combat.ROW_FRONT, true, false)
 	await create_timer(0.2).timeout
 	if is_instance_valid(t3):
 		t3.card_data["hp"] = 20
 		t3.current_hp = 20
-		combat._net_resolve_custom_spell("smite_spell", t3, false, {})
+		combat._net_resolve_spell(qshot, int(t3.entity_id), 0)
 		await create_timer(0.15).timeout
-		_check(is_instance_valid(t3) and int(t3.current_hp) == 14,
-			"host (no Worn Spellbook) deals base Smite 6 (20 -> 14)")
+		combat._net_resolve_spell(qshot, int(t3.entity_id), 0)
+		await create_timer(0.15).timeout
+		_check(is_instance_valid(t3) and int(t3.current_hp) == 18,
+			"host (no Worn Spellbook) stays base on a repeat too (20 -> 18)")
 	for n in [t1, t2, t3]:
 		if is_instance_valid(n):
 			n.current_hp = 0
@@ -1063,11 +1231,11 @@ func _test_net_worn_spellbook() -> void:
 
 
 ## The newly-ported board/utility spells (holy_smite / ricochet / provision /
-## baggage_train / bloodletting): each must resolve with the right perspective using
+## bloodletting): each must resolve with the right perspective using
 ## the net primitives. Self-contained — spawns its own creatures with bumped HP so
 ## the damage reads are exact regardless of leftover board clutter.
 func _test_net_new_board_spells() -> void:
-	print("— newly-ported skirmish spells: holy_smite / ricochet / provision / baggage_train / bloodletting")
+	print("— newly-ported skirmish spells: holy_smite / ricochet / provision / bloodletting")
 	if combat._net_match_over:
 		_check(true, "match already over before new-spell test (skipped, acceptable)")
 		return
@@ -1107,15 +1275,6 @@ func _test_net_new_board_spells() -> void:
 		if bool(c.is_token):
 			has_token = true
 	_check(has_token, "the mustered body is a token (2/1 soldier)")
-	# baggage_train / Baggage Train (host caster): "gain 3 Command next turn" — the
-	# wagons catch up overnight, banked above the cap via _bonus_mana_next_turn (the
-	# Mourner channel), NOT immediate mana. (The old spell id "adrenaline" was reworked
-	# into this next-turn Command; the CARD id stays "adrenaline" for save migration.)
-	var bonus0: int = int(combat._bonus_mana_next_turn)
-	combat._net_resolve_spell({"spell": {"type": "custom", "id": "baggage_train"}}, -1, 0)
-	await create_timer(0.15).timeout
-	_check(int(combat._bonus_mana_next_turn) == bonus0 + 3,
-		"baggage_train banked +3 Command for the host caster's NEXT turn")
 	# bloodletting (host caster): -1 own face, +2 Command.
 	var face0: int = int(combat.player_hp)
 	var mana1: int = int(combat.player_mana)
@@ -1123,6 +1282,242 @@ func _test_net_new_board_spells() -> void:
 	await create_timer(0.15).timeout
 	_check(int(combat.player_hp) == face0 - 1, "bloodletting cost the host caster 1 HP")
 	_check(int(combat.player_mana) == mana1 + 2, "bloodletting gave the host caster +2 Command")
+
+
+## 2026-07-14 live replacements whose board state is host-authoritative in
+## Skirmish. Countermarch and Rain of Blows retain legacy wire ids for save/net
+## compatibility; the assertions use their current player-facing identities.
+func _test_net_replacement_spells() -> void:
+	print("— replacement spells: Countermarch / Rain of Blows / Frenzy / Leyline")
+	if combat._net_match_over:
+		_check(true, "match over before replacement-spell test (skipped, acceptable)")
+		return
+	await _clear_net_board()
+	var RS = root.get_node_or_null("RunState")
+	var spells_before: int = int(combat._net_spells_this_turn)
+
+	# Countermarch (legacy baggage_train): row swap + Shield. The forged writ
+	# also Shields the target's canonical neighbours after it reaches the back row.
+	var cm_base = combat._net_spawn_creature(CDB.get_card_data("brute"), 94010,
+		3, combat.ROW_FRONT, false, false)
+	var cm_left = combat._net_spawn_creature(CDB.get_card_data("goblin"), 94011,
+		0, combat.ROW_BACK, false, false)
+	var cm_plus_target = combat._net_spawn_creature(CDB.get_card_data("brute"), 94012,
+		1, combat.ROW_FRONT, false, false)
+	var cm_right = combat._net_spawn_creature(CDB.get_card_data("goblin"), 94013,
+		2, combat.ROW_BACK, false, false)
+	await create_timer(0.15).timeout
+	if is_instance_valid(cm_base):
+		combat._net_resolve_spell(CDB.get_card_data("adrenaline"), int(cm_base.entity_id), 0)
+		await create_timer(0.12).timeout
+		_check(cm_base.current_row == combat.ROW_BACK and cm_base.state.has_shield,
+			"Countermarch moved front -> back and Shielded its target")
+	if is_instance_valid(cm_plus_target):
+		var cm_plus: Dictionary = RS.preview_plus_upgrade(CDB.get_card_data("adrenaline"))
+		combat._net_resolve_spell(cm_plus, int(cm_plus_target.entity_id), 0)
+		await create_timer(0.12).timeout
+		_check(cm_plus_target.current_row == combat.ROW_BACK and cm_plus_target.state.has_shield,
+			"Countermarch+ moved and Shielded its target")
+		_check(is_instance_valid(cm_left) and is_instance_valid(cm_right) \
+				and cm_left.state.has_shield and cm_right.state.has_shield,
+			"Countermarch+ Shielded both adjacent back-row allies")
+
+	# Rain of Blows (legacy smite_spell): the resolver arms the shared extra-strike
+	# pass; it is no longer a damage spell.
+	if is_instance_valid(cm_base):
+		combat._net_resolve_spell(CDB.get_card_data("smite_spell"), int(cm_base.entity_id), 0)
+		await create_timer(0.12).timeout
+		_check(cm_base.state.battle_order_second_strike,
+			"Rain of Blows armed the target's second strike")
+
+	# Net targeting must snapshot the EFFECTIVE amount paid, so cancel refunds a
+	# discounted spell exactly instead of either minting or deleting Command.
+	var cancel_spell = combat.CARD_SCENE.instantiate()
+	cancel_spell.card_id = "smite_spell"
+	cancel_spell.card_data = CDB.get_card_data("smite_spell")
+	cancel_spell.deck_uid = -94018
+	combat._hand_container.add_child(cancel_spell)
+	combat._hand.append(cancel_spell)
+	var saved_cancel_mana: int = int(combat.player_mana)
+	var saved_cards_played: int = int(combat._cards_played_this_turn)
+	var saved_first_spell: bool = bool(combat._first_spell_this_turn)
+	combat.player_mana = 3
+	await combat._net_play_spell(cancel_spell, 1) # discounted from printed cost 2
+	_check(int(combat._targeting_paid_cost) == 1 and int(combat.player_mana) == 2,
+		"net targeting remembered the discounted Command actually paid")
+	combat._cancel_targeting()
+	_check(int(combat.player_mana) == 3 and int(combat._targeting_paid_cost) == 0 \
+			and combat._hand.has(cancel_spell),
+		"canceling net targeting refunded exactly the paid Command")
+	combat._hand.erase(cancel_spell)
+	if is_instance_valid(cancel_spell):
+		if cancel_spell.get_parent() != null:
+			cancel_spell.get_parent().remove_child(cancel_spell)
+		cancel_spell.queue_free()
+	combat.player_mana = saved_cancel_mana
+	combat._cards_played_this_turn = saved_cards_played
+	combat._first_spell_this_turn = saved_first_spell
+
+	# Picker-driven Salvage remains a caster-local net spell. Headless cannot pick
+	# its victim, so lock the live data/upgrade channel here and the solo probe too.
+	var salvage: Dictionary = CDB.get_card_data("recycle")
+	var salvage_plus: Dictionary = RS.preview_plus_upgrade(salvage)
+	_check(SS.is_net_playable_spell(salvage) and salvage.get("keywords", []).has("exhaust") \
+			and String(salvage.get("desc", "")).contains("Draw cards equal to its cost"),
+		"Salvage is net-playable with its cost-based draw contract")
+	_check(int(salvage_plus.get("extra_draw", 0)) == 1,
+		"Salvage+ carries its one-extra-draw resolver field")
+	_check(not SS.is_net_playable_spell(CDB.get_card_data("unholy_bargain")),
+		"The Black Contract stays campaign-only in Skirmish")
+
+	await _clear_net_board()
+
+	# Frenzy: first cast supplies the round buff and Doom 2; a second cast adds
+	# another +3 before the canonical Doom blast and death.
+	var saved_enemy_hp: int = int(combat.enemy_hp)
+	combat.enemy_hp = 50
+	var fuse = combat._net_spawn_creature(CDB.get_card_data("brute"), 94014,
+		0, combat.ROW_FRONT, false, false)
+	await create_timer(0.12).timeout
+	if is_instance_valid(fuse):
+		combat._net_resolve_spell(CDB.get_card_data("turbo"), int(fuse.entity_id), 0)
+		await create_timer(0.12).timeout
+		_check(fuse.temp_atk_buff == 3 and fuse.has_keyword("doom") and fuse.doom_counter == 2,
+			"Frenzy granted +3 ATK this round and armed Doom 2")
+		fuse.state.has_shield = true
+		if not fuse.card_data.get("keywords", []).has("last_stand"):
+			fuse.card_data["keywords"].append("last_stand")
+		fuse.last_stand_used = false
+		var expected_blast: int = fuse.effective_atk() + 3
+		var face_before: int = int(combat.enemy_hp)
+		combat._net_resolve_spell(CDB.get_card_data("turbo"), int(fuse.entity_id), 0)
+		await create_timer(0.15).timeout
+		_check(not is_instance_valid(fuse) or int(fuse.current_hp) <= 0,
+			"Frenzy detonation bypassed Shield / Last Stand")
+		_check(int(combat.enemy_hp) == face_before - expected_blast,
+			"Frenzy's detonation used the twice-buffed effective ATK")
+	combat.enemy_hp = saved_enemy_hp
+
+	await _clear_net_board()
+
+	# Leyline is integrated at the _net_resolve_spell boundary: only spell one
+	# Shields each Conduit and the friendly sharing its column.
+	var conduit = combat._net_spawn_creature(CDB.get_card_data("leyline_conduit"), 94015,
+		1, combat.ROW_FRONT, false, false)
+	var mate = combat._net_spawn_creature(CDB.get_card_data("brute"), 94016,
+		1, combat.ROW_BACK, false, false)
+	var bystander = combat._net_spawn_creature(CDB.get_card_data("brute"), 94017,
+		3, combat.ROW_FRONT, false, false)
+	await create_timer(0.12).timeout
+	combat._net_spells_this_turn = 0
+	if is_instance_valid(conduit) and is_instance_valid(mate):
+		combat._net_resolve_spell({"spell": {"type": "buff_atk", "value": 0}},
+			int(conduit.entity_id), 0)
+		await create_timer(0.12).timeout
+		_check(conduit.state.has_shield and mate.state.has_shield,
+			"first spell Shielded Leyline Conduit and its column-mate")
+		_check(is_instance_valid(bystander) and not bystander.state.has_shield,
+			"Leyline left an unrelated body unshielded")
+		conduit.state.has_shield = false
+		mate.state.has_shield = false
+		combat._net_resolve_spell({"spell": {"type": "buff_atk", "value": 0}},
+			int(conduit.entity_id), 0)
+		await create_timer(0.12).timeout
+		_check(not conduit.state.has_shield and not mate.state.has_shield,
+			"second spell did not retrigger Leyline")
+	combat._net_spells_this_turn = spells_before
+	await _clear_net_board()
+
+
+## Sealed Orders has two spell steps in one round. Combo count, first-spell
+## Leyline triggers, and Echo history must stay isolated by caster, then reset for
+## both sides at the next round boundary.
+func _test_net_sealed_spell_isolation() -> void:
+	print("— Sealed Orders: per-caster spell count / Leyline / Echo isolation")
+	if combat._net_match_over:
+		_check(true, "match over before sealed spell-state test (skipped, acceptable)")
+		return
+	await _clear_net_board()
+	var saved_style: int = int(NM.battle_style)
+	var saved_player_hp: int = int(combat.player_hp)
+	var saved_enemy_hp: int = int(combat.enemy_hp)
+	var saved_count: int = int(combat._net_spells_this_turn)
+	var saved_last: Dictionary = combat._net_last_spell_data.duplicate(true)
+	var saved_target: int = int(combat._net_last_spell_target_eid)
+	var saved_fight_counts: Array = combat._net_spells_fight.duplicate()
+	var saved_card_counts: Array = combat._net_cards_played.duplicate()
+	NM.battle_style = NM.STYLE_SEALED
+	combat.net._net_reset_sealed_spell_state()
+
+	# A host spell must not become the client's Echo history. Loading the client's
+	# spell step also mirrors an empty ledger into Combat's legacy scalar fields.
+	var host_probe := {
+		"type": "spell", "targeting": "none",
+		"spell": {"type": "damage_face", "value": 1, "id": "sealed_host_probe"},
+	}
+	combat.enemy_hp = 50
+	combat.player_hp = 50
+	combat._net_resolve_spell(host_probe, -1, 0)
+	_check(combat.net._net_spell_count_for(0) == 1 \
+			and combat.net._net_spell_count_for(1) == 0,
+		"initiative caster's spell count did not leak to the second caster")
+	_check(combat.net._net_last_spell_for(1).is_empty(),
+		"initiative caster's last spell did not leak into the second caster's Echo")
+	combat.net._sealed_load_spell_state(1)
+	_check(int(combat._net_spells_this_turn) == 0 and combat._net_last_spell_data.is_empty(),
+		"second spell step loaded its own empty scalar mirror")
+	var hp_before_echo: int = int(combat.player_hp)
+	combat._net_resolve_spell(CDB.get_card_data("echo_spell"), -1, 1)
+	_check(int(combat.player_hp) == hp_before_echo,
+		"client Echo did not copy the host's spell")
+
+	# Reset the round and prove Flame Bolt sees each caster's own first-spell count.
+	combat.net._net_reset_sealed_spell_state()
+	var enemy_before_flames: int = int(combat.enemy_hp)
+	var player_before_flames: int = int(combat.player_hp)
+	combat._net_resolve_spell(CDB.get_card_data("flame_bolt"), -1, 0)
+	combat._net_resolve_spell(CDB.get_card_data("flame_bolt"), -1, 1)
+	_check(int(combat.enemy_hp) == enemy_before_flames - 3 \
+			and int(combat.player_hp) == player_before_flames - 3,
+		"each caster's first Flame Bolt used base damage (no cross-player combo)")
+
+	# Leyline likewise triggers once for EACH caster, not merely once globally.
+	await _clear_net_board()
+	combat.net._net_reset_sealed_spell_state()
+	var host_conduit = combat._net_spawn_creature(CDB.get_card_data("leyline_conduit"), 94110,
+		0, combat.ROW_FRONT, false, false)
+	var host_mate = combat._net_spawn_creature(CDB.get_card_data("brute"), 94111,
+		0, combat.ROW_BACK, false, false)
+	var client_conduit = combat._net_spawn_creature(CDB.get_card_data("leyline_conduit"), 94112,
+		2, combat.ROW_FRONT, true, false)
+	var client_mate = combat._net_spawn_creature(CDB.get_card_data("brute"), 94113,
+		2, combat.ROW_BACK, true, false)
+	await create_timer(0.12).timeout
+	if is_instance_valid(host_conduit) and is_instance_valid(host_mate) \
+			and is_instance_valid(client_conduit) and is_instance_valid(client_mate):
+		var harmless := {"type": "spell", "targeting": "friendly_creature",
+			"spell": {"type": "buff_atk", "value": 0}}
+		combat._net_resolve_spell(harmless, int(host_conduit.entity_id), 0)
+		combat._net_resolve_spell(harmless, int(client_conduit.entity_id), 1)
+		_check(host_conduit.state.has_shield and host_mate.state.has_shield \
+				and client_conduit.state.has_shield and client_mate.state.has_shield,
+			"each caster received its own first-spell Leyline Shields")
+
+	combat.net._net_reset_sealed_spell_state()
+	_check(combat.net._net_spell_count_for(0) == 0 \
+			and combat.net._net_spell_count_for(1) == 0 \
+			and combat.net._net_last_spell_for(0).is_empty() \
+			and combat.net._net_last_spell_for(1).is_empty(),
+		"sealed round reset cleared both caster ledgers")
+	await _clear_net_board()
+	NM.battle_style = saved_style
+	combat.player_hp = saved_player_hp
+	combat.enemy_hp = saved_enemy_hp
+	combat._net_spells_this_turn = saved_count
+	combat._net_last_spell_data = saved_last
+	combat._net_last_spell_target_eid = saved_target
+	combat._net_spells_fight = saved_fight_counts
+	combat._net_cards_played = saved_card_counts
 
 
 ## Spell MAGNITUDE parity: the net resolver must deal the SAME numbers as solo / the
@@ -1197,11 +1592,11 @@ func _test_net_temp_state_spells() -> void:
 	_check(int(eb.current_row) == int(combat.ROW_BACK), "rout drove a front foe into its back row")
 	# venom_tip (host caster) on a friendly → it gains the poison keyword + temp tag.
 	combat._net_resolve_spell({"spell": {"type": "custom", "id": "venom_tip"}}, int(fr.entity_id), 0)
-	_check(fr.card_data.keywords.has("poison") and fr.get_meta("temp_poison", false),
+	_check(fr.card_data.keywords.has("poison") and fr.state.temp_poison,
 		"venom_tip gave the friendly Poison for the round")
 	# charge_spell (host caster) on the friendly → charges_this_turn rider.
 	combat._net_resolve_spell({"spell": {"type": "custom", "id": "charge_spell"}}, int(fr.entity_id), 0)
-	_check(fr.get_meta("charges_this_turn", false), "charge_spell armed the friendly's multi-strike")
+	_check(fr.state.charges_this_turn, "charge_spell armed the friendly's multi-strike")
 	# hoarfrost (host caster) on the friendly → friendly shielded, opposing enemy frozen.
 	combat._net_resolve_spell({"spell": {"type": "custom", "id": "hoarfrost"}}, int(fr.entity_id), 0)
 	_check(fr.state.has_shield, "hoarfrost shielded the friendly")
@@ -1219,7 +1614,12 @@ func _test_net_temp_state_spells() -> void:
 	# Decay the host side → the friendly's temp Poison + charge rider clear,
 	# and the round-scoped Doubled Hour flag rests with them.
 	combat._net_decay_side_states(false)
-	_check(not fr.card_data.keywords.has("poison") and not fr.has_meta("charges_this_turn"),
+	# These live on fr.state, never as node metadata — the old has_meta() form was
+	# VACUOUSLY true (nothing calls set_meta for this key anywhere), so this line
+	# passed green while the decay it guards was a no-op and the Charge! rider
+	# stayed armed for the whole match. Assert the real fields.
+	_check(not fr.card_data.keywords.has("poison") \
+			and not fr.state.charges_this_turn and not fr.state.temp_poison,
 		"decay stripped the friendly's temp Poison + charge rider")
 	_check(not combat._doubled_hour[0], "decay cleared the caster side's Doubled Hour flag")
 	# Shield is NOT a per-turn state — it must survive the decay (consumed on hit).
@@ -1328,7 +1728,7 @@ func _test_net_phase_b_spells() -> void:
 	await create_timer(0.12).timeout
 	_check(combat._all_player_creatures().size() == wc_before + 2, "war_chant mustered 2 Soldiers from 2 pitched cards")
 
-	# ── mass_grave: damage caster foes by discard size (forwarded as _net_picks) ──
+	# ── mass_grave: damage caster foes by fallen count (forwarded as _net_picks) ──
 	var mg = combat._net_spawn_creature(CDB.get_card_data("brute"), 70005, 0, combat.ROW_FRONT, true, false)
 	await create_timer(0.12).timeout
 	if is_instance_valid(mg):
@@ -1336,14 +1736,14 @@ func _test_net_phase_b_spells() -> void:
 		mg.current_hp = 30
 		combat._net_resolve_spell({"spell": {"type": "custom", "id": "mass_grave"}, "_net_picks": 4}, -1, 0)
 		await create_timer(0.12).timeout
-		_check(is_instance_valid(mg) and int(mg.current_hp) == 26, "mass_grave hit the caster's foe for discard-size (4)")
+		_check(is_instance_valid(mg) and int(mg.current_hp) == 26, "mass_grave hit the caster's foe for its fallen count (4)")
 
 
 ## Player-2 parity for the 6 client-owned creature effects that solo only ran for the
 ## player side. The host resolves a CLIENT creature with is_enemy=true; verify each
 ## reaches the right owner: Doppelganger (per-side grave), Adaptable + Copycat (the
 ## EV_CHOICE → IN_CHOICE pick), Chaos Imp (perspective auto-target), Griffin (return-
-## to-caster + once-guard), Mourner (next-turn Command via EV_MANA next=true).
+## to-caster + once-guard), Mourner (owner draw via EV_DRAW).
 func _test_net_client_owned_effects() -> void:
 	print("— client-owned effects: doppelganger / adaptable / copycat / chaos_imp / griffin / mourner")
 	if combat._net_match_over:
@@ -1396,6 +1796,10 @@ func _test_net_client_owned_effects() -> void:
 	combat._on_net_intent(2, {"t": NM.IN_CHOICE, "eid": 80004, "kind": "copy_friendly", "pick": 80004})
 	await create_timer(0.1).timeout
 	_check(is_instance_valid(cpy) and int(cpy.current_atk) == cpy_base_atk, "copycat can't copy itself (keeps its own body, unchanged)")
+	# A response consumes exactly one prompt, even when its pick is invalid. Open a
+	# fresh prompt before exercising the valid branch; replaying the first response
+	# must never mutate the creature later.
+	combat._net_request_client_choice(cpy, "copy_friendly")
 	combat._on_net_intent(2, {"t": NM.IN_CHOICE, "eid": 80004, "kind": "copy_friendly", "pick": 80003})
 	await create_timer(0.1).timeout
 	_check(is_instance_valid(cpy) and int(cpy.current_atk) == int(tgt.current_atk) and cpy.card_data.keywords.has("armored"),
@@ -1424,24 +1828,19 @@ func _test_net_client_owned_effects() -> void:
 	combat._net_return_dead_to_caster(false)
 	_check(combat._net_return_once_used[0].has(555), "host griffin routed to its OWN hand (per-side, mirrored)")
 
-	# ── mourner's bonus_mana (on-death): next-turn Command reaches the OWNER ──
+	# ── Mourner dues (On-Death, 2026-07-15 rework): Command banks for the
+	# OWNER — host banks locally, a client death ships EV_MANA over the wire
+	# and must never touch the host's own bank.
 	var KE = root.get_node_or_null("KeywordEffects")
-	var base_bonus: int = int(combat._bonus_mana_next_turn)
-	KE._run_on_death({"type": "bonus_mana", "value": 1}, 0, false, combat)
-	_check(int(combat._bonus_mana_next_turn) == base_bonus + 1,
-		"host mourner's bonus_mana bumps the HOST's next-turn Command")
-	KE._run_on_death({"type": "bonus_mana", "value": 1}, 0, true, combat)
-	_check(int(combat._bonus_mana_next_turn) == base_bonus + 1,
-		"client mourner's bonus_mana ships to the client, never the host's pool")
-	# Receive side: the client folds EV_MANA next=true into its OWN next-turn pool
-	# (flip to NET_CLIENT so _on_net_event's host guard lets the event through).
-	var saved_mode: int = int(combat.combat_mode)
-	combat.combat_mode = combat.CombatMode.NET_CLIENT
-	combat._on_net_event({"t": NM.EV_MANA, "n": 1, "next": true})
-	combat.combat_mode = saved_mode
-	_check(int(combat._bonus_mana_next_turn) == base_bonus + 2,
-		"client folds EV_MANA next=true into its own next-turn Command")
-	combat._bonus_mana_next_turn = base_bonus
+	var mourner_effect: Dictionary = CDB.get_card_data("mourner").get("on_death", {})
+	var host_bank_before: int = int(combat._bonus_mana_next_turn)
+	KE._run_on_death(mourner_effect, 0, false, combat)
+	_check(int(combat._bonus_mana_next_turn) == host_bank_before + 1,
+		"host Mourner banked 1 Command for the HOST's next turn")
+	var host_after_own_bank: int = int(combat._bonus_mana_next_turn)
+	KE._run_on_death(mourner_effect, 0, true, combat)
+	_check(int(combat._bonus_mana_next_turn) == host_after_own_bank,
+		"client Mourner shipped EV_MANA without touching the host bank")
 
 
 func _clear_net_board() -> void:
@@ -1528,29 +1927,38 @@ func _test_net_client_passives() -> void:
 	combat.enemy_hp = 15
 	var ll = _spawn_passive(82030, 0, combat.ROW_FRONT, true, "", 3, 5, ["lifelink"])
 	await create_timer(0.1).timeout
+	_muster_board()
 	await combat._creature_hits_face(ll, 0, true)
 	_check(int(combat.enemy_hp) > 15, "client Lifelink healed the CLIENT hero on a face hit")
 
-	# ── wall: a client Iron Bastion blunts a HOST attacker's face hit ──
+	# ── ward: a client Honor Guard floors its column-mate at 1 HP ──
+	# (Iron Bastion's old reduce_face_damage retired 2026-07-15; the rare is
+	# now Honor Guard: column_ward. State-derived like the drummer — refresh,
+	# then a lethal hit on the column-mate is held at 1.)
 	await _clear_net_board()
-	combat.enemy_hp = 20
-	_spawn_passive(82040, 0, combat.ROW_BACK, true, "reduce_face_damage", 0, 8)
-	var ha = _spawn_passive(82041, 0, combat.ROW_FRONT, false, "", 4, 5)
+	_spawn_passive(82040, 0, combat.ROW_BACK, true, "column_ward", 2, 7)
+	var hg_mate = _spawn_passive(82041, 0, combat.ROW_FRONT, true, "", 2, 3)
 	await create_timer(0.1).timeout
-	await combat._creature_hits_face(ha, 0, false)
-	_check(int(combat.enemy_hp) == 17, "client Iron Bastion blunted the host's face hit (4 -> 3)")
+	combat._refresh_adjacency_buffs()
+	hg_mate.take_damage(9)
+	_check(is_instance_valid(hg_mate) and int(hg_mate.current_hp) == 1,
+		"client Honor Guard held its column-mate at 1 HP (9 damage floored)")
+
+	# ── Tallow Doll: a client-owned death compels the opposing HOST body ──
+	await _clear_net_board()
+	var traitor = _spawn_passive(82050, 0, combat.ROW_FRONT, false, "", 3, 5)
+	var betrayed = _spawn_passive(82051, 1, combat.ROW_FRONT, false, "", 2, 5)
+	await create_timer(0.1).timeout
+	combat._resolve_tallow_betrayal(0, true)
+	_check(is_instance_valid(betrayed) and int(betrayed.current_hp) == 2,
+		"client Tallow Doll turned the opposing host creature on its nearest ally")
+	_check(is_instance_valid(traitor) and int(traitor.current_hp) == 3,
+		"the betrayed host ally countered the compelled attack")
 
 	# ── play-time enter bonuses read the CLIENT's per-side counters ──
 	await _clear_net_board()
-	combat._net_tallow_played[1] = 2
-	var tl = _spawn_passive(82050, 0, combat.ROW_FRONT, true, "tallow_stacking", 1, 1)
-	await create_timer(0.1).timeout
-	combat._apply_play_time_passives(tl, true)
-	_check(is_instance_valid(tl) and int(tl.current_atk) == 3 and int(tl.current_hp) == 3,
-		"client Tallow Doll stacked +2/+2 from 2 priors (1/1 -> 3/3)")
-	_check(int(combat._net_tallow_played[1]) == 3, "client Tallow count incremented to 3")
 	combat._net_spells_fight[1] = 4
-	var hx = _spawn_passive(82051, 1, combat.ROW_FRONT, true, "atk_per_spell", 2, 3)
+	var hx = _spawn_passive(82052, 1, combat.ROW_FRONT, true, "atk_per_spell", 2, 3)
 	await create_timer(0.1).timeout
 	combat._apply_play_time_passives(hx, true)
 	# Hexblade now scales THIS ROUND per cast, so a late entrance no longer
@@ -1559,7 +1967,7 @@ func _test_net_client_passives() -> void:
 
 	# ── per-spell: a client spell grows the client Hexblade + Emberwright pings host ──
 	combat.player_hp = 20
-	_spawn_passive(82052, 2, combat.ROW_FRONT, true, "ember_per_spell", 2, 3)
+	_spawn_passive(82053, 2, combat.ROW_FRONT, true, "ember_per_spell", 2, 3)
 	await create_timer(0.1).timeout
 	var hx_atk: int = int(hx.effective_atk())
 	combat._net_resolve_spell({"spell": {"type": "damage_face", "value": 0}}, -1, 1)
@@ -1567,7 +1975,7 @@ func _test_net_client_passives() -> void:
 	_check(int(combat.player_hp) < 20, "a client spell pinged the HOST hero via client Emberwright")
 
 	# ── double_on_death detected on the client side ──
-	_spawn_passive(82053, 3, combat.ROW_FRONT, true, "double_on_death")
+	_spawn_passive(82054, 3, combat.ROW_FRONT, true, "double_on_death")
 	await create_timer(0.1).timeout
 	_check(combat._has_passive_on_side("double_on_death", true), "client Warden of Graves seen on the client side")
 	await _clear_net_board()
@@ -1584,12 +1992,11 @@ func _test_match_over() -> void:
 	_check(combat.phase == combat.Phase.GAME_OVER, "phase moved to GAME_OVER")
 
 
-## Boot a fresh NET_CLIENT scene and verify the second player's opening hand is
-## pre-dealt (so they can see it during turn 1) at the normal refill PLUS the Coin
-## (the going-second compensation — a one-time +1 Command card, not a raw extra
-## draw), and that their first turn skips the draw rather than topping the hand up.
+## Boot a fresh NET_CLIENT scene and feed it the host-owned private hand snapshot.
+## The second player sees the normal refill PLUS the Coin, and its first turn uses
+## the next host snapshot rather than drawing from a client-owned pile.
 func _test_client_opening_hand() -> void:
-	print("— second player (client) opening hand: pre-dealt refill + the Coin")
+	print("— second player opening hand: host snapshot + Coin, no client authority")
 	if is_instance_valid(combat):
 		combat.queue_free()
 		await create_timer(0.2).timeout
@@ -1600,6 +2007,8 @@ func _test_client_opening_hand() -> void:
 	NM.local_player_index = 1
 	NM._connected = true
 	NM.remote_present = true
+	# See _setup_state: EVERY term of is_connected_to_peer() or this boots SOLO.
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0
 	NM.entities.clear()
 
@@ -1613,11 +2022,20 @@ func _test_client_opening_hand() -> void:
 	if not is_instance_valid(combat):
 		_check(false, "client opening-hand scene booted")
 		return
-	# _ready stalls at prebake headless; the client branch of _net_begin_combat
-	# pre-deals the opening hand (no renderer dependency).
+	# _ready stalls at prebake headless, so wire listeners are opened directly.
 	combat._net_begin_combat()
 	await create_timer(0.4).timeout
 	var refill: int = combat.HAND_REFILL_TARGET
+	var slot = SS.get_slot(1)
+	var authority = NetPlayerStateScript.new()
+	_check(authority.setup(slot.deck, slot.deck_uids, slot.relics, slot.potions,
+		12345, slot.base_max_mana, Callable(SS, "skirmish_card_data")),
+		"host private-state fixture accepted the submitted loadout")
+	authority.predeal(refill, true)
+	var opening: Dictionary = authority.state_payload()
+	opening["t"] = NM.EV_HAND_SET
+	combat._on_net_event(opening)
+	await create_timer(0.3).timeout
 	# Going second deals the normal refill of real deck cards PLUS one synthetic Coin,
 	# so the opening hand is refill+1 total — but the +1 is the Coin, not a raw draw.
 	_check(combat._hand.size() == refill + 1,
@@ -1632,20 +2050,26 @@ func _test_client_opening_hand() -> void:
 	_check(coins == 1, "the going-second compensation is exactly one Coin (got %d)" % coins)
 	_check(deck_cards == refill,
 		"the rest of the opening hand is the normal refill of deck cards (got %d)" % deck_cards)
-	_check(combat._net_skip_draw_this_round, "skip-draw armed so turn 1 won't top it up")
-	# Simulate the client's first turn (round 2): _start_round must SKIP the draw.
+	# Simulate the host opening the client's first turn. The authority ledger clears
+	# its one-shot predeal guard and publishes the exact same six-card hand.
 	var before: int = combat._hand.size()
+	authority.begin_turn(1)
+	var turn_state: Dictionary = authority.state_payload()
+	turn_state["t"] = NM.EV_HAND_SET
+	combat._on_net_event(turn_state)
 	combat._net_client_turn_begin(1, 2)
 	await create_timer(0.4).timeout
-	_check(combat._hand.size() == before, "first turn kept the pre-dealt hand, no re-draw (%d)" % combat._hand.size())
-	_check(not combat._net_skip_draw_this_round, "skip-draw flag cleared after the first turn")
-	# EV_DRAW receive: a draw spell the client cast resolves on the host, which tells
-	# the client to draw from its own pile. Verify the client grows its hand on it.
+	_check(combat._hand.size() == before,
+		"first turn kept the host-predealt hand, no client draw (%d)" % combat._hand.size())
+	# Draw consequences also happen in the host ledger and arrive as an exact state.
 	var pre_draw: int = combat._hand.size()
-	combat._on_net_event({"t": NM.EV_DRAW, "n": 2})
+	authority.draw_cards(2)
+	var drawn_state: Dictionary = authority.state_payload()
+	drawn_state["t"] = NM.EV_HAND_SET
+	combat._on_net_event(drawn_state)
 	await create_timer(0.3).timeout
 	_check(combat._hand.size() == pre_draw + 2,
-		"client drew 2 cards on EV_DRAW (%d -> %d)" % [pre_draw, combat._hand.size()])
+		"host-authoritative draw added 2 cards (%d -> %d)" % [pre_draw, combat._hand.size()])
 
 
 ## Boot a fresh combat scene as NET_CLIENT and feed it host board snapshots to
@@ -1666,6 +2090,8 @@ func _run_client_reconcile_test() -> void:
 	NM.local_player_index = 1
 	NM._connected = true
 	NM.remote_present = true
+	# See _setup_state: EVERY term of is_connected_to_peer() or this boots SOLO.
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0
 	NM.entities.clear()
 
@@ -1802,38 +2228,6 @@ func _test_net_spell_recycle() -> void:
 		card.queue_free()
 
 
-## Caster-LOCAL pile spell, driven through the real entry point (_net_play_caster_
-## local_spell) with a no-UI spell so the headless harness can exercise it end to
-## end: Frenzy grants +2 Command and adds a Curse to the caster's own discard, and
-## the spell card itself recycles. (scrap/recycle/gambit/war_chant share this path
-## but gate on a hand-picker modal the harness can't drive.)
-func _test_net_caster_local_turbo() -> void:
-	print("— caster-local Frenzy (turbo) through the real play path: +2 Command + Curse to discard")
-	if not is_instance_valid(combat):
-		_check(false, "scene present for the caster-local turbo test")
-		return
-	var card = combat.CARD_SCENE.instantiate()
-	card.card_id = "turbo"
-	card.card_data = CDB.get_card_data("turbo")
-	card.deck_uid = SS.UID_SLOT_STRIDE + 9
-	combat.add_child(card)
-	combat._hand.append(card)
-	await create_timer(0.1).timeout
-	var mana_before: int = int(combat.player_mana)
-	var disc_before: int = combat._player_discard_pile.size()
-	await combat._net_play_caster_local_spell(card, 0)
-	await create_timer(0.1).timeout
-	_check(int(combat.player_mana) == mana_before + 2, "Frenzy granted +2 Command (%d -> %d)" % [mana_before, int(combat.player_mana)])
-	# +2: the Curse (turbo's effect) and the spell card itself (generic recycle).
-	_check(combat._player_discard_pile.size() == disc_before + 2,
-		"Frenzy added the Curse AND recycled the spell card into discard")
-	var still_in_hand := false
-	for h in combat._hand:
-		if is_instance_valid(h) and int(h.deck_uid) == SS.UID_SLOT_STRIDE + 9:
-			still_in_hand = true
-	_check(not still_in_hand, "Frenzy left the caster's hand (card consumed)")
-
-
 ## Rematch: HP refresh keeps decks but restores HP, and the handshake flags set
 ## correctly. Driven on the client scene so it can't self-relaunch (host-only).
 func _test_rematch_logic() -> void:
@@ -1864,3 +2258,13 @@ func _finish(code: int) -> void:
 	NM.leave()
 	_done = true
 	quit(code)
+
+
+## Staged fixtures represent bodies ALREADY deployed. The muster delay (a body
+## cannot swing the round it arrives) is covered by _probe_muster_delay; these
+## tests spawn and clash with no round boundary between, so without mustering
+## first every clash assertion here would no-op on the new rule.
+func _muster_board() -> void:
+	for c in combat._all_creatures_both_sides():
+		if is_instance_valid(c):
+			c.state.ready_to_swing = true

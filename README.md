@@ -2,7 +2,7 @@
 
 A lane-combat roguelike deckbuilder built in **Godot 4.6** (2D, GL Compatibility renderer). Inspired by *Card Wars* (combat) and *Slay the Spire* (roguelike structure).
 
-Pick one of five heroes and fight through three branching acts — placing creatures across a 4-lane, 2-row battlefield, casting spells, and resolving simultaneous combat each round — toward each act's boss. Draft cards, collect relics, manage your deck, and survive.
+Pick one of five claimants and march through three branching acts of the Successor Wars. Place creatures across a 4-lane, 2-row battlefield, cast spells, break rival Generals, recruit cards, and build a remembered warband for each act's keep.
 
 ## Running it
 
@@ -16,13 +16,13 @@ No build step, no external dependencies.
 
 - **Board:** 4 lanes × 2 rows (front/back) per side — 8 slots each.
 - **Heroes:** 5 playable, each a distinct archetype + signature relic.
-- **Structure:** 3 acts, branching maps with combat / elite / boss / shop / rest / event / treasure nodes.
-- **Content:** 150+ cards, 130+ relics, 40+ encounters, 40+ events, potions, mutators, ascension difficulty tiers, plus daily & custom-seed runs.
+- **Structure:** 3 acts, branching war roads with combat / General / keep / shop / rest / event / recruit / treasure stops.
+- **Content:** 170+ cards, 130+ relics, 50+ encounters, dozens of events, potions, mutators, ascension rules, plus daily and custom-seed marches.
 - **Saves:** 3 slots with mid-run resume.
 
 ## Combat in one breath
 
-Draw 4 → play creatures/spells and spend mana (bank up to 2) → toggle *floop* abilities → Swift pre-phase → simultaneous combat (both rows attack; front strikes and is struck first) → deaths & on-death effects → enemy reinforces → next round. Round 1 is setup only.
+Refill your persistent hand to five → play creatures and spells by spending Command → mark unwanted cards for end-turn discard → choose creature abilities → resolve Swift → clash in every occupied lane → process deaths and enemy reinforcements → begin the next round. Combat happens in round 1; there is no consequence-free setup turn.
 
 ## Project layout
 
@@ -39,9 +39,19 @@ Draw 4 → play creatures/spells and spend mana (bank up to 2) → toggle *floop
 - [`CLAUDE.md`](CLAUDE.md) — architecture overview & conventions.
 - [`docs/COPY_STYLE.md`](docs/COPY_STYLE.md) — house style for all in-game text.
 - [`docs/ROADMAP_TO_1.0.md`](docs/ROADMAP_TO_1.0.md) — the production plan to 1.0.
-- [`docs/CONQUEST_REDESIGN.md`](docs/CONQUEST_REDESIGN.md) — the planned "Successor Wars" faction/conquest redesign.
+- [`docs/CONQUEST_REDESIGN.md`](docs/CONQUEST_REDESIGN.md) — the Successor Wars design specification and implementation history.
 - [`CREDITS.md`](CREDITS.md) — asset attributions.
+
+## Verification
+
+Run the strict, save-isolated release checks from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/run_safe_probes.ps1 -GodotPath D:\games\Godot_v4.6.2-stable_win64_console.exe
+```
+
+The runner gives every probe a timeout, requires both exit code 0 and its success sentinel, rejects Godot parse/runtime errors, and redirects `user://` to a temporary test home. It does not touch production save slots.
 
 ## Credits & license
 
-Art and audio combine public-domain master paintings, CC0 assets (Kenney, OpenGameArt), and CC-BY 3.0 assets (game-icons.net, pbmojART, and J. W. Bjerk's *Painterly Spell Icons*) — see [`CREDITS.md`](CREDITS.md) and the in-game Credits screen. Built on the Godot Engine (MIT).
+Art and audio combine public-domain paintings, CC0 assets, CC-BY 3.0 art, and CC-BY 3.0/4.0 music. See [`CREDITS.md`](CREDITS.md), [`THIRD_PARTY_LICENSES.txt`](THIRD_PARTY_LICENSES.txt), the music/SFX ledgers under `assets/audio/`, and the in-game Credits screen. Built on the Godot Engine (MIT).

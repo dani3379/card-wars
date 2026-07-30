@@ -38,7 +38,7 @@ const TERRAIN_TIPS := {
 const WAYSIDE_TIPS := {
 	"drill_yard": ["The Drill Yard",
 		"Drill a creature: +1/+1, then push your luck for more."],
-	"muster_scale": ["The Quartermaster's Scales",
+	"muster_scale": ["The Trading Scales",
 		"One trade by weight — sell a card for gold, or buy provisions."],
 	"standard_bearer": ["The Standard-Bearer",
 		"Move one keyword from one of your creatures to another."],
@@ -65,7 +65,12 @@ func _ready() -> void:
 	# The chart is the screen the player returns to most — rotate the campaign
 	# themes (picker excludes the last-played track; positions resume) so the
 	# road never drones on one loop.
-	AudioBank.play_music_random(["map", "map_b", "map_c", "map_d"])
+	# Per-act chart score: each act carries its own anchor over a shared bed,
+	# so the campaign darkens musically as the scorch spreads.
+	match RunState.get_act():
+		2: AudioBank.play_music_random(["map_act2", "map_c", "map_d"])
+		3: AudioBank.play_music_random(["map_act3", "map", "map_d"])
+		_: AudioBank.play_music_random(["map", "map_b", "map_e"])
 	# No atmosphere overlay here: the chart plate carries its own mood, and
 	# the menu-style vignette just dims it.
 	overlay_handles_standard = true
@@ -112,6 +117,11 @@ func _ready() -> void:
 	RunState.current_node_type = ""
 	RunState.current_encounter_id = ""
 	await _resolve_meta_pickers()
+	# A Daily attempt begins at the first durable map checkpoint, not while the
+	# War Chest is still open. That keeps "marching" records resumable.
+	if RunState.is_daily_run:
+		MetaState.record_daily_start(RunState.current_hero_id,
+			RunState.active_slot, RunState.daily_date)
 	RunState.save_run()
 
 
@@ -121,6 +131,35 @@ func _resolve_meta_pickers() -> void:
 	# was later removed. The helper no-ops when a valid binding already exists.
 	if RunState.has_relic("bottled_talisman"):
 		await GameTheme.bind_bottled_talisman(self)
+	# Articles of War: a one-time tribe commitment. Only tribes currently in the
+	# company are offered, so the positive boss relic cannot be chosen blank.
+	if RunState.has_relic("articles_of_war") and RunState.articles_of_war_tribe == "":
+		var tribe_counts: Dictionary = {}
+		for cid in RunState.deck:
+			var cd: Dictionary = CardDB.get_card_data(cid)
+			if cd.get("type", "") != "creature":
+				continue
+			var tribe: String = String(cd.get("ctype", ""))
+			if tribe != "":
+				tribe_counts[tribe] = int(tribe_counts.get(tribe, 0)) + 1
+		var tribes: Array = tribe_counts.keys()
+		tribes.sort_custom(func(a, b):
+			var ac: int = int(tribe_counts[a])
+			var bc: int = int(tribe_counts[b])
+			return ac > bc if ac != bc else String(a) < String(b))
+		var tribe_opts: Array = []
+		for tribe in tribes:
+			tribe_opts.append({
+				"label": String(tribe).capitalize(),
+				"desc": "%d creature%s — they cost 1 less, minimum 1." % [
+					int(tribe_counts[tribe]), "s" if int(tribe_counts[tribe]) != 1 else ""],
+				"color": Color(0.34, 0.24, 0.13),
+			})
+		if not tribe_opts.is_empty():
+			var tribe_pick: int = await GameTheme.show_option_picker(self,
+				"The Articles of War — choose a tribe", tribe_opts)
+			if tribe_pick >= 0:
+				RunState.articles_of_war_tribe = String(tribes[tribe_pick])
 	# Totem Pole: pick a keyword once per act.
 	if RunState.has_relic("totem_pole") and RunState.totem_pole_act != RunState.get_act():
 		var kw_opts := [
@@ -223,8 +262,14 @@ func _site_label_for_preview(nd: Dictionary) -> String:
 		return "GENERAL"
 	if typ == "boss":
 		return "KEEP"
+	if String(nd.get("setpiece_id", "")) != "":
+		return "NAMED ACTION"
 	if typ == "combat":
 		return "HOLD"
+	if typ == "arsenal":
+		return "SUPPLY CACHE"
+	if typ == "treasure":
+		return "RELIC CACHE"
 	if typ == "wayside":
 		var wid: String = String(nd.get("wayside_id", ""))
 		if WAYSIDE_TIPS.has(wid):
@@ -270,10 +315,48 @@ func _tip(nd: Dictionary) -> String:
 		var enc: Dictionary = EncounterDB.get_encounter(String(nd.encounter_id))
 		if not enc.is_empty():
 			label = enc.name
+	# A NAMED ACTION states its whole bargain on the chart: the ground, the
+	# order, the trophy and the TOLL. This is the one node type whose failure
+	# costs HP without ending the run, so the price has to be readable from the
+	# road — a toll the player only discovers after committing would be a trap,
+	# and this game does not set traps for the player.
+	var sp_id: String = String(nd.get("setpiece_id", ""))
+	if sp_id != "" and SetPieceDB.exists(sp_id):
+		var sp: Dictionary = SetPieceDB.get_set_piece(sp_id)
+		label = "%s
+A NAMED ACTION" % String(sp.get("name", sp_id))
+		var ground: Dictionary = sp.get("ground", {})
+		if String(ground.get("text", "")) != "":
+			label += "
+%s: %s" % [String(ground.get("name", "")).capitalize(),
+				String(ground.get("text", ""))]
+		label += "
+Order: %s" % SetPieceDB.objective_label(sp_id)
+		var sp_trophy: String = String(sp.get("trophy", {}).get("relic", ""))
+		if sp_trophy != "":
+			label += "
+Carry it: %s + %d gold" % [
+				String(RelicDB.get_relic(sp_trophy).get("name", sp_trophy)),
+				int(sp.get("gold", 0))]
+		var sp_toll: int = int(sp.get("toll", 0))
+		if sp_toll > 0:
+			label += "
+Failure: lose %d HP and forfeit the prize." % sp_toll
+		return label
 	if t == "elite":
-		label += "\nA General holds this ground — break them for a relic."
+		label += "\nA General holds this ground. Win to gain a relic."
 	if t == "recruit":
-		label += "\nFree draft — take 1 of 3 cards."
+		label = "Recruit Camp\nChoose 1 of 3 cards for free."
+	if t == "shop":
+		label = "Trader's Wagon\nBuy cards, relics, and potions, or sell one card."
+	if t == "rest":
+		label = "Make Camp\nHeal, upgrade cards, or hold a wake."
+	if t == "event":
+		label = "Something on the Road\nAn event with several choices."
+	if t == "treasure":
+		label = "Relic Cache\nReveal one relic. Take it or choose gold."
+	if t == "arsenal":
+		label = "Supply Cache\nChoose a card upgrade, potions, or gold."
 	if t == "wayside":
 		var wid: String = String(nd.get("wayside_id", ""))
 		if WAYSIDE_TIPS.has(wid):
@@ -287,6 +370,10 @@ func _tip(nd: Dictionary) -> String:
 				HeroDB.get_faction(rival)).get("lord_title", ""))
 			if title != "":
 				label += "\n%s" % title
+		var siege := EncounterDB.get_siege(String(nd.get("encounter_id", "")))
+		if not siege.is_empty():
+			label += "\nCapital siege: %s" % String(siege.get(
+				"brief", "Break the defenses, then defeat the lord."))
 	# Mutator tag — surfaces "Stormy: enemies gain Swift" etc. so the player
 	# can route around a fight they don't want without entering it first.
 	var mut_id: String = String(nd.get("mutator_id", ""))
@@ -323,9 +410,11 @@ func _on_node_pressed(row: int, col: int) -> void:
 	if not ok:
 		return
 	var dest := Vector2.ZERO
+	var dest_nd: Dictionary = {}
 	for nd in _nodes:
 		if int(nd.row) == row and int(nd.col) == col:
 			dest = nd.pos
+			dest_nd = nd
 			break
 	# Capture the march origin before visiting flips availability state.
 	var from_p: Vector2 = _player_pos if _has_player else _camp_pos
@@ -341,7 +430,7 @@ func _on_node_pressed(row: int, col: int) -> void:
 		"shop": target = SHOP_SCENE
 		"rest": target = REST_SCENE
 		"event": target = EVENT_SCENE
-		"treasure": target = TREASURE_SCENE
+		"treasure", "arsenal": target = TREASURE_SCENE
 		"recruit": target = RECRUIT_SCENE
 		"wayside": target = WAYSIDE_SCENE
 	# The army marches down the carved road to the chosen site, then the
@@ -349,11 +438,18 @@ func _on_node_pressed(row: int, col: int) -> void:
 	# menu click.
 	if _overlay != null:
 		_overlay.clear_route_preview()
-		await _overlay.march_along(road_path_between(from_p, dest))
+		await _overlay.march_along(road_path_between(from_p, dest),
+			_site_label_for_preview(dest_nd))
 	if ntype in ["combat", "elite", "boss"]:
 		await ScenePreload.wait_for_encounter_art(RunState.current_encounter_id)
 	if target != "":
-		GameTheme.fade_out_then_change_scene(self, target, 0.30)
+		# Bloom the signature ink transition from the site the standard reached.
+		# The scene handoff now belongs to the committed place, not a fixed corner.
+		var screen_dest: Vector2 = dest * _view_zoom + _view_pan
+		var origin_uv := Vector2(0.08, 0.10)
+		if size.x > 0.0 and size.y > 0.0:
+			origin_uv = Vector2(screen_dest.x / size.x, screen_dest.y / size.y)
+		GameTheme.fade_out_then_change_scene(self, target, 0.30, origin_uv)
 	else:
 		_marching = false
 
@@ -384,8 +480,16 @@ func _build_top_hud() -> void:
 	# MapTerrain's title cartouche below docks to the SAME x=118 rail, so the
 	# corner reads as one aligned column instead of four staggered edges.
 	var x := 128.0
-	_place_painted_icon(GameTheme.tex_hud_heart, Vector2(x, ROW_Y),
-		ICON, Color.WHITE)
+	# The army's blood is an oxblood wax seal — the same wax that means HP on
+	# every card face and the combat plaques, so the icon IS the color code.
+	# (Its predecessor, tex_hud_heart, was a glossy valentine heart — the one
+	# emoji-register icon on the whole war table.)
+	var hp_seal = preload("res://scripts/ui/painters/WaxSeal.gd").new()
+	hp_seal.wax = Color(0.51, 0.137, 0.106)
+	hp_seal.seed_text = "map_hp"
+	hp_seal.position = Vector2(x, ROW_Y)
+	hp_seal.size = Vector2(ICON, ICON)
+	_hud_root.add_child(hp_seal)
 	_place_centred_label(
 		"%d/%d" % [RunState.hero_hp, RunState.hero_max_hp],
 		Rect2(x + ICON + GAP, ROW_Y, 130, ROW_H),
@@ -394,8 +498,13 @@ func _build_top_hud() -> void:
 
 	const GOLD_ICON := 50.0
 	var gold_y: float = ROW_Y - (GOLD_ICON - ICON) * 0.5
-	_place_painted_icon(GameTheme.tex_hud_gold, Vector2(x, gold_y),
-		GOLD_ICON, Color.WHITE)
+	# The purse is the Old King's coinage (CoinProp — the event tables' mint),
+	# not a flat gilt disc.
+	var purse = preload("res://scripts/ui/painters/CoinProp.gd").new()
+	purse.seed_text = "map_purse"
+	purse.position = Vector2(x, gold_y)
+	purse.size = Vector2(GOLD_ICON, GOLD_ICON)
+	_hud_root.add_child(purse)
 	_place_centred_label(str(RunState.gold),
 		Rect2(x + GOLD_ICON + GAP, ROW_Y, 90, ROW_H),
 		Color(1.0, 0.90, 0.45), FONT_SZ)
@@ -470,7 +579,7 @@ func _build_top_hud() -> void:
 
 func _place_hud_text_button(x: float, y: float, h: float, text: String,
 		tip: String, callback: Callable, rest_color: Color) -> float:
-	var w: float = maxf(116.0, float(text.length()) * 9.0 + 34.0)
+	var w: float = maxf(116.0, float(text.length()) * 9.6 + 34.0)
 	var btn := MapTipButton.new()
 	btn.view = self
 	btn.flat = true
@@ -482,7 +591,7 @@ func _place_hud_text_button(x: float, y: float, h: float, text: String,
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	if GameTheme.font_display != null:
 		btn.add_theme_font_override("font", GameTheme.font_display)
-	btn.add_theme_font_size_override("font_size", 15)
+	btn.add_theme_font_size_override("font_size", 16)
 	btn.add_theme_color_override("font_color", rest_color)
 	btn.add_theme_color_override("font_hover_color", GameTheme.GILT_BRIGHT)
 	btn.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.88))
@@ -814,20 +923,20 @@ func _show_war_council() -> void:
 		_overlay_label(root, "%s: %s" % [engine, engine_line], 19,
 			Color(0.84, 0.92, 0.96))
 
-	var gate_line := "Keep: break %d more %s to open the road." % [
+	var gate_line := "Keep: win %d more %s to open the road." % [
 		maxi(RunState.HOLDS_TO_OPEN_LORD - RunState.holds_broken_in_act, 0),
 		"hold" if RunState.HOLDS_TO_OPEN_LORD - RunState.holds_broken_in_act == 1 else "holds"]
 	if RunState.is_lord_gate_open():
-		gate_line = "Keep: the road is open. You can march on the lord now."
+		gate_line = "Keep: the road is open. You can challenge the lord now."
 	_overlay_label(root, gate_line, 18, Color(0.96, 0.80, 0.48))
 	_overlay_label(root, _terrain_summary(), 18, Color(0.80, 0.76, 0.64))
 
 	var advice := {
-		"grasswake": "Plan: cover empty lanes early. Letting them ride through is how the toll starts.",
-		"last_wall": "Plan: break adjacent pairs before Formation turns a line into a wall.",
-		"owed": "Plan: every death feeds them. Kill engines before you farm small bodies.",
-		"lanternhall": "Plan: expect spell tricks and exile pressure. Win with clean, early board claims.",
-		"everflame": "Plan: Doom and delayed payoffs punish waiting. End fuses before they pay."
+		"grasswake": "Plan: cover empty lanes early. Their riders punish gaps.",
+		"last_wall": "Plan: separate adjacent enemies before Formation strengthens them.",
+		"owed": "Plan: enemy deaths trigger many of their effects. Destroy key creatures first.",
+		"lanternhall": "Plan: expect spell effects and cards removed from your draw pile. Build your board early.",
+		"everflame": "Plan: watch Doom timers and destroy those creatures before they detonate."
 	}
 	if advice.has(faction):
 		_overlay_label(root, String(advice[faction]), 18, GameTheme.IVORY)
@@ -842,15 +951,22 @@ func _show_war_council() -> void:
 
 
 func _company_next_line(kills: int, deck_index: int) -> String:
-	if kills < RunState.VETERAN_EPITHET_KILLS:
-		return "%d to epithet" % (RunState.VETERAN_EPITHET_KILLS - kills)
+	# The ladder in reading order: name + school at 3, rank at 6, doctrine at 10.
+	# Each rung reports the SOONEST thing still owed, so an unclaimed choice always
+	# outranks a distance — an owed pick the player never noticed is the one
+	# failure this readout exists to prevent.
+	if kills < RunState.veteran_epithet_kills():
+		return "%d to a name and a war school" % (
+			RunState.veteran_epithet_kills() - kills)
+	if not RunState.has_upgrade_path(deck_index, "war_school"):
+		return "war school ready next fight"
 	if kills < RunState.VETERAN_RANK_KILLS:
 		return "%d to +1/+1" % (RunState.VETERAN_RANK_KILLS - kills)
-	if kills < RunState.VETERAN_SCHOOL_KILLS:
-		return "%d to war school" % (RunState.VETERAN_SCHOOL_KILLS - kills)
-	if RunState.has_upgrade_path(deck_index, "war_school"):
-		return "war school complete"
-	return "war school ready next fight"
+	if kills < RunState.veteran_doctrine_kills():
+		return "%d to a doctrine" % (RunState.veteran_doctrine_kills() - kills)
+	if RunState.has_upgrade_path(deck_index, "doctrine"):
+		return "fully trained"
+	return "doctrine ready next fight"
 
 
 func _company_spotlight_line() -> String:
@@ -868,17 +984,24 @@ func _company_spotlight_line() -> String:
 		saw_creature = true
 		var uid := int(RunState.deck_uids[i])
 		var kills := RunState.get_kills(uid)
-		if kills >= RunState.VETERAN_SCHOOL_KILLS \
+		# An UNCLAIMED choice always takes the spotlight over a countdown, and the
+		# doctrine outranks the school because a card holding both owes the later
+		# one. Both are checked before any distance is computed.
+		if kills >= RunState.veteran_doctrine_kills() \
+				and not RunState.has_upgrade_path(i, "doctrine"):
+			return "Doctrine waiting: %s specialises next fight." \
+				% String(data.get("name", RunState.deck[i]))
+		if kills >= RunState.veteran_school_kills() \
 				and not RunState.has_upgrade_path(i, "war_school"):
 			return "War school waiting: %s chooses Armored, Swift, or Thorns next fight." \
 				% String(data.get("name", RunState.deck[i]))
 		var gap := 999
-		if kills < RunState.VETERAN_EPITHET_KILLS:
-			gap = RunState.VETERAN_EPITHET_KILLS - kills
+		if kills < RunState.veteran_epithet_kills():
+			gap = RunState.veteran_epithet_kills() - kills
 		elif kills < RunState.VETERAN_RANK_KILLS:
 			gap = RunState.VETERAN_RANK_KILLS - kills
-		elif kills < RunState.VETERAN_SCHOOL_KILLS:
-			gap = RunState.VETERAN_SCHOOL_KILLS - kills
+		elif kills < RunState.veteran_doctrine_kills():
+			gap = RunState.veteran_doctrine_kills() - kills
 		else:
 			continue
 		if kills > 0 and (gap < best_gap or (gap == best_gap and kills > best_kills)):
@@ -981,6 +1104,7 @@ func _show_deck_viewer() -> void:
 	# a row that silently skips starters or curses reads as a miscount.
 	var creatures := 0
 	var spells := 0
+	var armaments := 0
 	var curses := 0
 	var rarity_counts := {"starter": 0, "common": 0, "uncommon": 0, "rare": 0}
 	for card_id in RunState.deck:
@@ -990,10 +1114,10 @@ func _show_deck_viewer() -> void:
 		if CardDB.is_curse(card_id):
 			curses += 1
 			continue
-		if cdata.get("type", "") == "creature":
-			creatures += 1
-		else:
-			spells += 1
+		match String(cdata.get("type", "")):
+			"creature": creatures += 1
+			"spell": spells += 1
+			"armament": armaments += 1
 		var r = cdata.get("rarity", "common")
 		if rarity_counts.has(r):
 			rarity_counts[r] += 1
@@ -1004,17 +1128,23 @@ func _show_deck_viewer() -> void:
 	stats_bar.add_theme_constant_override("separation", 32)
 	overlay.add_child(stats_bar)
 
+	# Card TYPE isn't an identity colour system the way rarity and tribe are, so
+	# this pair used to be an ad-hoc web-green and periwinkle sitting beside gilt
+	# and ash siblings on the same bar. Bone for creatures, the house spell-blue
+	# for spells — the same ink spells already wear on the card face.
 	var comp_items = [
-		["Creatures: %d" % creatures, Color(0.55, 0.85, 0.55)],
-		["Spells: %d" % spells, Color(0.55, 0.70, 0.95)],
+		["Creatures: %d" % creatures, Color(0.86, 0.82, 0.72)],
+		["Spells: %d" % spells, Color(0.70, 0.86, 1.0)],
 	]
+	if armaments > 0:
+		comp_items.append(["Armaments: %d" % armaments, Color(0.90, 0.68, 0.30)])
 	if curses > 0:
 		comp_items.append(["Curses: %d" % curses, Color(0.68, 0.56, 0.72)])
 	comp_items.append_array([
 		["|", Color(0.4, 0.35, 0.3)],
 		["Starter: %d" % rarity_counts["starter"], Color(0.62, 0.60, 0.54)],
 		["Common: %d" % rarity_counts["common"], Color(0.78, 0.75, 0.68)],
-		["Uncommon: %d" % rarity_counts["uncommon"], Color(0.40, 0.75, 0.95)],
+		["Uncommon: %d" % rarity_counts["uncommon"], GameTheme.RARITY_UNCOMMON],
 		["Rare: %d" % rarity_counts["rare"], Color(0.95, 0.78, 0.25)],
 	])
 	for item in comp_items:
@@ -1182,7 +1312,38 @@ func _build_map_tooltip(text: String) -> Control:
 		body.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.75))
 		body.add_theme_constant_override("outline_size", 3)
 		box.add_child(body)
+	# Keep the tooltip inside the frame. Site tooltips on the right-hand stops
+	# (the keep sits at 0.80·w, and Etna east of it) ran off the right edge and
+	# got cut mid-word — the engine's own clamp measures against the real window
+	# while this game lays out in a 1600×900 canvas behind a Supersample
+	# SubViewport, so the two disagree. Deferred because the panel has no size
+	# until it has been laid out once. (Screen audit 2026-07-21.)
+	panel.tree_entered.connect(func() -> void:
+		_clamp_tooltip_into_view.call_deferred(panel))
 	return panel
+
+
+## Nudge a shown tooltip back inside the viewport. Walks up to the embedded
+## popup that owns the panel (Godot parents custom tooltips into one); if the
+## tree shape isn't what we expect, this quietly does nothing rather than
+## fighting the engine.
+func _clamp_tooltip_into_view(panel: Control) -> void:
+	if panel == null or not is_instance_valid(panel) or not panel.is_inside_tree():
+		return
+	var host: Node = panel.get_parent()
+	while host != null and not (host is Window):
+		host = host.get_parent()
+	if host == null:
+		return
+	var win := host as Window
+	var frame: Vector2i = get_viewport().get_visible_rect().size
+	var tip: Vector2i = win.size
+	var pos: Vector2i = win.position
+	const MARGIN := 8
+	pos.x = clampi(pos.x, MARGIN, maxi(MARGIN, frame.x - tip.x - MARGIN))
+	pos.y = clampi(pos.y, MARGIN, maxi(MARGIN, frame.y - tip.y - MARGIN))
+	if pos != win.position:
+		win.position = pos
 
 
 ## Button whose tooltip renders as the chart-styled panel above.
@@ -1224,6 +1385,7 @@ class MapPulseOverlay extends Control:
 	var _hover_path: PackedVector2Array = PackedVector2Array()
 	var _hover_dest := Vector2.ZERO
 	var _hover_label := ""
+	var _march_label := ""
 	var _hover_t := -10.0
 	# Frontier reveal: one-shot light-up of the reachable sites on map open,
 	# staggered by distance from the standard. Keyed by node index.
@@ -1293,10 +1455,12 @@ class MapPulseOverlay extends Control:
 
 	## Walk the standard along a road curve. Awaitable; progress sticks at 1
 	## so the banner stays planted at the destination through the scene fade.
-	func march_along(path: PackedVector2Array, duration := 0.55) -> void:
+	func march_along(path: PackedVector2Array, label: String = "",
+			duration := 0.55) -> void:
 		_march_pts = path
 		_hover_path = PackedVector2Array()
 		_hover_label = ""
+		_march_label = label
 		_march_cum = PackedFloat32Array()
 		_march_cum.append(0.0)
 		_march_len = 0.0
@@ -1369,6 +1533,10 @@ class MapPulseOverlay extends Control:
 			Vector2(map._view_zoom, map._view_zoom))
 		var amber: Color = map.PLAYER_AMBER
 		var crimson: Color = map.CRIMSON
+		# A committed order stays explicit while the standard moves; hover ink
+		# has become an issued road, not vanished feedback.
+		if _march_prog >= 0.0 and _march_pts.size() >= 2:
+			_draw_committed_route(amber)
 		# 0.7 — hovered route preview: the chosen branch brightens before
 		# commit, so route-planning feels like reading the chart, not hunting
 		# tiny tooltips.
@@ -1388,7 +1556,7 @@ class MapPulseOverlay extends Control:
 				draw_arc(p, rr, 0, TAU, 48,
 					Color(col.r, col.g, col.b, 0.10 + 0.24 * pulse), 2.0, true)
 				draw_circle(p, rr,
-					Color(col.r, col.g, col.b, 0.015 + 0.035 * pulse))
+					Color(col.r, col.g, col.b, 0.015 + 0.035 * pulse), true, -1.0, true)
 				# Frontier reveal: a one-shot bright ring blooming off the site
 				# when the map opens — nearest road first, then the next.
 				var rd: float = float(_reveal_delay.get(ni, -1.0))
@@ -1399,7 +1567,7 @@ class MapPulseOverlay extends Control:
 						draw_arc(p, rr2, 0, TAU, 44,
 							Color(col.r, col.g, col.b, 0.55 * (1.0 - rk)), 2.6, true)
 						draw_circle(p, 3.6,
-							Color(1.0, 0.92, 0.62, 0.55 * (1.0 - rk)))
+							Color(1.0, 0.92, 0.62, 0.55 * (1.0 - rk)), true, -1.0, true)
 		# 1.5 — march glints: a short runner sliding camp-side → door along
 		# each open leg. Direction without shouting — the baked amber dashes
 		# carry the state; this just says "that way". Quiet during the march.
@@ -1425,7 +1593,7 @@ class MapPulseOverlay extends Control:
 				var fade := sin(ph * PI)
 				draw_line(tail, head,
 					Color(1.0, 0.86, 0.50, 0.30 * fade), 3.0, true)
-				draw_circle(head, 2.2, Color(1.0, 0.90, 0.60, 0.50 * fade))
+				draw_circle(head, 2.2, Color(1.0, 0.90, 0.60, 0.50 * fade), true, -1.0, true)
 		# 2 — ember puffs off Etna's plume, drifting NE on the strait wind.
 		var apex: Vector2 = (map._etna_peak as Vector2) + Vector2(0, -42.0)
 		for k in range(3):
@@ -1433,16 +1601,10 @@ class MapPulseOverlay extends Control:
 			var pp := apex + Vector2(30.0, -38.0) * ph \
 				+ Vector2(sin(_t * 0.9 + float(k) * 2.1) * 4.0, 0)
 			draw_circle(pp, 3.5 + 9.0 * ph,
-				Color(0.75, 0.70, 0.64, (1.0 - ph) * 0.085))
+				Color(0.75, 0.70, 0.64, (1.0 - ph) * 0.085), true, -1.0, true)
 		# 3 — the army standard: walking the road while marching, otherwise
 		# planted at the player's latest conquest (or the camp gate).
-		var sp: Vector2
-		if _march_prog >= 0.0:
-			sp = _march_pos()
-		elif bool(map._has_player):
-			sp = map._player_pos
-		else:
-			sp = (map._camp_pos as Vector2) + Vector2(30, -4)
+		var sp: Vector2 = _standard_point()
 		var quiet_motion: bool = UserSettings != null and UserSettings.reduce_motion
 		# 3.2 — march dust: a puff dropped every few paces, swelling and fading
 		# behind the column. The road remembers the army passed.
@@ -1459,7 +1621,9 @@ class MapPulseOverlay extends Control:
 					continue
 				var k := age / 0.9
 				draw_circle(d.p, 2.6 + 5.5 * k,
-					Color(0.72, 0.63, 0.48, 0.16 * (1.0 - k)))
+					Color(0.72, 0.63, 0.48, 0.16 * (1.0 - k)), true, -1.0, true)
+			if _march_prog > 0.0 and _march_prog < 1.0:
+				_draw_march_column(amber)
 			# 3.3 — arrival ring: one clean ground pulse where the march ends,
 			# timed to ride through the scene fade.
 			var ak := (_t - _arrive_t) / 0.5
@@ -1475,7 +1639,7 @@ class MapPulseOverlay extends Control:
 				draw_arc(_commit_p, cr, 0, TAU, 36,
 					Color(1.0, 0.86, 0.50, 0.30 * (1.0 - ck)), 2.2, true)
 				draw_circle(_commit_p, 5.0,
-					Color(1.0, 0.82, 0.42, 0.22 * (1.0 - ck)))
+					Color(1.0, 0.82, 0.42, 0.22 * (1.0 - ck)), true, -1.0, true)
 		var sway := sin(_t * 2.3)
 		if _march_prog >= 0.0 and _march_prog < 1.0:
 			sway = sin(_t * 9.0)   # the banner snaps in the wind on the move
@@ -1483,17 +1647,17 @@ class MapPulseOverlay extends Control:
 		# one bright focal point on the chart (the "you are the light on this
 		# table" read). Stacked discs so the falloff stays soft.
 		draw_circle(sp + Vector2(0, 1), 56.0 + 5.0 * sway,
-			Color(1.0, 0.80, 0.42, 0.038 + 0.010 * sway))
+			Color(1.0, 0.80, 0.42, 0.038 + 0.010 * sway), true, -1.0, true)
 		draw_circle(sp + Vector2(0, 1), 34.0 + 3.0 * sway,
-			Color(1.0, 0.82, 0.46, 0.055))
+			Color(1.0, 0.82, 0.46, 0.055), true, -1.0, true)
 		draw_circle(sp + Vector2(0, 2), 13.0 + 2.0 * sway,
-			Color(amber.r, amber.g, amber.b, 0.07))
+			Color(amber.r, amber.g, amber.b, 0.07), true, -1.0, true)
 		draw_arc(sp, 19.0 + 1.5 * sway, 0, TAU, 40,
 			Color(amber.r, amber.g, amber.b, 0.22), 1.4, true)
-		draw_circle(sp + Vector2(1, 3), 3.4, Color(0, 0, 0, 0.45))
+		draw_circle(sp + Vector2(1, 3), 3.4, Color(0, 0, 0, 0.45), true, -1.0, true)
 		draw_line(sp + Vector2(0, 4), sp + Vector2(0, -36),
 			Color(0.05, 0.04, 0.03), 2.4, true)
-		draw_circle(sp + Vector2(0, -36), 1.8, Color(0.92, 0.78, 0.42))
+		draw_circle(sp + Vector2(0, -36), 1.8, Color(0.92, 0.78, 0.42), true, -1.0, true)
 		var tip_x := 26.0 + 2.0 * sway
 		var flag := PackedVector2Array([
 			sp + Vector2(0, -36),
@@ -1505,6 +1669,30 @@ class MapPulseOverlay extends Control:
 		var outline := flag.duplicate()
 		outline.append(flag[0])
 		draw_polyline(outline, Color(0.16, 0.11, 0.05, 0.9), 1.2, true)
+		# The standard accumulates the run instead of resetting visually at every
+		# stop. Honors are silhouette; exact counts remain in the War Council.
+		for honor_i in range(mini(RunState.generals_broken_run, 5)):
+			var hx := 5.0 + float(honor_i) * 4.0
+			var hcol := Color(0.66, 0.15, 0.10) if honor_i % 2 == 0 \
+				else Color(0.88, 0.61, 0.22)
+			draw_colored_polygon(PackedVector2Array([
+				sp + Vector2(hx, -21), sp + Vector2(hx + 3.0, -21),
+				sp + Vector2(hx + 2.5, -11), sp + Vector2(hx + 1.5, -13),
+				sp + Vector2(hx + 0.5, -11)]), hcol)
+		if not RunState.fallen.is_empty():
+			var cloth_len := minf(15.0 + float(RunState.fallen.size()) * 1.5, 25.0)
+			draw_colored_polygon(PackedVector2Array([
+				sp + Vector2(1, -21), sp + Vector2(6, -20),
+				sp + Vector2(4, -20 + cloth_len), sp + Vector2(1, -17 + cloth_len)]),
+				Color(0.045, 0.038, 0.036, 0.96))
+		for seal_i in range(clampi(RunState.current_act_idx, 0, 3)):
+			var seal_p := sp + Vector2(8.0 + float(seal_i) * 9.0, 2.0)
+			draw_circle(seal_p + Vector2(1, 1), 4.2,
+				Color(0, 0, 0, 0.28), true, -1.0, true)
+			draw_circle(seal_p, 4.2,
+				Color(0.52, 0.085, 0.055), true, -1.0, true)
+			draw_arc(seal_p, 2.8, 0, TAU, 12,
+				Color(0.92, 0.46, 0.22, 0.72), 0.8, true)
 
 	func _draw_route_preview(amber: Color) -> void:
 		var age := clampf((_t - _hover_t) / 0.18, 0.0, 1.0)
@@ -1518,15 +1706,17 @@ class MapPulseOverlay extends Control:
 		draw_arc(_hover_dest, 32.0 + 4.0 * pulse, 0, TAU, 48,
 			Color(1.0, 0.88, 0.50, 0.42 * age), 2.8, true)
 		draw_circle(_hover_dest, 6.0,
-			Color(amber.r, amber.g, amber.b, 0.24 * age))
+			Color(amber.r, amber.g, amber.b, 0.24 * age), true, -1.0, true)
 		if _hover_label == "" or GameTheme.font_display == null:
 			return
 		var fsz := 13
 		var pad := Vector2(9.0, 5.0)
 		var sw := GameTheme.font_display.get_string_size(_hover_label,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, fsz)
-		var plaque := Rect2(_hover_dest + Vector2(-sw.x * 0.5 - pad.x, 35.0),
-			Vector2(sw.x + pad.x * 2.0, 24.0))
+		# Through the same avoidance as the committed order: the hover label is
+		# smaller but it lands in the same place for the same reason, and covering
+		# the standard while the player is comparing two legs is worse, not better.
+		var plaque := _plaque_rect(_hover_dest, sw.x + pad.x * 2.0, 24.0)
 		draw_rect(plaque, Color(0.045, 0.036, 0.026, 0.82 * age), true)
 		draw_rect(plaque, Color(1.0, 0.80, 0.36, 0.62 * age), false, 1.2)
 		var txt_pos := Vector2(plaque.position.x + pad.x, plaque.position.y + 17.0)
@@ -1536,3 +1726,175 @@ class MapPulseOverlay extends Control:
 		draw_string(GameTheme.font_display, txt_pos, _hover_label,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, fsz,
 			Color(1.0, 0.90, 0.58, 0.95 * age))
+
+
+	## The road already carries baked reachability dashes. Commit adds one quiet
+	## ruled casing and progressively inks only the part the column has covered,
+	## plus a plain-language order at the destination.
+	func _draw_committed_route(amber: Color) -> void:
+		draw_polyline(_march_pts, Color(0.035, 0.025, 0.016, 0.58), 9.0, true)
+		draw_polyline(_march_pts,
+			Color(amber.r, amber.g, amber.b, 0.22), 3.4, true)
+		var covered := _march_progress_path()
+		if covered.size() >= 2:
+			draw_polyline(covered, Color(0.03, 0.02, 0.012, 0.82), 7.0, true)
+			draw_polyline(covered,
+				Color(1.0, 0.88, 0.52, 0.92), 3.8, true)
+		var dest: Vector2 = _march_pts[_march_pts.size() - 1]
+		# A wax-pin diamond is the non-colour state cue: this is an issued order,
+		# not another breathing availability ring.
+		draw_colored_polygon(PackedVector2Array([
+			dest + Vector2(0, -7), dest + Vector2(7, 0),
+			dest + Vector2(0, 7), dest + Vector2(-7, 0)]),
+			Color(0.06, 0.04, 0.025, 0.92))
+		draw_colored_polygon(PackedVector2Array([
+			dest + Vector2(0, -4), dest + Vector2(4, 0),
+			dest + Vector2(0, 4), dest + Vector2(-4, 0)]), amber)
+		if _march_label != "":
+			_draw_operation_plaque(dest, "MARCH TO %s" % _march_label, amber)
+
+
+	func _march_progress_path() -> PackedVector2Array:
+		var out := PackedVector2Array()
+		if _march_pts.is_empty():
+			return out
+		out.append(_march_pts[0])
+		if _march_pts.size() < 2 or _march_len <= 0.0:
+			return out
+		var limit := clampf(_march_prog, 0.0, 1.0) * _march_len
+		for i in range(1, _march_pts.size()):
+			if _march_cum[i] <= limit:
+				out.append(_march_pts[i])
+				continue
+			var seg := _march_cum[i] - _march_cum[i - 1]
+			var local := 0.0 if seg <= 0.0 \
+				else (limit - _march_cum[i - 1]) / seg
+			out.append(_march_pts[i - 1].lerp(_march_pts[i],
+				clampf(local, 0.0, 1.0)))
+			break
+		return out
+
+
+	func _march_point_at_distance(distance: float) -> Vector2:
+		if _march_pts.is_empty():
+			return Vector2.ZERO
+		var d := clampf(distance, 0.0, _march_len)
+		for i in range(1, _march_pts.size()):
+			if d <= _march_cum[i]:
+				var seg := _march_cum[i] - _march_cum[i - 1]
+				var local := 0.0 if seg <= 0.0 \
+					else (d - _march_cum[i - 1]) / seg
+				return _march_pts[i - 1].lerp(_march_pts[i], local)
+		return _march_pts[_march_pts.size() - 1]
+
+
+	## Three shield-shaped rank counters trail the standard. Dust says motion;
+	## these say an army is moving. They are skipped entirely under Reduce Motion.
+	func _draw_march_column(amber: Color) -> void:
+		var head_d := clampf(_march_prog, 0.0, 1.0) * _march_len
+		for rank_i in range(3):
+			var d := head_d - 18.0 - float(rank_i) * 15.0
+			if d <= 3.0:
+				continue
+			var p := _march_point_at_distance(d)
+			var behind := _march_point_at_distance(maxf(d - 4.0, 0.0))
+			var dir := (p - behind).normalized()
+			if dir == Vector2.ZERO:
+				dir = Vector2.RIGHT
+			var nrm := dir.orthogonal()
+			p += nrm * (3.0 if rank_i % 2 == 0 else -3.0)
+			var shield := PackedVector2Array([
+				p + dir * 4.2, p + nrm * 3.4,
+				p - dir * 3.2 + nrm * 2.2,
+				p - dir * 5.0, p - dir * 3.2 - nrm * 2.2,
+				p - nrm * 3.4])
+			var shadow := PackedVector2Array()
+			for q in shield:
+				shadow.append(q + Vector2(1.0, 1.2))
+			draw_colored_polygon(shadow, Color(0.0, 0.0, 0.0, 0.42))
+			draw_colored_polygon(shield,
+				Color(amber.r, amber.g, amber.b, 0.76))
+			var outline := shield.duplicate()
+			outline.append(shield[0])
+			draw_polyline(outline, Color(0.06, 0.04, 0.025, 0.90), 1.2, true)
+
+
+	## Where the player's standard is standing right now — the marching position
+	## mid-march, the last claimed stop otherwise, the camp gate on a fresh act.
+	## Extracted 2026-07-30 because the order plaques have to know: they are drawn
+	## at the DESTINATION and the standard is at the ORIGIN, one lane away.
+	func _standard_point() -> Vector2:
+		if _march_prog >= 0.0:
+			return _march_pos()
+		if map != null and bool(map._has_player):
+			return map._player_pos
+		if map != null:
+			return (map._camp_pos as Vector2) + Vector2(30, -4)
+		return Vector2.ZERO
+
+
+	## The standard's real footprint: the lamplight pool, the pole running up to
+	## sp.y - 36, and the banner cloth hanging to its right. Deliberately a little
+	## generous — a plaque grazing the glow still reads as a collision.
+	func _standard_keepout() -> Rect2:
+		var sp := _standard_point()
+		return Rect2(sp.x - 34.0, sp.y - 48.0, 74.0, 64.0)
+
+
+	## Place a plaque near `dest` without covering the standard.
+	##
+	## THE BUG THIS FIXES: the plaque sat a fixed 62px above the destination (36
+	## below, near the top edge) and was centred on it, up to 250px wide. A leg
+	## that climbs or drops one lane puts the origin stop inside that rect — so
+	## committing a march regularly stamped "MARCH TO ..." straight over the army
+	## standard, hiding the one object on the chart that answers "where am I".
+	##
+	## Resolution order is deliberate: try the side the layout wants, then the
+	## other side, and only then slide sideways. Flipping keeps the plaque tied to
+	## its destination; sliding is the last resort because a plaque far from its
+	## pin stops reading as that pin's label.
+	func _plaque_rect(dest: Vector2, w: float, h: float) -> Rect2:
+		var min_x := 36.0
+		var max_x: float = float(map.size.x) - w - 36.0
+		var px := clampf(dest.x - w * 0.5, min_x, maxf(min_x, max_x))
+		# Near the top edge the plaque must hang below or it leaves the sheet.
+		var prefer_below: bool = dest.y < float(map.size.y) * 0.30
+		var keep := _standard_keepout()
+		var candidates: Array[float] = []
+		candidates.append(dest.y + 36.0 if prefer_below else dest.y - h - 35.0)
+		candidates.append(dest.y - h - 35.0 if prefer_below else dest.y + 36.0)
+		for cy in candidates:
+			var r := Rect2(px, cy, w, h)
+			if not r.intersects(keep):
+				return r
+		# Both sides blocked (the standard is effectively on top of the pin). Slide
+		# the plaque away from the standard along x, still on the preferred side.
+		var away: float = keep.position.x + keep.size.x + 12.0 \
+			if dest.x >= keep.get_center().x else keep.position.x - w - 12.0
+		var slid_y: float = candidates[0]
+		return Rect2(clampf(away, min_x, maxf(min_x, max_x)), slid_y, w, h)
+
+
+	func _draw_operation_plaque(dest: Vector2, text: String, amber: Color) -> void:
+		if map == null or GameTheme.font_display == null:
+			return
+		var fsz := 14
+		var sw := GameTheme.font_display.get_string_size(text,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, fsz)
+		var plaque_w := clampf(sw.x + 38.0, 116.0, 250.0)
+		var plaque := _plaque_rect(dest, plaque_w, 27.0)
+		draw_rect(plaque, Color(0.035, 0.027, 0.018, 0.94), true)
+		draw_rect(plaque, Color(amber.r, amber.g, amber.b, 0.82), false, 1.5)
+		var seal_p := plaque.position + Vector2(14.0, plaque.size.y * 0.5)
+		draw_circle(seal_p, 6.0, Color(0.08, 0.05, 0.025, 0.96))
+		draw_colored_polygon(PackedVector2Array([
+			seal_p + Vector2(0, -3.5), seal_p + Vector2(3.5, 0),
+			seal_p + Vector2(0, 3.5), seal_p + Vector2(-3.5, 0)]), amber)
+		var text_pos := Vector2(plaque.position.x + 27.0,
+			plaque.position.y + 19.0)
+		draw_string_outline(GameTheme.font_display, text_pos, text,
+			HORIZONTAL_ALIGNMENT_LEFT, plaque_w - 32.0, fsz, 3,
+			Color(0.0, 0.0, 0.0, 0.92))
+		draw_string(GameTheme.font_display, text_pos, text,
+			HORIZONTAL_ALIGNMENT_LEFT, plaque_w - 32.0, fsz,
+			Color(1.0, 0.91, 0.64, 0.98))

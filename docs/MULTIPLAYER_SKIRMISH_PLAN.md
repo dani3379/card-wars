@@ -1,20 +1,29 @@
 # Burning Meadow — Online Multiplayer (Skirmish + Draft) Technical Plan
 
-> **Status:** Phases 0–1 BUILT & parse-verified (lobby + draft). **Phase 2 + the
-> creature slice of Phase 3 BUILT & parse-verified 2026-06-16** — the full chain
-> Menu → Lobby → Draft → networked Combat compiles and is wired end to end.
-> Combat model: **full alternating (Hearthstone-style)** — see §2.
+> **Status (2026-07-16):** friend-play Online Skirmish is built end to end:
+> room-code relay + direct ENet, lobby/lord pick, Draft/Constructed/Quick/Sealed,
+> alternating and Sealed Orders combat, battle relics/potions, rematch, and
+> disconnect-to-menu. The live authority/security contract below supersedes the
+> older phased implementation notes where they disagree.
 >
-> **v1 combat architecture as built (refines §12-13): HOST-AUTHORITATIVE with
-> FULL BOARD-SNAPSHOT SYNC.** Draw + Command are local per side (each player
-> draws their own deck on their own turn via the existing `_start_round`, with
-> relic/mutator/encounter branches inert in net). Placement, on-enter/on-death,
-> and the attack clash run ONLY on the host; after every mutation the host pushes
-> a complete board snapshot (`EV_BOARD_SYNC`) and the client reconciles by
-> `entity_id` (= the card's deck uid for drafted creatures; host-issued ≥1,000,000
-> for tokens). The client never resolves combat — it sends intents, renders
-> snapshots. This collapses the §9 fine-grained event set into one reconcile
-> channel for v1; the other `EV_*` stay reserved for a later per-strike replay.
+> **Combat architecture as built: HOST-AUTHORITATIVE public + private state.**
+> The host owns both decks, hands, draw/discard/exhaust piles, Command/costs,
+> potions, RNG consequences, board state, and combat resolution. The client gets
+> snapshots of its own private-zone membership (`EV_HAND_SET`, with future draw
+> order redacted), a redacted foe hand count, full public-board snapshots
+> (`EV_BOARD_SYNC`), and the paced clash/FX stream. It sends intents; it never
+> decides game state. Draft-end loadouts,
+> card UIDs, costs, targets, discards, sealed bundles, choices, and consumables
+> are validated before mutation.
+>
+> **Wire/relay hardening (2026-07-16):** direct and relayed play share the same
+> versioned `{pv,sid,seq,k,p}` envelope (`NetProtocol.gd`). Stale sessions,
+> duplicate/reordered sequences, unknown message families, unsafe Variant/object
+> payloads, excessive depth/size, wrong role direction, invalid loadouts, and
+> phase-invalid intents are rejected. Relay rooms use cryptographic 6-character
+> codes/session IDs, per-peer rate and byte budgets, room/idle expiry, and a
+> bounded room table. This is sufficient for casual friend play; the host is
+> still a player rather than a neutral competitive server.
 >
 > **BUILT (v1 scope):**
 > - **CREATURES** — place (client intent → host seats on its enemy side, runs
@@ -36,7 +45,8 @@
 >   number on face damage), so combat reads as a clash even though the client
 >   never runs the resolver. Opponent hand size shows in the "Opponent's turn"
 >   line (`EV_HAND_COUNT`). Mid-match disconnect (`peer_left` / `host_closed`)
->   ends cleanly and returns both peers to the menu (plan §15).
+>   ends cleanly and returns both peers to the menu (plan §15). Clashes ship as
+>   a paced per-strike replay before the outcome snapshot is reconciled.
 >
 > - **LORD PICK (2026-07-09)** — both players choose their character in the
 >   lobby ("MARCH AS" portrait chips, also on the Practice-vs-Bot panel; the
@@ -66,26 +76,23 @@
 >   payouts read as ONE beat. Solo reuses the same pulse on the player's own
 >   rail. Verify: `tools/_shot_foe_arsenal.tscn` (windowed, 31 frames).
 >
-> All Combat.gd net code is `_is_net()`-guarded; **solo campaign is untouched**
-> (the only shared-signature change is `_resolve_ranged_attacks(side_filter=-1)`,
-> whose default reproduces the old both-sides behavior). **DEFERRED:** combat-time
-> floop toggles and battlefield reposition (both cleanly gated OFF in net — board
-> interactivity stays off; hand plays + spell targeting still work; floop is
-> largely superseded by on-play, which IS netted), exotic spells
-> (pile/draw/discover — already denylisted in draft), a dedicated opponent
-> hand-count widget (only the turn-line readout exists), and per-strike clash
-> replay (§13.2 strategy B — the coarse snapshot animation is the v1).
+> All Combat.gd net code is `_is_net()`-guarded; **solo campaign is untouched.**
+> Battlefield reposition, persistent-hand marked discards, pile/hand spell
+> consequences, battle relics/potions, and per-strike replay are live.
+> **DEFERRED:** combat-time floop toggles, unsupported Discover/economy spells,
+> reconnect/resume, spectator mode, and neutral-server ranked authority.
 >
-> **VERIFIED HEADLESS 2026-06-16** (all three layers; see §16 items 6–8):
+> **VERIFIED HEADLESS 2026-07-16** (all layers; see §16):
 > the logic probe, a fake-peer COMBAT harness that boots the real combat scene
 > as NET_HOST and drives a full turn cycle with scripted client intents (turn
 > open + local draw, host creature play + on-enter + entity_id registration, the
 > attack clash, turn passing, client creature/spell intents, match-over) AND
 > reboots it as NET_CLIENT to verify the board-snapshot reconcile (owner→side
-> mapping, HP perspective, spawn/update/despawn), and a two-process ENet
-> TRANSPORT smoke test over loopback (host/join, ready handshake, match-seed
-> propagation, client→host intent + host→client event round-trips — the same
-> @rpc path Tailscale uses). All green. The only thing still unexercised is a
+> mapping, HP perspective, spawn/update/despawn), a two-process direct-ENet smoke
+> test, and a three-process relay + host + client round trip (room creation/pairing,
+> ready, match seed, client→host intent + host→client event). Adversarial probes
+> cover malformed envelopes/loadouts, UID replay, overspend, illegal/duplicate
+> discards, and one-shot potion use. All green. The only thing still unexercised is a
 > live human-played match WITH rendering (visual/animation feel, the draft/lobby
 > UI clicks) — the code under it is verified; that pass is the designer's to run.
 >
@@ -94,11 +101,10 @@
 > now place-then-simultaneous-clash, so BOTH sides place before any clash and round 1
 > clashes contested like every round — no opener strike pass to skip. The DONE button
 > replaced ATTACK.)* Originally: the opener couldn't attack into an empty board.
-> (2) **Going-second compensation** — the client
-> (always the second turn) has its opening hand PRE-DEALT at match start
-> (`_net_begin_combat`) at `HAND_REFILL_TARGET + 1` (= 6) so it's visible/plannable
-> during the host's turn 1 AND carries the extra card; a `_net_skip_draw_this_round`
-> flag makes its first `_start_round` keep that hand instead of topping it up.
+> (2) **Going-second compensation** — whichever side goes second receives a
+> host-dealt normal opening hand plus The Coin. The host's private-state ledger
+> preserves that hand into its first placement turn; the client never tops up or
+> shuffles a private pile locally.
 > (3) **Rematch / stay-connected** — match-over shows a REMATCH / LEAVE TO MENU
 > overlay instead of auto-dropping to the menu; both sides pressing REMATCH has the
 > host re-`launch_combat()` with the SAME drafted decks. `NetMatch._enter_combat_local`
@@ -106,7 +112,7 @@
 > launch (no-op on first fight, full reset on rematch). New wire verbs `IN_REMATCH`
 > / `EV_REMATCH`; `_net_on_peer_lost` handles a post-match leave too.
 >
-> Last updated 2026-06-16.
+> Last updated 2026-07-16.
 >
 > **Audience:** an engineer or AI agent who has *not* seen this conversation. This
 > doc is meant to be self-contained: it describes the existing single-player
@@ -383,7 +389,7 @@ Use Godot 4's built-in high-level multiplayer:
 ### 5.2 "Online with a friend" — the NAT problem
 Raw ENet needs the host reachable. Options, in recommended order for this project:
 1. **★ BUILT — Self-hosted relay + room codes.** Both players connect *outward* to a
-   relay you run; it pairs them by a 4-char room code and forwards each envelope to
+   relay you run; it pairs them by a 6-character room code and forwards each envelope to
    the room partner only. Outbound traversal works through any NAT/CGNAT, so no
    player installs anything or forwards a port — they just share a code. This is the
    **shipping default** (`Transport.RELAY` in `NetMatch`; relay =
@@ -552,6 +558,13 @@ Validation the host MUST do (never trust the client):
 - the card is actually in that player's hand (uid present);
 - `player_mana >= _effective_cost`;
 - target slot empty / target legal for the spell's `targeting`.
+- discard/exhaust UIDs are unique, in hand, and legal for that operation;
+- a potion id is in the submitted remaining loadout and has not been consumed;
+- board/resource relic outcomes are computed from the submitted loadout, not a
+  client-provided payout amount;
+- Sealed Orders contain only the committed ghost slots, unique real hand UIDs,
+  and an affordable total; sorcery/alternating verbs cannot cross phase boundaries;
+- a private choice answers one outstanding host-issued prompt exactly once.
 On failure → `reject` event back to the requester (§9.2) and no state change.
 
 ### 9.2 Host → Clients: EVENTS (authoritative; clients render)
@@ -879,8 +892,12 @@ board only while `round_begin.active_index == local_index`.
   opponent's hand. Hearthstone does exactly this ("a dispatcher holds back/changes
   packets per player").
 - Because all validation is host-side, a hacked client cannot make illegal plays —
-  worst case it can read its own hand early (already allowed) or DoS the host
+  worst case it can inspect its own legal private state or DoS the host
   (acceptable for a play-with-a-friend tool).
+- Both transports validate the same version/session/sequence envelope before
+  dispatch. The relay also validates sender direction, applies rate/byte limits,
+  caps rooms, and expires abandoned rooms. These are abuse bounds, not identity
+  or confidentiality: ENet payloads are not encrypted by this layer.
 - **v1 posture:** the host is a player, not a neutral server, so a cheating *host*
   is possible. For a friends-only playtest this is fine. A competitive release
   would need a dedicated authoritative server — out of scope.

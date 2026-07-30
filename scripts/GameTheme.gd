@@ -1,4 +1,4 @@
-﻿extends Node
+extends Node
 
 # ── Fonts ──
 var font_display: Font = null   # Kreon Bold — card names, type, FLOOP, buttons/titles
@@ -11,7 +11,6 @@ var font_card_body: Font = null      # Kreon 500 — card rules text (the writ's
 var font_card_body_bold: Font = null # Kreon 700 — keyword [b] tags on the card page
 
 # ── Textures ──
-var tex_card_frame_ornate: Texture2D = null
 var tex_icon_sword: Texture2D = null
 var tex_icon_heart: Texture2D = null
 var tex_icon_diamond: Texture2D = null
@@ -66,22 +65,6 @@ var tex_card_vignette: Texture2D = null
 # _build_card_surface_textures for the bake.
 var tex_card_brush_edge: Texture2D = null
 
-const USE_NEW_FRAME := true  # flip to false to revert to assets/ui/card_frame_ornate.png
-# v4 procedural card frame — drawn entirely in Godot, no PNG dependency.
-# Adds Hearthstone-canonical stat colors (blue cost / yellow ATK / red HP), a
-# visible rarity gem, and 225x300 card dimensions. Flip false to revert to v3.
-# TURNED OFF to test the new painted v5 frames (frame_v5_a/b) via the v3
-# PNG-based path. Flip true to revert to procedural.
-const USE_PROCEDURAL_FRAME := false
-# v5 — "overlap and paint the seams." Single CardCanvas draws the body +
-# tapered ribbon banner + scroll divider in one _draw(); stat orbs straddle
-# the art/description seam. Replaces v4's stack-of-Panels look. Flip false
-# to fall back to v4 (which still works).
-const USE_V5_OVERLAP_PAINT := true
-
-# v3 frame variants: 2 types (creature/spell) x 4 rarities + curse.
-# Populated by _load_new_frames() when USE_NEW_FRAME is true.
-var _new_frames: Dictionary = {}
 # Keyword name -> Texture2D for the medallion strip.
 var _keyword_icons: Dictionary = {}
 
@@ -247,18 +230,7 @@ func _load_assets() -> void:
 	else:
 		font_card_body = font_body
 		font_card_body_bold = font_body_bold
-	# Flip USE_NEW_FRAME below to false to revert to the old card_frame_ornate.png.
-	var ornate_path = "res://assets/ui/card_frame_ornate.png"
-	if USE_NEW_FRAME:
-		_load_new_frames()
-		var new_path = "res://assets/frames/frame_creature_common.png"
-		if ResourceLoader.exists(new_path):
-			ornate_path = new_path
-	if ResourceLoader.exists(ornate_path):
-		tex_card_frame_ornate = load(ornate_path)
-	if OS.is_debug_build():
-		print("[GameTheme] tex_card_frame_ornate (default) loaded from: ", ornate_path,
-			"  USE_NEW_FRAME=", USE_NEW_FRAME)
+	_load_keyword_icons()
 	tex_icon_sword = load("res://assets/icons/sword.png")
 	tex_icon_heart = load("res://assets/icons/heart.png")
 	tex_icon_diamond = load("res://assets/icons/diamond.png")
@@ -288,8 +260,16 @@ func _load_assets() -> void:
 	var heart_painted = "res://assets/icons/map/hud_heart_painted.png"
 	tex_hud_heart = load(heart_painted) if ResourceLoader.exists(heart_painted) \
 		else load("res://assets/icons/map/hud_heart.png")
-	var gold_painted = "res://assets/icons/map/hud_gold_painted.png"
-	tex_hud_gold = load(gold_painted) if ResourceLoader.exists(gold_painted) \
+	# ONE MINT EVERYWHERE. The gold symbol used to be three different coins: the
+	# map purse painted CoinProp (the Old King's crowned profile), while the
+	# event ledger and every inline outcome glyph used a bought asset-store coin
+	# — bright lemon, cartoon bevel, and a CYAN DIAMOND stamped on it, which is
+	# the only pure cyan in a sepia-and-ember game. `hud_gold_coin.png` is the
+	# CoinProp painter baked to a texture (tools/_bake_coin_icon.gd), so the HUD
+	# register and the BBCode glyphs carry the same coinage as the map purse and
+	# the event tables' props. Re-run the bake if CoinProp's mint ever changes.
+	var gold_mint = "res://assets/icons/map/hud_gold_coin.png"
+	tex_hud_gold = load(gold_mint) if ResourceLoader.exists(gold_mint) \
 		else load("res://assets/icons/map/hud_gold.png")
 	var potion_painted = "res://assets/icons/map/hud_potion_painted.png"
 	tex_hud_potion = load(potion_painted) if ResourceLoader.exists(potion_painted) \
@@ -612,7 +592,9 @@ class ChartPanelStyle extends StyleBox:
 			emit_changed()
 
 	func _get_draw_rect(rect: Rect2) -> Rect2:
-		return rect.grow(6.0 + shadow_size * 1.2) if shadow else rect
+		# No-shadow plates still grow a touch: the hand-cut wobble breathes
+		# up to ~3px outside the box and must not clip.
+		return rect.grow(6.0 + shadow_size * 1.2) if shadow else rect.grow(4.0)
 
 	static func _oct(r: Rect2, inset: float, ch: float) -> PackedVector2Array:
 		var l := r.position.x + inset
@@ -625,6 +607,40 @@ class ChartPanelStyle extends StyleBox:
 			Vector2(rr, b - c), Vector2(rr - c, b), Vector2(l + c, b),
 			Vector2(l, b - c), Vector2(l, t + c)])
 
+	## Hand-cut plate silhouette: the chamfered octagon with a seeded organic
+	## wobble along each long edge — the WritLeaf rule scaled down to furniture.
+	## Corners stay PINNED (wobble eases to zero at both ends of every edge) so
+	## the plate keeps its rectangular stance and chamfer cuts read clean; the
+	## wobble is two low sines + a per-point hash jitter, so the edge reads as
+	## material cut and worn by hand — not a rectangle, not a pure wave.
+	## amp <= 0 returns the exact octagon (small chips stay crisp).
+	static func _plate(r: Rect2, inset: float, ch: float, seed: int, amp: float) -> PackedVector2Array:
+		var oct := _oct(r, inset, ch)
+		if amp <= 0.05:
+			return oct
+		var pts := PackedVector2Array()
+		for e in range(8):
+			var a := oct[e]
+			var b := oct[(e + 1) % 8]
+			var seg := a.distance_to(b)
+			var count := maxi(1, int(seg / 22.0))
+			if count == 1:
+				pts.append(a)   # chamfer diagonals and short edges pass through
+				continue
+			# Outward normal (octagon winds clockwise): wobble breathes both ways.
+			var n := Vector2(b.y - a.y, a.x - b.x).normalized() * -1.0
+			var ph1 := float(absi((seed ^ (e * 19349663)) % 628)) * 0.01
+			var ph2 := float(absi((seed ^ (e * 83492791)) % 628)) * 0.01
+			for i in range(count):
+				var t := float(i) / float(count)
+				var pin := sin(t * PI)
+				# Two smooth sines only — a per-point hash jitter was tried for
+				# "deckle grain" and read as ALIASING at 1080p ("the game looks
+				# pixely"), not as material. Organic must stay smooth.
+				var d := sin(t * TAU * 1.5 + ph1) * 0.62 + sin(t * TAU * 3.5 + ph2) * 0.38
+				pts.append(a.lerp(b, t) + n * d * amp * pin)
+		return pts
+
 	static func _closed(pts: PackedVector2Array) -> PackedVector2Array:
 		var out := pts.duplicate()
 		out.append(pts[0])
@@ -634,10 +650,19 @@ class ChartPanelStyle extends StyleBox:
 	func _draw(ci: RID, rect: Rect2) -> void:
 		var ch := clampf(chamfer, 4.0, minf(rect.size.x, rect.size.y) * 0.26)
 		var small: bool = minf(rect.size.x, rect.size.y) < 70.0
+		# Seeded per canvas item: every control gets its own stable hand-cut,
+		# and a button's hover/pressed styleboxes (different instances, same
+		# ci) keep the SAME silhouette — the plate doesn't re-cut itself on
+		# state changes. Amp scales with the plate so chips stay near-crisp.
+		var seed := int(ci.get_id() & 0x7FFFFFFF)
+		var amp := clampf(minf(rect.size.x, rect.size.y) * 0.032, 0.0, 3.6)
+		if small:
+			amp = minf(amp, 1.1)
 
 		# 1. Drop shadow — three soft octagon layers, offset down, so the panel
 		#    sinks into the painted scene instead of floating as a flat cutout.
 		#    shadow_color/shadow_size let hover states retint it into a glow.
+		#    (The blur hides straight edges, so the shadow skips the wobble.)
 		if shadow:
 			var spread := shadow_size / 8.0
 			var glow := not shadow_color.is_equal_approx(Color(0, 0, 0, 1.0))
@@ -651,36 +676,78 @@ class ChartPanelStyle extends StyleBox:
 					PackedColorArray([Color(shadow_color.r, shadow_color.g,
 						shadow_color.b, sh_a[i] * shadow_color.a)]))
 
-		# 2. Field — lit from above. Parchment mode warms the ink toward aged
-		#    paper (matching the old parchment=true wash) before the gradient.
+		# 2. Field — lit from above, bounded by the hand-cut plate silhouette.
+		#    Parchment mode warms the ink toward aged paper before the gradient.
 		var base := bg_color
 		if parchment:
 			base = bg_color.lerp(Color(0.16, 0.12, 0.08, bg_color.a), 0.35)
 		var top_c := base.lerp(Color(0.30, 0.24, 0.16, base.a), 0.22)
 		var bot_c := base.lerp(Color(0.0, 0.0, 0.0, base.a), 0.30)
-		var body := _oct(rect, rule_width * 0.5, ch)
+		var body := _plate(rect, rule_width * 0.5, ch, seed, amp)
 		var cols := PackedColorArray()
 		for p in body:
 			var f := clampf((p.y - rect.position.y) / maxf(rect.size.y, 1.0), 0.0, 1.0)
 			cols.append(top_c.lerp(bot_c, f))
 		RenderingServer.canvas_item_add_polygon(ci, body, cols)
 
-		# 3. Inner rule — the card frames' metal DOUBLE-rule convention: the same
-		#    metal as the outer rule, fainter, one mat-width in. (A black keyline
-		#    here was invisible on the dark field.) Skipped on chips too small.
-		if not small:
-			var key := _oct(rect, rule_width + 4.0, ch)
-			var key_c := Color(border_color.r, border_color.g, border_color.b,
-				border_color.a * 0.34)
-			RenderingServer.canvas_item_add_polyline(ci, _closed(key),
-				PackedColorArray([key_c]), 1.0, true)
+		# 2b. Interior ageing — DOCUMENT tiles only (parchment): sepia washes +
+		#     foxing specks. Plain dark plates keep their flat lit gradient —
+		#     warm washes on every panel stacked into a global brightness lift
+		#     ("the game looks too lit up"), so the material lives on the
+		#     tiles that are supposed to read as paper, not on all chrome.
+		if parchment and not small:
+			for k in range(4):
+				var hx := float(absi((seed ^ (k * 40503 + 977)) % 1000)) * 0.001
+				var hy := float(absi((seed ^ (k * 65599 + 331)) % 1000)) * 0.001
+				var hr := float(absi((seed ^ (k * 97911 + 173)) % 1000)) * 0.001
+				var pos := rect.position + Vector2(
+					rect.size.x * lerpf(0.16, 0.84, hx),
+					rect.size.y * lerpf(0.18, 0.82, hy))
+				var rad := minf(rect.size.x, rect.size.y) * lerpf(0.16, 0.34, hr)
+				RenderingServer.canvas_item_add_circle(ci, pos, rad,
+					Color(0.42, 0.30, 0.17, 0.035), true)
+			# (Foxing specks were tried here and cut — 1-3px dark dots on dark
+			# fills read as stuck pixels, not age. Real foxing lives on the
+			# cards' true-parchment faces, where the paper is light.)
 
-		# 4. Outer metal rule — the caller's accent lives here.
-		var frame := _oct(rect, rule_width * 0.5, ch)
-		RenderingServer.canvas_item_add_polyline(ci, _closed(frame),
-			PackedColorArray([border_color]), rule_width, true)
+		# 3a. Contour ink seam — thin dark AA line on the path, under
+		#     everything, at FIXED alpha. This is the aliasing guard: canvas
+		#     polygons can't antialias, and the metal rule inherits the
+		#     CALLER'S border alpha — a faint border (disabled chips, dim
+		#     accents) would leave the fill's staircase edge uncovered.
+		#     Doubles as the cards' contour-ink idiom.
+		var loop := _closed(body)
+		RenderingServer.canvas_item_add_polyline(ci, loop,
+			PackedColorArray([Color(0.04, 0.03, 0.02, 0.85)]),
+			maxf(rule_width, 1.4) + 1.4, true)
+
+		# 3b. Edge toast — a scorched dark band straddling the SAME hand-cut
+		#    path (the WritLeaf rule: shading never separates from the
+		#    silhouette). This is what makes the cut read as seared material
+		#    instead of a vector outline.
+		if not small:
+			RenderingServer.canvas_item_add_polyline(ci, loop,
+				PackedColorArray([Color(0.02, 0.012, 0.006, 0.50)]),
+				rule_width + 9.0, true)
+
+		# 4. The engraved rule — a faint halo of the metal under a crisp rule
+		#    along the same path reads as the old double-rule convention
+		#    without needing a parallel inset path. Kept at whisper alpha:
+		#    at 0.26 the halo on every panel edge stacked into a global
+		#    brightness lift across panel-dense screens.
+		if not small:
+			RenderingServer.canvas_item_add_polyline(ci, loop,
+				PackedColorArray([Color(border_color.r, border_color.g,
+					border_color.b, border_color.a * 0.12)]),
+				rule_width + 3.0, true)
+		# The crisp rule floors at 1.4px: canvas polygons can't antialias in
+		# GD4, so this line is what covers the fill's hard staircase edge —
+		# a 1px line leaves it peeking through on every wobbled span.
+		RenderingServer.canvas_item_add_polyline(ci, loop,
+			PackedColorArray([border_color]), maxf(rule_width, 1.4), true)
 
 		# 5. Parchment top sheen — a faint gilt catch-light along the top edge.
+		var frame := _oct(rect, rule_width * 0.5, ch)
 		if parchment and not small:
 			var sheen_c := Color(0.95, 0.82, 0.52, 0.28 * border_color.a)
 			RenderingServer.canvas_item_add_polyline(ci,
@@ -689,6 +756,8 @@ class ChartPanelStyle extends StyleBox:
 
 		# 6. Corner tacks — small metal diamonds pinned on the chamfer cuts,
 		#    echoing the map plate's corner tacks. Auto-hidden on small chips.
+		#    Placed off the un-wobbled octagon: corners are pinned, so the
+		#    tacks sit exactly on the drawn chamfers.
 		if corner_tacks and not small and ch >= 7.0:
 			var s := clampf(ch * 0.30, 2.5, 4.5)
 			var fill := Color(border_color.r * 0.55, border_color.g * 0.55,
@@ -1034,7 +1103,7 @@ const CARD_TRIBES := {
 	"devils_champion": "undead", "collectors_champion": "undead",
 
 	# CONSTRUCT — stone, walls, golems, siege engines, titans
-	"stone_wall": "construct", "iron_bastion": "construct", "warding_stone": "construct",
+	"iron_bastion": "construct", "warding_stone": "construct",
 	"siege_golem": "construct", "riteforge": "construct",
 	"golem": "construct", "stone_sentinel": "construct",
 
@@ -1065,8 +1134,8 @@ const TRIBE_COLORS := {
 	"neutral":   Color(0.165, 0.122, 0.071, 1.0),  # warm dark brown (v3 default)
 }
 
-# Bright variants — used by render paths that paint the name on a DARK banner
-# (v5 engraved path, legacy _build_full_layout). Same tribes, hand-tuned for
+# Bright variants — used by render paths that paint the name on a DARK banner.
+# Same tribes, hand-tuned for
 # 4.5:1 contrast on near-black instead of cream.
 const TRIBE_COLORS_BRIGHT := {
 	"soldier":   Color(0.96, 0.80, 0.34, 1.0),  # warm gold
@@ -1123,6 +1192,28 @@ func make_settings_gear(host: Node, size: int = 48,
 	# on every machine regardless of which fonts have U+2699. A prior version
 	# used `Button.text = "⚙"` but Lilita One doesn't include the gear codepoint,
 	# so the button rendered as empty space on most machines.
+	# Ink roundel under the glyph — the same dark-disc + gilt-hairline orb the
+	# combat "?" / emote buttons wear, so the gear stops being the one naked
+	# icon on every screen and reads as part of the instrument family.
+	var orb := Panel.new()
+	orb.anchor_left = 0.0
+	orb.anchor_right = 0.0
+	orb.anchor_top = 0.0
+	orb.anchor_bottom = 0.0
+	orb.offset_left = offset.x
+	orb.offset_right = offset.x + size
+	orb.offset_top = offset.y
+	orb.offset_bottom = offset.y + size
+	orb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var orb_st := StyleBoxFlat.new()
+	orb_st.bg_color = Color(0.10, 0.075, 0.060, 0.92)
+	orb_st.border_color = Color(0.62, 0.48, 0.26, 0.75)
+	orb_st.set_border_width_all(2)
+	orb_st.set_corner_radius_all(size / 2)
+	orb_st.shadow_color = Color(0, 0, 0, 0.6)
+	orb_st.shadow_size = 6
+	orb.add_theme_stylebox_override("panel", orb_st)
+	host.add_child(orb)
 	var btn := TextureButton.new()
 	var tex: Texture2D = load(GEAR_ICON_PATH) as Texture2D
 	btn.texture_normal = tex
@@ -1132,23 +1223,28 @@ func make_settings_gear(host: Node, size: int = 48,
 	btn.anchor_right = 0.0
 	btn.anchor_top = 0.0
 	btn.anchor_bottom = 0.0
-	btn.offset_left = offset.x
-	btn.offset_right = offset.x + size
-	btn.offset_top = offset.y
-	btn.offset_bottom = offset.y + size
-	btn.custom_minimum_size = Vector2(size, size)
+	# Glyph inset inside the roundel so the disc stays a disc, not a tight crop.
+	var inset := int(size * 0.17)
+	btn.offset_left = offset.x + inset
+	btn.offset_right = offset.x + size - inset
+	btn.offset_top = offset.y + inset
+	btn.offset_bottom = offset.y + size - inset
+	btn.custom_minimum_size = Vector2(size - inset * 2, size - inset * 2)
 	btn.tooltip_text = "Settings"
 	btn.focus_mode = Control.FOCUS_NONE
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	# Gilt tint at rest, bright gold on hover — matches the rest of the HUD's
 	# parchment palette. Modulate (not theme color) since this is a TextureButton.
+	# The roundel rim brightens in step (direct stylebox write; it's per-orb).
 	btn.modulate = Color(0.82, 0.66, 0.30, 0.85)
 	btn.mouse_entered.connect(func():
 		var tw := btn.create_tween()
-		tw.tween_property(btn, "modulate", Color(1.0, 0.88, 0.35, 1.0), 0.12))
+		tw.tween_property(btn, "modulate", Color(1.0, 0.88, 0.35, 1.0), 0.12)
+		orb_st.border_color = GILT_BRIGHT)
 	btn.mouse_exited.connect(func():
 		var tw := btn.create_tween()
-		tw.tween_property(btn, "modulate", Color(0.82, 0.66, 0.30, 0.85), 0.12))
+		tw.tween_property(btn, "modulate", Color(0.82, 0.66, 0.30, 0.85), 0.12)
+		orb_st.border_color = Color(0.62, 0.48, 0.26, 0.75))
 	btn.pressed.connect(_open_settings_overlay_from_anywhere)
 	host.add_child(btn)
 	return btn
@@ -1606,8 +1702,16 @@ func fit_tile_height(btn: Button, col: VBoxContainer) -> void:
 	# one bogus pass balloons the tile permanently (seen: 2000px-tall tiles).
 
 
+## `hover_desc` = the shelf mode (Shop). The description leaves the tile and
+## moves to the shared rich-hover tip, so every tile on the row keeps EXACTLY
+## the height it was asked for and the price sits on one shared baseline. A
+## shelf of wares whose prices float to four different heights because one relic
+## has a six-line rule is the thing this fixes; pick-one-of-three screens
+## (Reward/Treasure) still want the text inline and leave this false.
+## NOTE: hover_desc owns `scale` (it pops the tile itself) — do NOT also call
+## hover_lift on the returned button, they would fight over the same property.
 func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 172),
-		price: int = -1) -> Button:
+		price: int = -1, hover_desc: bool = false) -> Button:
 	# A relic "card" button: gilt-trimmed panel with the relic's icon stacked
 	# above its name + description (and an optional price line for the shop).
 	# Built on the shared make_tile_skeleton (empty Button + centered VBox) so the
@@ -1648,14 +1752,20 @@ func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 17
 	var name_lbl := make_label(r.get("name", rid), 18, KEYWORD_GOLD)
 	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(name_lbl)
-	var desc_lbl := make_label(r.get("desc", ""), 16, IVORY)
-	desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	col.add_child(desc_lbl)
+	if not hover_desc:
+		var desc_lbl := make_label(r.get("desc", ""), 16, IVORY)
+		desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		col.add_child(desc_lbl)
 	if price >= 0:
 		var price_lbl := make_label("— %dg —" % price, FONT_BODY, GILT)
 		price_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		col.add_child(price_lbl)
+	if hover_desc:
+		# Fixed height by construction: never measure content, never grow.
+		attach_rich_hover(btn, String(r.get("name", rid)), String(r.get("desc", "")),
+			"RELIC", GILT, 1.03)
+		return btn
 	fit_tile_height(btn, col)
 	return btn
 
@@ -1665,17 +1775,19 @@ func make_relic_card(rid: String, bg: Color, min_size: Vector2 = Vector2(220, 17
 # screens used to build their own near-identical copies, which drifted ("Play"
 # vs "Place creatures", different combat wording). Now both call this.
 const HOW_TO_PLAY_PRIMER := [
-	["The goal", "Three acts, each held by a rival lord. Fight across the map, break open the lord's keep, and bring it down — then march on to the next act. Run out of health and the run ends; you begin again from the start, a little wiser."],
-	["A turn, step by step", "Gain 3 Command and top your hand back up. Drag creatures onto your lanes and cast spells, spending Command as you go. Forecast chips show incoming enemy strikes. End the turn — both armies strike at once, then a new round begins."],
-	["Command", "Your turn resource — you start with 3 each turn and spend it to play creatures and spells. Up to 2 unspent Command banks into next turn."],
-	["Your hand", "Unplayed cards stay in your hand between turns; each turn tops it back up to 5. Right-click cards to mark them for discard — as many as you like. Marked cards are thrown out when your turn ends, and the next top-up deals fresh ones."],
-	["The board", "Four lanes, two ranks per side. The front rank fights; the back rank is reserve. Place creatures into either rank."],
-	["Combat", "Both armies strike at once. In each lane the front rank trades first and is hit first; the back waits behind it. Swift creatures strike before the clash."],
-	["The Forge", "At a rest, Forge a card for a permanent \"+\" upgrade. You pick the card and see exactly what it becomes — no rolls."],
-	["Recruit camps", "A free draft — take 1 of 3 cards to join your deck. The main way your deck grows between fights."],
-	["The boss gate", "Each lord's keep starts barred. Break enough holds to open the road, then march on the keep. The map tracks how many remain."],
+	["The goal", "Cross three acts and defeat each rival lord. If your hero reaches 0 HP, the run ends and you start a new one."],
+	["Each round", "Refill your hand and Command, then play cards. End your turn to resolve both sides' attacks and begin the next round."],
+	["Command", "Command pays for creatures and spells. You start each turn with 3. Up to 2 unspent Command carries into your next turn."],
+	["Your hand", "Cards stay in your hand between turns. Each turn refills it to 5. Right-click a card to mark it for discard at the end of your turn."],
+	["The board", "Each side has 4 lanes with a front and back slot. Both rows attack. The front row attacks first and takes attacks before the back row."],
+	["New creatures", "A creature played this round is Forming Up and cannot attack until next round. Swift creatures can attack immediately."],
+	["Forecast and combat", "Incoming shows expected face damage. End your turn to start the clash: Swift attacks first, then front rows, then back rows."],
+	["Map sites", "Holds are normal fights; Generals are harder fights with relic rewards. Recruit Camps add cards. The Trader sells items. Relic Caches offer a relic. Supply Caches offer an upgrade, potions, or gold."],
+	["Cards and upgrades", "Hover keywords for their rules. At camp, Forge gives one card its permanent + version. The preview shows the exact change before you confirm."],
+	["The boss gate", "A lord's keep starts locked. Win enough Holds to open the road. The map always shows how many Holds remain."],
+	["Ascension and Daily March", "Ascension adds the listed difficulty rules. Daily March uses today's fixed hero, seed, and special rule so everyone faces the same run."],
+	["Skirmish modes", "Draft: pick 1 of 3 cards twenty times. Constructed: choose any 20 cards. Quick Battle: use random decks. Sealed: build 20 cards from a fixed pool."],
 ]
-
 ## Builds the full-screen "How to Play" overlay. Add the returned Control as a
 ## child; CLOSE or a click on the dim scrim dismisses it.
 func make_how_to_play_overlay() -> Control:
@@ -1747,12 +1859,15 @@ func make_how_to_play_overlay() -> Control:
 	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	outer.add_child(cols)
 
+	# The field the columns are cut out of — the fade at each cut edge dissolves
+	# into exactly this, so the text reads as running under the panel rather than
+	# stopping at a hard line.
+	var field := Color(0.06, 0.05, 0.045, 0.99)
+
 	# LEFT — campaign primer.
-	var left_scroll := ScrollContainer.new()
-	left_scroll.custom_minimum_size = Vector2(500, 0)
-	left_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	left_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	cols.add_child(left_scroll)
+	var left_wrap: Control = _htp_scroll_column(500.0, false, field)
+	cols.add_child(left_wrap)
+	var left_scroll: ScrollContainer = left_wrap.get_node("Scroll")
 	var left := VBoxContainer.new()
 	left.add_theme_constant_override("separation", 10)
 	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1775,23 +1890,89 @@ func make_how_to_play_overlay() -> Control:
 	cols.add_child(right_col)
 	right_col.add_child(make_label("KEYWORD GLOSSARY", FONT_SUBHEADER, gilt_b))
 	right_col.add_child(make_label(
-		"Every keyword that can appear on a card.", 15, ash_c))
+		"Keywords and combat status terms.", 15, ash_c))
 
-	var gloss_scroll := ScrollContainer.new()
-	gloss_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	gloss_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	gloss_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	right_col.add_child(gloss_scroll)
+	var gloss_wrap: Control = _htp_scroll_column(0.0, true, field)
+	right_col.add_child(gloss_wrap)
+	var gloss_scroll: ScrollContainer = gloss_wrap.get_node("Scroll")
 	var gloss := VBoxContainer.new()
 	gloss.add_theme_constant_override("separation", 9)
 	gloss.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	gloss_scroll.add_child(gloss)
+	gloss.add_child(_htp_keyword_row("mustering", "Forming Up",
+		"Cannot attack this round. Can attack next round.", ivory_c))
 	for key in KeywordEffects.KEYWORDS.keys():
 		var kw: Dictionary = KeywordEffects.KEYWORDS[key]
-		gloss.add_child(_htp_keyword_row(
+		gloss.add_child(_htp_keyword_row(String(key),
 			String(kw.get("display", key)), String(kw.get("desc", "")), ivory_c))
 
 	return scrim
+
+
+func _htp_scroll_column(min_w: float, expand_h: bool, field: Color) -> Control:
+	# Both manual columns are longer than the panel, and the left one cuts
+	# mid-sentence ("Marked cards are"). A hard edge under a hairline rail reads
+	# as BROKEN TEXT, not as more text — the player has no reason to suspect a
+	# scroll. Two cues fix it together: the present rail says the column moves,
+	# and the fade at the cut says the sentence continues under the panel.
+	#
+	# A plain Control wraps the scroll rather than a container, because the fade
+	# must sit OVER the scroll's clipped viewport — a container would lay both
+	# children out as siblings in the same flow instead of stacking them.
+	var wrap := Control.new()
+	wrap.custom_minimum_size = Vector2(min_w, 0)
+	wrap.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	if expand_h:
+		wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var scroll := ScrollContainer.new()
+	scroll.name = "Scroll"
+	scroll.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	style_rail_scrollbar(scroll)
+	wrap.add_child(scroll)
+
+	var grad := Gradient.new()
+	grad.set_color(0, Color(field.r, field.g, field.b, 0.0))
+	grad.set_color(1, Color(field.r, field.g, field.b, 1.0))
+	grad.set_offset(0, 0.0)
+	grad.set_offset(1, 1.0)
+	var tex := GradientTexture2D.new()
+	tex.gradient = grad
+	tex.width = 4
+	tex.height = 64
+	tex.fill_from = Vector2(0, 0)
+	tex.fill_to = Vector2(0, 1)
+
+	var fade := TextureRect.new()
+	fade.texture = tex
+	fade.stretch_mode = TextureRect.STRETCH_SCALE
+	fade.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	fade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	fade.visible = false
+	fade.anchor_left = 0.0
+	fade.anchor_right = 1.0
+	fade.anchor_top = 1.0
+	fade.anchor_bottom = 1.0
+	fade.offset_top = -52
+	# Stop short of the rail: veiling the slider would undo the other half of the
+	# cue at exactly the moment the fade is telling the player to use it.
+	fade.offset_right = -15
+	wrap.add_child(fade)
+
+	# The fade is a PROMISE of more text, so it must be honest: hidden at the
+	# bottom of the travel and hidden when the column doesn't overflow at all.
+	var bar := scroll.get_v_scroll_bar()
+	var sync := func() -> void:
+		if not is_instance_valid(fade) or not is_instance_valid(bar):
+			return
+		var span: float = bar.max_value - bar.page
+		fade.visible = span > 2.0 and bar.value < span - 2.0
+	bar.value_changed.connect(func(_v: float): sync.call())
+	bar.changed.connect(func(): sync.call())
+	wrap.resized.connect(func(): sync.call())
+	return wrap
 
 
 func _htp_primer_block(heading: String, body: String, ivory: Color) -> Control:
@@ -1807,30 +1988,119 @@ func _htp_primer_block(heading: String, body: String, ivory: Color) -> Control:
 	return box
 
 
-func _htp_keyword_row(name: String, desc: String, ivory: Color) -> Control:
-	# Gilt keyword name + dim body on a hairline ink chip — the chart kit.
-	var row := PanelContainer.new()
+func _htp_keyword_row(key: String, name: String, desc: String, ivory: Color) -> Control:
+	# Frameless glossary entry: the keyword's white-silhouette device in gilt,
+	# name + body beside it, a hairline rule below. Replaced the boxed chip
+	# rows — a column of outlined rectangles read as a settings form, not a
+	# war manual (feedback: no flat rectangles).
+	var entry := VBoxContainer.new()
+	entry.add_theme_constant_override("separation", 8)
+	entry.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 14)
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.085, 0.072, 0.060, 0.65)
-	sb.border_color = Color(0.45, 0.38, 0.26, 0.45)
-	sb.set_border_width_all(1)
-	sb.set_corner_radius_all(3)
-	sb.content_margin_left = 12
-	sb.content_margin_right = 12
-	sb.content_margin_top = 7
-	sb.content_margin_bottom = 7
-	row.add_theme_stylebox_override("panel", sb)
+	entry.add_child(row)
+
+	# Device column — fixed box so text always aligns whether or not a
+	# keyword ships a device; icon-less keywords take the house diamond.
+	var icon_box := Control.new()
+	icon_box.custom_minimum_size = Vector2(34, 34)
+	icon_box.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	icon_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(icon_box)
+	var device: Texture2D = get_keyword_icon(key)
+	var icon := TextureRect.new()
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.set_anchors_preset(Control.PRESET_FULL_RECT)
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if device != null:
+		icon.texture = device
+		icon.modulate = Color(0.95, 0.82, 0.48, 0.95)
+	else:
+		icon.texture = tex_icon_diamond
+		icon.offset_left = 9
+		icon.offset_right = -9
+		icon.offset_top = 9
+		icon.offset_bottom = -9
+		icon.modulate = Color(0.80, 0.68, 0.42, 0.70)
+	icon_box.add_child(icon)
+
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 1)
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(v)
 	v.add_child(make_label(name, 17, Color(0.95, 0.82, 0.48, 1.0)))
 	var d := make_label(desc, 16, ivory)
 	d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	d.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	d.custom_minimum_size = Vector2(560, 0)
+	d.custom_minimum_size = Vector2(510, 0)
 	v.add_child(d)
-	return row
+
+	# Hairline rule closes the entry — indented past the device column so
+	# the rules read as ledger lines under the text.
+	var rule := ColorRect.new()
+	rule.color = Color(0.45, 0.38, 0.26, 0.25)
+	rule.custom_minimum_size = Vector2(0, 1)
+	rule.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	entry.add_child(rule)
+	return entry
+
+
+func style_thin_scrollbar(scroll: ScrollContainer) -> void:
+	# Slim gilt grabber on an invisible track. The stock chunky grey
+	# VScrollBar reads as engine chrome on every themed screen; this turns
+	# it into a hairline that only asserts itself under the cursor.
+	var bar := scroll.get_v_scroll_bar()
+	var track := StyleBoxEmpty.new()
+	bar.add_theme_stylebox_override("scroll", track)
+	bar.add_theme_stylebox_override("scroll_focus", track)
+	var grab := StyleBoxFlat.new()
+	grab.bg_color = Color(0.72, 0.61, 0.38, 0.45)
+	grab.set_corner_radius_all(2)
+	grab.content_margin_left = 2
+	grab.content_margin_right = 2
+	bar.add_theme_stylebox_override("grabber", grab)
+	var grab_hl: StyleBoxFlat = grab.duplicate()
+	grab_hl.bg_color = Color(0.95, 0.82, 0.48, 0.75)
+	bar.add_theme_stylebox_override("grabber_highlight", grab_hl)
+	bar.add_theme_stylebox_override("grabber_pressed", grab_hl)
+	bar.custom_minimum_size = Vector2(6, 0)
+
+
+func style_rail_scrollbar(scroll: ScrollContainer, width: int = 11) -> void:
+	# The hairline above is right for a side list you glance at and wrong for a
+	# screen whose whole PURPOSE is scrolling (the compendium, the manual). There
+	# the rail is the primary navigation, and a 6px grabber at 45% alpha on an
+	# invisible track tells the player neither that the screen scrolls nor how
+	# much of it is left. This is the same gilt-on-ink material, drawn as a real
+	# fitting: a sunk groove with a solid gilt slider riding in it.
+	var bar := scroll.get_v_scroll_bar()
+	var track := StyleBoxFlat.new()
+	track.bg_color = Color(0.08, 0.065, 0.052, 0.70)
+	track.set_corner_radius_all(4)
+	track.border_width_left = 1
+	track.border_width_right = 1
+	track.border_color = Color(0.62, 0.50, 0.34, 0.26)
+	bar.add_theme_stylebox_override("scroll", track)
+	bar.add_theme_stylebox_override("scroll_focus", track)
+	var grab := StyleBoxFlat.new()
+	grab.bg_color = Color(0.72, 0.61, 0.38, 0.82)
+	grab.set_corner_radius_all(4)
+	grab.content_margin_left = 2
+	grab.content_margin_right = 2
+	# Vertical margins set the grabber's MINIMUM height. Without them a
+	# hundred-plus-tile gallery shrinks the slider to a few pixels of nub, which
+	# is unclickable and reads as a speck of dirt on the groove.
+	grab.content_margin_top = 11
+	grab.content_margin_bottom = 11
+	bar.add_theme_stylebox_override("grabber", grab)
+	var grab_hl: StyleBoxFlat = grab.duplicate()
+	grab_hl.bg_color = Color(0.96, 0.84, 0.50, 0.95)
+	bar.add_theme_stylebox_override("grabber_highlight", grab_hl)
+	bar.add_theme_stylebox_override("grabber_pressed", grab_hl)
+	bar.custom_minimum_size = Vector2(width, 0)
 
 
 # ═══════════════════════════════════════════
@@ -1958,25 +2228,6 @@ static func rarity_card_tint(rarity: String) -> Color:
 		_:          return Color(1.000, 1.000, 1.000, 0.00)
 
 
-# ═══════════════════════════════════════════
-#  V3 FRAME VARIANT LOADER + LOOKUP
-# ═══════════════════════════════════════════
-
-func _load_new_frames() -> void:
-	# Loads all 9 baked v3 variants into _new_frames. Missing files fall back
-	# to creature_common at lookup time.
-	var keys = [
-		"creature_starter", "creature_common", "creature_uncommon", "creature_rare",
-		"spell_starter",    "spell_common",    "spell_uncommon",    "spell_rare",
-		"curse",
-	]
-	for k in keys:
-		var p = "res://assets/frames/frame_%s.png" % k
-		if ResourceLoader.exists(p):
-			_new_frames[k] = load(p)
-	_load_keyword_icons()
-
-
 func _load_keyword_icons() -> void:
 	# Game-icons.net SVGs, CC-BY 3.0 (credited in CREDITS.md), plus the
 	# hand-authored redesign-keyword devices in the same white-silhouette kit.
@@ -1986,10 +2237,10 @@ func _load_keyword_icons() -> void:
 		"wither", "on_enter", "on_death", "adj_buff",
 		# Redesign keywords — were silently icon-less (no bottom-margin device).
 		"shield", "poison", "guardian", "doom", "rampage", "lifelink",
-		"overrun", "formation", "structure", "sniper",
+		"overrun", "formation", "structure", "sniper", "charge",
 		# Transient statuses (not card keywords) — the battlefield tokens' live
 		# status rail renders these while the effect holds.
-		"frozen", "stunned",
+		"frozen", "stunned", "mustering",
 	]
 	for k in keywords:
 		var p = "res://assets/icons/keywords/%s.svg" % k
@@ -2028,21 +2279,6 @@ func cb_color(c: Color) -> Color:
 				return Color.from_hsv(0.47, c.s, c.v, c.a)
 			return c
 	return c
-
-
-func get_card_frame(card_data: Dictionary) -> Texture2D:
-	# Returns the appropriate v3 frame for a card. Falls back to the legacy
-	# tex_card_frame_ornate if USE_NEW_FRAME is off or the file is missing.
-	if not USE_NEW_FRAME or _new_frames.is_empty():
-		return tex_card_frame_ornate
-	var ct: String = "spell" if String(card_data.get("type", "creature")) == "spell" else "creature"
-	if CardDB.is_curse(String(card_data.get("id", ""))) or String(card_data.get("type", "")) == "curse":
-		return _new_frames.get("curse", tex_card_frame_ornate)
-	var rarity: String = String(card_data.get("rarity", "common"))
-	if rarity not in ["starter", "common", "uncommon", "rare", "white"]:
-		rarity = "common"
-	var key = "%s_%s" % [ct, rarity]
-	return _new_frames.get(key, _new_frames.get("creature_common", tex_card_frame_ornate))
 
 
 # ═══════════════════════════════════════════
@@ -2396,6 +2632,10 @@ func make_screen_title(text: String, color: Color = GILT_BRIGHT,
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vbox.add_child(title)
+	# Every screen headline takes the letterpress strike from one place rather
+	# than eight call sites. The screens still deal_in the whole title unit
+	# (title + rule); this presses the WORD onto the page inside it.
+	Motion.stamp_in(title, 0.06, Color(color.r * 1.20, color.g * 1.14, color.b * 0.92))
 
 	# ── diamond separator — texture-based so it renders even if the display
 	# font is missing the U+25C6 glyph.
@@ -2596,355 +2836,229 @@ func spawn_floating_text(host: Node, global_pos: Vector2, text: String,
 	tw.chain().tween_callback(lbl.queue_free)
 
 
+# ── Shared motion kit — the verbs live in scripts/ui/Motion.gd (R6) ───────
+# Extracted 2026-07-16 (the painters/CombatNet precedent): every verb below
+# is a same-name delegator so the shell screens' ~140 GameTheme.* call sites
+# keep working unchanged. New motion verbs belong in Motion.gd; add a
+# delegator here only when shell code will call it as GameTheme.<verb>.
+# The stateful motion pieces — the trauma screen shake and the ink-wipe
+# scene transition — genuinely live on this autoload (they need _process /
+# a cached shader), further down this file.
+
 func pulse_label(lbl: Label, flash_color: Color = Color(1.0, 0.85, 0.30)) -> void:
-	# One-shot color-flash + scale punch on a label. Used by Shop / Rest / Reward
-	# to give gold and HP labels feedback when they change.
-	if lbl == null or not is_instance_valid(lbl):
-		return
-	var rest_color: Color = lbl.get_theme_color("font_color")
-	var rest_scale := lbl.scale
-	lbl.pivot_offset = lbl.size * 0.5
-	var tw := lbl.create_tween()
-	tw.set_parallel(true)
-	tw.tween_property(lbl, "scale", rest_scale * 1.20, 0.10) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	tw.tween_method(func(c: Color):
-			lbl.add_theme_color_override("font_color", c),
-		flash_color, rest_color, 0.32)
-	tw.chain().tween_property(lbl, "scale", rest_scale, 0.22) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	Motion.pulse_label(lbl, flash_color)
 
-
-# ── Shared motion kit (2026-07-11 animation pass) ─────────────────────────
-# Screen-agnostic entrance/choice motion for the shell screens (Reward, Shop,
-# Treasure, Wayside, Recruit, map HUD). deal_in / hover_lift / claim_pop
-# animate modulate + scale ONLY — never position or size — so container
-# layout is untouched. Everything gates on Reduce Motion.
 
 func deal_in(ctrl: Control, delay: float = 0.0) -> void:
-	# Entrance: the tile rises into place with a soft back-settle. Stagger the
-	# delay across a row so offers land like dealt cards, not a wall.
-	if ctrl == null or not is_instance_valid(ctrl):
-		return
-	if UserSettings != null and UserSettings.reduce_motion:
-		return
-	ctrl.modulate.a = 0.0
-	ctrl.scale = Vector2(0.92, 0.92)
-	var tw := ctrl.create_tween()
-	tw.tween_interval(maxf(delay, 0.001))
-	# Pivot can only be centred once the container has sized the tile.
-	tw.tween_callback(func():
-		if is_instance_valid(ctrl):
-			ctrl.pivot_offset = ctrl.size * 0.5)
-	tw.tween_property(ctrl, "modulate:a", 1.0, 0.22).set_ease(Tween.EASE_OUT)
-	tw.parallel().tween_property(ctrl, "scale", Vector2.ONE, 0.34) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	Motion.deal_in(ctrl, delay)
 
 
-func hover_lift(btn: Control, lift: float = 1.03) -> void:
-	# A small scale lift on hover — the stylebox swap says "interactive", the
-	# lift says "pick me up". Scale only, so row layout never reflows.
-	if btn == null or not is_instance_valid(btn):
-		return
-	if UserSettings != null and UserSettings.reduce_motion:
-		return
-	btn.mouse_entered.connect(func():
-		if not is_instance_valid(btn):
-			return
-		btn.pivot_offset = btn.size * 0.5
-		var tw := btn.create_tween()
-		tw.tween_property(btn, "scale", Vector2(lift, lift), 0.12) \
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
-	btn.mouse_exited.connect(func():
-		if not is_instance_valid(btn):
-			return
-		var tw := btn.create_tween()
-		tw.tween_property(btn, "scale", Vector2.ONE, 0.14) \
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
+func stamp_in(lbl: Control, delay: float = 0.0,
+		bloom: Color = Color(1.0, 0.90, 0.52), shake: bool = false) -> void:
+	Motion.stamp_in(lbl, delay, bloom, shake)
+
+
+func hover_lift(btn: Control, lift: float = 1.03, target: Control = null,
+		raise_z: bool = false) -> void:
+	Motion.hover_lift(btn, lift, target, raise_z)
+
+
+func punch(ctrl: Control, amount: float = 1.08) -> void:
+	Motion.punch(ctrl, amount)
+
+
+func fade_exit(ctrl: Control, dur: float = Motion.EXIT) -> void:
+	Motion.fade_exit(ctrl, dur)
 
 
 func claim_pop(ctrl: Control) -> void:
-	# The chosen tile flares bright and punches up, then settles — a pick
-	# reads as a physical grab (Combat's _punch_label language, tile-sized).
-	if ctrl == null or not is_instance_valid(ctrl):
-		return
-	if UserSettings != null and UserSettings.reduce_motion:
-		return
-	ctrl.pivot_offset = ctrl.size * 0.5
-	var tw := ctrl.create_tween()
-	tw.tween_property(ctrl, "scale", Vector2(1.08, 1.08), 0.10) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tw.parallel().tween_property(ctrl, "self_modulate",
-		Color(1.35, 1.28, 1.05), 0.10)
-	tw.tween_property(ctrl, "scale", Vector2.ONE, 0.18) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	tw.parallel().tween_property(ctrl, "self_modulate", Color.WHITE, 0.18)
+	Motion.claim_pop(ctrl)
 
 
 func pocket_away(ctrl: Control, to_global: Vector2, dur: float = 0.32) -> void:
-	# The bought/claimed tile detaches from its container and dives toward a
-	# destination point (the player's pack, the merchant's counter), shrinking
-	# and fading on the way. Awaitable — callers rebuild their UI after it
-	# lands. Reduce Motion collapses it to an instant return.
-	if ctrl == null or not is_instance_valid(ctrl):
-		return
-	if UserSettings != null and UserSettings.reduce_motion:
-		return
-	var gp := ctrl.global_position
-	ctrl.top_level = true
-	ctrl.global_position = gp
-	ctrl.z_index = 220
-	ctrl.pivot_offset = ctrl.size * 0.5
-	ctrl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var tw := ctrl.create_tween()
-	tw.tween_property(ctrl, "scale", ctrl.scale * 1.06, 0.08) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tw.tween_property(ctrl, "global_position", to_global - ctrl.size * 0.5, dur) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	tw.parallel().tween_property(ctrl, "scale", Vector2(0.35, 0.35), dur) \
-		.set_ease(Tween.EASE_IN)
-	tw.parallel().tween_property(ctrl, "modulate:a", 0.0, dur) \
-		.set_ease(Tween.EASE_IN)
-	await tw.finished
+	# Await-forwarding: callers rebuild their UI after the tile lands.
+	await Motion.pocket_away(ctrl, to_global, dur)
 
 
 func tick_number(lbl: Label, from_val: int, to_val: int,
 		template: String = "%d", dur: float = 0.5) -> void:
-	# Rolls a numeric label from one value to another (gold counters, HP).
-	# Pairs with pulse_label for the change-flash; Reduce Motion snaps.
-	if lbl == null or not is_instance_valid(lbl):
-		return
-	if from_val == to_val or (UserSettings != null and UserSettings.reduce_motion):
-		lbl.text = template % to_val
-		return
-	var tw := lbl.create_tween()
-	tw.tween_method(func(v: float):
-		if is_instance_valid(lbl):
-			lbl.text = template % int(round(v)),
-		float(from_val), float(to_val), dur)
-	pulse_label(lbl, Color(1.0, 0.85, 0.30) if to_val > from_val \
-		else Color(1.0, 0.45, 0.20))
+	Motion.tick_number(lbl, from_val, to_val, template, dur)
+
+
+func write_on(rich_label, delay: float = 0.10) -> void:
+	Motion.write_on(rich_label, delay)
+
+
+func ken_burns(art: Control, pivot: Vector2, amount: float = 1.035,
+		period: float = 16.0) -> void:
+	Motion.ken_burns(art, pivot, amount, period)
+
+
+func card_reveal(card: Control, delay: float, rarity: String = "",
+		companion: Control = null) -> void:
+	Motion.card_reveal(card, delay, rarity, companion)
 
 
 func forge_strike(host: Control, target: Control) -> void:
-	# The forge set-piece: the tempered card flashes white-hot, anvil sparks
-	# shower off its base and FALL (unlike combat's rising embers — different
-	# material, deliberate), a shock ring pops, and the metal cools back to
-	# white. Awaitable (~0.6s); Reduce Motion / missing target = no beat.
-	if host == null or target == null \
-			or not is_instance_valid(host) or not is_instance_valid(target):
-		return
-	if UserSettings != null and UserSettings.reduce_motion:
-		return
-	var center: Vector2 = target.global_position + target.size * 0.5
-	var base_pt: Vector2 = center + Vector2(0, target.size.y * 0.32)
-
-	# White-hot flash → cool. Scale punch rides the same beat.
-	target.pivot_offset = target.size * 0.5
-	var tw := target.create_tween()
-	tw.tween_property(target, "modulate", Color(2.1, 1.85, 1.35), 0.07) \
-		.set_ease(Tween.EASE_OUT)
-	tw.parallel().tween_property(target, "scale", Vector2(1.07, 1.07), 0.07) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tw.tween_property(target, "modulate", Color(1.30, 1.08, 0.86), 0.16)
-	tw.parallel().tween_property(target, "scale", Vector2.ONE, 0.22) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	tw.tween_property(target, "modulate", Color.WHITE, 0.30) \
-		.set_ease(Tween.EASE_OUT)
-
-	# Shock ring at the strike point.
-	_spawn_ring(host, base_pt, Color(1.0, 0.88, 0.55, 0.75), 18.0, 150.0, 0.34)
-
-	# Anvil sparks: spray up and out, then fall under gravity.
-	if (UserSettings == null or UserSettings.particles) \
-			and DisplayServer.get_name() != "headless":
-		var p := CPUParticles2D.new()
-		p.position = base_pt
-		p.z_index = 220
-		p.one_shot = true
-		p.explosiveness = 0.92
-		p.amount = 36
-		p.lifetime = 0.7
-		p.direction = Vector2(0, -1)
-		p.spread = 62.0
-		p.gravity = Vector2(0, 640.0)
-		p.initial_velocity_min = 180.0
-		p.initial_velocity_max = 360.0
-		p.scale_amount_min = 1.4
-		p.scale_amount_max = 3.0
-		var ramp := Gradient.new()
-		ramp.set_color(0, Color(1.0, 0.95, 0.72, 1.0))
-		ramp.set_color(1, Color(1.0, 0.42, 0.10, 0.0))
-		p.color_ramp = ramp
-		host.add_child(p)
-		p.emitting = true
-		host.get_tree().create_timer(p.lifetime + 0.3).timeout.connect(p.queue_free)
-
-	await host.get_tree().create_timer(0.60).timeout
+	# Await-forwarding: the forge set-piece is a ~0.6s beat callers wait on.
+	await Motion.forge_strike(host, target)
 
 
 func rarity_reveal(ctrl: Control, rarity: String, delay: float = 0.0) -> void:
-	# One-shot engraved sunburst behind a freshly dealt card offer, scaled to
-	# the pull: uncommon = a cool silver ring-glint, rare = a gilt ray halo +
-	# a brightness kiss on the card itself. Commons/starters no-op — the shine
-	# must stay information ("this slate rolled well"), not wallpaper. Drawn as
-	# the burst Control's OWN geometry (draw signal) with show_behind_parent,
-	# so the rays sit behind the card face and above the screen background.
-	if ctrl == null or not is_instance_valid(ctrl):
-		return
-	if rarity != "uncommon" and rarity != "rare":
-		return
-	if UserSettings != null and UserSettings.reduce_motion:
-		return
-	if DisplayServer.get_name() == "headless":
-		return
-	var is_rare := rarity == "rare"
-	var col: Color = Color(1.0, 0.83, 0.36) if is_rare else Color(0.74, 0.83, 0.94)
-	var burst := Control.new()
-	burst.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	burst.show_behind_parent = true
-	burst.modulate.a = 0.0
-	burst.scale = Vector2(0.55, 0.55)
-	ctrl.add_child(burst)
-	# Ray directions rolled once; geometry is drawn in the burst's local space
-	# around origin, so the tween animates transform + alpha only.
-	var rays: Array = []
-	var ray_n: int = 12 if is_rare else 7
-	for i in ray_n:
-		rays.append([Vector2.from_angle(
-			TAU * (float(i) + randf_range(-0.18, 0.18)) / float(ray_n)),
-			randf_range(0.85, 1.2)])
-	burst.draw.connect(func():
-		if not is_instance_valid(ctrl):
-			return
-		# Elliptical halo hugging the card's silhouette, rays ticking outward
-		# from just past its edge — an engraved sunburst, not a lens flare.
-		var rx: float = ctrl.size.x * 0.62
-		var ry: float = ctrl.size.y * 0.58
-		var ring := PackedVector2Array()
-		for i in range(57):
-			var a := TAU * float(i) / 56.0
-			ring.append(Vector2(cos(a) * rx, sin(a) * ry))
-		burst.draw_polyline(ring, Color(col.r, col.g, col.b, 0.80), 2.5, true)
-		if is_rare:
-			burst.draw_polyline(ring, Color(col.r, col.g, col.b, 0.35), 7.0, true)
-		for r in rays:
-			var d: Vector2 = r[0]
-			var p0 := Vector2(d.x * ctrl.size.x * 0.58, d.y * ctrl.size.y * 0.55)
-			var p1: Vector2 = p0 * (1.30 if is_rare else 1.18) * float(r[1])
-			burst.draw_line(p0, p1, Color(col.r, col.g, col.b, 0.75), 3.0, true))
-	var tw := ctrl.create_tween()
-	tw.tween_interval(maxf(delay, 0.001))
-	tw.tween_callback(func():
-		if is_instance_valid(burst) and is_instance_valid(ctrl):
-			burst.position = ctrl.size * 0.5
-			burst.queue_redraw())
-	tw.tween_property(burst, "modulate:a", 1.0, 0.12).set_ease(Tween.EASE_OUT)
-	tw.parallel().tween_property(burst, "scale", Vector2.ONE, 0.36) \
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	tw.parallel().tween_property(burst, "rotation", 0.12, 0.55)
-	if is_rare:
-		tw.parallel().tween_property(ctrl, "modulate",
-			Color(1.20, 1.14, 1.00), 0.14)
-	tw.chain().tween_property(burst, "modulate:a", 0.0, 0.46) \
-		.set_ease(Tween.EASE_IN)
-	if is_rare:
-		tw.parallel().tween_property(ctrl, "modulate", Color.WHITE, 0.30)
-	tw.chain().tween_callback(func():
-		if is_instance_valid(burst):
-			burst.queue_free())
+	Motion.rarity_reveal(ctrl, rarity, delay)
 
 
-# ── The reroll flourish ────────────────────────────────────────────────
-# One expanding ring (a horn-blast / arcane pulse), drawn from a circular
-# StyleBox so it needs no texture or shader: a square Panel whose corner
-# radius ≥ half its size renders as a ring outline; scaling the Panel grows
-# the whole ring. Parented onto the caller-supplied overlay and self-frees.
-func _spawn_ring(overlay: Control, center: Vector2, color: Color,
+func ring_pulse(overlay: Control, center: Vector2, color: Color,
 		start_d: float, end_d: float, dur: float, delay: float = 0.0) -> void:
-	if overlay == null or not is_instance_valid(overlay):
-		return
-	var ring := Panel.new()
-	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var st := StyleBoxFlat.new()
-	st.bg_color = Color(0, 0, 0, 0)
-	st.border_color = color
-	st.set_border_width_all(5)
-	st.set_corner_radius_all(600)
-	ring.add_theme_stylebox_override("panel", st)
-	ring.size = Vector2(start_d, start_d)
-	ring.pivot_offset = ring.size * 0.5
-	ring.position = center - ring.size * 0.5
-	ring.modulate.a = 0.0
-	overlay.add_child(ring)
-	var grow: float = end_d / maxf(start_d, 1.0)
-	var tw := ring.create_tween()
-	tw.tween_interval(delay)
-	tw.set_parallel(true)
-	tw.tween_property(ring, "modulate:a", 1.0, 0.08)
-	tw.chain().set_parallel(true)
-	tw.tween_property(ring, "scale", Vector2(grow, grow), dur) \
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	tw.tween_property(ring, "modulate:a", 0.0, dur).set_ease(Tween.EASE_IN)
-	tw.chain().tween_callback(ring.queue_free)
+	Motion.ring_pulse(overlay, center, color, start_d, end_d, dur, delay)
 
 
-## The reroll flourish: a double call-ring pulse plus the current choice cards
-## scattering off the table (blown outward from screen-centre, spinning and
-## fading), so a reroll READS as "sweep these away, call new ones." Reparents
-## `cards` onto a temporary top overlay so they animate free of their layout
-## containers; the overlay self-frees after the sweep. Returns the seconds the
-## caller should wait before dealing the fresh slate in (a short beat gives a
-## snappy old-out / new-in overlap). `accent` colours the rings so callers can
-## flavour it (gold horn-blast vs. cool arcane pulse).
 func reroll_sweep(host: Control, cards: Array,
 		accent: Color = Color(1.0, 0.82, 0.36)) -> float:
-	if host == null or not is_instance_valid(host):
-		return 0.0
-	var center: Vector2 = host.get_viewport_rect().size * 0.5
-	var overlay := Control.new()
-	overlay.name = "RerollSweepFX"
-	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	overlay.z_index = 180
-	host.add_child(overlay)
+	# Returns the seconds the caller should wait before dealing the new slate.
+	return Motion.reroll_sweep(host, cards, accent)
 
-	_spawn_ring(overlay, center, Color(accent.r, accent.g, accent.b, 0.95),
-		96.0, 580.0, 0.52)
-	_spawn_ring(overlay, center, Color(1, 1, 1, 0.75), 54.0, 320.0, 0.42, 0.06)
 
-	var longest := 0.30
-	for i in cards.size():
-		var card = cards[i]
-		if card == null or not is_instance_valid(card) or not (card is Control):
-			continue
-		var gpos: Vector2 = card.global_position
-		var par: Node = card.get_parent()
-		if par != null:
-			par.remove_child(card)
-		overlay.add_child(card)
-		card.position = gpos
-		card.pivot_offset = card.size * 0.5
-		var cc: Vector2 = gpos + card.size * 0.5
-		var dir: Vector2 = cc - center
-		if dir.length() < 1.0:
-			dir = Vector2(0, -1)
-		dir = dir.normalized()
-		var away: Vector2 = dir * 260.0 + Vector2(0, -70.0)
-		var d := float(i) * 0.05
-		var tw: Tween = card.create_tween()
-		tw.set_parallel(true)
-		tw.tween_property(card, "position", card.position + away, 0.34) \
-			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN).set_delay(d)
-		tw.tween_property(card, "rotation", randf_range(-0.6, 0.6), 0.34).set_delay(d)
-		tw.tween_property(card, "scale", card.scale * 0.5, 0.34).set_delay(d)
-		tw.tween_property(card, "modulate:a", 0.0, 0.30).set_delay(d)
-		longest = maxf(longest, d + 0.34)
+# ── Trauma screen shake (R2 of docs/ANIMATION_AUDIT_20260716.md) ──────────
+# One shake service for every screen (Eiserloh's GDC trauma model): impulses
+# ADD energy to a 0–1 trauma reservoir, amplitude = trauma² × SHAKE_MAX_OFFSET,
+# offsets come from smooth noise, and trauma decays linearly. Compared to the
+# old per-call jitter tween this composes (a kill during a shake makes it
+# BIGGER, not a restart) and gives the shaken property a single writer.
+#
+# Usage: `set_shake_target(node)` once per screen (idempotent — safe to call
+# per impulse), then `add_trauma(x)` with x in 0–1 (0.2 = a tap, 0.5 = a heavy
+# blow, 1.0 = the world ends). Combat.screen_shake delegates here and maps its
+# legacy pixel amounts; shell set-pieces call it directly with small values.
+# CanvasLayers shake via "offset", Controls/Node2Ds via "position"; the rest
+# value is captured at registration and restored exactly when trauma runs out.
+# Gates on the dedicated Screen Shake setting, NOT reduce_motion (shake has
+# its own toggle in Settings).
 
-	var kill := overlay.create_tween()
-	kill.tween_interval(longest + 0.08)
-	kill.tween_callback(overlay.queue_free)
-	return longest
+const SHAKE_MAX_OFFSET: float = 18.0  # px at full trauma (amplitude = trauma² × this)
+const SHAKE_DECAY: float = 2.4        # trauma lost per second (full shake fades in ~0.4s)
+const SHAKE_FREQ: float = 190.0       # noise sample speed — higher = more violent rattle
+
+var _shake_trauma: float = 0.0
+var _shake_target: Node = null
+var _shake_prop: String = "position"
+var _shake_rest: Vector2 = Vector2.ZERO
+# Co-targets shaken off the same trauma, in lockstep with _shake_target.
+# Entries: {node, prop, rest}. See set_shake_targets.
+var _shake_extra: Array = []
+var _shake_clock: float = 0.0
+var _shake_noise_x: FastNoiseLite = null
+var _shake_noise_y: FastNoiseLite = null
+
+
+func set_shake_target(node: Node) -> void:
+	# Idempotent: re-registering the current target keeps its trauma (so
+	# per-impulse callers don't reset a shake in flight). A NEW target releases
+	# the old one back to its rest value first.
+	if node == _shake_target:
+		return
+	_release_shake_target()
+	if node == null or not is_instance_valid(node):
+		return
+	_shake_target = node
+	_shake_prop = "offset" if node is CanvasLayer else "position"
+	_shake_rest = node.get(_shake_prop)
+
+
+func set_shake_targets(nodes: Array) -> void:
+	# Shake several nodes IN LOCKSTEP off one trauma reservoir. Combat needs
+	# this because the board and the HUD are different layers: the cards live in
+	# _board_container (a Control) while the floating numbers, rings and impact
+	# bursts live in _hud_layer (a CanvasLayer). Shaking only one of them either
+	# leaves the battlefield perfectly still while the numbers jitter (what the
+	# game did before 2026-07-17) or tears the VFX off the cards they were
+	# spawned on. One offset, applied to every target, keeps them welded.
+	#
+	# Idempotent on the same set, for the same reason as set_shake_target: an
+	# impulse arriving mid-shake must ADD energy, not restart the shake.
+	var live: Array = []
+	for n in nodes:
+		if n != null and is_instance_valid(n):
+			live.append(n)
+	if live.is_empty():
+		return
+	if _shake_extra_match(live):
+		return
+	_release_shake_target()
+	_shake_target = live[0]
+	_shake_prop = "offset" if live[0] is CanvasLayer else "position"
+	_shake_rest = live[0].get(_shake_prop)
+	for i in range(1, live.size()):
+		var n: Node = live[i]
+		var prop: String = "offset" if n is CanvasLayer else "position"
+		_shake_extra.append({"node": n, "prop": prop, "rest": n.get(prop)})
+
+
+func _shake_extra_match(live: Array) -> bool:
+	if _shake_target != live[0] or _shake_extra.size() != live.size() - 1:
+		return false
+	for i in range(1, live.size()):
+		if _shake_extra[i - 1]["node"] != live[i]:
+			return false
+	return true
+
+
+func add_trauma(amount: float) -> void:
+	if UserSettings != null and not UserSettings.screen_shake:
+		return
+	if _shake_target == null or not is_instance_valid(_shake_target):
+		return
+	if _shake_noise_x == null:
+		_shake_noise_x = FastNoiseLite.new()
+		_shake_noise_x.seed = 1013
+		_shake_noise_y = FastNoiseLite.new()
+		_shake_noise_y.seed = 4021
+	_shake_trauma = clampf(_shake_trauma + clampf(amount, 0.0, 1.0), 0.0, 1.0)
+	set_process(true)
+
+
+func shake_impulse(node: Node, amount: float) -> void:
+	# Convenience for shell one-shots (forge strike, treasure burst): target +
+	# impulse in one call.
+	set_shake_target(node)
+	add_trauma(amount)
+
+
+func _process(delta: float) -> void:
+	# Only runs while a shake is live — add_trauma() arms it, and it disarms
+	# itself (restoring the target's rest value exactly) when trauma hits zero
+	# or the target is freed under it.
+	if _shake_trauma <= 0.0 or _shake_target == null \
+			or not is_instance_valid(_shake_target):
+		_release_shake_target()
+		set_process(false)
+		return
+	_shake_trauma = maxf(_shake_trauma - SHAKE_DECAY * delta, 0.0)
+	_shake_clock += delta
+	var amp: float = _shake_trauma * _shake_trauma * SHAKE_MAX_OFFSET
+	var off := Vector2(
+		_shake_noise_x.get_noise_1d(_shake_clock * SHAKE_FREQ),
+		_shake_noise_y.get_noise_1d(_shake_clock * SHAKE_FREQ)) * amp
+	_shake_target.set(_shake_prop, _shake_rest + off)
+	# Same offset on every co-target, so the board and the effects drawn over it
+	# move as one object.
+	for e in _shake_extra:
+		if is_instance_valid(e["node"]):
+			e["node"].set(e["prop"], e["rest"] + off)
+	if _shake_trauma <= 0.0:
+		_release_shake_target()
+		set_process(false)
+
+
+func _release_shake_target() -> void:
+	if _shake_target != null and is_instance_valid(_shake_target):
+		_shake_target.set(_shake_prop, _shake_rest)
+	for e in _shake_extra:
+		if is_instance_valid(e["node"]):
+			e["node"].set(e["prop"], e["rest"])
+	_shake_extra.clear()
+	_shake_target = null
+	_shake_trauma = 0.0
 
 
 # ── The signature transition: an ink-bleed wipe ────────────────────────
@@ -2959,6 +3073,7 @@ const _INK_WIPE_CODE := "
 shader_type canvas_item;
 uniform float progress : hint_range(0.0, 1.0) = 0.0;
 uniform vec3 ember : source_color = vec3(0.95, 0.45, 0.14);
+uniform vec2 origin = vec2(0.08, 0.10);
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
@@ -2972,7 +3087,7 @@ float vnoise(vec2 p) {
 void fragment() {
 	float n = vnoise(UV * 7.0) * 0.55 + vnoise(UV * 19.0) * 0.30
 		+ vnoise(UV * 43.0) * 0.15;
-	float field = distance(UV, vec2(0.08, 0.10)) / 1.35;
+	float field = distance(UV, origin) / 1.35;
 	float f = field * 0.72 + n * 0.28;
 	float t = progress * 1.12;
 	float a = 1.0 - smoothstep(t - 0.035, t, f);
@@ -2996,7 +3111,8 @@ func _get_ink_wipe_shader() -> Shader:
 # input immediately and auto-frees right after the scene switch. Calling
 # fade_in() at scene _ready time is the matched bookend.
 func fade_out_then_change_scene(host: Node, target_scene: String,
-		duration: float = 0.34) -> void:
+		duration: float = 0.34,
+		origin_uv: Vector2 = Vector2(0.08, 0.10)) -> void:
 	if host == null or not is_instance_valid(host) or host.get_tree() == null:
 		return
 	var overlay := ColorRect.new()
@@ -3008,6 +3124,10 @@ func fade_out_then_change_scene(host: Node, target_scene: String,
 	var mat := ShaderMaterial.new()
 	mat.shader = _get_ink_wipe_shader()
 	mat.set_shader_parameter("progress", 0.0)
+	# MapView passes the committed site's screen position so the ink starts at
+	# the place the army just entered. Other scenes keep the page-turn origin.
+	mat.set_shader_parameter("origin", Vector2(
+		clampf(origin_uv.x, 0.0, 1.0), clampf(origin_uv.y, 0.0, 1.0)))
 	overlay.material = mat
 	host.get_tree().root.add_child(overlay)
 	var tw := overlay.create_tween()
@@ -3156,23 +3276,15 @@ func show_confirm_dialog(host: Node, title: String, message: String,
 
 	var panel := PanelContainer.new()
 	panel.custom_minimum_size = Vector2(460, 0)
-	var s := StyleBoxFlat.new()
-	s.bg_color = Color(0.12, 0.09, 0.07, 0.97)
-	s.border_color = GILT_BRIGHT
-	s.border_width_left = 2
-	s.border_width_right = 2
-	s.border_width_top = 2
-	s.border_width_bottom = 2
-	s.corner_radius_top_left = 16
-	s.corner_radius_top_right = 16
-	s.corner_radius_bottom_left = 16
-	s.corner_radius_bottom_right = 16
-	s.content_margin_left = 28
-	s.content_margin_right = 28
+	# House document kit (chamfer + metal rule + corner tacks) — the old
+	# 16px-radius rounded bubble was the last non-kit panel in the pause flow.
+	var s := make_panel_style(
+		Color(0.105, 0.082, 0.062, 0.98), Color(0.70, 0.58, 0.35, 0.95),
+		2, 6, true, true)
+	s.content_margin_left = 30
+	s.content_margin_right = 30
 	s.content_margin_top = 24
 	s.content_margin_bottom = 24
-	s.shadow_size = 22
-	s.shadow_color = Color(0, 0, 0, 0.6)
 	panel.add_theme_stylebox_override("panel", s)
 	center.add_child(panel)
 
@@ -3252,6 +3364,9 @@ func show_confirm_dialog(host: Node, title: String, message: String,
 ## {root, card, badge, button} — the caller wires `button.pressed` and updates
 ## `badge.text` / `badge.visible` / `button.disabled` / `card.modulate` as the
 ## deck changes. Lets deck screens show real card art instead of a name list.
+## The card keeps its crisp vector rules text at any thumbnail scale — small but
+## legible, and honest about what each card does (see the rules-text note in
+## Card2D._build_baked_overlay_layout).
 func make_card_thumb(card_data: Dictionary, card_scale: float = 0.46) -> Dictionary:
 	var w: float = 225.0 * card_scale
 	var h: float = 300.0 * card_scale
@@ -3321,13 +3436,19 @@ func show_deck_picker(host: Node, title: String, type_filter: String = "",
 		allow_cancel: bool = false) -> int:
 	## Modal grid of the run deck; the player clicks a card. Returns the chosen
 	## RunState.deck INDEX, or -1 if dismissed / nothing eligible.
-	##   type_filter: "" (any) | "creature" | "spell"
+	##   type_filter: "" (any) | "creature" | "spell" | "upgradeable"
 	if host == null or not is_instance_valid(host) or host.get_tree() == null:
 		return -1
 	# Resolve eligible deck indices first — bail before building UI if empty.
 	var eligible: Array[int] = []
 	for i in RunState.deck.size():
 		var d: Dictionary = RunState.get_upgraded_card_data(i)
+		if type_filter == "upgradeable":
+			if RunState.has_upgrade_path(i, "plus") \
+					or not CardDB.is_upgradeable(RunState.deck[i]):
+				continue
+			eligible.append(i)
+			continue
 		if type_filter != "" and d.get("type", "") != type_filter:
 			continue
 		eligible.append(i)
@@ -3454,23 +3575,13 @@ func show_option_picker(host: Node, title: String, options: Array) -> int:
 
 	var panel := PanelContainer.new()
 	panel.custom_minimum_size = Vector2(540, 0)
-	var s := StyleBoxFlat.new()
-	s.bg_color = Color(0.12, 0.09, 0.07, 0.97)
-	s.border_color = GILT_BRIGHT
-	s.border_width_left = 2
-	s.border_width_right = 2
-	s.border_width_top = 2
-	s.border_width_bottom = 2
-	s.corner_radius_top_left = 16
-	s.corner_radius_top_right = 16
-	s.corner_radius_bottom_left = 16
-	s.corner_radius_bottom_right = 16
+	# The chart kit, not a CSS-rounded rect — same conversion the confirm
+	# dialog got (2026-07-18); this was the last rounded-rect modal.
+	var s := make_panel_style(Color(0.12, 0.09, 0.07, 0.97), GILT_BRIGHT, 2, 6, true)
 	s.content_margin_left = 28
 	s.content_margin_right = 28
 	s.content_margin_top = 24
 	s.content_margin_bottom = 24
-	s.shadow_size = 22
-	s.shadow_color = Color(0, 0, 0, 0.6)
 	panel.add_theme_stylebox_override("panel", s)
 	center.add_child(panel)
 

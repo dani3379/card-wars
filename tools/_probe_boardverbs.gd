@@ -116,14 +116,15 @@ func _test_vanguard_front_buff() -> void:
 
 func _test_vanguard_back_draw() -> void:
 	_clear_all()
-	# Guarantee something to draw.
-	if combat._player_draw_pile.is_empty():
-		combat._player_draw_pile.append(combat._pile_entry("goblin", -1))
+	# 2026-07-15 rework: the back mode is the SCOUT — it reveals the foe's next
+	# arrival (battle-log intel) instead of the washed draw refill-to-5 killed.
+	# Assert the draw is gone and the reveal resolves without touching the hand.
 	var p = _place(2, 3, 0, false, combat.ROW_BACK)
 	var hand0: int = combat._hand.size()
 	p.card_data["on_play"] = {"type": "vanguard_split", "value": 2}
 	await combat._resolve_on_play_ability(p, 0, false)
-	_assert("vanguard_split BACK: draws a card", combat._hand.size() == hand0 + 1)
+	_assert("vanguard_split BACK: scouts instead of drawing (hand untouched)",
+		combat._hand.size() == hand0)
 
 
 func _test_snipe_back() -> void:

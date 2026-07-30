@@ -28,6 +28,7 @@ const ALIASES: Dictionary = {
 	"fourth_legion_dead":   "e_bone_knight",  # the Fourth, ninety years on
 	"cornicen":             "battle_drummer", # the horn-player of the legion
 	"unpaid_optio":         "ironclad_veteran",
+	"gate_section":         "stone_wall",      # Stalwart capital siege objective
 
 	# ── Player-side near-duplicates ──────────────────────────────────────
 	# Type keystones (2026-07-15) — stand-in art until bespoke paintings land.
@@ -38,6 +39,16 @@ const ALIASES: Dictionary = {
 	"siegewright":          "iron_bastion", # Bastion keystone — a great wall-engine
 	"kingpin":              "sellsword",    # Stray keystone (Free Company Captain) — the crew's boss
 	"deserter":             "skirmisher",   # Stray common — a soldier who ran
+	# The four Part C tribe keystones (2026-07-30) — stand-ins until bespoke art
+	# lands. Each borrows from its own tribe so the alias never crosses a tribe
+	# line, which is the thing a shared stand-in most easily gets wrong.
+	"pike_captain":         "royal_guard",  # Soldier keystone — the man who calls the volley
+	"siege_bastion":        "iron_bastion", # Bastion keystone — the fortified works
+	"the_magister":         "archmage",     # Warlock keystone — the coven's ledger-keeper
+	"dire_alpha":           "wolf_c",       # Beast keystone — the pack's biggest wolf
+	# COUNTERORDERS (2026-07-30) — both bodies are Strays who read the enemy's post.
+	"order_breaker":        "skirmisher",   # the runner who breaks a committed line
+	"the_interpreter":      "sellsword",    # the one who reads the foe's orders
 	"sellsword_outrider":   "duelist",      # Stray uncommon — the dancing flanker
 	# Rarity-floor vanillas (2026-07-16) — stand-ins until bespoke art lands.
 	"man_at_arms":          "militia",
@@ -76,6 +87,19 @@ const ALIASES: Dictionary = {
 	"levy_rider":           "ranger",  # Outrider — a hooded scout, not sharing Lookout's face
 	"palisade":             "iron_bastion",
 	"mourner":              "the_crone",  # grieving hooded figure, not sharing Gravedigger
+	# Hero-retinue starters (2026-07-28); bespoke files auto-win later.
+	"grasswake_lancer": "lancer",
+	"trail_scout": "lookout",
+	"rank_spearman": "pikeman",
+	"wall_tender": "torchbearer",
+	"standard_page": "bannerman",
+	"grave_goods_levy": "gravedigger",
+	"debt_guard": "e_dark_priest",
+	"lens_apprentice": "witch",
+	"mirror_guard": "mirror_knight",
+	"glass_savant": "archmage",
+	"fuse_tender": "ember_mystic",
+	"cinderward": "ember_warden",
 	"sin_eater":            "e_dark_priest",
 	# 2026-07-07 fun slate — orphaned paintings put back to work.
 	# (trebuchet.png exists outright, so Trebuchet needs no alias.)
@@ -781,6 +805,14 @@ const SPELL_ALIASES: Dictionary = {
 	"deserters_mark": "curse",
 	"war_debt": "curse",
 	"grave_debt": "wound",
+	"spur_forward": "charge_spell",
+	"cut_them_off": "smite_spell",
+	"close_ranks_order": "patch_up",
+	"read_the_will": "grave_robbery",
+	"last_due": "fuel_the_pyre",
+	"star_chart": "lost_tome",
+	"countermarch_levy": "adrenaline",
+	"touchpaper": "turbo",
 	# Penance (card id reckless_charge) — the old cavalry-charge painting moved
 	# to assets/_unused; Offering's somber art fits the sin-burning.
 	"reckless_charge": "offering",

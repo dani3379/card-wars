@@ -30,6 +30,9 @@ KeywordEffects="*res://scripts/data/KeywordEffects.gd"
 EncounterEffects="*res://scripts/data/EncounterEffects.gd"
 EncounterDB="*res://scripts/data/EncounterDB.gd"
 MutatorDB="*res://scripts/data/MutatorDB.gd"
+SetPieceDB="*res://scripts/data/SetPieceDB.gd"
+WritDB="*res://scripts/data/WritDB.gd"
+BannerDB="*res://scripts/data/BannerDB.gd"
 GameTheme="*res://scripts/GameTheme.gd"
 UserSettings="*res://scripts/state/UserSettings.gd"
 Supersample="*res://scripts/state/Supersample.gd"
@@ -52,6 +55,6 @@ window/stretch/mode="canvas_items"
 
 [rendering]
 
-textures/canvas_textures/default_texture_filter=3
+textures/canvas_textures/default_texture_filter=2
 renderer/rendering_method="gl_compatibility"
 environment/defaults/default_clear_color=Color(0.04, 0.03, 0.025, 1)

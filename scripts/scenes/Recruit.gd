@@ -9,10 +9,9 @@ extends Control
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 const MAP_SCENE = "res://scenes/map.tscn"
 
-# Roll a wide slate, keep the 3 most kingdom-aligned. This delivers the
-# "curated faction draft" without per-card faction data — the affinity
-# table reads the shape cards already have. A real faction tag pass can
-# replace it later without touching this screen's flow.
+# Roll a wide slate, keep the 3 most kingdom-aligned. Explicit card affinities
+# lead the "curated faction draft"; the shape heuristics keep the rest of the
+# pool legible without requiring every card to carry a faction tag.
 const SLATE_SIZE := 8
 
 # What "fits the kingdom" means per faction, read off existing card fields.
@@ -84,7 +83,8 @@ func _roll_offer() -> Array[String]:
 	var slate: Array[String] = CardDB.roll_card_reward(
 		RunState.get_act(), false, false, maxi(SLATE_SIZE, offer_size))
 	var out: Array[String] = []
-	if faction == "" or slate.size() <= offer_size:
+	# Score whenever anything leans the slate — the kingdom OR the season.
+	if (faction == "" and RunState.season_tribes.is_empty()) or slate.size() <= offer_size:
 		out = slate.slice(0, mini(offer_size, slate.size()))
 	else:
 		var scored: Array = []
@@ -128,10 +128,18 @@ func _choice_role_tip(id: String) -> String:
 
 
 func _affinity(d: Dictionary, faction: String) -> int:
+	var s := 0
+	# Season winds: the run's dealt tribes lean every muster, in every kingdom.
+	# +2 sits between the explicit faction tag (+4) and the terrain accent (+1):
+	# the season colors the road without drowning the local banner.
+	if RunState.season_tribes.has(String(d.get("ctype", ""))):
+		s += 2
 	var rules: Dictionary = AFFINITY.get(faction, {})
 	if rules.is_empty():
-		return 0
-	var s := 0
+		return s
+	var explicit_affinities: Array = d.get("affinities", [])
+	if explicit_affinities.has(faction):
+		s += 4
 	var kws: Array = d.get("keywords", [])
 	for kw in rules.get("kw", []):
 		if kws.has(kw):
@@ -192,9 +200,13 @@ func _build_ui() -> void:
 
 	var outer := VBoxContainer.new()
 	outer.add_theme_constant_override("separation", 14)
+	# One centered composition (the Treasure pattern): title, flavor, the
+	# three banners, and the walk-away all hang together mid-screen instead
+	# of cards floating in a full-height framed void.
+	outer.alignment = BoxContainer.ALIGNMENT_CENTER
 	margin.add_child(outer)
 
-	var title = GameTheme.make_screen_title("THE MUSTER",
+	var title = GameTheme.make_screen_title("RECRUIT CAMP",
 		GameTheme.GILT_BRIGHT, GameTheme.FONT_HEADER)
 	outer.add_child(title)
 	GameTheme.deal_in(title, 0.02)
@@ -212,34 +224,25 @@ func _build_ui() -> void:
 	outer.add_child(sub)
 	GameTheme.deal_in(sub, 0.06)
 
+	# Season winds: say WHY the slate leans, so the lean reads as weather,
+	# not as a rigged shop.
+	var season_text: String = RunState.season_line()
+	if season_text != "":
+		var season = GameTheme.make_label(season_text, GameTheme.FONT_SUBHEADER,
+			Color(0.64, 0.74, 0.60))
+		season.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		outer.add_child(season)
+		GameTheme.deal_in(season, 0.09)
+
 	if _choices.size() > 0:
-		var stage := PanelContainer.new()
-		stage.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		stage.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var accent := _muster_accent()
-		var st := GameTheme.make_panel_style(
-			Color(0.045, 0.036, 0.030, 0.42),
-			Color(accent.r, accent.g, accent.b, 0.46),
-			1, 4, true, true)
-		st.content_margin_left = 18
-		st.content_margin_right = 18
-		st.content_margin_top = 18
-		st.content_margin_bottom = 18
-		stage.add_theme_stylebox_override("panel", st)
-		outer.add_child(stage)
-		GameTheme.deal_in(stage, 0.10)
-
-		var stage_margin := MarginContainer.new()
-		stage_margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		stage_margin.add_theme_constant_override("margin_top", 8)
-		stage_margin.add_theme_constant_override("margin_bottom", 8)
-		stage.add_child(stage_margin)
-
+		# Frameless stage — the recruits stand on the scene itself (no cage;
+		# the old full-height bordered panel was mostly empty air).
+		outer.add_child(_make_spacer(18))
 		var card_row = HBoxContainer.new()
-		card_row.add_theme_constant_override("separation", 30)
+		card_row.add_theme_constant_override("separation", 34)
 		card_row.alignment = BoxContainer.ALIGNMENT_CENTER
-		card_row.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		stage_margin.add_child(card_row)
+		outer.add_child(card_row)
 
 		var slot_idx := 0
 		for id in _choices:
@@ -251,7 +254,12 @@ func _build_ui() -> void:
 			card_row.add_child(slot)
 
 			var role := String(_choice_roles.get(id, "ROAD BANNER"))
-			var role_lbl := GameTheme.make_label(role, 15, accent)
+			# 16, the caption band's floor — not 15. This line is the only thing
+			# telling the player WHY these three banners are the offer, so it is
+			# the second thing they should read, and it was rendering below the
+			# size every other caption on every other screen uses. (Audit
+			# 2026-07-21.)
+			var role_lbl := GameTheme.make_label(role, 16, accent)
 			role_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			role_lbl.custom_minimum_size = Vector2(210, 0)
 			role_lbl.tooltip_text = _choice_role_tip(id)
@@ -262,6 +270,9 @@ func _build_ui() -> void:
 			card_wrap.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 			card_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			card_wrap.pivot_offset = card_wrap.custom_minimum_size * 0.5
+			# Ground the recruit: a soft pooled contact shadow under the card
+			# (children draw over the parent, so the card stands on it).
+			card_wrap.draw.connect(_draw_card_shadow.bind(card_wrap))
 			slot.add_child(card_wrap)
 
 			var card = CARD_SCENE.instantiate()
@@ -289,18 +300,38 @@ func _build_ui() -> void:
 			"Sound the Horn — new recruits  (%d left)" % RunState.muster_rerolls_left,
 			Color(0.20, 0.14, 0.06), Vector2(380, 40), 16)
 		reroll_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		reroll_btn.tooltip_text = "Recruiter's Horn — reroll this muster's recruits."
+		reroll_btn.tooltip_text = "Recruiter's Horn — replace these three recruits."
 		reroll_btn.pressed.connect(_reroll_muster)
 		outer.add_child(reroll_btn)
 		GameTheme.deal_in(reroll_btn, 0.38)
 		GameTheme.hover_lift(reroll_btn, 1.03)
 
+	outer.add_child(_make_spacer(10))
 	var leave_btn = GameTheme.make_back_button("Turn Them Away", Vector2(200, 42))
 	leave_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	leave_btn.pressed.connect(_on_leave_pressed.bind(leave_btn))
 	outer.add_child(leave_btn)
 	GameTheme.deal_in(leave_btn, 0.42)
 	GameTheme.hover_lift(leave_btn, 1.03)
+
+
+func _make_spacer(h: float) -> Control:
+	var sp := Control.new()
+	sp.custom_minimum_size = Vector2(0, h)
+	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return sp
+
+
+func _draw_card_shadow(card_wrap: Control) -> void:
+	# Pooled ellipse at the card's foot — three stacked passes fake the blur.
+	var c := Vector2(Card2D.CARD_W * 0.5, Card2D.CARD_H + 8.0)
+	for pass_i in range(3):
+		var w := 96.0 - float(pass_i) * 18.0
+		var h := 13.0 - float(pass_i) * 2.5
+		card_wrap.draw_set_transform(c, 0.0, Vector2(w / 100.0, h / 100.0))
+		card_wrap.draw_circle(Vector2.ZERO, 100.0, Color(0, 0, 0, 0.13),
+			true, -1.0, true)
+	card_wrap.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 func _muster_accent() -> Color:
@@ -314,19 +345,9 @@ func _muster_accent() -> Color:
 
 
 func _animate_card_reveal(card: Control, idx: int, rarity: String = "") -> void:
-	# Staggered fan-in, same beat as the Reward screen's reveal.
-	card.modulate.a = 0.0
-	card.scale = Vector2(0.6, 0.6)
-	var delay := 0.18 + float(idx) * 0.16
-	var tw := create_tween()
-	tw.set_parallel(true)
-	tw.tween_property(card, "modulate:a", 1.0, 0.28).set_delay(delay)
-	tw.tween_property(card, "scale", Vector2.ONE, 0.36) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(delay)
-	# A lucky pull should feel lucky before the text is read: uncommons glint
-	# silver, rares erupt in gilt (no-ops for commons + Reduce Motion). Fires
-	# just after the fan-in settles so it never fights the entrance tween.
-	GameTheme.rarity_reveal(card, rarity, delay + 0.34)
+	# Staggered fan-in via the kit's shared card_reveal verb (rarity shine
+	# included — uncommons glint silver, rares erupt in gilt).
+	GameTheme.card_reveal(card, 0.18 + float(idx) * 0.16, rarity)
 
 
 func _on_recruit_card_input(event: InputEvent, id: String,

@@ -39,7 +39,7 @@ var _mirror_btn: Button
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "reward")
-	AudioBank.play_music_random(["map_c", "map_d", "rest_c"])  # muster pool
+	AudioBank.play_music_random(["net_lobby", "net_lobby_b", "rest_c"])  # muster pool
 
 	if not NetMatch.is_connected_to_peer():
 		get_tree().change_scene_to_file(MENU_SCENE)
@@ -67,6 +67,9 @@ func _ready() -> void:
 	_refresh_deck_ui()
 	_update_status()
 	_install_net_chrome()
+	# Every net game opens with the shared arsenal stage (3 relics + 2 potions);
+	# the overlay sits above the quick-battle controls until the picks are made.
+	_begin_arsenal()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -121,22 +124,40 @@ func _build_scaffold() -> void:
 
 	_root.add_child(GameTheme.make_screen_title("QUICK BATTLE", GILT_BRIGHT))
 
-	_header = GameTheme.make_label("Your warband — random 20 cards.", 18, IVORY)
+	_header = GameTheme.make_label("Your warband — %d cards, dealt at random." % _target, 18, IVORY)
 	_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_root.add_child(_header)
 
-	# Deck preview — real card art (wrapping grid of thumbnails), matching the
-	# Constructed / Sealed builders rather than a text list.
-	var scroll := ScrollContainer.new()
-	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	_root.add_child(scroll)
+	# Deck preview — the dealt warband staged as one centered muster sheet (a
+	# tacked parchment plate) instead of a thumbnail sprawl pinned top-left.
+	# 20 cards at thumb scale are always ≤2 rows, so the sheet needs no scroll.
+	var sheet_center := CenterContainer.new()
+	sheet_center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_root.add_child(sheet_center)
+
+	var sheet := PanelContainer.new()
+	var sheet_style := GameTheme.make_panel_style(GameTheme.PARCHMENT,
+		Color(0.60, 0.51, 0.34, 0.80), 1, 6)
+	sheet_style.content_margin_left = 22
+	sheet_style.content_margin_right = 22
+	sheet_style.content_margin_top = 18
+	sheet_style.content_margin_bottom = 18
+	sheet.add_theme_stylebox_override("panel", sheet_style)
+	# Narrower than the canvas so ~20 thumbs wrap into two balanced rows rather
+	# than one long row plus a stub.
+	sheet.custom_minimum_size = Vector2(1064, 0)
+	sheet_center.add_child(sheet)
 
 	_deck_box = HFlowContainer.new()
+	# BOTH alignments: `alignment` centers the full lines, `last_wrap_alignment`
+	# the final partial one — without the second, the last row left-aligns and
+	# the sheet reads lopsided.
+	_deck_box.alignment = FlowContainer.ALIGNMENT_CENTER
+	_deck_box.last_wrap_alignment = FlowContainer.LAST_WRAP_ALIGNMENT_CENTER
 	_deck_box.add_theme_constant_override("h_separation", 8)
 	_deck_box.add_theme_constant_override("v_separation", 8)
 	_deck_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	scroll.add_child(_deck_box)
+	sheet.add_child(_deck_box)
 
 	_root.add_child(GameTheme.make_separator(Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.35), 400.0))
 
@@ -146,19 +167,25 @@ func _build_scaffold() -> void:
 	ctrl_row.add_theme_constant_override("separation", 20)
 	_root.add_child(ctrl_row)
 
+	# All three buttons speak in the sepia world and in one voice: the two
+	# secondary actions sit in muted ash-brown, the commit action in ember, and
+	# every label is caps. This row used to mix a blue tile, a brown tile, and a
+	# green tile with three different casings.
 	if NetMatch.is_host:
-		_mirror_btn = GameTheme.make_themed_button("Mirrored" if _mirror else "Random",
-			Color(0.15, 0.25, 0.40), Vector2(140, 38), 15)
+		_mirror_btn = GameTheme.make_themed_button("MIRRORED" if _mirror else "RANDOM",
+			Color(0.20, 0.17, 0.13), Vector2(140, 38), 15)
+		_mirror_btn.tooltip_text = "Host's call: MIRRORED deals both sides the same 20 cards; RANDOM deals each side its own."
 		_mirror_btn.pressed.connect(_on_toggle_mirror)
 		ctrl_row.add_child(_mirror_btn)
 
 		_reroll_btn = GameTheme.make_themed_button("REROLL",
 			Color(0.28, 0.20, 0.10), Vector2(130, 38), 15)
+		_reroll_btn.tooltip_text = "Host's call: deal both warbands again."
 		_reroll_btn.pressed.connect(_on_reroll)
 		ctrl_row.add_child(_reroll_btn)
 
 	_ready_btn = GameTheme.make_themed_button("READY",
-		Color(0.18, 0.36, 0.18), Vector2(160, 44), 17)
+		Color(0.34, 0.22, 0.08), Vector2(160, 44), 17)
 	_ready_btn.pressed.connect(_on_ready_pressed)
 	ctrl_row.add_child(_ready_btn)
 
@@ -172,6 +199,7 @@ func _refresh_deck_ui() -> void:
 		return
 	_deck_gen += 1
 	var gen := _deck_gen
+	_clear_hover_preview_under(_deck_box)   # a previewed tile is about to be freed
 	for c in _deck_box.get_children():
 		c.queue_free()
 
@@ -194,6 +222,9 @@ func _refresh_deck_ui() -> void:
 
 	# Bake-then-add (Collection pattern): warm each card's texture before its thumb
 	# so the Card2D builds the cheap baked overlay; a warm-cache Reroll fills instantly.
+	# Each thumb deals onto the sheet with a small stagger — a Reroll reads as a
+	# fresh hand hitting the table, not a repaint.
+	var dealt := 0
 	for id in order:
 		if gen != _deck_gen or not is_instance_valid(_deck_box):
 			return
@@ -206,17 +237,22 @@ func _refresh_deck_ui() -> void:
 		var badge := thumb["badge"] as Label
 		badge.text = "×%d" % n
 		badge.visible = n > 1
-		(thumb["button"] as Button).tooltip_text = String(d.get("name", id))   # hover-name; no add/remove
+		# No add/remove click in Quick — but hovering still pops the full card
+		# beside the tile (the shared builder preview), so the sealed 20 can be
+		# read properly before READY.
+		_attach_hover_preview(thumb["button"] as Button, id)
 		_deck_box.add_child(thumb["root"])
+		GameTheme.deal_in(thumb["root"], 0.02 + float(dealt) * 0.025)
+		dealt += 1
 
 
 func _update_status() -> void:
 	if _status == null:
 		return
-	var mode_str: String = "Mirrored" if _mirror else "Random"
-	var you_str: String = "READY" if _local_ready else "waiting"
-	var opp_str: String = "READY" if _remote_ready else "waiting"
-	_status.text = "[%s]  You: %s   ·   Opponent: %s" % [mode_str, you_str, opp_str]
+	var mode_str: String = "Mirrored decks" if _mirror else "Random decks"
+	var you_str: String = "READY" if _local_ready else "not ready"
+	var opp_str: String = "READY" if _remote_ready else "not ready"
+	_status.text = "%s   ·   You: %s   ·   Opponent: %s" % [mode_str, you_str, opp_str]
 
 	if _local_ready and _remote_ready:
 		_status.add_theme_color_override("font_color", GREEN)
@@ -235,7 +271,7 @@ func _on_toggle_mirror() -> void:
 		return
 	_mirror = not _mirror
 	if _mirror_btn != null:
-		_mirror_btn.text = "Mirrored" if _mirror else "Random"
+		_mirror_btn.text = "MIRRORED" if _mirror else "RANDOM"
 	_regenerate_deck()
 	_refresh_deck_ui()
 	_update_status()
@@ -292,7 +328,9 @@ func _finish_and_handoff() -> void:
 		SkirmishState.add_card_to(SkirmishState.local_index, id)
 	# Send full deck to peer (same "finished" contract as NetDraft).
 	var my_deck: Array = SkirmishState.local_slot().deck.duplicate()
-	NetMatch.send_draft_event({"t": "finished", "cards": my_deck})
+	NetMatch.send_draft_event({"t": "finished", "cards": my_deck,
+		"relics": SkirmishState.local_slot().relics.duplicate(),
+		"potions": SkirmishState.local_slot().potions.duplicate()})
 	# Bake the sealed warband's textures behind the waiting screen (idle time).
 	ScenePreload.warm_card_ids(my_deck, true)
 	_show_marching()
@@ -307,7 +345,7 @@ func _on_draft_event(event: Dictionary) -> void:
 				_mirror = bool(event.get("mirror", true))
 				_sub_seed = int(event.get("seed", 0))
 				if _mirror_btn != null:
-					_mirror_btn.text = "Mirrored" if _mirror else "Random"
+					_mirror_btn.text = "MIRRORED" if _mirror else "RANDOM"
 				_regenerate_deck()
 				_refresh_deck_ui()
 				_update_status()
@@ -318,6 +356,10 @@ func _on_draft_event(event: Dictionary) -> void:
 		"finished":
 			_remote_finished = true
 			_store_opponent_deck(event.get("cards", []))
+			var opp_slot := SkirmishState.get_slot(SkirmishState.opponent_index())
+			if opp_slot != null:
+				opp_slot.relics = event.get("relics", [])
+				opp_slot.potions = event.get("potions", [])
 			_maybe_begin_combat()
 
 
@@ -360,7 +402,7 @@ func _on_peer_lost(_id: int = 0) -> void:
 	for c in _deck_box.get_children():
 		c.queue_free()
 	if _header != null:
-		_header.text = "Opponent disconnected."
+		_header.text = "Opponent disconnected — the match is off."
 		_header.add_theme_color_override("font_color", RED_WARN)
 	if _status != null:
 		_status.text = ""

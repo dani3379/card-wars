@@ -12,8 +12,10 @@ extends SceneTree
 ##   4. Net potions: the drafted potion shows in the belt, Rallying Horn adds
 ##      +2 Command caster-local, the heal routes through _net_heal_hero, and
 ##      EV_POTION_FX routes without crashing.
-##   5. The NetDraft scene runs relic slate → potion slate → card triplets; each
-##      pick lands in the local slot, and the finished handoff ships the potion.
+##   5. The NetDraft scene runs the shared ARSENAL stage (3 relic slates + 2
+##      potion slates, pass allowed per slate — NetDeckBuilder._begin_arsenal,
+##      2026-07-16) → card triplets; picks land in the local slot, and the
+##      finished handoff ships the whole arsenal.
 ##
 ## Run:
 ##   Godot.exe --headless --path "D:\Godot" --script res://tools/_probe_draft_relic.gd
@@ -200,7 +202,8 @@ func _run_test() -> void:
 	combat.queue_free()
 	await create_timer(0.3).timeout
 
-	# ── 4. The draft scene opens on the relic slate ──────────────────────────
+	# ── 4. The draft opens on the shared ARSENAL stage (3 relics + 2 potions,
+	#       NetDeckBuilder._begin_arsenal — 2026-07-16) ────────────────────────
 	NM.start_vs_bot(SS.MatchMode.DRAFT, 1)
 	var draft = load("res://scenes/net_draft.tscn").instantiate()
 	root.add_child(draft)
@@ -209,25 +212,35 @@ func _run_test() -> void:
 		_check(false, "draft scene survived boot")
 		_finish(1)
 		return
-	_check(draft._relic_stage, "draft opens on the battle-relic stage")
-	var slots: int = draft._card_row.get_child_count()
-	_check(slots == 4, "relic slate shows 3 relics + the decline column (got %d)" % slots)
-	draft._on_relic_pick("deep_satchel")
-	await create_timer(0.2).timeout
-	_check(not draft._relic_stage, "picking a relic ends the relic stage")
-	_check(SS.local_slot().relics.has("deep_satchel"), "the pick landed in the local slot's relics")
-
-	# ── The POTION slate follows the relic (pick 1 of 3 or decline) ──────────
-	_check(draft._potion_stage, "potion slate follows the relic stage")
-	_check(String(draft._header.text).begins_with("Choose a battle potion"),
-		"header prompts for a potion")
-	var pslots: int = draft._card_row.get_child_count()
-	_check(pslots == 4, "potion slate shows 3 potions + the decline column (got %d)" % pslots)
-	draft._on_potion_pick("healing")
-	await create_timer(0.2).timeout
-	_check(not draft._potion_stage, "picking a potion ends the potion stage")
-	_check(SS.local_slot().potions.has("healing"), "the pick landed in the local slot's potions")
-	_check(String(draft._header.text).begins_with("Pick a card"), "card picks follow the potion stage")
+	_check(draft.arsenal_active(), "draft opens on the arsenal stage")
+	# 2026-07-19 restage: the slate row holds the 3 offering tiles; PASS moved to
+	# its own quiet button below the row (_ars_pass_btn).
+	var slots: int = draft._ars_row.get_child_count()
+	_check(slots == 3, "relic slate shows 3 relic tiles (got %d)" % slots)
+	_check(draft._ars_pass_btn != null and is_instance_valid(draft._ars_pass_btn)
+		and draft._ars_pass_btn.visible, "the pass action exists below the slate")
+	_check(String(draft._ars_header.text).begins_with("Choose a battle relic — 1 of 3"),
+		"header prompts for relic 1 of 3")
+	draft._on_ars_pick("deep_satchel", true)
+	_check(SS.local_slot().relics.has("deep_satchel"), "relic pick 1 landed in the local slot")
+	_check(String(draft._ars_header.text).begins_with("Choose a battle relic — 2 of 3"),
+		"a second relic slate follows")
+	draft._on_ars_pick("lantern", true)
+	draft._on_ars_pick("", true)   # round 3: pass — fighting lighter is legal
+	await create_timer(0.15).timeout
+	_check(SS.local_slot().relics.size() == 2, "two picks + one pass = 2 relics held")
+	_check(String(draft._ars_header.text).begins_with("Choose a battle potion — 1 of 2"),
+		"potion slates follow the relic rounds")
+	var pslots: int = draft._ars_row.get_child_count()
+	_check(pslots == 3, "potion slate shows 3 potion tiles (got %d)" % pslots)
+	draft._on_ars_pick("healing", false)
+	_check(String(draft._ars_header.text).begins_with("Choose a battle potion — 2 of 2"),
+		"a second potion slate follows")
+	draft._on_ars_pick("insight_tonic", false)
+	await create_timer(0.15).timeout
+	_check(SS.local_slot().potions.size() == 2, "both potion picks landed in the local slot")
+	_check(not draft.arsenal_active(), "the arsenal closes after the 3+2 rounds")
+	_check(String(draft._header.text).begins_with("Pick a card"), "card picks follow the arsenal")
 
 	# One card pick still works after the two opening stages.
 	var legal: Array = SS.skirmish_legal_pool()

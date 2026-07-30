@@ -1,6 +1,6 @@
 extends Node
-## RelicDB.gd — relic catalog.
-## Tiers: starting (9), combat (includes 4 class-restricted), utility (8), boss (21), event (4).
+## RelicDB.gd — relic catalog. Retired entries remain readable for old saves,
+## but every live reward is drawn through the eligibility filters below.
 ## ~122 relics after the 2026-07-07 pool cut (14 dead/no-decision relics removed,
 ## 5 reshaped in place, 6 new system-payoff relics — see the dated section at the
 ## bottom of RELICS) on top of the 3-round design pass + Wave 2 keyword/build relics
@@ -26,7 +26,7 @@ extends Node
 
 const RELICS: Dictionary = {
 	# ═══════════════════════════════════════════
-	#  STARTING RELICS (pick 1 of 3 from pool of 8)
+	#  STARTING / SIGNATURE RELICS
 	# ═══════════════════════════════════════════
 	"iron_buckler": {"id": "iron_buckler", "name": "Iron Buckler", "tier": "starting",
 		"desc": "The first creature you play each fight gains Last Stand.",
@@ -41,65 +41,122 @@ const RELICS: Dictionary = {
 		"desc": "Gain 10 extra gold per fight.",
 		"hooks": ["combat_end"], "effect": "bonus_gold", "value": 10},
 	"worn_spellbook": {"id": "worn_spellbook", "name": "Worn Spellbook", "tier": "starting",
-		"desc": "Your damage spells deal +1 damage.",
-		"hooks": ["spell_damage"], "effect": "spell_damage_bonus", "value": 1},
+		"desc": "When you cast a spell already cast this fight: draw 1. If it deals damage, it deals +2 damage.",
+		"hooks": ["spell_played", "spell_damage"], "effect": "repeat_spellbook", "value": 2},
 	"scouts_emblem": {"id": "scouts_emblem", "name": "Scout's Emblem", "tier": "starting",
 		"desc": "Recruit camps show 4 choices instead of 3.",
 		"hooks": [], "effect": "extra_reward_choice", "value": 1},
+	# 2026-07-25: death still pays the bill, but it pays in BODIES rather than
+	# Command — Command is a fixed resource and no relic should manufacture it.
+	# The Acolyte's "spend cheap creatures freely" loop is unchanged in play; the
+	# payout is now a body on the board, which also feeds the Dead tribe's
+	# death-spine payoffs instead of sitting in a resource counter.
 	"soul_lantern": {"id": "soul_lantern", "name": "Soul Lantern", "tier": "starting",
-		"desc": "When the first friendly dies each round: gain 1 Command next turn.",
-		"hooks": ["creature_death"], "effect": "mana_on_death", "value": 1},
+		"desc": "When the first friendly dies each round: a Shade rises in its lane (1/1).",
+		"hooks": ["creature_death"], "effect": "shade_on_death", "value": 1},
 	"veterans_medal": {"id": "veterans_medal", "name": "Veteran's Medal", "tier": "starting",
 		"desc": "Your 1-cost creatures have +1/+1.",
 		"hooks": ["creature_played"], "effect": "buff_cheap_creatures", "value": 1},
 	"ember_censer": {"id": "ember_censer", "name": "Ember Censer", "tier": "starting",
 		"desc": "When one of your Doom creatures detonates: it deals +1 damage.",
 		"hooks": ["doom_detonate"], "effect": "doom_detonate_bonus", "value": 1},
+	# Low-duplicate hero Doctrines (2026-07-28). New ids preserve legacy saves
+	# and keep Skirmish's historical starter-relic semantics unchanged.
+	"marching_spurs": {"id": "marching_spurs", "name": "Marching Spurs", "tier": "starting",
+		"campaign_only": true, "restricted_to": "raider", "icon": "drovers_whip",
+		"desc": "The first friendly you relocate each round gets +1 ATK and Swift this round.",
+		"hooks": ["lane_changed"], "effect": "starter_first_relocate_swift", "value": 1},
+	"rearward_horn": {"id": "rearward_horn", "name": "Rearward Horn", "tier": "starting",
+		"campaign_only": true, "restricted_to": "raider", "icon": "war_horn",
+		"desc": "The first creature you play in your back row each round gets +1 ATK and Swift this round.",
+		"hooks": ["creature_played"], "effect": "starter_back_row_swift", "value": 1},
+	"centurions_rule": {"id": "centurions_rule", "name": "Centurion's Rule", "tier": "starting",
+		"campaign_only": true, "restricted_to": "stalwart", "icon": "iron_buckler",
+		"desc": "The first friendly to survive a hit each round gains +1 HP this fight. One adjacent friendly does too.",
+		"hooks": ["creature_damaged"], "effect": "starter_survive_adjacent_hp", "value": 1},
+	"reserve_standard": {"id": "reserve_standard", "name": "Reserve Standard", "tier": "starting",
+		"campaign_only": true, "restricted_to": "stalwart", "icon": "vanguard_banner",
+		"desc": "The first creature you play directly behind a friendly each round gains Shield.",
+		"hooks": ["creature_played"], "effect": "starter_back_rank_shield", "value": 1},
+	# Reshaped 2026-07-28. This shipped with Soul Lantern's desc word for word, so
+	# the Acolyte's signature/alternate pick was no choice at all. The pair now
+	# reads: double the bequest (here) vs transfer the strength (Ledger Seal).
+	"funeral_lantern": {"id": "funeral_lantern", "name": "Funeral Lantern", "tier": "starting",
+		"campaign_only": true, "restricted_to": "acolyte", "icon": "soul_lantern",
+		"desc": "When the first friendly dies each round: its On-Death effect fires a second time.",
+		"hooks": ["creature_death"], "effect": "starter_double_first_bequest", "value": 1},
+	"ledger_seal": {"id": "ledger_seal", "name": "Ledger Seal", "tier": "starting",
+		"campaign_only": true, "restricted_to": "acolyte", "icon": "coin_purse",
+		"desc": "When the first friendly dies each round: a surviving friendly in its column gains +1/+1 this fight.",
+		"hooks": ["creature_death"], "effect": "starter_death_column_buff", "value": 1},
+	"mirror_primer": {"id": "mirror_primer", "name": "Mirror Primer", "tier": "starting",
+		"campaign_only": true, "restricted_to": "pyromancer", "icon": "worn_spellbook",
+		"desc": "The first time you cast two differently named spells each round: draw 1.",
+		"hooks": ["spell_played"], "effect": "starter_distinct_spell_draw", "value": 1},
+	# Reshaped 2026-07-28, twice over. It shipped as "your first non-damage spell
+	# each round costs 0" — Command manipulation (a standing no), and a strictly
+	# narrower Ember Crown, which is an unrestricted starting relic the Pyromancer
+	# can simply find, so her unlockable doctrine was worse than a common pickup.
+	"cinder_crown": {"id": "cinder_crown", "name": "Cinder Crown", "tier": "starting",
+		"campaign_only": true, "restricted_to": "pyromancer", "icon": "ember_crown",
+		"desc": "The first damage spell you cast each round deals +1 damage.",
+		"hooks": ["spell_played"], "effect": "starter_first_spell_damage", "value": 1},
+	"chain_censer": {"id": "chain_censer", "name": "Chain Censer", "tier": "starting",
+		"campaign_only": true, "restricted_to": "kindler", "icon": "ember_censer",
+		"desc": "Your first Doom detonation each round reduces adjacent friendly Doom timers by 1.",
+		"hooks": ["doom_detonate"], "effect": "starter_chain_doom", "value": 1},
+	# The timer clause was dropped 2026-07-28: a first-win unlock must be strictly
+	# positive, and pushing a fuse OUT fought the Kindler's other doctrine (Chain
+	# Censer), which exists to pull fuses IN. The body is worth more instead.
+	"war_bellows": {"id": "war_bellows", "name": "War Bellows", "tier": "starting",
+		"campaign_only": true, "restricted_to": "kindler", "icon": "war_horn",
+		"desc": "The first Doom creature you play each round gains +2/+2.",
+		"hooks": ["creature_played"], "effect": "starter_doom_buff", "value": 2},
 
 	# ═══════════════════════════════════════════
-	#  COMBAT RELICS (23) — from elites, bosses, events, shops
+	#  COMBAT RELICS — Field rewards and shop stock
 	# ═══════════════════════════════════════════
 	# ── 2026-07-03 interest pass: six of the invisible "+1 to a subtype"
 	# micro-modifiers below were reshaped into trigger-relics with a visible
 	# moment (same ids — collections and saves stay valid). Balance rule:
 	# reshape into situational/dramatic, don't tune numbers.
 	"vanguards_cry": {"id": "vanguards_cry", "name": "Vanguard's Cry", "tier": "combat",
-		"desc": "The first creature you play each fight lets loose a war-cry: deal 2 damage to the creature across from it.",
+		"desc": "The first creature you play each fight deals 2 damage to the opposing creature.",
 		"hooks": ["creature_played"], "effect": "war_cry_open", "value": 2},
 	"banner_of_unity": {"id": "banner_of_unity", "name": "Banner of Unity", "tier": "combat",
 		"desc": "When you play a creature between two friendlies: all three gain +1 ATK this fight.",
 		"hooks": ["creature_played"], "effect": "flanked_rally", "value": 1},
 	"swift_boots": {"id": "swift_boots", "name": "Swift Boots", "tier": "combat",
 		"desc": "Swift creatures have +1 ATK. The first time your Swift creatures strike in a fight: draw a card.",
-		"hooks": [], "effect": "swift_atk_bonus", "value": 1},
+		"hooks": [], "effect": "swift_atk_bonus", "value": 1, "retired": true},
 	"briar_amulet": {"id": "briar_amulet", "name": "Man-Trap", "tier": "combat",
-		"desc": "When an enemy dies on your Thorns: its neighbors take 2 damage.",
+		"desc": "When an enemy dies from your Thorns: adjacent enemies take 2 damage.",
 		"hooks": [], "effect": "man_trap", "value": 2},
 	"echo_staff": {"id": "echo_staff", "name": "Echo Staff", "tier": "combat",
 		"desc": "Your On-Enter effects trigger twice.",
 		"hooks": ["creature_played"], "effect": "double_floop", "value": 0},
 	"piercing_crown": {"id": "piercing_crown", "name": "Bodkin Points", "tier": "combat",
-		"desc": "Your creatures' killing blows always overflow, as if Piercing.",
+		"desc": "Your creatures deal excess damage from killing blows as if they had Piercing.",
 		"hooks": [], "effect": "always_overflow", "value": 0},
 	"conscription_relic": {"id": "conscription_relic", "name": "Conscription", "tier": "combat",
-		"desc": "Start of each fight: a 1/1 Conscript musters in your back row. Your Summon tokens enter with +1 HP.",
+		"desc": "Start of each fight: summon a 1/1 Conscript in your back row. Your Summon tokens enter with +1 HP.",
 		"hooks": ["combat_start", "summon_token"], "effect": "token_hp_bonus", "value": 1,
 		"retired": true},  # 2026-07-08 merged → imp_generator (recurring bodies) + the_family (token stat buff)
 	"bone_ring": {"id": "bone_ring", "name": "Bone Ring", "tier": "combat",
-		"desc": "Your On-Death damage effects deal +1 damage and chip the enemy face for 1.",
+		"desc": "Your On-Death damage effects deal +1 damage and 1 damage to enemy face.",
 		"hooks": ["on_death_damage"], "effect": "on_death_bonus", "value": 1},
 	"war_horn": {"id": "war_horn", "name": "War Horn", "tier": "combat",
-		"desc": "The first ATK-buff spell each fight sounds the horn: ALL your creatures gain +1 ATK this round.",
+		"desc": "After your first spell that grants ATK each fight, all your creatures gain +1 ATK this round.",
 		"hooks": ["spell_buff"], "effect": "war_horn_rally", "value": 1,
 		"retired": true},  # 2026-07-08 merged → bloodstone_relic (reactive one-round board ATK pump)
 	"battle_scars": {"id": "battle_scars", "name": "Battle Scars", "tier": "combat",
-		"desc": "The first time you take face damage each fight: gain 2 Command this turn.",
+		"desc": "The first time you take face damage each fight: gain 2 Command next turn.",
 		"hooks": ["hero_damaged"], "effect": "battle_scars_mana", "value": 2},
 	"glass_cannon": {"id": "glass_cannon", "name": "Glass Cannon", "tier": "combat",
 		"desc": "Your creatures have +1 ATK but -1 HP.",
-		"hooks": ["creature_played"], "effect": "glass_cannon", "value": 0},
+		"hooks": ["creature_played"], "effect": "glass_cannon", "value": 0, "retired": true},
 	"thiefs_gloves": {"id": "thiefs_gloves", "name": "Thief's Gloves", "tier": "combat",
-		"desc": "Win a fight taking 0 face damage: the perfect raid pays 15 gold, and your next fight starts with +1 Command.",
+		"desc": "After a fight: if you took 1–5 face damage, gain 15 gold. If you took 0, start the next fight with +1 Command.",
 		"hooks": ["combat_end"], "effect": "gold_no_damage", "value": 15},
 	"butchers_cleaver": {"id": "butchers_cleaver", "name": "Butcher's Cleaver", "tier": "combat",
 		"desc": "When you sacrifice a creature: the next creature you play this turn gets +2 ATK for 2 rounds.",
@@ -108,14 +165,14 @@ const RELICS: Dictionary = {
 		"desc": "After each fight: heal 1 HP per friendly death (max 5).",
 		"hooks": ["combat_end"], "effect": "heal_per_death", "value": 1},
 	"gamblers_coin": {"id": "gamblers_coin", "name": "Gambler's Coin", "tier": "combat",
-		"desc": "Start of fight: flip a coin — heads, draw 1 card; tails, deal 3 damage to a random enemy.",
+		"desc": "Start of each fight: flip a coin. Heads: draw 1. Tails: deal 3 damage to a random enemy creature.",
 		"hooks": ["combat_start"], "effect": "gamblers_coin", "value": 0,
 		"retired": true},
 	"bone_pile": {"id": "bone_pile", "name": "Bone Pile", "tier": "combat",
-		"desc": "When you sacrifice a creature: deal damage equal to its ATK to the opposing creature.",
+		"desc": "When you sacrifice a creature: deal its ATK as damage to the opposing creature.",
 		"hooks": ["sacrifice"], "effect": "sacrifice_damage", "value": 0},
 	"resonance_crystal": {"id": "resonance_crystal", "name": "Resonance Crystal", "tier": "combat",
-		"desc": "The first time a friendly with a keyword dies each fight: all your other creatures gain that keyword.",
+		"desc": "The first time a friendly with a keyword dies each fight, all your other creatures gain that keyword.",
 		"hooks": ["creature_death"], "effect": "resonance_crystal", "value": 0},
 	"mimic_ring": {"id": "mimic_ring", "name": "Mimic Ring", "tier": "combat",
 		"desc": "When you play a creature: it copies 1 keyword from an adjacent friendly creature.",
@@ -132,59 +189,64 @@ const RELICS: Dictionary = {
 	# collection tag, not a reward pool). `value` is the reroll-charge count and the
 	# single source of truth — RunState reads it on acquire; keep desc + value in sync.
 	"recruiters_horn": {"id": "recruiters_horn", "name": "Recruiter's Horn", "tier": "combat",
-		"desc": "At the Muster, sound the horn to call up a fresh slate of recruits. 3 uses per run.",
+		"desc": "Reroll the cards at a Recruit Camp. 3 uses per run.",
 		"hooks": [], "effect": "muster_reroll", "value": 3},
 
 	# ═══════════════════════════════════════════
 	#  4x4 RELICS — designed around the front/back row redesign
 	# ═══════════════════════════════════════════
-	"vanguard_banner": {"id": "vanguard_banner", "name": "Vanguard Banner", "tier": "combat",
-		"desc": "Your front-row creatures have +1 ATK.",
-		"hooks": [], "effect": "front_row_atk", "value": 1},
+	# 2026-07-16 reshape (same-id precedent): the last three invisible always-on
+	# passives left standing became the pattern-mined Wave-2 designs — see
+	# docs/RELIC_SLATE_PITCH_20260716.md. vanguard_banner (flat front ATK) →
+	# The Tally-Stick; bridge_watcher (positional Thorns/HP) → Witch-Shot;
+	# lantern (quiet turn-1 Command) → The Burnt Dispatches.
+	"vanguard_banner": {"id": "vanguard_banner", "name": "Third Card Banner", "tier": "combat",
+		"desc": "After you play your 3rd card each turn, your creatures gain +1 ATK this round.",
+		"hooks": ["creature_played"], "effect": "tally_stick", "value": 1},
 	"rear_guard_charm": {"id": "rear_guard_charm", "name": "Rear Guard Charm", "tier": "combat",
 		"desc": "When a front-row friendly dies: the back-row creature in its column gets +1/+1 this fight.",
 		"hooks": ["creature_death"], "effect": "rear_guard_inherit", "value": 1},
 	"phantom_veil": {"id": "phantom_veil", "name": "Phantom Veil", "tier": "combat",
 		"desc": "Once per round: the first friendly that would die survives at 1 HP.",
 		"hooks": ["creature_death"], "effect": "phantom_veil", "value": 1},
-	"hexagonal_shield": {"id": "hexagonal_shield", "name": "Pavise", "tier": "combat",
-		"desc": "When an enemy Sniper shoots your back row: the Sniper takes 3 back.",
-		"hooks": [], "effect": "pavise", "value": 3},
+	"hexagonal_shield": {"id": "hexagonal_shield", "name": "Sniper Shield", "tier": "combat",
+		"desc": "When an enemy Sniper attacks your back row: deal 3 damage to that Sniper.",
+		"hooks": [], "effect": "pavise", "value": 3, "retired": true},
 
 	# ═══════════════════════════════════════════
 	#  UTILITY RELICS (5)
 	# ═══════════════════════════════════════════
 	"merchants_license": {"id": "merchants_license", "name": "Merchant's License", "tier": "utility",
-		"desc": "Shop prices reduced by 25%.",
+		"desc": "Shop items cost 25% less.",
 		"hooks": [], "effect": "shop_discount", "value": 25},
 	"collectors_tome": {"id": "collectors_tome", "name": "Collector's Tome", "tier": "utility",
-		"desc": "Enlist 2 cards at recruit camps instead of 1.",
+		"desc": "Take 2 cards at each Recruit Camp instead of 1.",
 		"hooks": [], "effect": "double_reward_pick", "value": 0},
 	"blacksmiths_hammer": {"id": "blacksmiths_hammer", "name": "Blacksmith's Hammer", "tier": "utility",
 		"desc": "Forge upgrades give +3 instead of +2.",
 		"hooks": [], "effect": "upgrade_bonus", "value": 0},
-	"scavengers_pouch": {"id": "scavengers_pouch", "name": "Sutler's Marker", "tier": "utility",
-		"desc": "The sutler's buy-back pays double.",
+	"scavengers_pouch": {"id": "scavengers_pouch", "name": "Trader's Marker", "tier": "utility",
+		"desc": "Selling a card pays twice as much.",
 		"hooks": [], "effect": "sell_double", "value": 2},
 	"whetstone": {"id": "whetstone", "name": "Whetstone", "tier": "utility",
-		"desc": "Once per act, Reforge at a rest site: upgrade 2 cards instead of 1.",
+		"desc": "Once per act, you may Reforge at a rest site to upgrade 2 cards.",
 		"hooks": [], "effect": "whetstone_reforge", "value": 2},
 
 	# ═══════════════════════════════════════════
-	#  BOSS RELICS (pick 1 of 3 after boss kill, all +1 max mana with downside)
+	#  RETIRED BOSS BARGAINS — preserved for old saves, never offered
 	# ═══════════════════════════════════════════
 	"cursed_key": {"id": "cursed_key", "name": "Cursed Key", "tier": "boss",
 		"desc": "+1 max Command. Gain a Curse after every fight.",
 		"hooks": ["combat_end"], "effect": "boss_mana", "value": 1,
-		"downside": "curse_on_reward"},
+		"downside": "curse_on_reward", "retired": true},
 	"coffee_dripper": {"id": "coffee_dripper", "name": "Hairshirt", "tier": "boss",
 		"desc": "+1 max Command. Can't heal at rest sites.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
-		"downside": "no_rest_heal"},
+		"downside": "no_rest_heal", "retired": true},
 	"fusion_hammer": {"id": "fusion_hammer", "name": "Cracked Anvil", "tier": "boss",
 		"desc": "+1 max Command. Can't upgrade cards at rest sites.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
-		"downside": "no_upgrade"},
+		"downside": "no_upgrade", "retired": true},
 	"ectoplasm": {"id": "ectoplasm", "name": "Vow of Poverty", "tier": "boss",
 		"desc": "+1 max Command. Can't gain gold.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
@@ -192,38 +254,44 @@ const RELICS: Dictionary = {
 	"busted_crown": {"id": "busted_crown", "name": "Tarnished Crown", "tier": "boss",
 		"desc": "+1 max Command. Recruit camps show 2 choices instead of 3.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
-		"downside": "fewer_rewards"},
+		"downside": "fewer_rewards", "retired": true},
 	"sozu": {"id": "sozu", "name": "Temperance Vow", "tier": "boss",
 		"desc": "+1 max Command. Can't gain potions.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
-		"downside": "no_potions"},
+		"downside": "no_potions", "retired": true},
 	"philosophers_stone": {"id": "philosophers_stone", "name": "Philosopher's Stone", "tier": "boss",
 		"desc": "+1 max Command. All enemies get +1 ATK.",
 		"hooks": ["combat_start"], "effect": "boss_mana", "value": 1,
-		"downside": "enemy_atk_buff"},
+		"downside": "enemy_atk_buff", "retired": true},
 	"velvet_choker": {"id": "velvet_choker", "name": "Penitent's Collar", "tier": "boss",
 		"desc": "+1 max Command. Can only play 5 cards per turn.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
-		"downside": "play_limit"},
+		"downside": "play_limit", "retired": true},
 	"mark_of_pain": {"id": "mark_of_pain", "name": "Mark of Pain", "tier": "boss",
 		"desc": "+1 max Command. Start each fight with 2 Curses in your draw pile.",
 		"hooks": ["combat_start"], "effect": "boss_mana", "value": 1,
-		"downside": "start_curses"},
+		"downside": "start_curses", "retired": true},
 
 	# ═══════════════════════════════════════════
 	#  MANA RELICS (regular, found in shops/events/rewards)
 	# ═══════════════════════════════════════════
-	"lantern": {"id": "lantern", "name": "Lantern", "tier": "combat",
-		"desc": "On turn 1 of each fight, gain 1 bonus Command.",
-		"hooks": ["turn_start"], "effect": "bonus_mana_turn1", "value": 1,
-		"mana_cap_cost": 1},
+	"lantern": {"id": "lantern", "name": "The Burnt Dispatches", "tier": "combat",
+		"desc": "First spell you Exhaust each turn: return a random spell from discard. It costs 0 this turn.",
+		"hooks": ["spell_exhausted"], "effect": "burnt_dispatches", "value": 0},  # 2026-07-16 reshape — see note above vanguard_banner
 	"happy_flower": {"id": "happy_flower", "name": "Saint's Posy", "tier": "combat",
-		"desc": "Every 3 turns, gain 1 bonus Command.",
+		"desc": "Every 3rd turn, gain 1 Command.",
 		"hooks": ["turn_start"], "effect": "happy_flower", "value": 1,
 		"retired": true},  # 2026-07-08 merged → lantern (Command trickle). Also dropped from skirmish NET_RELIC_POOL.
-	"ice_cream": {"id": "ice_cream", "name": "Miser's Coffer", "tier": "combat",
-		"desc": "Unspent Command carries over fully between turns (no cap).",
-		"hooks": [], "effect": "full_mana_bank", "value": 0},
+	# 2026-07-25: was Miser's Coffer (uncapped Command banking) — retired because
+	# Command is a FIXED resource and banking is the clearest violation of that.
+	# Replaced in place (the id is load-bearing: FOUNDATION_RELICS, the rarity
+	# map and skirmish's NET_RELIC_POOL all name it). Creature sustain was an
+	# entirely empty niche — every other heal in this file heals the HERO — and
+	# it reads honestly under the attrition model, where one extra point of HP
+	# is often the difference between trading and holding the line.
+	"ice_cream": {"id": "ice_cream", "name": "Iron Rations", "tier": "combat",
+		"desc": "At the start of each round, each of your damaged creatures heals 1.",
+		"hooks": ["turn_start"], "effect": "rations_heal", "value": 1},
 	"deep_satchel": {"id": "deep_satchel", "name": "Deep Satchel", "tier": "combat",
 		"desc": "Your hand refills to 6 cards each turn instead of 5.",
 		"hooks": ["turn_start"], "effect": "hand_refill_bonus", "value": 1},
@@ -236,29 +304,29 @@ const RELICS: Dictionary = {
 
 	# ─── Cost manipulation ───
 	"mummified_hand": {"id": "mummified_hand", "name": "Withered Saint's Hand", "tier": "combat",
-		"desc": "When you cast a spell: a random creature in your hand costs 0 this turn.",
+		"desc": "When you cast a spell: a random creature card in your hand costs 0 this turn.",
 		"hooks": ["spell_played"], "effect": "mummified_hand", "value": 0},
 	"sigil_of_hunger": {"id": "sigil_of_hunger", "name": "Sigil of Hunger", "tier": "combat",
 		"desc": "After a friendly dies: the next creature you play costs 1 less. Once per round.",
 		"hooks": ["creature_death"], "effect": "sigil_of_hunger", "value": 1},
 	"tricksters_glove": {"id": "tricksters_glove", "name": "Trickster's Glove", "tier": "combat",
-		"desc": "While you hold 4+ cards, all cards in hand cost 1 less.",
+		"desc": "While your hand has at least 4 cards, all cards in it cost 1 less.",
 		"hooks": [], "effect": "tricksters_glove", "value": 1,
 		"retired": true},
 	"pact_of_embers": {"id": "pact_of_embers", "name": "Pact of Embers", "tier": "combat",
-		"desc": "At turn start: the highest-cost card in hand costs 0 this turn.",
+		"desc": "Start of each turn: the highest-cost card in your hand costs 0 this turn.",
 		"hooks": ["turn_start"], "effect": "pact_of_embers", "value": 0},
 	"mana_tide": {"id": "mana_tide", "name": "War Chest", "tier": "combat",
-		"desc": "After you bank Command: the next creature you play costs 1 less.",
+		"desc": "When you bank Command: the next creature you play costs 1 less.",
 		"hooks": ["mana_banked"], "effect": "mana_tide", "value": 1,
 		"retired": true},  # 2026-07-08 merged → sigil_of_hunger ("next creature costs 1 less"). Also dropped from skirmish NET_RELIC_POOL.
 	"last_breath": {"id": "last_breath", "name": "Last Breath", "tier": "combat",
 		"desc": "Creatures with 1 base HP cost 1 less.",
-		"hooks": [], "effect": "last_breath_discount", "value": 1},
+		"hooks": [], "effect": "last_breath_discount", "value": 1, "retired": true},
 
 	# ─── Hand / draw manipulation ───
 	"toolbox": {"id": "toolbox", "name": "Quartermaster's Chest", "tier": "combat",
-		"desc": "Start of each fight: choose 1 of 3 extra cards to add to your hand.",
+		"desc": "Start of each fight: choose 1 of 3 cards to add to your hand.",
 		"hooks": ["combat_start"], "effect": "toolbox", "value": 3},
 	"bottled_talisman": {"id": "bottled_talisman", "name": "Bottled Talisman", "tier": "combat",
 		"desc": "Start each fight with a chosen card in your hand.",
@@ -266,44 +334,44 @@ const RELICS: Dictionary = {
 
 	# ─── 4x4 lane / positional ───
 	"phalanx_stone": {"id": "phalanx_stone", "name": "Phalanx Stone", "tier": "combat",
-		"desc": "If all 4 front lanes are full: friendlies have +1 ATK.",
+		"desc": "While all 4 front-row slots are full, friendlies have +1 ATK.",
 		"hooks": [], "effect": "phalanx_full_front", "value": 1,
 		"retired": true},  # 2026-07-08 merged → vanguard_banner (conditional flat front ATK)
 	"cavalry_sigil": {"id": "cavalry_sigil", "name": "Cavalry Sigil", "tier": "combat",
-		"desc": "Empty edge lanes (1 & 4): +1 Command per turn each.",
+		"desc": "Gain +1 Command each turn for each empty edge lane.",
 		"hooks": ["turn_start"], "effect": "empty_edge_mana", "value": 1,
-		"mana_cap_cost": 1},
+		"mana_cap_cost": 1, "retired": true},
 	"sentinel_pact": {"id": "sentinel_pact", "name": "Sentinel Pact", "tier": "combat",
 		"desc": "Empty lanes count as friendlies for your Adj. Buff effects.",
 		"hooks": [], "effect": "empty_lanes_as_adj", "value": 0,
 		"retired": true},
 	"catapult_crew": {"id": "catapult_crew", "name": "Catapult Crew", "tier": "combat",
-		"desc": "Your back-row creatures snipe the lowest-HP enemy, repeating on a kill.",
+		"desc": "Your back-row creatures have Sniper.",
 		"hooks": [], "effect": "back_row_ranged", "value": 0},
-	"bridge_watcher": {"id": "bridge_watcher", "name": "Bridge Watcher", "tier": "combat",
-		"desc": "Center-lane friendlies (2 & 3) have Thorns 2 and +1 HP.",
-		"hooks": [], "effect": "center_lane_buff", "value": 1},
+	"bridge_watcher": {"id": "bridge_watcher", "name": "Witch-Shot", "tier": "combat",
+		"desc": "Your damage spells ignore Armored and Shield.",
+		"hooks": [], "effect": "witch_shot", "value": 0},  # 2026-07-16 reshape — see note above vanguard_banner
 	"spotters_glass": {"id": "spotters_glass", "name": "Spotter's Glass", "tier": "combat",
-		"desc": "When you place a creature in an empty column: +1 ATK to friendlies in that column.",
+		"desc": "When you play a creature in an empty column: friendlies in that column gain +1 ATK.",
 		"hooks": ["creature_played"], "effect": "empty_column_atk", "value": 1,
 		"retired": true},  # 2026-07-08 merged → banner_of_unity (per-placement ATK payoff)
 	"flanking_banner": {"id": "flanking_banner", "name": "Flanking Banner", "tier": "combat",
-		"desc": "When 3 of 4 front lanes are full: enemies in the empty column take 2 damage at end of round.",
+		"desc": "End of each round: if 3 front-row slots are full, enemies in the empty column take 2 damage.",
 		"hooks": ["round_end"], "effect": "flank_damage", "value": 2},
 
 	# ─── Combat-start setups ───
 	"bag_of_marbles": {"id": "bag_of_marbles", "name": "Bag of Marbles", "tier": "combat",
-		"desc": "Start of fight: deal 1 damage to all enemies.",
-		"hooks": ["combat_start"], "effect": "marbles_aoe", "value": 1},
+		"desc": "Start of each fight: deal 1 damage to all enemies.",
+		"hooks": ["combat_start"], "effect": "marbles_aoe", "value": 1, "retired": true},
 	"champions_belt": {"id": "champions_belt", "name": "Champion's Belt", "tier": "combat",
 		"desc": "On turn 1 of each fight: friendlies have +1 ATK.",
 		"hooks": ["combat_start"], "effect": "champions_belt", "value": 1,
 		"retired": true},  # 2026-07-08 merged → vanguard_banner (flat front-row +1 ATK, always on)
 	"war_drum": {"id": "war_drum", "name": "War Drum", "tier": "combat",
-		"desc": "Start of fight: a random friendly creature from your deck enters lane 1.",
+		"desc": "Start of each fight: play a random creature from your deck in lane 1.",
 		"hooks": ["combat_start"], "effect": "war_drum_spawn", "value": 0},
 	"witchs_brew": {"id": "witchs_brew", "name": "Witch's Brew", "tier": "combat",
-		"desc": "Start of fight: cast a random spell from your deck at no cost. Auto-targeted.",
+		"desc": "Start of each fight: cast a random spell from your deck for free. Targets are chosen automatically.",
 		"hooks": ["combat_start"], "effect": "witchs_brew", "value": 0,
 		"retired": true},
 
@@ -313,24 +381,30 @@ const RELICS: Dictionary = {
 		"hooks": [], "effect": "spell_tome_discount", "value": 1},
 	"iron_legion": {"id": "iron_legion", "name": "Iron Legion", "tier": "combat",
 		"desc": "If 60%+ of your deck is creatures: friendlies have +1 HP.",
-		"hooks": ["creature_played"], "effect": "iron_legion_buff", "value": 1},
+		"hooks": ["creature_played"], "effect": "iron_legion_buff", "value": 1, "retired": true},
 	"tome_of_many": {"id": "tome_of_many", "name": "Tome of Many", "tier": "combat",
 		"desc": "If your deck has 20+ cards: draw 2 extra per turn.",
 		"hooks": ["turn_start"], "effect": "big_deck_draw", "value": 2,
 		"retired": true},
+	# 2026-07-25: was a spend-streak "+1 max Command this fight" — retired with the
+	# rest of the Command-manufacturing relics. The name already meant "arrive
+	# ready to fight", so it now answers the muster delay instead: granting Swift
+	# reuses the existing keyword machinery whole, which matters because Swift is
+	# ALSO the keyword barred from reaching the face on its arrival round — the
+	# relic inherits that guard for free rather than opening a burst-finisher hole.
 	"mana_drunkard": {"id": "mana_drunkard", "name": "Forced March", "tier": "combat",
-		"desc": "If you spend all your Command 2 turns in a row: +1 max Command this fight.",
-		"hooks": ["turn_end"], "effect": "mana_drunkard", "value": 1},
+		"desc": "The first creature you play each round gains Swift.",
+		"hooks": ["creature_played"], "effect": "first_creature_swift", "value": 0},
 
 	# ─── Sacrifice / death deepening ───
 	"reapers_scythe": {"id": "reapers_scythe", "name": "Reaper's Scythe", "tier": "combat",
-		"desc": "When you sacrifice a creature with an On-Enter effect: the next creature you play also triggers it.",
+		"desc": "When you sacrifice a creature with an On-Enter effect, the next creature you play also triggers that effect.",
 		"hooks": ["sacrifice"], "effect": "reapers_scythe", "value": 0},
 	"du_vu_doll": {"id": "du_vu_doll", "name": "Maledetto Poppet", "tier": "combat",
-		"desc": "+1 ATK to all friendlies for each Curse in your deck.",
-		"hooks": ["creature_played"], "effect": "du_vu_doll", "value": 1},
+		"desc": "When you draw a Curse: prevent its on-draw effect and deal 2 damage to a random enemy creature.",
+		"hooks": ["card_drawn"], "effect": "curse_poppet", "value": 2},
 	"soul_ledger": {"id": "soul_ledger", "name": "Soul Ledger", "tier": "combat",
-		"desc": "Every 5th friendly death (across all fights): summon a 4/4 token in a random empty lane.",
+		"desc": "Every 5th friendly death this run: summon a 4/4 token in a random empty lane.",
 		"hooks": ["creature_death"], "effect": "soul_ledger", "value": 5},
 
 	# ─── Spell deepening ───
@@ -339,18 +413,18 @@ const RELICS: Dictionary = {
 		"hooks": ["spell_played"], "effect": "reagent_pouch", "value": 2,
 		"retired": true},
 	"inkpot_of_many": {"id": "inkpot_of_many", "name": "Inkpot of Many", "tier": "combat",
-		"desc": "Every 5th spell cast: choose a random spell to copy into your hand.",
+		"desc": "Every 5th spell you cast: add a random spell to your hand.",
 		"hooks": ["spell_played"], "effect": "inkpot", "value": 5},
 	"mana_pearl": {"id": "mana_pearl", "name": "Knife Up the Sleeve", "tier": "combat",
-		"desc": "Spells that cost 0 deal +3 damage.",
-		"hooks": ["spell_damage"], "effect": "zero_cost_spell_bonus", "value": 3},
+		"desc": "Your 0-cost spells deal +1 damage.",
+		"hooks": ["spell_damage"], "effect": "zero_cost_spell_bonus", "value": 1, "retired": true},
 
 	# ─── Build-around scaling ───
 	"pen_nib": {"id": "pen_nib", "name": "Pen Nib", "tier": "combat",
-		"desc": "Every 10th card played: the leftmost creature in your hand becomes 6/6 Piercing this fight.",
+		"desc": "Every 10th card you play: the leftmost creature in your hand becomes 6/6 and gains Piercing this fight.",
 		"hooks": ["card_played"], "effect": "pen_nib", "value": 10},
 	"wormwood": {"id": "wormwood", "name": "Wormwood", "tier": "combat",
-		"desc": "When a friendly takes damage: it gains +1 ATK permanently (max +5 per creature per fight).",
+		"desc": "When a friendly Bastion survives a hit: it gains +1 ATK this fight (max +5 per creature).",
 		"hooks": ["creature_damaged"], "effect": "wormwood", "value": 5},
 
 	# ─── Hades imports (boon/keepsake-flavored) ───
@@ -358,12 +432,12 @@ const RELICS: Dictionary = {
 		"desc": "When an enemy dies: heal 1 HP. Max 5 per fight.",
 		"hooks": ["enemy_death"], "effect": "heal_on_kill", "value": 5},
 	"bone_hourglass": {"id": "bone_hourglass", "name": "Bone Hourglass", "tier": "combat",
-		"desc": "Each act, pick: +1 ATK in front row / +1 HP in back row / +1 max Command when center lanes are full.",
+		"desc": "At each act's start, choose: front row +1 ATK; back row +1 HP; or +1 max Command while both center lanes are full.",
 		"hooks": ["act_start"], "effect": "bone_hourglass", "value": 0},
 
 	# ─── Monster Train imports ───
 	"pyre_stoker": {"id": "pyre_stoker", "name": "Pyre Stoker", "tier": "combat",
-		"desc": "Face damage you deal is +1 if you played 3+ cards this turn.",
+		"desc": "After you play at least 3 cards this turn, deal +1 face damage.",
 		"hooks": ["face_damage_dealt"], "effect": "pyre_stoker", "value": 1},
 	"imp_generator": {"id": "imp_generator", "name": "Imp Generator", "tier": "combat",
 		"desc": "End of each round: summon a 1/1 Imp token in a random empty back-row lane.",
@@ -371,18 +445,18 @@ const RELICS: Dictionary = {
 
 	# ─── Balatro imports (conditional copy/scaling) ───
 	"blueprint": {"id": "blueprint", "name": "Mason's Tracing", "tier": "combat",
-		"desc": "The next creature you play copies the On-Enter effect of the previous creature you played this fight.",
+		"desc": "Each creature you play copies the On-Enter effect of the previous creature you played this fight.",
 		"hooks": ["creature_played"], "effect": "blueprint", "value": 0},
 	"brainstorm": {"id": "brainstorm", "name": "Drillmaster's Whistle", "tier": "combat",
-		"desc": "Each round, the first creature you play copies the keywords of the first creature you played this fight.",
+		"desc": "The first creature you play each round copies the keywords of the first creature you played this fight.",
 		"hooks": ["creature_played"], "effect": "brainstorm", "value": 0,
 		"retired": true},  # 2026-07-08 merged → mimic_ring (keyword copy onto a creature)
 	"mime": {"id": "mime", "name": "Mummer's Mask", "tier": "combat",
-		"desc": "At end of turn, one chosen card in hand is played for free, triggering its On-Enter effect.",
+		"desc": "End of each turn: play 1 chosen card from your hand for free.",
 		"hooks": ["turn_end"], "effect": "mime", "value": 0,
 		"retired": true},
 	"the_family": {"id": "the_family", "name": "Sharpened Pitchforks", "tier": "combat",
-		"desc": "Your 1/1 tokens muster as 2/1.",
+		"desc": "Your 1/1 tokens are summoned as 2/1.",
 		"hooks": [], "effect": "token_pitchforks", "value": 1},
 
 	# ─── Wildfrost imports ───
@@ -393,16 +467,16 @@ const RELICS: Dictionary = {
 
 	# ─── Inscryption imports ───
 	"totem_pole": {"id": "totem_pole", "name": "Totem Pole", "tier": "combat",
-		"desc": "Each act, pick a keyword (Thorns / Swift / Regenerate / Armored). All friendlies have it this act.",
+		"desc": "Each act, choose Thorns, Swift, Regenerate, or Armored. All friendlies gain that keyword for the act.",
 		"hooks": ["act_start"], "effect": "totem_pole", "value": 0},
 	"death_card": {"id": "death_card", "name": "Death Card", "tier": "combat",
-		"desc": "Friendlies that die this fight return to your hand, costing +1 more each time.",
+		"desc": "When a friendly dies, return it to your hand. It costs 1 more each time this happens.",
 		"hooks": ["creature_death"], "effect": "death_card", "value": 1},
 
 	# ─── Backpack Hero imports (4x4 adjacency variants) ───
 	"linked_banner": {"id": "linked_banner", "name": "Linked Banner", "tier": "combat",
 		"desc": "Friendlies with 2+ adjacent friendlies have +1 ATK and +1 HP.",
-		"hooks": [], "effect": "linked_adj", "value": 1},
+		"hooks": [], "effect": "linked_adj", "value": 1, "retired": true},
 	"diagonal_crest": {"id": "diagonal_crest", "name": "Diagonal Crest", "tier": "combat",
 		"desc": "Diagonal friendlies count as adjacent. Your Adj. Buff effects grant +1 extra HP.",
 		"hooks": [], "effect": "diagonal_adj", "value": 1,
@@ -421,7 +495,7 @@ const RELICS: Dictionary = {
 		"hooks": ["creature_played"], "effect": "swift_mana", "value": 1,
 		"restricted_to": "raider"},
 	"stalwarts_anvil": {"id": "stalwarts_anvil", "name": "Stalwart's Anvil", "tier": "combat",
-		"desc": "Stalwart only. The first time a friendly takes damage each turn: gain 1 Command this turn.",
+		"desc": "Stalwart only. The first time a friendly takes damage each round: gain 1 Command next turn.",
 		"hooks": ["creature_damaged"], "effect": "first_hit_mana", "value": 1,
 		"restricted_to": "stalwart", "mana_cap_cost": 1},
 	"acolytes_tome": {"id": "acolytes_tome", "name": "Acolyte's Tome", "tier": "combat",
@@ -454,35 +528,54 @@ const RELICS: Dictionary = {
 		"desc": "Whenever a creature dies: gain 2 gold.",
 		"hooks": ["creature_death"], "effect": "gold_on_death", "value": 2},
 	"verse_of_you": {"id": "verse_of_you", "name": "A Verse of You", "tier": "event",
-		"desc": "When a friendly creature dies: draw 1 card. Once per round.",
-		"hooks": ["creature_death"], "effect": "draw_on_friendly_death", "value": 1},
+		"desc": "The first time a friendly dies each round: your next creature gets +1/+1 this fight.",
+		"hooks": ["creature_death", "creature_played"], "effect": "fallen_verse", "value": 1},
 	"warm_knucklebone": {"id": "warm_knucklebone", "name": "Warm Knucklebone", "tier": "event",
-		"desc": "At the start of each turn: 1 in 6 odds to gain 1 Command.",
+		"desc": "Start of each turn: 1 in 6 chance to gain 1 Command.",
 		"hooks": ["turn_start"], "effect": "chance_bonus_mana", "value": 1},
 	"sin_eaters_crust": {"id": "sin_eaters_crust", "name": "The Sin-Eater's Crust", "tier": "event",
 		"desc": "Whenever a card leaves your deck: heal 3 HP.",
 		"hooks": [], "effect": "heal_on_card_removed", "value": 3},
 
 	# ═══════════════════════════════════════════════════════════════════════
+	#  SET-PIECE TROPHIES (2026-07-20) — tier "event" so they never enter any
+	#  roll pool; each is granted BY NAME on the field the moment its named
+	#  action is carried (SetPieceDB `trophy`). One trophy per set-piece, so
+	#  a player who never reroutes for a named action never sees one — which
+	#  is the point: these are the reason to take the harder road.
+	# ═══════════════════════════════════════════════════════════════════════
+	"sunken_road_stone": {"id": "sunken_road_stone", "name": "The Sunken Road Stone", "tier": "event",
+		"desc": "The first creature you play each round gains Armored.",
+		"hooks": ["creature_played"], "effect": "first_played_armored", "value": 1},
+	"paymasters_tally": {"id": "paymasters_tally", "name": "Paymaster's Coin", "tier": "event",
+		"desc": "At the start of every fight: gain 12 gold.",
+		"hooks": ["combat_start"], "effect": "gold_on_combat_start", "value": 12},
+	"eagle_of_the_fourth": {"id": "eagle_of_the_fourth", "name": "The Eagle of the Fourth", "tier": "event",
+		"desc": "The first friendly creature that dies each fight returns as a 1/1.",
+		"hooks": ["creature_death"], "effect": "first_fallen_rises", "value": 1},
+
+	# ═══════════════════════════════════════════════════════════════════════
 	#  BOSS RELICS — Round 3 additions (9) — run-warping, no +1-mana template.
 	#  These replace the "all boss relics are +1 mana with downside" monotony.
 	# ═══════════════════════════════════════════════════════════════════════
 	"pandoras_box": {"id": "pandoras_box", "name": "The Conjurer's Coffer", "tier": "boss",
-		"desc": "Transform all your starting creatures into random rare creatures.",
+		"desc": "Transform all starting creatures into random rares. If none remain, gain a random rare creature.",
 		"hooks": [], "effect": "pandoras_box", "value": 0},
 	"snecko_eye": {"id": "snecko_eye", "name": "Basilisk Eye", "tier": "boss",
-		"desc": "Draw 6 cards, but every card's cost is randomized 0-3 each turn.",
-		"hooks": ["turn_start"], "effect": "snecko_eye", "value": 6},
+		"desc": "Draw 6 cards each turn. At the start of each turn, randomize every card's cost from 0 to 3.",
+		"hooks": ["turn_start"], "effect": "snecko_eye", "value": 6,
+		"retired": true},
 	"calling_bell": {"id": "calling_bell", "name": "Calling Bell", "tier": "boss",
 		"desc": "Gain 3 boss relics. Add 3 Curses to your deck.",
-		"hooks": [], "effect": "calling_bell", "value": 3},
+		"hooks": [], "effect": "calling_bell", "value": 3, "retired": true},
 	"runic_pyramid": {"id": "runic_pyramid", "name": "Runic Pyramid", "tier": "boss",
-		"desc": "You no longer discard your hand at end of turn.",
+		"desc": "Keep your hand at the end of each turn.",
 		"hooks": [], "effect": "no_end_turn_discard", "value": 0,
 		"retired": true},
 	"lichs_bargain": {"id": "lichs_bargain", "name": "Lich's Bargain", "tier": "boss",
-		"desc": "Friendlies trigger On-Death effects twice. After each fight: lose 1 HP per friendly death (max 3).",
-		"hooks": ["creature_death", "combat_end"], "effect": "lichs_bargain", "value": 2},
+		"desc": "Friendly On-Death effects trigger twice. After each fight, lose 1 HP per friendly death (max 3 HP).",
+		"hooks": ["creature_death", "combat_end"], "effect": "lichs_bargain", "value": 2,
+		"retired": true},
 	"lean_mean": {"id": "lean_mean", "name": "Lean Company", "tier": "boss",
 		"desc": "+1 max Command while your deck has 14 or fewer cards.",
 		"hooks": [], "effect": "lean_mean", "value": 1},
@@ -490,11 +583,13 @@ const RELICS: Dictionary = {
 		"desc": "Your damage spells deal +1 per spell already cast this fight (max +5).",
 		"hooks": ["spell_damage"], "effect": "glowing_hand", "value": 5},
 	"marathoners_sash": {"id": "marathoners_sash", "name": "Marathoner's Sash", "tier": "boss",
-		"desc": "+2 max Command. Start each fight with 1 Command; gain 2 Command per round (capped at max).",
-		"hooks": ["combat_start", "turn_start"], "effect": "marathoners_sash", "value": 2},
+		"desc": "+2 max Command. Start each fight with 1 Command. Gain 2 Command per round, up to your maximum.",
+		"hooks": ["combat_start", "turn_start"], "effect": "marathoners_sash", "value": 2,
+		"retired": true},
 	"steady_banner": {"id": "steady_banner", "name": "Steady Banner", "tier": "boss",
-		"desc": "Friendlies gain +2 ATK permanently for each full round they survive, but start at -1 ATK on turn 1.",
-		"hooks": ["round_end", "creature_played"], "effect": "steady_banner", "value": 2},
+		"desc": "Friendlies start turn 1 with -1 ATK. After each full round they survive, they gain +2 ATK for the fight.",
+		"hooks": ["round_end", "creature_played"], "effect": "steady_banner", "value": 2,
+		"retired": true},
 
 	# ═══════════════════════════════════════════════════════════════════════
 	#  WAVE 2 — keyword-synergy + build-defining relics (Doom / Rampage /
@@ -505,7 +600,8 @@ const RELICS: Dictionary = {
 	# ─── Doom synergy ───
 	"doom_herald": {"id": "doom_herald", "name": "Doom Herald", "tier": "combat",
 		"desc": "When one of your Doom creatures detonates: draw 1.",
-		"hooks": ["doom_detonate"], "effect": "doom_detonate_draw", "value": 1},
+		"hooks": ["doom_detonate"], "effect": "doom_detonate_draw", "value": 1,
+		"retired": true},
 	"hourglass_of_ruin": {"id": "hourglass_of_ruin", "name": "Hourglass of Ruin", "tier": "boss",
 		"desc": "Your Doom creatures detonate 1 round sooner.",
 		"hooks": ["creature_played"], "effect": "doom_accelerate", "value": 1},
@@ -539,23 +635,64 @@ const RELICS: Dictionary = {
 	#  reinforcements, gold-in-combat.
 	# ═══════════════════════════════════════════════════════════════════════
 	"letters_patent": {"id": "letters_patent", "name": "Letters Patent", "tier": "combat",
-		"desc": "When a friendly earns its epithet (3rd kill): it is knighted — +1/+1 permanently.",
+		"desc": "When a friendly earns its epithet at 3 kills, it permanently gains +1/+1.",
 		"hooks": ["creature_death"], "effect": "epithet_knight", "value": 1},
 	"deserters_toll": {"id": "deserters_toll", "name": "Deserter's Toll", "tier": "combat",
-		"desc": "The first card you discard each turn strikes on its way out: a random enemy creature takes damage equal to its Command cost.",
+		"desc": "The first card you discard each turn deals damage equal to its Command cost to a random enemy creature.",
 		"hooks": ["turn_end"], "effect": "discard_toll", "value": 0},
 	"drovers_whip": {"id": "drovers_whip", "name": "Drover's Whip", "tier": "combat",
 		"desc": "When you move a creature: it gains +1 ATK this round.",
 		"hooks": [], "effect": "move_atk", "value": 1},
 	"dregs": {"id": "dregs", "name": "Dregs", "tier": "combat",
-		"desc": "After you drink a potion in combat: the empty bottle flies — 2 damage to a random enemy.",
+		"desc": "After you drink a potion in a fight: deal 2 damage to a random enemy creature.",
 		"hooks": [], "effect": "potion_bottle", "value": 2},
 	"poisoned_rations": {"id": "poisoned_rations", "name": "Poisoned Rations", "tier": "combat",
-		"desc": "The first enemy reinforcement each fight arrives dead. Its On-Death still fires.",
+		"desc": "The first enemy reinforcement each fight dies when placed. Its On-Death effect still triggers.",
 		"hooks": [], "effect": "reinforcement_dies", "value": 0},
 	"sellswords_retainer": {"id": "sellswords_retainer", "name": "Sellsword's Retainer", "tier": "combat",
-		"desc": "Start of fight: if you hold 150+ gold, a 3/3 Sellsword joins your back row. If he lives, he collects 10 gold. The dead collect nothing.",
+		"desc": "Fight start: with at least 150 gold, summon a 3/3 Sellsword in back. If it survives, lose 10 gold.",
 		"hooks": ["combat_start", "combat_end"], "effect": "sellsword", "value": 150},
+
+	# 2026-07-16 final structural slate. These are deliberately simple, positive
+	# permanents: each either changes a recurring combat decision or makes the
+	# campaign's existing memory / route systems matter. Offer eligibility is
+	# centralized below so none can appear before it has a live constituency.
+	"heads_on_pikes": {"id": "heads_on_pikes", "name": "Heads on Pikes", "tier": "combat",
+		"desc": "Start of each fight: the highest-ATK enemy gets -1 ATK this fight for each General defeated this run (max -3).",
+		"hooks": ["combat_start"], "effect": "general_fear", "value": 3},
+	"powder_horn": {"id": "powder_horn", "name": "Powder Horn", "tier": "combat",
+		"desc": "Banking Command adds 1 powder charge (max 3). Your next damage spell spends all charges for +2 damage each.",
+		"hooks": ["mana_banked", "spell_damage"], "effect": "powder_charges", "value": 2},
+	"familiars_quill": {"id": "familiars_quill", "name": "The Familiar's Quill", "tier": "combat",
+		"desc": "When you play a Warlock: your next spell this turn costs 1 less.",
+		"hooks": ["creature_played"], "effect": "warlock_spell_discount", "value": 1},
+	"head_money": {"id": "head_money", "name": "Head-Money", "tier": "combat",
+		"desc": "When a Stray kills an enemy creature: gain gold equal to its printed Command cost (max 10 gold per fight).",
+		"hooks": ["creature_kill"], "effect": "stray_bounty", "value": 10},
+	"old_meg": {"id": "old_meg", "name": "Old Meg", "tier": "combat",
+		"desc": "Once per round, a targeted damage spell also deals 2 to the other enemy in that column, or face if empty.",
+		"hooks": ["spell_damage"], "effect": "column_bombard", "value": 2},
+	"portcullis": {"id": "portcullis", "name": "The Portcullis", "tier": "combat",
+		"desc": "Once per round, while a friendly Bastion is in play, prevent the first 2 face damage you would take.",
+		"hooks": ["hero_damaged"], "effect": "bastion_face_guard", "value": 2},
+	"second_rank": {"id": "second_rank", "name": "The Second Rank", "tier": "combat",
+		"desc": "When you play a Soldier directly behind another Soldier: both gain +1/+1 this fight.",
+		"hooks": ["creature_played"], "effect": "soldier_column_drill", "value": 1},
+	"sextons_spade": {"id": "sextons_spade", "name": "The Sexton's Spade", "tier": "combat",
+		"desc": "The first friendly Doom creature to detonate each fight detonates twice.",
+		"hooks": ["doom_detonate"], "effect": "double_first_doom", "value": 1},
+	"forlorn_hope": {"id": "forlorn_hope", "name": "Forlorn Hope", "tier": "combat",
+		"desc": "Your first creature each fight gains +1 ATK. Against a General or lord, it gains +2 ATK and Swift this round.",
+		"hooks": ["creature_played"], "effect": "storming_party", "value": 1},
+	"cerecloth": {"id": "cerecloth", "name": "The Cerecloth", "tier": "combat",
+		"desc": "Your first creature each fight copies the newest fallen creature's printed keywords. If none, it gains +1/+1.",
+		"hooks": ["creature_played"], "effect": "wear_last_shroud", "value": 1},
+	"drill_book": {"id": "drill_book", "name": "The Drill Book", "tier": "utility",
+		"desc": "Your creatures earn epithets at 2 kills instead of 3; the war school opens at 7 kills instead of 10.",
+		"hooks": [], "effect": "faster_veterancy", "value": 0},
+	"articles_of_war": {"id": "articles_of_war", "name": "The Articles of War", "tier": "boss",
+		"desc": "Choose a tribe. Its creatures cost 1 less (minimum 1).",
+		"hooks": [], "effect": "tribe_discount", "value": 1},
 }
 
 
@@ -581,6 +718,7 @@ const RELIC_RARITY: Dictionary = {
 	"phoenix_heart": "rare",       # once-per-run cheat-death
 	"pen_nib": "rare",             # spawns a 6/6 Piercing on a card-count engine
 	"bone_hourglass": "rare",      # flexible per-act board buff
+	"old_meg": "rare", "sextons_spade": "rare", "cerecloth": "rare",
 
 	# ── UNCOMMON: strong, archetype-defining, but not run-warping. ──
 	"banner_of_unity": "uncommon", "linked_banner": "uncommon",
@@ -591,9 +729,14 @@ const RELIC_RARITY: Dictionary = {
 	"cavalry_sigil": "uncommon", "mana_drunkard": "uncommon",
 	"soul_ledger": "uncommon", "inkpot_of_many": "uncommon", "imp_generator": "uncommon",
 	"war_drum": "uncommon", "flanking_banner": "uncommon", "death_card": "uncommon",
+	"vanguard_banner": "uncommon", "lantern": "uncommon",  # 2026-07-16 Wave-2 reshapes
 	"bulwark_engine": "uncommon", "phantom_veil": "uncommon", "thiefs_gloves": "uncommon",
 	"bridge_watcher": "uncommon", "swift_boots": "uncommon", "du_vu_doll": "uncommon",
 	"sellswords_retainer": "uncommon", "bottled_talisman": "uncommon",
+	"heads_on_pikes": "uncommon", "powder_horn": "uncommon",
+	"familiars_quill": "uncommon", "head_money": "uncommon",
+	"portcullis": "uncommon", "second_rank": "uncommon", "forlorn_hope": "uncommon",
+	"drill_book": "rare",
 }
 
 # Draw weights for the rarity-tiered roll. The SHAPE (common ≫ uncommon > rare)
@@ -611,6 +754,7 @@ static var _painted_icon_cache: Dictionary = {}
 
 static func clear_icon_cache() -> void:
 	_icon_cache.clear()
+	_painted_icon_cache.clear()
 
 
 static func get_relic(id: String) -> Dictionary:
@@ -627,11 +771,12 @@ static func get_relic(id: String) -> Dictionary:
 static func get_relic_icon(id: String) -> Texture2D:
 	if _icon_cache.has(id):
 		return _icon_cache[id]
-	var png_path := "res://assets/icons/relics/%s.png" % id
+	var icon_id := String(RELICS[id].get("icon", id)) if RELICS.has(id) else id
+	var png_path := "res://assets/icons/relics/%s.png" % icon_id
 	if ResourceLoader.exists(png_path):
 		_icon_cache[id] = load(png_path) as Texture2D
 		return _icon_cache[id]
-	var svg_path := "res://assets/icons/relics/%s.svg" % id
+	var svg_path := "res://assets/icons/relics/%s.svg" % icon_id
 	if ResourceLoader.exists(svg_path):
 		_icon_cache[id] = load(svg_path) as Texture2D
 		return _icon_cache[id]
@@ -644,18 +789,29 @@ static func get_relic_icon(id: String) -> Texture2D:
 # wreck a full-color painting).
 static func is_painted_icon(id: String) -> bool:
 	if not _painted_icon_cache.has(id):
-		_painted_icon_cache[id] = ResourceLoader.exists("res://assets/icons/relics/%s.png" % id)
+		var icon_id := String(RELICS[id].get("icon", id)) if RELICS.has(id) else id
+		_painted_icon_cache[id] = ResourceLoader.exists("res://assets/icons/relics/%s.png" % icon_id)
 	return bool(_painted_icon_cache[id])
 
 
 # Tier accent color for the relic frame's glow halo — at-a-glance rarity cue
 # like WoW item quality. Boss relics shine purple, utility green, combat
 # warm bronze, starting gold.
+## Tier accents. These ride every relic chip — the shop shelf, the Collection
+## tiles, the combat rail, the reward slate — so they have to be five distinct
+## inks that still live in the sepia world.
+##
+## Three of the five already did (gilt / ember / verdigris) and two were
+## leftover neon: utility read as a web-green and boss as a screen magenta,
+## which made them the only digital colours on the shelf. Both are now muted
+## into the family at the same value the event tier was already pulled to,
+## keeping the hue that carries their identity — utility still reads green,
+## boss still reads violet — without the saturation. (Audit 2026-07-21.)
 const TIER_COLORS := {
 	"starting": Color(1.00, 0.85, 0.45, 1.0),
 	"combat":   Color(0.95, 0.55, 0.30, 1.0),
-	"utility":  Color(0.55, 0.90, 0.50, 1.0),
-	"boss":     Color(0.85, 0.45, 1.00, 1.0),
+	"utility":  Color(0.62, 0.78, 0.50, 1.0),  # sage — kept clear of event verdigris
+	"boss":     Color(0.74, 0.54, 0.86, 1.0),  # muted amethyst
 	"event":    Color(0.47, 0.83, 0.75, 1.0),  # verdigris — the "blue option" ink
 }
 
@@ -674,23 +830,67 @@ static func get_relics_by_tier(tier: String) -> Array[String]:
 	return result
 
 
-static func roll_relic_reward(tier: String = "combat", relics_held: Array[String] = [], hero_id: String = "") -> Array[String]:
+const FOUNDATION_RELICS: Array[String] = [
+	"vanguards_cry", "banner_of_unity", "piercing_crown", "phoenix_heart",
+	"rear_guard_charm", "phantom_veil", "lantern", "ice_cream",
+	"deep_satchel", "vanguard_banner", "forlorn_hope",
+]
+
+
+static func roll_foundation_relics(count: int = 1, relics_held: Array[String] = [],
+		hero_id: String = "", rng: RandomNumberGenerator = null) -> Array[String]:
+	var pool: Array[String] = filter_pool_for_run(FOUNDATION_RELICS, hero_id, relics_held)
+	return weighted_sample(pool, mini(count, pool.size()), rng)
+
+
+static func roll_field_relics(count: int = 3, relics_held: Array[String] = [],
+		hero_id: String = "") -> Array[String]:
+	var pool: Array[String] = filter_pool_for_run(
+		get_relics_by_tier("combat"), hero_id, relics_held)
+	var picks: Array[String] = []
+	# The first relic after the signature teaches the baseline grammar before
+	# the pool asks for a niche engine. General offers still have a second slot.
+	if _non_signature_count(relics_held) == 0 and count > 0:
+		picks = roll_foundation_relics(1, relics_held, hero_id)
+	for id in picks:
+		pool.erase(id)
+	var rest: Array[String] = weighted_sample(pool, mini(count - picks.size(), pool.size()))
+	picks.append_array(rest)
+	return picks
+
+
+static func roll_campaign_relics(count: int = 1, relics_held: Array[String] = [],
+		hero_id: String = "") -> Array[String]:
+	var pool: Array[String] = filter_pool_for_run(
+		get_relics_by_tier("utility"), hero_id, relics_held)
+	return weighted_sample(pool, mini(count, pool.size()))
+
+
+# Backward-compatible entry point for old saves/events. New reward sources use
+# the named Foundation / Field / Campaign methods so their contract is visible.
+static func roll_relic_reward(tier: String = "combat", relics_held: Array[String] = [],
+		hero_id: String = "", count: int = 3) -> Array[String]:
+	if tier == "combat":
+		return roll_field_relics(count, relics_held, hero_id)
+	if tier == "utility":
+		return roll_campaign_relics(count, relics_held, hero_id)
 	var pool: Array[String] = filter_pool_for_run(get_relics_by_tier(tier), hero_id, relics_held)
-	return weighted_sample(pool, mini(3, pool.size()))
+	return weighted_sample(pool, mini(count, pool.size()))
 
 
 # Rarity-weighted sample without replacement. Commons dominate the draw; rares
 # surface occasionally (see RELIC_RARITY / RARITY_WEIGHT). Ids with no rarity
 # entry weigh as common, so a pool with no rarity data behaves like a plain
 # shuffle — keeping the boss/utility roll paths identical to before.
-static func weighted_sample(pool: Array[String], k: int) -> Array[String]:
+static func weighted_sample(pool: Array[String], k: int,
+		rng: RandomNumberGenerator = null) -> Array[String]:
 	var remaining: Array[String] = pool.duplicate()
 	var picks: Array[String] = []
 	while picks.size() < k and not remaining.is_empty():
 		var total := 0
 		for id in remaining:
 			total += int(RARITY_WEIGHT.get(get_relic_rarity(id), 6))
-		var roll := randi() % total
+		var roll := (rng.randi() if rng != null else randi()) % total
 		var chosen := 0
 		for i in remaining.size():
 			roll -= int(RARITY_WEIGHT.get(get_relic_rarity(remaining[i]), 6))
@@ -705,21 +905,7 @@ static func weighted_sample(pool: Array[String], k: int) -> Array[String]:
 static func roll_boss_relics(relics_held: Array[String] = [], hero_id: String = "") -> Array[String]:
 	var pool: Array[String] = filter_pool_for_run(get_relics_by_tier("boss"), hero_id, relics_held)
 	pool.shuffle()
-	var picks: Array[String] = pool.slice(0, mini(3, pool.size()))
-	# Guarantee at least one run-warping boss relic in a full offer, so the player
-	# is never shown three interchangeable "+1 Command / downside" boss_mana taxes.
-	if picks.size() == 3:
-		var has_warper := false
-		for id in picks:
-			if RELICS[id].get("effect", "") != "boss_mana":
-				has_warper = true
-				break
-		if not has_warper:
-			for id in pool:  # pool is already shuffled; first non-pick warper wins
-				if id not in picks and RELICS[id].get("effect", "") != "boss_mana":
-					picks[2] = id
-					break
-	return picks
+	return pool.slice(0, mini(3, pool.size()))
 
 
 static func get_boss_mana_bonus(relics_held: Array[String]) -> int:
@@ -775,7 +961,8 @@ static func is_restricted_to_other_hero(relic_id: String, hero_id: String) -> bo
 
 
 # Central reward-pool filter. Strips relics the player can't have right now:
-# already owned, retired, wrong-hero restricted, or would push past the mana cap.
+# already owned, retired, wrong-hero restricted, over the mana cap, or structurally
+# blank for the current run. This is the relic equivalent of PotionDB._roll_allowed.
 static func filter_pool_for_run(pool: Array[String], hero_id: String, relics_held: Array[String]) -> Array[String]:
 	var result: Array[String] = []
 	for id in pool:
@@ -789,5 +976,164 @@ static func filter_pool_for_run(pool: Array[String], hero_id: String, relics_hel
 			continue
 		if would_exceed_mana_cap(id, relics_held):
 			continue
+		if not _offer_allowed(id, relics_held):
+			continue
 		result.append(id)
 	return result
+
+
+static func _non_signature_count(relics_held: Array[String]) -> int:
+	var count := 0
+	for id in relics_held:
+		if RELICS.has(id) and String(RELICS[id].get("tier", "")) in [
+				"combat", "utility", "boss"]:
+			count += 1
+	return count
+
+
+static func _deck_data() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	if RunState == null or not RunState.run_active:
+		return out
+	# Eligibility must see the same folded cards Combat will draw. Permanent
+	# grant_kw / war_school / forge mods can create the keyword or subtype that
+	# makes a relic live; reading CardDB bases here falsely hid those offers.
+	for i in range(RunState.deck.size()):
+		var d: Dictionary = RunState.get_upgraded_card_data(i)
+		if not d.is_empty():
+			out.append(d)
+	return out
+
+
+static func _deck_ctype_count(ctype: String) -> int:
+	var count := 0
+	for d in _deck_data():
+		if String(d.get("ctype", "")) == ctype:
+			count += 1
+	return count
+
+
+static func _deck_has_keyword(keyword: String) -> bool:
+	for d in _deck_data():
+		if d.get("keywords", []).has(keyword):
+			return true
+	return false
+
+
+static func _deck_has_spell() -> bool:
+	for d in _deck_data():
+		if String(d.get("type", "")) == "spell":
+			return true
+	return false
+
+
+static func _deck_has_damage_spell() -> bool:
+	const DAMAGE_TYPES := ["damage", "damage_face", "damage_all_enemies", "damage_all"]
+	const DAMAGE_CUSTOMS := [
+		"blood_tithe", "petard", "slow_match", "sappers_charge", "penance",
+		"lightning", "mass_grave", "plague_bell", "last_rites", "pillage",
+		"earthquake", "slash", "flame_bolt", "quick_shot", "ambush",
+		"inferno", "immolate", "wildfire", "ricochet", "ballista_bolt",
+		"cataclysm", "fuel_the_pyre", "rout", "holy_smite", "hex", "wolf_pits",
+	]
+	for d in _deck_data():
+		if String(d.get("type", "")) != "spell":
+			continue
+		var spell: Dictionary = d.get("spell", {})
+		if String(spell.get("type", "")) in DAMAGE_TYPES:
+			return true
+		if String(spell.get("type", "")) == "custom" \
+				and String(spell.get("id", "")) in DAMAGE_CUSTOMS:
+			return true
+	return false
+
+
+static func _deck_has_curse_or_source(relics_held: Array[String]) -> bool:
+	if RunState != null:
+		for id in RunState.deck:
+			if CardDB.is_curse(String(id)):
+				return true
+	for id in relics_held:
+		if not RELICS.has(id):
+			continue
+		if String(RELICS[id].get("downside", "")) in ["curse_on_reward", "start_curses"]:
+			return true
+	return false
+
+
+static func _deck_has_sacrifice_source() -> bool:
+	for d in _deck_data():
+		if d.get("keywords", []).has("sacrifice"):
+			return true
+		if String(d.get("spell", {}).get("id", "")) in [
+				"offering", "fuel_the_pyre", "dark_pact"]:
+			return true
+		if String(d.get("floop", {}).get("type", "")) == "blood_sacrifice":
+			return true
+	return false
+
+
+static func _deck_has_on_death_damage() -> bool:
+	for d in _deck_data():
+		if String(d.get("on_death", {}).get("type", "")).begins_with("damage"):
+			return true
+	return false
+
+
+static func _deck_has_token_source() -> bool:
+	for d in _deck_data():
+		if String(d.get("on_death", {}).get("type", "")) == "summon":
+			return true
+		if String(d.get("floop", {}).get("type", "")) in [
+				"summon_random", "kill_adjacent_summon", "summon_token"]:
+			return true
+	return false
+
+
+static func _offer_allowed(id: String, relics_held: Array[String]) -> bool:
+	# Outside a live run (collection/probes), eligibility is informational only.
+	if RunState == null or not RunState.run_active:
+		return true
+	match id:
+		"heads_on_pikes":
+			return RunState.generals_broken_run > 0
+		"powder_horn", "old_meg":
+			return _deck_has_damage_spell()
+		"glowing_hand":
+			return _deck_has_damage_spell()
+		"familiars_quill":
+			return _deck_ctype_count("warlock") > 0 and _deck_has_spell()
+		"head_money":
+			return _deck_ctype_count("stray") > 0
+		"portcullis":
+			return _deck_ctype_count("bastion") > 0
+		"wormwood":
+			return _deck_ctype_count("bastion") > 0
+		"second_rank":
+			return _deck_ctype_count("soldier") >= 2
+		"sextons_spade", "hourglass_of_ruin":
+			return _deck_has_keyword("doom")
+		"cerecloth":
+			return not RunState.fallen.is_empty()
+		"drill_book":
+			if RunState.get_act() < 3:
+				return true
+			for uid in RunState.creature_kills:
+				if int(RunState.creature_kills[uid]) >= 2:
+					return true
+			return false
+		"centaur_heart":
+			return RunState.get_act() == 1
+		"du_vu_doll":
+			return _deck_has_curse_or_source(relics_held)
+		"briar_amulet":
+			return _deck_has_keyword("thorns")
+		"bulwark_engine":
+			return _deck_has_keyword("armored")
+		"bone_ring":
+			return _deck_has_on_death_damage()
+		"butchers_cleaver", "bone_pile", "reapers_scythe":
+			return _deck_has_sacrifice_source()
+		"the_family":
+			return _deck_has_token_source()
+	return true

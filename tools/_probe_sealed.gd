@@ -51,7 +51,9 @@ func _run_test() -> void:
 	SS.reset()
 	for cid in ["brute", "goblin", "brute", "goblin", "brute", "strike", "goblin", "strike"]:
 		SS.add_card_to(0, cid)
-	for cid in ["brute", "goblin", "brute", "goblin", "strike", "brute", "goblin", "brute"]:
+	# Keep the remote fixture cheap so two real, authoritative hand cards can be
+	# committed in one 3-Command orders bundle.
+	for cid in ["goblin", "goblin", "goblin", "goblin", "goblin", "goblin", "goblin", "goblin"]:
 		SS.add_card_to(1, cid)
 	SS.combat_mode = SS.CombatMode.NET_HOST
 	SS.local_index = 0
@@ -60,6 +62,9 @@ func _run_test() -> void:
 	NM.local_player_index = 0
 	NM._connected = true
 	NM.remote_present = true
+	# All THREE terms of is_connected_to_peer(), or Combat boots SOLO and
+	# every net assertion below fails for a reason none of them name.
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0   # send_to_client no-ops — no real peer
 	NM.entities.clear()
 	NM._next_entity_id = 1
@@ -118,7 +123,7 @@ func _run_test() -> void:
 	_check(combat._sealed_pending.size() == 1, "the order joined the pending bundle")
 	_check(int(combat.player_mana) == mana_before - order_cost, "Command paid at commit")
 	var stand = combat._row_array(false, combat.ROW_FRONT)[0]
-	_check(stand != null and is_instance_valid(stand) and stand.get_meta("sealed_pending", false),
+	_check(stand != null and is_instance_valid(stand) and stand.state.sealed_pending,
 		"a stand-in occupies the slot (second orders can't stack on it)")
 	combat._net_sync_board()
 	await create_timer(0.1).timeout
@@ -126,10 +131,18 @@ func _run_test() -> void:
 			and not NM.entities.values().has(stand),
 		"the stand-in never enters a snapshot (no entity id — the order stays private)")
 
-	# ── The foe's ghost ping shows position only ──
+	# ── The foe's ghost pings show positions only. Select actual cards from the
+	# host-owned remote hand; arbitrary ids/uids are no longer accepted. ──
+	var remote_orders: Array = []
+	var remote_lanes: Array[int] = [2, 0]
+	for i in 2:
+		var remote_entry: Dictionary = combat.net._remote_state.hand[i]
+		remote_orders.append({"id": String(remote_entry.id), "uid": int(remote_entry.uid),
+			"lane": remote_lanes[i], "row": 0})
 	combat._on_net_intent(2, {"t": NM.IN_ORDER_GHOST, "lane": 2, "row": 0})
+	combat._on_net_intent(2, {"t": NM.IN_ORDER_GHOST, "lane": 0, "row": 0})
 	await create_timer(0.15).timeout
-	_check(combat._sealed_ghosts.size() == 1, "the foe's commit shows as a face-down ghost")
+	_check(combat._sealed_ghosts.size() == 2, "the foe's commits show as face-down ghosts")
 	_check(combat._row_array(true, combat.ROW_FRONT)[2] == null,
 		"the ghost is pure UI — no creature on the enemy board yet")
 
@@ -143,22 +156,25 @@ func _run_test() -> void:
 		"one sealed side resolves nothing (the reveal waits for both)")
 
 	# ── The client's bundle lands → the orders break open ──
-	combat._on_net_intent(2, {"t": NM.IN_ORDERS, "mana": 1, "list": [
-		{"id": "brute", "uid": 501, "lane": 2, "row": 0},
-		{"id": "goblin", "uid": 502, "lane": 0, "row": 0},
-	]})
+	combat._on_net_intent(2, {"t": NM.IN_ORDERS, "list": "not-an-array"})
+	await create_timer(0.1).timeout
+	_check(not combat._sealed_bundles.has(1),
+		"a malformed sealed bundle is rejected without changing phase state")
+	combat._on_net_intent(2, {"t": NM.IN_ORDERS, "mana": 99, "list": remote_orders})
 	await create_timer(1.6).timeout
 	var host_c = combat._row_array(false, combat.ROW_FRONT)[0]
 	_check(host_c != null and is_instance_valid(host_c) \
-			and not host_c.get_meta("sealed_pending", false) \
+			and not host_c.state.sealed_pending \
 			and int(host_c.entity_id) == order_uid,
 		"the host's REAL creature replaced its stand-in (registered under its uid)")
 	var cli_a = combat._row_array(true, combat.ROW_FRONT)[2]
 	var cli_b = combat._row_array(true, combat.ROW_FRONT)[0]
-	_check(cli_a != null and is_instance_valid(cli_a) and int(cli_a.entity_id) == 501,
-		"client order 1 seated on the enemy side (eid 501)")
-	_check(cli_b != null and is_instance_valid(cli_b) and int(cli_b.entity_id) == 502,
-		"client order 2 seated on the enemy side (eid 502)")
+	_check(cli_a != null and is_instance_valid(cli_a)
+		and int(cli_a.entity_id) == int(remote_orders[0].uid),
+		"client order 1 seated from an authoritative hand uid")
+	_check(cli_b != null and is_instance_valid(cli_b)
+		and int(cli_b.entity_id) == int(remote_orders[1].uid),
+		"client order 2 seated from an authoritative hand uid")
 	_check(combat._sealed_ghosts.is_empty(), "the ghosts cleared at the reveal")
 	_check(int(combat._net_cards_played[0]) == 1 and int(combat._net_cards_played[1]) == 2,
 		"per-side play tallies kept through the reveal (1 host / 2 client)")
@@ -198,7 +214,18 @@ func _run_test() -> void:
 		or (cli_after == null or not is_instance_valid(cli_after)) \
 		or int(combat.player_hp) < host_hp_before \
 		or (is_instance_valid(cli_after) and int(cli_after.current_hp) < cli_hp_before)
-	_check(traded, "the round-1 clash actually struck (lane-0 trade or face damage)")
+	# Round 1 is the MUSTER round. Under the muster delay (a body cannot swing the
+	# round it arrives) both sides spend round 1 deploying, so the round-1 clash
+	# is deliberately quiet. This probe asserted the opposite until 2026-07-21 —
+	# that was the correct contract before the rule changed.
+	_check(not traded,
+		"round 1 is a MUSTER round — both lines deploy, neither swings")
+	var mustered_in := 0
+	for c in combat._all_creatures_both_sides():
+		if is_instance_valid(c) and c.state.ready_to_swing:
+			mustered_in += 1
+	_check(mustered_in > 0,
+		"the survivors are mustered for round 2 (%d ready)" % mustered_in)
 
 	_finish(_fails)
 

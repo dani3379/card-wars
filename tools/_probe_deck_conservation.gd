@@ -25,6 +25,8 @@ const HEROES := ["raider", "stalwart", "acolyte", "pyromancer", "kindler"]
 const MAX_ROUNDS := 40
 const TURN_WAIT_TICKS := 80
 const TICK := 0.1
+const SETTLE_TICK := 0.05
+const SETTLE_MAX_TICKS := 40
 const MODAL_BLOCKLIST := ["familiar", "scholar", "treasure_hunter", "adaptable",
 	"copycat", "doppelganger", "lost_tome", "war_council", "chaos_imp"]
 const POOL_WINDOW := 16
@@ -199,12 +201,25 @@ func _fight(n: int, total: int, hero: String, enc_id: String) -> void:
 	# in an earlier phase stay legitimately gone).
 	var exile_fight := false
 
+	# THE DECK CAN GROW MID-FIGHT. Black Contract (unholy_bargain) calls
+	# RunState.add_card("war_debt"), which appends to the RUN's permanent deck and
+	# deliberately does NOT deal the card into the fight in progress — it arrives
+	# from the NEXT fight on (see Combat._add_discovered_card_to_hand's header for
+	# why mid-fight insertion was removed). Re-reading RS.deck_uids every round
+	# therefore reports a legitimate new uid as a leak.
+	#
+	# The invariant this probe actually guards is the one in its header: a card
+	# that STARTS a fight in the deck is always in exactly one zone. Snapshot the
+	# roster at the opening bell and hold every round against that.
+	var start_uids: Array = RS.deck_uids.duplicate()
+	var start_ids: Array = RS.deck.duplicate()
+
 	var rounds := 0
 	while is_instance_valid(combat) and combat.phase != combat.Phase.GAME_OVER and rounds < MAX_ROUNDS:
 		if String(combat._encounter_passive) == "void_exile" \
 				or String(combat._reactive_passive.get("type", "")) == "exile_card":
 			exile_fight = true
-		_assert_conservation(enc_id, rounds + 1, exile_fight)
+		_assert_conservation(enc_id, rounds + 1, exile_fight, start_uids, start_ids)
 		await _auto_play_turn()
 		if not is_instance_valid(combat):
 			break
@@ -222,7 +237,8 @@ func _fight(n: int, total: int, hero: String, enc_id: String) -> void:
 	await _teardown()
 
 
-func _assert_conservation(enc_id: String, rnd: int, exile_fight: bool) -> void:
+func _assert_conservation(enc_id: String, rnd: int, exile_fight: bool,
+		start_uids: Array, start_ids: Array) -> void:
 	var zones: Dictionary = {}   # uid -> Array[zone names]
 	var note := func(uid: int, zone: String) -> void:
 		if uid < 0:
@@ -250,10 +266,10 @@ func _assert_conservation(enc_id: String, rnd: int, exile_fight: bool) -> void:
 		if zones[uid].size() > 1:
 			errs.append("uid %d DOUBLE-COUNTED in %s" % [uid, str(zones[uid])])
 	if not exile_fight:
-		for i in RS.deck_uids.size():
-			var uid: int = int(RS.deck_uids[i])
+		for i in start_uids.size():
+			var uid: int = int(start_uids[i])
 			if not zones.has(uid):
-				errs.append("uid %d (%s) VANISHED" % [uid, String(RS.deck[i])])
+				errs.append("uid %d (%s) VANISHED" % [uid, String(start_ids[i])])
 	if errs.is_empty():
 		_checks += 1   # one silent OK per clean round keeps the log readable
 	else:
@@ -268,11 +284,41 @@ func _wait_for_player_turn() -> bool:
 			return false
 		if combat.phase == combat.Phase.GAME_OVER:
 			return true
-		if combat.phase == combat.Phase.PLAYER_TURN:
+		# NOT `phase == PLAYER_TURN` on its own. `Phase.PLAYER_TURN` is enum 0 AND
+		# the declared default of `var phase`, so it reads true on the very first
+		# tick — before `_ready` has awaited its way through _build_hud() and
+		# _init_decks(). A probe that trusts it gets a Combat with a null HUD and
+		# an EMPTY draw pile, which reads as "every uid in the deck VANISHED".
+		# `round_number` starts at 0 and only leaves it inside _start_round(),
+		# strictly after both. See docs: the probe-readiness trap.
+		if int(combat.round_number) >= 1 and combat.phase == combat.Phase.PLAYER_TURN:
+			await _wait_hand_settled()
 			return true
 		await create_timer(TICK).timeout
 		waited += 1
 	return false
+
+
+## The refill deals ONE card immediately and staggers the rest on 0.08 s timers
+## (Combat._start_round). Conservation itself is safe mid-stagger — a not-yet-
+## dealt card is still an entry in the draw pile, and draw_one/_draw_card move it
+## atomically — but the micro-tests and the auto-play pilot both need the settled
+## hand, or they measure a one-card turn.
+func _wait_hand_settled() -> void:
+	var last := -1
+	var stable := 0
+	var waited := 0
+	while stable < 3 and waited < SETTLE_MAX_TICKS:
+		if not is_instance_valid(combat):
+			return
+		var n: int = combat._hand.size()
+		if n == last:
+			stable += 1
+		else:
+			stable = 0
+			last = n
+		await create_timer(SETTLE_TICK).timeout
+		waited += 1
 
 
 func _auto_play_turn() -> void:

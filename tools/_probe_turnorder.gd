@@ -28,6 +28,9 @@ func _run() -> void:
 	NM.local_player_index = 0
 	NM._connected = true
 	NM.remote_present = true
+	# All THREE terms of is_connected_to_peer(), or Combat boots SOLO and
+	# every net assertion below fails for a reason none of them name.
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0
 	NM.entities.clear(); NM._next_entity_id = 1
 

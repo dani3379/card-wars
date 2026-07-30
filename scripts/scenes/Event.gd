@@ -14,7 +14,7 @@ extends Control
 ##   grant_keyword_pick — a chosen creature PERMANENTLY learns a keyword
 ##                 (the Pensioned Master; rides the wayside grant_kw mod)
 ##   veteran_swap — remove every copy of one starter, gain that many
-##                 uncommons (the Free Company's one-for-one muster)
+##                 uncommons (the Free Company's bounded one-for-one muster)
 ##   purge_curses — remove ALL Curses at a max-HP price (the Scapegoat)
 ##   hidden+tell — Rotting Carnival (reading the tell IS the game)
 ## Some are state-gated (low HP, has-curse, starters, fallen, act, at_war,
@@ -30,6 +30,42 @@ extends Control
 
 const MAP_SCENE = "res://scenes/map.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+# The gamble stage's painters (2026-07-18 "the screen plays the scene" pass —
+# see docs/EVENT_PLAY_PITCH_20260718.md). Same-name consts, painter-extraction
+# convention.
+const KnuckleboneDie = preload("res://scripts/ui/painters/KnuckleboneDie.gd")
+const CastPatch = preload("res://scripts/ui/painters/CastPatch.gd")
+const TouchGlow = preload("res://scripts/ui/painters/TouchGlow.gd")
+const CandleStub = preload("res://scripts/ui/painters/CandleStub.gd")
+const EventHelm = preload("res://scripts/ui/painters/EventHelm.gd")
+const PaperSlip = preload("res://scripts/ui/painters/PaperSlip.gd")
+const BoneStraw = preload("res://scripts/ui/painters/BoneStraw.gd")
+const TrinketIcon = preload("res://scripts/ui/painters/TrinketIcon.gd")
+const EffectsTray = preload("res://scripts/ui/painters/EffectsTray.gd")
+const TrayCloth = preload("res://scripts/ui/painters/TrayCloth.gd")
+const PayToken = preload("res://scripts/ui/painters/PayToken.gd")
+const PaySack = preload("res://scripts/ui/painters/PaySack.gd")
+const TallySlate = preload("res://scripts/ui/painters/TallySlate.gd")
+const DerbyBeetle = preload("res://scripts/ui/painters/DerbyBeetle.gd")
+const CoinProp = preload("res://scripts/ui/painters/CoinProp.gd")
+const GauntletHand = preload("res://scripts/ui/painters/GauntletHand.gd")
+const ChalkSlate = preload("res://scripts/ui/painters/ChalkSlate.gd")
+const FieldCell = preload("res://scripts/ui/painters/FieldCell.gd")
+const GibbetPost = preload("res://scripts/ui/painters/GibbetPost.gd")
+const RingProp = preload("res://scripts/ui/painters/RingProp.gd")
+const QuoitsPeg = preload("res://scripts/ui/painters/QuoitsPeg.gd")
+const DrumHead = preload("res://scripts/ui/painters/DrumHead.gd")
+const BalanceScale = preload("res://scripts/ui/painters/BalanceScale.gd")
+const StrongboxDial = preload("res://scripts/ui/painters/StrongboxDial.gd")
+const PowderKeg = preload("res://scripts/ui/painters/PowderKeg.gd")
+const SignalBeacon = preload("res://scripts/ui/painters/SignalBeacon.gd")
+const MerelsBoard = preload("res://scripts/ui/painters/MerelsBoard.gd")
+const BoneTessera = preload("res://scripts/ui/painters/BoneTessera.gd")
+const WarPip = preload("res://scripts/ui/painters/WarPip.gd")
+const PipDie = preload("res://scripts/ui/painters/PipDie.gd")
+const FortuneWheel = preload("res://scripts/ui/painters/FortuneWheel.gd")
+const EVENT_LAYOUT_STAGE = preload("res://scripts/ui/painters/EventLayoutStage.gd")
+const EVENT_CHOICE_DEVICE = preload("res://scripts/ui/painters/EventChoiceDevice.gd")
 
 # Nodes that survive across UI rebuilds within a single event (initial choice
 # screen → result screen → continue). Modal sub-pickers (remove/butcher) hide
@@ -88,6 +124,8 @@ const ART_SCRIM_DARKNESS := {
 # sub-dict when the player picks a branching choice. Multi-stage events read
 # desc + choices from this; the top-level event title stays on _event_data.
 var _current_node: Dictionary = {}
+var _selected_choice_for_result: Dictionary = {}
+var _art_reaction_tween: Tween = null
 
 
 func _ready() -> void:
@@ -98,8 +136,17 @@ func _ready() -> void:
 	# purple hairline box reads as a stray line, not furniture. The vignette
 	# and brightness layers still apply.
 	GameTheme.add_atmosphere(self, "event", false)
-	AudioBank.play_music_random(["event", "event_b", "event_c"])
 	_pick_event()
+	# Mood-matched score (after _pick_event so _event_data is live): bone and
+	# ember events draw from the dread book, gilt and verdigris from the wry
+	# one; unmooded events keep the full original trio.
+	match String(_event_data.get("mood", "")):
+		"bone", "ember":
+			AudioBank.play_music_random(["event", "event_b", "event_dread"])
+		"gilt", "verdigris":
+			AudioBank.play_music_random(["event_c", "event_wry"])
+		_:
+			AudioBank.play_music_random(["event", "event_b", "event_c"])
 	# Per-event ambience loop ("river", "carnival", "fire_crackle", ...).
 	# AudioBank no-ops gracefully when the asset dir doesn't exist yet, and an
 	# event WITHOUT the field stops whatever loop the previous scene left
@@ -112,6 +159,14 @@ func _ready() -> void:
 	# the event painting is even requested. The async hydrator hot-swaps only
 	# the background layers; it never rebuilds or disables the choice controls.
 	_begin_event_art_hydration()
+	# Adaptive supersample scope, same as Combat's: the gamble minigames animate
+	# heavy procedural painters (wheel, scale, dice, board) that redraw at the
+	# full requested render scale (up to 2x). Without a scope this screen had no
+	# auto-relief when a machine couldn't sustain it — only Combat did. Triggers
+	# only on sustained slowness and self-clears when this scene leaves the tree.
+	var supersample := get_node_or_null("/root/Supersample")
+	if supersample != null:
+		supersample.begin_adaptive_scope(self)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -123,6 +178,9 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _exit_tree() -> void:
+	var supersample := get_node_or_null("/root/Supersample")
+	if supersample != null:
+		supersample.end_adaptive_scope(self)
 	# Invalidate any coroutine still polling the worker request before releasing
 	# our strong reference. A completed late request is ignored by its serial.
 	_event_art_request_serial += 1
@@ -170,7 +228,12 @@ func _pick_event() -> void:
 	_event_id = available[0]
 	_event_data = EVENTS[_event_id]
 	_current_node = _event_data
-	RunState.events_seen.append(_event_id)
+	# Guarded like the bridge path above. Once `unseen` is exhausted this fell
+	# through to `gate_passing`, so every repeat re-appended and events_seen
+	# became a multiset — any gate that COUNTS rather than tests membership
+	# (and the seen_texts story threads) then read wrong.
+	if not RunState.events_seen.has(_event_id):
+		RunState.events_seen.append(_event_id)
 
 
 # Returns true if the event's gate (if any) is satisfied by current RunState.
@@ -219,6 +282,8 @@ func _event_gate_passes_dict(gate: Dictionary) -> bool:
 				if not RunState.events_seen.has(needed):
 					return false
 			return true
+		"choice_made":
+			return RunState.has_event_choice(String(gate.get("flag", "")))
 		"hero_is":
 			return RunState.current_hero_id == String(gate.get("value", ""))
 		"upgraded_at_least":
@@ -409,7 +474,9 @@ func _refresh_ledger(animate: bool = true) -> void:
 		if animate and prev != v and not UserSettings.reduce_motion:
 			var flash: Color = GameTheme.GILT_BRIGHT
 			if key == "hp":
-				flash = Color(0.55, 0.88, 0.55) if v > prev else Color(0.88, 0.40, 0.32)
+				# HEALTH_GREEN, not a hand-rolled green: the constant carries the
+				# retune away from electric #40D959 that this literal undid.
+				flash = GameTheme.HEALTH_GREEN if v > prev else Color(0.88, 0.40, 0.32)
 			lbl.add_theme_color_override("font_color", flash)
 			var back := create_tween()
 			back.tween_interval(0.55)
@@ -446,6 +513,12 @@ func _build_ui() -> void:
 		_apply_effect(_current_node.auto_effect)
 		return
 
+	# Ordinary events now choose a composition from EventDB.  Table/minigame
+	# engines and untagged legacy events retain the folio below as a fallback.
+	var presentation_layout := _event_presentation_layout()
+	if presentation_layout != "folio":
+		_build_presented_event(presentation_layout)
+		return
 	# Left-column layout: title → body → choices stack down a fixed-width
 	# column anchored to the left edge. The horizontal scrim behind
 	# (EventOverlayLeft) pools the column in a darker region; the right
@@ -461,9 +534,7 @@ func _build_ui() -> void:
 	title.offset_right = COLUMN_LEFT + COLUMN_WIDTH
 	title.offset_bottom = 132
 	add_child(title)
-	if not UserSettings.reduce_motion:
-		title.modulate.a = 0.0
-		create_tween().tween_property(title, "modulate:a", 1.0, 0.22)
+	GameTheme.deal_in(title)
 
 	# Title setting — a gilt hairline with a diamond finial: the cartouche
 	# rule that stakes the page before the ink starts.
@@ -522,11 +593,7 @@ func _build_ui() -> void:
 	# and it writes itself in (quick typewriter; reduce_motion shows it whole).
 	var desc = _make_event_desc(_illuminate_desc(_sub_campaign_tokens(_current_node.desc)))
 	column.add_child(desc)
-	if not UserSettings.reduce_motion:
-		desc.visible_ratio = 0.0
-		var reveal := clampf(desc.get_total_character_count() * 0.0032, 0.25, 0.85)
-		create_tween().tween_property(desc, "visible_ratio", 1.0, reveal) \
-			.set_delay(0.12)
+	GameTheme.write_on(desc, 0.12)
 
 	# A breath between the prose and the first option — the paragraph should
 	# sit close enough to read as one document, far enough to end cleanly.
@@ -573,6 +640,362 @@ func _build_ui() -> void:
 	_refresh_ledger()
 
 
+# ── Data-driven ordinary-event compositions ───────────────────────────────
+
+func _event_presentation_layout() -> String:
+	var presentation: Dictionary = _event_data.get("presentation", {})
+	var layout := String(presentation.get("layout", "folio"))
+	if layout not in ["character", "confrontation", "location", "bargain", "ritual"]:
+		return "folio"
+	return layout
+
+
+func _visible_event_choices() -> Array:
+	var visible: Array = []
+	for choice in _current_node.get("choices", []):
+		if choice.has("blue") and not _event_gate_passes_dict(choice.blue):
+			continue
+		visible.append(choice)
+	return visible
+
+
+func _event_choice_parts(choice: Dictionary) -> Dictionary:
+	var headline := ""
+	var body := ""
+	var effect := ""
+	if choice.get("hidden", false):
+		headline = "???"
+		body = String(choice.get("tell", ""))
+	else:
+		var parts: PackedStringArray = String(choice.get("label", "")).split("\n\n", true, 1)
+		headline = parts[0] if not parts.is_empty() else "Choose"
+		if parts.size() > 1:
+			body = parts[1].strip_edges().replace("\n", " ")
+		effect = String(choice.get("desc", ""))
+	return {
+		"headline": _sub_campaign_tokens(headline),
+		"body": _sub_campaign_tokens(body),
+		"effect": _ink_outcome(_sub_campaign_tokens(effect)) if not effect.is_empty() else "",
+	}
+
+
+func _build_presented_event(layout: String) -> void:
+	var old_overlay := get_node_or_null("EventOverlayLeft") as CanvasItem
+	if old_overlay:
+		old_overlay.visible = false
+
+	var stage = EVENT_LAYOUT_STAGE.new()
+	stage.name = "EventLayoutStage"
+	add_child(stage)
+	stage.configure(layout, _mood_title_ink())
+
+	var title_rect := Rect2(80, 58, 650, 74)
+	var desc_rect := Rect2(80, 148, 575, 230)
+	var centered := false
+	match layout:
+		"character":
+			title_rect = Rect2(1000, 58, 520, 72)
+			desc_rect = Rect2(1000, 146, 520, 190)
+		"location":
+			title_rect = Rect2(300, 42, 1000, 76)
+			desc_rect = Rect2(350, 116, 900, 116)
+			centered = true
+		"bargain":
+			title_rect = Rect2(80, 52, 850, 76)
+			desc_rect = Rect2(80, 140, 830, 138)
+		"ritual":
+			title_rect = Rect2(300, 40, 1000, 76)
+			desc_rect = Rect2(400, 116, 800, 118)
+			centered = true
+
+	var title_copy := _sub_campaign_tokens(String(_event_data.get("name", "Event")))
+	if centered:
+		title_copy = "[center]" + title_copy + "[/center]"
+	var title := _make_event_title(title_copy)
+	_place_event_control(title, title_rect)
+	add_child(title)
+	GameTheme.deal_in(title, 0.02)
+
+	var desc_copy := _illuminate_desc(_sub_campaign_tokens(String(_current_node.get("desc", ""))))
+	if centered:
+		desc_copy = "[center]" + desc_copy + "[/center]"
+	var desc := _make_event_desc(desc_copy)
+	_place_event_control(desc, desc_rect)
+	add_child(desc)
+	GameTheme.write_on(desc, 0.10)
+	# The head ink band used to be a guessed constant while the copy rect ran
+	# 50px past it, so a three-line paragraph printed its last line below the
+	# band on the lit painting with the seam running between lines. Report the
+	# copy's real bottom once it has laid out and let the pool cut itself to fit.
+	_report_copy_extent(stage, desc, desc_rect)
+
+	if layout == "character":
+		_add_character_speaker_plate()
+	_add_template_whisper(layout)
+	var choices := _visible_event_choices()
+	match layout:
+		"character":
+			_build_character_choices(choices)
+		"bargain":
+			_build_bargain_choices(choices)
+		"ritual":
+			_build_ritual_choices(choices)
+		_:
+			_build_template_choice_row(layout, choices)
+
+	var skip_btn := _make_walk_on_button()
+	skip_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
+	add_child(skip_btn)
+	_refresh_ledger()
+
+
+func _report_copy_extent(stage: Control, desc: RichTextLabel, rect: Rect2) -> void:
+	if stage == null or not is_instance_valid(stage):
+		return
+	await get_tree().process_frame
+	if not is_instance_valid(stage) or not is_instance_valid(desc):
+		return
+	# `write_on` types the copy in, so the label's content height is only honest
+	# once it holds the full string; the authored rect bottom is the safe floor.
+	stage.copy_bottom = maxf(rect.position.y + desc.get_content_height(),
+		rect.position.y + rect.size.y)
+
+
+## The location rail's stops must mark the choices they belong to. Reported once
+## the row has laid out, because the devices are centred in an HBoxContainer and
+## their real widths depend on how many there are.
+func _report_route_stops(stage: Control, row: Control) -> void:
+	if stage == null or not is_instance_valid(stage):
+		return
+	await get_tree().process_frame
+	if not is_instance_valid(stage) or not is_instance_valid(row):
+		return
+	var stops := PackedFloat32Array()
+	for child in row.get_children():
+		var device := child as Control
+		if device != null:
+			stops.append(device.position.x + row.position.x + device.size.x * 0.5)
+	stage.route_stops = stops
+
+
+func _place_event_control(control: Control, rect: Rect2) -> void:
+	control.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	control.position = rect.position
+	control.size = rect.size
+
+
+func _add_character_speaker_plate() -> void:
+	var presentation: Dictionary = _event_data.get("presentation", {})
+	var caption := String(presentation.get("speaker", "A ROAD ENCOUNTER")).strip_edges()
+	if caption.is_empty():
+		return
+	var plate := Label.new()
+	plate.name = "ConfrontationSpeaker"
+	plate.text = caption.to_upper()
+	plate.position = Vector2(92, 806)
+	plate.size = Vector2(720, 32)
+	plate.add_theme_font_size_override("font_size", 16)
+	plate.add_theme_color_override("font_color", Color(0.86, 0.72, 0.45, 0.92))
+	plate.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.90))
+	plate.add_theme_constant_override("outline_size", 3)
+	if GameTheme.font_body:
+		plate.add_theme_font_override("font", GameTheme.font_body)
+	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(plate)
+
+
+func _availability_effect_text(effect_text: String, reason: String) -> String:
+	if reason.is_empty():
+		return effect_text
+	var rendered := _ink_outcome(effect_text)
+	if not rendered.is_empty():
+		rendered += "\n"
+	return rendered + "[color=#e06550]Unavailable: %s[/color]" % reason
+
+
+func _mark_choice_unavailable(button: Button, reason: String) -> void:
+	if reason.is_empty():
+		return
+	button.set_meta("unavailable_reason", reason)
+	# Choice devices own their locked look (visible border, reason on its own
+	# line). Anything else still takes the plain dim.
+	if button.has_method("set_locked"):
+		button.set_locked(reason)
+		return
+	button.disabled = true
+	button.tooltip_text = reason
+	button.mouse_default_cursor_shape = Control.CURSOR_FORBIDDEN
+	button.modulate = Color(0.58, 0.58, 0.58, 0.92)
+
+
+func _make_presented_choice(choice: Dictionary, layout: String, ordinal: int = -1) -> Button:
+	var parts := _event_choice_parts(choice)
+	var headline := String(parts.headline)
+	var unavailable := _choice_unavailable_reason(choice)
+	# The reason is NOT folded into the effect string here — set_locked() gives it
+	# its own line so it can't overflow a fixed-height tile. Blue's diamond is the
+	# device's job too; only the roman numeral is composed here.
+	var effect_text := String(parts.effect)
+	if layout == "character" and not choice.has("blue") and ordinal > 0:
+		var romans := ["I", "II", "III", "IV"]
+		headline = "%s.  %s" % [romans[mini(ordinal, romans.size()) - 1], headline]
+	var device = EVENT_CHOICE_DEVICE.new()
+	device.configure(layout, headline, effect_text,
+		String(parts.body), choice.has("blue"), _resolve_choice.bind(choice),
+		_on_presented_choice_hover, _mood_title_ink())
+	_mark_choice_unavailable(device, unavailable)
+	return device
+
+func _on_presented_choice_hover(text: String, active: bool) -> void:
+	_set_whisper(text)
+	for child in get_children():
+		if child.has_method("set_attention"):
+			child.set_attention(active)
+	var art := get_node_or_null("EventArt") as TextureRect
+	if art == null or UserSettings.reduce_motion or art.modulate.a < 0.98:
+		return
+	if _art_reaction_tween != null and _art_reaction_tween.is_running():
+		_art_reaction_tween.kill()
+	var target := Color(1.055, 1.035, 1.0, art.modulate.a) if active else Color(1, 1, 1, art.modulate.a)
+	_art_reaction_tween = create_tween()
+	_art_reaction_tween.tween_property(art, "modulate", target, 0.15 if active else 0.24) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
+
+
+func _build_character_choices(choices: Array) -> void:
+	var column := VBoxContainer.new()
+	column.name = "ChoiceDevices"
+	column.position = Vector2(990, 356)
+	column.size = Vector2(530, 410)
+	column.alignment = BoxContainer.ALIGNMENT_BEGIN
+	column.add_theme_constant_override("separation", 10)
+	add_child(column)
+	var count := maxi(1, choices.size())
+	var device_height := 148.0 if count == 1 else (136.0 if count == 2 else
+		(116.0 if count == 3 else 92.0))
+	var next_ordinal := 1
+	for i in choices.size():
+		var choice: Dictionary = choices[i]
+		var ordinal := -1
+		if not choice.has("blue"):
+			ordinal = next_ordinal
+			next_ordinal += 1
+		var device := _make_presented_choice(choice, "character", ordinal)
+		device.custom_minimum_size = Vector2(530, device_height)
+		column.add_child(device)
+		GameTheme.deal_in(device, 0.10 + float(i) * 0.055)
+
+
+func _build_template_choice_row(layout: String, choices: Array) -> void:
+	var row := HBoxContainer.new()
+	row.name = "ChoiceDevices"
+	row.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+	row.offset_left = 70
+	row.offset_right = -70
+	row.offset_top = -228
+	row.offset_bottom = -88
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	var separation := 16 if layout == "confrontation" else 22
+	row.add_theme_constant_override("separation", separation)
+	add_child(row)
+	var count := maxi(1, choices.size())
+	var preferred := 620.0 if count == 1 else (520.0 if count == 2 else
+		(430.0 if count == 3 else 350.0))
+	var device_width := minf(preferred,
+		(1460.0 - float(count - 1) * float(separation)) / float(count))
+	# Content is top-aligned now (so peers share a headline baseline), which left
+	# the old centred heights with a dead band under every one-line answer.
+	var device_height := 120.0 if count <= 2 else 112.0
+	for i in choices.size():
+		var device := _make_presented_choice(choices[i], layout)
+		device.custom_minimum_size = Vector2(device_width, device_height)
+		device.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		row.add_child(device)
+		GameTheme.deal_in(device, 0.10 + float(i) * 0.055)
+	if layout == "location":
+		_report_route_stops(get_node_or_null("EventLayoutStage"), row)
+
+func _build_bargain_choices(choices: Array) -> void:
+	# Offers stack as ledger entries down one ruled column, sized to the line they
+	# carry. The old shape gave two choices a 820x160 box each to hold a single
+	# sentence, so the screen read as two empty crates with the whole right half
+	# of the page dead. An account is a list; make it look like one.
+	var grid := GridContainer.new()
+	grid.name = "ChoiceContracts"
+	grid.columns = 1
+	var count := maxi(1, choices.size())
+	var entry_height := 112.0 if count <= 2 else (100.0 if count == 3 else 92.0)
+	var separation := 14
+	var stack_height := float(count) * entry_height + float(count - 1) * float(separation)
+	# Hang the stack from the ledger's ruled head rather than centring it in the
+	# empty field — an account fills from the top.
+	grid.position = Vector2(112, 352)
+	grid.size = Vector2(830, stack_height)
+	var stage := get_node_or_null("EventLayoutStage")
+	if stage != null:
+		stage.ledger_bottom = grid.position.y + stack_height + 12.0
+	grid.add_theme_constant_override("v_separation", separation)
+	add_child(grid)
+	var device_size := Vector2(818, entry_height)
+	for i in choices.size():
+		var device := _make_presented_choice(choices[i], "bargain")
+		device.custom_minimum_size = device_size
+		grid.add_child(device)
+		GameTheme.deal_in(device, 0.10 + float(i) * 0.06)
+
+func _build_ritual_choices(choices: Array) -> void:
+	var layer := Control.new()
+	layer.name = "ChoiceSeals"
+	layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	layer.mouse_filter = Control.MOUSE_FILTER_PASS
+	add_child(layer)
+	var count := maxi(1, choices.size())
+	var preferred := 480.0 if count == 1 else (400.0 if count == 2 else
+		(350.0 if count == 3 else 310.0))
+	var width := minf(preferred,
+		(1440.0 - float(count - 1) * 24.0) / float(count))
+	var total := float(count) * width + float(count - 1) * 24.0
+	var start_x := (1600.0 - total) * 0.5
+	var tile_h := 122.0 if count <= 2 else 112.0
+	for i in choices.size():
+		var device := _make_presented_choice(choices[i], "ritual")
+		var x := start_x + float(i) * (width + 24.0)
+		# Seated on the seal's near rim rather than nudged by a flat 15px offset
+		# — the old version read as three boxes that had failed to line up.
+		device.position = Vector2(x, EVENT_LAYOUT_STAGE.seal_rim_y(x + width * 0.5, tile_h))
+		device.size = Vector2(width, tile_h)
+		layer.add_child(device)
+		GameTheme.deal_in(device, 0.10 + float(i) * 0.06)
+
+func _add_template_whisper(layout: String) -> void:
+	var rect := Rect2(90, 588, 650, 42)
+	match layout:
+		"character":
+			rect = Rect2(1000, 770, 520, 42)
+		"location":
+			rect = Rect2(300, 602, 1000, 42)
+		"bargain":
+			rect = Rect2(100, 296, 860, 42)
+		"ritual":
+			rect = Rect2(350, 584, 900, 42)
+	var whisper := Label.new()
+	whisper.name = "HoverWhisper"
+	whisper.text = ""
+	whisper.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	whisper.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER \
+		if layout in ["location", "ritual"] else HORIZONTAL_ALIGNMENT_LEFT
+	whisper.add_theme_font_size_override("font_size", 17)
+	whisper.add_theme_color_override("font_color", Color(0.82, 0.78, 0.68, 0.94))
+	whisper.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.82))
+	whisper.add_theme_constant_override("outline_size", 3)
+	if GameTheme.font_body:
+		whisper.add_theme_font_override("font", GameTheme.font_body)
+	_place_event_control(whisper, rect)
+	whisper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(whisper)
+	_whisper = whisper
+
 ## Pin the margin hairline to the CHOICE ENTRIES' real rect (the reading
 ## column also holds the desc — the rule belongs to the options only). Two
 ## frames: one for the entries' content-fit growth (each waits a frame to
@@ -610,17 +1033,12 @@ func _ensure_fullscreen_art(tex: Texture2D, fade_from_placeholder: bool = false)
 		art.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		add_child(art)
 		move_child(art, 1)  # behind Atmosphere so the vignette still tints corners
-		# The plate breathes — a 16s Ken Burns drift (scale only, from center,
-		# COVERED keeps every edge bled). Started once; the art node survives
-		# result-screen rebuilds via PRESERVE_NODES so the drift never resets.
-		if not UserSettings.reduce_motion:
-			art.pivot_offset = Vector2(800, 450)  # 1600x900 canvas center
-			var kb := create_tween().set_loops()
-			kb.tween_property(art, "scale", Vector2(1.035, 1.035), 16.0) \
-				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-			kb.tween_property(art, "scale", Vector2.ONE, 16.0) \
-				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		# The plate breathes — the kit's 16s Ken Burns drift. Started once; the
+		# art node survives result-screen rebuilds via PRESERVE_NODES so the
+		# drift never resets.
+		GameTheme.ken_burns(art, Vector2(800, 450))  # 1600x900 canvas center
 	art.texture = tex
+	_apply_event_art_focus(art)
 
 	# The fallback remains underneath during the short hot-swap, avoiding a
 	# black frame even when the painting finishes between rendered frames.
@@ -649,6 +1067,29 @@ func _ensure_fullscreen_art(tex: Texture2D, fade_from_placeholder: bool = false)
 	_ensure_event_overlay(_art_scrim_darkness(tex))
 
 
+func _apply_event_art_focus(art: TextureRect) -> void:
+	# Optional per-painting crop metadata.  Enlarging the TextureRect slightly
+	# gives us safe bleed to move its authored focal point toward the layout's
+	# open art field without revealing an edge.
+	var presentation: Dictionary = _event_data.get("presentation", {})
+	if not presentation.has("focal_uv"):
+		return
+	var layout := String(presentation.get("layout", "folio"))
+	var target := Vector2(0.34, 0.48) if layout == "character" else \
+		(Vector2(0.72, 0.47) if layout in ["confrontation", "bargain"] else Vector2(0.50, 0.47))
+	var focus: Vector2 = presentation.get("focal_uv", target)
+	var zoom := maxf(1.0, float(presentation.get("zoom", 1.035)))
+	var bleed := Vector2(800.0 * (zoom - 1.0), 450.0 * (zoom - 1.0))
+	var shift := (target - focus) * Vector2(260.0, 150.0)
+	# Never move farther than the extra bleed created by zoom; an aggressive
+	# authored focal point must not expose a viewport edge.
+	shift.x = clampf(shift.x, -bleed.x, bleed.x)
+	shift.y = clampf(shift.y, -bleed.y, bleed.y)
+	art.offset_left = -bleed.x + shift.x
+	art.offset_right = bleed.x + shift.x
+	art.offset_top = -bleed.y + shift.y
+	art.offset_bottom = bleed.y + shift.y
+
 func _ensure_event_overlay(darkness_left: float) -> void:
 	var scrim := get_node_or_null("EventOverlayLeft") as ColorRect
 	if scrim == null:
@@ -661,7 +1102,22 @@ func _ensure_event_overlay(darkness_left: float) -> void:
 		var mat := scrim.material as ShaderMaterial
 		if mat:
 			mat.set_shader_parameter("darkness_left", darkness_left)
-	scrim.visible = _event_art_visible
+	scrim.visible = _event_art_visible and _wants_left_scrim()
+
+
+## This wash pools ink down the LEFT and pools it deeper at the bottom-left and
+## top-left — a shape cut for the folio ladder, whose title and choices live
+## exactly there. A presented layout draws its own ink where ITS copy sits, so
+## on those the folio wash lands on the painting instead of the text: it dimmed
+## the portrait on `character` (whose copy is on the right), and double-darkened
+## `bargain`/`confrontation`, which already lay their own slab over the left.
+##
+## `_build_presented_event` tries to switch it off, but it runs BEFORE the scrim
+## exists — `_ready` calls `_build_ui()` first and `_begin_event_art_hydration()`
+## (which creates the scrim) second, so that hide was a no-op on first build and
+## every presented event shipped with the folio wash on top of it.
+func _wants_left_scrim() -> bool:
+	return _event_presentation_layout() == "folio"
 
 
 ## How deep the left text scrim must run for this painting. Values are scanned
@@ -826,8 +1282,12 @@ func _make_event_choice(choice: Dictionary, height: int, ordinal: int = -1) -> B
 		# The mechanical outcome. Branch picks (follow_up, no desc) leave this
 		# empty and show only the flavor beat — the payoff is the next screen.
 		effect_text = String(choice.get("desc", ""))
-	return _make_frameless_choice(headline_text, effect_text, body_text, height,
+	var unavailable := _choice_unavailable_reason(choice)
+	effect_text = _availability_effect_text(effect_text, unavailable)
+	var button := _make_frameless_choice(headline_text, effect_text, body_text, height,
 			_resolve_choice.bind(choice), choice.has("blue"), ordinal)
+	_mark_choice_unavailable(button, unavailable)
+	return button
 
 
 # Verdigris ink for blue options — the color is the tell that the event SEES
@@ -922,24 +1382,101 @@ const COST_INK := "#e06550"
 # Inline devices for the outcome lines — one small glyph opens each segment so
 # the ladder scans by SHAPE ("which of these costs blood?") before it's read.
 # Painted HUD icons where they exist; the skull is the white silhouette kit.
-const GLYPH_GOLD := "[img=16]res://assets/icons/map/hud_gold_painted.png[/img] "
-const GLYPH_HP := "[img=16]res://assets/icons/map/hud_heart_painted.png[/img] "
-const GLYPH_CURSE := "[img=15]res://assets/icons/skull.png[/img] "
-const GLYPH_POTION := "[img=16]res://assets/icons/map/hud_potion_painted.png[/img] "
-const GLYPH_RELIC := "[img=16]res://assets/icons/map/hud_relic.png[/img] "
-const GLYPH_CARD := "[img=16]res://assets/icons/map/hud_deck.png[/img] "
-const GLYPH_COMMAND := "[img=16]res://assets/icons/stats/cost_runestone.png[/img] "
+# Sized 20, not 16. The gold glyph is the CoinProp mint (see GameTheme's
+# `gold_mint` note) and its crowned profile only begins to resolve at ~20px —
+# below that the stamp mushes to a dark smudge and the coin reads as a plain
+# disc. The rest of the row moves with it: they are one set and a 20px coin
+# beside a 16px heart reads as a mistake. 20 also sits right against the 18px
+# outcome text these open.
+const GLYPH_GOLD := "[img=20]res://assets/icons/map/hud_gold_coin.png[/img] "
+const GLYPH_HP := "[img=20]res://assets/icons/map/hud_heart_painted.png[/img] "
+const GLYPH_CURSE := "[img=19]res://assets/icons/skull.png[/img] "
+const GLYPH_POTION := "[img=20]res://assets/icons/map/hud_potion_painted.png[/img] "
+const GLYPH_RELIC := "[img=20]res://assets/icons/map/hud_relic.png[/img] "
+const GLYPH_CARD := "[img=20]res://assets/icons/map/hud_deck.png[/img] "
+const GLYPH_COMMAND := "[img=20]res://assets/icons/stats/cost_runestone.png[/img] "
 
 
+## Words that open a discrete stake rather than continue a prose clause.
+## No "sharpen" here: it never OPENS a stake in the pool, it only ever trails as
+## prose ("returns to your deck, sharpened"), where a middot reads wrong.
+const TERM_VERBS := ["heal", "gain", "remove", "transform", "eat", "give", "add",
+	"free", "upgrade", "lose", "pay", "bury", "purge"]
+## The house separator for discrete contract terms — the same middot the card
+## faces use for "{contract} · {EXHAUST}".
+const OUTCOME_SEP := "[color=#7c6a49]  ·  [/color]"
+
+
+## True when a comma-separated piece is a stake of the deal, not the tail of a
+## sentence. "+1 Curse" and "remove 2 chosen cards" are terms; "kept properly"
+## and "then a relic" are prose and keep their comma.
+func _is_discrete_term(seg: String) -> bool:
+	var lower := seg.strip_edges().to_lower()
+	if lower.begins_with("+") or lower.begins_with("-"):
+		return true
+	for verb in TERM_VERBS:
+		if lower.begins_with(verb):
+			return true
+	return false
+
+
+## Split one clause on term-separating commas ONLY. Two commas are never
+## boundaries: those inside parentheses ("(2/5, Last Stand)" is one creature,
+## not two stakes) and any comma past an em dash (everything after the dash is
+## flavor, so "grief, kept properly, is a kind of armor" stays one breath).
+## Returns [segments, untouched_tail].
+func _split_outcome_terms(clause: String) -> Array:
+	var dash := clause.find("—")
+	var head := clause if dash < 0 else clause.substr(0, dash)
+	var tail := "" if dash < 0 else clause.substr(dash)
+	var segs: Array = []
+	var buf := ""
+	var depth := 0
+	var i := 0
+	while i < head.length():
+		var c := head[i]
+		if c == "(":
+			depth += 1
+		elif c == ")":
+			depth = maxi(0, depth - 1)
+		if depth == 0 and c == "," and i + 1 < head.length() and head[i + 1] == " ":
+			segs.append(buf)
+			buf = ""
+			i += 2
+			continue
+		buf += c
+		i += 1
+	segs.append(buf)
+	return [segs, tail]
+
+
+## Stakes should read as countable terms, not one run-on string. "+55 gold, +1
+## Curse" is two different things happening to the player and the comma made
+## them blur; the middot separates them at a glance while prose keeps its commas.
 func _ink_outcome(text: String) -> String:
 	if text.find("[") >= 0:
 		return text
 	var big_parts: Array = []
 	for half in text.split("; "):
-		var parts: Array = []
-		for seg in String(half).split(", "):
-			parts.append(_ink_segment(String(seg)))
-		big_parts.append(", ".join(parts))
+		var split_result := _split_outcome_terms(String(half))
+		var segs: Array = split_result[0]
+		var tail := String(split_result[1])
+		var out := ""
+		for i in segs.size():
+			var seg := String(segs[i]).strip_edges()
+			if seg.is_empty():
+				continue
+			if out.is_empty():
+				out = _ink_segment(seg)
+			elif _is_discrete_term(seg):
+				out += OUTCOME_SEP + _ink_segment(seg)
+			else:
+				out += ", " + _ink_segment(seg)
+		# strip_edges() above ate the space the head carried before the em dash;
+		# put it back or the flavor welds onto the last term ("for free— the river").
+		if not tail.is_empty() and not out.is_empty():
+			out += " "
+		big_parts.append(out + tail)
 	return "; ".join(big_parts)
 
 
@@ -1249,6 +1786,8 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 		slide.tw.tween_property(underline, "custom_minimum_size:x", line_w, 0.16) \
 			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	btn.mouse_entered.connect(func() -> void:
+		if btn.disabled:
+			return
 		gem.modulate = gem_hot
 		headline.add_theme_color_override("font_color", head_hot)
 		if whisper_text != "":
@@ -1256,6 +1795,8 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 		slide_to.call(36.0, -12.0, 1.0, 168.0)
 	)
 	btn.mouse_exited.connect(func() -> void:
+		if btn.disabled:
+			return
 		gem.modulate = gem_rest
 		headline.add_theme_color_override("font_color", head_rest)
 		if whisper_text != "":
@@ -1387,11 +1928,164 @@ const MODAL_EFFECTS := [
 	"upgrade_choice", "upgrade_choice_multi",
 	"stranger_hand_pick", "relic_sacrifice_pick", "sacrifice_pick",
 	"transform_choice", "dice_run", "risk_loop", "pawn_appraisal",
-	"grant_keyword_pick", "veteran_swap",
+	"grant_keyword_pick", "veteran_swap", "shell_game", "straw_game",
+	"cut_game", "sack_game", "wheel_game", "liar_game", "morra_game",
+	"tali_game", "field_game", "quoits_game", "crown_game", "scale_game",
+	"box_game", "deal_game", "signal_game", "morris_game",
 ]
+
+func _choice_unavailable_reason(choice: Dictionary) -> String:
+	var gold_cost := 0
+	var hp_cost := 0
+	var max_hp_cost := 0
+	var potion_rewards := 0
+	var effects: Array = choice.get("effects", [])
+	for raw_effect in effects:
+		if not (raw_effect is Dictionary):
+			continue
+		var effect: Dictionary = raw_effect
+		var kind := String(effect.get("type", ""))
+		var value := int(effect.get("value", 0))
+		if kind == "gold" and value < 0:
+			gold_cost += -value
+		if effect.has("stake"):
+			gold_cost += maxi(0, int(effect.get("stake", 0)))
+		if kind == "pawn_buyback":
+			gold_cost += maxi(0, int(effect.get("price", 0)))
+		if kind == "damage":
+			hp_cost += maxi(0, value)
+		elif kind == "lose_max_hp":
+			max_hp_cost += maxi(0, value)
+		elif kind == "purge_curses":
+			var purge_count := _removable_filtered_count("curse")
+			if purge_count <= 0:
+				return "No removable Curse in your deck."
+			max_hp_cost += purge_count * maxi(0, int(effect.get("max_hp_per", 2)))
+		elif kind in ["gain_potion", "gain_potion_random"]:
+			potion_rewards += 1
+
+	if gold_cost > RunState.gold:
+		return "Need %d gold (you have %d)." % [gold_cost, RunState.gold]
+	if hp_cost > 0 and RunState.hero_hp <= hp_cost:
+		return "Need at least %d HP to pay this safely." % (hp_cost + 1)
+	if max_hp_cost > 0 and RunState.hero_max_hp <= max_hp_cost:
+		return "Need at least %d max HP to pay this." % (max_hp_cost + 1)
+	if potion_rewards > 0:
+		var open_slots := 0
+		if not RunState.has_downside("no_potions"):
+			open_slots = maxi(0, RunState.MAX_POTIONS - RunState.potions.size())
+		if open_slots < potion_rewards:
+			return "Need an empty potion slot." if potion_rewards == 1 \
+				else "Need %d empty potion slots." % potion_rewards
+
+	for raw_effect in effects:
+		if raw_effect is Dictionary:
+			var target_reason := _effect_target_unavailable_reason(raw_effect)
+			if not target_reason.is_empty():
+				return target_reason
+	return ""
+
+
+func _removable_filtered_count(filter: String) -> int:
+	var matches := 0
+	for card_id in RunState.deck:
+		if _card_matches_filter(String(card_id), filter):
+			matches += 1
+	return mini(matches, maxi(0, RunState.deck.size() - 1))
+
+
+func _effect_target_unavailable_reason(effect: Dictionary) -> String:
+	var kind := String(effect.get("type", ""))
+	match kind:
+		"remove_choice", "remove_choice_multi":
+			if RunState.deck.size() <= 1:
+				return "No removable card in your deck."
+		"remove_choice_filtered", "remove_choice_all_copies":
+			if _removable_filtered_count(String(effect.get("filter", ""))) <= 0:
+				return "No eligible card to remove."
+		"copy_card":
+			if RunState.deck.is_empty():
+				return "No card to copy."
+		"upgrade_choice", "upgrade_choice_multi":
+			var can_upgrade := false
+			for i in range(RunState.deck.size()):
+				if not RunState.has_upgrade_path(i, "plus") \
+						and CardDB.is_upgradeable(RunState.deck[i]):
+					can_upgrade = true
+					break
+			if not can_upgrade:
+				return "No eligible card to upgrade."
+		"transform_choice":
+			var can_transform := false
+			for card_id in RunState.deck:
+				if not CardDB.is_curse(String(card_id)):
+					can_transform = true
+					break
+			if not can_transform:
+				return "No eligible card to transform."
+		"grant_keyword_pick":
+			var keyword := String(effect.get("keyword", ""))
+			var can_learn := false
+			for i in range(RunState.deck.size()):
+				var data: Dictionary = RunState.get_upgraded_card_data(i)
+				if data.get("type", "") == "creature" \
+						and not (data.get("keywords", []) as Array).has(keyword):
+					can_learn = true
+					break
+			if keyword.is_empty() or not can_learn:
+				return "No soldier can take this lesson."
+		"relic_sacrifice_pick":
+			var can_trade_relic := false
+			for relic_id in RunState.relics:
+				if RelicDB.get_relic(relic_id).get("tier", "starting") != "starting":
+					can_trade_relic = true
+					break
+			if not can_trade_relic:
+				return "No non-starting relic to trade."
+		"sacrifice_pick":
+			var can_sacrifice := RunState.deck.size() > 1
+			if can_sacrifice:
+				can_sacrifice = false
+				for card_id in RunState.deck:
+					if CardDB.get_card_data(card_id).get("type", "") == "creature":
+						can_sacrifice = true
+						break
+			if not can_sacrifice:
+				return "No creature can be sacrificed."
+		"veteran_swap":
+			var has_starter := false
+			for card_id in RunState.deck:
+				if not CardDB.is_curse(card_id) \
+						and CardDB.get_card_data(card_id).get("rarity", "") == "starter":
+					has_starter = true
+					break
+			if not has_starter:
+				return "No starting card can be replaced."
+	return ""
+
+
+func _record_choice_history(choice: Dictionary) -> void:
+	for flag in choice.get("record_choices", []):
+		RunState.record_event_choice(String(flag))
+	var single := String(choice.get("record_choice", ""))
+	if not single.is_empty():
+		RunState.record_event_choice(single)
+
+
+func _record_effect_outcome(effect: Dictionary, key: String) -> void:
+	var flag := String(effect.get(key, ""))
+	if not flag.is_empty():
+		RunState.record_event_choice(flag)
 
 
 func _resolve_choice(choice: Dictionary) -> void:
+	var unavailable := _choice_unavailable_reason(choice)
+	if not unavailable.is_empty():
+		_refresh_ledger(false)
+		return
+	# Keep the physical decision so the result page can stamp the same writ,
+	# road marker, contract, or vow instead of replacing it with generic copy.
+	_selected_choice_for_result = choice.duplicate(true)
 	# PlayLog: record the player's event decision (effect TYPES only, to stay
 	# JSON-safe — choice dicts can carry runtime Callables we must not serialize).
 	var _pl_eff: Array = []
@@ -1433,6 +2127,7 @@ func _resolve_choice(choice: Dictionary) -> void:
 	# stage-2 desc + choices read from `_current_node`. We don't show the
 	# stage-1 result text — the follow-up flavor IS the transition beat.
 	if not follow_up.is_empty():
+		_record_choice_history(choice)
 		_current_node = follow_up
 		_build_ui()
 		return
@@ -1440,6 +2135,7 @@ func _resolve_choice(choice: Dictionary) -> void:
 	# Start interactive copy picker if any copy_card effects exist.
 	if copy_count > 0:
 		_start_copy_mode(copy_count, result_text.strip_edges())
+		_record_choice_history(choice)
 		return
 
 	# Other modal pickers: each opens its own UI and handles the post-pick
@@ -1452,8 +2148,10 @@ func _resolve_choice(choice: Dictionary) -> void:
 		_pending_pre_text = result_text.strip_edges()
 		for effect in modal_effects:
 			_apply_effect(effect)
+		_record_choice_history(choice)
 		return
 
+	_record_choice_history(choice)
 	if result_text.strip_edges().is_empty():
 		GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 	else:
@@ -1480,20 +2178,31 @@ func _apply_effect(effect: Dictionary) -> String:
 				_sting("coin")
 				return "Gained %d gold." % effect.value
 			else:
-				# Floor at 0 — a flat gold cost must never push the player into
-				# negative gold (which soft-bricks every later price check). Only
-				# charge what they actually have, like lose_gold_partial.
-				var lost: int = mini(-effect.value, RunState.gold)
-				RunState.gold -= lost  # losses bypass ectoplasm
+				# Fixed prices are all-or-nothing. The choice preflight protects
+				# normal play; the guard below also protects direct/test callers.
+				var price: int = -int(effect.value)
+				if RunState.gold < price:
+					return "Could not pay %d gold." % price
+				RunState.gold -= price  # losses bypass ectoplasm
 				_sting("coin", -6.0)
-				return "Lost %d gold." % lost
+				return "Paid %d gold." % price
 		"remove_cards":
 			var count = effect.value
+			# The game picks at random here, so naming the casualties is the whole
+			# job — "Removed one card." told the player nothing they could act on.
+			var struck: PackedStringArray = []
 			for i in range(count):
 				if RunState.deck.size() > 1:
 					var idx = randi() % RunState.deck.size()
+					var gone_r: Dictionary = RunState.get_upgraded_card_data(idx).duplicate(true)
 					RunState.remove_card_at(idx)
-			return "Removed %d card(s)." % count
+					_result_lost.append(gone_r)
+					struck.append(String(gone_r.get("name", "a card")))
+			if struck.is_empty():
+				return "Nothing could be spared."
+			if struck.size() == 1:
+				return "%s is struck from the roll." % struck[0]
+			return "%s are struck from the roll." % ", ".join(struck)
 		"add_rare":
 			var rares = CardDB.cards_of_rarity("rare")
 			if rares.size() > 0:
@@ -1523,7 +2232,7 @@ func _apply_effect(effect: Dictionary) -> String:
 			_sting("spell_cast", -4.0)
 			return "%s was added to your deck." % curse_data.name
 		"random_relic":
-			var choices = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
+			var choices = RelicDB.roll_field_relics(1, RunState.relics, RunState.current_hero_id)
 			if choices.size() > 0:
 				RunState.add_relic(choices[0])
 				var relic = RelicDB.get_relic(choices[0])
@@ -1553,10 +2262,12 @@ func _apply_effect(effect: Dictionary) -> String:
 				upgradeable.append(i)
 			if upgradeable.size() > 0:
 				var idx = upgradeable[randi() % upgradeable.size()]
+				# The GAME chose the card here, so showing both halves matters
+				# more than anywhere else — otherwise the player is handed a
+				# finished card and no idea which of theirs it used to be.
+				var before_rand := _note_card_change(idx)
 				RunState.upgrade_card(idx, "plus")
-				# Show the card the tent sharpened — the folded data carries
-				# the " +" name and the bumped numbers.
-				_result_cards.append(RunState.get_upgraded_card_data(idx))
+				_seal_card_change(before_rand, idx)
 				_sting("card_play")
 				return "Upgraded a card!"
 			return "No cards to upgrade."
@@ -1589,15 +2300,15 @@ func _apply_effect(effect: Dictionary) -> String:
 			var stake: int = int(effect.get("stake", 40))
 			var payout: int = int(effect.get("payout", 100))
 			if RunState.gold < stake:
-				return "You haven't the coin to cover that bet."
+				return "You do not have enough gold for that bet."
 			RunState.gold -= stake
 			_result_suspense = true
 			if randi() % 2 == 0:
 				RunState.gain_gold(payout)
 				_sting("coin")
-				return "The dice land true — won %d gold!" % payout
+				return "Won %d gold." % payout
 			_sting("hit_hero", -6.0)
-			return "The dice turn on you. Lost %d gold." % stake
+			return "Lost %d gold." % stake
 		"wager_relic_or_curse":
 			# The face-down red card: a pure coin flip, no stake. Heads is a
 			# relic; tails is `curses` curses. EV ~ neutral — the draw is the
@@ -1605,19 +2316,20 @@ func _apply_effect(effect: Dictionary) -> String:
 			var n_curse: int = int(effect.get("curses", 2))
 			_result_suspense = true
 			if randi() % 2 == 0:
-				var won = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
+				var won = RelicDB.roll_field_relics(1, RunState.relics, RunState.current_hero_id)
 				if won.size() > 0:
 					RunState.add_relic(won[0])
 					_result_relics.append(won[0])
 					_sting("card_play")
-					return "The card turns up a blessing: %s." % RelicDB.get_relic(won[0]).name
-				return "The card turns up blank. Nothing answers."
+					return "Gained relic: %s." % RelicDB.get_relic(won[0]).name
+				return "Nothing happened."
 			for _i in range(n_curse):
 				var flip_curse := CardDB.random_curse_id()
 				RunState.add_card(flip_curse)
 				_result_cards.append(CardDB.get_card_data(flip_curse))
 			_sting("spell_cast", -4.0)
-			return "The card turns up a wound. %d Curse(s) settle into your deck." % n_curse
+			return "Added 1 Curse to your deck." if n_curse == 1 \
+				else "Added %d Curses to your deck." % n_curse
 		"gain_potion":
 			if RunState.add_potion("healing"):
 				return "Gained a Healing Potion."
@@ -1625,11 +2337,11 @@ func _apply_effect(effect: Dictionary) -> String:
 		"sell_potion":
 			# Blue option (Pawnbroker): she pays over shop odds for a bottle.
 			if RunState.potions.is_empty():
-				return "Your belt is empty. She slides the glass shut."
+				return "Your potion belt is empty."
 			RunState.potions.pop_back()
 			var price: int = int(effect.get("value", 65))
 			RunState.gain_gold(price)
-			return "She buys a potion off your belt for %d gold." % price
+			return "Sold a potion for %d gold." % price
 		"add_card":
 			# Add one random card of the given rarity (default common). Lets an
 			# event hand out a non-rare pull without the "always a rare" inflation.
@@ -1660,10 +2372,10 @@ func _apply_effect(effect: Dictionary) -> String:
 			# The blue gate (pawned_at_least + gold_at_least) keeps this branch
 			# affordable-only, but guard anyway for direct calls.
 			if RunState.pawned_cards.is_empty():
-				return "The shelf holds nothing of yours."
+				return "You have nothing to buy back."
 			var back_price: int = int(effect.get("price", 60))
 			if RunState.gold < back_price:
-				return "Your coin does not reach the shelf. She does not haggle."
+				return "You do not have enough gold."
 			var back_id := String(RunState.pawned_cards[0])
 			RunState.pawned_cards.remove_at(0)
 			if CardDB.get_card_data(back_id).is_empty():
@@ -1671,11 +2383,12 @@ func _apply_effect(effect: Dictionary) -> String:
 			RunState.gold -= back_price
 			RunState.add_card(back_id)
 			var back_idx: int = RunState.deck.size() - 1
+			var before_pawn := _note_card_change(back_idx)
 			if CardDB.is_upgradeable(back_id):
 				RunState.upgrade_card(back_idx, "plus")
-			_result_cards.append(RunState.get_upgraded_card_data(back_idx))
+			_seal_card_change(before_pawn, back_idx)
 			_sting("coin")
-			return "%s comes back across the counter wrapped in the same cloth you sold it in — keener than you left it. She kept it better than you did." \
+			return "%s was returned and upgraded." \
 				% CardDB.get_card_data(back_id).name
 		"gain_potion_random":
 			# Any potion from the live PotionDB pool (gain_potion is always the
@@ -1687,26 +2400,31 @@ func _apply_effect(effect: Dictionary) -> String:
 			return "Gained %s." % PotionDB.get_potion(pid).get("name", "a potion")
 		"purge_curses":
 			# The Scapegoat: remove EVERY Curse in one rite, priced per head in
-			# max HP. Count first, then charge, then remove — floor max HP at 1
-			# and never empty the deck (both mirror the other removal paths).
+			# max HP. Validate the full price before removing anything; the deck
+			# still keeps its universal one-card floor.
 			var curse_idx: Array = []
 			for ci in range(RunState.deck.size()):
 				if CardDB.is_curse(RunState.deck[ci]):
 					curse_idx.append(ci)
 			if curse_idx.is_empty():
-				return "You carry nothing the goat would recognize."
+				return "You have no Curses to remove."
+			var removable := mini(curse_idx.size(), maxi(0, RunState.deck.size() - 1))
+			if removable <= 0:
+				return "You cannot remove your last card."
+			var hp_price: int = removable * int(effect.get("max_hp_per", 2))
+			if RunState.hero_max_hp <= hp_price:
+				return "You cannot pay %d max HP." % hp_price
 			var purged := 0
 			for ci in range(curse_idx.size() - 1, -1, -1):
-				if RunState.deck.size() <= 1:
+				if purged >= removable:
 					break
 				RunState.remove_card_at(curse_idx[ci])
 				purged += 1
-			var hp_price: int = purged * int(effect.get("max_hp_per", 2))
-			var new_cap: int = maxi(1, RunState.hero_max_hp - hp_price)
-			var paid: int = RunState.hero_max_hp - new_cap
-			RunState.hero_max_hp = new_cap
+			RunState.hero_max_hp -= hp_price
 			RunState.hero_hp = mini(RunState.hero_hp, RunState.hero_max_hp)
-			return "The goat carries %d Curse(s) over the boundary stone. Lost %d max HP." % [purged, paid]
+			return "Removed 1 Curse. Lost %d max HP." % hp_price \
+				if purged == 1 else \
+				"Removed %d Curses. Lost %d max HP." % [purged, hp_price]
 		"upgrade_choice":
 			_start_upgrade_mode(1)
 			return ""
@@ -1746,7 +2464,7 @@ func _apply_effect(effect: Dictionary) -> String:
 				return "Gained relic: %s" % relic.name
 			# Pool exhausted — fall back to a combat-tier relic so the player
 			# never gets nothing from a "guaranteed rare" payoff.
-			var fallback = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
+			var fallback = RelicDB.roll_field_relics(1, RunState.relics, RunState.current_hero_id)
 			if fallback.size() > 0:
 				RunState.add_relic(fallback[0])
 				var relic = RelicDB.get_relic(fallback[0])
@@ -1841,6 +2559,54 @@ func _apply_effect(effect: Dictionary) -> String:
 		"dice_run":
 			_start_dice_run(effect)
 			return ""
+		"shell_game":
+			_start_shell_game(effect)
+			return ""
+		"straw_game":
+			_start_straw_game(effect)
+			return ""
+		"cut_game":
+			_start_cut_game(effect)
+			return ""
+		"sack_game":
+			_start_sack_game(effect)
+			return ""
+		"wheel_game":
+			_start_wheel_game(effect)
+			return ""
+		"liar_game":
+			_start_liar_game(effect)
+			return ""
+		"morra_game":
+			_start_morra_game(effect)
+			return ""
+		"tali_game":
+			_start_tali_game(effect)
+			return ""
+		"field_game":
+			_start_field_game(effect)
+			return ""
+		"quoits_game":
+			_start_quoits_game(effect)
+			return ""
+		"crown_game":
+			_start_crown_game(effect)
+			return ""
+		"scale_game":
+			_start_scale_game(effect)
+			return ""
+		"box_game":
+			_start_box_game(effect)
+			return ""
+		"deal_game":
+			_start_deal_game(effect)
+			return ""
+		"signal_game":
+			_start_signal_game(effect)
+			return ""
+		"morris_game":
+			_start_morris_game(effect)
+			return ""
 		"risk_loop":
 			_start_risk_loop(effect)
 			return ""
@@ -1854,6 +2620,7 @@ func _apply_effect(effect: Dictionary) -> String:
 			# Keeps one-shot choices from being a printed menu: the player
 			# commits to an action, not a price list.
 			_result_suspense = true
+			_result_lots = true
 			var outcomes: Array = effect.get("outcomes", [])
 			var total := 0
 			for o in outcomes:
@@ -1888,6 +2655,87 @@ func _combine_lines(parts: Array) -> String:
 		if String(p).strip_edges() != "":
 			out.append(String(p))
 	return "\n".join(out)
+
+
+# ── The prize table (2026-07-29) ──────────────────────────────────────────
+# THE ONE FUNNEL every minigame resolver pays through. Before this the table
+# could only push coins across it: 15 of 17 resolvers had no wire but
+# `RunState.gain_gold(<int>)`, and the gambles carry ~40% of the pool's
+# branches. Two general arms already existed and each was read at exactly ONE
+# site — `win_effects`/`lose_effects` (the straw game) and `bank_relic` (the
+# dice run). Both are generalised HERE rather than copy-pasted fifteen times.
+#
+# `win_effects` / `lose_effects` on a game's config REPLACE that game's
+# hardcoded coin payout; the array runs through the normal effect applier, so
+# anything an event choice can pay, a game can now pay. With neither key
+# present the gold path runs exactly as before, so every untouched event is
+# unchanged.
+#
+# Honored by every surviving resolver, win AND lose side: dice_run,
+# shell_game, straw_game, sack_game, wheel_game, tali_game, field_game,
+# crown_game, scale_game, box_game, deal_game. On a pot game the BANK button
+# pays the tier it stopped on, so gate a terminal prize behind `win_effects_at`
+# or `bank_relic_at` — a bare `win_effects` would pay in full at any stop.
+#
+# Returns the receipt to fold into the resolver's result line (through
+# `_combine_lines`) — "" on the gold path, because the caller's own win_text
+# already reports the coins.
+func _gamble_pay(cfg: Dictionary, win: bool, gold: int,
+		coin_sfx: String = "coin") -> String:
+	var key := "win_effects" if win else "lose_effects"
+	# Pot games: `win_effects_at` is an optional floor so an early stop cannot
+	# claim the terminal prize. It reads the pot/tier actually stopped on — the
+	# same number `bank_relic_at` reads, so a game's two prize arms gate alike.
+	# Under the floor, the pot pays in coin exactly as it always did.
+	var gated: bool = win and gold < int(cfg.get("win_effects_at", 0))
+	if gated or not cfg.has(key):
+		if gold > 0:
+			RunState.gain_gold(gold)
+			if coin_sfx != "":
+				_sting(coin_sfx)
+			# A GATED pot reports its own coin: that game's win_text has to read
+			# for BOTH branches, so it cannot name a payout itself. Ungated games
+			# keep returning "" — their win_text already prints the number.
+			if gated:
+				return "Gained %d gold." % gold
+		return ""
+	# A picker prize (grant_keyword_pick / upgrade_choice / transform_choice /
+	# remove_choice…) OWNS the screen, and the resolver's trailing _show_result
+	# would clobber it — the same one-modal-per-choice constraint _resolve_choice
+	# obeys. So the modal is HELD here and launched by _show_result at the exact
+	# beat the result page would have appeared; the receipt rides into the
+	# picker's own result page through _pending_pre_text. At most one, as always.
+	var plain: Array = []
+	for e in cfg.get(key, []):
+		if e is Dictionary and String(e.get("type", "")) in MODAL_EFFECTS \
+				and _gamble_pending_modal.is_empty():
+			_gamble_pending_modal = e
+		else:
+			plain.append(e)
+	return _apply_effect_list(plain)
+
+
+# The terminal prize on a push-your-luck pot: stop holding at least N and the
+# table's own relic leaves with the gold. The dice-run arm, generalised to the
+# four pot games that escalated toward nothing (crown / deal / field / sack).
+# Event relics are tier "event" — granted BY NAME, never rolled into a pool.
+# Returns the granted relic id, or "" when nothing was granted; the CALLER
+# owns the wording so each game's seen_texts overrides still apply.
+## A picker prize stashed by _gamble_pay, launched by _show_result. Empty
+## otherwise. Never holds more than one — see the constraint on MODAL_EFFECTS.
+var _gamble_pending_modal: Dictionary = {}
+
+
+func _gamble_bank_relic(cfg: Dictionary, pot: int) -> String:
+	var rid := String(cfg.get("bank_relic", ""))
+	if rid == "" or pot < int(cfg.get("bank_relic_at", 0)):
+		return ""
+	if RunState.relics.has(rid) or RelicDB.get_relic(rid).is_empty():
+		return ""
+	RunState.add_relic(rid)
+	_result_relics.append(rid)
+	_sting("card_play")
+	return rid
 
 
 func _deck_count(kind: String) -> int:
@@ -1931,9 +2779,23 @@ func _deck_count(kind: String) -> int:
 # relics print as writ plates. StS shows you the card; so do we.
 var _result_cards: Array = []    # card DATA dicts (folded where relevant)
 var _result_relics: Array = []   # relic ids
+# CHANGED cards, shown as a BEFORE → AFTER pair (2026-07-28). Every path that
+# reshapes a card you already own — forge, transform, a keyword taught, a pawned
+# card bought back — used to print only the finished article, or in a couple of
+# cases only a sentence. The player could not see what the road had actually done
+# to their soldier. Each entry: {"before": Dictionary, "after": Dictionary}.
+# Push via _note_card_change(), which snapshots BEFORE mutating RunState.
+var _result_pairs: Array = []
+# Cards STRUCK FROM THE ROLL — removals. Rendered greyed and crossed. Removal was
+# the one payoff class that showed nothing at all: "Removed one card." and no
+# indication of which, even when the game had chosen at random.
+var _result_lost: Array = []
 # Set by gamble effects (roll_table, coin calls): the result page holds blank
 # for a breath before the ink lands — the pause IS the dice rolling.
 var _result_suspense: bool = false
+# roll_table additionally: the commit resolves as a DRAWN LOT — an upturned
+# helmet of folded slips plays over the result page while the ink waits.
+var _result_lots: bool = false
 
 
 func _sting(sound: String, volume_db: float = 0.0) -> void:
@@ -1941,23 +2803,42 @@ func _sting(sound: String, volume_db: float = 0.0) -> void:
 
 
 func _show_result(text: String) -> void:
+	# A minigame paid a PICKER prize (see `_gamble_pay`): open it here, at the
+	# beat the result page would have appeared, and carry this receipt into the
+	# picker's own result page. Cleared before dispatch so nothing re-enters.
+	if not _gamble_pending_modal.is_empty():
+		var modal := _gamble_pending_modal
+		_gamble_pending_modal = {}
+		_pending_pre_text = _combine_lines([_pending_pre_text, text]).strip_edges()
+		_apply_effect(modal)
+		return
 	# Merge any stashed co-effect receipt (set when a modal picker was launched
 	# alongside non-modal effects) ahead of the picker's own result line.
 	var full := text.strip_edges()
 	if _pending_pre_text != "":
 		full = (_pending_pre_text + "\n" + full).strip_edges()
 		_pending_pre_text = ""
-	if full.is_empty() and _result_cards.is_empty() and _result_relics.is_empty():
+	# A change pair or a casualty counts as a payoff even with no text: the cards
+	# on the page ARE the result.
+	var has_objects := not _result_cards.is_empty() or not _result_relics.is_empty() \
+		or not _result_pairs.is_empty() or not _result_lost.is_empty()
+	if full.is_empty() and not has_objects:
 		# Never strand the player on a dead screen with nothing to click — if a
 		# result resolves to no text, just walk back to the map.
 		GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 		return
-	var had_payoffs := not _result_cards.is_empty() or not _result_relics.is_empty()
+	var had_payoffs := has_objects
 	_clear_ui()
 	# Result keeps the event art behind it — same scene, same beat. The receipt
 	# is written on the same page as the event (left column, drop cap, ivory
 	# ink) instead of the old centered slab that broke the writ metaphor.
 	_set_event_art_visible(true)
+
+	var delay := _result_presentation_delay()
+	var presentation_layout := _event_presentation_layout()
+	if presentation_layout != "folio":
+		_build_presented_result(full, presentation_layout, delay, had_payoffs)
+		return
 
 	# Same reading block as the choice screens: receipt text and the Continue
 	# action grouped in one bottom-anchored column, gained objects on the right.
@@ -1974,15 +2855,7 @@ func _show_result(text: String) -> void:
 	var desc := _make_event_desc(_illuminate_desc(_sub_campaign_tokens(full)))
 	column.add_child(desc)
 
-	var delay := 0.0
-	if _result_suspense and not UserSettings.reduce_motion:
-		delay = 0.7
-	_result_suspense = false
-	if not UserSettings.reduce_motion:
-		desc.visible_ratio = 0.0
-		var reveal := clampf(desc.get_total_character_count() * 0.0032, 0.25, 0.9)
-		create_tween().tween_property(desc, "visible_ratio", 1.0, reveal) \
-			.set_delay(0.10 + delay)
+	GameTheme.write_on(desc, 0.10 + delay)
 
 	_spawn_result_seal(full, delay, had_payoffs)
 	_show_result_objects(delay)
@@ -1992,6 +2865,158 @@ func _show_result(text: String) -> void:
 
 	_refresh_ledger()
 
+
+func _result_presentation_delay() -> float:
+	var delay := 0.0
+	if _result_suspense and not UserSettings.reduce_motion:
+		delay = 0.7
+		if _result_lots:
+			# Defer the physical lot until the selected composition has been built,
+			# so the slip always lands above its stage rather than behind it.
+			delay = 1.7
+			call_deferred("_play_lots_draw")
+	_result_suspense = false
+	_result_lots = false
+	return delay
+
+
+func _build_presented_result(full: String, layout: String, delay: float,
+		had_payoffs: bool) -> void:
+	var old_overlay := get_node_or_null("EventOverlayLeft") as CanvasItem
+	if old_overlay:
+		old_overlay.visible = false
+	var stage = EVENT_LAYOUT_STAGE.new()
+	stage.name = "EventResultStage"
+	add_child(stage)
+	stage.configure(layout, _result_accent(full, had_payoffs))
+	if layout == "character":
+		_add_character_speaker_plate()
+
+	var centered := layout in ["location", "ritual"]
+	var title_rect := Rect2(80, 58, 650, 74)
+	var desc_rect := Rect2(80, 154, 620, 300)
+	var continue_rect := Rect2(640, 698, 320, 112)
+	var selected_rect := Rect2(80, 642, 500, 126)
+	# How far the receipt may rise toward a SHORT outcome line. Default -1 means
+	# "don't move": most stages park the receipt on a painted band or arc
+	# (confrontation's y=650 rail, ritual's y=634 foot), and floating it up out of
+	# that band would read worse than the gap does. Only stages with genuinely
+	# empty space between the prose and the receipt opt in — and the floor must
+	# clear that stage's own furniture.
+	var receipt_floor := -1.0
+	match layout:
+		"character":
+			title_rect = Rect2(1000, 58, 520, 72)
+			desc_rect = Rect2(1000, 146, 520, 250)
+			selected_rect = Rect2(1000, 444, 520, 126)
+			continue_rect = Rect2(1160, 628, 360, 104)
+			# The conversation column is empty between the prose and the reply —
+			# no horizontal furniture — so let the measured text drive it fully.
+			receipt_floor = 232.0
+		"location":
+			title_rect = Rect2(300, 42, 1000, 76)
+			desc_rect = Rect2(270, 126, 820 if had_payoffs else 1060, 230)
+			continue_rect = Rect2(870, 704, 360, 108)
+			selected_rect = Rect2(250, 664, 500, 126)
+		"bargain":
+			title_rect = Rect2(80, 52, 850, 76)
+			desc_rect = Rect2(80, 150, 760, 280)
+			continue_rect = Rect2(680, 698, 340, 112)
+			selected_rect = Rect2(80, 548, 540, 142)
+			receipt_floor = 352.0   # below the ledger head rules (y=314/322)
+		"ritual":
+			title_rect = Rect2(300, 40, 1000, 76)
+			desc_rect = Rect2(300 if not had_payoffs else 160, 140,
+				860 if had_payoffs else 1000, 250)
+			continue_rect = Rect2(890, 704, 350, 112)
+			selected_rect = Rect2(250, 654, 470, 132)
+
+	var title_copy := _sub_campaign_tokens(String(_event_data.get("name", "Event")))
+	if centered:
+		title_copy = "[center]" + title_copy + "[/center]"
+	var title := _make_event_title(title_copy)
+	_place_event_control(title, title_rect)
+	add_child(title)
+	GameTheme.deal_in(title, 0.02)
+
+	var desc_copy := _illuminate_desc(_sub_campaign_tokens(full))
+	if centered:
+		desc_copy = "[center]" + desc_copy + "[/center]"
+	var desc := _make_event_desc(desc_copy)
+	_place_event_control(desc, desc_rect)
+	add_child(desc)
+	GameTheme.write_on(desc, 0.10 + delay)
+
+	_spawn_result_seal(full, delay, had_payoffs)
+	_show_result_objects(delay)
+	var receipt := _add_resolved_choice(layout, full, selected_rect, delay)
+	# Short outcomes are the common case — close the hole they leave, where the
+	# stage has room for it.
+	if receipt_floor > 0.0:
+		_tuck_under_desc(desc, receipt, selected_rect.position.y, receipt_floor)
+
+	var continue_btn = EVENT_CHOICE_DEVICE.new()
+	continue_btn.configure(layout, "Continue", "", "Walk on.", false,
+		func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE),
+		Callable(), _result_accent(full, had_payoffs))
+	continue_btn.position = continue_rect.position
+	continue_btn.size = continue_rect.size
+	add_child(continue_btn)
+	GameTheme.deal_in(continue_btn, delay + 0.16)
+	_refresh_ledger()
+
+## Pull a result-page element up under the outcome prose once the label has
+## measured itself. The page reserves a fixed 250-300px band for that prose, but
+## most outcomes run one or two lines ("Gained 12 gold."), which stranded the
+## receipt hundreds of pixels below the text it belongs to — the layout was cut
+## for more words than it usually carries. Moves UP only: a genuinely long
+## outcome keeps its authored position, and nothing rises above `min_y`.
+func _tuck_under_desc(desc: RichTextLabel, ctrl: Control, authored_y: float,
+		min_y: float, gap: float = 30.0) -> void:
+	await get_tree().process_frame
+	if desc == null or ctrl == null:
+		return
+	if not is_instance_valid(desc) or not is_instance_valid(ctrl):
+		return
+	var content := desc.get_content_height()
+	if content <= 0.0:
+		return
+	ctrl.position.y = clampf(desc.position.y + content + gap, min_y, authored_y)
+
+
+func _add_resolved_choice(layout: String, full: String, rect: Rect2,
+		delay: float) -> Control:
+	if _selected_choice_for_result.is_empty():
+		return null
+	var parts := _event_choice_parts(_selected_choice_for_result)
+	var device = EVENT_CHOICE_DEVICE.new()
+	device.configure(layout, String(parts.headline), String(parts.effect),
+		String(parts.body), _selected_choice_for_result.has("blue"),
+		Callable(), Callable(), _result_accent(full, false))
+	device.position = rect.position
+	device.size = rect.size
+	add_child(device)
+	device.mark_resolved(_result_stamp_word(layout, full), _result_is_bad(full))
+	GameTheme.deal_in(device, delay + 0.10)
+	return device
+
+
+func _result_stamp_word(layout: String, full: String) -> String:
+	if _result_is_bad(full):
+		return {
+			"character": "ANSWERED",
+			"confrontation": "ANSWERED",
+			"location": "PAID",
+			"bargain": "COLLECTED",
+			"ritual": "BROKEN",
+		}.get(layout, "PAID")
+	return {
+		"character": "ANSWERED",
+		"confrontation": "ANSWERED",
+		"location": "TAKEN",
+		"bargain": "SEALED",
+		"ritual": "BOUND",
+	}.get(layout, "DONE")
 
 func _result_is_bad(text: String) -> bool:
 	var lower := text.to_lower()
@@ -2015,43 +3040,68 @@ func _result_accent(text: String, had_payoffs: bool) -> Color:
 
 
 func _spawn_result_seal(text: String, delay: float, had_payoffs: bool) -> void:
+	# The kit's ring pulse (same device as the reroll flourish and the forge
+	# shock ring), stamped once on the art half of the page as the outcome's
+	# wax-seal beat.
 	if UserSettings.reduce_motion:
 		return
 	var accent := _result_accent(text, had_payoffs)
-	var center := Vector2(1160, 410 if had_payoffs else 360)
-	var ring := Panel.new()
-	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	ring.z_index = 120
-	var st := StyleBoxFlat.new()
-	st.bg_color = Color(0, 0, 0, 0)
-	st.border_color = Color(accent.r, accent.g, accent.b, 0.58)
-	st.set_border_width_all(4)
-	st.set_corner_radius_all(600)
-	ring.add_theme_stylebox_override("panel", st)
-	ring.size = Vector2(50, 50)
-	ring.pivot_offset = ring.size * 0.5
-	ring.position = center - ring.size * 0.5
-	add_child(ring)
-	var tw := ring.create_tween()
-	tw.tween_interval(delay + 0.10)
-	tw.set_parallel(true)
-	tw.tween_property(ring, "scale", Vector2(5.4, 5.4), 0.48) \
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	tw.tween_property(ring, "modulate:a", 0.0, 0.48).set_ease(Tween.EASE_IN)
-	tw.chain().tween_callback(ring.queue_free)
+	var center_x := 480.0 if _event_presentation_layout() == "character" else 1160.0
+	var center := Vector2(center_x, 410 if had_payoffs else 360)
+	GameTheme.ring_pulse(self, center,
+		Color(accent.r, accent.g, accent.b, 0.58), 50.0, 270.0, 0.48,
+		delay + 0.10)
 
 
-## Stand the staged payoffs on the art half of the result page: up to 3 gained
-## cards as real Card2Ds (dealt in with a small stagger), relic writs beneath.
+## Snapshot a card's CURRENT folded data so it can be shown as the "before" half
+## of a change pair. MUST be called before the RunState mutation — after it, the
+## folded data already reads as the "after". Returns the deck index so call sites
+## can chain: `var i := _note_card_change(idx)` … mutate … `_seal_card_change(i)`.
+func _note_card_change(deck_index: int) -> Dictionary:
+	if deck_index < 0 or deck_index >= RunState.deck.size():
+		return {}
+	return RunState.get_upgraded_card_data(deck_index).duplicate(true)
+
+
+## Close the pair opened by _note_card_change, reading the post-mutation state.
+func _seal_card_change(before: Dictionary, deck_index: int) -> void:
+	if before.is_empty() or deck_index < 0 or deck_index >= RunState.deck.size():
+		return
+	_result_pairs.append({
+		"before": before,
+		"after": RunState.get_upgraded_card_data(deck_index).duplicate(true),
+	})
+
+
+## Stand the staged payoffs on the art half of the result page: gained cards as
+## real Card2Ds (dealt in with a small stagger), CHANGED cards as a before→after
+## pair, removed cards struck through, relic writs beneath.
 func _show_result_objects(delay: float = 0.0) -> void:
+	_show_result_change_pairs(delay)
+	# A change pair (or a casualty list) owns the stage on its own — it is the
+	# whole story of the beat, and no event both forges a card and hands you three
+	# others. Falling through would stack the gained-card row on top of it.
+	if not _result_pairs.is_empty() or not _result_lost.is_empty():
+		_show_result_relic_writs(560.0, delay)
+		_result_cards = []
+		_result_relics = []
+		_result_pairs = []
+		_result_lost = []
+		return
+	# Cap stays 3. Four 225-wide cards plus separators come to 978px, which
+	# centred on either stage anchor runs off the canvas (1649 on the 1600-wide
+	# desktop layout, -9 on the character layout). The "…and N more" line below
+	# is the honest overflow.
 	var shown: Array = _result_cards.slice(0, mini(3, _result_cards.size()))
 	var extra: int = _result_cards.size() - shown.size()
 	var n: int = shown.size()
+	var character_stage := _event_presentation_layout() == "character"
+	var art_center_x := 480.0 if character_stage else 1160.0
 	if n > 0:
 		var card_w := 225
 		var sep := 26
 		var total_w: int = n * card_w + (n - 1) * sep
-		var start_x: float = 1160.0 - total_w / 2.0
+		var start_x: float = art_center_x - total_w / 2.0
 		for i in range(n):
 			var wrapper := Control.new()
 			wrapper.custom_minimum_size = Vector2(225, 300)
@@ -2064,15 +3114,7 @@ func _show_result_objects(delay: float = 0.0) -> void:
 			CardTextureCache.bake(shown[i])
 			wrapper.add_child(card_node)
 			add_child(wrapper)
-			if not UserSettings.reduce_motion:
-				wrapper.modulate.a = 0.0
-				wrapper.pivot_offset = Vector2(112, 150)
-				wrapper.scale = Vector2(0.92, 0.92)
-				var tw := create_tween().set_parallel(true)
-				var d := delay + 0.16 + i * 0.10
-				tw.tween_property(wrapper, "modulate:a", 1.0, 0.28).set_delay(d)
-				tw.tween_property(wrapper, "scale", Vector2.ONE, 0.30).set_delay(d) \
-					.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			GameTheme.deal_in(wrapper, delay + 0.16 + i * 0.10)
 		if extra > 0:
 			var more := Label.new()
 			more.text = "…and %d more march behind." % extra
@@ -2085,15 +3127,26 @@ func _show_result_objects(delay: float = 0.0) -> void:
 			more.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			more.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			add_child(more)
-	# Relic writs — name in gold over the rules line, printed on the page below
-	# (or in place of) the cards.
-	var ry: float = 520.0 if n > 0 else 260.0
+	_show_result_relic_writs(520.0 if n > 0 else 260.0, delay)
+	_result_cards = []
+	_result_relics = []
+	_result_pairs = []
+	_result_lost = []
+
+
+## Relic writs — name in gold over the rules line, printed on the page below (or
+## in place of) the cards. Split out of _show_result_objects so the change-pair
+## stage can reuse it.
+func _show_result_relic_writs(start_y: float, delay: float) -> void:
+	var character_stage := _event_presentation_layout() == "character"
+	var relic_x := 250.0 if character_stage else 940.0
+	var ry: float = start_y
 	for rid in _result_relics:
 		var relic = RelicDB.get_relic(String(rid))
 		if relic.is_empty():
 			continue
 		var v := VBoxContainer.new()
-		v.position = Vector2(940, ry)
+		v.position = Vector2(relic_x, ry)
 		v.size = Vector2(460, 90)
 		v.add_theme_constant_override("separation", 4)
 		v.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -2120,13 +3173,119 @@ func _show_result_objects(delay: float = 0.0) -> void:
 			dl.add_theme_font_override("font", GameTheme.font_body)
 		v.add_child(dl)
 		add_child(v)
-		if not UserSettings.reduce_motion:
-			v.modulate.a = 0.0
-			create_tween().tween_property(v, "modulate:a", 1.0, 0.3) \
-				.set_delay(delay + 0.3)
+		GameTheme.deal_in(v, delay + 0.3)
 		ry += 96.0
-	_result_cards = []
-	_result_relics = []
+
+
+## BEFORE → AFTER, the Slay-the-Spire beat. The card you handed over stands on
+## the left, an arrow between, the card you got back on the right — plus a plain
+## one-line summary of what actually changed, so the difference is readable
+## without the player diffing two stat blocks by eye. Removals ride the same
+## stage, greyed and struck, because "which card did I just lose?" is the same
+## question. Lifted wholesale from the camp forge (Rest._add_preview_card /
+## _add_arrow_glyph / _build_change_summary) so both screens say it the same way.
+func _show_result_change_pairs(delay: float) -> void:
+	if _result_pairs.is_empty() and _result_lost.is_empty():
+		return
+	var character_stage := _event_presentation_layout() == "character"
+	var center_x := 480.0 if character_stage else 1160.0
+	var y := 150.0
+	# Two pairs is the vertical budget: each row is 300px of card plus a caption,
+	# and the relic writs still want the foot of the page. No shipped event
+	# produces more than two changed cards in one resolution.
+	for pair in _result_pairs.slice(0, mini(2, _result_pairs.size())):
+		var before: Dictionary = pair.get("before", {})
+		var after: Dictionary = pair.get("after", {})
+		if before.is_empty() or after.is_empty():
+			continue
+		_stage_card(before, Vector2(center_x - 268.0, y), delay + 0.16, 0.82)
+		_stage_arrow(Vector2(center_x - 26.0, y + 128.0), delay + 0.30)
+		_stage_card(after, Vector2(center_x + 58.0, y), delay + 0.42, 1.0)
+		var summary := _change_summary_text(before, after)
+		if summary != "":
+			# +312, not +268: the "after" card renders at full scale from y and is
+			# 300 tall, so a caption at +268 sat on top of its own subject.
+			_stage_caption(summary, Vector2(center_x - 268.0, y + 312.0), 496.0,
+				GameTheme.KEYWORD_GOLD, delay + 0.52)
+		y += 372.0
+	for lost in _result_lost.slice(0, mini(2, _result_lost.size())):
+		if typeof(lost) != TYPE_DICTIONARY or lost.is_empty():
+			continue
+		var node := _stage_card(lost, Vector2(center_x - 112.0, y), delay + 0.16, 0.82)
+		if node != null:
+			node.modulate = Color(0.62, 0.58, 0.54, 0.92)
+		_stage_caption("STRUCK FROM THE ROLL",
+			Vector2(center_x - 210.0, y + 258.0), 420.0, GameTheme.DESC_DIM, delay + 0.30)
+		y += 330.0
+
+
+func _stage_card(data: Dictionary, pos: Vector2, delay: float,
+		card_scale: float) -> Control:
+	var wrapper := Control.new()
+	wrapper.custom_minimum_size = Vector2(225, 300)
+	wrapper.position = pos
+	wrapper.scale = Vector2(card_scale, card_scale)
+	wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var card_node = CARD_SCENE.instantiate()
+	card_node.static_display = true
+	card_node.card_data = data
+	card_node.live_baked_mode = true
+	CardTextureCache.bake(data)
+	wrapper.add_child(card_node)
+	add_child(wrapper)
+	GameTheme.deal_in(wrapper, delay)
+	return wrapper
+
+
+func _stage_arrow(pos: Vector2, delay: float) -> void:
+	var arrow := GameTheme.make_label("→", 46, GameTheme.KEYWORD_GOLD)
+	arrow.position = pos
+	arrow.size = Vector2(56, 56)
+	arrow.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	arrow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(arrow)
+	GameTheme.deal_in(arrow, delay)
+
+
+func _stage_caption(text: String, pos: Vector2, width: float, col: Color,
+		delay: float) -> void:
+	var lab := GameTheme.make_label(text, GameTheme.MIN_LABEL_SIZE, col)
+	lab.position = pos
+	lab.size = Vector2(width, 30)
+	lab.custom_minimum_size = Vector2(width, 0)
+	lab.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lab.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lab.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
+	lab.add_theme_constant_override("outline_size", 3)
+	lab.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(lab)
+	GameTheme.deal_in(lab, delay)
+
+
+## One plain line naming what changed between two folded card datas. Deliberately
+## not a full diff — the two cards are on screen; this is the caption that stops
+## the player hunting for the difference.
+func _change_summary_text(before: Dictionary, after: Dictionary) -> String:
+	var bits: PackedStringArray = []
+	var b_name := String(before.get("name", ""))
+	var a_name := String(after.get("name", ""))
+	if b_name != a_name and not a_name.begins_with(b_name):
+		return "%s became %s." % [b_name, a_name]
+	var d_atk: int = int(after.get("atk", 0)) - int(before.get("atk", 0))
+	var d_hp: int = int(after.get("hp", 0)) - int(before.get("hp", 0))
+	var d_cost: int = int(after.get("cost", 0)) - int(before.get("cost", 0))
+	if d_atk != 0 or d_hp != 0:
+		bits.append("%+d/%+d" % [d_atk, d_hp])
+	if d_cost != 0:
+		bits.append("costs %d" % int(after.get("cost", 0)))
+	var b_kw: Array = before.get("keywords", [])
+	for kw in after.get("keywords", []):
+		if kw not in b_kw:
+			bits.append(String(KeywordEffects.KEYWORDS.get(kw, {}).get(
+				"display", String(kw).capitalize())))
+	if bits.is_empty():
+		return "%s was reforged." % a_name
+	return "%s — %s" % [a_name, ", ".join(bits)]
 
 
 func _make_card_picker_grid(title_text: String, title_color: Color) -> GridContainer:
@@ -2197,17 +3356,9 @@ func _add_card_to_grid(grid: GridContainer, data: Dictionary, callback: Callable
 	click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 	click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
 	click_btn.pressed.connect(callback)
-	if not UserSettings.reduce_motion:
-		click_btn.mouse_entered.connect(func() -> void:
-			wrapper.z_index = 1
-			var tw := wrapper.create_tween()
-			tw.tween_property(wrapper, "scale", Vector2(1.05, 1.05), 0.10) \
-				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT))
-		click_btn.mouse_exited.connect(func() -> void:
-			wrapper.z_index = 0
-			var tw := wrapper.create_tween()
-			tw.tween_property(wrapper, "scale", Vector2.ONE, 0.10) \
-				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT))
+	# The kit's hover lift: the invisible catcher hovers, the card wrapper
+	# lifts and pops above its overlapping grid neighbors.
+	GameTheme.hover_lift(click_btn, 1.05, wrapper, true)
 	wrapper.add_child(click_btn)
 	grid.add_child(wrapper)
 
@@ -2231,12 +3382,15 @@ func _on_remove_pick(deck_index: int) -> void:
 	if RunState.deck.size() <= 1:
 		_show_result("That is the last thing you carry. You keep it.")
 		return
+	var gone: Dictionary = RunState.get_upgraded_card_data(deck_index).duplicate(true)
 	RunState.remove_card_at(deck_index)
-	_show_result("Card removed.")
+	_result_lost.append(gone)
+	_show_result("%s is struck from the roll." % gone.get("name", "The card"))
 
 
 func _start_multi_remove_mode(count: int) -> void:
-	var grid = _make_card_picker_grid("Choose %d card(s) to remove" % count, GameTheme.BLOOD_RED)
+	var grid = _make_card_picker_grid("Choose a card to remove" if count == 1
+		else "Choose %d cards to remove" % count, GameTheme.BLOOD_RED)
 
 	for i in range(RunState.deck.size()):
 		var data = RunState.get_upgraded_card_data(i)
@@ -2254,7 +3408,8 @@ func _on_multi_remove_pick(deck_index: int, total: int) -> void:
 	_multi_remove_removed += 1
 	_multi_remove_remaining -= 1
 	if _multi_remove_remaining <= 0 or RunState.deck.size() <= 1:
-		_show_result("Removed %d card(s)." % _multi_remove_removed)
+		_show_result("Removed one card." if _multi_remove_removed == 1
+			else "Removed %d cards." % _multi_remove_removed)
 	else:
 		_start_multi_remove_mode(_multi_remove_remaining)
 
@@ -2314,8 +3469,8 @@ func _filter_empty_message(filter: String) -> String:
 		"curse":
 			return "You carry no Curse for him to eat."
 		"starter":
-			return "Nothing green enough is left to give."
-	return "Nothing here he'll take."
+			return "You have no starting cards to give."
+	return "You have no valid cards."
 
 
 # ── Remove ALL copies (the Last Tinker's blue option) ────────────────────
@@ -2331,7 +3486,7 @@ func _start_remove_all_copies_mode(filter: String) -> void:
 	if unique_ids.is_empty():
 		_show_result(_filter_empty_message(filter))
 		return
-	var grid = _make_card_picker_grid("Choose a card — he keeps every copy of it", GameTheme.KEYWORD_GOLD)
+	var grid = _make_card_picker_grid("Choose a card. Every copy will be removed.", GameTheme.KEYWORD_GOLD)
 	for cid in unique_ids:
 		_add_card_to_grid(grid, CardDB.get_card_data(cid),
 			_on_remove_all_copies_pick.bind(String(cid)))
@@ -2346,7 +3501,7 @@ func _on_remove_all_copies_pick(card_id: String) -> void:
 		if RunState.deck[i] == card_id:
 			RunState.remove_card_at(i)
 			removed += 1
-	_show_result("He weighs the matched set once and keeps it. Removed %d × %s." % [removed, nm])
+	_show_result("Removed %d copies of %s." % [removed, nm])
 
 
 func _filter_removed_message(filter: String, card_name: String) -> String:
@@ -2416,7 +3571,7 @@ func _start_grant_keyword_mode(effect: Dictionary) -> void:
 	_grant_kw_effect = effect
 	var kw := String(effect.get("keyword", ""))
 	if kw == "":
-		_show_result("The lesson dissolves into shop-talk. Nothing sticks.")
+		_show_result("No keyword was selected.")
 		return
 	var eligible: Array = []
 	for i in range(RunState.deck.size()):
@@ -2427,7 +3582,7 @@ func _start_grant_keyword_mode(effect: Dictionary) -> void:
 			continue
 		eligible.append(i)
 	if eligible.is_empty():
-		_show_result("He looks your soldiers over twice and shakes his head. Nobody here can take that lesson.")
+		_show_result("No creature can gain that keyword.")
 		return
 	var disp := String(KeywordEffects.KEYWORDS.get(kw, {}).get("display", kw.capitalize()))
 	var grid = _make_card_picker_grid(
@@ -2441,21 +3596,22 @@ func _start_grant_keyword_mode(effect: Dictionary) -> void:
 func _on_grant_keyword_pick(deck_index: int) -> void:
 	var kw := String(_grant_kw_effect.get("keyword", ""))
 	var data: Dictionary = RunState.get_upgraded_card_data(deck_index)
+	var before := _note_card_change(deck_index)
 	RunState.apply_wayside_upgrade(deck_index, {"path": "grant_kw", "keyword": kw})
 	var disp := String(KeywordEffects.KEYWORDS.get(kw, {}).get("display", kw.capitalize()))
-	# Show the soldier as they leave the lesson — folded data now carries the
-	# new keyword chip.
-	_result_cards.append(RunState.get_upgraded_card_data(deck_index))
+	# Show the soldier either side of the lesson, so the new keyword chip is
+	# something the player SEES arrive rather than a sentence they're told.
+	_seal_card_change(before, deck_index)
 	_sting("card_play")
-	_show_result("%s takes the lesson and keeps it: %s, permanently." \
+	_show_result("%s permanently gained %s." \
 		% [data.get("name", "The soldier"), disp])
 
 
 # ── The Free Company's one-for-one muster (veteran_swap) ─────────────────
-# Picker over unique STARTER card ids; choosing one removes every copy and
+# Picker over unique STARTER card ids; choosing one removes up to two copies and
 # enlists the same count of random uncommons — the deck keeps its size but
-# sheds its greenest identity in one stroke. Replacements are dealt from a
-# shuffled pool without repeats ("no two alike") while the pool lasts.
+# keeps a named retinue intact if a future deck restores larger duplicate runs.
+# Replacements are dealt without repeats while the uncommon pool lasts.
 
 func _start_veteran_swap_mode() -> void:
 	var unique_ids: Array = []
@@ -2468,10 +3624,10 @@ func _start_veteran_swap_mode() -> void:
 		if not unique_ids.has(cid):
 			unique_ids.append(cid)
 	if unique_ids.is_empty():
-		_show_result("He chalks your column again and comes up empty. \"No levies left. You HAVE been busy.\"")
+		_show_result("No starting cards are left to trade.")
 		return
 	var grid = _make_card_picker_grid(
-		"Muster out which levy? He takes EVERY copy and matches the count.",
+		"Choose a starting card. Up to 2 copies will be removed and replaced.",
 		GameTheme.KEYWORD_GOLD)
 	for cid in unique_ids:
 		_add_card_to_grid(grid, CardDB.get_card_data(cid),
@@ -2482,13 +3638,13 @@ func _on_veteran_swap_pick(card_id: String) -> void:
 	var nm: String = CardDB.get_card_data(card_id).name
 	var removed := 0
 	for i in range(RunState.deck.size() - 1, -1, -1):
-		if RunState.deck.size() <= 1:
+		if RunState.deck.size() <= 1 or removed >= 2:
 			break
 		if RunState.deck[i] == card_id:
 			RunState.remove_card_at(i)
 			removed += 1
 	if removed == 0:
-		_show_result("That is the last thing you carry. The recruiter waves it off.")
+		_show_result("You cannot remove your last card.")
 		return
 	var pool: Array = CardDB.cards_of_rarity("uncommon")
 	pool.shuffle()
@@ -2498,7 +3654,7 @@ func _on_veteran_swap_pick(card_id: String) -> void:
 		names.append(CardDB.get_card_data(pool[i]).name)
 		_result_cards.append(CardDB.get_card_data(pool[i]))
 	_sting("card_play")
-	_show_result("%d × %s muster out. In their place march: %s." \
+	_show_result("Removed %d copies of %s. Added: %s." \
 		% [removed, nm, ", ".join(names)])
 
 
@@ -2542,8 +3698,9 @@ func _start_upgrade_mode(count: int) -> void:
 
 func _on_upgrade_choice_pick(deck_index: int) -> void:
 	var data = CardDB.get_card_data(RunState.deck[deck_index])
+	var before := _note_card_change(deck_index)
 	RunState.upgrade_card(deck_index, "plus")
-	_result_cards.append(RunState.get_upgraded_card_data(deck_index))
+	_seal_card_change(before, deck_index)
 	_sting("card_play")
 	_upgrade_choice_names.append(data.name)
 	_upgrade_choice_remaining -= 1
@@ -2581,7 +3738,7 @@ func _start_stranger_hand_mode() -> void:
 	add_child(_make_picker_scrim())
 
 	var title = GameTheme.make_label(
-		"Three cards lie face-up on the stone. Each is owed.",
+		"Choose one rare card and pay its listed cost.",
 		22, GameTheme.KEYWORD_GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.position = Vector2(300, 60)
@@ -2607,6 +3764,7 @@ func _start_stranger_hand_mode() -> void:
 	var card_w: int = 220
 	var sep: int = 40
 	var total_w: int = n * card_w + (n - 1) * sep
+	var flip_rows: Array = []
 	var hbox := HBoxContainer.new()
 	hbox.set_anchors_preset(Control.PRESET_CENTER)
 	hbox.offset_left = -total_w / 2
@@ -2647,6 +3805,20 @@ func _start_stranger_hand_mode() -> void:
 		click_btn.pressed.connect(_on_stranger_hand_pick.bind(card_id, cost))
 		wrapper.add_child(click_btn)
 		v.add_child(wrapper)
+		# L4 (docs/EVENT_PLAY_PITCH_20260718.md): the wet cards land
+		# face-DOWN and flip up one at a time — a dealing beat, not a
+		# different offer. Reduce Motion deals them face-up as before.
+		if not UserSettings.reduce_motion:
+			var back := TextureRect.new()
+			back.name = "WetBack"
+			back.texture = load("res://assets/ui/card_back.png")
+			back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			back.set_anchors_preset(Control.PRESET_FULL_RECT)
+			back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			wrapper.add_child(back)
+			card_node.visible = false
+			flip_rows.append([wrapper, card_node, back])
 
 		var cost_label := Label.new()
 		cost_label.text = cost.label
@@ -2665,7 +3837,7 @@ func _start_stranger_hand_mode() -> void:
 	var leave_btn := _make_frameless_choice(
 		"Walk on",
 		"",
-		"The stranger does not look up. The road is still yours.",
+		"You leave without taking a card.",
 		88,
 		_on_stranger_hand_leave)
 	leave_btn.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
@@ -2674,7 +3846,40 @@ func _start_stranger_hand_mode() -> void:
 	leave_btn.offset_top = -160
 	leave_btn.offset_bottom = -72
 	add_child(leave_btn)
+	if flip_rows.size() > 0:
+		_play_wet_deal(flip_rows)
 	_refresh_ledger()
+
+
+## L4's dealing beat: each wet card flips up off the stone in turn — the
+## wrapper thins to its edge, the back swaps for the face at the edge-on
+## moment, and the face springs open. Fire-and-forget; clicks during the
+## deal still work (the offer is already live underneath).
+func _play_wet_deal(rows: Array) -> void:
+	await get_tree().create_timer(0.35).timeout
+	for i in range(rows.size()):
+		# Untyped on purpose: assigning a freed node into a TYPED var errors
+		# before any validity guard can run (the deal may be in flight when
+		# the screen rebuilds under it).
+		var wrapper = rows[i][0]
+		if not is_instance_valid(wrapper):
+			return
+		wrapper.pivot_offset = wrapper.size * 0.5
+		AudioBank.play_sfx("card_draw", 0.05, -6.0)
+		var tw: Tween = wrapper.create_tween()
+		tw.tween_property(wrapper, "scale:x", 0.06, 0.16) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		tw.tween_callback(_wet_flip_show.bind(rows[i][1], rows[i][2]))
+		tw.tween_property(wrapper, "scale:x", 1.0, 0.20) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		await get_tree().create_timer(0.22).timeout
+
+
+func _wet_flip_show(card: Control, back: Control) -> void:
+	if is_instance_valid(back):
+		back.visible = false
+	if is_instance_valid(card):
+		card.visible = true
 
 
 func _on_stranger_hand_pick(card_id: String, cost: Dictionary) -> void:
@@ -2721,7 +3926,7 @@ func _start_relic_sacrifice_mode() -> void:
 		if r.get("tier", "starting") != "starting":
 			non_starting.append(rid)
 	if non_starting.is_empty():
-		_show_result("The smith waves you off — nothing of his make in your bag.")
+		_show_result("You have none of the smith's relics.")
 		return
 
 	# Same reading block as every other screen (restyled 2026-07-04 after the
@@ -2732,7 +3937,7 @@ func _start_relic_sacrifice_mode() -> void:
 	# the same column. The list scrolls only when the bag is truly heavy.
 	var choices_vbox := _build_event_screen(
 		"The anvil is patient",
-		"Lay one on the anvil. He makes heavy things from light ones — and the trade is final.",
+		"Choose one of the smith's relics to trade. The trade is permanent.",
 		mini(non_starting.size(), 5) + 1)
 
 	# 96px per entry — the content-fit pass grows a name+rules entry to ~85px,
@@ -2754,14 +3959,14 @@ func _start_relic_sacrifice_mode() -> void:
 		lst.add_child(_make_frameless_choice(
 			String(relic.get("name", "Relic")),
 			String(relic.get("desc", "")),
-			"It goes on the anvil.", 66,
+			"Trade this relic.", 66,
 			_on_relic_sacrifice_pick.bind(String(rid))))
 
 	# The player may inspect their relics and decline — backing out leaves the
 	# whole event (same as the Stranger's Hand picker).
 	choices_vbox.add_child(_make_frameless_choice(
 		"Keep them all", "",
-		"The forge has no fire. Your hands stop hurting anyway.",
+		"Keep all relics and leave.",
 		72, _on_stranger_hand_leave))
 
 
@@ -2770,15 +3975,15 @@ func _on_relic_sacrifice_pick(relic_id: String) -> void:
 	RunState.relics.erase(relic_id)
 	var choices = RelicDB.roll_relic_reward("boss", RunState.relics, RunState.current_hero_id)
 	if choices.is_empty():
-		choices = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
+		choices = RelicDB.roll_field_relics(1, RunState.relics, RunState.current_hero_id)
 	if choices.is_empty():
-		_show_result("Lost %s. The smith finds nothing worthy to give back." % lost_name)
+		_show_result("Lost %s. No replacement relic was available." % lost_name)
 		return
 	RunState.add_relic(choices[0])
 	_result_relics.append(choices[0])
 	_sting("card_play")
 	var gained_name = RelicDB.get_relic(choices[0]).name
-	_show_result("You lay down %s. He returns %s, heavier." % [lost_name, gained_name])
+	_show_result("Traded %s for %s." % [lost_name, gained_name])
 
 
 # ── Sacrifice altar picker (Dark Altar, etc.) ────────────────────────────
@@ -2797,10 +4002,10 @@ func _start_sacrifice_mode(effect: Dictionary) -> void:
 		if data.get("type", "") == "creature":
 			creatures.append(i)
 	if creatures.is_empty():
-		_show_result("You have no creature to lay down.")
+		_show_result("You have no creature to sacrifice.")
 		return
 	var grid = _make_card_picker_grid(
-		effect.get("prompt", "Lay one creature on the altar."), GameTheme.BLOOD_RED)
+		effect.get("prompt", "Choose a creature to sacrifice."), GameTheme.BLOOD_RED)
 	for i in creatures:
 		var data = RunState.get_upgraded_card_data(i)
 		_add_card_to_grid(grid, data, _on_sacrifice_pick.bind(i))
@@ -2809,7 +4014,7 @@ func _start_sacrifice_mode(effect: Dictionary) -> void:
 func _on_sacrifice_pick(deck_index: int) -> void:
 	# Deck floor of 1 — sacrificing your only card would leave an empty deck.
 	if RunState.deck.size() <= 1:
-		_show_result("It is all you have left to lay down. The altar lets you keep it.")
+		_show_result("You cannot sacrifice your last card.")
 		return
 	var data = RunState.get_upgraded_card_data(deck_index)
 	var atk: int = int(data.get("atk", 0))
@@ -2821,14 +4026,14 @@ func _on_sacrifice_pick(deck_index: int) -> void:
 			var per: int = int(_sacrifice_effect.get("per_atk", 5))
 			var amt := base + atk * per
 			RunState.gain_gold(amt)
-			_show_result("You lay down %s. The altar pays %d gold." % [nm, amt])
+			_show_result("Sacrificed %s. Gained %d gold." % [nm, amt])
 		"max_hp":
 			var hp_gain := base + int(atk / 2.0)
 			RunState.hero_max_hp += hp_gain
 			RunState.hero_hp += hp_gain
-			_show_result("You lay down %s. You feel %d sturdier." % [nm, hp_gain])
+			_show_result("Sacrificed %s. Gained %d max HP." % [nm, hp_gain])
 		"relic":
-			var choices = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
+			var choices = RelicDB.roll_field_relics(1, RunState.relics, RunState.current_hero_id)
 			if choices.is_empty():
 				_show_result("You lay down %s. The altar gives nothing back." % nm)
 				return
@@ -2885,10 +4090,16 @@ func _on_transform_pick(deck_index: int) -> void:
 	if pool.is_empty():
 		pool = CardDB.cards_of_rarity("common")
 		pool.erase(old_id)
+	# Snapshot the folded original BEFORE it leaves the deck — a transform is the
+	# clearest before→after in the game and it used to resolve as a sentence.
+	var before_tf: Dictionary = RunState.get_upgraded_card_data(deck_index).duplicate(true)
 	RunState.remove_card_at(deck_index)
 	var new_id: String = pool[randi() % pool.size()]
 	RunState.add_card(new_id)
-	_result_cards.append(CardDB.get_card_data(new_id))
+	_result_pairs.append({
+		"before": before_tf,
+		"after": CardDB.get_card_data(new_id).duplicate(true),
+	})
 	_sting("card_play")
 	_transform_results.append("%s became %s" \
 		% [old_data.get("name", "it"), CardDB.get_card_data(new_id).name])
@@ -2910,9 +4121,25 @@ func _on_transform_pick(deck_index: int) -> void:
 var _dice_cfg: Dictionary = {}
 var _dice_pot: int = 0
 
+# The road remembers: any gamble cfg may carry `seen_texts` — per-event text
+# overrides that wake when the player has met the OTHER half of the story
+# this run (the coin knows the pit, the pit knows the coin, the clerk knows
+# them both). World-threading as data: no extra choices, no layout cost,
+# sparse keys so the variants surface as recognition beats rather than a
+# rewritten event. Shared by dice_run and shell_game.
+func _seen_text_override(cfg: Dictionary, key: String, raw: String) -> String:
+	var variants: Dictionary = cfg.get("seen_texts", {})
+	for ev_id in variants:
+		if RunState.events_seen.has(String(ev_id)) \
+				and (variants[ev_id] as Dictionary).has(key):
+			return String(variants[ev_id][key])
+	return raw
+
+
 func _dice_text(key: String, fallback: String, gain: int = 0) -> String:
-	return String(_dice_cfg.get(key, fallback)) \
-		.replace("{pot}", str(_dice_pot)).replace("{gain}", str(gain))
+	var raw := _seen_text_override(_dice_cfg, key,
+		String(_dice_cfg.get(key, fallback)))
+	return raw.replace("{pot}", str(_dice_pot)).replace("{gain}", str(gain))
 
 
 func _start_dice_run(effect: Dictionary) -> void:
@@ -2922,11 +4149,11 @@ func _start_dice_run(effect: Dictionary) -> void:
 	var stake: int = int(effect.get("stake", 0))
 	if stake > 0:
 		if RunState.gold < stake:
-			_show_result(_dice_text("broke_text", "You haven't the coin to sit down."))
+			_show_result(_dice_text("broke_text", "You do not have enough gold to play."))
 			return
 		RunState.gold -= stake
 	_build_dice_screen(_dice_text("open_text",
-		"The space in the circle is yours. The pot sits at {pot} gold."))
+		"The pot is {pot} gold. Cast to increase it, or take it now."))
 
 
 # Shared scaffold for the interactive push-your-luck / appraisal event screens
@@ -2979,8 +4206,18 @@ func _build_event_screen(title_text: String, beat: String, _n_choices: int,
 # pulse (the pot just grew) or sit still (first deal of the screen).
 var _dice_prev_pot: int = -1
 
+# The gamble's physical stage (2026-07-18): live prop references for the beat
+# functions. Rebuilt with every _build_dice_screen; the beats animate the
+# CURRENT stage, then the ordinary rebuild/result flow takes over.
+var _dice_stage_dice: Array = []      # KnuckleboneDie nodes on the current stage
+var _dice_stage_heap: Control = null  # the pot heap — the bank button itself
+var _dice_stage_coin: Control = null  # the spinner's coin (prop "coin")
+var _dice_coin_tween: Tween = null    # the spinner's idle squash loop
+var _dice_busy: bool = false          # input lock while a cast beat plays
+
 
 func _build_dice_screen(beat: String) -> void:
+	_dice_busy = false   # every fresh screen unlocks the props
 	var choices_vbox := _build_event_screen(
 		"The pot: [color=#e8b547]%d gold[/color]" % _dice_pot, beat, 2)
 
@@ -2989,74 +4226,46 @@ func _build_dice_screen(beat: String) -> void:
 
 	choices_vbox.add_child(_make_frameless_choice(
 		_dice_text("roll_label", "Cast the bones"),
-		_dice_text("roll_sub", "2 in 3 the pot grows. Skulls lose it all."),
-		_dice_text("roll_body", "The knuckles rattle like teeth in a cup."),
+		_dice_text("roll_sub", "A safe cast increases the pot. A skull loses it."),
+		_dice_text("roll_body", "Cast the bones."),
 		84, _on_dice_roll))
 	choices_vbox.add_child(_make_frameless_choice(
 		_dice_text("bank_label", "Bank the pot"),
-		_dice_text("bank_sub", "Take {pot} gold and leave the circle."),
-		_dice_text("bank_body", "The dead nod. Walking away is also a move."),
+		_dice_text("bank_sub", "Take {pot} gold and leave."),
+		_dice_text("bank_body", "Take the current pot."),
 		84, _on_dice_bank))
 
 
-## The pot as a physical object on the art half of the page: a heap of coin
-## icons (the heap grows with the pot) under a big gilt figure. `pulse` scales
-## it up-and-settle when the pot just grew. The coin variant ("prop": "coin")
-## stands one big coin spinning in place of the heap.
+## The gamble's physical stage (2026-07-18, replaces the passive pot display —
+## docs/EVENT_PLAY_PITCH_20260718.md). Two props share it, and BOTH follow
+## bake-then-shade: the outcome resolves before anything here animates.
+##   "bones" — the full knucklebone table: a leather CastPatch, four
+##   KnuckleboneDie painters resting at your edge (click the bones to cast),
+##   and the pot as a coin heap that IS the bank button.
+##   "coin"  — the spinner: one patient piece turning on its edge; the coin
+##   itself is the CALL button, the pot figure rides below.
+## The text choice rows stay in the ladder as accessible duplicates — both
+## paths call the same handlers.
 func _add_pot_display(pulse: bool) -> void:
+	_dice_stage_dice = []
+	_dice_stage_heap = null
+	_dice_stage_coin = null
+	_dice_coin_tween = null
 	var root := Control.new()
 	root.name = "PotDisplay"
-	root.position = Vector2(1020, 300)
-	root.size = Vector2(360, 220)
-	root.pivot_offset = Vector2(180, 130)
+	root.position = Vector2(860, 200)
+	root.size = Vector2(560, 460)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(root)
 
 	var is_coin: bool = String(_dice_cfg.get("prop", "bones")) == "coin"
 	if is_coin:
-		# One patient silver-gold piece, spinning on its edge forever.
-		var spin := TextureRect.new()
-		spin.texture = GameTheme.tex_hud_gold
-		spin.custom_minimum_size = Vector2(84, 84)
-		spin.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		spin.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		spin.position = Vector2(138, 30)
-		spin.pivot_offset = Vector2(42, 42)
-		spin.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		root.add_child(spin)
-		if not UserSettings.reduce_motion:
-			var tw := spin.create_tween().set_loops()
-			tw.tween_property(spin, "scale:x", 0.08, 0.5) \
-				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
-			tw.tween_property(spin, "scale:x", 1.0, 0.5) \
-				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		_build_spinner_stage(root)
 	else:
-		# The heap: a compact pyramid pile just above the figure — coins are
-		# ADDED row by row as the pot grows, overlapping like a real stack
-		# (the old index-hash scatter read as random dots floating on the art).
-		var n_coins: int = clampi(3 + _dice_pot / 40, 3, 9)
-		const PILE_ROWS := [4, 3, 2]
-		var placed := 0
-		for row in range(PILE_ROWS.size()):
-			var count: int = PILE_ROWS[row]
-			for i in range(count):
-				if placed >= n_coins:
-					break
-				var c := TextureRect.new()
-				c.texture = GameTheme.tex_hud_gold
-				c.custom_minimum_size = Vector2(32, 32)
-				c.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-				c.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-				# Row r sits 18px higher, its coins centered and half-lapped.
-				var cx: float = 180.0 - (count - 1) * 13.0 + i * 26.0 - 16.0
-				var cy: float = 88.0 - row * 18.0
-				c.position = Vector2(cx + fmod(float(placed) * 7.3, 5.0) - 2.5, cy)
-				c.rotation = fmod(float(placed) * 1.1, 0.5) - 0.25
-				c.mouse_filter = Control.MOUSE_FILTER_IGNORE
-				root.add_child(c)
-				placed += 1
+		_build_bone_stage(root)
 
 	var figure := Label.new()
+	figure.name = "PotFigure"
 	figure.text = "%d" % _dice_pot
 	figure.add_theme_font_size_override("font_size", 44)
 	figure.add_theme_color_override("font_color", GameTheme.KEYWORD_GOLD)
@@ -3066,56 +4275,373 @@ func _add_pot_display(pulse: bool) -> void:
 	figure.add_theme_constant_override("shadow_offset_y", 2)
 	if GameTheme.font_display:
 		figure.add_theme_font_override("font", GameTheme.font_display)
-	figure.position = Vector2(0, 128)
-	figure.size = Vector2(360, 56)
+	if is_coin:
+		figure.position = Vector2(0, 330)
+		figure.size = Vector2(560, 56)
+	else:
+		# Under the heap, on the patch's high corner — the pot labels itself.
+		figure.position = Vector2(330, 214)
+		figure.size = Vector2(210, 50)
 	figure.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	figure.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(figure)
 
 	if pulse and not UserSettings.reduce_motion:
-		root.scale = Vector2(1.14, 1.14)
-		root.create_tween().tween_property(root, "scale", Vector2.ONE, 0.30) \
-			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		# The pot just grew: the heap (or coin) takes the weight, not the
+		# whole table.
+		var puls: Control = _dice_stage_coin if is_coin else _dice_stage_heap
+		if puls != null:
+			puls.scale = Vector2(1.16, 1.16)
+			puls.create_tween().tween_property(puls, "scale", Vector2.ONE, 0.30) \
+				.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 
-## The cast itself: a few props tumble across the pot area and fade — ivory
-## knucklebone chips for the pit, coins for the spinner. Pure tween theater;
-## fires on the press, before the result is known, because that IS the throw.
-func _toss_props() -> void:
-	if UserSettings.reduce_motion:
+func _build_bone_stage(root: Control) -> void:
+	var patch := CastPatch.new()
+	patch.seed_text = "patch_" + _event_id
+	patch.chalk = "ring"
+	patch.position = Vector2(10, 40)
+	patch.size = Vector2(540, 360)
+	root.add_child(patch)
+
+	# The pot heap on the patch's high corner. The heap IS the bank button —
+	# potion-slot pattern: wrapper PASS for the rich-hover tip, transparent
+	# PASS button for the click.
+	var heap := Control.new()
+	heap.name = "PotHeap"
+	heap.position = Vector2(360, 78)
+	heap.size = Vector2(150, 130)
+	heap.pivot_offset = Vector2(75, 65)
+	heap.mouse_filter = Control.MOUSE_FILTER_PASS
+	root.add_child(heap)
+	_dice_stage_heap = heap
+	var n_coins: int = clampi(3 + _dice_pot / 25, 3, 9)
+	const PILE_ROWS := [4, 3, 2]
+	var placed := 0
+	for row in range(PILE_ROWS.size()):
+		var count: int = PILE_ROWS[row]
+		for i in range(count):
+			if placed >= n_coins:
+				break
+			# The Old King's coinage (CoinProp handles the lying squash, edge
+			# thickness, and ground pool itself — no node scale/rotation).
+			var c := CoinProp.new()
+			c.seed_text = "pot_%s_%d" % [_event_id, placed]
+			c.lying = true
+			c.size = Vector2(32, 32)
+			var cx: float = 75.0 - (count - 1) * 13.0 + i * 26.0 - 16.0
+			var cy: float = 86.0 - row * 17.0
+			c.position = Vector2(cx + fmod(float(placed) * 7.3, 5.0) - 2.5, cy)
+			heap.add_child(c)
+			placed += 1
+	var bank_btn := Button.new()
+	bank_btn.flat = true
+	bank_btn.focus_mode = Control.FOCUS_NONE
+	bank_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bank_btn.mouse_filter = Control.MOUSE_FILTER_PASS
+	bank_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	for st in ["normal", "hover", "pressed", "focus"]:
+		bank_btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+	bank_btn.pressed.connect(_on_dice_bank)
+	heap.add_child(bank_btn)
+	GameTheme.attach_rich_hover(heap, _dice_text("bank_label", "Bank the pot"),
+		_dice_text("bank_sub", "Take {pot} gold and leave."),
+		"Click the pot to collect it.", GameTheme.KEYWORD_GOLD, 1.07)
+
+	# Four knucklebones resting at your edge of the patch — the cast zone.
+	var rests := [
+		["kb_a", Vector2(64, 328), -0.28], ["kb_b", Vector2(112, 344), 0.18],
+		["kb_c", Vector2(162, 330), 0.42], ["kb_d", Vector2(212, 346), -0.10]]
+	for spec in rests:
+		var die := KnuckleboneDie.new()
+		die.seed_text = String(spec[0])
+		die.face = 1 + posmod(hash(spec[0]), 4)
+		die.position = spec[1]
+		die.size = Vector2(38, 38)
+		die.pivot_offset = Vector2(19, 19)
+		die.rotation = spec[2]
+		root.add_child(die)
+		_dice_stage_dice.append(die)
+	var cast_zone := Control.new()
+	cast_zone.name = "CastZone"
+	cast_zone.position = Vector2(44, 302)
+	cast_zone.size = Vector2(224, 100)
+	cast_zone.mouse_filter = Control.MOUSE_FILTER_PASS
+	root.add_child(cast_zone)
+	var cast_btn := Button.new()
+	cast_btn.flat = true
+	cast_btn.focus_mode = Control.FOCUS_NONE
+	cast_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+	cast_btn.mouse_filter = Control.MOUSE_FILTER_PASS
+	cast_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	for st in ["normal", "hover", "pressed", "focus"]:
+		cast_btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+	cast_btn.pressed.connect(_on_dice_roll)
+	cast_zone.add_child(cast_btn)
+	GameTheme.attach_rich_hover(cast_zone, _dice_text("roll_label", "Cast the bones"),
+		_dice_text("roll_sub", "A safe cast increases the pot. A skull loses it."),
+		"Click the bones to cast.", KnuckleboneDie.BONE, 1.0)
+
+
+func _build_spinner_stage(root: Control) -> void:
+	# One patient silver-gold piece, spinning on its edge forever. The coin
+	# is the CALL button — you touch the thing itself. Walking away is the
+	# ladder's bank row: banking never touches the coin, which is the point.
+	var wrap := Control.new()
+	wrap.name = "SpinnerCoin"
+	wrap.position = Vector2(220, 140)
+	wrap.size = Vector2(120, 140)
+	wrap.pivot_offset = Vector2(60, 70)
+	wrap.mouse_filter = Control.MOUSE_FILTER_PASS
+	root.add_child(wrap)
+	_dice_stage_coin = wrap
+	# Ground shadow — the one thing the coin never loses.
+	var shade := Panel.new()
+	shade.position = Vector2(24, 116)
+	shade.size = Vector2(72, 12)
+	shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var shade_st := StyleBoxFlat.new()
+	shade_st.bg_color = Color(0, 0, 0, 0.30)
+	shade_st.set_corner_radius_all(99)
+	shade.add_theme_stylebox_override("panel", shade_st)
+	wrap.add_child(shade)
+	var spin := CoinProp.new()
+	spin.name = "Coin"
+	spin.seed_text = "spinner_" + _event_id
+	spin.shadow = false
+	spin.size = Vector2(96, 96)
+	spin.position = Vector2(12, 22)
+	spin.pivot_offset = Vector2(48, 48)
+	wrap.add_child(spin)
+	if not UserSettings.reduce_motion:
+		# The turn drives face_t, not scale.x — at the thin moment the coin
+		# flashes its milled edge instead of a squashed picture.
+		_dice_coin_tween = spin.create_tween().set_loops()
+		_dice_coin_tween.tween_property(spin, "face_t", 0.04, 0.5) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+		_dice_coin_tween.tween_property(spin, "face_t", 1.0, 0.5) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	var call_btn := Button.new()
+	call_btn.flat = true
+	call_btn.focus_mode = Control.FOCUS_NONE
+	call_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+	call_btn.mouse_filter = Control.MOUSE_FILTER_PASS
+	call_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	for st in ["normal", "hover", "pressed", "focus"]:
+		call_btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+	call_btn.pressed.connect(_on_dice_roll)
+	wrap.add_child(call_btn)
+	GameTheme.attach_rich_hover(wrap, _dice_text("roll_label", "Call it"),
+		_dice_text("roll_sub", "Win to double the pot. Lose to forfeit it."),
+		"Click the coin to call.", GameTheme.KEYWORD_GOLD, 1.05)
+
+
+## The cast beat (prop "bones"): the resting bones tumble across the patch
+## and settle on faces that MATCH the already-resolved outcome — clean pips
+## on a win, one or two skulls up on a bust (never all four: even the bad
+## news should look like a near thing). Pure theater; Reduce Motion snaps
+## the faces and keeps only a reading pause.
+func _play_bone_cast(bust: bool) -> void:
+	var faces: Array = []
+	for i in range(4):
+		faces.append({"skull": false, "face": randi_range(1, 4)})
+	if bust:
+		faces[randi_range(0, 3)]["skull"] = true
+		if randf() < 0.5:
+			faces[randi_range(0, 3)]["skull"] = true
+	AudioBank.play_sfx("bone_cast", 0.06, -2.0)
+	if UserSettings.reduce_motion or _dice_stage_dice.size() < 4:
+		for i in range(_dice_stage_dice.size()):
+			var d = _dice_stage_dice[i]
+			d.skull = bool(faces[i]["skull"])
+			d.face = int(faces[i]["face"])
+			d.queue_redraw()
+		await get_tree().create_timer(0.5).timeout
 		return
-	var is_coin: bool = String(_dice_cfg.get("prop", "bones")) == "coin"
+	# The tumble: four independent throws. Each die arcs up with its face
+	# TURNING in the air, stamps its true face at first impact, then loses
+	# the rest of its energy in decaying hops while the spin dies into a
+	# resting angle. Fire-and-forget per die; the shared await below covers
+	# the longest throw.
+	var lands := [Vector2(140, 190), Vector2(235, 250), Vector2(178, 296),
+		Vector2(315, 215)]
+	for i in range(4):
+		_tumble_die(_dice_stage_dice[i], faces[i],
+			lands[i] + Vector2(randf_range(-14, 14), randf_range(-10, 10)),
+			0.07 * i, 1.0 if i % 2 == 0 else -1.0)
+	await get_tree().create_timer(1.05).timeout
+	# Let the throw READ before anything else happens.
+	await get_tree().create_timer(0.40).timeout
+	if bust:
+		# The skulls announce themselves, then the pot drains to the dead.
+		for i in range(4):
+			if bool(faces[i]["skull"]):
+				var d: Control = _dice_stage_dice[i]
+				var ft := d.create_tween().set_loops(2)
+				ft.tween_property(d, "modulate", Color(1.0, 0.52, 0.42), 0.12)
+				ft.tween_property(d, "modulate", Color.WHITE, 0.12)
+		await get_tree().create_timer(0.50).timeout
+		if _dice_stage_heap != null and is_instance_valid(_dice_stage_heap):
+			var ht := _dice_stage_heap.create_tween()
+			ht.tween_property(_dice_stage_heap, "position",
+				_dice_stage_heap.position + Vector2(150, 34), 0.45) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+			ht.parallel().tween_property(_dice_stage_heap, "modulate:a", 0.0, 0.45)
+			# The gilt figure is the pot's label — it leaves with the coins.
+			var fig := _dice_stage_heap.get_parent().get_node_or_null("PotFigure")
+			if fig != null:
+				ht.parallel().tween_property(fig, "modulate:a", 0.0, 0.45)
+		await get_tree().create_timer(0.50).timeout
+	else:
+		_fly_coins_to_heap()
+		await get_tree().create_timer(0.42).timeout
+
+
+## One knucklebone's throw: rise, spin, and swell toward the eye — with the
+## face turning over mid-air, a die nobody can read yet — then the true face
+## stamps at FIRST impact and the energy dies in two shrinking hops as the
+## spin settles into a resting angle. The stamped face is the resolved one;
+## the tumble only ever LOOKS undecided.
+func _tumble_die(die: Control, spec: Dictionary, dest: Vector2,
+		delay: float, spin_dir: float) -> void:
+	if delay > 0.0:
+		await get_tree().create_timer(delay).timeout
+	if not is_instance_valid(die):
+		return
+	var mid: Vector2 = die.position.lerp(dest, 0.55) + Vector2(0, -70)
+	var final_rot := randf_range(-0.35, 0.35)
+	var tw := die.create_tween()
+	tw.tween_property(die, "position", mid, 0.22) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(die, "rotation",
+		die.rotation + randf_range(3.4, 5.2) * spin_dir, 0.46)
+	tw.parallel().tween_property(die, "scale", Vector2(1.26, 1.26), 0.22) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(die, "position", dest, 0.24) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tw.parallel().tween_property(die, "scale", Vector2.ONE, 0.24) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	# Airborne: every look shows another side (the skull included — it IS a
+	# face of the die; only the stamped face is the truth).
+	for _j in range(4):
+		await get_tree().create_timer(0.105).timeout
+		if not is_instance_valid(die):
+			return
+		die.face = randi_range(1, 4)
+		die.skull = randf() < 0.18
+		die.queue_redraw()
+	await get_tree().create_timer(0.05).timeout
+	if not is_instance_valid(die):
+		return
+	# First impact: the true face stamps, the clack lands, the body squashes.
+	die.skull = bool(spec["skull"])
+	die.face = int(spec["face"])
+	die.queue_redraw()
+	AudioBank.play_sfx("bone_settle", 0.08, -7.0)
+	var sq := die.create_tween()
+	sq.tween_property(die, "scale", Vector2(1.24, 0.78), 0.05)
+	sq.tween_property(die, "scale", Vector2.ONE, 0.10) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	# Two decaying hops; the spin eases into rest on the way down.
+	var hop := die.create_tween()
+	hop.tween_property(die, "position", dest + Vector2(spin_dir * 7.0, -11.0), 0.11) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	hop.tween_property(die, "position", dest + Vector2(spin_dir * 12.0, 0.0), 0.10) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	hop.parallel().tween_property(die, "rotation", final_rot, 0.15)
+	hop.tween_property(die, "position", dest + Vector2(spin_dir * 16.0, -4.0), 0.08)
+	hop.tween_property(die, "position", dest + Vector2(spin_dir * 18.0, 0.0), 0.07) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+
+
+## Winnings arrive as objects: three coins arc from the cast into the heap,
+## and the heap takes the weight.
+func _fly_coins_to_heap() -> void:
+	if _dice_stage_heap == null or not is_instance_valid(_dice_stage_heap):
+		return
+	AudioBank.play_sfx("coin_pour", 0.06)
+	var root := _dice_stage_heap.get_parent() as Control
+	if root == null:
+		return
+	var dest: Vector2 = _dice_stage_heap.position + Vector2(60, 70)
 	for i in range(3):
-		var prop: Control
-		if is_coin:
-			var c := TextureRect.new()
-			c.texture = GameTheme.tex_hud_gold
-			c.custom_minimum_size = Vector2(26, 26)
-			c.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			c.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			prop = c
-		else:
-			var p := Panel.new()
-			var sb := StyleBoxFlat.new()
-			sb.bg_color = Color(0.88, 0.85, 0.76)
-			sb.border_color = Color(0.25, 0.20, 0.14)
-			sb.set_border_width_all(2)
-			sb.set_corner_radius_all(4)
-			p.add_theme_stylebox_override("panel", sb)
-			p.custom_minimum_size = Vector2(16, 16)
-			prop = p
-		prop.position = Vector2(1080 + i * 30, 250)
-		prop.pivot_offset = Vector2(8, 8)
-		prop.rotation = randf_range(-0.5, 0.5)
-		prop.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		add_child(prop)
-		var dest := prop.position + Vector2(randf_range(-70, 70), randf_range(90, 150))
-		var tw := prop.create_tween().set_parallel(true)
-		tw.tween_property(prop, "position", dest, 0.45) \
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		tw.tween_property(prop, "rotation", prop.rotation + randf_range(-3.0, 3.0), 0.45)
-		tw.tween_property(prop, "modulate:a", 0.0, 0.30).set_delay(0.30)
-		tw.chain().tween_callback(prop.queue_free)
+		# Airborne pieces: face-on, no ground pool until they join the heap.
+		var c := CoinProp.new()
+		c.seed_text = "fly_%d_%d" % [randi() % 1000, i]
+		c.shadow = false
+		c.size = Vector2(26, 26)
+		c.position = Vector2(200 + i * 26, 240)
+		root.add_child(c)
+		var tw := c.create_tween()
+		tw.tween_interval(0.05 * i)
+		tw.tween_property(c, "position",
+			dest + Vector2(randf_range(-12, 12), randf_range(-8, 8)), 0.34) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		tw.tween_property(c, "modulate:a", 0.0, 0.10)
+		tw.tween_callback(c.queue_free)
+	var hp := _dice_stage_heap.create_tween()
+	hp.tween_interval(0.30)
+	hp.tween_property(_dice_stage_heap, "scale", Vector2(1.12, 1.12), 0.08)
+	hp.tween_property(_dice_stage_heap, "scale", Vector2.ONE, 0.16) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+## The spinner's call (prop "coin"): the spin tightens, the coin leans past
+## sense — and either rights itself (the pot doubles) or falls flat at last.
+## The near-miss wobble is the drama the prose already sells.
+func _play_coin_call(bust: bool) -> void:
+	_sting("card_play", -4.0)
+	var wrap := _dice_stage_coin
+	if wrap == null or not is_instance_valid(wrap) or UserSettings.reduce_motion:
+		await get_tree().create_timer(0.4).timeout
+		if bust:
+			AudioBank.play_sfx("coin_fall", 0.04, -2.0)
+		return
+	var coin: Control = wrap.get_node_or_null("Coin")
+	if coin == null:
+		await get_tree().create_timer(0.4).timeout
+		return
+	if _dice_coin_tween != null and _dice_coin_tween.is_valid():
+		_dice_coin_tween.kill()
+	# The spin tightens…
+	var fast := coin.create_tween().set_loops(4)
+	fast.tween_property(coin, "face_t", 0.06, 0.10) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	fast.tween_property(coin, "face_t", 1.0, 0.10) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	await get_tree().create_timer(0.82).timeout
+	# …then it leans, each lean deeper than the last.
+	var lean := coin.create_tween()
+	for a in [0.16, -0.22, 0.30]:
+		lean.tween_property(coin, "rotation", a, 0.16) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	await lean.finished
+	if bust:
+		# Past the point of no return: it topples through one last half-turn
+		# and lands flat — TAILS up (flipped while edge-on, so the swap is
+		# never seen), thickness and ground pool on. One hard clack.
+		var fall := coin.create_tween()
+		fall.tween_property(coin, "rotation", 1.35, 0.16) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		fall.parallel().tween_property(coin, "face_t", 0.06, 0.16)
+		fall.tween_callback(func () -> void:
+			if is_instance_valid(coin) and coin is CoinProp:
+				coin.tails = true
+				coin.lying = true)
+		fall.tween_property(coin, "rotation", 0.0, 0.10)
+		fall.parallel().tween_property(coin, "face_t", 1.0, 0.10)
+		fall.parallel().tween_property(coin, "position:y", coin.position.y + 12, 0.10)
+		await fall.finished
+		AudioBank.play_sfx("coin_fall", 0.04, -2.0)
+		await get_tree().create_timer(0.55).timeout
+	else:
+		var right := coin.create_tween()
+		right.tween_property(coin, "rotation", 0.0, 0.20) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		right.parallel().tween_property(coin, "face_t", 1.0, 0.20)
+		await right.finished
+		Motion.burst(self, coin.get_global_position() + coin.size * 0.5, "coin_spark")
+		await get_tree().create_timer(0.30).timeout
 
 
 ## Losing everything should feel like it: a short table-shake, a red wash over
@@ -3123,6 +4649,9 @@ func _toss_props() -> void:
 ## wash lies over the bust text, not under a rebuild.
 func _bust_feedback() -> void:
 	_sting("hit_hero")
+	# The table takes the hit through the shared trauma service — it gates on
+	# the dedicated screen-shake setting itself, and impulses compound.
+	GameTheme.shake_impulse(self, 0.35)
 	if UserSettings.reduce_motion:
 		return
 	var wash := ColorRect.new()
@@ -3133,50 +4662,5534 @@ func _bust_feedback() -> void:
 	var wt := wash.create_tween()
 	wt.tween_property(wash, "color:a", 0.0, 0.55).set_delay(0.05)
 	wt.tween_callback(wash.queue_free)
-	var shake := create_tween()
-	for off in [Vector2(9, 0), Vector2(-7, 2), Vector2(5, -2), Vector2.ZERO]:
-		shake.tween_property(self, "position", off, 0.05)
+
+
+## The positive counterpart to _bust_feedback: a warm gold wash + a light
+## shake for a game WON, so a payout lands with a flourish instead of just a
+## line of text. `pos` (global) optionally spits a coin burst there. Shake
+## gates on its own setting; the wash gates on reduce_motion.
+func _win_flourish(pos: Vector2 = Vector2.ZERO) -> void:
+	GameTheme.shake_impulse(self, 0.16)
+	if UserSettings.reduce_motion:
+		return
+	var wash := ColorRect.new()
+	wash.color = Color(0.86, 0.66, 0.28, 0.20)
+	wash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	wash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(wash)
+	var wt := wash.create_tween()
+	wt.tween_property(wash, "color:a", 0.0, 0.6).set_delay(0.05)
+	wt.tween_callback(wash.queue_free)
+	if pos != Vector2.ZERO:
+		Motion.burst(self, pos, "coin")
+
+
+## A consistent entrance for a minigame stage root: it settles in with a
+## small fade + scale-from-centre so the table arrives instead of popping.
+## Decorative — Reduce Motion just leaves it fully shown.
+func _stage_entrance(root: Control) -> void:
+	if root == null or not is_instance_valid(root) or UserSettings.reduce_motion:
+		return
+	root.pivot_offset = root.size * 0.5
+	root.modulate.a = 0.0
+	root.scale = Vector2(0.965, 0.965)
+	var tw := root.create_tween()
+	tw.tween_property(root, "modulate:a", 1.0, 0.24)
+	tw.parallel().tween_property(root, "scale", Vector2.ONE, 0.30) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+## The rest-state "you may touch this" cue: a TouchGlow ground-ring under a
+## clickable stage prop (2026-07-20 legibility pass — the stages mix
+## play-by-choice-column and play-by-clicking-props, and clickable props
+## looked identical to decorations until hovered). host must be a plain
+## Control wrap sized to the prop — NEVER the Button itself (a Control
+## child of a Button is never laid out); btn's hover drives the brighten.
+func _stage_touchable(host: Control, btn: BaseButton) -> void:
+	var g := TouchGlow.new()
+	g.position = Vector2(-6, -2)
+	g.size = host.size + Vector2(12, 8)
+	host.add_child(g)
+	host.move_child(g, 0)
+	btn.mouse_entered.connect(func():
+		if is_instance_valid(g):
+			g.hot = true)
+	btn.mouse_exited.connect(func():
+		if is_instance_valid(g):
+			g.hot = false)
+
+
+## The drawing of lots (docs/EVENT_PLAY_PITCH_20260718.md L3): every
+## roll_table commit resolves as a physical draw — an upturned helmet of
+## folded slips rises out of the dark, one lot comes up and unfolds, and
+## the page's ink lands as it fades. Pure theater OVER the already-built
+## result page (the outcome resolved before this runs); Reduce Motion never
+## calls it. Fire-and-forget from _show_result.
+func _play_lots_draw() -> void:
+	var root := Control.new()
+	root.name = "LotsBeat"
+	root.position = Vector2(1010, 330)
+	root.size = Vector2(300, 340)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.modulate.a = 0.0
+	add_child(root)
+	var helm := EventHelm.new()
+	helm.seed_text = "lots_" + _event_id
+	helm.dome_up = false
+	helm.slips = 4
+	helm.position = Vector2(75, 150)
+	helm.size = Vector2(150, 120)
+	root.add_child(helm)
+	var slip := PaperSlip.new()
+	slip.seed_text = "lot_" + _event_id
+	slip.position = Vector2(80, 130)
+	slip.size = Vector2(140, 84)
+	slip.pivot_offset = Vector2(70, 42)
+	slip.scale = Vector2(0.9, 0.08)
+	slip.rotation = 0.10
+	root.add_child(slip)
+	var t := root.create_tween()
+	t.tween_property(root, "modulate:a", 1.0, 0.22)
+	await t.finished
+	if not is_instance_valid(slip):
+		return
+	AudioBank.play_sfx("paper_draw", 0.06, -4.0)
+	var d := slip.create_tween()
+	d.tween_property(slip, "position:y", 34.0, 0.30) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	d.tween_property(slip, "scale", Vector2.ONE, 0.26) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	d.parallel().tween_property(slip, "rotation", -0.06, 0.26)
+	await d.finished
+	await get_tree().create_timer(0.55).timeout
+	if not is_instance_valid(root):
+		return
+	var out := root.create_tween()
+	out.tween_property(root, "modulate:a", 0.0, 0.30)
+	out.tween_callback(root.queue_free)
 
 
 func _on_dice_roll() -> void:
-	_sting("card_play", -4.0)
-	_toss_props()
-	if randf() < float(_dice_cfg.get("bust_pct", 1.0 / 3.0)):
+	if _dice_busy:
+		return
+	_dice_busy = true
+	# Bake then shade: resolve the whole throw FIRST, then let the props
+	# perform the resolved outcome. Nothing about the result rides on the
+	# animation — Reduce Motion collapses the beat to a reading pause.
+	var bust: bool = randf() < float(_dice_cfg.get("bust_pct", 1.0 / 3.0))
+	var gain: int = 0
+	if not bust:
+		if String(_dice_cfg.get("mode", "add")) == "double":
+			gain = _dice_pot
+		else:
+			gain = randi_range(int(_dice_cfg.get("gain_min", 18)),
+				int(_dice_cfg.get("gain_max", 34)))
+	if String(_dice_cfg.get("prop", "bones")) == "coin":
+		await _play_coin_call(bust)
+	else:
+		await _play_bone_cast(bust)
+	if bust:
 		_dice_pot = 0
 		_dice_prev_pot = -1
-		_show_result(_dice_text("bust_text",
-			"Skulls. The pot drains back into the pit, coin by coin, and the circle closes over it. The dead do not gloat. Much."))
+		var bust_receipt := _gamble_pay(_dice_cfg, false, 0)
+		_show_result(_combine_lines([_dice_text("bust_text",
+			"Skull. You lost the entire pot."), bust_receipt]))
 		_bust_feedback()
 		return
-	var gain: int = 0
 	if String(_dice_cfg.get("mode", "add")) == "double":
-		gain = _dice_pot
 		_dice_pot *= 2
 	else:
-		gain = randi_range(int(_dice_cfg.get("gain_min", 18)),
-			int(_dice_cfg.get("gain_max", 34)))
 		_dice_pot += gain
 	_sting("coin")
 	_build_dice_screen(_dice_text("grow_text",
-		"The bones land clean — {gain} more into the pot. The oldest legionary clicks his jaw, which you have learned is applause.", gain))
+		"Safe cast. Added {gain} gold to the pot.", gain))
 
 
 func _on_dice_bank() -> void:
-	RunState.gain_gold(_dice_pot)
-	_sting("coin")
+	if _dice_busy:
+		return
+	_dice_busy = true
+	var receipt := _gamble_pay(_dice_cfg, true, _dice_pot)
+	# The pot leaves the table the way it should: pocketed toward the ledger
+	# that just grew (top-right), not vanished by a screen swap.
+	if _dice_stage_heap != null and is_instance_valid(_dice_stage_heap) \
+			and not UserSettings.reduce_motion:
+		await Motion.pocket_away(_dice_stage_heap, Vector2(1470, 90))
 	_dice_prev_pot = -1
 	var line := _dice_text("bank_text",
-		"You bank {pot} gold and stand. A space stays open in the circle behind you. It is always open. That is the other rule.")
+		"Collected {pot} gold.")
 	# Big-pot payoff: banking past the threshold carries the table's own
 	# relic away with the gold (event relics — granted by name, never rolled).
-	var rid := String(_dice_cfg.get("bank_relic", ""))
-	if rid != "" and _dice_pot >= int(_dice_cfg.get("bank_relic_at", 0)) \
-			and not RunState.relics.has(rid):
-		RunState.add_relic(rid)
-		_result_relics.append(rid)
+	var rid := _gamble_bank_relic(_dice_cfg, _dice_pot)
+	if rid != "":
 		line += "\n\n" + _dice_text("bank_relic_text",
 			"Gained relic: %s." % RelicDB.get_relic(rid).name)
-	_show_result(line)
+	_show_result(_combine_lines([line, receipt]))
+
+
+# ── The Old Army Game (shell_game) — three helmets, one coin, honest ─────
+# The shell game engine (docs/EVENT_PLAY_PITCH_20260718.md XL): the coin
+# RIDES ITS HELMET through every swap, so the shuffle is honest by
+# construction — tracking it is the whole game, and an attentive player
+# genuinely beats the odds. The dented helm is the mercy rule: the coin
+# never STARTS under the crease, so it can never end there; losing the
+# thread leaves you a coin flip, not a guess of three. Swaps animate as
+# front/back crossing arcs at watchable speed (the pitch's "honest speed"
+# bar); Reduce Motion swaps snap position-to-position with reading pauses —
+# the game stays fair without continuous motion. Config:
+#   {stake, payout, swaps, open_text, win_text, lose_text, broke_text,
+#    seen_texts} — texts take {stake} / {payout}.
+
+var _shell_cfg: Dictionary = {}
+var _shell_helms: Array = []      # helm wrap Controls, by helm index
+var _shell_order: Array = []      # order[slot] = helm index
+var _shell_prize_helm: int = 1    # the coin rides this helm
+var _shell_dent_helm: int = 0     # the tell — never the prize, by rule
+var _shell_slots: Array = []      # slot base positions (stage-local)
+var _shell_coin: Control = null
+var _shell_root: Control = null
+var _shell_vbox: VBoxContainer = null
+var _shell_busy := true
+
+
+func _shell_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_shell_cfg, key,
+		String(_shell_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_shell_cfg.get("stake", 0)))) \
+		.replace("{payout}", str(int(_shell_cfg.get("payout", 0))))
+
+
+func _start_shell_game(effect: Dictionary) -> void:
+	_shell_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_shell_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	_shell_busy = true
+	_shell_vbox = _build_event_screen(_event_data.name,
+		_shell_text("open_text",
+			"Watch the coin under the middle helmet, then follow the shuffle."), 3)
+	_build_shell_stage()
+	_run_shell_shuffle()
+
+
+func _build_shell_stage() -> void:
+	_shell_helms = []
+	_shell_order = [0, 1, 2]
+	_shell_slots = [Vector2(42, 186), Vector2(202, 186), Vector2(362, 186)]
+	var root := Control.new()
+	root.name = "ShellStage"
+	root.position = Vector2(860, 210)
+	root.size = Vector2(560, 430)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_shell_root = root
+	var drum := CastPatch.new()
+	drum.seed_text = "drum_" + _event_id
+	drum.position = Vector2(10, 60)
+	drum.size = Vector2(540, 340)
+	root.add_child(drum)
+	# The coin — shown once, honestly, then hidden until the reveal. Added
+	# before the helms so a lifted helm uncovers it.
+	var coin := CoinProp.new()
+	coin.seed_text = "shell_" + _event_id
+	# CoinProp draws the lying squash, edge thickness, and ground pool itself.
+	coin.lying = true
+	# The blue seat plays for the clerk's own pay-token — worn smooth.
+	coin.worn = int(_shell_cfg.get("stake", 30)) == 0
+	coin.size = Vector2(34, 34)
+	coin.position = _shell_slots[1] + Vector2(60, 82)
+	root.add_child(coin)
+	_shell_coin = coin
+	# Helms: the coin starts under the MIDDLE one, in plain view; the dent
+	# goes to one of the others.
+	_shell_prize_helm = 1
+	_shell_dent_helm = 0 if randi() % 2 == 0 else 2
+	for h in range(3):
+		var wrap := Control.new()
+		wrap.name = "Helm%d" % h
+		wrap.position = _shell_slots[h]
+		wrap.size = Vector2(155, 122)
+		wrap.pivot_offset = Vector2(77, 100)
+		wrap.mouse_filter = Control.MOUSE_FILTER_PASS
+		root.add_child(wrap)
+		_shell_helms.append(wrap)
+		var helm := EventHelm.new()
+		helm.seed_text = "helm_%d_%s" % [h, _event_id]
+		helm.dome_up = true
+		helm.dented = h == _shell_dent_helm
+		helm.set_anchors_preset(Control.PRESET_FULL_RECT)
+		wrap.add_child(helm)
+		var btn := Button.new()
+		btn.flat = true
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		btn.mouse_filter = Control.MOUSE_FILTER_PASS
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		for st in ["normal", "hover", "pressed", "focus"]:
+			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+		btn.pressed.connect(_on_shell_pick.bind(h))
+		wrap.add_child(btn)
+		GameTheme.attach_rich_hover(wrap, "Lift this helmet",
+			"This is the dented helmet." if h == _shell_dent_helm
+				else "The coin is under one of the three helmets.",
+			"Click to lift", GameTheme.KEYWORD_GOLD, 1.04)
+
+
+func _run_shell_shuffle() -> void:
+	# The show: the prize helm starts lifted over the coin, drops, and the
+	# passes begin — quickening as he warms to it.
+	var pw: Control = _shell_helms[_shell_prize_helm]
+	if not UserSettings.reduce_motion:
+		pw.position = _shell_slots[1] + Vector2(0, -56)
+		await get_tree().create_timer(0.85).timeout
+		if _shell_root == null or not is_instance_valid(_shell_root):
+			return
+		var drop := pw.create_tween()
+		drop.tween_property(pw, "position", _shell_slots[1], 0.18) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		drop.tween_property(pw, "scale", Vector2(1.06, 0.94), 0.05)
+		drop.tween_property(pw, "scale", Vector2.ONE, 0.10)
+		await drop.finished
+	else:
+		await get_tree().create_timer(0.8).timeout
+	if _shell_root == null or not is_instance_valid(_shell_root):
+		return
+	if _shell_coin != null and is_instance_valid(_shell_coin):
+		_shell_coin.visible = false
+	AudioBank.play_sfx("bone_settle", 0.06, -6.0)
+	await get_tree().create_timer(0.25).timeout
+	var n: int = int(_shell_cfg.get("swaps", 7))
+	for s in range(n):
+		if _shell_root == null or not is_instance_valid(_shell_root):
+			return
+		var a := randi() % 3
+		var b := (a + 1 + randi() % 2) % 3
+		await _shell_swap(a, b,
+			lerpf(0.44, 0.28, float(s) / maxf(1.0, float(n - 1))))
+	_shell_busy = false
+	_arm_shell_rows()
+
+
+func _shell_swap(slot_a: int, slot_b: int, dur: float) -> void:
+	var ha: Control = _shell_helms[_shell_order[slot_a]]
+	var hb: Control = _shell_helms[_shell_order[slot_b]]
+	var pa: Vector2 = _shell_slots[slot_a]
+	var pb: Vector2 = _shell_slots[slot_b]
+	var tmp: int = _shell_order[slot_a]
+	_shell_order[slot_a] = _shell_order[slot_b]
+	_shell_order[slot_b] = tmp
+	AudioBank.play_sfx("helm_slide", 0.08, -8.0)
+	if UserSettings.reduce_motion:
+		ha.position = pb
+		hb.position = pa
+		await get_tree().create_timer(maxf(dur, 0.40)).timeout
+		return
+	# One passes in front (dips toward the player), one behind — the cross
+	# reads as hands moving, not a teleport.
+	ha.z_index = 1
+	hb.z_index = 0
+	var ta := ha.create_tween()
+	ta.tween_property(ha, "position", pa.lerp(pb, 0.5) + Vector2(0, 16), dur * 0.5) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	ta.tween_property(ha, "position", pb, dur * 0.5) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	var tb := hb.create_tween()
+	tb.tween_property(hb, "position", pa.lerp(pb, 0.5) + Vector2(0, -14), dur * 0.5) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	tb.tween_property(hb, "position", pa, dur * 0.5) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	await ta.finished
+	await get_tree().create_timer(0.05).timeout
+
+
+## After the shuffle the ladder gets its accessible duplicates — one row
+## per SLOT, same handlers as the helmet clicks.
+func _arm_shell_rows() -> void:
+	if _shell_vbox == null or not is_instance_valid(_shell_vbox):
+		return
+	var names := ["Lift the left helmet", "Lift the middle helmet",
+		"Lift the right helmet"]
+	for slot in range(3):
+		var helm_idx: int = _shell_order[slot]
+		var sub := ""
+		if helm_idx == _shell_dent_helm:
+			sub = "This is the dented helmet."
+		_shell_vbox.add_child(_make_frameless_choice(names[slot], sub, "",
+			64, _on_shell_pick.bind(helm_idx)))
+
+
+func _show_shell_coin(slot: int) -> void:
+	if _shell_coin == null or not is_instance_valid(_shell_coin):
+		return
+	_shell_coin.position = _shell_slots[slot] + Vector2(60, 82)
+	_shell_coin.visible = true
+
+
+func _on_shell_pick(helm_idx: int) -> void:
+	if _shell_busy:
+		return
+	_shell_busy = true
+	var wrap: Control = _shell_helms[helm_idx]
+	var win: bool = helm_idx == _shell_prize_helm
+	var slot: int = _shell_order.find(helm_idx)
+	var rm := UserSettings.reduce_motion
+	AudioBank.play_sfx("card_play", 0.05, -4.0)
+	if not rm and is_instance_valid(wrap):
+		var up := wrap.create_tween()
+		up.tween_property(wrap, "position",
+			_shell_slots[slot] + Vector2(0, -52), 0.22) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		up.parallel().tween_property(wrap, "rotation",
+			0.10 if slot < 2 else -0.10, 0.22)
+		await up.finished
+	if win:
+		_show_shell_coin(slot)
+		_sting("coin")
+		if not rm and _shell_root != null and is_instance_valid(_shell_root):
+			Motion.burst(self, _shell_root.get_global_position()
+				+ _shell_slots[slot] + Vector2(77, 86), "coin_spark")
+		await get_tree().create_timer(0.55).timeout
+		# Honesty on the house: the other two lift empty before he pays.
+		if not rm:
+			for h in range(3):
+				if h != helm_idx and is_instance_valid(_shell_helms[h]):
+					var os: int = _shell_order.find(h)
+					var ot: Tween = (_shell_helms[h] as Control).create_tween()
+					ot.tween_property(_shell_helms[h], "position",
+						_shell_slots[os] + Vector2(0, -40), 0.20) \
+						.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			await get_tree().create_timer(0.60).timeout
+		var receipt := _gamble_pay(_shell_cfg, true,
+			int(_shell_cfg.get("payout", 0)), "coin_pour")
+		_win_flourish()
+		_show_result(_combine_lines([_shell_text("win_text",
+			"Correct. Won {payout} gold."), receipt]))
+	else:
+		await get_tree().create_timer(0.45).timeout
+		# The honest reveal: he lifts the right one himself.
+		var pslot: int = _shell_order.find(_shell_prize_helm)
+		var pw: Control = _shell_helms[_shell_prize_helm]
+		if not rm and is_instance_valid(pw):
+			var pu := pw.create_tween()
+			pu.tween_property(pw, "position",
+				_shell_slots[pslot] + Vector2(0, -44), 0.20) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		_show_shell_coin(pslot)
+		_sting("hit_hero", -4.0)
+		await get_tree().create_timer(0.75).timeout
+		var lose_receipt := _gamble_pay(_shell_cfg, false, 0)
+		_show_result(_combine_lines([_shell_text("lose_text",
+			"Wrong helmet. You lost the stake."), lose_receipt]))
+
+
+# ── The Short Straw (straw_game) — misère Nim against the dead watch ─────
+# A real strategy game, honest by construction: every straw is on the
+# table, the count prints big, and there is NO roll anywhere. The dead play
+# PERFECT misère Nim (take 1–3; the last straw stands the watch), and the
+# opening count only ever deals first-player-winnable positions (never
+# ≡ 1 mod 4) — so the game is a learnable puzzle: perfect play always
+# wins, one blunder and the dead never let you back in. You take from the
+# RIGHT end of the row; hovering telegraphs the exact straws a click would
+# take. Both sides' spent straws pile at their edge of the plate, so the
+# whole history stays readable. Ladder rows (take one/two/three) are the
+# accessible duplicates of the same handler. Config:
+#   {counts: [..], win_effects: [..], lose_effects: [..],
+#    open_text, win_text, lose_text, seen_texts} — texts take {count}.
+
+var _straw_cfg: Dictionary = {}
+var _straw_count: int = 0
+var _straw_nodes: Array = []      # live straws, left→right
+var _straw_taken: int = 0         # retired to either pile (pile jitter seed)
+var _straw_root: Control = null
+var _straw_figure: Label = null
+var _straw_status: Label = null
+var _straw_busy := true
+
+
+func _straw_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_straw_cfg, key,
+		String(_straw_cfg.get(key, fallback)))
+	return raw.replace("{count}", str(_straw_count))
+
+
+func _start_straw_game(effect: Dictionary) -> void:
+	_straw_cfg = effect
+	var counts: Array = effect.get("counts", [12, 14, 15, 16])
+	_straw_count = int(counts[randi() % counts.size()])
+	_straw_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_straw_text("open_text",
+			"There are {count} straws. Take 1, 2, or 3. Whoever takes the last straw loses."), 3)
+	_build_straw_stage()
+	var row_labels := ["Take one straw", "Take two straws", "Take three straws"]
+	for k in range(1, 4):
+		vbox.add_child(_make_frameless_choice(row_labels[k - 1], "", "", 56,
+			_on_straw_take.bind(k)))
+	_straw_busy = false
+
+
+func _build_straw_stage() -> void:
+	_straw_nodes = []
+	_straw_taken = 0
+	var root := Control.new()
+	root.name = "StrawStage"
+	root.position = Vector2(860, 210)
+	root.size = Vector2(560, 430)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_straw_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "watch_" + _event_id
+	patch.chalk = "line"
+	patch.position = Vector2(10, 60)
+	patch.size = Vector2(540, 340)
+	root.add_child(patch)
+	# The row, centered in the light pool; you draw from the RIGHT end.
+	var start_x := 270.0 - float(_straw_count - 1) * 14.0
+	for i in range(_straw_count):
+		var s := BoneStraw.new()
+		s.seed_text = "straw_%d_%s" % [i, _event_id]
+		s.size = Vector2(16, 76)
+		s.pivot_offset = Vector2(8, 38)
+		s.position = Vector2(start_x + float(i) * 28.0 + fmod(float(i) * 3.7, 4.0) - 10.0,
+			178.0 + fmod(float(i) * 2.3, 9.0))
+		s.rotation = fmod(float(i) * 0.83, 0.16) - 0.08
+		root.add_child(s)
+		_straw_nodes.append(s)
+		var btn := Button.new()
+		btn.flat = true
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		btn.offset_left = -6.0
+		btn.offset_right = 6.0
+		btn.mouse_filter = Control.MOUSE_FILTER_PASS
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		for st in ["normal", "hover", "pressed", "focus"]:
+			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+		btn.pressed.connect(_on_straw_clicked.bind(s))
+		btn.mouse_entered.connect(_on_straw_hover.bind(s))
+		btn.mouse_exited.connect(_clear_straw_lights)
+		s.add_child(btn)
+	# The honest arithmetic: the count prints big in the plate's far shadow.
+	var figure := Label.new()
+	figure.text = str(_straw_count)
+	figure.add_theme_font_size_override("font_size", 42)
+	figure.add_theme_color_override("font_color", Color(0.92, 0.88, 0.80))
+	figure.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	figure.add_theme_constant_override("outline_size", 5)
+	if GameTheme.font_display:
+		figure.add_theme_font_override("font", GameTheme.font_display)
+	figure.position = Vector2(350, 78)
+	figure.size = Vector2(170, 52)
+	figure.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	figure.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(figure)
+	_straw_figure = figure
+	var status := Label.new()
+	status.text = "THE LIVING DRAW FIRST"
+	status.add_theme_font_size_override("font_size", 18)
+	status.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
+	status.position = Vector2(320, 132)
+	status.size = Vector2(230, 24)
+	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	status.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(status)
+	_straw_status = status
+	GameTheme.attach_rich_hover(patch, "The drawing",
+		"Take 1, 2, or 3 straws. Whoever takes the last straw loses.",
+		"Click a straw to take it and every straw to its right.", Color(0.92, 0.88, 0.80), 1.0)
+
+
+func _on_straw_hover(s: Control) -> void:
+	if _straw_busy:
+		return
+	_clear_straw_lights()
+	var j := _straw_nodes.find(s)
+	if j < 0:
+		return
+	var k := _straw_nodes.size() - j
+	if k > 3:
+		return
+	for i in range(j, _straw_nodes.size()):
+		_straw_nodes[i].lit = true
+		_straw_nodes[i].queue_redraw()
+
+
+func _clear_straw_lights() -> void:
+	for s in _straw_nodes:
+		if is_instance_valid(s) and s.lit:
+			s.lit = false
+			s.queue_redraw()
+
+
+func _on_straw_clicked(s: Control) -> void:
+	var j := _straw_nodes.find(s)
+	if j < 0:
+		return
+	var k := _straw_nodes.size() - j
+	if k > 3:
+		return
+	_on_straw_take(k)
+
+
+## Perfect misère play: leave the mover a count ≡ 1 (mod 4); from a lost
+## position, stall with one straw and wait for the blunder.
+func _straw_ai_take() -> int:
+	if _straw_count == 1:
+		return 1
+	var r := (_straw_count - 1) % 4
+	return 1 if r == 0 else r
+
+
+func _retire_straws(k: int, to_dead: bool) -> void:
+	var rm := UserSettings.reduce_motion
+	AudioBank.play_sfx("bone_settle", 0.08, -6.0)
+	for i in range(k):
+		if _straw_nodes.is_empty():
+			break
+		var s = _straw_nodes.pop_back()
+		if not is_instance_valid(s):
+			continue
+		var n := _straw_taken
+		_straw_taken += 1
+		var dest: Vector2
+		var rot: float
+		if to_dead:
+			dest = Vector2(44.0 + fmod(float(n) * 13.0, 34.0),
+				84.0 + fmod(float(n) * 7.0, 20.0))
+			rot = -1.45 + fmod(float(n) * 0.37, 0.24)
+		else:
+			dest = Vector2(420.0 + fmod(float(n) * 13.0, 34.0),
+				330.0 + fmod(float(n) * 7.0, 20.0))
+			rot = 1.45 - fmod(float(n) * 0.37, 0.24)
+		if rm:
+			s.position = dest
+			s.rotation = rot
+		else:
+			var tw: Tween = s.create_tween()
+			tw.tween_interval(0.07 * i)
+			tw.tween_property(s, "position", dest, 0.26) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN_OUT)
+			tw.parallel().tween_property(s, "rotation", rot, 0.26)
+	await get_tree().create_timer(0.34 if rm else 0.30 + 0.07 * k).timeout
+
+
+func _update_straw_hud(caption: String) -> void:
+	if _straw_figure != null and is_instance_valid(_straw_figure):
+		_straw_figure.text = str(_straw_count)
+	if _straw_status != null and is_instance_valid(_straw_status):
+		_straw_status.text = caption
+
+
+func _on_straw_take(k: int) -> void:
+	if _straw_busy or _straw_count <= 0:
+		return
+	k = clampi(k, 1, mini(3, _straw_count))
+	_straw_busy = true
+	_clear_straw_lights()
+	await _retire_straws(k, false)
+	_straw_count -= k
+	_update_straw_hud("THEIR DRAW")
+	if _straw_root == null or not is_instance_valid(_straw_root):
+		return
+	if _straw_count <= 0:
+		await _finish_straw_game(false)
+		return
+	await get_tree().create_timer(0.65).timeout
+	if _straw_root == null or not is_instance_valid(_straw_root):
+		return
+	var ai_k := _straw_ai_take()
+	await _retire_straws(ai_k, true)
+	_straw_count -= ai_k
+	_update_straw_hud("YOUR DRAW")
+	if _straw_count <= 0:
+		await _finish_straw_game(true)
+		return
+	_straw_busy = false
+
+
+func _finish_straw_game(win: bool) -> void:
+	_update_straw_hud("ROUND OVER")
+	await get_tree().create_timer(0.55).timeout
+	# The arm this whole funnel was generalised FROM (see `_gamble_pay`).
+	var receipt := _gamble_pay(_straw_cfg, win, 0)
+	if win:
+		_sting("coin")
+		_win_flourish()
+	else:
+		_sting("hit_hero", -4.0)
+	_show_result(_combine_lines([
+		_straw_text("win_text",
+			"The corporal takes the last straw. You win.") if win
+		else _straw_text("lose_text",
+			"You take the last straw. You lose."),
+		receipt]))
+
+
+# ── The Widow's Cut (cut_game) — cut high cards with the dead, best of three ─
+# The high-card duel, played across a mourning-woman's black cloth: she deals
+# her dead soldier's own paybook, and you cut against him, best of three. The
+# only skill is the ONE swap you hold for the match — trade a low chit for the
+# next off the deck. HONEST BY CONSTRUCTION: one real deck of distinct chits
+# (1..13), shuffled once and drawn WITHOUT replacement; the dead's chit is
+# drawn from the SAME remaining deck only at the reveal, so the odds shown for
+# your chit ("beats M of the N left") are exactly the chance the dead cuts
+# lower. Win two cuts to take the pot; a clean 2-0 pays a bonus.
+#   Config: {stake, pay, sweep, open_text, win_text, sweep_text, lose_text,
+#            broke_text, seen_texts} — texts take {stake}/{pay}.
+
+var _cut_cfg: Dictionary = {}
+var _cut_deck: Array = []
+var _cut_pos := 0                   # next undrawn card
+var _cut_round := 0                 # 0-based round index
+var _cut_you := 0                   # rounds you have won
+var _cut_dead := 0                  # rounds the dead has won
+var _cut_swaps := 1                 # swaps left this match
+var _cut_your_rank := 0
+var _cut_pay := 0
+var _cut_root: Control = null
+var _cut_rows: VBoxContainer = null
+var _cut_caption: Label = null
+var _cut_tally: Label = null
+var _cut_odds: Label = null
+var _cut_swap_lbl: Label = null
+var _cut_your_chit: CoinProp = null
+var _cut_your_num: Label = null
+var _cut_dead_chit: CoinProp = null
+var _cut_dead_num: Label = null
+var _cut_busy := true
+
+const CUT_ROUNDS := 3
+const CUT_WIN := 2
+const CUT_COOL := Color(0.80, 0.85, 0.95)   # the dead's chit tint (cold coin)
+
+
+func _cut_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_cut_cfg, key,
+		String(_cut_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_cut_cfg.get("stake", 0)))) \
+		.replace("{pay}", str(_cut_pay))
+
+
+func _start_cut_game(effect: Dictionary) -> void:
+	_cut_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_cut_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	_cut_deck = []
+	for r in range(1, 14):
+		_cut_deck.append(r)
+	_cut_deck.shuffle()
+	_cut_pos = 0
+	_cut_round = 0
+	_cut_you = 0
+	_cut_dead = 0
+	_cut_swaps = 1
+	_cut_pay = 0
+	_cut_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_cut_text("open_text",
+			"Play best of three. Higher card wins each round. You may replace one card during the match."), 4)
+	_cut_rows = VBoxContainer.new()
+	_cut_rows.add_theme_constant_override("separation", 12)
+	vbox.add_child(_cut_rows)
+	_build_cut_stage()
+	_cut_deal_round()
+
+
+func _build_cut_stage() -> void:
+	var root := Control.new()
+	root.name = "CutStage"
+	root.position = Vector2(860, 200)
+	root.size = Vector2(560, 450)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_cut_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "cut_" + _event_id
+	patch.chalk = "line"
+	patch.position = Vector2(10, 56)
+	patch.size = Vector2(540, 356)
+	root.add_child(patch)
+	var caption := Label.new()
+	caption.text = "ROUND 1 OF 3"
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", Color(0.92, 0.86, 0.70))
+	caption.position = Vector2(30, 74)
+	caption.size = Vector2(500, 24)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(caption)
+	_cut_caption = caption
+	var tally := Label.new()
+	tally.text = "YOU  0      —      0  THE DEAD"
+	tally.add_theme_font_size_override("font_size", 19)
+	tally.add_theme_color_override("font_color", Color(0.86, 0.80, 0.66))
+	tally.position = Vector2(30, 102)
+	tally.size = Vector2(500, 26)
+	tally.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	tally.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(tally)
+	_cut_tally = tally
+	# The two facing chits: yours (warm gold, left) and the dead's (cold, right).
+	_cut_your_chit = _cut_make_chit(root, Vector2(118, 178), false)
+	_cut_your_num = _cut_your_chit.get_node("Num")
+	_cut_dead_chit = _cut_make_chit(root, Vector2(322, 178), true)
+	_cut_dead_num = _cut_dead_chit.get_node("Num")
+	var you_lbl := _cut_side_label(root, "YOU", Vector2(118, 152))
+	you_lbl.add_theme_color_override("font_color", Color(0.90, 0.80, 0.46))
+	var dead_lbl := _cut_side_label(root, "THE DEAD", Vector2(322, 152))
+	dead_lbl.add_theme_color_override("font_color", Color(0.72, 0.78, 0.88))
+	# The "cut against" mark between the two hands.
+	var vs := Label.new()
+	vs.text = "cut"
+	vs.add_theme_font_size_override("font_size", 16)
+	vs.add_theme_color_override("font_color", Color(0.66, 0.60, 0.50))
+	vs.position = Vector2(238, 228)
+	vs.size = Vector2(64, 22)
+	vs.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vs.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(vs)
+	var odds := Label.new()
+	odds.add_theme_font_size_override("font_size", 18)
+	odds.add_theme_color_override("font_color", Color(0.84, 0.78, 0.64))
+	odds.position = Vector2(30, 312)
+	odds.size = Vector2(500, 24)
+	odds.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	odds.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(odds)
+	_cut_odds = odds
+	var swap_lbl := Label.new()
+	swap_lbl.add_theme_font_size_override("font_size", 15)
+	swap_lbl.add_theme_color_override("font_color", Color(0.70, 0.64, 0.52))
+	swap_lbl.position = Vector2(30, 340)
+	swap_lbl.size = Vector2(500, 20)
+	swap_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	swap_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(swap_lbl)
+	_cut_swap_lbl = swap_lbl
+	_stage_entrance(root)
+	GameTheme.attach_rich_hover(patch, "The widow's cloth",
+		"Higher card wins each round. Win two rounds to win. You may replace one card during the match.",
+		"Play your card or use your one replacement.", Color(0.86, 0.82, 0.72), 1.0)
+
+
+func _cut_make_chit(root: Control, pos: Vector2, cold: bool) -> CoinProp:
+	var wrap := Control.new()
+	wrap.position = pos
+	wrap.size = Vector2(124, 124)
+	wrap.pivot_offset = Vector2(62, 62)
+	wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if cold:
+		wrap.modulate = CUT_COOL
+	root.add_child(wrap)
+	var coin := CoinProp.new()
+	coin.seed_text = ("cutdead_" if cold else "cutyou_") + _event_id
+	coin.worn = true
+	coin.set_anchors_preset(Control.PRESET_FULL_RECT)
+	wrap.add_child(coin)
+	var num := Label.new()
+	num.name = "Num"
+	num.add_theme_font_size_override("font_size", 64)
+	num.add_theme_color_override("font_color", Color(0.20, 0.13, 0.05))
+	if GameTheme.font_display:
+		num.add_theme_font_override("font", GameTheme.font_display)
+	num.set_anchors_preset(Control.PRESET_FULL_RECT)
+	num.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	num.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	num.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Num rides ON the coin (so get_node("Num") resolves and the cool modulate
+	# on the wrap tints both together); the coin keeps a back-ref to its wrap
+	# for the swap pop tween.
+	coin.add_child(num)
+	coin.set_meta("wrap", wrap)
+	return coin
+
+
+func _cut_side_label(root: Control, text: String, pos: Vector2) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", 16)
+	l.position = pos
+	l.size = Vector2(124, 22)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(l)
+	return l
+
+
+## Deal your chit for the round face-up; the dead's stays hidden until reveal.
+func _cut_deal_round() -> void:
+	_cut_busy = true
+	if _cut_pos >= _cut_deck.size():
+		# Safety: reshuffle a fresh deck if the paybook runs thin (rare).
+		_cut_deck.shuffle()
+		_cut_pos = 0
+	_cut_your_rank = int(_cut_deck[_cut_pos])
+	_cut_pos += 1
+	if _cut_your_num != null and is_instance_valid(_cut_your_num):
+		_cut_your_num.text = str(_cut_your_rank)
+	if _cut_dead_num != null and is_instance_valid(_cut_dead_num):
+		_cut_dead_num.text = "?"
+	if _cut_caption != null and is_instance_valid(_cut_caption):
+		_cut_caption.text = "ROUND %d OF %d · YOUR CUT" % [_cut_round + 1, CUT_ROUNDS]
+	_cut_refresh_odds()
+	_cut_arm_rows()
+
+
+func _cut_beats_left() -> Vector2i:
+	var lower := 0
+	var total := 0
+	for i in range(_cut_pos, _cut_deck.size()):
+		total += 1
+		if int(_cut_deck[i]) < _cut_your_rank:
+			lower += 1
+	return Vector2i(lower, total)
+
+
+func _cut_refresh_odds() -> void:
+	if _cut_tally != null and is_instance_valid(_cut_tally):
+		_cut_tally.text = "YOU  %d      —      %d  THE DEAD" % [_cut_you, _cut_dead]
+	var b := _cut_beats_left()
+	if _cut_odds != null and is_instance_valid(_cut_odds):
+		if b.y <= 0:
+			_cut_odds.text = "your %d — the deck is spent" % _cut_your_rank
+		else:
+			_cut_odds.text = "your %d beats %d of the %d left in the deck" % [
+				_cut_your_rank, b.x, b.y]
+	if _cut_swap_lbl != null and is_instance_valid(_cut_swap_lbl):
+		_cut_swap_lbl.text = ("1 swap in hand" if _cut_swaps > 0
+			else "no swaps left")
+
+
+func _cut_arm_rows() -> void:
+	if _cut_rows == null or not is_instance_valid(_cut_rows):
+		return
+	_cut_busy = false
+	for ch in _cut_rows.get_children():
+		ch.queue_free()
+	_cut_rows.add_child(_make_frameless_choice("Play the cut",
+		"Reveal the opponent's card against your %d. Higher card wins." % _cut_your_rank,
+		"", 52, _on_cut_play))
+	if _cut_swaps > 0:
+		_cut_rows.add_child(_make_frameless_choice("Swap your card  (1 left)",
+			"Replace your %d with the next card in the deck." % _cut_your_rank,
+			"", 52, _on_cut_swap))
+
+
+func _on_cut_swap() -> void:
+	if _cut_busy or _cut_swaps <= 0:
+		return
+	if _cut_pos >= _cut_deck.size():
+		return
+	_cut_busy = true
+	_cut_swaps -= 1
+	AudioBank.play_sfx("coin", 0.05, -8.0)
+	_cut_your_rank = int(_cut_deck[_cut_pos])
+	_cut_pos += 1
+	if _cut_your_num != null and is_instance_valid(_cut_your_num):
+		_cut_your_num.text = str(_cut_your_rank)
+	if not UserSettings.reduce_motion and _cut_your_chit != null \
+			and is_instance_valid(_cut_your_chit):
+		var yw = _cut_your_chit.get_meta("wrap")
+		if is_instance_valid(yw):
+			var tw: Tween = yw.create_tween()
+			tw.tween_property(yw, "scale", Vector2(1.10, 1.10), 0.08)
+			tw.tween_property(yw, "scale", Vector2.ONE, 0.16) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_cut_refresh_odds()
+	_cut_arm_rows()
+
+
+func _on_cut_play() -> void:
+	if _cut_busy:
+		return
+	_cut_busy = true
+	for ch in _cut_rows.get_children():
+		ch.queue_free()
+	if _cut_pos >= _cut_deck.size():
+		_cut_deck.shuffle()
+		_cut_pos = 0
+	var dead_rank := int(_cut_deck[_cut_pos])
+	_cut_pos += 1
+	await _cut_reveal(dead_rank)
+	var you_win := _cut_your_rank > dead_rank
+	if you_win:
+		_cut_you += 1
+	else:
+		_cut_dead += 1
+	if _cut_caption != null and is_instance_valid(_cut_caption):
+		_cut_caption.text = ("YOU WIN THE ROUND WITH %d" % _cut_your_rank) if you_win \
+			else ("THE OPPONENT WINS WITH %d" % dead_rank)
+	_cut_refresh_odds()
+	if you_win:
+		_sting("coin", -4.0)
+	else:
+		_sting("hit_hero", -10.0)
+	await get_tree().create_timer(0.9).timeout
+	if _cut_you >= CUT_WIN or _cut_dead >= CUT_WIN or _cut_round + 1 >= CUT_ROUNDS:
+		_cut_end_match()
+		return
+	_cut_round += 1
+	_cut_deal_round()
+
+
+func _cut_reveal(dead_rank: int) -> void:
+	if _cut_dead_chit == null or not is_instance_valid(_cut_dead_chit):
+		return
+	if UserSettings.reduce_motion:
+		if _cut_dead_num != null and is_instance_valid(_cut_dead_num):
+			_cut_dead_num.text = str(dead_rank)
+		await get_tree().create_timer(0.5).timeout
+		return
+	AudioBank.play_sfx("coin", 0.05, -6.0)
+	var t := _cut_dead_chit.create_tween()
+	t.tween_property(_cut_dead_chit, "face_t", 0.05, 0.14) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	t.parallel().tween_property(_cut_dead_num, "modulate:a", 0.0, 0.11)
+	t.tween_callback(func():
+		if _cut_dead_num != null and is_instance_valid(_cut_dead_num):
+			_cut_dead_num.text = str(dead_rank))
+	t.tween_property(_cut_dead_chit, "face_t", 1.0, 0.17) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	t.parallel().tween_property(_cut_dead_num, "modulate:a", 1.0, 0.15)
+	await t.finished
+	await get_tree().create_timer(0.2).timeout
+
+
+func _cut_end_match() -> void:
+	var won := _cut_you > _cut_dead
+	if won:
+		var sweep := _cut_dead == 0
+		_cut_pay = int(_cut_cfg.get("sweep", 85)) if sweep \
+			else int(_cut_cfg.get("pay", 55))
+		RunState.gain_gold(_cut_pay)
+		_sting("coin_pour")
+		if _cut_your_chit != null and is_instance_valid(_cut_your_chit):
+			_win_flourish(_cut_your_chit.get_global_position() + _cut_your_chit.size * 0.5)
+		else:
+			_win_flourish()
+		if sweep:
+			_show_result(_cut_text("sweep_text",
+				"You won the first two rounds. Gained {pay} gold."))
+		else:
+			_show_result(_cut_text("win_text",
+				"You won the match. Gained {pay} gold."))
+	else:
+		_bust_feedback()
+		_show_result(_cut_text("lose_text",
+			"You lost the match and the stake."))
+
+
+# ── The Courier's Satchel (sack_game) — the counting game ────────────────
+# Informed push-your-luck: draw bone pay-chits (three each of 1–6) from the
+# drowned courier's satchel toward the target; the TallySlate chalks what's
+# still in the bag after every draw, so the odds are never hidden — only
+# unread. Bust over the target loses the stake; stopping pays by tier.
+# Bake then shade: each chit comes off the real multiset before it
+# animates. Config:
+#   {stake, target (13), pay: [[floor, gold] high→low], open_text,
+#    win_text, perfect_text, flat_text, bust_text, broke_text, seen_texts}
+#   — texts take {stake} / {sum} / {pay} / {target}.
+
+var _sack_cfg: Dictionary = {}
+var _sack_bag: Array = []
+var _sack_sum := 0
+var _sack_drawn := 0
+var _sack_root: Control = null
+var _sack_slate: Control = null
+var _sack_figure: Label = null
+var _sack_busy := true
+
+
+func _sack_text(key: String, fallback: String, pay: int = 0) -> String:
+	var raw := _seen_text_override(_sack_cfg, key,
+		String(_sack_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_sack_cfg.get("stake", 0)))) \
+		.replace("{sum}", str(_sack_sum)).replace("{pay}", str(pay)) \
+		.replace("{target}", str(int(_sack_cfg.get("target", 13))))
+
+
+func _start_sack_game(effect: Dictionary) -> void:
+	_sack_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_sack_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	_sack_bag = []
+	for v in range(1, 7):
+		for _i in range(3):
+			_sack_bag.append(v)
+	_sack_sum = 0
+	_sack_drawn = 0
+	_sack_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_sack_text("open_text",
+			"Draw cards toward {target}. Stop at any time. Going over loses the stake."), 2)
+	_build_sack_stage()
+	vbox.add_child(_make_frameless_choice("Draw a token",
+		"Draw toward {target}. Do not go over.".replace("{target}",
+			str(int(effect.get("target", 13)))),
+		"The satchel is colder than the evening is.", 74, _on_sack_draw))
+	vbox.add_child(_make_frameless_choice("Stop and take the reward",
+		"Stop now. Totals closer to {target} pay more.".replace("{target}",
+			str(int(effect.get("target", 13)))),
+		"Stop now and take the reward for your total.", 74, _on_sack_stop))
+	_sack_busy = false
+
+
+func _build_sack_stage() -> void:
+	var root := Control.new()
+	root.name = "SackStage"
+	root.position = Vector2(860, 210)
+	root.size = Vector2(560, 430)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_sack_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "bank_" + _event_id
+	patch.position = Vector2(10, 60)
+	patch.size = Vector2(540, 340)
+	root.add_child(patch)
+	var sack := PaySack.new()
+	sack.seed_text = "sack_" + _event_id
+	sack.position = Vector2(36, 240)
+	sack.size = Vector2(150, 144)
+	root.add_child(sack)
+	var sack_btn := Button.new()
+	sack_btn.flat = true
+	sack_btn.focus_mode = Control.FOCUS_NONE
+	sack_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+	sack_btn.mouse_filter = Control.MOUSE_FILTER_PASS
+	sack_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	for st in ["normal", "hover", "pressed", "focus"]:
+		sack_btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+	sack_btn.pressed.connect(_on_sack_draw)
+	var sack_wrap := Control.new()
+	sack_wrap.position = sack.position
+	sack_wrap.size = sack.size
+	sack_wrap.mouse_filter = Control.MOUSE_FILTER_PASS
+	root.add_child(sack_wrap)
+	sack_wrap.add_child(sack_btn)
+	GameTheme.attach_rich_hover(sack_wrap, "The satchel",
+		"Draw one card and add it to your total.", "Click to draw",
+		Color(0.92, 0.88, 0.80), 1.04)
+	var slate := TallySlate.new()
+	slate.seed_text = "slate_" + _event_id
+	slate.position = Vector2(316, 66)
+	slate.size = Vector2(214, 106)
+	root.add_child(slate)
+	_sack_slate = slate
+	var figure := Label.new()
+	figure.text = "0"
+	figure.add_theme_font_size_override("font_size", 42)
+	figure.add_theme_color_override("font_color", Color(0.92, 0.88, 0.80))
+	figure.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	figure.add_theme_constant_override("outline_size", 5)
+	if GameTheme.font_display:
+		figure.add_theme_font_override("font", GameTheme.font_display)
+	figure.position = Vector2(46, 78)
+	figure.size = Vector2(150, 52)
+	figure.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	figure.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(figure)
+	_sack_figure = figure
+
+
+func _sack_update_slate() -> void:
+	if _sack_slate == null or not is_instance_valid(_sack_slate):
+		return
+	var counts: Array = [0, 0, 0, 0, 0, 0]
+	for v in _sack_bag:
+		counts[int(v) - 1] += 1
+	_sack_slate.remaining = counts
+	_sack_slate.queue_redraw()
+	if _sack_figure != null and is_instance_valid(_sack_figure):
+		_sack_figure.text = str(_sack_sum)
+
+
+func _on_sack_draw() -> void:
+	if _sack_busy or _sack_bag.is_empty():
+		return
+	_sack_busy = true
+	# Bake: the chit leaves the real multiset before anything moves.
+	var v: int = _sack_bag.pop_at(randi() % _sack_bag.size())
+	_sack_sum += v
+	var tok := PayToken.new()
+	tok.seed_text = "chit_%d_%s" % [_sack_drawn, _event_id]
+	tok.value = v
+	tok.size = Vector2(46, 46)
+	tok.pivot_offset = Vector2(23, 23)
+	var dest := Vector2(206.0 + float(_sack_drawn % 6) * 54.0,
+		184.0 + float(_sack_drawn / 6) * 54.0)
+	_sack_drawn += 1
+	if _sack_root != null and is_instance_valid(_sack_root):
+		_sack_root.add_child(tok)
+		if UserSettings.reduce_motion:
+			tok.position = dest
+			await get_tree().create_timer(0.35).timeout
+		else:
+			tok.position = Vector2(96, 258)
+			tok.scale = Vector2(0.4, 0.4)
+			var mid := tok.position.lerp(dest, 0.5) + Vector2(0, -46)
+			var tw := tok.create_tween()
+			tw.tween_property(tok, "position", mid, 0.16) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			tw.parallel().tween_property(tok, "scale", Vector2.ONE, 0.16)
+			tw.tween_property(tok, "position", dest, 0.16) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+			tw.tween_property(tok, "scale", Vector2(1.18, 0.84), 0.05)
+			tw.tween_property(tok, "scale", Vector2.ONE, 0.10) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			await tw.finished
+	AudioBank.play_sfx("bone_settle", 0.08, -7.0)
+	_sack_update_slate()
+	if _sack_sum > int(_sack_cfg.get("target", 13)):
+		await get_tree().create_timer(0.55).timeout
+		var bust_receipt := _gamble_pay(_sack_cfg, false, 0)
+		_show_result(_combine_lines([_sack_text("bust_text",
+			"Your total is {sum}, above the target. You lost the stake."),
+			bust_receipt]))
+		_bust_feedback()
+		return
+	_sack_busy = false
+
+
+func _on_sack_stop() -> void:
+	if _sack_busy:
+		return
+	_sack_busy = true
+	var pay := 0
+	for tier in _sack_cfg.get("pay", [[13, 80], [12, 55], [11, 40], [8, 20]]):
+		if _sack_sum >= int(tier[0]):
+			pay = int(tier[1])
+			break
+	if pay > 0:
+		var receipt := _gamble_pay(_sack_cfg, true, pay)
+		_win_flourish()
+		# The satchel's terminal prize: stop holding at least the posted count
+		# and the courier's own keepsake rides out with the pay.
+		var rid := _gamble_bank_relic(_sack_cfg, pay)
+		if rid != "":
+			receipt = _combine_lines([receipt,
+				_sack_text("bank_relic_text",
+					"Gained relic: %s." % RelicDB.get_relic(rid).name, pay)])
+		if _sack_sum == int(_sack_cfg.get("target", 13)):
+			_show_result(_combine_lines([_sack_text("perfect_text",
+				"Exact total: {sum}. Gained {pay} gold.", pay), receipt]))
+		else:
+			_show_result(_combine_lines([_sack_text("win_text",
+				"Stopped at {sum}. Gained {pay} gold.", pay), receipt]))
+	else:
+		var flat_receipt := _gamble_pay(_sack_cfg, false, 0)
+		_show_result(_combine_lines([_sack_text("flat_text",
+			"Stopped at {sum}, below the minimum reward. You lost the stake."),
+			flat_receipt]))
+
+
+# ── The Wheel of the Fourth (wheel_game) — back a colour, spin the wheel ──
+# Roulette, retold as the sappers' painted fortune-wheel: three runners' colours
+# divide the wheel into equal slices, each runner owning as many slices as its
+# odds are short (the favourite owns half the wheel; the longshot, one slice).
+# HONEST BY CONSTRUCTION: every slice is the SAME size and the winning slice is
+# picked UNIFORMLY, so a runner's chance is exactly its share of the wheel —
+# which you can read at a glance by counting its colour. Back one, spin, and
+# the wheel lands where it lands. Bigger colour = safer = pays less.
+#   Config: {stake, runners:[{name,mult,weight,tint,blurb}], open_text,
+#            win_text, lose_text, broke_text, seen_texts} — texts take {stake}.
+
+var _wheel_cfg: Dictionary = {}
+var _wheel_runners: Array = []
+var _wheel_slice_runner: Array = []   # slice index → runner index
+var _wheel_stake := 0
+var _wheel_bet := -1
+var _wheel_busy := true
+var _wheel_root: Control = null
+var _wheel_rows: VBoxContainer = null
+var _wheel_caption: Label = null
+var _wheel_result_lbl: Label = null
+var _wheel: FortuneWheel = null
+
+
+func _wheel_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_wheel_cfg, key,
+		String(_wheel_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(_wheel_stake))
+
+
+func _start_wheel_game(effect: Dictionary) -> void:
+	_wheel_cfg = effect
+	_wheel_stake = int(effect.get("stake", 0))
+	if _wheel_stake > 0 and RunState.gold < _wheel_stake:
+		_show_result(_wheel_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if _wheel_stake > 0:
+		RunState.gold -= _wheel_stake
+	_wheel_runners = effect.get("runners", [
+		{"name": "Old Crown", "mult": 2, "weight": 3, "tint": Color(0.85, 0.68, 0.25)},
+		{"name": "Widow's Mite", "mult": 3, "weight": 2, "tint": Color(0.58, 0.52, 0.66)},
+		{"name": "Little Fourth", "mult": 5, "weight": 1, "tint": Color(0.80, 0.32, 0.20)},
+	])
+	_wheel_bet = -1
+	_wheel_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_wheel_text("open_text",
+			"Choose a color, then spin. More wheel spaces mean a better chance but a smaller reward."), 4)
+	_wheel_rows = VBoxContainer.new()
+	_wheel_rows.add_theme_constant_override("separation", 12)
+	vbox.add_child(_wheel_rows)
+	_build_wheel_stage()
+	_wheel_busy = false
+	_wheel_arm_rows()
+
+
+func _build_wheel_stage() -> void:
+	# Expand each runner into `weight` equal slices, round-robin interleaved so
+	# the colours spread around the wheel instead of clustering into big arcs.
+	var segments: Array = []
+	_wheel_slice_runner = []
+	var remaining: Array = []
+	for r in _wheel_runners:
+		remaining.append(maxi(1, int(r.get("weight", 1))))
+	var guard := 0
+	while guard < 64:
+		var any := false
+		for ri in range(_wheel_runners.size()):
+			if int(remaining[ri]) > 0:
+				any = true
+				var r: Dictionary = _wheel_runners[ri]
+				segments.append({"tint": r.get("tint", Color(0.8, 0.7, 0.4)),
+					"weight": 1.0, "label": String(r.get("name", ""))})
+				_wheel_slice_runner.append(ri)
+				remaining[ri] = int(remaining[ri]) - 1
+		if not any:
+			break
+		guard += 1
+	var root := Control.new()
+	root.name = "WheelStage"
+	root.position = Vector2(860, 200)
+	root.size = Vector2(560, 450)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_wheel_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "wheel_" + _event_id
+	patch.position = Vector2(10, 56)
+	patch.size = Vector2(540, 356)
+	root.add_child(patch)
+	var caption := Label.new()
+	caption.text = "BACK A COLOUR, THEN SPIN"
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", Color(0.92, 0.86, 0.70))
+	caption.position = Vector2(30, 66)
+	caption.size = Vector2(500, 24)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(caption)
+	_wheel_caption = caption
+	var wheel := FortuneWheel.new()
+	wheel.seed_text = "wheel_" + _event_id
+	wheel.segments = segments
+	wheel.position = Vector2(140, 84)
+	wheel.size = Vector2(260, 290)
+	root.add_child(wheel)
+	_wheel = wheel
+	var res := Label.new()
+	res.add_theme_font_size_override("font_size", 17)
+	res.add_theme_color_override("font_color", Color(0.84, 0.78, 0.64))
+	res.position = Vector2(30, 380)
+	res.size = Vector2(500, 24)
+	res.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	res.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(res)
+	_wheel_result_lbl = res
+	_stage_entrance(root)
+	GameTheme.attach_rich_hover(patch, "The sappers' fortune-wheel",
+		"Choose a color, then spin. The number of wheel spaces shows its chance. Smaller sections pay more.",
+		"Back a colour, then spin the wheel", Color(0.90, 0.84, 0.68), 1.0)
+
+
+func _wheel_slices_for(runner_idx: int) -> int:
+	var n := 0
+	for ri in _wheel_slice_runner:
+		if int(ri) == runner_idx:
+			n += 1
+	return n
+
+
+func _wheel_arm_rows() -> void:
+	if _wheel_rows == null or not is_instance_valid(_wheel_rows):
+		return
+	_wheel_busy = false
+	for ch in _wheel_rows.get_children():
+		ch.queue_free()
+	var total := _wheel_slice_runner.size()
+	for ri in range(_wheel_runners.size()):
+		var r: Dictionary = _wheel_runners[ri]
+		var slices := _wheel_slices_for(ri)
+		_wheel_rows.add_child(_make_frameless_choice(
+			"Back %s" % String(r.get("name", "")),
+			"Pays %dx; covers %d of %d spaces." % [int(r.get("mult", 2)), slices, total],
+			"", 52, _on_wheel_bet.bind(ri)))
+
+
+func _on_wheel_bet(runner_idx: int) -> void:
+	if _wheel_busy:
+		return
+	_wheel_busy = true
+	_wheel_bet = runner_idx
+	for ch in _wheel_rows.get_children():
+		ch.queue_free()
+	var r: Dictionary = _wheel_runners[runner_idx]
+	if _wheel_caption != null and is_instance_valid(_wheel_caption):
+		_wheel_caption.text = "SPINNING ON THE %s…" % String(r.get("name", "")).to_upper()
+	# Bake the result: a uniform slice → weight-proportional runner odds.
+	var winner_slice := randi() % maxi(1, _wheel_slice_runner.size())
+	await _wheel_spin_to(winner_slice)
+	var winner_runner := int(_wheel_slice_runner[winner_slice])
+	if _wheel != null and is_instance_valid(_wheel):
+		_wheel.highlight_index = winner_slice
+	var won := winner_runner == _wheel_bet
+	var wname := String(_wheel_runners[winner_runner].get("name", ""))
+	if _wheel_result_lbl != null and is_instance_valid(_wheel_result_lbl):
+		_wheel_result_lbl.text = "THE WHEEL STOPS ON THE %s" % wname.to_upper()
+	await get_tree().create_timer(0.7).timeout
+	if won:
+		var pay := _wheel_stake * int(_wheel_runners[winner_runner].get("mult", 2))
+		var receipt := _gamble_pay(_wheel_cfg, true, pay, "coin_pour")
+		if _wheel != null and is_instance_valid(_wheel):
+			_win_flourish(_wheel.get_global_position() + _wheel.size * 0.5)
+		else:
+			_win_flourish()
+		_show_result(_combine_lines([_wheel_text("win_text",
+			"The wheel landed on %s. Won %d gold." % [wname, pay]), receipt]))
+	else:
+		_sting("hit_hero", -6.0)
+		_bust_feedback()
+		var lose_receipt := _gamble_pay(_wheel_cfg, false, 0)
+		_show_result(_combine_lines([_wheel_text("lose_text",
+			"The wheel landed on %s. You lost the stake." % wname),
+			lose_receipt]))
+
+
+func _wheel_spin_to(winner_slice: int) -> void:
+	if _wheel == null or not is_instance_valid(_wheel):
+		return
+	var target := _wheel.center_angle_of(winner_slice)
+	if UserSettings.reduce_motion:
+		_wheel.angle = target
+		_wheel.queue_redraw()
+		await get_tree().create_timer(0.6).timeout
+		return
+	AudioBank.play_sfx("bone_settle", 0.06, -4.0)
+	var start := _wheel.angle
+	var final := start + TAU * 4.0
+	final += fposmod(target - final, TAU)
+	# FortuneWheel.angle has a redraw setter, so tween the property directly.
+	var t := _wheel.create_tween()
+	t.tween_property(_wheel, "angle", final, 2.3) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	await t.finished
+	AudioBank.play_sfx("coin", 0.05, -8.0)
+
+
+# ── The Provost Marshal (liar_game) — liars' dice against a man who can't ─
+# The bluffing game, honest by construction: four knucklebones each; yours
+# lie OPEN at your edge, his rattle under his helm. Bids name "at least Q
+# of face F" across all eight; raise or call. The provost NEVER bluffs —
+# his policy is a posted drill (he bids only what his own bones support,
+# crediting you exactly one of every face) — so his raises are TRUE
+# information about his helm, and his bids can still be WRONG about you:
+# the mistake window is the whole game. You may lie freely; he calls any
+# bid that needs three or more of one face from your hand. Every row does
+# the player's arithmetic in the open (your holding, what his helm must
+# carry). Showdown lifts the helm, tumbles his bones out, and counts the
+# bid face bone by bone before the verdict — bake-then-shade: the bones
+# were baked at the deal; the count only performs them. Config:
+#   {stake, payout, open_text, win_stood_text, win_called_text,
+#    lose_caught_text, lose_wrong_text, broke_text, seen_texts}
+#   — texts take {stake} / {payout} / {bid} / {qty} / {count}.
+
+const LIAR_FACES := ["dog", "pike", "wheel", "crown"]
+const LIAR_QTY := ["one", "two", "three", "four", "five", "six", "seven", "eight"]
+
+var _liar_cfg: Dictionary = {}
+var _liar_mine: Array = []        # your four faces, public
+var _liar_his: Array = []         # his four faces, under the helm
+var _liar_q := 0                  # standing bid quantity
+var _liar_f := 0                  # standing bid face
+var _liar_bid_mine := false       # whose bid stands
+var _liar_root: Control = null
+var _liar_rows: VBoxContainer = null
+var _liar_chalk: Label = null
+var _liar_caption: Label = null
+var _liar_helm: Control = null
+var _liar_my_dice: Array = []
+var _liar_his_dice: Array = []
+var _liar_busy := true
+
+
+func _liar_text(key: String, fallback: String, count: int = 0) -> String:
+	var raw := _seen_text_override(_liar_cfg, key,
+		String(_liar_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_liar_cfg.get("stake", 0)))) \
+		.replace("{payout}", str(int(_liar_cfg.get("payout", 0)))) \
+		.replace("{bid}", _liar_phrase(_liar_q, _liar_f)) \
+		.replace("{qty}", LIAR_QTY[clampi(_liar_q, 1, 8) - 1]) \
+		.replace("{count}", str(count))
+
+
+func _liar_face_word(f: int, n: int) -> String:
+	var w: String = LIAR_FACES[clampi(f, 1, 4) - 1]
+	return w if n == 1 else w + "s"
+
+
+func _liar_phrase(q: int, f: int) -> String:
+	return "%s %s" % [LIAR_QTY[clampi(q, 1, 8) - 1], _liar_face_word(f, q)]
+
+
+func _liar_count(arr: Array, f: int) -> int:
+	var n := 0
+	for v in arr:
+		if int(v) == f:
+			n += 1
+	return n
+
+
+func _start_liar_game(effect: Dictionary) -> void:
+	_liar_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_liar_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	# Bake the whole deal: eight bones, before anything moves.
+	_liar_mine = []
+	_liar_his = []
+	for _i in range(4):
+		_liar_mine.append(randi_range(1, 4))
+		_liar_his.append(randi_range(1, 4))
+	_liar_q = 0
+	_liar_f = 0
+	_liar_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_liar_text("open_text",
+			"You see four bones; four are hidden. Raise the bid or call a lie. The opponent never bluffs."), 3)
+	_liar_rows = VBoxContainer.new()
+	_liar_rows.add_theme_constant_override("separation", 12)
+	vbox.add_child(_liar_rows)
+	_build_liar_stage()
+	_liar_run_intro()
+
+
+func _build_liar_stage() -> void:
+	_liar_my_dice = []
+	_liar_his_dice = []
+	var root := Control.new()
+	root.name = "LiarStage"
+	root.position = Vector2(860, 210)
+	root.size = Vector2(560, 430)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_liar_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "provost_" + _event_id
+	patch.chalk = "ring"
+	patch.position = Vector2(10, 60)
+	patch.size = Vector2(540, 340)
+	root.add_child(patch)
+	# His bones wait under the helm, already true — hidden, not undecided.
+	for i in range(4):
+		var d := KnuckleboneDie.new()
+		d.seed_text = "his_%d_%s" % [i, _event_id]
+		d.face = int(_liar_his[i])
+		d.size = Vector2(30, 30)
+		d.pivot_offset = Vector2(15, 15)
+		d.position = Vector2(96.0 + float(i) * 24.0, 176.0)
+		d.visible = false
+		root.add_child(d)
+		_liar_his_dice.append(d)
+	var helm := Control.new()
+	helm.position = Vector2(56, 100)
+	helm.size = Vector2(150, 118)
+	helm.pivot_offset = Vector2(75, 96)
+	helm.mouse_filter = Control.MOUSE_FILTER_PASS
+	root.add_child(helm)
+	_liar_helm = helm
+	var steel := EventHelm.new()
+	steel.seed_text = "provost_helm_" + _event_id
+	steel.dome_up = true
+	steel.set_anchors_preset(Control.PRESET_FULL_RECT)
+	helm.add_child(steel)
+	GameTheme.attach_rich_hover(helm, "His helm",
+		"Four bones are hidden here. The opponent only makes bids his bones can support.",
+		"", Color(0.72, 0.74, 0.78), 1.0)
+	# Your bones tumble in openly at your edge of the plate. The tumble's
+	# final hops all drift +18 x (spin_dir 1), so the rests stay spread.
+	var dests := [Vector2(300, 300), Vector2(356, 314), Vector2(412, 298),
+		Vector2(468, 316)]
+	for i in range(4):
+		var d := KnuckleboneDie.new()
+		d.seed_text = "mine_%d_%s" % [i, _event_id]
+		d.face = int(_liar_mine[i])
+		d.size = Vector2(34, 34)
+		d.pivot_offset = Vector2(17, 17)
+		d.position = Vector2(420.0 + float(i) * 18.0, 428.0)
+		root.add_child(d)
+		_liar_my_dice.append(d)
+		d.set_meta("dest", dests[i])
+	var chalk := Label.new()
+	chalk.text = ""
+	chalk.add_theme_font_size_override("font_size", 30)
+	chalk.add_theme_color_override("font_color", Color(0.92, 0.88, 0.80))
+	chalk.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	chalk.add_theme_constant_override("outline_size", 5)
+	if GameTheme.font_display:
+		chalk.add_theme_font_override("font", GameTheme.font_display)
+	chalk.position = Vector2(230, 74)
+	chalk.size = Vector2(310, 40)
+	chalk.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	chalk.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(chalk)
+	_liar_chalk = chalk
+	var caption := Label.new()
+	caption.text = "HE RATTLES HIS UNDER THE STEEL"
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
+	caption.position = Vector2(230, 118)
+	caption.size = Vector2(310, 24)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(caption)
+	_liar_caption = caption
+	GameTheme.attach_rich_hover(patch, "The count",
+		"A bid states how many matching faces are present across all eight bones.",
+		"His raises are honest; yours needn't be", Color(0.92, 0.88, 0.80), 1.0)
+
+
+func _liar_run_intro() -> void:
+	var rm := UserSettings.reduce_motion
+	AudioBank.play_sfx("bone_cast", 0.06, -4.0)
+	if rm:
+		for d in _liar_my_dice:
+			if is_instance_valid(d):
+				d.position = d.get_meta("dest")
+		await get_tree().create_timer(0.6).timeout
+	else:
+		for i in range(_liar_my_dice.size()):
+			var d = _liar_my_dice[i]
+			if is_instance_valid(d):
+				_tumble_die(d, {"face": int(_liar_mine[i]), "skull": false},
+					d.get_meta("dest"), 0.10 * i, 1.0)
+		await get_tree().create_timer(1.15).timeout
+		# The rattle: his helm shivers once — the bones are in, and hidden.
+		if _liar_helm != null and is_instance_valid(_liar_helm):
+			var tw: Tween = _liar_helm.create_tween()
+			tw.tween_property(_liar_helm, "rotation", 0.03, 0.07)
+			tw.tween_property(_liar_helm, "rotation", -0.03, 0.07)
+			tw.tween_property(_liar_helm, "rotation", 0.0, 0.07)
+		AudioBank.play_sfx("bone_settle", 0.08, -6.0)
+		await get_tree().create_timer(0.5).timeout
+	if _liar_root == null or not is_instance_valid(_liar_root):
+		return
+	# He opens — the dead speak first, and truthfully.
+	var open := _liar_his_open()
+	_liar_set_bid(int(open["q"]), int(open["f"]), false)
+	_liar_busy = false
+	_liar_arm_rows()
+
+
+## His opening drill: his most common face, one more than he holds — he
+## credits the living exactly one of everything. He has met a lot of soldiers.
+func _liar_his_open() -> Dictionary:
+	var best_f := 1
+	for f in range(2, 5):
+		if _liar_count(_liar_his, f) >= _liar_count(_liar_his, best_f):
+			best_f = f
+	return {"q": _liar_count(_liar_his, best_f) + 1, "f": best_f}
+
+
+## His response drill, posted in the fiction: he calls any bid that needs
+## three or more of one face from your hand; otherwise he makes the honest
+## raise his own bones best support. No roll anywhere — his replies are
+## a readable function of his helm.
+func _liar_his_reply(q: int, f: int) -> Dictionary:
+	if q - _liar_count(_liar_his, f) > 2:
+		return {"call": true}
+	var best_q := -1
+	var best_f := -1
+	var best_slack := -99
+	for f2 in range(1, 5):
+		var q2 := q + 1 if f2 <= f else q
+		if q2 > 8:
+			continue
+		var slack := _liar_count(_liar_his, f2) + 1 - q2
+		if slack < 0:
+			continue
+		if slack > best_slack or (slack == best_slack and q2 < best_q):
+			best_slack = slack
+			best_q = q2
+			best_f = f2
+	if best_q < 0:
+		return {"call": true}
+	return {"call": false, "q": best_q, "f": best_f}
+
+
+func _liar_set_bid(q: int, f: int, mine: bool) -> void:
+	_liar_q = q
+	_liar_f = f
+	_liar_bid_mine = mine
+	if _liar_chalk != null and is_instance_valid(_liar_chalk):
+		_liar_chalk.text = _liar_phrase(q, f).to_upper()
+	if _liar_caption != null and is_instance_valid(_liar_caption):
+		_liar_caption.text = "YOUR BID STANDS" if mine \
+			else "HIS BID — RAISE OR CALL"
+
+
+## The player's turn: two curated raises (your strongest ground first) plus
+## the call. Every row does the arithmetic in the open — your holding, and
+## what his helm would have to carry.
+func _liar_arm_rows() -> void:
+	if _liar_rows == null or not is_instance_valid(_liar_rows):
+		return
+	for c in _liar_rows.get_children():
+		c.queue_free()
+	var faces := [1, 2, 3, 4]
+	faces.sort_custom(func(a, b) -> bool:
+		var ca := _liar_count(_liar_mine, a)
+		var cb := _liar_count(_liar_mine, b)
+		return ca > cb if ca != cb else a > b)
+	var offered := 0
+	for f2 in faces:
+		if offered >= 2:
+			break
+		var q2 := _liar_q + 1 if f2 <= _liar_f else _liar_q
+		if q2 > 8:
+			continue
+		var k := _liar_count(_liar_mine, f2)
+		var sub := "Your visible bones already support this bid." if k >= q2 \
+			else "You show %d. The hidden bones must contain %d more." % [k, q2 - k]
+		_liar_rows.add_child(_make_frameless_choice(
+			"Bid %s" % _liar_phrase(q2, f2), sub, "", 56,
+			_on_liar_raise.bind(q2, f2)))
+		offered += 1
+	var kc := _liar_count(_liar_mine, _liar_f)
+	_liar_rows.add_child(_make_frameless_choice("Call the lie",
+		"The bid claims %d. You show %d." % [_liar_q, kc],
+		"", 56, _on_liar_call))
+
+
+func _on_liar_raise(q: int, f: int) -> void:
+	if _liar_busy:
+		return
+	_liar_busy = true
+	_liar_set_bid(q, f, true)
+	if _liar_rows != null and is_instance_valid(_liar_rows):
+		for c in _liar_rows.get_children():
+			c.queue_free()
+	if _liar_caption != null and is_instance_valid(_liar_caption):
+		_liar_caption.text = "HE COUNTS UNDER THE STEEL"
+	AudioBank.play_sfx("button_click")
+	await get_tree().create_timer(0.6 if UserSettings.reduce_motion else 1.0).timeout
+	if _liar_root == null or not is_instance_valid(_liar_root):
+		return
+	var rep := _liar_his_reply(q, f)
+	if bool(rep.get("call", false)):
+		if _liar_caption != null and is_instance_valid(_liar_caption):
+			_liar_caption.text = "\"LIAR,\" HE SAYS."
+		AudioBank.play_sfx("card_play", 0.05, -6.0)
+		await get_tree().create_timer(0.8).timeout
+		await _liar_showdown(false)
+		return
+	_liar_set_bid(int(rep["q"]), int(rep["f"]), false)
+	AudioBank.play_sfx("bone_settle", 0.08, -8.0)
+	_liar_busy = false
+	_liar_arm_rows()
+
+
+func _on_liar_call() -> void:
+	if _liar_busy:
+		return
+	_liar_busy = true
+	if _liar_rows != null and is_instance_valid(_liar_rows):
+		for c in _liar_rows.get_children():
+			c.queue_free()
+	if _liar_caption != null and is_instance_valid(_liar_caption):
+		_liar_caption.text = "YOU CALL THE LIE."
+	AudioBank.play_sfx("card_play", 0.05, -6.0)
+	await get_tree().create_timer(0.7).timeout
+	if _liar_root == null or not is_instance_valid(_liar_root):
+		return
+	await _liar_showdown(true)
+
+
+## The helm comes up, his bones tumble out, and the bid face is counted
+## bone by bone across both hands before the verdict lands.
+func _liar_showdown(player_called: bool) -> void:
+	var rm := UserSettings.reduce_motion
+	AudioBank.play_sfx("helm_slide", 0.08, -6.0)
+	var spreads := [Vector2(230, 168), Vector2(286, 180), Vector2(342, 166),
+		Vector2(398, 182)]
+	if _liar_helm != null and is_instance_valid(_liar_helm):
+		if rm:
+			_liar_helm.position += Vector2(0, -56)
+		else:
+			var tw: Tween = _liar_helm.create_tween()
+			tw.tween_property(_liar_helm, "position",
+				_liar_helm.position + Vector2(0, -56), 0.28) \
+				.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			tw.parallel().tween_property(_liar_helm, "rotation", -0.12, 0.28)
+	for i in range(_liar_his_dice.size()):
+		var d = _liar_his_dice[i]
+		if not is_instance_valid(d):
+			continue
+		d.visible = true
+		if rm:
+			d.position = spreads[i]
+		else:
+			_tumble_die(d, {"face": int(_liar_his[i]), "skull": false},
+				spreads[i], 0.06 * i, 1.0)
+	await get_tree().create_timer(0.7 if rm else 1.25).timeout
+	if _liar_root == null or not is_instance_valid(_liar_root):
+		return
+	# The count beat: every bone of the bid face answers, both hands.
+	var total: int = _liar_count(_liar_his, _liar_f) + _liar_count(_liar_mine, _liar_f)
+	if not rm:
+		var n := 0
+		for d in _liar_his_dice + _liar_my_dice:
+			if not is_instance_valid(d) or int(d.face) != _liar_f:
+				continue
+			n += 1
+			var pu: Tween = d.create_tween()
+			pu.tween_property(d, "scale", Vector2(1.34, 1.34), 0.09) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			pu.tween_property(d, "scale", Vector2.ONE, 0.14)
+			AudioBank.play_sfx("bone_settle", 0.08, -10.0)
+			if _liar_chalk != null and is_instance_valid(_liar_chalk):
+				_liar_chalk.text = "%d ON THE TABLE" % n
+			await get_tree().create_timer(0.26).timeout
+			if _liar_root == null or not is_instance_valid(_liar_root):
+				return
+	if _liar_chalk != null and is_instance_valid(_liar_chalk):
+		_liar_chalk.text = "%s ON THE TABLE" % str(total)
+	if _liar_caption != null and is_instance_valid(_liar_caption):
+		_liar_caption.text = "THE BID NEEDED %d" % _liar_q
+	await get_tree().create_timer(0.9).timeout
+	var bid_true: bool = total >= _liar_q
+	var player_wins: bool = (not bid_true) if player_called else bid_true
+	if player_wins:
+		RunState.gain_gold(int(_liar_cfg.get("payout", 0)))
+		_sting("coin_pour")
+		_win_flourish()
+		_show_result(_liar_text(
+			"win_called_text" if player_called else "win_stood_text",
+			"Correct call: only {count} matched a bid of {qty}. Gained {payout} gold." if player_called
+			else "The opponent called incorrectly. There are {count} matches. Gained {payout} gold.",
+			total))
+	else:
+		_sting("hit_hero", -4.0)
+		_bust_feedback()
+		_show_result(_liar_text(
+			"lose_wrong_text" if player_called else "lose_caught_text",
+			"Wrong call: {count} matches support the bid. You lost the stake." if player_called
+			else "The opponent called correctly. There are {count} matches; your bid needed {qty}. You lost the stake.",
+			total))
+
+
+# ── The Old Game (morra_game) — the flash of fingers, older than the war ──
+# Morra against a dead pikeman: each throw, both hands flash at once. You
+# pick your fingers (one to five) and name what HIS hand will show; he has
+# three fingers left, so his throw is one, two, or three — and he throws
+# them to a DRILL, a repeating figure whose phase is baked fresh each
+# sitting. His call never changes: six, the pikeman's number — he scores
+# any throw where the two hands total six. You score by naming his hand.
+# No roll decides a round: his sequence is fixed at the deal, his spent
+# throws pile at his table edge in ORDER, and reading the drill is the
+# whole game (the straw game's covenant: learnable, and the dead never
+# blunder). First to three points; the throws run out at seven. Config:
+#   {stake, payout, drill: [3,1,2], target: 3, rounds: 7, open_text,
+#    win_text, lose_text, wash_text, broke_text, seen_texts}
+#   — texts take {stake} / {payout} / {you} / {him}.
+
+var _morra_cfg: Dictionary = {}
+var _morra_drill: Array = []
+var _morra_phase := 0
+var _morra_round := 0
+var _morra_you := 0
+var _morra_him := 0
+var _morra_throw := 2             # your selected fingers for the next flash
+var _morra_root: Control = null
+var _morra_rows: VBoxContainer = null
+var _morra_your_hand: Control = null
+var _morra_his_hand: Control = null
+var _morra_score: Label = null
+var _morra_caption: Label = null
+var _morra_your_num: Label = null
+var _morra_his_num: Label = null
+var _morra_studs: Array = []
+var _morra_busy := true
+
+
+func _morra_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_morra_cfg, key,
+		String(_morra_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_morra_cfg.get("stake", 0)))) \
+		.replace("{payout}", str(int(_morra_cfg.get("payout", 0)))) \
+		.replace("{you}", str(_morra_you)).replace("{him}", str(_morra_him))
+
+
+func _start_morra_game(effect: Dictionary) -> void:
+	_morra_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_morra_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	_morra_drill = effect.get("drill", [3, 1, 2])
+	_morra_phase = randi() % maxi(1, _morra_drill.size())
+	_morra_round = 0
+	_morra_you = 0
+	_morra_him = 0
+	_morra_throw = 2
+	_morra_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_morra_text("open_text",
+			"Both players reveal 1 to 3 fingers. Guess his hand to score. If the total is 6, he scores. First to 3 points wins."), 3)
+	_morra_rows = VBoxContainer.new()
+	_morra_rows.add_theme_constant_override("separation", 12)
+	vbox.add_child(_morra_rows)
+	_build_morra_stage()
+	_morra_busy = false
+	_morra_arm_rows()
+
+
+func _build_morra_stage() -> void:
+	_morra_studs = []
+	var root := Control.new()
+	root.name = "MorraStage"
+	root.position = Vector2(860, 210)
+	root.size = Vector2(560, 430)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_morra_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "morra_" + _event_id
+	patch.chalk = "ring"
+	patch.position = Vector2(10, 60)
+	patch.size = Vector2(540, 340)
+	root.add_child(patch)
+	# His hand, far side — the maimed throwing hand IS the posted rule.
+	var his := GauntletHand.new()
+	his.seed_text = "pikeman_" + _event_id
+	his.bony = true
+	his.maimed = true
+	his.fingers = 0
+	his.position = Vector2(64, 78)
+	his.size = Vector2(130, 165)
+	his.pivot_offset = Vector2(65, 145)
+	root.add_child(his)
+	_morra_his_hand = his
+	var his_wrap := Control.new()
+	his_wrap.position = his.position
+	his_wrap.size = his.size
+	his_wrap.mouse_filter = Control.MOUSE_FILTER_PASS
+	root.add_child(his_wrap)
+	GameTheme.attach_rich_hover(his_wrap, "His hand",
+		"He shows 1, 2, or 3 fingers in a repeating pattern. His previous throws remain visible.",
+		"", Color(0.72, 0.74, 0.78), 1.0)
+	# Your hand, near side.
+	var yours := GauntletHand.new()
+	yours.seed_text = "your_hand_" + _event_id
+	yours.fingers = 0
+	yours.position = Vector2(344, 208)
+	yours.size = Vector2(140, 175)
+	yours.pivot_offset = Vector2(70, 152)
+	root.add_child(yours)
+	_morra_your_hand = yours
+	# The flash numerals: each hand's thrown count chalks beside it while
+	# the hands stand open — the arithmetic in the open, always (they carry
+	# game state, so they play under Reduce Motion too).
+	for side in ["his", "yours"]:
+		var num := Label.new()
+		num.text = ""
+		num.add_theme_font_size_override("font_size", 34)
+		num.add_theme_color_override("font_color", Color(0.92, 0.88, 0.80))
+		num.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+		num.add_theme_constant_override("outline_size", 5)
+		if GameTheme.font_display:
+			num.add_theme_font_override("font", GameTheme.font_display)
+		num.position = Vector2(24, 122) if side == "his" else Vector2(296, 258)
+		num.size = Vector2(44, 44)
+		num.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		num.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(num)
+		if side == "his":
+			_morra_his_num = num
+		else:
+			_morra_your_num = num
+	# The five studs: pick your fingers for the flash. The hand stays a
+	# fist until the throw — morra is simultaneous or it is nothing.
+	for i in range(5):
+		var wrap := Control.new()
+		wrap.position = Vector2(44.0 + float(i) * 46.0, 326.0)
+		wrap.size = Vector2(40, 40)
+		wrap.pivot_offset = Vector2(20, 20)
+		wrap.mouse_filter = Control.MOUSE_FILTER_PASS
+		root.add_child(wrap)
+		_morra_studs.append(wrap)
+		var tok := PayToken.new()
+		tok.seed_text = "stud_%d_%s" % [i, _event_id]
+		tok.value = i + 1
+		tok.set_anchors_preset(Control.PRESET_FULL_RECT)
+		wrap.add_child(tok)
+		var btn := Button.new()
+		btn.flat = true
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		btn.mouse_filter = Control.MOUSE_FILTER_PASS
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		for st in ["normal", "hover", "pressed", "focus"]:
+			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+		btn.pressed.connect(_on_morra_stud.bind(i + 1))
+		wrap.add_child(btn)
+		GameTheme.attach_rich_hover(wrap, "Throw %s" % LIAR_QTY[i],
+			"Choose how many fingers to show. The total is your hand plus his.",
+			"Click to set your throw", Color(0.92, 0.88, 0.80), 1.04)
+	_morra_mark_studs()
+	var score := Label.new()
+	score.text = "0 — 0"
+	score.add_theme_font_size_override("font_size", 38)
+	score.add_theme_color_override("font_color", Color(0.92, 0.88, 0.80))
+	score.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	score.add_theme_constant_override("outline_size", 5)
+	if GameTheme.font_display:
+		score.add_theme_font_override("font", GameTheme.font_display)
+	score.position = Vector2(250, 72)
+	score.size = Vector2(240, 48)
+	score.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	score.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(score)
+	_morra_score = score
+	var caption := Label.new()
+	caption.text = "THROW 1 OF %d · HE CALLS SIX" % int(_morra_cfg.get("rounds", 7))
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
+	caption.position = Vector2(230, 124)
+	caption.size = Vector2(280, 24)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(caption)
+	_morra_caption = caption
+	GameTheme.attach_rich_hover(patch, "The old game",
+		"Guess his hand to score. If both hands total 6, he scores. First to 3 points; the game lasts 7 throws.",
+		"Pick your fingers below, then call his hand", Color(0.92, 0.88, 0.80), 1.0)
+
+
+func _morra_mark_studs() -> void:
+	for i in range(_morra_studs.size()):
+		var wrap = _morra_studs[i]
+		if not is_instance_valid(wrap):
+			continue
+		var picked: bool = i + 1 == _morra_throw
+		wrap.modulate = Color(1.22, 1.18, 1.05) if picked else Color(0.82, 0.80, 0.76)
+		wrap.position.y = 318.0 if picked else 326.0
+
+
+func _on_morra_stud(n: int) -> void:
+	if _morra_busy:
+		return
+	_morra_throw = n
+	AudioBank.play_sfx("button_click")
+	_morra_mark_studs()
+	_morra_arm_rows()
+
+
+## Three calls — one per finger he has left. The sub-line does the count's
+## arithmetic for the flash you have set, and names the six out loud.
+func _morra_arm_rows() -> void:
+	if _morra_rows == null or not is_instance_valid(_morra_rows):
+		return
+	for c in _morra_rows.get_children():
+		c.queue_free()
+	for h in range(1, 4):
+		var total := _morra_throw + h
+		var sub := "You show %s; the combined total would be %d." % [
+			LIAR_QTY[_morra_throw - 1], total]
+		if total == 6:
+			sub += " That would total 6."
+		_morra_rows.add_child(_make_frameless_choice(
+			"Guess he shows %s" % LIAR_QTY[h - 1], sub, "", 56,
+			_on_morra_call.bind(h)))
+
+
+func _on_morra_call(h: int) -> void:
+	if _morra_busy:
+		return
+	_morra_busy = true
+	var rm := UserSettings.reduce_motion
+	# Bake: his throw was always going to be this one — the drill decides.
+	var his: int = int(_morra_drill[(_morra_phase + _morra_round) % _morra_drill.size()])
+	var total: int = _morra_throw + his
+	var you_hit: bool = h == his
+	var him_hit: bool = total == 6
+	# The flash: both hands at once — the pop IS the reveal.
+	AudioBank.play_sfx("bone_settle", 0.08, -5.0)
+	if _morra_your_hand != null and is_instance_valid(_morra_your_hand):
+		_morra_your_hand.fingers = _morra_throw
+		_morra_your_hand.queue_redraw()
+	if _morra_his_hand != null and is_instance_valid(_morra_his_hand):
+		_morra_his_hand.fingers = his
+		_morra_his_hand.queue_redraw()
+	if _morra_your_num != null and is_instance_valid(_morra_your_num):
+		_morra_your_num.text = str(_morra_throw)
+	if _morra_his_num != null and is_instance_valid(_morra_his_num):
+		_morra_his_num.text = str(his)
+	if not rm:
+		for hand in [_morra_your_hand, _morra_his_hand]:
+			if hand == null or not is_instance_valid(hand):
+				continue
+			var tw: Tween = hand.create_tween()
+			tw.tween_property(hand, "scale", Vector2(1.16, 1.16), 0.09) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			tw.tween_property(hand, "scale", Vector2.ONE, 0.16) \
+				.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	if _morra_caption != null and is_instance_valid(_morra_caption):
+		_morra_caption.text = "THE COUNT: %d" % total
+	await get_tree().create_timer(0.55 if rm else 0.75).timeout
+	if _morra_root == null or not is_instance_valid(_morra_root):
+		return
+	# His spent throw joins the pile — in ORDER, at his table edge. The
+	# drill sits there in plain view for whoever thinks to read it.
+	var tok := PayToken.new()
+	tok.seed_text = "drill_%d_%s" % [_morra_round, _event_id]
+	tok.value = his
+	tok.size = Vector2(30, 30)
+	tok.pivot_offset = Vector2(15, 15)
+	tok.position = Vector2(212.0 + float(_morra_round) * 40.0, 168.0)
+	tok.scale = Vector2(0.4, 0.4)
+	_morra_root.add_child(tok)
+	if rm:
+		tok.scale = Vector2.ONE
+	else:
+		var tt: Tween = tok.create_tween()
+		tt.tween_property(tok, "scale", Vector2.ONE, 0.18) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	# Score beats — both can land on one flash.
+	if you_hit:
+		_morra_you += 1
+		_sting("coin")
+		if not rm and _morra_his_hand != null and is_instance_valid(_morra_his_hand):
+			Motion.burst(self, _morra_root.get_global_position()
+				+ _morra_his_hand.position + Vector2(55, 60), "coin_spark")
+	if him_hit:
+		_morra_him += 1
+		_sting("hit_hero", -8.0)
+	if _morra_score != null and is_instance_valid(_morra_score):
+		_morra_score.text = "%d — %d" % [_morra_you, _morra_him]
+	if _morra_caption != null and is_instance_valid(_morra_caption):
+		if you_hit and him_hit:
+			_morra_caption.text = "THE COUNT: %d — BOTH CALLS STAND" % total
+		elif you_hit:
+			_morra_caption.text = "THE COUNT: %d — YOU NAMED HIS HAND" % total
+		elif him_hit:
+			_morra_caption.text = "THE COUNT: %d — SIX. HIS CALL." % total
+		else:
+			_morra_caption.text = "THE COUNT: %d — NO CALL STANDS" % total
+	_morra_round += 1
+	await get_tree().create_timer(0.9 if rm else 1.1).timeout
+	if _morra_root == null or not is_instance_valid(_morra_root):
+		return
+	var target: int = int(_morra_cfg.get("target", 3))
+	var rounds: int = int(_morra_cfg.get("rounds", 7))
+	if _morra_you >= target or _morra_him >= target or _morra_round >= rounds:
+		_finish_morra_game()
+		return
+	# Fists again for the next flash.
+	for hand in [_morra_your_hand, _morra_his_hand]:
+		if hand != null and is_instance_valid(hand):
+			hand.fingers = 0
+			hand.queue_redraw()
+	for num in [_morra_your_num, _morra_his_num]:
+		if num != null and is_instance_valid(num):
+			num.text = ""
+	if _morra_caption != null and is_instance_valid(_morra_caption):
+		_morra_caption.text = "THROW %d OF %d · HE CALLS SIX" % [
+			_morra_round + 1, rounds]
+	_morra_busy = false
+	_morra_arm_rows()
+
+
+func _finish_morra_game() -> void:
+	var target: int = int(_morra_cfg.get("target", 3))
+	if _morra_you >= target or _morra_you > _morra_him:
+		RunState.gain_gold(int(_morra_cfg.get("payout", 0)))
+		_sting("coin_pour")
+		_win_flourish()
+		_show_result(_morra_text("win_text",
+			"You reached {you} points first. Gained {payout} gold."))
+	elif _morra_him > _morra_you:
+		_sting("hit_hero", -4.0)
+		_bust_feedback()
+		_show_result(_morra_text("lose_text",
+			"He won {him} to {you}. You lost the stake."))
+	else:
+		_show_result(_morra_text("wash_text",
+			"The game ended {you} to {him}. Your stake was returned."))
+
+
+# ── The Burial Fund (tali_game) — the Venus throw, one recast each ───────
+# The keep-and-recast game (dice poker's ancestor, played with the real
+# Roman tali): both throws land OPEN, the rank table is chalked on a
+# slate, and each side gets ONE recast. The skill is the slate itself —
+# with four-faced bones the true odds defy poker instinct (four alike is
+# the rarest throw; CROSSED PIKES genuinely outrank THE COLUMN — count
+# the ways), so reading the table's law beats playing by feel. The
+# signifer's recast is a posted drill: he keeps whatever rank is made
+# and throws the rest, never chasing. Ties break on total pips; dead
+# level is a wash. Winning WITH Venus pays double — the fund can afford
+# beauty. Bake-then-shade throughout: every face is decided before its
+# tumble. Config:
+#   {stake, payout, venus_pay, open_text, win_text, venus_text,
+#    lose_text, wash_text, broke_text, seen_texts}
+#   — texts take {stake} / {pay} / {yours} / {his}.
+
+const TALI_RANKS := ["THE WALL", "VENUS", "CROSSED PIKES", "THE COLUMN", "THE FILE"]
+const TALI_GLYPHS := [[2, 2, 2, 2], [1, 2, 3, 4], [2, 2, 3, 3], [3, 3, 3, 1],
+	[2, 2, 1, 4]]
+
+var _tali_cfg: Dictionary = {}
+var _tali_mine: Array = []
+var _tali_his: Array = []
+var _tali_keep: Array = []
+var _tali_root: Control = null
+var _tali_rows: VBoxContainer = null
+var _tali_my_dice: Array = []      # wrap Controls (die child 0), clickable
+var _tali_his_dice: Array = []     # bare dice
+var _tali_my_caption: Label = null
+var _tali_his_caption: Label = null
+var _tali_chalk: Label = null
+var _tali_busy := true
+
+
+func _tali_text(key: String, fallback: String, pay: int = 0, yours := "",
+		his := "") -> String:
+	var raw := _seen_text_override(_tali_cfg, key,
+		String(_tali_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_tali_cfg.get("stake", 0)))) \
+		.replace("{pay}", str(pay)).replace("{yours}", yours) \
+		.replace("{his}", his)
+
+
+## Rank a four-tali throw. Lower index = higher rank, ordered by what the
+## bones actually do: 4 alike (1.6%) > all different (9.4%) > two pair
+## (14%) > three alike (18.8%) > one pair (56%).
+func _tali_rank(arr: Array) -> Dictionary:
+	var counts := [0, 0, 0, 0]
+	var pips := 0
+	for v in arr:
+		counts[int(v) - 1] += 1
+		pips += int(v)
+	var shape: Array = []
+	for n in counts:
+		if int(n) > 0:
+			shape.append(int(n))
+	shape.sort()
+	shape.reverse()
+	var idx := 4
+	if shape == [4]:
+		idx = 0
+	elif shape == [1, 1, 1, 1]:
+		idx = 1
+	elif shape == [2, 2]:
+		idx = 2
+	elif shape == [3, 1]:
+		idx = 3
+	return {"idx": idx, "name": TALI_RANKS[idx], "pips": pips}
+
+
+## The drill keep: hold whatever rank is made, throw the rest. Never chase.
+func _tali_drill_keep(arr: Array) -> Array:
+	var counts := [0, 0, 0, 0]
+	for v in arr:
+		counts[int(v) - 1] += 1
+	var idx := int(_tali_rank(arr)["idx"])
+	if idx <= 2:
+		return [true, true, true, true]
+	# Column or File: keep the multiple, recast the strays.
+	var keep_face := 0
+	for f in range(4):
+		if counts[f] >= 2 and (keep_face == 0 or counts[f] > counts[keep_face - 1]):
+			keep_face = f + 1
+	var out: Array = []
+	for v in arr:
+		out.append(int(v) == keep_face)
+	return out
+
+
+func _start_tali_game(effect: Dictionary) -> void:
+	_tali_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_tali_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	_tali_mine = []
+	_tali_his = []
+	for _i in range(4):
+		_tali_mine.append(randi_range(1, 4))
+		_tali_his.append(randi_range(1, 4))
+	_tali_keep = _tali_drill_keep(_tali_mine)
+	_tali_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_tali_text("open_text",
+			"The opponent rolls openly. Select bones to keep, then reroll the rest once."), 2)
+	_tali_rows = VBoxContainer.new()
+	_tali_rows.add_theme_constant_override("separation", 12)
+	vbox.add_child(_tali_rows)
+	_build_tali_stage()
+	_tali_run_intro()
+
+
+func _build_tali_stage() -> void:
+	_tali_my_dice = []
+	_tali_his_dice = []
+	var root := Control.new()
+	root.name = "TaliStage"
+	root.position = Vector2(860, 210)
+	root.size = Vector2(560, 430)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_tali_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "fund_" + _event_id
+	patch.chalk = "ring"
+	patch.position = Vector2(10, 60)
+	patch.size = Vector2(540, 340)
+	root.add_child(patch)
+	# His throw, far side — open from the first.
+	for i in range(4):
+		var d := KnuckleboneDie.new()
+		d.seed_text = "sig_%d_%s" % [i, _event_id]
+		d.face = int(_tali_his[i])
+		d.size = Vector2(30, 30)
+		d.pivot_offset = Vector2(15, 15)
+		d.position = Vector2(-40, 120)
+		root.add_child(d)
+		_tali_his_dice.append(d)
+		d.set_meta("dest", Vector2(38.0 + float(i) * 52.0, 124.0))
+	var his_cap := Label.new()
+	his_cap.text = "HIS THROW"
+	his_cap.add_theme_font_size_override("font_size", 15)
+	his_cap.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
+	his_cap.position = Vector2(30, 90)
+	his_cap.size = Vector2(280, 22)
+	his_cap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(his_cap)
+	_tali_his_caption = his_cap
+	# Your throw, near side — each bone a toggle: standing = kept.
+	for i in range(4):
+		var wrap := Control.new()
+		wrap.position = Vector2(34.0 + float(i) * 58.0, 282.0)
+		wrap.size = Vector2(38, 38)
+		wrap.pivot_offset = Vector2(19, 19)
+		wrap.mouse_filter = Control.MOUSE_FILTER_PASS
+		root.add_child(wrap)
+		_tali_my_dice.append(wrap)
+		var d := KnuckleboneDie.new()
+		d.seed_text = "own_%d_%s" % [i, _event_id]
+		d.face = int(_tali_mine[i])
+		d.set_anchors_preset(Control.PRESET_FULL_RECT)
+		wrap.add_child(d)
+		var btn := Button.new()
+		btn.flat = true
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		btn.mouse_filter = Control.MOUSE_FILTER_PASS
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		for st in ["normal", "hover", "pressed", "focus"]:
+			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+		btn.pressed.connect(_on_tali_bone.bind(i))
+		wrap.add_child(btn)
+		GameTheme.attach_rich_hover(wrap, "Keep or recast",
+			"Raised bones will be kept. Lowered bones will be rerolled.",
+			"Click to toggle", Color(0.92, 0.88, 0.80), 1.04)
+	var my_cap := Label.new()
+	my_cap.text = "YOURS"
+	my_cap.add_theme_font_size_override("font_size", 15)
+	my_cap.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
+	my_cap.position = Vector2(30, 338)
+	my_cap.size = Vector2(300, 22)
+	my_cap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(my_cap)
+	_tali_my_caption = my_cap
+	# The verdict chalk, center field — empty until the ranks stand.
+	var chalk := Label.new()
+	chalk.text = ""
+	chalk.add_theme_font_size_override("font_size", 24)
+	chalk.add_theme_color_override("font_color", Color(0.92, 0.88, 0.80))
+	chalk.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	chalk.add_theme_constant_override("outline_size", 5)
+	if GameTheme.font_display:
+		chalk.add_theme_font_override("font", GameTheme.font_display)
+	chalk.position = Vector2(30, 192)
+	chalk.size = Vector2(290, 36)
+	chalk.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	chalk.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(chalk)
+	_tali_chalk = chalk
+	# The table's law, chalked where both sides can read it.
+	var slate := ChalkSlate.new()
+	slate.seed_text = "law_" + _event_id
+	slate.position = Vector2(334, 72)
+	slate.size = Vector2(208, 252)
+	root.add_child(slate)
+	var head := Label.new()
+	head.text = "THE TABLE'S LAW"
+	head.add_theme_font_size_override("font_size", 15)
+	head.add_theme_color_override("font_color", Color(0.85, 0.86, 0.82, 0.9))
+	head.position = Vector2(346, 84)
+	head.size = Vector2(184, 18)
+	head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	head.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(head)
+	for r in range(5):
+		var glyphs: Array = TALI_GLYPHS[r]
+		for j in range(4):
+			var g := KnuckleboneDie.new()
+			g.seed_text = "law_%d_%d_%s" % [r, j, _event_id]
+			g.face = int(glyphs[j])
+			g.size = Vector2(18, 18)
+			g.position = Vector2(346.0 + float(j) * 20.0,
+				108.0 + float(r) * 38.0)
+			root.add_child(g)
+		var rname := Label.new()
+		rname.text = TALI_RANKS[r].capitalize()
+		rname.add_theme_font_size_override("font_size", 16)
+		rname.add_theme_color_override("font_color", Color(0.85, 0.86, 0.82, 0.9))
+		rname.position = Vector2(432.0, 109.0 + float(r) * 38.0)
+		rname.size = Vector2(104, 18)
+		rname.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(rname)
+	var pays := Label.new()
+	pays.text = "VENUS PAYS DOUBLE"
+	pays.add_theme_font_size_override("font_size", 16)
+	pays.add_theme_color_override("font_color", Color(0.85, 0.86, 0.82, 0.75))
+	pays.position = Vector2(346, 298)
+	pays.size = Vector2(184, 16)
+	pays.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pays.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(pays)
+	var slate_hover := Control.new()
+	slate_hover.position = slate.position
+	slate_hover.size = slate.size
+	slate_hover.mouse_filter = Control.MOUSE_FILTER_PASS
+	root.add_child(slate_hover)
+	GameTheme.attach_rich_hover(slate_hover, "The table's law",
+		"Hands rank from rarest to commonest: Wall, Venus, Crossed Pikes, Column, Pair, High.",
+		"Ties use total pips. Exact ties return the stake.",
+		Color(0.85, 0.86, 0.82), 1.0)
+
+
+func _tali_run_intro() -> void:
+	var rm := UserSettings.reduce_motion
+	AudioBank.play_sfx("bone_cast", 0.06, -4.0)
+	if rm:
+		for d in _tali_his_dice:
+			if is_instance_valid(d):
+				d.position = d.get_meta("dest")
+		await get_tree().create_timer(0.6).timeout
+	else:
+		for i in range(_tali_his_dice.size()):
+			var d = _tali_his_dice[i]
+			if is_instance_valid(d):
+				_tumble_die(d, {"face": int(_tali_his[i]), "skull": false},
+					d.get_meta("dest"), 0.08 * i, 1.0)
+		await get_tree().create_timer(1.2).timeout
+	if _tali_root == null or not is_instance_valid(_tali_root):
+		return
+	_tali_update_captions()
+	_tali_mark_keeps()
+	_tali_busy = false
+	_tali_arm_rows()
+
+
+func _tali_update_captions() -> void:
+	var rh := _tali_rank(_tali_his)
+	var rm := _tali_rank(_tali_mine)
+	if _tali_his_caption != null and is_instance_valid(_tali_his_caption):
+		_tali_his_caption.text = "HIS THROW — %s" % String(rh["name"])
+	if _tali_my_caption != null and is_instance_valid(_tali_my_caption):
+		var kept := 0
+		for k in _tali_keep:
+			if k:
+				kept += 1
+		_tali_my_caption.text = "YOURS — %s · KEEPING %d" % [String(rm["name"]), kept]
+
+
+func _tali_mark_keeps() -> void:
+	for i in range(_tali_my_dice.size()):
+		var wrap = _tali_my_dice[i]
+		if not is_instance_valid(wrap):
+			continue
+		var kept: bool = bool(_tali_keep[i])
+		wrap.modulate = Color(1.18, 1.14, 1.02) if kept else Color(0.68, 0.66, 0.62)
+		wrap.position.y = 276.0 if kept else 288.0
+
+
+func _on_tali_bone(i: int) -> void:
+	if _tali_busy:
+		return
+	_tali_keep[i] = not bool(_tali_keep[i])
+	AudioBank.play_sfx("button_click")
+	_tali_mark_keeps()
+	_tali_update_captions()
+	_tali_arm_rows()
+
+
+func _tali_arm_rows() -> void:
+	if _tali_rows == null or not is_instance_valid(_tali_rows):
+		return
+	for c in _tali_rows.get_children():
+		c.queue_free()
+	var kept := 0
+	for k in _tali_keep:
+		if k:
+			kept += 1
+	if kept < 4:
+		_tali_rows.add_child(_make_frameless_choice("Throw the rest",
+			"Keep %d and reroll %d. You have one reroll." % [
+				kept, 4 - kept],
+			"", 56, _on_tali_throw))
+	_tali_rows.add_child(_make_frameless_choice("Stand pat",
+		"The throw as it lies: %s." % String(_tali_rank(_tali_mine)["name"]).capitalize(),
+		"", 56, _on_tali_stand))
+
+
+func _on_tali_throw() -> void:
+	if _tali_busy:
+		return
+	_tali_busy = true
+	if _tali_rows != null and is_instance_valid(_tali_rows):
+		for c in _tali_rows.get_children():
+			c.queue_free()
+	var rm := UserSettings.reduce_motion
+	AudioBank.play_sfx("bone_cast", 0.06, -4.0)
+	for i in range(4):
+		if bool(_tali_keep[i]):
+			continue
+		# Bake, then recast the bone in place. The wrap can't ride
+		# _tumble_die (that stamps face/skull on its target, and the wrap
+		# is a plain Control), so the wrap hops here and the child die
+		# flickers-then-stamps on the same clock via _tali_stamp_later.
+		_tali_mine[i] = randi_range(1, 4)
+		var wrap = _tali_my_dice[i]
+		if wrap == null or not is_instance_valid(wrap):
+			continue
+		var die = wrap.get_child(0)
+		if die == null or not is_instance_valid(die):
+			continue
+		if rm:
+			die.face = int(_tali_mine[i])
+			die.queue_redraw()
+		else:
+			var home := Vector2(34.0 + float(i) * 58.0, 276.0)
+			wrap.position = home + Vector2(-12, 66)
+			var tw: Tween = wrap.create_tween()
+			tw.tween_interval(0.08 * i)
+			tw.tween_property(wrap, "position", home + Vector2(-4, -30), 0.22) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			tw.tween_property(wrap, "position", home, 0.20) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+			tw.tween_property(wrap, "scale", Vector2(1.16, 0.84), 0.05)
+			tw.tween_property(wrap, "scale", Vector2.ONE, 0.10) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			_tali_stamp_later(die, int(_tali_mine[i]))
+	await get_tree().create_timer(0.6 if rm else 1.15).timeout
+	if _tali_root == null or not is_instance_valid(_tali_root):
+		return
+	# The keep phase is over; the four stand as thrown, uniformly.
+	_tali_keep = [true, true, true, true]
+	_tali_mark_keeps()
+	_tali_update_captions()
+	await _tali_his_drill()
+
+
+func _on_tali_stand() -> void:
+	if _tali_busy:
+		return
+	_tali_busy = true
+	if _tali_rows != null and is_instance_valid(_tali_rows):
+		for c in _tali_rows.get_children():
+			c.queue_free()
+	# All four stand as they lie.
+	_tali_keep = [true, true, true, true]
+	_tali_mark_keeps()
+	await _tali_his_drill()
+
+
+## The recast bone's airborne flicker: every look shows another side, then
+## the baked truth stamps with the settle clack.
+func _tali_stamp_later(die: Control, truth: int) -> void:
+	for _j in range(4):
+		await get_tree().create_timer(0.105).timeout
+		if not is_instance_valid(die):
+			return
+		die.face = randi_range(1, 4)
+		die.queue_redraw()
+	await get_tree().create_timer(0.05).timeout
+	if not is_instance_valid(die):
+		return
+	die.face = truth
+	die.queue_redraw()
+
+
+func _tali_his_drill() -> void:
+	var keep := _tali_drill_keep(_tali_his)
+	var thrown := 0
+	for k in keep:
+		if not k:
+			thrown += 1
+	var rm := UserSettings.reduce_motion
+	if thrown == 0:
+		if _tali_his_caption != null and is_instance_valid(_tali_his_caption):
+			_tali_his_caption.text = "HIS THROW — %s · HE STANDS" \
+				% String(_tali_rank(_tali_his)["name"])
+		await get_tree().create_timer(0.8).timeout
+	else:
+		if _tali_his_caption != null and is_instance_valid(_tali_his_caption):
+			_tali_his_caption.text = "HE KEEPS %s, THROWS %d" % [
+				String(_tali_rank(_tali_his)["name"]), thrown]
+		await get_tree().create_timer(0.9).timeout
+		if _tali_root == null or not is_instance_valid(_tali_root):
+			return
+		AudioBank.play_sfx("bone_cast", 0.06, -6.0)
+		for i in range(4):
+			if bool(keep[i]):
+				continue
+			_tali_his[i] = randi_range(1, 4)
+			var d = _tali_his_dice[i]
+			if d == null or not is_instance_valid(d):
+				continue
+			if rm:
+				d.face = int(_tali_his[i])
+				d.queue_redraw()
+			else:
+				d.position += Vector2(-12, -40)
+				_tumble_die(d, {"face": int(_tali_his[i]), "skull": false},
+					Vector2(38.0 + float(i) * 52.0 - 18.0, 124.0), 0.08 * i, 1.0)
+		await get_tree().create_timer(0.6 if rm else 1.25).timeout
+	if _tali_root == null or not is_instance_valid(_tali_root):
+		return
+	await _tali_verdict()
+
+
+func _tali_verdict() -> void:
+	_tali_update_captions()
+	var rme := _tali_rank(_tali_mine)
+	var rhe := _tali_rank(_tali_his)
+	var yours := String(rme["name"]).capitalize()
+	var his := String(rhe["name"]).capitalize()
+	var win: bool = int(rme["idx"]) < int(rhe["idx"]) \
+		or (int(rme["idx"]) == int(rhe["idx"]) and int(rme["pips"]) > int(rhe["pips"]))
+	var lose: bool = int(rhe["idx"]) < int(rme["idx"]) \
+		or (int(rme["idx"]) == int(rhe["idx"]) and int(rhe["pips"]) > int(rme["pips"]))
+	# The winning row answers, bone by bone.
+	if not UserSettings.reduce_motion:
+		var row: Array = _tali_my_dice if win else _tali_his_dice
+		if win or lose:
+			for d in row:
+				if not is_instance_valid(d):
+					continue
+				var pu: Tween = d.create_tween()
+				pu.tween_property(d, "scale", Vector2(1.28, 1.28), 0.09) \
+					.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+				pu.tween_property(d, "scale", Vector2.ONE, 0.14)
+				AudioBank.play_sfx("bone_settle", 0.08, -10.0)
+				await get_tree().create_timer(0.14).timeout
+				if _tali_root == null or not is_instance_valid(_tali_root):
+					return
+	if _tali_chalk != null and is_instance_valid(_tali_chalk):
+		if win:
+			_tali_chalk.text = "%s TAKES THE FUND" % String(rme["name"])
+		elif lose:
+			_tali_chalk.text = "%s HOLDS" % String(rhe["name"])
+		else:
+			_tali_chalk.text = "DEAD LEVEL"
+	await get_tree().create_timer(1.0).timeout
+	if win:
+		var venus: bool = int(rme["idx"]) == 1
+		var pay: int = int(_tali_cfg.get("venus_pay",
+			int(_tali_cfg.get("payout", 0)) * 2)) if venus \
+			else int(_tali_cfg.get("payout", 0))
+		var receipt := _gamble_pay(_tali_cfg, true, pay, "coin_pour")
+		_win_flourish()
+		if venus:
+			_show_result(_combine_lines([_tali_text("venus_text",
+				"Venus beats {his}. Gained {pay} gold.",
+				pay, yours, his), receipt]))
+		else:
+			_show_result(_combine_lines([_tali_text("win_text",
+				"{yours} beats {his}. Gained {pay} gold.",
+				pay, yours, his), receipt]))
+	elif lose:
+		_sting("hit_hero", -4.0)
+		_bust_feedback()
+		var lose_receipt := _gamble_pay(_tali_cfg, false, 0)
+		_show_result(_combine_lines([_tali_text("lose_text",
+			"{his} beats {yours}. You lost the stake.",
+			0, yours, his), lose_receipt]))
+	else:
+		_show_result(_tali_text("wash_text",
+			"{yours} ties {his}. Your stake was returned.",
+			0, yours, his))
+
+
+# ── The Proving Ground (field_game) — the sappers' sand-table exam ───────
+# Minesweeper as a one-decision-per-file crossing: five files of raked
+# sand, three pinches of powder buried at the deal (NEVER two in one
+# file — posted), and every safe step chalks its own count of charges in
+# the eight cells around it. The whole game is informed push-your-luck:
+# the numbers accrue as you cross, a zero clears every neighbor, and you
+# may lift your marker between steps and take the tier your files have
+# earned. A charge ends the exam — the stake drowns, the pinch of powder
+# is real (posted HP singe), and the honest show flags every remaining
+# charge before the page turns. Bake-then-shade: the whole field is laid
+# at the deal; the steps only discover it. The blue seat's `scout` flag
+# chalks one charge before the first step. Config:
+#   {stake, charges: 3, singe: 3, pay: [0,10,25,45,65,90], scout: bool,
+#    open_text, win_text, bank_text, bust_text, broke_text, seen_texts}
+#   — texts take {stake} / {pay} / {files}.
+
+const FIELD_COLS := 5
+const FIELD_ROWS := 3
+
+var _field_cfg: Dictionary = {}
+var _field_mines: Array = []       # per column: mined row, or -1
+var _field_col := 0                # next file to step (0-based)
+var _field_root: Control = null
+var _field_rows_box: VBoxContainer = null
+var _field_cells: Array = []       # [col][row] wrap Controls
+var _field_caption: Label = null
+var _field_busy := true
+
+
+func _field_text(key: String, fallback: String, pay: int = 0) -> String:
+	var raw := _seen_text_override(_field_cfg, key,
+		String(_field_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_field_cfg.get("stake", 0)))) \
+		.replace("{pay}", str(pay)).replace("{files}", str(_field_col))
+
+
+func _field_mine_at(c: int) -> int:
+	if c < 0 or c >= _field_mines.size():
+		return -1
+	return int(_field_mines[c])
+
+
+func _field_count(c: int, r: int) -> int:
+	var n := 0
+	for dc in range(-1, 2):
+		var mr := _field_mine_at(c + dc)
+		if mr < 0:
+			continue
+		if dc == 0 and mr == r:
+			continue
+		if absi(mr - r) <= 1 and not (dc == 0 and mr == r):
+			n += 1
+	return n
+
+
+func _start_field_game(effect: Dictionary) -> void:
+	_field_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_field_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	# Lay the field: charges in distinct files, never two in one.
+	var cols := [0, 1, 2, 3, 4]
+	cols.shuffle()
+	_field_mines = [-1, -1, -1, -1, -1]
+	for i in range(clampi(int(effect.get("charges", 3)), 1, FIELD_COLS)):
+		_field_mines[int(cols[i])] = randi() % FIELD_ROWS
+	_field_col = 0
+	_field_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_field_text("open_text",
+			"Choose one cell in each column. A safe cell shows how many charges touch it. Stop after a safe step to collect."), 4)
+	_field_rows_box = VBoxContainer.new()
+	_field_rows_box.add_theme_constant_override("separation", 12)
+	vbox.add_child(_field_rows_box)
+	_build_field_stage()
+	_field_busy = false
+	_field_arm_rows()
+
+
+func _build_field_stage() -> void:
+	_field_cells = []
+	var root := Control.new()
+	root.name = "FieldStage"
+	root.position = Vector2(860, 210)
+	root.size = Vector2(560, 430)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_field_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "exam_" + _event_id
+	patch.position = Vector2(10, 60)
+	patch.size = Vector2(540, 340)
+	root.add_child(patch)
+	# Chalked start and finish lines — the march reads left to right.
+	for x in [86.0, 474.0]:
+		var line := ColorRect.new()
+		line.color = Color(0.88, 0.88, 0.84, 0.30)
+		line.position = Vector2(x, 138)
+		line.size = Vector2(3, 214)
+		line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(line)
+	var caption := Label.new()
+	caption.text = "COLUMN 1 OF %d - %d CHARGES - ONE PER COLUMN" % [
+		FIELD_COLS, clampi(int(_field_cfg.get("charges", 3)), 1, FIELD_COLS)]
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
+	caption.position = Vector2(30, 84)
+	caption.size = Vector2(500, 24)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(caption)
+	_field_caption = caption
+	# The pay ledger, chalked at the near edge.
+	var pay: Array = _field_cfg.get("pay", [0, 10, 25, 45, 65, 90])
+	var ledger := Label.new()
+	var parts: Array = []
+	for i in range(1, pay.size()):
+		parts.append(str(int(pay[i])))
+	ledger.text = "FILES PAY: " + " · ".join(parts)
+	ledger.add_theme_font_size_override("font_size", 15)
+	ledger.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
+	ledger.position = Vector2(30, 366)
+	ledger.size = Vector2(500, 20)
+	ledger.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ledger.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(ledger)
+	for c in range(FIELD_COLS):
+		var col_cells: Array = []
+		for r in range(FIELD_ROWS):
+			var wrap := Control.new()
+			wrap.position = Vector2(96.0 + float(c) * 74.0,
+				142.0 + float(r) * 70.0)
+			wrap.size = Vector2(66, 62)
+			wrap.pivot_offset = Vector2(33, 31)
+			wrap.mouse_filter = Control.MOUSE_FILTER_PASS
+			root.add_child(wrap)
+			col_cells.append(wrap)
+			var cell := FieldCell.new()
+			cell.seed_text = "cell_%d_%d_%s" % [c, r, _event_id]
+			cell.set_anchors_preset(Control.PRESET_FULL_RECT)
+			wrap.add_child(cell)
+			var btn := Button.new()
+			btn.flat = true
+			btn.focus_mode = Control.FOCUS_NONE
+			btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+			btn.mouse_filter = Control.MOUSE_FILTER_PASS
+			btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+			for st in ["normal", "hover", "pressed", "focus"]:
+				btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+			btn.pressed.connect(_on_field_step.bind(c, r))
+			wrap.add_child(btn)
+		_field_cells.append(col_cells)
+	# The derby crowd's scout: one charge chalked before the first step.
+	if bool(_field_cfg.get("scout", false)):
+		var mined: Array = []
+		for c in range(FIELD_COLS):
+			if _field_mine_at(c) >= 0:
+				mined.append(c)
+		if not mined.is_empty():
+			var sc: int = mined[randi() % mined.size()]
+			var w = _field_cells[sc][_field_mine_at(sc)]
+			if is_instance_valid(w):
+				var painter = w.get_child(0)
+				painter.flagged = true
+				painter.queue_redraw()
+	_stage_entrance(root)
+	GameTheme.attach_rich_hover(patch, "The sand table",
+		"Move one cell per column from left to right. A safe cell shows the number of nearby charges.",
+		"Click a cell in the next column.", Color(0.92, 0.88, 0.80), 1.0)
+
+
+func _field_arm_rows() -> void:
+	if _field_rows_box == null or not is_instance_valid(_field_rows_box):
+		return
+	for c in _field_rows_box.get_children():
+		c.queue_free()
+	var lanes := ["Step the high path", "Step the center", "Step the low path"]
+	for r in range(FIELD_ROWS):
+		_field_rows_box.add_child(_make_frameless_choice(lanes[r],
+			"File %d of %d." % [_field_col + 1, FIELD_COLS], "", 52,
+			_on_field_step.bind(_field_col, r)))
+	if _field_col > 0:
+		var pay: Array = _field_cfg.get("pay", [0, 10, 25, 45, 65, 90])
+		var tier: int = int(pay[clampi(_field_col, 0, pay.size() - 1)])
+		_field_rows_box.add_child(_make_frameless_choice("Lift your marker",
+			"Take %d gold for %s crossed." % [tier,
+				"one file" if _field_col == 1 else "%d files" % _field_col],
+			"", 52, _on_field_bank))
+
+
+func _on_field_step(c: int, r: int) -> void:
+	if _field_busy or c != _field_col:
+		return
+	_field_busy = true
+	var wrap = _field_cells[c][r]
+	AudioBank.play_sfx("bone_settle", 0.08, -8.0)
+	if _field_mine_at(c) == r:
+		# The pinch goes off. Bake-then-shade: the ledger settles first.
+		var singe: int = int(_field_cfg.get("singe", 3))
+		var receipt := _combine_lines([
+			_apply_effect_list([{"type": "damage", "value": singe}]),
+			_gamble_pay(_field_cfg, false, 0)])
+		if is_instance_valid(wrap):
+			var painter = wrap.get_child(0)
+			painter.state = "blown"
+			painter.queue_redraw()
+		if not UserSettings.reduce_motion and _field_root != null \
+				and is_instance_valid(_field_root):
+			Motion.burst(self, _field_root.get_global_position()
+				+ wrap.position + Vector2(33, 26), "impact")
+		AudioBank.play_sfx("hit_hero", 0.05, -4.0)
+		# The honest show: every remaining charge uncovered.
+		for cc in range(FIELD_COLS):
+			var mr := _field_mine_at(cc)
+			if mr < 0 or (cc == c and mr == r):
+				continue
+			var mw = _field_cells[cc][mr]
+			if is_instance_valid(mw):
+				var mp = mw.get_child(0)
+				if mp.state == "hidden":
+					mp.state = "charge"
+					mp.queue_redraw()
+		if _field_caption != null and is_instance_valid(_field_caption):
+			_field_caption.text = "THE FIELD KEEPS THE FEE"
+		await get_tree().create_timer(1.5).timeout
+		_bust_feedback()
+		_show_result(_combine_lines([_field_text("bust_text",
+			"You stepped on a charge. You lost the entry fee."), receipt]))
+		return
+	# Safe: the sand presses flat and the count chalks itself.
+	if is_instance_valid(wrap):
+		var painter = wrap.get_child(0)
+		painter.state = "stepped"
+		painter.queue_redraw()
+		var num := Label.new()
+		num.text = str(_field_count(c, r))
+		num.add_theme_font_size_override("font_size", 22)
+		num.add_theme_color_override("font_color", Color(0.93, 0.93, 0.89))
+		num.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+		num.add_theme_constant_override("outline_size", 4)
+		if GameTheme.font_display:
+			num.add_theme_font_override("font", GameTheme.font_display)
+		num.set_anchors_preset(Control.PRESET_FULL_RECT)
+		num.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		num.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		num.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wrap.add_child(num)
+		if not UserSettings.reduce_motion:
+			var pu: Tween = wrap.create_tween()
+			pu.tween_property(wrap, "scale", Vector2(1.10, 0.92), 0.07)
+			pu.tween_property(wrap, "scale", Vector2.ONE, 0.12) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_field_col += 1
+	await get_tree().create_timer(0.55).timeout
+	if _field_root == null or not is_instance_valid(_field_root):
+		return
+	if _field_col >= FIELD_COLS:
+		var pay: Array = _field_cfg.get("pay", [0, 10, 25, 45, 65, 90])
+		var full: int = int(pay[pay.size() - 1])
+		var receipt := _gamble_pay(_field_cfg, true, full, "coin_pour")
+		# The exam's terminal prize: cross the whole field and the ground's own
+		# commendation rides out with the fee.
+		var frid := _gamble_bank_relic(_field_cfg, full)
+		if frid != "":
+			receipt = _combine_lines([receipt,
+				_field_text("bank_relic_text",
+					"Gained relic: %s." % RelicDB.get_relic(frid).name, full)])
+		_win_flourish()
+		if _field_caption != null and is_instance_valid(_field_caption):
+			_field_caption.text = "THE FIELD IS CROSSED"
+		await get_tree().create_timer(0.7).timeout
+		_show_result(_combine_lines([_field_text("win_text",
+			"You crossed all five columns safely. Gained {pay} gold.", full),
+			receipt]))
+		return
+	if _field_caption != null and is_instance_valid(_field_caption):
+		_field_caption.text = "FILE %d OF %d · THE COUNT IS CHALKED" % [
+			_field_col + 1, FIELD_COLS]
+	_field_busy = false
+	_field_arm_rows()
+
+
+func _on_field_bank() -> void:
+	if _field_busy or _field_col <= 0:
+		return
+	_field_busy = true
+	var pay: Array = _field_cfg.get("pay", [0, 10, 25, 45, 65, 90])
+	var tier: int = int(pay[clampi(_field_col, 0, pay.size() - 1)])
+	# An early stop earns its TIER, never the whole prize — a pot game's
+	# terminal payoff is `bank_relic_at`, which reads the tier it stopped on.
+	var receipt := _gamble_pay(_field_cfg, true, tier) if tier > 0 else ""
+	var rid := _gamble_bank_relic(_field_cfg, tier)
+	if rid != "":
+		receipt = _combine_lines([receipt,
+			_field_text("bank_relic_text",
+				"Gained relic: %s." % RelicDB.get_relic(rid).name, tier)])
+	_show_result(_combine_lines([_field_text("bank_text",
+		"Stopped after crossing %s. Gained {pay} gold."
+		% ("one file" if _field_col == 1 else "{files} files"), tier),
+		receipt]))
+
+
+# ── The Gibbet Green (quoits_game) — read the chain, loose at the peg ────
+# The environmental-reading game: rope quoits pitched at the gallows
+# stake, where the WIND is the house — and the field posts it honestly
+# twice over: the hanged man's empty chain swings downwind (one notch of
+# lean per notch of wind), and the crow sits the gibbet arm only in a
+# dead calm. Wind runs -2..2; you can only aim one mark either side of
+# the peg, so a hard two-notch gust is unwinnable beyond a leaner — the
+# real decision is "Wait out the wind" (limited holds per sitting) versus
+# taking the eight. Bake-then-shade: each throw's wind is baked before
+# the chain shows it, and the landing is aim + wind, arithmetic a player
+# can check against the resting rings. Config:
+#   {stake, ringer: 20, leaner: 8, waits: 2, throws: 3, open_text,
+#    perfect_text, win_text, poor_text, broke_text, seen_texts}
+#   — texts take {stake} / {pay} / {hits}.
+
+var _quoits_cfg: Dictionary = {}
+var _quoits_wind := 0
+var _quoits_throw := 0
+var _quoits_hits := 0
+var _quoits_pay := 0
+var _quoits_waits := 0
+var _quoits_root: Control = null
+var _quoits_rows: VBoxContainer = null
+var _quoits_gibbet: Control = null
+var _quoits_caption: Label = null
+var _quoits_busy := true
+
+
+func _quoits_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_quoits_cfg, key,
+		String(_quoits_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_quoits_cfg.get("stake", 0)))) \
+		.replace("{pay}", str(_quoits_pay)).replace("{hits}", str(_quoits_hits))
+
+
+func _start_quoits_game(effect: Dictionary) -> void:
+	_quoits_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_quoits_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	_quoits_wind = randi_range(-2, 2)
+	_quoits_throw = 0
+	_quoits_hits = 0
+	_quoits_pay = 0
+	_quoits_waits = int(effect.get("waits", 2))
+	_quoits_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_quoits_text("open_text",
+			"You have three throws and two waits. The chain points downwind, so aim the opposite way."), 4)
+	_quoits_rows = VBoxContainer.new()
+	_quoits_rows.add_theme_constant_override("separation", 12)
+	vbox.add_child(_quoits_rows)
+	_build_quoits_stage()
+	_quoits_busy = false
+	_quoits_arm_rows()
+
+
+func _build_quoits_stage() -> void:
+	var root := Control.new()
+	root.name = "QuoitsStage"
+	root.position = Vector2(860, 210)
+	root.size = Vector2(560, 430)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_quoits_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "green_" + _event_id
+	patch.chalk = "court"
+	patch.position = Vector2(10, 60)
+	patch.size = Vector2(540, 340)
+	root.add_child(patch)
+	var gibbet := GibbetPost.new()
+	gibbet.seed_text = "gallows_" + _event_id
+	gibbet.lean = float(_quoits_wind) * 0.5
+	gibbet.crow = _quoits_wind == 0
+	gibbet.position = Vector2(28, 66)
+	gibbet.size = Vector2(150, 250)
+	root.add_child(gibbet)
+	_quoits_gibbet = gibbet
+	# The live flutter — decorative; the LEAN is the information.
+	if not UserSettings.reduce_motion:
+		var sw: Tween = gibbet.create_tween().set_loops()
+		sw.tween_method(_quoits_sway_tick, -1.0, 1.0, 1.3) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		sw.tween_method(_quoits_sway_tick, 1.0, -1.0, 1.3) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	var gib_hover := Control.new()
+	gib_hover.position = gibbet.position
+	gib_hover.size = gibbet.size
+	gib_hover.mouse_filter = Control.MOUSE_FILTER_PASS
+	root.add_child(gib_hover)
+	GameTheme.attach_rich_hover(gib_hover, "The gauge",
+		"The chain points downwind. Each notch shows one level of wind. No lean means calm.",
+		"Aim opposite the chain.", Color(0.72, 0.74, 0.78), 1.0)
+	var peg := QuoitsPeg.new()
+	peg.seed_text = "peg_" + _event_id
+	peg.position = Vector2(300, 168)
+	peg.size = Vector2(30, 78)
+	root.add_child(peg)
+	var caption := Label.new()
+	caption.text = "THROW 1 OF %d · READ THE CHAIN" % int(_quoits_cfg.get("throws", 3))
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
+	caption.position = Vector2(200, 84)
+	caption.size = Vector2(340, 24)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(caption)
+	_quoits_caption = caption
+	# The three chalked aiming marks, and the pay chalked at the near edge.
+	for k in range(-1, 2):
+		var tick := ColorRect.new()
+		tick.color = Color(0.90, 0.90, 0.86, 0.55)
+		tick.position = Vector2(313.0 + float(k) * 40.0, 250.0)
+		tick.size = Vector2(4, 14)
+		tick.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(tick)
+	var ledger := Label.new()
+	ledger.text = "AROUND THE PEG: %d · TOUCHING: %d" % [
+		int(_quoits_cfg.get("ringer", 20)), int(_quoits_cfg.get("leaner", 8))]
+	ledger.add_theme_font_size_override("font_size", 15)
+	ledger.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
+	ledger.position = Vector2(30, 366)
+	ledger.size = Vector2(500, 20)
+	ledger.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ledger.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(ledger)
+	_stage_entrance(root)
+
+
+func _quoits_sway_tick(v: float) -> void:
+	if _quoits_gibbet == null or not is_instance_valid(_quoits_gibbet):
+		return
+	_quoits_gibbet.sway = v * 0.07
+	_quoits_gibbet.queue_redraw()
+
+
+func _quoits_lean_to(v: float) -> void:
+	if _quoits_gibbet == null or not is_instance_valid(_quoits_gibbet):
+		return
+	_quoits_gibbet.lean = v
+	_quoits_gibbet.queue_redraw()
+
+
+func _quoits_arm_rows() -> void:
+	if _quoits_rows == null or not is_instance_valid(_quoits_rows):
+		return
+	for c in _quoits_rows.get_children():
+		c.queue_free()
+	_quoits_rows.add_child(_make_frameless_choice("Aim left of the peg",
+		"Throw one step left.", "", 52,
+		_on_quoits_loose.bind(-1)))
+	_quoits_rows.add_child(_make_frameless_choice("Aim at the peg",
+		"Throw at the center.", "", 52,
+		_on_quoits_loose.bind(0)))
+	_quoits_rows.add_child(_make_frameless_choice("Aim right of the peg",
+		"Throw one step right.", "", 52,
+		_on_quoits_loose.bind(1)))
+	if _quoits_waits > 0:
+		_quoits_rows.add_child(_make_frameless_choice("Wait out the wind",
+			"Skip this wind. %s remain." % (
+				"Two holds" if _quoits_waits == 2 else "One hold"), "", 52,
+			_on_quoits_wait))
+
+
+func _on_quoits_wait() -> void:
+	if _quoits_busy or _quoits_waits <= 0:
+		return
+	_quoits_busy = true
+	_quoits_waits -= 1
+	await _quoits_shift_wind("THE WIND CHANGES - CHECK THE CHAIN")
+	if _quoits_root == null or not is_instance_valid(_quoits_root):
+		return
+	_quoits_busy = false
+	_quoits_arm_rows()
+
+
+## Rebake the wind and swing the gauge to it; the crow answers last.
+func _quoits_shift_wind(caption: String) -> void:
+	_quoits_wind = randi_range(-2, 2)
+	if _quoits_caption != null and is_instance_valid(_quoits_caption):
+		_quoits_caption.text = caption
+	var gib = _quoits_gibbet
+	if gib == null or not is_instance_valid(gib):
+		return
+	var had_crow: bool = bool(gib.crow)
+	if UserSettings.reduce_motion:
+		gib.lean = float(_quoits_wind) * 0.5
+		gib.crow = _quoits_wind == 0
+		gib.queue_redraw()
+		await get_tree().create_timer(0.7).timeout
+		return
+	var tw: Tween = gib.create_tween()
+	tw.tween_method(_quoits_lean_to, float(gib.lean),
+		float(_quoits_wind) * 0.5, 0.8) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	await tw.finished
+	if gib == null or not is_instance_valid(gib):
+		return
+	gib.crow = _quoits_wind == 0
+	gib.queue_redraw()
+	if had_crow and not bool(gib.crow) and _quoits_root != null \
+			and is_instance_valid(_quoits_root):
+		Motion.burst(self, _quoits_root.get_global_position()
+			+ gib.position + Vector2(96, 18), "ash")
+	await get_tree().create_timer(0.4).timeout
+
+
+func _on_quoits_loose(aim: int) -> void:
+	if _quoits_busy:
+		return
+	_quoits_busy = true
+	var landing: int = clampi(aim + _quoits_wind, -3, 3)
+	var rm := UserSettings.reduce_motion
+	var rest := Vector2(315.0 + float(landing) * 40.0 - 24.0, 212.0)
+	AudioBank.play_sfx("card_play", 0.06, -8.0)
+	var ring := RingProp.new()
+	ring.seed_text = "quoit_%d_%s" % [_quoits_throw, _event_id]
+	ring.size = Vector2(48, 48)
+	ring.pivot_offset = Vector2(24, 24)
+	if _quoits_root != null and is_instance_valid(_quoits_root):
+		_quoits_root.add_child(ring)
+		if rm:
+			ring.position = rest
+			await get_tree().create_timer(0.55).timeout
+		else:
+			ring.airborne = true
+			ring.position = Vector2(452, 386)
+			ring.scale = Vector2(1.2, 1.2)
+			var mid := ring.position.lerp(rest, 0.55) + Vector2(0, -90)
+			var tw: Tween = ring.create_tween()
+			tw.tween_property(ring, "position", mid, 0.26) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			tw.parallel().tween_property(ring, "rotation", -0.5, 0.26)
+			tw.tween_property(ring, "position", rest, 0.24) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+			tw.parallel().tween_property(ring, "scale", Vector2.ONE, 0.24)
+			tw.parallel().tween_property(ring, "rotation", 0.0, 0.24)
+			await tw.finished
+			if not is_instance_valid(ring):
+				return
+			ring.airborne = false
+			ring.queue_redraw()
+			AudioBank.play_sfx("bone_settle", 0.08, -8.0)
+			var sq: Tween = ring.create_tween()
+			sq.tween_property(ring, "scale", Vector2(1.14, 0.86), 0.06)
+			sq.tween_property(ring, "scale", Vector2.ONE, 0.10) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			await get_tree().create_timer(0.2).timeout
+	if _quoits_root == null or not is_instance_valid(_quoits_root):
+		return
+	# The board settles: arithmetic anyone can check against the rings.
+	if landing == 0:
+		_quoits_hits += 1
+		_quoits_pay += int(_quoits_cfg.get("ringer", 20))
+		_sting("coin")
+		if not rm:
+			Motion.burst(self, _quoits_root.get_global_position()
+				+ Vector2(315, 220), "coin_spark")
+		if _quoits_caption != null and is_instance_valid(_quoits_caption):
+			_quoits_caption.text = "AROUND THE PEG · %d WON" % _quoits_pay
+	elif absi(landing) == 1:
+		_quoits_pay += int(_quoits_cfg.get("leaner", 8))
+		if _quoits_caption != null and is_instance_valid(_quoits_caption):
+			_quoits_caption.text = "TOUCHING THE PEG · %d WON" % _quoits_pay
+	else:
+		if _quoits_caption != null and is_instance_valid(_quoits_caption):
+			_quoits_caption.text = "WIDE — THE WIND KEEPS IT"
+	_quoits_throw += 1
+	await get_tree().create_timer(0.9).timeout
+	if _quoits_root == null or not is_instance_valid(_quoits_root):
+		return
+	if _quoits_throw >= int(_quoits_cfg.get("throws", 3)):
+		if _quoits_pay > 0:
+			RunState.gain_gold(_quoits_pay)
+		if _quoits_hits >= int(_quoits_cfg.get("throws", 3)):
+			_sting("coin_pour")
+			_win_flourish()
+			_show_result(_quoits_text("perfect_text",
+				"Three ringers. Gained {pay} gold."))
+		elif _quoits_pay > 0:
+			_sting("coin")
+			_win_flourish()
+			_show_result(_quoits_text("win_text",
+				"The round ended with {pay} gold. You collect it."))
+		else:
+			_sting("hit_hero", -6.0)
+			_bust_feedback()
+			_show_result(_quoits_text("poor_text",
+				"All three throws missed. You lost the stake."))
+		return
+	await _quoits_shift_wind("THROW %d OF %d · READ THE CHAIN" % [
+		_quoits_throw + 1, int(_quoits_cfg.get("throws", 3))])
+	if _quoits_root == null or not is_instance_valid(_quoits_root):
+		return
+	_quoits_busy = false
+	_quoits_arm_rows()
+
+
+# ── Crown & Pike (crown_game) — back a mark, cast the three dice ─────────
+# Crown-and-Anchor, retold on the Old King's gaming board: six bold marks
+# (Crown · Pike · Skull · Banner · Coin · Wheel), each a distinct SILHOUETTE
+# and a distinct colour so it can never be mistaken (the fix for the drum
+# game's four identical heads IS the game). Back one mark, cast three dice;
+# every die that shows your mark multiplies the pot, and you may bank it or
+# let it ride for another cast. HONEST BY CONSTRUCTION: three fair d6 rolled
+# fresh each cast, the results baked before the tumble is shown, and the
+# printed pay-table (·1 hit ×2, ·2 hits ×3, ·triple ×4) is exactly what pays.
+#   Config: {stake, open_text, win_text, bust_text, broke_text, seen_texts}
+#           — texts take {stake}/{pot}.
+
+var _cap_cfg: Dictionary = {}
+var _cap_pot := 0
+var _cap_base := 0                  # the original stake, for text
+var _cap_mark := -1                 # backed symbol 0..5, -1 none
+var _cap_casts := 0
+var _cap_busy := true
+var _cap_root: Control = null
+var _cap_rows: VBoxContainer = null
+var _cap_caption: Label = null
+var _cap_pot_lbl: Label = null
+var _cap_pads: Array = []           # per mark: {"wrap":Control,"ring":Panel}
+var _cap_dice: Array = []           # 3 {"die":PipDie,"pip":WarPip}
+
+const CAP_NAMES := ["Crown", "Pike", "Skull", "Banner", "Coin", "Wheel"]
+const CAP_TINTS := [
+	Color(0.90, 0.74, 0.30),   # Crown  — gold
+	Color(0.52, 0.66, 0.84),   # Pike   — steel blue
+	Color(0.84, 0.82, 0.74),   # Skull  — bone
+	Color(0.82, 0.34, 0.29),   # Banner — crimson
+	Color(0.40, 0.72, 0.56),   # Coin   — verdigris
+	Color(0.68, 0.53, 0.82),   # Wheel  — violet
+]
+
+
+func _cap_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_cap_cfg, key,
+		String(_cap_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_cap_cfg.get("stake", 0)))) \
+		.replace("{pot}", str(_cap_pot))
+
+
+func _start_crown_game(effect: Dictionary) -> void:
+	_cap_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_cap_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	_cap_base = maxi(stake, 1)
+	_cap_pot = _cap_base
+	_cap_mark = -1
+	_cap_casts = 0
+	_cap_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_cap_text("open_text",
+			"Choose one symbol, then roll three dice. Matching dice multiply the pot. No matches lose it."), 4)
+	_cap_rows = VBoxContainer.new()
+	_cap_rows.add_theme_constant_override("separation", 12)
+	vbox.add_child(_cap_rows)
+	_build_crown_stage()
+	_cap_busy = false
+
+
+func _build_crown_stage() -> void:
+	_cap_pads = []
+	_cap_dice = []
+	var root := Control.new()
+	root.name = "CrownStage"
+	root.position = Vector2(860, 200)
+	root.size = Vector2(560, 450)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_cap_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "crown_" + _event_id
+	patch.chalk = "court"
+	patch.position = Vector2(10, 56)
+	patch.size = Vector2(540, 356)
+	root.add_child(patch)
+	var caption := Label.new()
+	caption.text = "TAP A MARK TO BACK IT"
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", Color(0.92, 0.86, 0.70))
+	caption.position = Vector2(30, 72)
+	caption.size = Vector2(500, 24)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(caption)
+	_cap_caption = caption
+	# The six betting marks, one row across the top of the board.
+	for i in range(6):
+		var wrap := Control.new()
+		wrap.position = Vector2(24.0 + float(i) * 90.0, 104.0)
+		wrap.size = Vector2(62, 62)
+		wrap.pivot_offset = Vector2(31, 31)
+		wrap.mouse_filter = Control.MOUSE_FILTER_PASS
+		root.add_child(wrap)
+		# Selection ring (hidden until backed).
+		var ring := Panel.new()
+		var rs := StyleBoxFlat.new()
+		rs.bg_color = Color(0, 0, 0, 0)
+		rs.border_color = CAP_TINTS[i]
+		rs.set_border_width_all(3)
+		rs.set_corner_radius_all(10)
+		ring.add_theme_stylebox_override("panel", rs)
+		ring.position = Vector2(-6, -6)
+		ring.size = Vector2(74, 74)
+		ring.visible = false
+		ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wrap.add_child(ring)
+		var pip := WarPip.new()
+		pip.kind = i
+		pip.tint = CAP_TINTS[i]
+		pip.set_anchors_preset(Control.PRESET_FULL_RECT)
+		wrap.add_child(pip)
+		var btn := Button.new()
+		btn.flat = true
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		btn.mouse_filter = Control.MOUSE_FILTER_PASS
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		for st in ["normal", "hover", "pressed", "focus"]:
+			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+		btn.pressed.connect(_on_crown_mark.bind(i))
+		_stage_touchable(wrap, btn)
+		wrap.add_child(btn)
+		var nm := Label.new()
+		nm.text = CAP_NAMES[i]
+		nm.add_theme_font_size_override("font_size", 14)
+		nm.add_theme_color_override("font_color", CAP_TINTS[i])
+		nm.position = Vector2(-14, 64)
+		nm.size = Vector2(90, 18)
+		nm.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		nm.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wrap.add_child(nm)
+		_cap_pads.append({"wrap": wrap, "ring": ring})
+	# The three dice, cup-cast in the centre of the board.
+	for j in range(3):
+		var dwrap := Control.new()
+		dwrap.position = Vector2(126.0 + float(j) * 112.0, 208.0)
+		dwrap.size = Vector2(84, 84)
+		dwrap.pivot_offset = Vector2(42, 42)
+		dwrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(dwrap)
+		var die := PipDie.new()
+		die.seed_text = "capdie_%d_%s" % [j, _event_id]
+		die.blank = true
+		die.set_anchors_preset(Control.PRESET_FULL_RECT)
+		dwrap.add_child(die)
+		var pip := WarPip.new()
+		pip.kind = 0
+		pip.visible = false
+		# The symbol sits inside the die's inset cell.
+		pip.position = Vector2(15, 15)
+		pip.size = Vector2(54, 54)
+		pip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		dwrap.add_child(pip)
+		_cap_dice.append({"die": die, "pip": pip})
+	var pot := Label.new()
+	pot.add_theme_font_size_override("font_size", 18)
+	pot.add_theme_color_override("font_color", Color(0.86, 0.76, 0.44))
+	pot.position = Vector2(30, 306)
+	pot.size = Vector2(500, 24)
+	pot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(pot)
+	_cap_pot_lbl = pot
+	var pay := Label.new()
+	pay.text = "MATCHES:  1 = x2    2 = x3    3 = x4"
+	pay.add_theme_font_size_override("font_size", 14)
+	pay.add_theme_color_override("font_color", Color(0.70, 0.64, 0.52))
+	pay.position = Vector2(30, 336)
+	pay.size = Vector2(500, 20)
+	pay.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(pay)
+	_cap_refresh_pot()
+	_stage_entrance(root)
+	GameTheme.attach_rich_hover(patch, "The Old King's gaming board",
+		"Choose a symbol and roll. Matching dice multiply the pot; no matches lose it. After a win, collect or roll again.",
+		"Back a mark, then cast the dice", Color(0.90, 0.84, 0.68), 1.0)
+
+
+func _cap_refresh_pot() -> void:
+	if _cap_pot_lbl == null or not is_instance_valid(_cap_pot_lbl):
+		return
+	if _cap_mark < 0:
+		_cap_pot_lbl.text = "POT  %d GOLD  ·  back a mark" % _cap_pot
+	else:
+		_cap_pot_lbl.text = "POT  %d GOLD  ·  on the %s" % [
+			_cap_pot, CAP_NAMES[_cap_mark]]
+
+
+func _on_crown_mark(i: int) -> void:
+	if _cap_busy:
+		return
+	_cap_mark = i
+	for k in range(_cap_pads.size()):
+		var ring = _cap_pads[k]["ring"]
+		if is_instance_valid(ring):
+			ring.visible = (k == i)
+	AudioBank.play_sfx("coin", 0.05, -10.0)
+	if _cap_caption != null and is_instance_valid(_cap_caption):
+		_cap_caption.text = "BACKED THE %s — CAST WHEN READY" % CAP_NAMES[i].to_upper()
+	_cap_refresh_pot()
+	_cap_arm_rows()
+
+
+func _cap_arm_rows(after_win: bool = false) -> void:
+	if _cap_rows == null or not is_instance_valid(_cap_rows):
+		return
+	_cap_busy = false
+	for ch in _cap_rows.get_children():
+		ch.queue_free()
+	if after_win:
+		_cap_rows.add_child(_make_frameless_choice("Bank the pot",
+			"Take %d gold off the board and walk." % _cap_pot, "", 52, _on_crown_bank))
+		_cap_rows.add_child(_make_frameless_choice("Let it ride",
+			"Cast again on the %s. The whole %d rides on it." % [
+				CAP_NAMES[_cap_mark], _cap_pot], "", 52, _on_crown_cast))
+	elif _cap_mark >= 0:
+		_cap_rows.add_child(_make_frameless_choice("Cast the dice",
+			"Roll the three dice on the %s." % CAP_NAMES[_cap_mark], "", 52,
+			_on_crown_cast))
+
+
+func _on_crown_cast() -> void:
+	if _cap_busy or _cap_mark < 0:
+		return
+	_cap_busy = true
+	_cap_casts += 1
+	for ch in _cap_rows.get_children():
+		ch.queue_free()
+	var results := [randi() % 6, randi() % 6, randi() % 6]
+	if _cap_caption != null and is_instance_valid(_cap_caption):
+		_cap_caption.text = "CASTING…"
+	await _cap_tumble(results)
+	var matches := 0
+	for j in range(3):
+		if results[j] == _cap_mark:
+			matches += 1
+			var d = _cap_dice[j]["die"]
+			if is_instance_valid(d):
+				d.lit = true
+				d.accent = CAP_TINTS[_cap_mark]
+				d.queue_redraw()
+	if matches == 0:
+		# Bust — the pot is lost.
+		if _cap_caption != null and is_instance_valid(_cap_caption):
+			_cap_caption.text = "NO %s — THE POT IS LOST" % CAP_NAMES[_cap_mark].to_upper()
+		_cap_pot = 0
+		_cap_refresh_pot()
+		await get_tree().create_timer(0.6).timeout
+		_sting("hit_hero", -6.0)
+		_bust_feedback()
+		var bust_receipt := _gamble_pay(_cap_cfg, false, 0)
+		_show_result(_combine_lines([_cap_text("bust_text",
+			"No dice matched %s. You lost the pot." % CAP_NAMES[_cap_mark]),
+			bust_receipt]))
+		return
+	# Win — grow the pot.
+	_cap_pot *= (1 + matches)
+	_pulse_crown_mark()
+	_cap_refresh_pot()
+	var word: String = ["", "ONE", "TWO", "THREE"][matches]
+	if _cap_caption != null and is_instance_valid(_cap_caption):
+		_cap_caption.text = "%s %s — POT NOW %d" % [word,
+			CAP_NAMES[_cap_mark].to_upper() + ("S" if matches > 1 else ""), _cap_pot]
+	_sting("coin" if matches < 3 else "coin_pour", -3.0)
+	if matches >= 2:
+		_win_flourish()
+	await get_tree().create_timer(0.7).timeout
+	_cap_arm_rows(true)
+
+
+func _cap_tumble(results: Array) -> void:
+	# Bake-then-shade: results are already decided; this is pure theatre.
+	if UserSettings.reduce_motion:
+		for j in range(3):
+			_cap_land_die(j, int(results[j]))
+		await get_tree().create_timer(0.6).timeout
+		return
+	# Blank the dice and rattle them.
+	for entry in _cap_dice:
+		entry["die"].blank = true
+		entry["die"].lit = false
+		entry["die"].queue_redraw()
+		entry["pip"].visible = false
+	AudioBank.play_sfx("bone_settle", 0.08, -4.0)
+	for _r in range(5):
+		for entry in _cap_dice:
+			var w = entry["die"].get_parent()
+			if is_instance_valid(w):
+				w.position.y += randf_range(-2.0, 2.0)
+		await get_tree().create_timer(0.09).timeout
+	# Stagger the landings, left to right.
+	for j in range(3):
+		_cap_land_die(j, int(results[j]))
+		AudioBank.play_sfx("bone_settle", 0.05, -6.0, 1.05)
+		await get_tree().create_timer(0.18).timeout
+
+
+func _cap_land_die(j: int, face: int) -> void:
+	if j < 0 or j >= _cap_dice.size():
+		return
+	var die = _cap_dice[j]["die"]
+	var pip = _cap_dice[j]["pip"]
+	if is_instance_valid(die):
+		die.blank = false
+		die.queue_redraw()
+	if is_instance_valid(pip):
+		pip.kind = face
+		pip.tint = CAP_TINTS[face]
+		pip.visible = true
+		pip.queue_redraw()
+	if not UserSettings.reduce_motion and is_instance_valid(die):
+		var w = die.get_parent()
+		if is_instance_valid(w):
+			var tw: Tween = w.create_tween()
+			tw.tween_property(w, "scale", Vector2(1.12, 1.12), 0.07)
+			tw.tween_property(w, "scale", Vector2.ONE, 0.14) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
+
+func _pulse_crown_mark() -> void:
+	if _cap_mark < 0 or _cap_mark >= _cap_pads.size():
+		return
+	if UserSettings.reduce_motion:
+		return
+	var wrap = _cap_pads[_cap_mark]["wrap"]
+	if is_instance_valid(wrap):
+		var tw: Tween = wrap.create_tween()
+		tw.tween_property(wrap, "scale", Vector2(1.18, 1.18), 0.09)
+		tw.tween_property(wrap, "scale", Vector2.ONE, 0.18) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+func _on_crown_bank() -> void:
+	var receipt := _gamble_pay(_cap_cfg, true, _cap_pot) if _cap_pot > 0 else ""
+	# Ride the pot past the posted mark and the drummer's own keepsake leaves
+	# with it — the terminal prize this pot game never had.
+	var rid := _gamble_bank_relic(_cap_cfg, _cap_pot)
+	if rid != "":
+		receipt = _combine_lines([receipt, _cap_text("bank_relic_text",
+			"Gained relic: %s." % RelicDB.get_relic(rid).name)])
+	_show_result(_combine_lines([_cap_text("win_text",
+		"Collected {pot} gold."), receipt]))
+
+
+# ── The Quartermaster's Scale (scale_game) — find the false pay-token ─────
+# The deductive-weighing puzzle: N pay-tokens, one debased LIGHT by the Old
+# King's mint, found on a balance in a fixed number of weighings, then
+# named. HONEST BY CONSTRUCTION: the counterfeit is baked at the first
+# breath, and every weighing reports the true comparison — the beam tips
+# decisively toward the heavier pan (a real balance does, however small the
+# difference), and BALANCED means the false coin is off the scale or split
+# even. A running weighings-log keeps the deduction in the open. Naming
+# correctly pays a base plus a bonus for every weighing you SAVED (a bold
+# early call pays more; a wrong call loses the stake).
+#   Config: {stake, coins: 9, weighings: 3, base: 30, per_saved: 12,
+#            open_text, win_text, poor_text, broke_text, seen_texts}
+#            — texts take {stake} / {pay} / {used}.
+
+var _scale_cfg: Dictionary = {}
+var _scale_n := 9
+var _scale_fake := 0                # baked counterfeit index (the light one)
+var _scale_assign: Array = []       # per coin: 0 off, -1 left pan, +1 right
+var _scale_used := 0
+var _scale_max := 3
+var _scale_pay := 0
+var _scale_accusing := false
+var _scale_root: Control = null
+var _scale_rows: VBoxContainer = null
+var _scale_beam = null              # BalanceScale painter
+var _scale_caption: Label = null
+var _scale_log_label: Label = null
+var _scale_log: Array = []
+var _scale_marks: Array = []        # per-coin L/R/· marker Labels
+var _scale_busy := true
+
+
+func _scale_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_scale_cfg, key,
+		String(_scale_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_scale_cfg.get("stake", 0)))) \
+		.replace("{pay}", str(_scale_pay)).replace("{used}", str(_scale_used))
+
+
+func _start_scale_game(effect: Dictionary) -> void:
+	_scale_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_scale_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	_scale_n = clampi(int(effect.get("coins", 9)), 3, 12)
+	_scale_fake = randi() % _scale_n
+	_scale_assign = []
+	for _i in range(_scale_n):
+		_scale_assign.append(0)
+	_scale_used = 0
+	_scale_max = int(effect.get("weighings", 3))
+	_scale_pay = 0
+	_scale_accusing = false
+	_scale_log = []
+	_scale_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_scale_text("open_text",
+			"One coin is lighter. Place coins on both pans and weigh them, then choose the light coin. Fewer weighings pay more."), 4)
+	_scale_rows = VBoxContainer.new()
+	_scale_rows.add_theme_constant_override("separation", 12)
+	vbox.add_child(_scale_rows)
+	_build_scale_stage()
+	_scale_busy = false
+	_scale_arm_rows()
+
+
+func _build_scale_stage() -> void:
+	_scale_marks = []
+	var root := Control.new()
+	root.name = "ScaleStage"
+	root.position = Vector2(860, 200)
+	root.size = Vector2(560, 450)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_scale_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "scale_" + _event_id
+	patch.position = Vector2(10, 56)
+	patch.size = Vector2(540, 356)
+	root.add_child(patch)
+	var caption := Label.new()
+	caption.text = "WEIGHING 1 OF %d · SET THE PANS" % _scale_max
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", Color(0.92, 0.86, 0.70))
+	caption.position = Vector2(30, 78)
+	caption.size = Vector2(500, 22)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(caption)
+	_scale_caption = caption
+	var beam := BalanceScale.new()
+	beam.position = Vector2(110, 96)
+	beam.size = Vector2(340, 158)
+	root.add_child(beam)
+	_scale_beam = beam
+	# The weighings log — the deduction, kept in the open on the table.
+	var log_lbl := Label.new()
+	log_lbl.text = ""
+	log_lbl.add_theme_font_size_override("font_size", 15)
+	log_lbl.add_theme_color_override("font_color", Color(0.74, 0.68, 0.56))
+	log_lbl.position = Vector2(30, 250)
+	log_lbl.size = Vector2(500, 20)
+	log_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	log_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(log_lbl)
+	_scale_log_label = log_lbl
+	# The pay-token row: click to cycle a coin off → left pan → right pan.
+	var step := 490.0 / float(_scale_n)
+	for i in range(_scale_n):
+		var wrap := Control.new()
+		wrap.position = Vector2(30.0 + float(i) * step + (step - 42.0) * 0.5, 286.0)
+		wrap.size = Vector2(42, 42)
+		wrap.pivot_offset = Vector2(21, 21)
+		wrap.mouse_filter = Control.MOUSE_FILTER_PASS
+		root.add_child(wrap)
+		var coin := CoinProp.new()
+		coin.seed_text = "paytoken_%d_%s" % [i, _event_id]
+		coin.worn = true
+		coin.set_anchors_preset(Control.PRESET_FULL_RECT)
+		wrap.add_child(coin)
+		var btn := Button.new()
+		btn.flat = true
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		btn.mouse_filter = Control.MOUSE_FILTER_PASS
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		for st in ["normal", "hover", "pressed", "focus"]:
+			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+		btn.pressed.connect(_on_scale_coin.bind(i))
+		_stage_touchable(wrap, btn)
+		wrap.add_child(btn)
+		var mark := Label.new()
+		mark.text = "·"
+		mark.add_theme_font_size_override("font_size", 15)
+		mark.add_theme_color_override("font_color", Color(0.55, 0.50, 0.42))
+		mark.position = Vector2(0, 42)
+		mark.size = Vector2(42, 18)
+		mark.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wrap.add_child(mark)
+		_scale_marks.append(mark)
+	_stage_entrance(root)
+	GameTheme.attach_rich_hover(patch, "The quartermaster's balance",
+		"Click a coin to move it: off, left pan, right pan. Then weigh both sides.",
+		"Set the pans, then drop the beam", Color(0.90, 0.84, 0.68), 1.0)
+
+
+func _scale_pan_counts() -> Vector2i:
+	var l := 0
+	var r := 0
+	for a in _scale_assign:
+		if a == -1:
+			l += 1
+		elif a == 1:
+			r += 1
+	return Vector2i(l, r)
+
+
+func _scale_refresh_marks() -> void:
+	for i in range(_scale_marks.size()):
+		var m = _scale_marks[i]
+		if not is_instance_valid(m):
+			continue
+		match int(_scale_assign[i]):
+			-1:
+				m.text = "◄ L"
+				# Gilt, matching the R marker below — a symmetric two-sided device
+				# had one side in-palette and one in steel blue.
+				m.add_theme_color_override("font_color", Color(0.86, 0.72, 0.42))
+			1:
+				m.text = "R ►"
+				m.add_theme_color_override("font_color", Color(0.86, 0.72, 0.42))
+			_:
+				m.text = "·"
+				m.add_theme_color_override("font_color", Color(0.55, 0.50, 0.42))
+	if _scale_beam != null and is_instance_valid(_scale_beam):
+		var c := _scale_pan_counts()
+		_scale_beam.left_n = c.x
+		_scale_beam.right_n = c.y
+		_scale_beam.settled = false
+		_scale_beam.queue_redraw()
+
+
+func _on_scale_coin(i: int) -> void:
+	if _scale_busy:
+		return
+	if _scale_accusing:
+		_scale_accuse(i)
+		return
+	_scale_assign[i] = -1 if _scale_assign[i] == 0 else (1 if _scale_assign[i] == -1 else 0)
+	AudioBank.play_sfx("coin", 0.06, -12.0)
+	_scale_refresh_marks()
+	# Level the beam while re-setting (the last result has been read).
+	if _scale_beam != null and is_instance_valid(_scale_beam) and _scale_beam.tip != 0.0:
+		_scale_beam.tip = 0.0
+		_scale_beam.queue_redraw()
+	# Re-arm so "Drop the beam" appears once both pans hold coins.
+	_scale_arm_rows()
+
+
+func _scale_arm_rows() -> void:
+	if _scale_rows == null or not is_instance_valid(_scale_rows):
+		return
+	for c in _scale_rows.get_children():
+		c.queue_free()
+	if _scale_accusing:
+		_scale_rows.add_child(_make_frameless_choice("Study the coins again",
+			"Not yet — back to the balance.", "", 52, _on_scale_cancel_accuse))
+		return
+	var counts := _scale_pan_counts()
+	if _scale_used < _scale_max and counts.x > 0 and counts.y > 0:
+		_scale_rows.add_child(_make_frameless_choice("Drop the beam",
+			"Weigh %d against %d. Weighing %d of %d." % [
+				counts.x, counts.y, _scale_used + 1, _scale_max], "", 52,
+			_on_scale_drop))
+	_scale_rows.add_child(_make_frameless_choice("Name the false coin",
+		"Choose the light coin. Correct pays %d after %d weighing%s." % [
+			_scale_base_plus_saved(), _scale_used,
+			"" if _scale_used == 1 else "s"], "", 52, _on_scale_begin_accuse))
+
+
+func _scale_base_plus_saved() -> int:
+	var base: int = int(_scale_cfg.get("base", 30))
+	var per: int = int(_scale_cfg.get("per_saved", 12))
+	return base + (_scale_max - _scale_used) * per
+
+
+func _on_scale_drop() -> void:
+	if _scale_busy or _scale_used >= _scale_max:
+		return
+	var counts := _scale_pan_counts()
+	if counts.x <= 0 or counts.y <= 0:
+		return
+	_scale_busy = true
+	# The honest weight: the false token is a shade light.
+	var lw := 0.0
+	var rw := 0.0
+	for i in range(_scale_n):
+		var w := 0.90 if i == _scale_fake else 1.0
+		if _scale_assign[i] == -1:
+			lw += w
+		elif _scale_assign[i] == 1:
+			rw += w
+	var tip := 0.0
+	var verdict := "THE BEAM HOLDS LEVEL"
+	var glyph := "LEVEL"
+	if absf(lw - rw) > 0.001:
+		if lw > rw:
+			tip = -0.22
+			verdict = "THE LEFT PAN SINKS"
+			glyph = "L↓"
+		else:
+			tip = 0.22
+			verdict = "THE RIGHT PAN SINKS"
+			glyph = "R↓"
+	_scale_used += 1
+	AudioBank.play_sfx("bone_settle", 0.05, -6.0)
+	if _scale_beam != null and is_instance_valid(_scale_beam):
+		if UserSettings.reduce_motion:
+			_scale_beam.tip = tip
+			_scale_beam.settled = true
+			_scale_beam.queue_redraw()
+		else:
+			var b = _scale_beam
+			var slam := tip
+			var tw: Tween = b.create_tween()
+			# Overshoot then settle, like a real beam finding its rest — and
+			# the table takes a little of the weight when it bottoms out.
+			tw.tween_method(func(v): b.tip = v; b.queue_redraw(),
+				0.0, tip * 1.18, 0.28).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			tw.tween_callback(func():
+				if absf(slam) > 0.001:
+					GameTheme.shake_impulse(self, 0.09))
+			tw.tween_method(func(v): b.tip = v; b.queue_redraw(),
+				tip * 1.18, tip, 0.55).set_trans(Tween.TRANS_ELASTIC).set_ease(Tween.EASE_OUT)
+			b.settled = true
+	_scale_log.append("W%d %dv%d %s" % [_scale_used, counts.x, counts.y, glyph])
+	if _scale_log_label != null and is_instance_valid(_scale_log_label):
+		_scale_log_label.text = "   ".join(_scale_log)
+	if _scale_caption != null and is_instance_valid(_scale_caption):
+		var left := _scale_max - _scale_used
+		_scale_caption.text = "%s · %s" % [verdict,
+			("NAME IT OR WEIGH %d MORE" % left) if left > 0 else "NO WEIGHINGS LEFT — NAME IT"]
+	await get_tree().create_timer(1.0 if UserSettings.reduce_motion else 0.95).timeout
+	if _scale_root == null or not is_instance_valid(_scale_root):
+		return
+	# Clear the pans for the next assignment; the log holds the memory.
+	for i in range(_scale_n):
+		_scale_assign[i] = 0
+	_scale_refresh_marks()
+	_scale_busy = false
+	if _scale_used >= _scale_max:
+		_scale_accusing = true
+		if _scale_caption != null and is_instance_valid(_scale_caption):
+			_scale_caption.text = "NO WEIGHINGS LEFT · POINT TO THE FALSE COIN"
+	_scale_arm_rows()
+
+
+func _on_scale_begin_accuse() -> void:
+	if _scale_busy:
+		return
+	_scale_accusing = true
+	if _scale_caption != null and is_instance_valid(_scale_caption):
+		_scale_caption.text = "POINT TO THE FALSE COIN"
+	_scale_arm_rows()
+
+
+func _on_scale_cancel_accuse() -> void:
+	if _scale_busy or _scale_used >= _scale_max:
+		return
+	_scale_accusing = false
+	if _scale_caption != null and is_instance_valid(_scale_caption):
+		_scale_caption.text = "WEIGHING %d OF %d · SET THE PANS" % [
+			_scale_used + 1, _scale_max]
+	_scale_arm_rows()
+
+
+func _scale_accuse(idx: int) -> void:
+	if _scale_busy:
+		return
+	_scale_busy = true
+	_scale_accusing = false
+	for c in _scale_rows.get_children():
+		c.queue_free()
+	# Reveal: the named coin lifts, and the true light one is shown worn-bright.
+	var correct: bool = idx == _scale_fake
+	# Lift the accused token; ring the true counterfeit.
+	if idx >= 0 and idx < _scale_marks.size():
+		var wrap = _scale_marks[idx].get_parent()
+		if is_instance_valid(wrap) and not UserSettings.reduce_motion:
+			var pu: Tween = wrap.create_tween()
+			pu.tween_property(wrap, "position:y", wrap.position.y - 10.0, 0.14)
+	var fake_wrap = _scale_marks[_scale_fake].get_parent()
+	if is_instance_valid(fake_wrap):
+		_scale_marks[_scale_fake].text = "LIGHT"
+		_scale_marks[_scale_fake].add_theme_color_override("font_color",
+			Color(0.92, 0.62, 0.30))
+		if not UserSettings.reduce_motion and _scale_root != null \
+				and is_instance_valid(_scale_root):
+			Motion.ring(self, _scale_root.get_global_position()
+				+ fake_wrap.position + fake_wrap.size * 0.5,
+				Color(0.92, 0.66, 0.34), {"radius": 34.0, "duration": 0.5})
+	await get_tree().create_timer(0.9).timeout
+	if correct:
+		_scale_pay = _scale_base_plus_saved()
+		var receipt := _gamble_pay(_scale_cfg, true, _scale_pay,
+			"coin_pour" if _scale_used <= 1 else "coin")
+		_win_flourish()
+		_show_result(_combine_lines([_scale_text("win_text",
+			"Correct. Gained {pay} gold."), receipt]))
+	else:
+		_sting("hit_hero", -6.0)
+		_bust_feedback()
+		var lose_receipt := _gamble_pay(_scale_cfg, false, 0)
+		_show_result(_combine_lines([_scale_text("poor_text",
+			"Wrong coin. You lost the stake."), lose_receipt]))
+
+
+# ── The Fourth's Strongbox (box_game) — crack the lost combination ────────
+# The code-breaking puzzle (Mastermind), retold as the Fourth Legion's
+# paychest — the strongbox marked IV, sealed a century, its combination
+# gone with the paymaster. Four brass wards, each 1..6; work them by
+# deduction from honest feedback. HONEST BY CONSTRUCTION: the combination
+# is baked at the first turn of a dial, and every attempt reports the exact
+# truth — SEATED (right ward, right number) and LOOSE (right number, wrong
+# ward). A running ledger keeps every past attempt and its pegs on the
+# table. Crack it and you pay the Fourth the wage the King never did.
+#   Config: {stake, wards: 4, marks: 6, tries: 7, base, per_saved,
+#            open_text, win_text, poor_text, broke_text, seen_texts}
+#            — texts take {stake} / {pay} / {tries} / {code}.
+
+const BOX_WARDS := 4
+const BOX_MARKS := 6
+
+var _box_cfg: Dictionary = {}
+var _box_code: Array = []
+var _box_guess: Array = []
+var _box_marks := 6
+var _box_tries := 0
+var _box_max := 7
+var _box_pay := 0
+var _box_root: Control = null
+var _box_rows: VBoxContainer = null
+var _box_caption: Label = null
+var _box_hist_label: Label = null
+var _box_dials: Array = []          # StrongboxDial nodes
+var _box_numlabels: Array = []      # numeral Labels
+var _box_history: Array = []        # ledger row strings
+var _box_busy := true
+
+
+func _box_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_box_cfg, key,
+		String(_box_cfg.get(key, fallback)))
+	var code_str := " ".join(_box_code.map(func(v): return str(v)))
+	return raw.replace("{stake}", str(int(_box_cfg.get("stake", 0)))) \
+		.replace("{pay}", str(_box_pay)).replace("{tries}", str(_box_tries)) \
+		.replace("{code}", code_str)
+
+
+func _box_tier() -> int:
+	var base: int = int(_box_cfg.get("base", 40))
+	var per: int = int(_box_cfg.get("per_saved", 14))
+	return base + (_box_max - _box_tries) * per
+
+
+func _start_box_game(effect: Dictionary) -> void:
+	_box_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_box_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	_box_marks = clampi(int(effect.get("marks", BOX_MARKS)), 3, 9)
+	_box_code = []
+	for _i in range(BOX_WARDS):
+		_box_code.append(randi() % _box_marks + 1)
+	_box_guess = [1, 1, 1, 1]
+	_box_tries = 0
+	_box_max = int(effect.get("tries", 7))
+	_box_pay = 0
+	_box_history = []
+	_box_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_box_text("open_text",
+			"Set four dials from 1 to 6. EXACT means correct number and position. MISPLACED means correct number in the wrong position."), 4)
+	_box_rows = VBoxContainer.new()
+	_box_rows.add_theme_constant_override("separation", 12)
+	vbox.add_child(_box_rows)
+	_build_box_stage()
+	_box_busy = false
+	_box_arm_rows()
+
+
+func _build_box_stage() -> void:
+	_box_dials = []
+	_box_numlabels = []
+	var root := Control.new()
+	root.name = "BoxStage"
+	root.position = Vector2(860, 200)
+	root.size = Vector2(560, 450)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_box_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "strongbox_" + _event_id
+	patch.position = Vector2(10, 56)
+	patch.size = Vector2(540, 356)
+	root.add_child(patch)
+	var caption := Label.new()
+	caption.text = "TRY 1 OF %d · SET THE WARDS" % _box_max
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", Color(0.92, 0.86, 0.70))
+	caption.position = Vector2(30, 76)
+	caption.size = Vector2(500, 22)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(caption)
+	_box_caption = caption
+	# The iron faceplate, branded IV, with its four wards.
+	var plate := ColorRect.new()
+	plate.color = Color(0.15, 0.14, 0.13)
+	plate.position = Vector2(120, 104)
+	plate.size = Vector2(300, 118)
+	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(plate)
+	var bevel := ColorRect.new()
+	bevel.color = Color(0.22, 0.20, 0.18)
+	bevel.position = Vector2(124, 108)
+	bevel.size = Vector2(292, 110)
+	bevel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(bevel)
+	for rv in [Vector2(130, 114), Vector2(404, 114), Vector2(130, 206), Vector2(404, 206)]:
+		var rivet := ColorRect.new()
+		rivet.color = Color(0.34, 0.30, 0.25)
+		rivet.position = rv
+		rivet.size = Vector2(6, 6)
+		rivet.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		root.add_child(rivet)
+	var brand := Label.new()
+	brand.text = "IV"
+	brand.add_theme_font_size_override("font_size", 20)
+	brand.add_theme_color_override("font_color", Color(0.52, 0.45, 0.34))
+	if GameTheme.font_display:
+		brand.add_theme_font_override("font", GameTheme.font_display)
+	brand.position = Vector2(120, 190)
+	brand.size = Vector2(300, 26)
+	brand.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	brand.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(brand)
+	for i in range(BOX_WARDS):
+		var wrap := Control.new()
+		wrap.position = Vector2(138.0 + float(i) * 66.0, 118.0)
+		wrap.size = Vector2(58, 58)
+		wrap.pivot_offset = Vector2(29, 29)
+		wrap.mouse_filter = Control.MOUSE_FILTER_PASS
+		root.add_child(wrap)
+		var dial := StrongboxDial.new()
+		dial.set_anchors_preset(Control.PRESET_FULL_RECT)
+		wrap.add_child(dial)
+		_box_dials.append(dial)
+		var num := Label.new()
+		num.text = str(_box_guess[i])
+		num.add_theme_font_size_override("font_size", 26)
+		num.add_theme_color_override("font_color", Color(0.93, 0.84, 0.55))
+		if GameTheme.font_display:
+			num.add_theme_font_override("font", GameTheme.font_display)
+		num.set_anchors_preset(Control.PRESET_FULL_RECT)
+		num.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		num.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		num.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wrap.add_child(num)
+		_box_numlabels.append(num)
+		var btn := Button.new()
+		btn.flat = true
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		btn.mouse_filter = Control.MOUSE_FILTER_PASS
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		for st in ["normal", "hover", "pressed", "focus"]:
+			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+		btn.pressed.connect(_on_box_dial.bind(i))
+		_stage_touchable(wrap, btn)
+		wrap.add_child(btn)
+	# The attempt ledger — every past try and its pegs, kept in the open.
+	var hist := Label.new()
+	hist.text = "● exact   ○ misplaced"
+	hist.add_theme_font_size_override("font_size", 15)
+	hist.add_theme_color_override("font_color", Color(0.74, 0.68, 0.56))
+	hist.position = Vector2(30, 244)
+	hist.size = Vector2(500, 160)
+	hist.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hist.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	hist.autowrap_mode = TextServer.AUTOWRAP_OFF
+	hist.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(hist)
+	_box_hist_label = hist
+	_stage_entrance(root)
+	GameTheme.attach_rich_hover(patch, "The paychest, marked IV",
+		"Turn each dial, then try the code. Use the EXACT and MISPLACED counts to solve it.",
+		"Turn the wards, then try the combination", Color(0.90, 0.84, 0.68), 1.0)
+
+
+func _box_arm_rows() -> void:
+	if _box_rows == null or not is_instance_valid(_box_rows):
+		return
+	for c in _box_rows.get_children():
+		c.queue_free()
+	var guess_str := " · ".join(_box_guess.map(func(v): return str(v)))
+	_box_rows.add_child(_make_frameless_choice("Try the combination",
+		"Code: %s. Attempt %d of %d. Current reward: %d gold." % [guess_str,
+			_box_tries + 1, _box_max, _box_tier()], "", 52, _on_box_try))
+
+
+func _on_box_dial(i: int) -> void:
+	if _box_busy:
+		return
+	_box_guess[i] = _box_guess[i] % _box_marks + 1
+	AudioBank.play_sfx("bone_settle", 0.06, -12.0, 1.15)
+	if i < _box_numlabels.size() and is_instance_valid(_box_numlabels[i]):
+		_box_numlabels[i].text = str(_box_guess[i])
+	for k in range(_box_dials.size()):
+		if is_instance_valid(_box_dials[k]):
+			_box_dials[k].active = (k == i)
+			_box_dials[k].queue_redraw()
+	if not UserSettings.reduce_motion and i < _box_dials.size():
+		var w = _box_dials[i].get_parent()
+		if is_instance_valid(w):
+			var tw: Tween = w.create_tween()
+			tw.tween_property(w, "scale", Vector2(1.12, 1.12), 0.06)
+			tw.tween_property(w, "scale", Vector2.ONE, 0.12) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_box_arm_rows()
+
+
+func _box_feedback(g: Array) -> Vector2i:
+	var seated := 0
+	for i in range(BOX_WARDS):
+		if int(g[i]) == int(_box_code[i]):
+			seated += 1
+	var matched := 0
+	for s in range(1, _box_marks + 1):
+		matched += mini(g.count(s), _box_code.count(s))
+	return Vector2i(seated, matched - seated)
+
+
+func _on_box_try() -> void:
+	if _box_busy:
+		return
+	_box_busy = true
+	var fb := _box_feedback(_box_guess)
+	_box_tries += 1
+	AudioBank.play_sfx("bone_settle", 0.05, -6.0, 0.9)
+	var pegs := ""
+	for _s in range(fb.x):
+		pegs += "●"
+	for _l in range(fb.y):
+		pegs += "○"
+	if pegs == "":
+		pegs = "—"
+	var guess_str := " ".join(_box_guess.map(func(v): return str(v)))
+	_box_history.append("%s    %s" % [guess_str, pegs])
+	if _box_hist_label != null and is_instance_valid(_box_hist_label):
+		_box_hist_label.text = "● exact   ○ misplaced\n" + "\n".join(_box_history)
+	if fb.x >= BOX_WARDS:
+		await _box_crack()
+		return
+	if _box_tries >= _box_max:
+		await _box_fail()
+		return
+	if _box_caption != null and is_instance_valid(_box_caption):
+		_box_caption.text = "%d EXACT · %d MISPLACED · TRY %d OF %d" % [
+			fb.x, fb.y, _box_tries + 1, _box_max]
+	for d in _box_dials:
+		if is_instance_valid(d):
+			d.active = false
+			d.queue_redraw()
+	_box_busy = false
+	_box_arm_rows()
+
+
+func _box_crack() -> void:
+	_box_pay = _box_tier()
+	if _box_caption != null and is_instance_valid(_box_caption):
+		_box_caption.text = "THE TUMBLERS FALL · THE FOURTH IS PAID"
+	# The tumblers fall one by one — a warm cha-chunk down the wards, left to
+	# right, before the lid gives and the coin comes.
+	for i in range(_box_dials.size()):
+		var d = _box_dials[i]
+		if is_instance_valid(d):
+			d.locked = true
+			d.active = false
+			d.queue_redraw()
+			AudioBank.play_sfx("bone_settle", 0.03, -5.0, 0.78 + float(i) * 0.09)
+			if not UserSettings.reduce_motion:
+				var w = d.get_parent()
+				if is_instance_valid(w):
+					var tw: Tween = w.create_tween()
+					tw.tween_property(w, "scale", Vector2(1.16, 1.16), 0.06)
+					tw.tween_property(w, "scale", Vector2.ONE, 0.13) \
+						.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			await get_tree().create_timer(0.12).timeout
+	if _box_root == null or not is_instance_valid(_box_root):
+		return
+	if not UserSettings.reduce_motion:
+		Motion.burst(self, _box_root.get_global_position() + Vector2(270, 160),
+			"coin")
+		Motion.ring(self, _box_root.get_global_position() + Vector2(270, 160),
+			Color(0.95, 0.80, 0.42), {"radius": 60.0, "duration": 0.6})
+	var receipt := _gamble_pay(_box_cfg, true, _box_pay, "coin_pour")
+	_win_flourish()
+	await get_tree().create_timer(0.9).timeout
+	_show_result(_combine_lines([_box_text("win_text",
+		"Correct code. Gained {pay} gold."), receipt]))
+
+
+func _box_fail() -> void:
+	_sting("hit_hero", -6.0)
+	_bust_feedback()
+	if _box_caption != null and is_instance_valid(_box_caption):
+		_box_caption.text = "THE WARDS SEIZE · THE BOX HOLDS"
+	await get_tree().create_timer(0.8).timeout
+	var receipt := _gamble_pay(_box_cfg, false, 0)
+	_show_result(_combine_lines([_box_text("poor_text",
+		"No attempts remain. The code was {code}. You lost the stake."),
+		receipt]))
+
+
+# ── The Dead Man's Deal (deal_game) — call the pay-chits higher or lower ──
+# The high-low card climb, dealt by a dead card-sharp of the Fourth from a
+# stripped paybook. HONEST BY CONSTRUCTION: one real deck of distinct pay-
+# chits (ranks 1..N), shuffled once and drawn WITHOUT replacement, so the
+# odds shift as the bag empties and the running count is exact — and it is
+# shown in the open (how many still run higher, how many lower), so the call
+# is never a guess, only a gamble. Each held call climbs the ladder; bank any
+# time, or push. One wrong call and the sharp keeps the stake.
+#   Config: {stake, ranks: 13, pay: [..indexed by streak..], open_text,
+#            win_text, bank_text, poor_text, broke_text, seen_texts}
+#            — texts take {stake}/{pay}/{streak}.
+
+var _deal_cfg: Dictionary = {}
+var _deal_deck: Array = []          # shuffled ranks, drawn front→back
+var _deal_pos := 0                  # index of the current face-up chit
+var _deal_streak := 0
+var _deal_pay := 0
+var _deal_root: Control = null
+var _deal_rows: VBoxContainer = null
+var _deal_caption: Label = null
+var _deal_odds: Label = null
+var _deal_streak_lbl: Label = null
+var _deal_chit_num: Label = null    # the big numeral on the current chit
+var _deal_chit: CoinProp = null
+var _deal_spent: HBoxContainer = null
+var _deal_busy := true
+
+const DEAL_LADDER := [0, 6, 14, 26, 42, 64, 92, 130, 180, 246, 332, 446, 600]
+
+
+func _deal_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_deal_cfg, key,
+		String(_deal_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_deal_cfg.get("stake", 0)))) \
+		.replace("{pay}", str(_deal_pay)).replace("{streak}", str(_deal_streak))
+
+
+func _deal_tier(streak: int) -> int:
+	var pay: Array = _deal_cfg.get("pay", DEAL_LADDER)
+	return int(pay[clampi(streak, 0, pay.size() - 1)])
+
+
+func _deal_current_rank() -> int:
+	return int(_deal_deck[_deal_pos])
+
+
+## Exact odds on the next draw: how many unseen chits beat the current one and
+## how many fall under it (no ties — every rank is distinct). This is the whole
+## deduction, kept in the open.
+func _deal_counts() -> Vector2i:
+	var cur := _deal_current_rank()
+	var hi := 0
+	var lo := 0
+	for i in range(_deal_pos + 1, _deal_deck.size()):
+		if int(_deal_deck[i]) > cur:
+			hi += 1
+		else:
+			lo += 1
+	return Vector2i(hi, lo)
+
+
+func _start_deal_game(effect: Dictionary) -> void:
+	_deal_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_deal_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	var ranks := clampi(int(effect.get("ranks", 13)), 5, 13)
+	_deal_deck = []
+	for r in range(1, ranks + 1):
+		_deal_deck.append(r)
+	_deal_deck.shuffle()
+	_deal_pos = 0
+	_deal_streak = 0
+	_deal_pay = 0
+	_deal_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_deal_text("open_text",
+			"Call whether the next card is higher or lower. Each correct call raises the reward. Stop at any time."), 4)
+	_deal_rows = VBoxContainer.new()
+	_deal_rows.add_theme_constant_override("separation", 12)
+	vbox.add_child(_deal_rows)
+	_build_deal_stage()
+	_deal_busy = false
+	_deal_arm_rows()
+
+
+func _build_deal_stage() -> void:
+	var root := Control.new()
+	root.name = "DealStage"
+	root.position = Vector2(860, 200)
+	root.size = Vector2(560, 450)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_deal_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "deal_" + _event_id
+	patch.chalk = "ring"
+	patch.position = Vector2(10, 56)
+	patch.size = Vector2(540, 356)
+	root.add_child(patch)
+	var caption := Label.new()
+	caption.text = "CALL THE NEXT CARD"
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", Color(0.92, 0.86, 0.70))
+	caption.position = Vector2(30, 76)
+	caption.size = Vector2(500, 24)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(caption)
+	_deal_caption = caption
+	# The odds, chalked in the open — how many chits beat this one, how many
+	# fall under it, still in the bag. The whole deduction, never hidden.
+	var odds := Label.new()
+	odds.add_theme_font_size_override("font_size", 19)
+	odds.add_theme_color_override("font_color", Color(0.86, 0.80, 0.66))
+	odds.position = Vector2(30, 106)
+	odds.size = Vector2(500, 26)
+	odds.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	odds.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(odds)
+	_deal_odds = odds
+	# The big current pay-chit, dead center — the boldest thing on the table.
+	var chit_wrap := Control.new()
+	chit_wrap.position = Vector2(205, 148)
+	chit_wrap.size = Vector2(150, 150)
+	chit_wrap.pivot_offset = Vector2(75, 75)
+	chit_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(chit_wrap)
+	var chit := CoinProp.new()
+	chit.seed_text = "dealchit_" + _event_id
+	chit.worn = true
+	chit.set_anchors_preset(Control.PRESET_FULL_RECT)
+	chit_wrap.add_child(chit)
+	_deal_chit = chit
+	var num := Label.new()
+	num.add_theme_font_size_override("font_size", 78)
+	num.add_theme_color_override("font_color", Color(0.20, 0.13, 0.05))
+	if GameTheme.font_display:
+		num.add_theme_font_override("font", GameTheme.font_display)
+	num.set_anchors_preset(Control.PRESET_FULL_RECT)
+	num.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	num.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	num.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chit_wrap.add_child(num)
+	_deal_chit_num = num
+	# The streak / pay-on-the-table line.
+	var st := Label.new()
+	st.add_theme_font_size_override("font_size", 17)
+	st.add_theme_color_override("font_color", Color(0.80, 0.70, 0.44))
+	st.position = Vector2(30, 304)
+	st.size = Vector2(500, 22)
+	st.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	st.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(st)
+	_deal_streak_lbl = st
+	# The row of spent chits — what's already been turned, so a counter can
+	# read the bag. Runs along the near edge of the cloth.
+	var spent := HBoxContainer.new()
+	spent.add_theme_constant_override("separation", 4)
+	spent.position = Vector2(40, 342)
+	spent.size = Vector2(480, 34)
+	spent.alignment = BoxContainer.ALIGNMENT_CENTER
+	spent.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(spent)
+	_deal_spent = spent
+	_deal_refresh()
+	_stage_entrance(root)
+	GameTheme.attach_rich_hover(patch, "The dead sharp's board",
+		"Call higher or lower. The remaining card counts show the exact odds. Stop after a win to collect.",
+		"Call higher or lower, then bank or push", Color(0.90, 0.84, 0.68), 1.0)
+
+
+func _deal_refresh() -> void:
+	if _deal_chit_num != null and is_instance_valid(_deal_chit_num):
+		_deal_chit_num.text = str(_deal_current_rank())
+	var c := _deal_counts()
+	if _deal_odds != null and is_instance_valid(_deal_odds):
+		if c.x + c.y == 0:
+			_deal_odds.text = "NO CARDS LEFT"
+		else:
+			_deal_odds.text = "HIGHER  %d        LOWER  %d        (of %d still to come)" % [
+				c.x, c.y, c.x + c.y]
+	if _deal_streak_lbl != null and is_instance_valid(_deal_streak_lbl):
+		if _deal_streak <= 0:
+			_deal_streak_lbl.text = "Make one correct call to earn a reward."
+		else:
+			_deal_streak_lbl.text = "%d correct in a row - %d gold available." % [
+				_deal_streak, "call" if _deal_streak == 1 else "calls", _deal_pay]
+
+
+func _deal_arm_rows() -> void:
+	if _deal_rows == null or not is_instance_valid(_deal_rows):
+		return
+	_deal_busy = false
+	for ch in _deal_rows.get_children():
+		ch.queue_free()
+	var c := _deal_counts()
+	var left := c.x + c.y
+	_deal_rows.add_child(_make_frameless_choice("Call higher",
+		"Next card is higher in %d of %d cases." % [c.x, left], "", 52,
+		_on_deal_higher))
+	_deal_rows.add_child(_make_frameless_choice("Call lower",
+		"Next card is lower in %d of %d cases." % [c.y, left], "", 52,
+		_on_deal_lower))
+	if _deal_streak >= 1:
+		_deal_rows.add_child(_make_frameless_choice("Take the money",
+			"Collect %d gold and leave." % _deal_pay, "", 52,
+			_on_deal_bank))
+
+
+func _on_deal_higher() -> void:
+	_deal_call(true)
+
+
+func _on_deal_lower() -> void:
+	_deal_call(false)
+
+
+func _deal_call(higher: bool) -> void:
+	if _deal_busy:
+		return
+	_deal_busy = true
+	var cur := _deal_current_rank()
+	var nxt := int(_deal_deck[_deal_pos + 1])
+	var correct := (nxt > cur) if higher else (nxt < cur)
+	for ch in _deal_rows.get_children():
+		ch.queue_free()
+	# Push the turned chit into the spent row, then flip up the next.
+	_deal_push_spent(cur)
+	_deal_pos += 1
+	await _deal_flip_to(nxt, correct)
+	if not correct:
+		if _deal_caption != null and is_instance_valid(_deal_caption):
+			_deal_caption.text = "YOU CALLED %s — IT RAN %s" % [
+				"HIGHER" if higher else "LOWER",
+				"HIGHER" if nxt > cur else "LOWER"]
+		await get_tree().create_timer(0.7).timeout
+		_sting("hit_hero", -6.0)
+		_bust_feedback()
+		var poor_receipt := _gamble_pay(_deal_cfg, false, 0)
+		_show_result(_combine_lines([_deal_text("poor_text",
+			"Wrong call. You lost the stake."), poor_receipt]))
+		return
+	# Held.
+	_deal_streak += 1
+	_deal_pay = _deal_tier(_deal_streak)
+	_sting("coin", -4.0)
+	_deal_refresh()
+	# Cleared the whole bag?
+	if _deal_pos >= _deal_deck.size() - 1:
+		var receipt := _gamble_pay(_deal_cfg, true, _deal_pay, "coin_pour")
+		var frid := _gamble_bank_relic(_deal_cfg, _deal_pay)
+		if frid != "":
+			receipt = _combine_lines([receipt, _deal_text("bank_relic_text",
+				"Gained relic: %s." % RelicDB.get_relic(frid).name)])
+		if _deal_chit != null and is_instance_valid(_deal_chit):
+			_win_flourish(_deal_chit.get_global_position() + _deal_chit.size * 0.5)
+		else:
+			_win_flourish()
+		_show_result(_combine_lines([_deal_text("win_text",
+			"You called every remaining card correctly. Gained {pay} gold."),
+			receipt]))
+		return
+	if _deal_caption != null and is_instance_valid(_deal_caption):
+		_deal_caption.text = "CALL THE NEXT CARD"
+	_deal_arm_rows()
+
+
+func _deal_push_spent(rank: int) -> void:
+	if _deal_spent == null or not is_instance_valid(_deal_spent):
+		return
+	var wrap := Control.new()
+	wrap.custom_minimum_size = Vector2(30, 30)
+	wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var coin := CoinProp.new()
+	coin.seed_text = "spent_%d_%d_%s" % [rank, _deal_pos, _event_id]
+	coin.worn = true
+	coin.set_anchors_preset(Control.PRESET_FULL_RECT)
+	wrap.add_child(coin)
+	var n := Label.new()
+	n.text = str(rank)
+	n.add_theme_font_size_override("font_size", 15)
+	n.add_theme_color_override("font_color", Color(0.22, 0.15, 0.06))
+	if GameTheme.font_display:
+		n.add_theme_font_override("font", GameTheme.font_display)
+	n.set_anchors_preset(Control.PRESET_FULL_RECT)
+	n.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	n.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	n.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wrap.add_child(n)
+	_deal_spent.add_child(wrap)
+
+
+func _deal_flip_to(nxt: int, correct: bool) -> void:
+	if _deal_chit == null or not is_instance_valid(_deal_chit):
+		return
+	var flash := Color(0.45, 0.72, 0.40) if correct else Color(0.80, 0.32, 0.22)
+	if UserSettings.reduce_motion:
+		if _deal_chit_num != null and is_instance_valid(_deal_chit_num):
+			_deal_chit_num.text = str(nxt)
+			_deal_chit_num.add_theme_color_override("font_color", flash.darkened(0.35))
+		await get_tree().create_timer(0.5).timeout
+		if _deal_chit_num != null and is_instance_valid(_deal_chit_num):
+			_deal_chit_num.add_theme_color_override("font_color", Color(0.20, 0.13, 0.05))
+		return
+	AudioBank.play_sfx("coin", 0.05, -8.0)
+	var t := _deal_chit.create_tween()
+	t.tween_property(_deal_chit, "face_t", 0.05, 0.13) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	t.parallel().tween_property(_deal_chit_num, "modulate:a", 0.0, 0.11)
+	t.tween_callback(func():
+		if _deal_chit_num != null and is_instance_valid(_deal_chit_num):
+			_deal_chit_num.text = str(nxt))
+	t.tween_property(_deal_chit, "face_t", 1.0, 0.17) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	t.parallel().tween_property(_deal_chit_num, "modulate:a", 1.0, 0.15)
+	await t.finished
+	_deal_ring(flash)
+	AudioBank.play_sfx("coin", 0.05, -4.0)
+	await get_tree().create_timer(0.26).timeout
+
+
+func _deal_ring(col: Color) -> void:
+	if UserSettings.reduce_motion:
+		return
+	if _deal_chit == null or not is_instance_valid(_deal_chit):
+		return
+	Motion.ring(self, _deal_chit.get_global_position() + _deal_chit.size * 0.5,
+		col, {"radius": 92.0, "duration": 0.5, "oval": Vector2(1.0, 0.9)})
+
+
+func _on_deal_bank() -> void:
+	# An early stop earns its LADDER TIER, never the whole prize — the
+	# terminal payoff on a pot game is `bank_relic_at`, read off that tier.
+	var receipt := _gamble_pay(_deal_cfg, true, _deal_pay) if _deal_pay > 0 else ""
+	var rid := _gamble_bank_relic(_deal_cfg, _deal_pay)
+	if rid != "":
+		receipt = _combine_lines([receipt, _deal_text("bank_relic_text",
+			"Gained relic: %s." % RelicDB.get_relic(rid).name)])
+	_show_result(_combine_lines([_deal_text("bank_text",
+		"Collected {pay} gold."), receipt]))
+
+
+# ── The Signal Line (signal_game) — light the whole beacon-chain ──────────
+# The parity puzzle (1-D Lights Out), retold as the fire-watch's beacon
+# line: each cresset's draught catches the two beside it, so lighting one
+# flips its neighbours too. Get the whole line burning. HONEST BY
+# CONSTRUCTION and always solvable: the board is generated FROM the
+# all-lit state by a known scramble, so a solution provably exists (re-press
+# the scramble), and nothing is hidden — every beacon's state is on the
+# wall. Solve inside the press budget for pay that climbs toward the clean
+# line.
+#   Config: {stake, beacons: 7, scramble: 5, budget, base, per_under,
+#            open_text, win_text, poor_text, broke_text, seen_texts}
+#            — texts take {stake}/{pay}/{presses}/{par}.
+
+var _signal_cfg: Dictionary = {}
+var _signal_lit: Array = []
+var _signal_n := 7
+var _signal_presses := 0
+var _signal_par := 5
+var _signal_budget := 9
+var _signal_pay := 0
+var _signal_beacons: Array = []
+var _signal_root: Control = null
+var _signal_rows: VBoxContainer = null
+var _signal_caption: Label = null
+var _signal_busy := true
+
+
+func _signal_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_signal_cfg, key,
+		String(_signal_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_signal_cfg.get("stake", 0)))) \
+		.replace("{pay}", str(_signal_pay)).replace("{presses}", str(_signal_presses)) \
+		.replace("{par}", str(_signal_par))
+
+
+func _signal_flip(i: int) -> void:
+	for j in [i - 1, i, i + 1]:
+		if j >= 0 and j < _signal_n:
+			_signal_lit[j] = not bool(_signal_lit[j])
+
+
+func _signal_all_lit() -> bool:
+	for v in _signal_lit:
+		if not bool(v):
+			return false
+	return true
+
+
+func _start_signal_game(effect: Dictionary) -> void:
+	_signal_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_signal_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	_signal_n = clampi(int(effect.get("beacons", 7)), 3, 9)
+	_signal_par = clampi(int(effect.get("scramble", 5)), 1, _signal_n)
+	_signal_budget = int(effect.get("budget", _signal_par + 4))
+	_signal_presses = 0
+	_signal_pay = 0
+	# Generate FROM the solved (all-lit) state so a solution always exists.
+	var attempts := 0
+	while attempts < 20:
+		attempts += 1
+		_signal_lit = []
+		for _i in range(_signal_n):
+			_signal_lit.append(true)
+		var idx := range(_signal_n)
+		idx.shuffle()
+		for k in range(_signal_par):
+			_signal_flip(int(idx[k]))
+		if not _signal_all_lit():
+			break
+	_signal_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_signal_text("open_text",
+			"Each beacon flips itself and its two neighbors. Turn every beacon on before you run out of moves."), 4)
+	_signal_rows = VBoxContainer.new()
+	_signal_rows.add_theme_constant_override("separation", 12)
+	vbox.add_child(_signal_rows)
+	_build_signal_stage()
+	_signal_busy = false
+	_signal_arm_rows()
+
+
+func _build_signal_stage() -> void:
+	_signal_beacons = []
+	var root := Control.new()
+	root.name = "SignalStage"
+	root.position = Vector2(860, 210)
+	root.size = Vector2(560, 430)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_signal_root = root
+	var patch := CastPatch.new()
+	patch.seed_text = "signal_" + _event_id
+	patch.chalk = "line"
+	patch.light_center_frac = Vector2(0.0, -0.02)
+	patch.position = Vector2(10, 60)
+	patch.size = Vector2(540, 340)
+	root.add_child(patch)
+	var caption := Label.new()
+	caption.text = "LIGHT THE LINE · PAR %d · BUDGET %d" % [_signal_par, _signal_budget]
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", Color(0.82, 0.72, 0.52))
+	caption.position = Vector2(30, 84)
+	caption.size = Vector2(500, 24)
+	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(caption)
+	_signal_caption = caption
+	# The wall the cressets are bracketed to.
+	var wall := ColorRect.new()
+	wall.color = Color(0.14, 0.12, 0.10, 0.55)
+	wall.position = Vector2(30, 250)
+	wall.size = Vector2(480, 8)
+	wall.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(wall)
+	var step := 480.0 / float(_signal_n)
+	for i in range(_signal_n):
+		var wrap := Control.new()
+		wrap.position = Vector2(30.0 + float(i) * step + (step - 64.0) * 0.5, 130.0)
+		wrap.size = Vector2(64, 120)
+		wrap.pivot_offset = Vector2(32, 70)
+		wrap.mouse_filter = Control.MOUSE_FILTER_PASS
+		root.add_child(wrap)
+		var bc := SignalBeacon.new()
+		bc.seed_text = "cresset_%d_%s" % [i, _event_id]
+		bc.lit = bool(_signal_lit[i])
+		bc.set_anchors_preset(Control.PRESET_FULL_RECT)
+		wrap.add_child(bc)
+		_signal_beacons.append(bc)
+		var btn := Button.new()
+		btn.flat = true
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		btn.mouse_filter = Control.MOUSE_FILTER_PASS
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		for st in ["normal", "hover", "pressed", "focus"]:
+			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+		btn.pressed.connect(_on_signal_press.bind(i))
+		btn.mouse_entered.connect(_on_signal_hover.bind(i, true))
+		btn.mouse_exited.connect(_on_signal_hover.bind(i, false))
+		_stage_touchable(wrap, btn)
+		wrap.add_child(btn)
+	_stage_entrance(root)
+	GameTheme.attach_rich_hover(patch, "The beacon-line",
+		"Click a beacon to flip it and its two neighbors. Light the full line. Fewer moves pay more.",
+		"Strike a beacon (it flips its neighbours too)", Color(0.94, 0.72, 0.40), 1.0)
+
+
+func _signal_refresh(changed: Array = []) -> void:
+	for i in range(_signal_beacons.size()):
+		var bc = _signal_beacons[i]
+		if not is_instance_valid(bc):
+			continue
+		bc.lit = bool(_signal_lit[i])
+		if i in changed and not UserSettings.reduce_motion:
+			bc.flare = 1.0
+			var tw: Tween = bc.create_tween()
+			tw.tween_method(func(v): bc.flare = v; bc.queue_redraw(),
+				1.0, 0.0, 0.4).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		bc.queue_redraw()
+
+
+## Hover-telegraph: light a dashed ring on the cresset under the cursor and
+## its two neighbours — the exact three a strike here would flip. Purely
+## informational, so it holds under Reduce Motion too.
+func _on_signal_hover(i: int, entering: bool) -> void:
+	if _signal_busy:
+		return
+	for j in [i - 1, i, i + 1]:
+		if j >= 0 and j < _signal_n and j < _signal_beacons.size():
+			var bc = _signal_beacons[j]
+			if is_instance_valid(bc):
+				bc.preview = entering
+				bc.queue_redraw()
+
+
+func _on_signal_press(i: int) -> void:
+	if _signal_busy:
+		return
+	# Clear any hover-preview rings before the strike resolves.
+	for bc in _signal_beacons:
+		if is_instance_valid(bc):
+			bc.preview = false
+	_signal_flip(i)
+	_signal_presses += 1
+	AudioBank.play_sfx("card_play", 0.06, -9.0, 1.05)
+	var changed := []
+	for j in [i - 1, i, i + 1]:
+		if j >= 0 and j < _signal_n:
+			changed.append(j)
+	_signal_refresh(changed)
+	if not UserSettings.reduce_motion and _signal_root != null \
+			and is_instance_valid(_signal_root):
+		var wrap = _signal_beacons[i].get_parent()
+		Motion.ring(self, _signal_root.get_global_position()
+			+ wrap.position + Vector2(32, 88), Color(0.92, 0.52, 0.20),
+			{"radius": 30.0, "duration": 0.35})
+	if _signal_all_lit():
+		await _signal_win()
+		return
+	if _signal_presses >= _signal_budget:
+		await _signal_fail()
+		return
+	if _signal_caption != null and is_instance_valid(_signal_caption):
+		var lit := 0
+		for v in _signal_lit:
+			if bool(v):
+				lit += 1
+		_signal_caption.text = "%d OF %d LIT · %d PRESSES · BUDGET %d" % [
+			lit, _signal_n, _signal_presses, _signal_budget]
+	_signal_arm_rows()
+
+
+func _signal_arm_rows() -> void:
+	if _signal_rows == null or not is_instance_valid(_signal_rows):
+		return
+	for c in _signal_rows.get_children():
+		c.queue_free()
+	var base: int = int(_signal_cfg.get("base", 22))
+	var per: int = int(_signal_cfg.get("per_under", 7))
+	var best := base + maxi(0, _signal_budget - _signal_par) * per
+	_signal_rows.add_child(_make_frameless_choice("Strike the beacons",
+		"Light every beacon. Solving it in %d moves pays up to %d gold." % [
+			_signal_par, best], "", 52, func(): pass))
+	_signal_rows.add_child(_make_frameless_choice("Leave the line dark",
+		"Leave and lose the %d gold stake." % int(_signal_cfg.get("stake", 0)),
+		"", 52, _on_signal_giveup))
+
+
+func _on_signal_giveup() -> void:
+	if _signal_busy:
+		return
+	_signal_busy = true
+	_show_result(_signal_text("giveup_text",
+		"You left before solving the line. You lost the stake."))
+
+
+func _signal_win() -> void:
+	_signal_busy = true
+	var base: int = int(_signal_cfg.get("base", 22))
+	var per: int = int(_signal_cfg.get("per_under", 7))
+	_signal_pay = base + maxi(0, _signal_budget - _signal_presses) * per
+	if _signal_caption != null and is_instance_valid(_signal_caption):
+		_signal_caption.text = "THE WHOLE LINE BURNS · %d PRESSES" % _signal_presses
+	if not UserSettings.reduce_motion and _signal_root != null \
+			and is_instance_valid(_signal_root):
+		for i in range(_signal_beacons.size()):
+			var wrap = _signal_beacons[i].get_parent()
+			Motion.ring(self, _signal_root.get_global_position()
+				+ wrap.position + Vector2(32, 88), Color(0.96, 0.66, 0.28),
+				{"radius": 26.0, "duration": 0.5, "delay": float(i) * 0.05})
+	RunState.gain_gold(_signal_pay)
+	_sting("coin_pour" if _signal_presses <= _signal_par else "coin")
+	_win_flourish()
+	await get_tree().create_timer(0.9).timeout
+	_show_result(_signal_text("win_text",
+		"All beacons are lit. Gained {pay} gold."))
+
+
+func _signal_fail() -> void:
+	_signal_busy = true
+	_sting("hit_hero", -6.0)
+	_bust_feedback()
+	if _signal_caption != null and is_instance_valid(_signal_caption):
+		_signal_caption.text = "OUT OF STRIKES · THE LINE STAYS BROKEN"
+	await get_tree().create_timer(0.8).timeout
+	_show_result(_signal_text("poor_text",
+		"You ran out of moves. You lost the stake."))
+
+
+# ── The Sentry's Board (morris_game) — three men's morris vs the drill ───
+# The pool's first true board game: three stones each on a merels grid
+# scratched into a guard-post flagstone, against a sentry of the Fourth
+# who was never relieved. Rules posted plain: place your three (the
+# garrison rule — not the middle post to open), then stones SLIDE along
+# the scratched lines (Tapatan movement); three in a row wins. The sentry
+# cannot improvise — he plays the standing drill, fully posted and
+# DETERMINISTIC: complete his mill, else block yours, else the middle
+# post, else the roll (first free post, far rank first, left to right);
+# on the march he also refuses any move that hands you a mill next turn
+# ("he never opens a door") — unless every move does. The drill being
+# learnable IS the game: forks beat him, and tools/_probe_morris_solve.gd
+# proves a forced player win exists against the exact shipped drill.
+# If neither side mills inside the move budget the watch calls the game
+# and the stake comes back. Telegraphs: threat tints ride the grooves
+# (gilt = yours, ember = his), a lifted stone halos with its legal posts
+# ringed green, and every drill choice is captioned in the open.
+# Config: {stake, payout, calls, open_text, win_text, lose_text,
+#          call_text, concede_text, broke_text, seen_texts} — texts take
+#          {stake} / {payout}.
+
+## Post adjacency along the scratched lines (Tapatan movement): consecutive
+## points of each mill only. The middle post touches all eight.
+const MOR_ADJ := [
+	[1, 3, 4], [0, 2, 4], [1, 4, 5],
+	[0, 4, 6], [0, 1, 2, 3, 5, 6, 7, 8], [2, 4, 8],
+	[3, 4, 7], [4, 6, 8], [4, 5, 7]]
+
+## In-world names for the nine posts — captions speak these, never numbers.
+const MOR_POST := [
+	"the far-left corner", "the far post", "the far-right corner",
+	"the left post", "the middle post", "the right post",
+	"the near-left corner", "the near post", "the near-right corner"]
+
+const MOR_STONE_SIZE := [30.0, 34.0, 38.0]  # by rank — nearer is bigger
+
+var _mor_cfg: Dictionary = {}
+var _mor_board: Array = []       # 9 posts: 0 empty / 1 you / 2 the sentry
+var _mor_stones: Array = []      # 9 posts → the seated prop Control (null = empty)
+var _mor_phase := "place"        # "place" → "move"
+var _mor_placed := [0, 0]        # stones placed: [you, him]
+var _mor_sel := -1               # your lifted stone's post
+var _mor_moves_left := 18        # march plies before the watch calls the game
+var _mor_root: Control = null
+var _mor_board_item: Control = null
+var _mor_status: Label = null
+var _mor_clock: Label = null
+var _mor_busy := true
+var _mor_over := false
+
+
+# ── The drill, as pure board functions (probed headless) ──
+# A board is a 9-int Array (0 empty / 1 player / 2 sentry). These are
+# STATIC so tools/_probe_morris_solve.gd can drive the exact shipped drill
+# and prove the player's forced win exists — change the drill, rerun it.
+
+static func mor_mill(board: Array, side: int) -> Array:
+	# The milled line's posts, or [] when side holds no mill.
+	for ln in MerelsBoard.LINES:
+		if int(board[ln[0]]) == side and int(board[ln[1]]) == side \
+				and int(board[ln[2]]) == side:
+			return ln
+	return []
+
+
+static func mor_completions(board: Array, side: int) -> Array:
+	# Empty posts that would complete a mill for side, muster order.
+	var out: Array = []
+	for p in range(9):
+		if int(board[p]) != 0:
+			continue
+		for ln in MerelsBoard.LINES:
+			if not p in ln:
+				continue
+			var n := 0
+			for q in ln:
+				if int(board[q]) == side:
+					n += 1
+			if n == 2 and not p in out:
+				out.append(p)
+	return out
+
+
+static func mor_moves(board: Array, side: int) -> Array:
+	# Legal marches for side: [from, to] pairs, muster order.
+	var out: Array = []
+	for s in range(9):
+		if int(board[s]) != side:
+			continue
+		for d in MOR_ADJ[s]:
+			if int(board[d]) == 0:
+				out.append([s, int(d)])
+	return out
+
+
+static func mor_can_mill_by_move(board: Array, side: int) -> bool:
+	for mv in mor_moves(board, side):
+		var b := board.duplicate()
+		b[mv[0]] = 0
+		b[mv[1]] = side
+		if not mor_mill(b, side).is_empty():
+			return true
+	return false
+
+
+static func mor_place_ai(board: Array) -> int:
+	# The posted placement drill: mill, block, the middle post, the roll.
+	var own := mor_completions(board, 2)
+	if not own.is_empty():
+		return int(own[0])
+	# He blocks the SHAPE of your threat, reachable or not — a hundred
+	# years of drill does not ask whether the threat is real.
+	var yours := mor_completions(board, 1)
+	if not yours.is_empty():
+		return int(yours[0])
+	if int(board[4]) == 0:
+		return 4
+	for p in range(9):
+		if int(board[p]) == 0:
+			return p
+	return -1
+
+
+static func mor_move_ai(board: Array) -> Array:
+	# The posted march drill: mill, block, never opens a door, the roll.
+	var moves := mor_moves(board, 2)
+	if moves.is_empty():
+		return []
+	for mv in moves:
+		var b := board.duplicate()
+		b[mv[0]] = 0
+		b[mv[1]] = 2
+		if not mor_mill(b, 2).is_empty():
+			return mv
+	# Block: the landing posts of your actual milling marches, first
+	# reachable one in muster order.
+	var doors: Array = []
+	for mv2 in mor_moves(board, 1):
+		var b2 := board.duplicate()
+		b2[mv2[0]] = 0
+		b2[mv2[1]] = 1
+		if not mor_mill(b2, 1).is_empty() and not int(mv2[1]) in doors:
+			doors.append(int(mv2[1]))
+	for t in doors:
+		for mv in moves:
+			if int(mv[1]) == int(t):
+				return mv
+	# "He never opens a door": refuse any march that leaves you a mill
+	# next turn — unless every march does.
+	for mv in moves:
+		var b3 := board.duplicate()
+		b3[mv[0]] = 0
+		b3[mv[1]] = 2
+		if not mor_can_mill_by_move(b3, 1):
+			return mv
+	return moves[0]
+
+
+func _mor_text(key: String, fallback: String) -> String:
+	var raw := _seen_text_override(_mor_cfg, key,
+		String(_mor_cfg.get(key, fallback)))
+	return raw.replace("{stake}", str(int(_mor_cfg.get("stake", 0)))) \
+		.replace("{payout}", str(int(_mor_cfg.get("payout", 0))))
+
+
+func _start_morris_game(effect: Dictionary) -> void:
+	_mor_cfg = effect
+	var stake: int = int(effect.get("stake", 0))
+	if stake > 0 and RunState.gold < stake:
+		_show_result(_mor_text("broke_text",
+			"You need {stake} gold to play."))
+		return
+	if stake > 0:
+		RunState.gold -= stake
+	_mor_board = []
+	_mor_stones = []
+	for _i in range(9):
+		_mor_board.append(0)
+		_mor_stones.append(null)
+	_mor_phase = "place"
+	_mor_placed = [0, 0]
+	_mor_sel = -1
+	_mor_moves_left = int(effect.get("calls", 18))
+	_mor_over = false
+	_mor_busy = true
+	var vbox := _build_event_screen(_event_data.name,
+		_mor_text("open_text",
+			"Place three stones, but not in the center first. Then slide along the lines. Make a row of three to win. The opponent's next move is shown."), 1)
+	vbox.add_child(_make_frameless_choice(
+		"Concede and lose the stake", "End the game and lose your stake.", "", 52,
+		_on_mor_concede))
+	_build_mor_stage()
+	_mor_busy = false
+
+
+func _build_mor_stage() -> void:
+	var root := Control.new()
+	root.name = "MorrisStage"
+	root.position = Vector2(860, 200)
+	root.size = Vector2(560, 440)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	_mor_root = root
+	var board := MerelsBoard.new()
+	board.seed_text = "merels_" + _event_id
+	board.position = Vector2(56, 70)
+	board.size = Vector2(448, 300)
+	root.add_child(board)
+	_mor_board_item = board
+	# One invisible button over each post.
+	for i in range(9):
+		var btn := Button.new()
+		btn.flat = true
+		btn.focus_mode = Control.FOCUS_NONE
+		for st in ["normal", "hover", "pressed", "focus"]:
+			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+		btn.mouse_filter = Control.MOUSE_FILTER_PASS
+		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		btn.size = Vector2(46, 46)
+		btn.position = board.position + board.point_pos(i) - Vector2(23, 23)
+		btn.pressed.connect(_on_mor_post.bind(i))
+		btn.mouse_entered.connect(_on_mor_hover.bind(i))
+		btn.mouse_exited.connect(_on_mor_unhover)
+		root.add_child(btn)
+	var status := Label.new()
+	status.text = "YOUR STONE FIRST — NOT THE MIDDLE POST"
+	status.add_theme_font_size_override("font_size", 18)
+	status.add_theme_color_override("font_color", Color(0.92, 0.88, 0.80))
+	status.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	status.add_theme_constant_override("outline_size", 4)
+	status.position = Vector2(30, 26)
+	status.size = Vector2(500, 24)
+	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	status.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(status)
+	_mor_status = status
+	var clock := Label.new()
+	clock.text = ""
+	clock.add_theme_font_size_override("font_size", 16)
+	clock.add_theme_color_override("font_color", Color(0.80, 0.74, 0.62))
+	clock.position = Vector2(30, 372)
+	clock.size = Vector2(500, 18)
+	clock.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	clock.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(clock)
+	_mor_clock = clock
+	var drill := Label.new()
+	drill.text = "OPPONENT PRIORITY: WIN - BLOCK - CENTER - RANDOM\nNO DIAGONAL MOVES"
+	drill.add_theme_font_size_override("font_size", 16)
+	drill.add_theme_color_override("font_color", Color(0.66, 0.60, 0.50))
+	drill.position = Vector2(30, 394)
+	drill.size = Vector2(500, 42)
+	drill.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	drill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(drill)
+	GameTheme.attach_rich_hover(board, "The sentry's board",
+		"Place three stones. Then select one of your stones and an adjacent open point. Make a row of three to win.",
+		"His whole drill is posted — beat it", Color(0.92, 0.88, 0.80), 1.0)
+	_stage_entrance(root)
+
+
+func _mor_caption(text: String) -> void:
+	if _mor_status != null and is_instance_valid(_mor_status):
+		_mor_status.text = text
+
+
+func _mor_update_clock() -> void:
+	if _mor_clock == null or not is_instance_valid(_mor_clock):
+		return
+	if _mor_phase != "move" or _mor_over:
+		_mor_clock.text = ""
+		return
+	_mor_clock.text = "THE WATCH CALLS THE GAME IN %d MOVES" % _mor_moves_left
+
+
+func _mor_refresh_rings() -> void:
+	if _mor_board_item == null or not is_instance_valid(_mor_board_item):
+		return
+	_mor_board_item.select_point = _mor_sel
+	var dests: Array = []
+	if _mor_sel >= 0:
+		for d in MOR_ADJ[_mor_sel]:
+			if int(_mor_board[d]) == 0:
+				dests.append(int(d))
+	_mor_board_item.dest_points = dests
+	_mor_board_item.queue_redraw()
+	# The lifted stone also brightens — the halo alone can hide under the
+	# stone's own footprint (informational, holds steady).
+	for p in range(9):
+		var st = _mor_stones[p]
+		if st != null and is_instance_valid(st) and int(_mor_board[p]) == 1:
+			st.modulate = Color(1.18, 1.12, 0.94) if p == _mor_sel else Color.WHITE
+
+
+func _mor_refresh_threats() -> void:
+	if _mor_board_item == null or not is_instance_valid(_mor_board_item):
+		return
+	var out: Array = []
+	for ln in MerelsBoard.LINES:
+		var you := 0
+		var him := 0
+		var open := 0
+		for q in ln:
+			match int(_mor_board[q]):
+				1: you += 1
+				2: him += 1
+				0: open += 1
+		if open == 1 and you == 2:
+			out.append({"pts": ln, "col": Color(0.85, 0.72, 0.38, 0.30)})
+		elif open == 1 and him == 2:
+			out.append({"pts": ln, "col": Color(0.80, 0.36, 0.20, 0.32)})
+	_mor_board_item.threats = out
+	_mor_board_item.queue_redraw()
+
+
+func _mor_seat_pos(i: int, sz: float) -> Vector2:
+	# Stones sit a touch above the pit so their ground pool reads under them.
+	return _mor_board_item.position + _mor_board_item.point_pos(i) \
+		- Vector2(sz * 0.5, sz * 0.62)
+
+
+func _mor_make_stone(side: int, i: int) -> Control:
+	var sz: float = MOR_STONE_SIZE[int(i / 3.0)] * (1.0 if side == 1 else 0.92)
+	var s: Control
+	if side == 1:
+		var coin := CoinProp.new()
+		coin.lying = true
+		coin.worn = true
+		coin.seed_text = "mor_coin_%d_%s" % [i, _event_id]
+		s = coin
+	else:
+		var bone := BoneTessera.new()
+		bone.seed_text = "mor_bone_%d_%s" % [i, _event_id]
+		s = bone
+	s.size = Vector2(sz, sz)
+	s.position = _mor_seat_pos(i, sz)
+	_mor_root.add_child(s)
+	return s
+
+
+func _mor_place_stone(side: int, i: int) -> void:
+	_mor_board[i] = side
+	var s := _mor_make_stone(side, i)
+	_mor_stones[i] = s
+	AudioBank.play_sfx("bone_settle", 0.06, -8.0, 1.15 if side == 1 else 0.85)
+	if not UserSettings.reduce_motion:
+		var dest := s.position
+		s.position = dest + (Vector2(0, 70) if side == 1 else Vector2(0, -60))
+		s.modulate.a = 0.0
+		var tw := s.create_tween()
+		tw.tween_property(s, "position", dest, 0.24) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		tw.parallel().tween_property(s, "modulate:a", 1.0, 0.16)
+	_mor_refresh_threats()
+
+
+func _mor_slide_stone(from: int, to: int, side: int) -> void:
+	var s = _mor_stones[from]
+	_mor_board[from] = 0
+	_mor_board[to] = side
+	_mor_stones[from] = null
+	_mor_stones[to] = s
+	AudioBank.play_sfx("bone_settle", 0.06, -10.0, 0.7)
+	if s != null and is_instance_valid(s):
+		var sz: float = MOR_STONE_SIZE[int(to / 3.0)] * (1.0 if side == 1 else 0.92)
+		var dest := _mor_seat_pos(to, sz)
+		if UserSettings.reduce_motion:
+			s.size = Vector2(sz, sz)
+			s.position = dest
+		else:
+			var tw: Tween = s.create_tween()
+			tw.tween_property(s, "position", dest, 0.30) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN_OUT)
+			tw.parallel().tween_property(s, "size", Vector2(sz, sz), 0.30)
+	_mor_refresh_threats()
+
+
+func _on_mor_hover(i: int) -> void:
+	if _mor_busy or _mor_over or _mor_board_item == null \
+			or not is_instance_valid(_mor_board_item):
+		return
+	var b = _mor_board_item
+	if _mor_phase == "place":
+		if int(_mor_board[i]) == 0 and not (_mor_placed[0] == 0 and i == 4):
+			b.hover_point = i
+	else:
+		if _mor_sel < 0 and int(_mor_board[i]) == 1:
+			# Preview a stone's legal posts before you even lift it.
+			var dests: Array = []
+			for d in MOR_ADJ[i]:
+				if int(_mor_board[d]) == 0:
+					dests.append(int(d))
+			b.dest_points = dests
+			b.hover_point = i
+		elif _mor_sel >= 0 and int(_mor_board[i]) == 0 and i in MOR_ADJ[_mor_sel]:
+			b.hover_point = i
+	b.queue_redraw()
+
+
+func _on_mor_unhover() -> void:
+	if _mor_board_item == null or not is_instance_valid(_mor_board_item):
+		return
+	_mor_board_item.hover_point = -1
+	_mor_refresh_rings()
+
+
+func _on_mor_post(i: int) -> void:
+	if _mor_busy or _mor_over:
+		return
+	if _mor_phase == "place":
+		if int(_mor_board[i]) != 0:
+			return
+		if _mor_placed[0] == 0 and i == 4:
+			_mor_caption("THE GARRISON RULE: NOT THE MIDDLE POST TO OPEN")
+			return
+		_mor_busy = true
+		_mor_place_stone(1, i)
+		_mor_placed[0] += 1
+		if not mor_mill(_mor_board, 1).is_empty():
+			await _finish_mor(true)
+			return
+		await _mor_ai_turn()
+	else:
+		if int(_mor_board[i]) == 1:
+			_mor_sel = -1 if _mor_sel == i else i
+			_mor_refresh_rings()
+			return
+		if _mor_sel < 0 or int(_mor_board[i]) != 0 or not i in MOR_ADJ[_mor_sel]:
+			return
+		_mor_busy = true
+		var moved_from := _mor_sel
+		_mor_sel = -1
+		_mor_refresh_rings()
+		_mor_slide_stone(moved_from, i, 1)
+		await get_tree().create_timer(0.32).timeout
+		if _mor_over or _mor_root == null or not is_instance_valid(_mor_root):
+			return
+		if not mor_mill(_mor_board, 1).is_empty():
+			await _finish_mor(true)
+			return
+		_mor_moves_left -= 1
+		_mor_update_clock()
+		if _mor_moves_left <= 0:
+			await _mor_watch_calls()
+			return
+		await _mor_ai_turn()
+
+
+func _mor_drill_why_place(p: int) -> String:
+	if p in mor_completions(_mor_board, 2):
+		return "HIS DRILL: THE MILL, AT " + MOR_POST[p].to_upper()
+	if p in mor_completions(_mor_board, 1):
+		return "HIS DRILL: HE BLOCKS " + MOR_POST[p].to_upper()
+	if p == 4:
+		return "HIS DRILL: HE TAKES THE MIDDLE POST"
+	return "HIS DRILL: THE ROLL SAYS " + MOR_POST[p].to_upper()
+
+
+func _mor_drill_why_move(mv: Array) -> String:
+	var b := _mor_board.duplicate()
+	b[mv[0]] = 0
+	b[mv[1]] = 2
+	if not mor_mill(b, 2).is_empty():
+		return "HIS DRILL: THE MILL, AT " + MOR_POST[int(mv[1])].to_upper()
+	var doors: Array = []
+	for mv2 in mor_moves(_mor_board, 1):
+		var b2 := _mor_board.duplicate()
+		b2[mv2[0]] = 0
+		b2[mv2[1]] = 1
+		if not mor_mill(b2, 1).is_empty() and not int(mv2[1]) in doors:
+			doors.append(int(mv2[1]))
+	if int(mv[1]) in doors:
+		return "HIS DRILL: HE BLOCKS " + MOR_POST[int(mv[1])].to_upper()
+	return "HIS DRILL: THE ROLL — " + MOR_POST[int(mv[0])].to_upper() \
+		+ " TO " + MOR_POST[int(mv[1])].to_upper()
+
+
+func _mor_ai_turn() -> void:
+	_mor_busy = true
+	_mor_caption("HE READS THE ROLL…")
+	await get_tree().create_timer(0.60).timeout
+	if _mor_over or _mor_root == null or not is_instance_valid(_mor_root):
+		return
+	if _mor_phase == "place":
+		var p := mor_place_ai(_mor_board)
+		if p < 0:
+			await _mor_watch_calls()
+			return
+		var why := _mor_drill_why_place(p)
+		_mor_place_stone(2, p)
+		_mor_placed[1] += 1
+		_mor_caption(why)
+		if not mor_mill(_mor_board, 2).is_empty():
+			await _finish_mor(false)
+			return
+		if _mor_placed[0] >= 3 and _mor_placed[1] >= 3:
+			_mor_phase = "move"
+			_mor_update_clock()
+			_mor_caption("ALL SIX DOWN — STONES SLIDE ALONG THE LINES NOW")
+	else:
+		var mv := mor_move_ai(_mor_board)
+		if mv.is_empty():
+			await _mor_watch_calls()
+			return
+		var why2 := _mor_drill_why_move(mv)
+		_mor_slide_stone(int(mv[0]), int(mv[1]), 2)
+		await get_tree().create_timer(0.32).timeout
+		if _mor_over or _mor_root == null or not is_instance_valid(_mor_root):
+			return
+		_mor_caption(why2)
+		if not mor_mill(_mor_board, 2).is_empty():
+			await _finish_mor(false)
+			return
+		_mor_moves_left -= 1
+		_mor_update_clock()
+		if _mor_moves_left <= 0:
+			await _mor_watch_calls()
+			return
+	# Zugzwang guard: if you cannot march, the watch calls the game.
+	if _mor_phase == "move" and mor_moves(_mor_board, 1).is_empty():
+		await _mor_watch_calls()
+		return
+	_mor_busy = false
+
+
+func _finish_mor(win: bool) -> void:
+	_mor_over = true
+	var line := mor_mill(_mor_board, 1 if win else 2)
+	if _mor_board_item != null and is_instance_valid(_mor_board_item):
+		_mor_board_item.win_pts = line
+		_mor_board_item.select_point = -1
+		_mor_board_item.dest_points = []
+		_mor_board_item.hover_point = -1
+		_mor_board_item.queue_redraw()
+	_mor_update_clock()
+	_mor_caption("THREE IN A ROW — THE MILL" if win else "HIS MILL — THE DRILL HOLDS")
+	AudioBank.play_sfx("bone_settle", 0.05, -6.0, 1.2 if win else 0.6)
+	await get_tree().create_timer(0.9).timeout
+	if win:
+		RunState.gain_gold(int(_mor_cfg.get("payout", 0)))
+		_sting("coin")
+		_win_flourish()
+		_show_result(_mor_text("win_text",
+			"You made a row of three. Gained {payout} gold."))
+	else:
+		_sting("hit_hero", -4.0)
+		_bust_feedback()
+		_show_result(_mor_text("lose_text",
+			"The opponent made a row of three. You lost the stake."))
+
+
+func _mor_watch_calls() -> void:
+	_mor_over = true
+	var stake: int = int(_mor_cfg.get("stake", 0))
+	if stake > 0:
+		RunState.gain_gold(stake)
+	_mor_caption("THE WATCH CALLS THE GAME")
+	_mor_update_clock()
+	await get_tree().create_timer(0.7).timeout
+	_show_result(_mor_text("call_text",
+		"The game ended in a draw. Your stake was returned."))
+
+
+func _on_mor_concede() -> void:
+	if _mor_busy or _mor_over:
+		return
+	_mor_over = true
+	_sting("hit_hero", -6.0)
+	_show_result(_mor_text("concede_text",
+		"You conceded. You lost the stake."))
 
 
 # ── Risk loop (risk_loop) — the generic "do it again?" engine ────────────
@@ -3237,9 +10250,81 @@ func _build_risk_screen(beat: String) -> void:
 		String(_risk_cfg.get("leave", "Step away")), "",
 		String(_risk_cfg.get("leave_sub", "Keep what you have.")), 84,
 		_on_risk_leave))
+	_add_risk_stage(steps.size())
+
+
+## The Burning Inch (docs/EVENT_PLAY_PITCH_20260718.md L2): the risk ladder's
+## spend made physical — a candle stub beside the choices burns visibly down
+## with every press, drips piling on the dish, and gutters out on the bust.
+## Display only; the odds stay in the step data. The flicker loop is
+## decorative (Reduce Motion holds the flame steady).
+var _risk_candle: Control = null
+var _risk_flick: Tween = null
+var _risk_busy := false
+
+
+func _add_risk_stage(n_steps: int) -> void:
+	_risk_busy = false
+	if _risk_flick != null and _risk_flick.is_valid():
+		_risk_flick.kill()
+	_risk_flick = null
+	_risk_candle = null
+	var root := Control.new()
+	root.name = "RiskStage"
+	root.position = Vector2(1030, 250)
+	root.size = Vector2(280, 400)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+	var candle := CandleStub.new()
+	candle.seed_text = "wick_" + _event_id
+	candle.burn = clampf(float(_risk_step) / maxf(1.0, float(n_steps)), 0.0, 1.0)
+	candle.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.add_child(candle)
+	_risk_candle = candle
+	if not UserSettings.reduce_motion:
+		_risk_flick = candle.create_tween().set_loops()
+		_risk_flick.tween_method(_risk_flick_tick, 0.0, 1.0, 0.9)
+
+
+func _risk_flick_tick(v: float) -> void:
+	if _risk_candle == null or not is_instance_valid(_risk_candle):
+		return
+	_risk_candle.flick = v
+	_risk_candle.flame_h = 0.92 + 0.14 * sin(v * TAU * 2.0)
+	_risk_candle.queue_redraw()
+
+
+func _candle_flame_to(v: float) -> void:
+	if _risk_candle == null or not is_instance_valid(_risk_candle):
+		return
+	_risk_candle.flame_h = v
+	_risk_candle.queue_redraw()
+
+
+## The bust: one last flare, then the dark takes the flame — ash where it
+## stood. Plays on the CURRENT screen before the result page replaces it.
+func _play_candle_gutter() -> void:
+	if _risk_candle == null or not is_instance_valid(_risk_candle) \
+			or UserSettings.reduce_motion:
+		return
+	if _risk_flick != null and _risk_flick.is_valid():
+		_risk_flick.kill()
+	AudioBank.play_sfx("candle_out", 0.05, -4.0)
+	var candle := _risk_candle
+	var t := candle.create_tween()
+	t.tween_method(_candle_flame_to, 1.0, 1.45, 0.14)
+	t.tween_method(_candle_flame_to, 1.45, 0.0, 0.32) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	await t.finished
+	if is_instance_valid(candle):
+		Motion.burst(self, candle.get_global_position()
+			+ Vector2(candle.size.x * 0.5, candle.size.y * 0.30), "ash")
+	await get_tree().create_timer(0.55).timeout
 
 
 func _on_risk_action() -> void:
+	if _risk_busy:
+		return
 	var steps: Array = _risk_cfg.get("steps", [])
 	if _risk_step >= steps.size():
 		_on_risk_leave()
@@ -3286,12 +10371,18 @@ func _on_risk_action() -> void:
 	else:
 		var bust: Dictionary = _risk_cfg.get("bust", {})
 		var bust_receipt := _apply_effect_list(bust.get("effects", []))
+		# Bake then shade: the bust's effects have already landed above —
+		# the candle only performs them before the page turns.
+		_risk_busy = true
+		await _play_candle_gutter()
 		_show_result(_combine_lines([String(bust.get("text", "The luck turns.")),
 			bust_receipt]))
 		_bust_feedback()
 
 
 func _on_risk_leave() -> void:
+	if _risk_busy:
+		return
 	if _risk_step == 0:
 		_show_result(String(_risk_cfg.get("leave_text_early",
 			_risk_cfg.get("leave_text", "You let it be."))))
@@ -3315,7 +10406,7 @@ func _start_appraisal_mode() -> void:
 	_appr_shown = 1
 	_appr_index = _appraisal_roll(-1)
 	if _appr_index < 0:
-		_show_result("She glances through your pack once and slides it back under the glass. Nothing in it interests her.")
+		_show_result("You have no card she will buy.")
 		return
 	_build_appraisal_screen()
 
@@ -3353,7 +10444,7 @@ func _build_appraisal_screen() -> void:
 	# Choices sit right of the appraised card (96–321), so widen the left inset.
 	var choices_vbox := _build_event_screen(
 		"She holds up [color=#e8b547]%s[/color]" % String(data.get("name", "a card")),
-		"She turns it over twice behind the smoked glass, taps it once, and names a figure. She does not repeat herself.",
+		"She offers a price for this card.",
 		n_choices, 360, 980)
 
 	# The card itself, stood on the scrim left of the choices.
@@ -3377,7 +10468,7 @@ func _build_appraisal_screen() -> void:
 		"Her hand is already open under the slot.", 84, _on_appraisal_sell))
 	if can_another:
 		choices_vbox.add_child(_make_frameless_choice("Show her another",
-			"She pulls a different card — but her interest cools.",
+			"Look at a different card.",
 			"\"As you like. The figure was for THAT one.\"", 84,
 			_on_appraisal_another))
 	choices_vbox.add_child(_make_frameless_choice("Keep your things", "",
@@ -3388,7 +10479,7 @@ func _build_appraisal_screen() -> void:
 func _on_appraisal_sell() -> void:
 	# Deck floor of 1 — she won't leave you with nothing to your name.
 	if RunState.deck.size() <= 1:
-		_show_result("She turns it over once more and slides it back. \"Your last? No. Even I have a line.\"")
+		_show_result("You cannot sell your last card.")
 		return
 	var data = RunState.get_upgraded_card_data(_appr_index)
 	var price := _appraisal_price(_appr_index)
@@ -3398,7 +10489,7 @@ func _on_appraisal_sell() -> void:
 	RunState.remove_card_at(_appr_index)
 	RunState.gain_gold(price)
 	_sting("coin")
-	_show_result("%s goes behind the smoked glass with everything else that mattered to someone once. You count %d gold. She has already stopped looking at you." \
+	_show_result("Sold %s for %d gold." \
 		% [String(data.get("name", "The card")), price])
 
 
@@ -3427,1304 +10518,5 @@ func _on_appraisal_another() -> void:
 # Stay around 1 emphasis word per paragraph; multiple per beat reads as broken
 # rendering. Single quotes and parentheses around tags are NOT required.
 
-const EVENTS: Dictionary = {
-
-	# ══════════════════ KEPT — distinct mechanic + distinct fiction ══════════════════
-
-	"pawnbrokers_window": {
-		"name": "The Pawnbroker's Window",
-		"desc": "Behind smoked glass, the pawnbroker fans her wares. She does not sell — she buys, but only what interests her, and her first figure is always her best.",
-		"mood": "gilt",
-		"choices": [
-			{
-				"label": "Slide your pack through the slot\n\nShe pulls out what interests HER.\nIt is never what you would have chosen to sell.",
-				"desc": "She names prices for your cards — each refusal cools her offer",
-				"effects": [
-					{"type": "pawn_appraisal"},
-				],
-			},
-			{
-				# Campaign memory: the shelf kept what you sold her (recorded by
-				# the appraisal counter). Act 2+, and only when the fee is there —
-				# a blue option that can't pay would be a lie.
-				"blue": {"type": "all", "gates": [
-					{"type": "pawned_at_least", "value": 1},
-					{"type": "act_at_least", "value": 2},
-					{"type": "gold_at_least", "value": 60},
-				]},
-				"label": "Ask after the shelf behind the glass\n\n{pawned} sits displayed where she can watch it. \"I knew you'd\nbe back. They always come back. The keeping fee is not negotiable.\"",
-				"desc": "-60 gold; {pawned} returns to your deck, sharpened",
-				"effects": [
-					{"type": "pawn_buyback", "price": 60},
-				],
-			},
-			{
-				"blue": {"type": "potions_full"},
-				"label": "Set your full belt on the sill\n\nShe holds a bottle to the smoked light and almost smiles.\n\"Liquids keep their word.\" She pays over the odds.",
-				"desc": "Sell a potion for 65 gold",
-				"effects": [
-					{"type": "sell_potion", "value": 65},
-				],
-			},
-			{
-				"label": "Buy the unclaimed pledge\n\nSomeone left it here against a debt and never came back.\nShe slides it through the slot without a word about them.",
-				"desc": "-75 gold, +random relic",
-				"effects": [
-					{"type": "gold", "value": -75},
-					{"type": "random_relic"},
-				],
-			},
-		],
-	},
-
-	"the_crossing": {
-		# Phase 2.5 — fires at bridge-flagged nodes (the plate painted the
-		# bridge on the road in; this room honors it). First bridge of the
-		# run always rolls it (_pick_event override); later bridges compete
-		# normally via the at_bridge gate.
-		"name": "The Crossing",
-		"desc": "The river runs brown and fast under a bridge of black timber. Three men lean on a chain across the far end. The toll is whatever you look like you can pay.",
-		"gate": {"type": "at_bridge"},
-		"art": "tollkeeper_bridge",
-		"mood": "bone",
-		"ambience": "river",
-		"choices": [
-			{
-				"label": "Pay the toll\n\nThey count it twice.\nThe chain comes down.",
-				"desc": "-45 gold",
-				"effects": [
-					{"type": "gold", "value": -45},
-				],
-			},
-			{
-				"blue": {"type": "hero_is", "value": "stalwart"},
-				"label": "Read the water like a soldier\n\nYou served on rivers like this. There's always a ford,\nalways where the cattle cross. You find it in an hour.",
-				"desc": "Ford upstream, free — the river owes soldiers",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 2,
-							"text": "The ford is exactly where doctrine says it should be. You cross dry to the boot-tops, and on the far bank you pocket a toll coin some less careful traveller dropped running.",
-							"effects": [{"type": "gold", "value": 20}]},
-						{"weight": 1,
-							"text": "The cattle path crosses at a drowned shrine stone. You touch it mid-river for luck, the way the drovers do, and the cold water takes the road-ache out of your legs.",
-							"effects": [{"type": "heal", "value": 4}]},
-					]},
-				],
-			},
-			{
-				"label": "Force the bridge\n\nThree men, one chain, and you.\nSomebody is wrong about how this goes.",
-				"desc": "Take the bridge by force — the scrap decides the price",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 2,
-							"text": "The chain holds longer than the men do. Not quite long enough. You cross with their toll box under your arm and one of their boot prints on your ribs.",
-							"effects": [{"type": "damage", "value": 4}, {"type": "gold", "value": 60}]},
-						{"weight": 1,
-							"text": "They are better at this than they look — leaning on that chain is what they do all day. You cross, in the end, but the toll box is light and your nose will set crooked.",
-							"effects": [{"type": "damage", "value": 9}, {"type": "gold", "value": 15}]},
-					]},
-				],
-			},
-			{
-				# The Tollkeeper's trophy shelf, folded in when her own event was
-				# retired — the chain post carries what the crossing has cost others.
-				"label": "Pay the other toll\n\nNailed to the chain post: a wedding ring, a fox skull, a child's\ndrawing, a long brown braid. The eldest points at your pack. Once.",
-				"desc": "+1 Curse, -1 random card",
-				"effects": [
-					{"type": "add_curse"},
-					{"type": "remove_cards", "value": 1},
-				],
-			},
-		],
-	},
-
-	"gravesong_choir": {
-		"name": "The Gravesong Choir",
-		"desc": "Four hooded singers ring an open grave, humming a tune you almost know — then you do: the verse carries a name. {fallen}. The fifth place in the circle stands empty.",
-		"mood": "bone",
-		"ambience": "choir",
-		"choices": [
-			{
-				"label": "Take the fifth place and sing\n\nVerse by verse, the soil gives up its grave-gifts.\nVerse by verse, the song learns your voice.",
-				"desc": "Each verse earns more gold, then a relic; a miss adds a Curse",
-				"effects": [
-					{"type": "risk_loop", "mode": "bust",
-						"open_text": "You step into the circle. The hum threads itself through your teeth without asking. The grave at the center is empty, and listening.",
-						"action": "Sing the next verse",
-						"action_body": "The harmony opens a place for you in it.",
-						"leave": "Bow out of the circle",
-						"leave_sub": "Keep what the soil gave up.",
-						"leave_text": "You step back. The choir closes the gap without looking, and the song goes on without your name in it.",
-						"leave_text_early": "You do not sing. The fifth place stays open behind you for a long way down the road.",
-						"steps": [
-							{"chance": 1.0, "sub": "Gain 25 gold — the first verse is welcome.",
-								"effects": [{"type": "gold", "value": 25}],
-								"text": "The soil stirs. A coin purse surfaces beside your boot like something coming up for air."},
-							{"chance": 0.7, "sub": "Gain 35 gold — 3 in 10 the song turns.",
-								"effects": [{"type": "gold", "value": 35}],
-								"text": "A ring. A chain. A saint's little finger in silver. The choir sings louder, and the grave is not so empty now."},
-							{"chance": 0.5, "sub": "The choir's own relic surfaces — even odds the song turns.",
-								"effects": [{"type": "specific_relic", "id": "verse_of_you"}],
-								"text": "Something works its way up out of the dark, wrapped in a winding-sheet the size of a kerchief: a verse, written in a hand you know, because it is yours."},
-						],
-						"bust": {"effects": [{"type": "add_curse"}],
-							"text": "The song turns on the high note. It walks down your throat, takes a verse of you with it, and lays it in the grave. The choir bows. To you, or to it."},
-						"done_text": "The hum fades. The grave is full now, though you never saw anything go in. One singer squeezes your arm — kindly, you decide."},
-				],
-			},
-			{
-				"label": "Lay 2 cards in the grave\n\nThe choir sings them down.\nThe song takes a little of you with them.",
-				"desc": "-6 HP, remove 2 chosen cards, +1 rare card",
-				"effects": [
-					{"type": "damage", "value": 6},
-					{"type": "remove_choice_multi", "value": 2},
-					{"type": "add_rare"},
-				],
-			},
-			{
-				"label": "Sing along from the road\n\nThe melody finds a card in your deck\nand sharpens it on the harmony.",
-				"desc": "Upgrade a chosen card",
-				"effects": [
-					{"type": "upgrade_choice"},
-				],
-			},
-		],
-	},
-
-	# ── Recurring NPC: the Sin-Eater pair ──
-
-	"sin_eater": {
-		"name": "The Sin-Eater",
-		"desc": "A man sits at a long table that should not be here, bread and a knife before him. \"Lay your worst card here,\" he says, not looking up. \"I'll eat it. The price is meat.\"",
-		"gate": {"type": "has_curse"},
-		"mood": "verdigris",
-		"choices": [
-			{
-				"label": "Feed him a Curse\n\nHe swallows it without water.\nThe price, he said, is meat.",
-				"desc": "-3 HP, eat a chosen Curse",
-				"effects": [
-					{"type": "damage", "value": 3},
-					{"type": "remove_choice_filtered", "filter": "curse"},
-				],
-			},
-			{
-				"label": "Feed him a starter\n\nHe wants it badly enough\nto pay. He tucks it away for later.",
-				"desc": "+50 gold, give a chosen starting card",
-				"effects": [
-					{"type": "gold", "value": 50},
-					{"type": "remove_choice_filtered", "filter": "starter"},
-				],
-			},
-			{
-				"label": "Bring nothing\n\nHe nods. The knife sits where it sat.",
-				"desc": "+1 gold",
-				"effects": [
-					{"type": "gold", "value": 1},
-				],
-			},
-		],
-	},
-
-	"fattened_sin_eater": {
-		"name": "The Fattened Sin-Eater",
-		"desc": "The man from the long table, enormous now, a feast where the bread was. He grins. \"You fed me well. Sit — I've saved you a seat.\"",
-		"mood": "verdigris",
-		"gate": {"type": "all", "gates": [
-			{"type": "act_at_least", "value": 3},
-			{"type": "seen_all", "events": ["sin_eater"]},
-		]},
-		"choices": [
-			{
-				"label": "Sit and eat with him\n\nHe carves like he means it.\nThe portion he gives you is his own.",
-				"desc": "Heal to full, +2 max HP, -30 gold, remove 1 chosen card",
-				"effects": [
-					{"type": "heal_full"},
-					{"type": "gain_max_hp", "value": 2},
-					{"type": "gold", "value": -30},
-					{"type": "remove_choice"},
-				],
-			},
-			{
-				"label": "Trade him another Curse\n\nHe takes it gently, lays it on the side of his plate,\nand tears you the heel of the loaf in payment.",
-				"desc": "Gain the Sin-Eater's Crust (relic), eat a chosen Curse",
-				"effects": [
-					{"type": "specific_relic", "id": "sin_eaters_crust"},
-					{"type": "remove_choice_filtered", "filter": "curse"},
-				],
-			},
-			{
-				"label": "Decline\n\nHe wraps a meal for you to take.\nThe bread is real.",
-				"desc": "+60 gold",
-				"effects": [
-					{"type": "gold", "value": 60},
-				],
-			},
-		],
-	},
-
-	# ── Hidden-info: the tells are the game ──
-
-	"rotting_carnival": {
-		"name": "The Rotting Carnival",
-		"desc": "Three tents, a barker asleep or dead at his post. A sign: PICK ONE. WE ARE NOT RESPONSIBLE FOR WHAT THE TENTS REMEMBER. Listen at the flaps.",
-		"mood": "verdigris",
-		"ambience": "carnival",
-		"choices": [
-			{
-				"hidden": true,
-				"tell": "From the red tent: a thock — thock — thock of blades into wood, and polite applause from no hands at all.",
-				"desc": "Hidden",
-				"effects": [
-					{"type": "upgrade_random"},
-					{"type": "damage", "value": 4},
-				],
-			},
-			{
-				"hidden": true,
-				"tell": "From the yellow tent: incense, shuffled cards, and the slow count of coins that are not being spent.",
-				"desc": "Hidden",
-				"effects": [
-					{"type": "gold", "value": 80},
-					{"type": "add_curse"},
-				],
-			},
-			{
-				"hidden": true,
-				"tell": "The black tent makes no sound and smells of nothing at all. The flap hangs open exactly your width.",
-				"desc": "Hidden",
-				"effects": [
-					{"type": "random_relic"},
-					{"type": "remove_cards", "value": 1},
-				],
-			},
-		],
-	},
-
-	# ── Choose-from-curated-pool (fixed slot costs: HP / gold / Curse) ──
-
-	"strangers_hand": {
-		"name": "The Wet Cards",
-		"desc": "A stranger deals wet cards face-up onto a flat stone, and looks up only once. \"Each of these is owed to someone. Pay it off — and take what they leave behind.\"",
-		"mood": "verdigris",
-		"auto_effect": {"type": "stranger_hand_pick"},
-		"choices": [],
-	},
-
-	# ── Pure gamble (absurd register) ──
-
-	"coin_on_edge": {
-		"name": "The Coin That Won't Land",
-		"desc": "A silver coin spins in a groove it has worn deep into the road. It does not wobble. It does not slow. A small sign reads: CALL IT.",
-		"mood": "gilt",
-		"choices": [
-			{
-				"label": "Put your stake down and call it\n\nDouble or nothing, as many times as your nerve holds.\nThe coin has all day. The coin has all century.",
-				"desc": "Stake 25 gold — even odds each call: double the pot, or lose it",
-				"effects": [
-					{"type": "dice_run", "stake": 25, "start": 40,
-						"mode": "double", "bust_pct": 0.5, "prop": "coin",
-						"bank_relic": "coin_landed", "bank_relic_at": 160,
-						"bank_relic_text": "As you turn to go, the spinning stops. The coin lies flat in your open palm — heads, warm as a struck match — and the groove in the road is empty. Gained relic: The Coin, Landed.",
-						"broke_text": "You haven't 25 gold to stake. The coin spins on, unbothered. It has been refused by poorer.",
-						"open_text": "You lay your stake in the groove beside the spinning silver. The pot stands at {pot} gold. The coin picks up speed, which should not be possible, and is.",
-						"roll_label": "Call it again",
-						"roll_sub": "Even odds: the pot doubles — or the coin lands and takes it all.",
-						"roll_body": "The coin is enjoying this. You can tell.",
-						"bank_label": "Take the pot",
-						"bank_sub": "Take {pot} gold and walk.",
-						"bank_body": "Some bets are best left spinning.",
-						"grow_text": "It blurs, leans, nearly topples — and rights itself, still spinning. The pot stands at {pot} gold. Somewhere behind the sign, something exhales.",
-						"bust_text": "The coin falls flat at last. Tails. Stake and pot slide into the worn groove and are gone. The coin stands back up on its edge and resumes spinning.",
-						"bank_text": "You bank {pot} gold and step back. The coin spins on, patient. The sign, you notice now, has your handwriting on it."},
-				],
-			},
-			{
-				"blue": {"type": "has_nonstarting_relic"},
-				"label": "Show the coin what you've already won\n\nYou spread your relics in the dust. The coin slows —\nactually slows. \"A winner,\" the sign rewrites itself. \"No stake.\"",
-				"desc": "Free flip: 90 gold on heads, nothing on tails",
-				"effects": [
-					{"type": "wager_gold", "stake": 0, "payout": 90},
-				],
-			},
-			{
-				"label": "Stop it with your finger\n\nNo wager, no warning — just the nerve to touch it.\nWhatever side it shows when it stops, it shows to you.",
-				"desc": "Free flip: a relic, or 2 Curses",
-				"effects": [
-					{"type": "wager_relic_or_curse", "curses": 2},
-				],
-			},
-			{
-				"label": "Leave it spinning\n\nYou step around it. A single coin has fallen flat in the dust\nnearby — heads — left by someone who also knew better.",
-				"desc": "+10 gold",
-				"effects": [
-					{"type": "gold", "value": 10},
-				],
-			},
-		],
-	},
-
-	# ── Push-your-luck pot game ──
-
-	"the_bone_pit": {
-		"name": "The Bone Pit",
-		"desc": "Four dead legionaries cast knucklebones cut from their own hands, still playing for wages the empire never paid. A space opens in the circle.",
-		"mood": "bone",
-		"choices": [
-			{
-				"label": "Take the open seat\n\nThe bones are warm.\nThey should not be warm.",
-				"desc": "Pot opens at 25 gold — bank any time; skulls take all",
-				"effects": [
-					{"type": "dice_run", "start": 25,
-						"bank_relic": "warm_knucklebone", "bank_relic_at": 75,
-						"bank_relic_text": "The eldest legionary stops you at the edge of the circle and presses one of his own knucklebones into your palm. It is warm. It stays warm. Gained relic: Warm Knucklebone."},
-				],
-			},
-			{
-				"blue": {"type": "seen_all", "events": ["coin_on_edge"]},
-				"label": "Tell them about the coin\n\nFour dead faces turn at once. \"The spinner,\" one clicks.\n\"It owes this table a pot. Sit — your stake is already in.\"",
-				"desc": "Pot opens at 50 gold — the dead respect a gambler",
-				"effects": [
-					{"type": "dice_run", "start": 50,
-						"bank_relic": "warm_knucklebone", "bank_relic_at": 75,
-						"bank_relic_text": "The eldest legionary stops you at the edge of the circle and presses one of his own knucklebones into your palm. It is warm. It stays warm. Gained relic: Warm Knucklebone."},
-				],
-			},
-			{
-				"label": "Rob the pot\n\nThey do not stand. They do not speak.\nThey only watch you go, all four, without turning their heads.",
-				"desc": "+35 gold, +1 Curse",
-				"effects": [
-					{"type": "gold", "value": 35},
-					{"type": "add_curse"},
-				],
-			},
-			{
-				"label": "Salute the game and pass\n\nThe oldest flicks a coin after you.\n\"For respecting the rules,\" his jaw clicks. \"Few do.\"",
-				"desc": "+5 gold",
-				"effects": [
-					{"type": "gold", "value": 5},
-				],
-			},
-		],
-	},
-
-	# ── War events (gate: at_war; speak through {kingdom}/{lord}) ──
-
-	"the_siege_kitchen": {
-		"name": "The Siege Kitchen",
-		"desc": "{lord}'s army retreated faster than its field kitchen could pack; the cooks shrugged and kept cooking. In the queue: deserters, farmers, two of your scouts, one bear. Nobody fights in sight of the pot.",
-		"gate": {"type": "at_war"},
-		"art": "butcher",
-		"mood": "ember",
-		"ambience": "fire_crackle",
-		"choices": [
-			{
-				"label": "Join the queue\n\nThe stew has been going since the siege of something-or-other\nand has only improved. The bear waits its turn. So do you.",
-				"desc": "Heal 9 HP",
-				"effects": [
-					{"type": "heal", "value": 9},
-				],
-			},
-			{
-				"label": "Hire the head cook\n\n\"I feed whoever holds the pot,\" she says, and hands you\nthe pot. It is heavier than a shield and has opinions.",
-				"desc": "The Camp Cook (1/5) joins your next fight",
-				"effects": [
-					{"type": "gift_creature", "name": "Camp Cook", "atk": 1, "hp": 5, "kw": [],
-						"text": "The Camp Cook marches with you, ladle shouldered like a poleaxe."},
-				],
-			},
-			{
-				"label": "Requisition the salt and the wine\n\nThe cooks let you take it. They also, in full view\nof the queue, write your name in the grease-book.",
-				"desc": "+55 gold, +1 Curse",
-				"effects": [
-					{"type": "gold", "value": 55},
-					{"type": "add_curse"},
-				],
-			},
-			{
-				"blue": {"type": "hero_is", "value": "kindler"},
-				"label": "Tend their fires properly\n\nYou bank the coals the way your trade banks them. The head\ncook watches, nods once, and teaches you the thing with the lid.",
-				"desc": "Upgrade a chosen card, free",
-				"effects": [
-					{"type": "upgrade_choice"},
-				],
-			},
-		],
-	},
-
-	# ══════════════════ NEW — 2026-07-03 pool remake ══════════════════
-	# Design bar: one concept per event, and the payoff should touch the BUILD
-	# or the FIGHTING (keywords, whole-deck swaps, specific cards, max-HP
-	# stakes, next-fight boons) — not just re-price gold/HP/Curse.
-
-	# ── The keyword teacher (pick a school, pick a soldier) ──
-
-	"the_lame_master": {
-		"name": "The Pensioned Master",
-		"desc": "An old master-at-arms drills scarecrows on half pay. She reads your soldiers the way a clerk reads a bad ledger. \"One of them. One lesson. My knee decides how long.\"",
-		"art": "beekeeper_returns",
-		"mood": "ember",
-		"choices": [
-			{
-				"label": "The low guard\n\nShe breaks the stance down to nothing and builds\nit back with the shield on the inside of the bone.",
-				"desc": "-4 HP; a chosen creature gains Armored, permanently",
-				"effects": [
-					{"type": "damage", "value": 4},
-					{"type": "grant_keyword_pick", "keyword": "armored",
-						"prompt": "Who takes the lesson? (gains Armored)"},
-				],
-			},
-			{
-				"label": "The first step\n\n\"Wars are lost standing still.\" She teaches the step\nthat lands before the other side has drawn breath.",
-				"desc": "-4 HP; a chosen creature gains Swift, permanently",
-				"effects": [
-					{"type": "damage", "value": 4},
-					{"type": "grant_keyword_pick", "keyword": "swift",
-						"prompt": "Who takes the lesson? (gains Swift)"},
-				],
-			},
-			{
-				"label": "The answered blow\n\n\"Make them pay to touch you.\" This lesson\nleaves marks on everyone involved. That is the lesson.",
-				"desc": "-4 HP; a chosen creature gains Thorns, permanently",
-				"effects": [
-					{"type": "damage", "value": 4},
-					{"type": "grant_keyword_pick", "keyword": "thorns",
-						"prompt": "Who takes the lesson? (gains Thorns)"},
-				],
-			},
-			{
-				"blue": {"type": "hero_is", "value": "stalwart"},
-				"label": "Salute her by her old rank\n\nShe straightens an inch past what the knee allows.\nFor one of her own, the bruises are waived.",
-				"desc": "A chosen creature gains Armored, free",
-				"effects": [
-					{"type": "grant_keyword_pick", "keyword": "armored",
-						"prompt": "Who takes the lesson? (gains Armored)"},
-				],
-			},
-		],
-	},
-
-	# ── The whole-deck swap (levies out, veterans in) ──
-
-	"the_free_company": {
-		"name": "The Free Company",
-		"desc": "Mercenaries at a cold camp, professionally unimpressed. \"Farmhands,\" the recruiter says. \"I'll trade you soldier for soldier — every copy of a kind, if you can part with them.\"",
-		"gate": {"type": "starters_at_least", "value": 2},
-		"art": "fork_in_the_long_road",
-		"mood": "gilt",
-		"choices": [
-			{
-				# Campaign memory: word of a 6-kill veteran travels between camps.
-				"blue": {"type": "veteran_kills_at_least", "value": 6},
-				"label": "He asks after {veteran} by name\n\nWord of the notches travels between camps. He does not insult\nyou with an offer — he pays tribute rates for a look at the technique.",
-				"desc": "+35 gold",
-				"effects": [
-					{"type": "gold", "value": 35},
-				],
-			},
-			{
-				"label": "Muster out a levy\n\nHe takes every copy of the same green face and sends\nback the same count in scarred ones. No two alike.",
-				"desc": "Remove every copy of one starter; gain that many uncommon cards",
-				"effects": [
-					{"type": "veteran_swap"},
-				],
-			},
-			{
-				"label": "Buy one veteran outright\n\nShe names her own price, and it is not negotiable,\nand by the look of her kit she is worth it.",
-				"desc": "-65 gold, +1 uncommon card",
-				"effects": [
-					{"type": "gold", "value": -65},
-					{"type": "add_card", "rarity": "uncommon"},
-				],
-			},
-			{
-				"label": "Steal their muster-book\n\nEvery name in it is owed by somebody.\nNow the book rides with you. So does the owing.",
-				"desc": "+45 gold, +1 Curse",
-				"effects": [
-					{"type": "gold", "value": 45},
-					{"type": "add_curse"},
-				],
-			},
-		],
-	},
-
-	# ── The Curse outlet with scale (mass purge, priced in flesh) ──
-
-	"the_scapegoat": {
-		"name": "The Scapegoat",
-		"desc": "A goat stands tethered at the boundary stone, wearing the village's sins on little paper collars. It regards you with professional calm. There is room on its back.",
-		"gate": {"type": "has_curse"},
-		"art": "two_headed_calf",
-		"mood": "verdigris",
-		"choices": [
-			{
-				"label": "Load every sin you carry\n\nThe goat holds your gaze while the paper goes on.\nWhat leaves on its back still leaves through you.",
-				"desc": "Remove ALL Curses from your deck; lose 2 max HP for each",
-				"effects": [
-					{"type": "purge_curses", "max_hp_per": 2},
-				],
-			},
-			{
-				"label": "Pay the parish rate\n\nThe priest weighs one sin in his palm, names a figure,\nand ties it on with a little bow. Very professional.",
-				"desc": "-25 gold, remove a chosen Curse",
-				"effects": [
-					{"type": "gold", "value": -25},
-					{"type": "remove_choice_filtered", "filter": "curse"},
-				],
-			},
-			{
-				"label": "Untie it and take it with you\n\nThe parish is horrified. The goat is delighted.\nIts current load, of course, transfers.",
-				"desc": "The Scapegoat (1/4) joins your next fight; +1 Curse",
-				"effects": [
-					{"type": "gift_creature", "name": "The Scapegoat", "atk": 1, "hp": 4, "kw": [],
-						"text": "The goat falls in beside the baggage cart as if promoted."},
-					{"type": "add_curse"},
-				],
-			},
-		],
-	},
-
-	# ── The all-in gamble (poverty for power) ──
-
-	"the_reliquary_cart": {
-		"name": "The Reliquary Cart",
-		"desc": "A chapel on wagon wheels: saints' shin-bones in glass, a coin slot worn smooth. The friar does not preach — he opens the ledger of miracles to the page that matches your purse.",
-		"art": "the_answering_well",
-		"mood": "gilt",
-		"choices": [
-			{
-				"blue": {"type": "hero_is", "value": "pyromancer"},
-				"label": "Let him see your hands\n\nThe friar has read the file on your fires — there IS a file.\nHe blesses your banner unasked, at speed, to stay on your good side.",
-				"desc": "+1 max Command next fight, free",
-				"effects": [
-					{"type": "combat_mana", "value": 1,
-						"text": "The blessing is genuine. The hurry in it is also genuine."},
-				],
-			},
-			{
-				"blue": {"type": "gold_at_least", "value": 120},
-				"label": "Empty the war chest into the slot\n\nThe friar counts by ear. Somewhere past the hundredth coin\nhe stops a saint mid-sentence and takes something down.",
-				"desc": "Lose ALL your gold; gain a boss-tier relic",
-				"effects": [
-					{"type": "lose_gold_partial", "value": 99999},
-					{"type": "add_boss_relic"},
-				],
-			},
-			{
-				"label": "A soldier's tithe\n\nOne coin for the box, one prayer for the column.\nThe friar blesses your banner at the going rate.",
-				"desc": "-25 gold; +1 max Command next fight",
-				"effects": [
-					{"type": "gold", "value": -25},
-					{"type": "combat_mana", "value": 1,
-						"text": "The blessing sits on your banner like weather about to break."},
-				],
-			},
-			{
-				"label": "Rob the poor-box\n\nIt is nailed, chained, and blessed.\nSo were you, once.",
-				"desc": "The box decides — friars fight like mule-drivers",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 2,
-							"text": "The chain gives before the friar finishes crossing himself. You leave heavier in coin and lighter in standing — somewhere, a saint has opened a file.",
-							"effects": [{"type": "gold", "value": 85}, {"type": "add_curse"}]},
-						{"weight": 1,
-							"text": "The friar breaks a shin-bone over your head — a RELIC, technically, so it hardly counts as violence. You get a fistful of coins and a week of headaches.",
-							"effects": [{"type": "damage", "value": 7}, {"type": "gold", "value": 35}]},
-					]},
-				],
-			},
-		],
-	},
-
-	# ── The fallen paid forward (campaign-memory payoff) ──
-
-	"the_bell_of_names": {
-		"name": "The Bell of Names",
-		"desc": "A traveling foundry pours bells from battle-scrap. Names cast into the rim ring longest. The master reads your column once. \"Give me the roll. All of it.\"",
-		"gate": {"type": "fallen_at_least", "value": 2},
-		"art": "drowned_bell",
-		"mood": "ember",
-		"choices": [
-			{
-				"label": "Cast the roll into the rim\n\nName by name — {fallen} last of all — the mould takes them.\nWhat rings for the dead rings a little in the living.",
-				"desc": "+1 max HP for each name on your Roll of the Fallen (max +6)",
-				"effects": [
-					{"type": "scaled", "count": "fallen", "per": 1, "cap": 6, "outcome": "max_hp"},
-				],
-			},
-			{
-				"label": "Sell him your battle-scrap\n\nDented, dulled, or done — he pays foundry rates\nand asks nothing the metal wouldn't answer.",
-				"desc": "+40 gold",
-				"effects": [
-					{"type": "gold", "value": 40},
-				],
-			},
-			{
-				"label": "Ring the finished bell\n\nThe peal rolls out over the next three fields. Everything\nin them now knows a paid-up army is coming.",
-				"desc": "+1 max Command next fight",
-				"effects": [
-					{"type": "combat_mana", "value": 1,
-						"text": "The peal marches ahead of the column and holds the ground for you."},
-				],
-			},
-		],
-	},
-
-	# ── The hp-gated heal, with teeth (enemy mercy) ──
-
-	"the_chirurgeon": {
-		"name": "The Chirurgeon",
-		"desc": "An enemy field hospital, no patients left to lose. The chirurgeon sharpens instruments nobody needs, and brightens at your limp in a way you do not love. \"Sit. Please.\"",
-		"gate": {"type": "hp_below_pct", "value": 0.5},
-		"art": "tooth_witch",
-		"mood": "verdigris",
-		"choices": [
-			{
-				"label": "Lie down on his table\n\nHe is excellent. He is also thorough,\nand he has been bored for a very long time.",
-				"desc": "Heal to full, gain a Wound",
-				"effects": [
-					{"type": "heal_full"},
-					{"type": "add_curse_id", "id": "wound"},
-				],
-			},
-			{
-				"label": "Buy his kit instead\n\nHe parts with it the way soldiers part with rations —\ngrieving, and counting the coin twice.",
-				"desc": "-35 gold, gain 2 random potions",
-				"effects": [
-					{"type": "gold", "value": -35},
-					{"type": "gain_potion_random"},
-					{"type": "gain_potion_random"},
-				],
-			},
-			{
-				"blue": {"type": "hero_is", "value": "acolyte"},
-				"label": "Talk shop\n\nYou dressed wounds through a worse war than his. He listens,\ntakes notes, and treats you as a colleague — carefully.",
-				"desc": "Heal 9 HP, free",
-				"effects": [
-					{"type": "heal", "value": 9},
-				],
-			},
-			{
-				"label": "Limp on\n\nHe deflates. The cots stay empty. You hear\nthe whetstone resume behind you.",
-				"desc": "No effect",
-				"effects": [],
-			},
-		],
-	},
-
-	# ── The clean exhale (life insists, mid-war) ──
-
-	"the_wedding_at_the_ford": {
-		"name": "The Wedding at the Ford",
-		"desc": "Two half-burned villages are marrying their heirs at the river, mid-war, so SOMEONE owns the mill lawfully by winter. You are the only armed guest — which makes you the guest of honor.",
-		"art": "thrice_blessed_spring",
-		"mood": "ember",
-		"choices": [
-			{
-				"label": "Stand as witness\n\nYou sign the register under 'sword'. Both mothers\nfeed you personally, in shifts, as a compliment.",
-				"desc": "Heal 8 HP, +15 gold",
-				"effects": [
-					{"type": "heal", "value": 8},
-					{"type": "gold", "value": 15},
-				],
-			},
-			{
-				"label": "Dance the sword-dance\n\nYou half remember it. The fiddler slows down for you.\nThe river is RIGHT there, and everyone knows it.",
-				"desc": "The dance decides — glory or the river",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 2,
-							"text": "You are, briefly, magnificent. The villages pass the hat, the fiddler takes a bow on your behalf, and two separate grandmothers propose.",
-							"effects": [{"type": "gold", "value": 35}]},
-						{"weight": 1,
-							"text": "Into the river, to a standing ovation. The bride fishes you out herself, still in her wedding crown, and presses a bottle on you for your dignity. There is no saving your dignity.",
-							"effects": [{"type": "damage", "value": 2}, {"type": "gain_potion"}]},
-					]},
-				],
-			},
-			{
-				"label": "Leave a soldier's gift\n\nYour second-best knife, laid on the gift table between\nthe butter churn and somebody's heirloom spoons.",
-				"desc": "-30 gold; the blessing of two villages: +4 max HP",
-				"effects": [
-					{"type": "gold", "value": -30},
-					{"type": "gain_max_hp", "value": 4},
-				],
-			},
-		],
-	},
-
-	# ── War comedy: the arms dealer (gate: at_war) ──
-
-	"the_ladder_merchant": {
-		"name": "The Ladder-Merchant",
-		"desc": "A cart of siege ladders, parked exactly between the armies. \"Patent escalade,\" he says, slapping a rung. \"{lord} bought 6. Between us — I sold him the SHORT ones.\"",
-		"gate": {"type": "at_war"},
-		# Stand-in: the forge cart — the closest fit for an arms dealer's rig.
-		"art": "old_forge",
-		"mood": "gilt",
-		"choices": [
-			{
-				"label": "Buy the ladder\n\nIt is, in fairness, an excellent ladder.\nIt takes 2 men to carry and fears nothing.",
-				"desc": "-30 gold; the Patent Ladder (0/7, Armored) joins your next fight",
-				"effects": [
-					{"type": "gold", "value": -30},
-					{"type": "gift_creature", "name": "Patent Ladder", "atk": 0, "hp": 7,
-						"kw": ["armored"],
-						"text": "The ladder is lashed to the baggage cart. It will stand in your line next fight, fearing nothing."},
-				],
-			},
-			{
-				"label": "Buy the patent itself\n\nFor the right sum he retires on the spot, hands you\nthe bracket, the stamp, and the ledger of who owes what.",
-				"desc": "-70 gold, +random relic",
-				"effects": [
-					{"type": "gold", "value": -70},
-					{"type": "random_relic"},
-				],
-			},
-			{
-				"label": "Tip him your route\n\nHe pays for marching schedules in good coin\nand sells them onward in better.",
-				"desc": "+50 gold, +1 Curse",
-				"effects": [
-					{"type": "gold", "value": 50},
-					{"type": "add_curse"},
-				],
-			},
-		],
-	},
-
-	# ── The named-card payoff (grim; pays Old Bones by name) ──
-
-	"the_last_garrison": {
-		"name": "The Last Garrison",
-		"desc": "Five dead men hold a fort for a war that ended before your grandmother. They know. But your banner, if they squint, could be authority.",
-		"gate": {"type": "act_at_least", "value": 2},
-		"art": "plague_bell",
-		"mood": "bone",
-		"choices": [
-			{
-				"label": "Read them the relief order\n\nYou improvise it with full honors. 4 of them march into\nthe hill, at rest. The sergeant, out of habit, falls in with you.",
-				"desc": "Gain Old Bones (rare); his long watch follows: +1 Grave-Debt",
-				"effects": [
-					{"type": "add_card_id", "id": "old_bones"},
-					{"type": "add_curse_id", "id": "grave_debt"},
-				],
-			},
-			{
-				"label": "Requisition the armory\n\n90 years of stores, and the dead sign the chit\nwithout reading it. Old habits.",
-				"desc": "+55 gold, -5 HP",
-				"effects": [
-					{"type": "gold", "value": 55},
-					{"type": "damage", "value": 5},
-				],
-			},
-			{
-				"label": "Post them to your keep\n\nYou cannot relieve them. You CAN redeploy them.\nThe paperwork is dubious. The dead don't check.",
-				"desc": "A Garrison Shade (2/5, Last Stand) joins your next fight",
-				"effects": [
-					{"type": "gift_creature", "name": "Garrison Shade", "atk": 2, "hp": 5,
-						"kw": ["last_stand"],
-						"text": "One of the watch shoulders his pike and falls in, still on duty. He has died before. It didn't take."},
-				],
-			},
-		],
-	},
-
-	# ── The transform verb's home (funny livestock register) ──
-
-	"the_remount_fair": {
-		"name": "The Remount Fair",
-		"desc": "Horse-traders behind the lines, dealing in everything a war sheds — remounts, mules, stranger stock under blankets. A painted board gives the rule: ONE IN, ONE OUT. NO REFUNDS. SOME BITE.",
-		"art": "hermit",
-		"mood": "ember",
-		"choices": [
-			{
-				"blue": {"type": "hero_is", "value": "raider"},
-				"label": "Read the brands\n\nHalf this stock was lifted from somebody, and you can name the\nroads it was lifted on. The dealer drops his price mid-sentence.",
-				"desc": "-20 gold, +1 random uncommon card",
-				"effects": [
-					{"type": "gold", "value": -20},
-					{"type": "add_card", "rarity": "uncommon"},
-				],
-			},
-			{
-				"label": "Trade one in\n\nYours goes behind the canvas.\nSomething the same weight comes back out.",
-				"desc": "Transform a chosen card into a random card of the same rarity",
-				"effects": [
-					{"type": "transform_choice", "value": 1},
-				],
-			},
-			{
-				"label": "Trade a matched pair\n\nThe dealer's eyes light up — pairs move fast.\nOne of the replacements bites you on the way out.",
-				"desc": "-4 HP, transform 2 chosen cards",
-				"effects": [
-					{"type": "damage", "value": 4},
-					{"type": "transform_choice", "value": 2},
-				],
-			},
-			{
-				"label": "Buy from under the blanket\n\nSight unseen, cage included.\nThe blanket moves in a way you elect to ignore.",
-				"desc": "-45 gold, +1 random uncommon card",
-				"effects": [
-					{"type": "gold", "value": -45},
-					{"type": "add_card", "rarity": "uncommon"},
-				],
-			},
-		],
-	},
-
-	# ── The eerie max-HP wager ──
-
-	"the_kings_measure": {
-		"name": "The King's Measure",
-		"desc": "A royal surveyor works the dead road, keeping a ledger sealed by a king 4 wars gone. He measures the road. He measures the ruts. He turns, and measures YOU.",
-		"art": "marked_one",
-		"mood": "bone",
-		"choices": [
-			{
-				"label": "Stand for the measure\n\nThe chain is cold and the entries are binding.\nYou will be exactly as much as the ledger says.",
-				"desc": "The ledger decides your size — it is not always flattering",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 3,
-							"text": "\"Taller than recorded,\" he says, annoyed at the road, and corrects the entry. You feel the correction take. The extra inch is yours to keep.",
-							"effects": [{"type": "gain_max_hp", "value": 4}]},
-						{"weight": 2,
-							"text": "He measures twice, which is somehow worse. \"The ledger,\" he says, gently, \"is never wrong.\" You are less than you were told, and now it is official.",
-							"effects": [{"type": "lose_max_hp", "value": 2}]},
-					]},
-				],
-			},
-			{
-				"label": "Carry his chain a mile\n\nHonest work for a mad office. He pays in coin\nstruck by a mint that no longer exists.",
-				"desc": "-3 HP, +45 gold",
-				"effects": [
-					{"type": "damage", "value": 3},
-					{"type": "gold", "value": 45},
-				],
-			},
-			{
-				"label": "Ask what he is measuring FOR\n\nHe shows you the ledger's last page.\nYou wish you had not seen the total.",
-				"desc": "+1 Curse; the knowing sharpens you: upgrade a chosen card",
-				"effects": [
-					{"type": "add_curse"},
-					{"type": "upgrade_choice"},
-				],
-			},
-		],
-	},
-
-	# ══════════════════ NEW — 2026-07-04 additions ══════════════════
-	# One build-reader (the scaled engine pays spells, gated so a deck
-	# without the material never rolls it), two act-3 heavyweights (the
-	# road before the last keep), and a second hidden+tell room so
-	# tell-reading stays a skill past act 1.
-
-	# ── The build-reader: he pays for what your magic did (scaled: spells) ──
-
-	"the_war_poet": {
-		"name": "The War-Poet",
-		"desc": "A poet follows the war at a professional distance, setting it in rhyme royal. \"Spells,\" he says, pen already moving. \"Nobody pays to hear about pike-drill. Tell me about the [color=#d97a3a]fire[/color].\"",
-		"gate": {"type": "deck_count_at_least", "kind": "spells", "value": 2},
-		"art": "woodcutter",
-		"mood": "gilt",
-		"choices": [
-			{
-				"label": "Sell him the true accounts\n\nEvery working you carry becomes a stanza.\nHe pays by the verse, and verses need material.",
-				"desc": "+6 gold per spell in your deck (max 60)",
-				"effects": [
-					{"type": "scaled", "count": "spells", "per": 6, "cap": 60,
-						"outcome": "gold"},
-				],
-			},
-			{
-				"label": "Embellish\n\nThe fireball becomes a firestorm. The trick with the rope\nbecomes a hanging. His rates improve. His ear, unfortunately, is good.",
-				"desc": "His ear decides — better rates, or a mocking verse",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 2,
-							"text": "He believes every word, or pays as if he does — art is not sworn testimony. The purse he hands over is embarrassingly heavy.",
-							"effects": [{"type": "gold", "value": 70}]},
-						{"weight": 1,
-							"text": "He stops writing mid-line and looks at you with terrible kindness. The verse he composes instead is short, accurate, and about you. By the next camp, everyone knows the chorus.",
-							"effects": [{"type": "add_curse_id", "id": "craven"}]},
-					]},
-				],
-			},
-			{
-				"blue": {"type": "fallen_at_least", "value": 1},
-				"label": "Give him {fallen}\n\nNot the dying — the marching. The bad jokes, the borrowed boots,\nthe name said right. He writes it down like it matters. It does.",
-				"desc": "+25 gold, heal 6 HP",
-				"effects": [
-					{"type": "gold", "value": 25},
-					{"type": "heal", "value": 6},
-				],
-			},
-		],
-	},
-
-	# ── Act 3: the army lightens for the last climb ──
-
-	"the_ninth_milestone": {
-		"name": "The Ninth Milestone",
-		"desc": "The ninth milestone from the keep, where armies lighten themselves for the last march — the verge is a hundred years deep in what could not be carried. Whatever you leave here stays left.",
-		"gate": {"type": "act_at_least", "value": 3},
-		"art": "the_weeping_orchard",
-		"mood": "bone",
-		"choices": [
-			{
-				"label": "Bury what you cannot carry\n\nThe verge takes it without comment.\nThe column walks lighter. The hill notices.",
-				"desc": "Remove 2 chosen cards",
-				"effects": [
-					{"type": "remove_choice_multi", "value": 2},
-				],
-			},
-			{
-				"label": "Take up what the dead set down\n\nA fine thing, half-buried, still warm somehow.\nWhoever left it left the owing with it.",
-				"desc": "+1 random relic, +1 Grave-Debt",
-				"effects": [
-					{"type": "random_relic"},
-					{"type": "add_curse_id", "id": "grave_debt"},
-				],
-			},
-			{
-				"label": "Read the milestone\n\nNine miles. After everything, nine miles.\nThe column stands a little straighter for knowing the number.",
-				"desc": "+1 max Command next fight",
-				"effects": [
-					{"type": "combat_mana", "value": 1,
-						"text": "Nine miles. The number marches with you, and it weighs nothing."},
-				],
-			},
-		],
-	},
-
-	# ── Act 3, at war: one of the five sees the ending coming ──
-
-	"the_turncoat_general": {
-		"name": "The Turncoat General",
-		"desc": "A man waits at the roadside in {kingdom}'s colors, the insignia unpicked — one of {lord}'s own five. \"You are going to win,\" he says, like weather. \"I would like to be somewhere accounted for when you do.\"",
-		"gate": {"type": "all", "gates": [
-			{"type": "at_war"},
-			{"type": "act_at_least", "value": 3},
-		]},
-		"art": "mirror_twin",
-		"mood": "ember",
-		"choices": [
-			{
-				"label": "Take his sword and his service\n\nHe is very good. That was never the question.\nThe question is what he cost the last army he was good for.",
-				"desc": "The Turncoat General (3/6) joins your next fight; +1 War-Debt",
-				"effects": [
-					{"type": "gift_creature", "name": "Turncoat General", "atk": 3, "hp": 6,
-						"kw": [],
-						"text": "He falls in at the column's head as if the position had been holding itself for him."},
-					{"type": "add_curse_id", "id": "war_debt"},
-				],
-			},
-			{
-				"label": "Buy the keep's watchword\n\nHe sells it flat, no ceremony — a word for a purse.\n\"The door opens easier,\" he says, \"when it knows you.\"",
-				"desc": "-45 gold; +1 max Command next fight",
-				"effects": [
-					{"type": "gold", "value": -45},
-					{"type": "combat_mana", "value": 1,
-						"text": "The watchword sits under your tongue like a key."},
-				],
-			},
-			{
-				"label": "Strip him and send him walking\n\nNo sword, no colors, no accounting. What's in his boots\nis yours. What you just made of him follows you instead.",
-				"desc": "+50 gold, +1 Deserter's Mark",
-				"effects": [
-					{"type": "gold", "value": 50},
-					{"type": "add_curse_id", "id": "deserters_mark"},
-				],
-			},
-		],
-	},
-
-	# ── Hidden-info #2 (act 2+): the tells stay a skill past the carnival ──
-
-	"the_drowned_ferry": {
-		"name": "The Drowned Ferry",
-		"desc": "A lake where the map insists on a meadow. Three ferrymen wait at three landings, and none names a fare — on this water, you learn the price when you land. Choose your boat.",
-		"gate": {"type": "act_at_least", "value": 2},
-		"art": "hollow_lantern",
-		"mood": "verdigris",
-		"choices": [
-			{
-				"hidden": true,
-				"tell": "The first boat rides low, patched with coffin-wood, and the ferryman's hands are raw from bailing something that is not water.",
-				"desc": "Hidden",
-				"effects": [
-					{"type": "add_rare"},
-					{"type": "add_curse_id", "id": "grave_debt"},
-				],
-			},
-			{
-				"hidden": true,
-				"tell": "The second boat is dry as a pulpit and full of birdcages, every door open. The ferryman hums while he waits, and looks extremely well fed.",
-				"desc": "Hidden",
-				"effects": [
-					{"type": "lose_gold_partial", "value": 25},
-					{"type": "transform_choice", "value": 1},
-				],
-			},
-			{
-				"hidden": true,
-				"tell": "The third boat does not sit in the water so much as slightly above it, and the ferryman's pole comes up dry. He is looking at you as if you are late.",
-				"desc": "Hidden",
-				"effects": [
-					{"type": "random_relic"},
-					{"type": "damage", "value": 5},
-				],
-			},
-		],
-	},
-
-	# ══════════════════ NEW — 2026-07-07 visual-diversity pass ══════════════════
-	# These five are designed AROUND the strongest unused paintings (the art is
-	# the brief, per the art-sourcing standard): the pool's only golden-daylight
-	# canvas, the burning apiary, the blood basin, the cocoon barn, and the
-	# glass cat. One concept per event, payoffs touch the build or the fighting.
-
-	# ── The bee-wife (part 1 of 2): the road's one warm afternoon ──
-
-	"the_bee_wife": {
-		"name": "The Bee-Wife",
-		"desc": "An old woman wheels her hives AWAY from the war, unhurried, through the year's last golden afternoon. She stops beside your column. \"The bees want telling,\" she says. \"News for news. That is the custom.\"",
-		"art": "beekeeper_again",
-		"mood": "gilt",
-		"ambience": "bees",
-		"choices": [
-			{
-				"label": "Buy a wintering skep\n\n\"Mind the lid,\" she says, strapping it shut.\nWhatever knocks it over will wish it had not.",
-				"desc": "-25 gold; the Hive Skep (0/5, Thorns) joins your next fight",
-				"effects": [
-					{"type": "gold", "value": -25},
-					{"type": "gift_creature", "name": "Hive Skep", "atk": 0, "hp": 5,
-						"kw": ["thorns"],
-						"text": "The skep rides the baggage cart, humming to itself in a minor key."},
-				],
-			},
-			{
-				# Campaign memory: the old custom — deaths must be told to the bees.
-				"blue": {"type": "fallen_at_least", "value": 1},
-				"label": "Tell the bees your dead\n\nYou say {fallen}'s name into the hive-mouth, the old way.\nThe hum drops for a breath. She waits until it climbs again.",
-				"desc": "The custom, paid in full: heal 8 HP, +1 Healing Potion",
-				"effects": [
-					{"type": "heal", "value": 8},
-					{"type": "gain_potion"},
-				],
-			},
-			{
-				"label": "Trade her the road's news\n\nWhich bridges stand. Which towns burn. She listens the way\nclerks count, and pays in comb the weight of what you know.",
-				"desc": "Heal 7 HP",
-				"effects": [
-					{"type": "heal", "value": 7},
-				],
-			},
-			{
-				"label": "Make off with a comb rack\n\nShe does not chase you. She does not need to.\nEvery bee on this road now files you under WASP.",
-				"desc": "+40 gold, +1 Curse",
-				"effects": [
-					{"type": "gold", "value": 40},
-					{"type": "add_curse"},
-				],
-			},
-		],
-	},
-
-	# ── The bee-wife (part 2 of 2): the war reached her anyway ──
-
-	"the_burned_apiary": {
-		"name": "The Burned Apiary",
-		"desc": "The bee-wife's yard, black to the fence line — the war came through on its way to somewhere else. She rakes ash without looking up. Above the plot hangs a homeless roar, waiting to be aimed.",
-		"gate": {"type": "all", "gates": [
-			{"type": "act_at_least", "value": 2},
-			{"type": "seen_all", "events": ["the_bee_wife"]},
-		]},
-		"art": "beekeeper",
-		"mood": "ember",
-		"ambience": "fire_crackle",
-		"choices": [
-			{
-				"label": "Take up the swarm\n\n\"They won't winter wild,\" she says. \"They'll war, though.\"\nShe hands you the veil. The roar falls in behind the column.",
-				"desc": "The Swarm (3/1, Swift) joins your next fight",
-				"effects": [
-					{"type": "gift_creature", "name": "The Swarm", "atk": 3, "hp": 1,
-						"kw": ["swift"],
-						"text": "The Swarm travels above the column like weather with a grudge."},
-				],
-			},
-			{
-				"label": "Rake for the queen\n\nOn your knees in the warm ash, parting cinders\nwith the flat of a knife. She works the other end of the row.",
-				"desc": "The ash decides what's left",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 2,
-							"text": "The queen turns up alive in a hollow fence post, furious. The bee-wife laughs like a girl and presses the whole cellar's honey on you — no hives left to feed, she says. Eat it marching.",
-							"effects": [{"type": "heal", "value": 8}, {"type": "gain_potion"}]},
-						{"weight": 1,
-							"text": "Wax and char, row after row. She pays you for the hour of your knees anyway, at a lord's rate, out of a jar the fire never found. It matters to her that the work is paid.",
-							"effects": [{"type": "gold", "value": 25}]},
-					]},
-				],
-			},
-			{
-				"label": "Put her name in the column's book\n\nShe cannot hold a pike. She can cook, stitch wounds, and hate\naccurately. The quartermaster's ledger gains a line.",
-				"desc": "-30 gold (her wage); +3 max HP",
-				"effects": [
-					{"type": "gold", "value": -30},
-					{"type": "gain_max_hp", "value": 3},
-				],
-			},
-			{
-				"blue": {"type": "hero_is", "value": "kindler"},
-				"label": "Read the burn\n\nYou bank fires for a living. This one was walked in a line,\nwith intent. You say nothing. But you will know their banners.",
-				"desc": "+1 max Command next fight",
-				"effects": [
-					{"type": "combat_mana", "value": 1,
-						"text": "You know which company burns like this. The knowing marches with you."},
-				],
-			},
-		],
-	},
-
-	# ── The flesh-priced forge (the well converts between flesh and steel) ──
-
-	"the_red_tithe": {
-		"name": "The Red Tithe",
-		"desc": "A round basin brims red under a red moon, and the overflow runs uphill. The kneeling-stone before it is worn to a polish. The tariff board is blank — the well already knows what you came for.",
-		"art": "blood_fountain",
-		"mood": "ember",
-		"choices": [
-			{
-				"label": "Dip your blades\n\nEdge by edge, the red takes the years off the steel.\nWhat it takes off you, it keeps.",
-				"desc": "-3 max HP; upgrade 2 chosen cards",
-				"effects": [
-					{"type": "lose_max_hp", "value": 3},
-					{"type": "upgrade_choice_multi", "value": 2},
-				],
-			},
-			{
-				"label": "Tithe a name from the rolls\n\nThe well takes the name off your muster and pays in vessel.\nSomewhere tonight, a soldier wakes up as somebody else.",
-				"desc": "Remove a chosen card; +3 max HP",
-				"effects": [
-					{"type": "gain_max_hp", "value": 3},
-					{"type": "remove_choice"},
-				],
-			},
-			{
-				"label": "Fill your flask\n\nThe basin only pours what you pour first.\nIt is strict about the order.",
-				"desc": "-4 HP, gain a random potion",
-				"effects": [
-					{"type": "damage", "value": 4},
-					{"type": "gain_potion_random"},
-				],
-			},
-			{
-				"blue": {"type": "hero_is", "value": "acolyte"},
-				"label": "Name the rite\n\nYou know this well's church, and it is not a church.\nSpoken to properly, it waives the tithe. Once.",
-				"desc": "Upgrade a chosen card, free",
-				"effects": [
-					{"type": "upgrade_choice"},
-				],
-			},
-		],
-	},
-
-	# ── The cocoon barn (act 2+; the gamble is what hatches, never whether) ──
-
-	"the_chrysalis": {
-		"name": "The Chrysalis",
-		"desc": "A tithe barn hung floor to rafter with pale bundles, each the size of a man and gently creaking. The silk is worth money. The waiting is worth more. One of them is warm.",
-		"gate": {"type": "act_at_least", "value": 2},
-		"mood": "verdigris",
-		"choices": [
-			{
-				"label": "Cut the warm one down\n\nYou carry it lashed to the cart like a rolled tent.\nBy the next field, something inside has turned to face front.",
-				"desc": "It hatches where you fight next — the silk decides what",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 3,
-							"text": "It splits at the first horn-call, hungry and on your side. What climbs out folds its wet wings the way a veteran squares a cloak.",
-							"effects": [{"type": "gift_creature", "name": "The Hatched",
-								"atk": 4, "hp": 2, "kw": ["swift"],
-								"text": "The Hatched keeps pace with the column, drying in the wind."}]},
-						{"weight": 2,
-							"text": "It hatches early, on the road, into something that clearly stopped becoming halfway through. It follows you anyway. It is trying.",
-							"effects": [{"type": "gift_creature", "name": "The Half-Made",
-								"atk": 1, "hp": 4, "kw": [],
-								"text": "The Half-Made carries its own silk like a soldier carries a bedroll."}]},
-					]},
-				],
-			},
-			{
-				# Campaign memory, at its least comfortable.
-				"blue": {"type": "fallen_at_least", "value": 1},
-				"label": "One of them says {fallen}'s name\n\nNot loudly. The way a sleeper says a name.\nYou could cut it down. You should not cut it down.",
-				"desc": "The Almost (2/4) joins your next fight; +1 Curse",
-				"effects": [
-					{"type": "gift_creature", "name": "The Almost", "atk": 2, "hp": 4,
-						"kw": [],
-						"text": "It marches where they used to march. It has the walk almost right."},
-					{"type": "add_curse"},
-				],
-			},
-			{
-				"label": "Strip the silk\n\nThe empty ones give freely. The full ones give too,\nif you are quick and do not listen.",
-				"desc": "+40 gold",
-				"effects": [
-					{"type": "gold", "value": 40},
-				],
-			},
-		],
-	},
-
-	# ── The glass cat (perfect memory sold by the copy) ──
-
-	"the_glass_familiar": {
-		"name": "The Glass Familiar",
-		"desc": "A cat of clear glass sits on a chapel shelf, grooming a paw it does not need to groom. Where its gaze rests, things double — two candles where one burns. It looks at your deck. It purrs like a finger on a wet glass rim.",
-		"art": "glass_familiar",
-		"mood": "verdigris",
-		"choices": [
-			{
-				"label": "Let it study a soldier\n\nIt circles the card twice and sits, satisfied.\nSomewhere inside the glass, a second one opens its eyes.",
-				"desc": "-45 gold; add a copy of a chosen card to your deck",
-				"effects": [
-					{"type": "gold", "value": -45},
-					{"type": "copy_card"},
-				],
-			},
-			{
-				# Campaign memory: it has been watching the column, the way cats do.
-				"blue": {"type": "veteran_kills_at_least", "value": 6},
-				"label": "It already knows {veteran}\n\nIt has watched the column for miles, the way cats watch.\nThe copy was finished yesterday. It was waiting for you to ask.",
-				"desc": "Add a copy of a chosen card, free",
-				"effects": [
-					{"type": "copy_card"},
-				],
-			},
-			{
-				"label": "Tap the glass\n\nYou should not tap the glass.\nEveryone knows you should not tap the glass.",
-				"desc": "The glass decides",
-				"effects": [
-					{"type": "roll_table", "outcomes": [
-						{"weight": 2,
-							"text": "It rings one pure note, flows off the shelf, and threads between your ankles all the way back to the column. Apparently you are furniture now. Its favorite furniture.",
-							"effects": [{"type": "gift_creature", "name": "Glass Cat",
-								"atk": 1, "hp": 1, "kw": ["thorns"],
-								"text": "The Glass Cat rides the baggage cart, refracting."}]},
-						{"weight": 1,
-							"text": "A hairline crack climbs one ear. The note it makes now is wrong in a way that follows you out the door and learns your route.",
-							"effects": [{"type": "add_curse"}]},
-					]},
-				],
-			},
-			{
-				"label": "Leave it be\n\nIt was sitting on a coin, the way cats sit on exactly\nwhat you need. It lifts, briefly, so you can take it.",
-				"desc": "+15 gold",
-				"effects": [
-					{"type": "gold", "value": 15},
-				],
-			},
-		],
-	},
-}
+const EventData = preload("res://scripts/data/EventDB.gd")
+const EVENTS: Dictionary = EventData.EVENTS

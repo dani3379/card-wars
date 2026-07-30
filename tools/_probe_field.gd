@@ -39,7 +39,7 @@ const DECKS := {
 	"AGGRO_SWIFT": ["goblin", "levy_rider", "skirmisher", "harpy", "lancer",
 		"scavenger", "breaker", "war_cry", "slash", "flame_bolt", "doom_knight",
 		"blood_tithe"],
-	"WALL_CONTROL": ["palisade", "warding_stone", "stone_wall", "iron_bastion",
+	"WALL_CONTROL": ["palisade", "warding_stone", "ironhide_anvil", "iron_bastion",
 		"siege_golem", "thornguard", "trebuchet", "torchbearer", "earthquake",
 		"kings_command", "the_leveler", "smite_spell"],
 	"ZEALOT_BURN": ["cinder_acolyte", "ember_warden", "bloodsworn", "hexblade",
@@ -76,7 +76,7 @@ const FIELD_BOSS := [
 # deck clears fights, the signal points at ENEMY strength, not deck strength. The
 # bare starter's own win% is printed as the baseline so each card's LIFT is honest.
 const RAIDER_STARTER := ["goblin", "goblin", "levy_rider", "levy_rider", "ratling",
-	"ratling", "brute", "brute", "fireball", "fireball"]
+	"ratling", "brute", "brute", "naga", "strike"]
 # A difficulty-representative slice (2 combats/act spanning the curve) so a full
 # ~110-card sweep stays tractable; elites/bosses excluded (dodgeable, meant hard).
 const PERCARD_FIELD := [
@@ -203,25 +203,44 @@ func _run() -> void:
 ## — if most cards keep the floor deck winning, the enemies are under-tuned.
 func _run_percard(copies: int) -> void:
 	var pc_field: Array = PERCARD_FIELD
+	# --only=<id,id,...> grades just those cards (2026-07-20). The full sweep is
+	# ~111 cards x 6 fights; when you are validating a handful of NEW cards you
+	# want the same instrument and the same baseline, not a 700-fight wait. The
+	# baseline below still runs, so the lifts stay comparable to a full sweep's.
+	var pc_only: Array = []
+	var pc_nobase: bool = false
 	for arg in OS.get_cmdline_user_args():
 		if arg == "--field=hard":
 			pc_field = PERCARD_FIELD_HARD
 		elif arg == "--field=buffed":
 			pc_field = PERCARD_FIELD_BUFFED
+		elif arg.begins_with("--only="):
+			pc_only = arg.substr(7).split(",", false)
+		elif arg == "--nobase":
+			pc_nobase = true
 	print("[field] PERCARD: raider starter + %dx <card> vs %d fights (win = kill & survive)"
 		% [copies, pc_field.size()])
 	# Baseline: the bare starter, no added card — the reference the lift is measured from.
+	# --nobase skips it (2026-07-20): the baseline is 6 more fights, which is most of
+	# a short chunk's budget, and it is FIXED for a given field — so when you are
+	# grading a couple of cards against a baseline you already measured this session,
+	# skipping it doubles how many cards fit in one run. Never skip it when the
+	# baseline itself might have moved (encounter or starter-deck edits).
 	var base_wins := 0
 	var base_margin := 0.0
-	for enc_id in pc_field:
-		var r = await _fight(enc_id, RAIDER_STARTER)
-		if r != null:
-			base_margin += float(r["margin"])
-			if r["won"]: base_wins += 1
-			print("[field]   baseline vs %-18s %s  m%+d" % [enc_id, ("WIN " if r["won"] else "LOSS"), int(r["margin"])])
-	var base_pct := 100.0 * float(base_wins) / float(maxi(1, pc_field.size()))
-	print("[field] BASELINE bare starter: win %.1f%% (%d/%d)  mean margin %+.1f"
-		% [base_pct, base_wins, pc_field.size(), base_margin / float(maxi(1, pc_field.size()))])
+	var base_pct := 0.0
+	if not pc_nobase:
+		for enc_id in pc_field:
+			var r = await _fight(enc_id, RAIDER_STARTER)
+			if r != null:
+				base_margin += float(r["margin"])
+				if r["won"]: base_wins += 1
+				print("[field]   baseline vs %-18s %s  m%+d" % [enc_id, ("WIN " if r["won"] else "LOSS"), int(r["margin"])])
+		base_pct = 100.0 * float(base_wins) / float(maxi(1, pc_field.size()))
+		print("[field] BASELINE bare starter: win %.1f%% (%d/%d)  mean margin %+.1f"
+			% [base_pct, base_wins, pc_field.size(), base_margin / float(maxi(1, pc_field.size()))])
+	else:
+		print("[field] BASELINE skipped (--nobase) — lifts below read 0; compare the raw win%% against a baseline from this same session")
 
 	# Draftable, auto-playable cards (same filter family as cardpower's MODAL skip).
 	var ids: Array = CDB.CARD_POOL.keys()
@@ -232,9 +251,14 @@ func _run_percard(copies: int) -> void:
 		var d: Dictionary = CDB.CARD_POOL[sid]
 		var t := String(d.get("type", ""))
 		if t not in ["creature", "spell"]: continue
-		if String(d.get("rarity", "")) == "enemy": continue
-		if CDB.is_curse(sid): continue
-		if sid in MODAL: continue
+		if not pc_only.is_empty():
+			# --only bypasses the draftable/modal filters the same way cardpower's
+			# does, so an in-development card can be graded before it is pool-legal.
+			if sid not in pc_only: continue
+		else:
+			if String(d.get("rarity", "")) == "enemy": continue
+			if CDB.is_curse(sid): continue
+			if sid in MODAL: continue
 		var deck: Array = RAIDER_STARTER.duplicate()
 		for _c in copies: deck.append(sid)
 		var wins := 0

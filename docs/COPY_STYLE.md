@@ -180,7 +180,97 @@ canonical display names:
 
 ---
 
-## 10. What to report back
+## 10. Event prose — the road register (2026-07-18 readability pass)
+
+Events are read mid-run, between fights — write for a tired player, not a
+literature seminar. Modelled on Failbetter's Fallen London writer guidelines.
+
+- **Budgets:** event `desc` ≤ ~40 words; each choice flavor line ≤ ~20 words;
+  result/roll/gamble texts ≤ ~60 words. Cut content before compressing syntax.
+- **Name things plainly, then color them.** The first sentence of a desc says
+  what the player is looking at. "Overhead hangs her swarm: homeless, furious"
+  — never a riddle to decode ("a homeless roar"). No withheld referents.
+- **Short active sentences, one idea each.** No triple-clause dash chains.
+  Fragments are fine when they land a beat ("Tails.").
+- **Direct speech over reported speech.** Let the NPCs talk.
+- **Period vocabulary is seasoning, not an ingredient.** No unglossed archaic
+  or trade words (skep, escalade, chirurgeon, chit, remount). If flavor needs
+  one, explain it in the same breath — or use the plain word.
+- **The label's first line is the action** — plain verb first. The two flavor
+  lines under it may carry tone but never hide what happens; the mechanic
+  `desc` line states the deal in this guide's vocabulary (§1–§7).
+- **Tone stays multi-register** (grim / funny / eerie). Humor and horror come
+  from incident and speech, not from vocabulary.
+- **One shared world.** Canon anchors: the Old King (dead, unpaying — the
+  Successor Wars' corpse), the Fourth Legion he never paid (the Bone Pit's
+  dead, the clerk's strongbox IV, the Last Garrison's war), the spinner, the
+  parish, {lord}/{kingdom} at war. Recognition beats stay sparse — one line,
+  never a lore dump; `seen_texts` and blue options carry the cross-references.
+
+---
+
+## 11. Rendering — the readability contract (2026-07-20 research pass)
+
+§0–§10 govern wording; this section governs how text is allowed to **land on
+screen**. Grounded in the Game Accessibility Guidelines, Xbox Accessibility
+Guidelines (XAG 101/104), BBC subtitle research, and desktop typography
+practice. Our canvas is 1600×900 (`canvas_items` stretch): **1 canvas px = 1
+real px at a 1600×900 window** — size for that worst case, not for your 4K
+monitor. Industry floors: ~16px for desktop-distance play, ~28px at 1080p for
+couch/10-foot play; lines over ~40 characters slow fast reading.
+
+### The three registers (the 2026-07-06 law, restated)
+
+- **Reading text** — prose, descs, tooltips, interactive labels, anything a
+  player must read to make a decision: **≥ 18px**, prefer
+  `GameTheme.MIN_LABEL_SIZE` over a literal.
+- **Caption chips** — subordinate one-breath markers riding a bigger element
+  (combat "NEXT ROUND", stage captions, pay ledgers, posted rules): **15–17px**,
+  all-caps or short words, ≤ ~8 words. A caption that states **rules, odds, or
+  live state is informational** — it may sit at 15–16, never below. The
+  minigame legibility aids (ledgers, drills, round trackers) are this register:
+  the honesty promise dies if the honest text is too small to read.
+- **Fitted numerals** — numbers set inside drawn objects (wax seals, count
+  badges, cost gems, Card2D's whole tuned system): free-sized; the object
+  provides the legibility.
+
+**Nothing worded renders below 14px, ever.** `tools/_probe_text_floor.gd`
+(headless) fails on a sub-14 worded size override; a deliberate fitted-numeral
+or glyph exception carries a `# textfloor: fitted` waiver on the same line.
+
+### Line measure
+
+- Body prose: **50–80 characters per line** (the event column runs ~60 — keep
+  it there). Under ~35 the text churns; past ~90 the eye loses the return sweep.
+- Fast-read text (combat captions, battle-log rows, one-beat callouts): aim
+  **≤ ~40 characters** — one fixation group, no wrap.
+
+### Leading and casing
+
+- Multi-line prose keeps line spacing in the **130–150%** band (card faces run
+  tighter by tuned exception — see the Card2D leading comment).
+- **ALL-CAPS is for micro-labels and captions only.** Caps erase word shape;
+  never set running prose in caps. Letterspace caps slightly; never
+  letterspace lowercase.
+
+### Contrast
+
+- Reading text holds **≥ 4.5:1** against its ground (WCAG AA); display text
+  ≥ 3:1. The house mechanics that guarantee it: `make_label`'s automatic 2px
+  near-black outline under 22px, the adaptive event scrim, tooltip panels,
+  the card-face dark-bronze keyword re-ink (`#7a4f10` on paper). Text over art
+  always gets a scrim, plate, or outline — never bare.
+- Color is never the only channel: pair every color cue with a word or shape.
+
+### Hierarchy
+
+Three tools, in this order: **size, contrast, position**. One voice per
+register per screen — if two nearby sizes are doing the same job, merge them.
+Don't invent a new size stop; pick the register and use its band.
+
+---
+
+## 12. What to report back
 
 For your assigned file(s), return:
 1. A count of strings changed.

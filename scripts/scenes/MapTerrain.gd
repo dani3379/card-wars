@@ -993,7 +993,8 @@ func _read_run_map() -> void:
 			"mutator_id": String(nd.get("mutator_id", "")),
 			"terrain": String(nd.get("terrain", "")),
 			"bridge": bool(nd.get("bridge", false)),
-			"wayside_id": String(nd.get("wayside_id", ""))})
+			"wayside_id": String(nd.get("wayside_id", "")),
+			"setpiece_id": String(nd.get("setpiece_id", ""))})
 		if nd.row == 0:
 			row0.append({"pos": p, "vis": bool(nd.visited),
 				"avail": avail.has(Vector2i(nd.row, nd.col))})
@@ -3062,6 +3063,7 @@ const SITE_STYLE := {
 	"shop": {"r": 18.0, "tint": Color(0.74, 0.56, 0.16), "wash": 0.18},
 	"event": {"r": 18.0, "tint": Color(0.44, 0.28, 0.56), "wash": 0.17},
 	"treasure": {"r": 18.0, "tint": Color(0.88, 0.68, 0.18), "wash": 0.24},
+	"arsenal": {"r": 18.0, "tint": Color(0.55, 0.42, 0.24), "wash": 0.20},
 	"recruit": {"r": 18.0, "tint": Color(0.22, 0.38, 0.55), "wash": 0.18},
 	"wayside": {"r": 17.0, "tint": Color(0.42, 0.35, 0.24), "wash": 0.10},
 	# Boss ("THE KEEP") is drawn as separate keep furniture on the plate, but the
@@ -3091,6 +3093,7 @@ const SITE_MAT := {
 	"shop":     {"face": Color(0.16, 0.42, 0.27), "bezel": Color(0.76, 0.59, 0.25), "ink": Color(0.84, 0.96, 0.80)},
 	"event":    {"face": Color(0.42, 0.24, 0.60), "bezel": Color(0.49, 0.45, 0.55), "ink": Color(0.95, 0.88, 1.00)},
 	"treasure": {"face": Color(0.50, 0.38, 0.11), "bezel": Color(0.88, 0.68, 0.28), "ink": Color(1.00, 0.92, 0.56)},
+	"arsenal":  {"face": Color(0.38, 0.28, 0.16), "bezel": Color(0.68, 0.55, 0.36), "ink": Color(0.96, 0.88, 0.70)},
 	"recruit":  {"face": Color(0.17, 0.33, 0.50), "bezel": Color(0.53, 0.60, 0.68), "ink": Color(0.90, 0.95, 1.00)},
 	"wayside":  {"face": Color(0.34, 0.30, 0.22), "bezel": Color(0.59, 0.51, 0.38), "ink": Color(0.96, 0.91, 0.78)},
 	"boss":     {"face": Color(0.35, 0.09, 0.08), "bezel": Color(0.64, 0.22, 0.15), "ink": Color(1.00, 0.86, 0.60)},
@@ -3103,8 +3106,8 @@ const SITE_MAT := {
 # "General" is the player-facing word for elite; waysides print their verb so
 # a Drill Yard reads different from a Cache without a key.
 const SITE_LABEL := {
-	"combat": "FIGHT", "elite": "GENERAL", "rest": "REST", "shop": "SHOP",
-	"event": "EVENT", "treasure": "TREASURE", "recruit": "RECRUIT",
+	"combat": "HOLD", "elite": "GENERAL", "rest": "REST", "shop": "SHOP",
+	"event": "EVENT", "treasure": "RELIC CACHE", "arsenal": "SUPPLY CACHE", "recruit": "RECRUIT",
 }
 const WAYSIDE_LABEL := {
 	"drill_yard": "DRILL YARD", "standard_bearer": "BANNER",
@@ -3116,6 +3119,13 @@ func _site_label_text(typ: String, nd: Dictionary) -> String:
 	if typ == "wayside":
 		return String(WAYSIDE_LABEL.get(String(nd.get("wayside_id", "")),
 			"WAYSIDE"))
+	# A SET-PIECE is a combat node wearing a setpiece_id — it must never print
+	# as a plain FIGHT, because the whole design depends on the player reading
+	# it off the chart and CHOOSING it. Its own name is too long for the token,
+	# so the token says what kind of thing it is and the tooltip carries the
+	# name, the ground, the order and the toll.
+	if String(nd.get("setpiece_id", "")) != "":
+		return "NAMED ACTION"
 	return String(SITE_LABEL.get(typ, ""))
 
 
@@ -3126,7 +3136,9 @@ func _site_label_visible(typ: String, nd: Dictionary, open_now: bool) -> bool:
 	# clutter while the hover tooltip keeps the deep intel.
 	if open_now:
 		return true
-	if typ in ["elite", "rest", "shop", "treasure"]:
+	if String(nd.get("setpiece_id", "")) != "":
+		return true
+	if typ in ["elite", "rest", "shop", "treasure", "arsenal"]:
 		return true
 	if typ == "wayside":
 		var wid := String(nd.get("wayside_id", ""))
@@ -3161,6 +3173,7 @@ func _draw_sites(tgt: CanvasItem) -> void:
 				p + Vector2(15, -17.5), p + Vector2(0, -13)]), PLAYER_AMBER)
 			tgt.draw_line(p + Vector2(0, -22), p + Vector2(0, -13),
 				Color(0.30, 0.16, 0.05), 1.0, true)
+			_draw_claimed_bivouac(tgt, p, nd)
 			continue
 		var st: Dictionary = SITE_STYLE.get(typ, SITE_STYLE["wayside"])
 		var mat: Dictionary = SITE_MAT.get(typ, SITE_MAT["wayside"])
@@ -3233,6 +3246,12 @@ func _draw_sites(tgt: CanvasItem) -> void:
 			# Mutator star — same signal as the old chart, on the chip's rim.
 			_draw_star(tgt, p + Vector2(r * 0.78, -r * 0.78), 6.0,
 				Color(1.0, 0.84, 0.30, 0.95))
+		if String(nd.get("setpiece_id", "")) != "":
+			# Named action — CROSSED PIKES on the chip's left shoulder, the
+			# mirror position of the mutator star so a stop can legibly wear
+			# both. Shape, not colour: the mark has to survive a colourblind
+			# read and a 0.6x chart zoom, and two crossed strokes do.
+			_draw_crossed_pikes(tgt, p + Vector2(-r * 0.80, -r * 0.80), 8.0)
 		# Pursuit mark — once the rival's response is riding (2+ holds
 		# broken), every unbroken hold wears a crimson outrider pennant
 		# over its left shoulder: the road has hardened since you landed.
@@ -3250,7 +3269,10 @@ func _draw_sites(tgt: CanvasItem) -> void:
 		var ltxt: String = _site_label_text(typ, nd)
 		if ltxt != "" and _site_label_visible(typ, nd, open_now) \
 				and GameTheme.font_display != null:
-			var lsz := 11 if open_now else 10
+			# Site names are route-planning information, not decorative microtype.
+			# Keep every state at a true 12px minimum; reachable stops get one
+			# extra pixel so the current choice still leads the hierarchy.
+			var lsz := 13 if open_now else 12
 			var lcol := Color(0.94, 0.86, 0.66, 1.0) if open_now \
 				else Color(0.76, 0.68, 0.52, 0.92)
 			# Below the token by default; lane scatter can pull the next lane's
@@ -3347,7 +3369,7 @@ func _draw_emboss_icon(tgt: CanvasItem, tex: Texture2D, p: Vector2,
 
 func _draw_core_site_glyph(tgt: CanvasItem, c: Vector2, s: float,
 		ink: Color, typ: String) -> bool:
-	if typ not in ["combat", "elite", "rest", "shop", "treasure"]:
+	if typ not in ["combat", "elite", "rest", "shop", "treasure", "arsenal"]:
 		return false
 	var shadow := Color(0.05, 0.04, 0.03, 0.92)
 	_draw_core_site_glyph_shape(tgt, c + Vector2(1.2, 1.4), s, shadow, typ)
@@ -3423,7 +3445,7 @@ func _draw_core_site_glyph_shape(tgt: CanvasItem, c: Vector2, s: float,
 				])
 				tgt.draw_colored_polygon(strip, ink if i != 1 else ink.darkened(0.26))
 			tgt.draw_circle(c + Vector2(0, s * 0.10), s * 0.12, ink)
-		"treasure":
+		"treasure", "arsenal":
 			# Chest with a crown of coins.
 			var box := Rect2(c + Vector2(-s * 0.62, -s * 0.08),
 				Vector2(s * 1.24, s * 0.66))
@@ -3959,6 +3981,30 @@ func _letterspace(s: String) -> String:
 	return out
 
 
+## The named-action mark: two crossed pikes over a dark disc, drawn on the
+## medallion's left shoulder. Deliberately NOT an icon texture — this bakes
+## into the plate ink with everything else in _draw_sites, and a two-stroke
+## glyph stays legible where a painted icon mushes (the same finding that keeps
+## the inline keyword stamps switched off below ~20px).
+func _draw_crossed_pikes(tgt: CanvasItem, c: Vector2, r: float) -> void:
+	tgt.draw_circle(c, r + 1.5, Color(0.07, 0.05, 0.035, 0.85))
+	tgt.draw_circle(c, r + 0.2, Color(0.93, 0.86, 0.68, 0.96))
+	var ink := Color(0.16, 0.09, 0.05, 0.98)
+	var d: float = r * 0.72
+	# Two shafts crossed at the centre.
+	tgt.draw_line(c + Vector2(-d, d), c + Vector2(d, -d), ink, 2.0, true)
+	tgt.draw_line(c + Vector2(-d, -d), c + Vector2(d, d), ink, 2.0, true)
+	# Heads: a small solid triangle at each upper end, so it reads as PIKES
+	# rather than a plain saltire (which the chart already uses for a cancel).
+	for tip in [Vector2(d, -d), Vector2(-d, -d)]:
+		var dir: Vector2 = tip.normalized()
+		var perp := Vector2(-dir.y, dir.x)
+		tgt.draw_colored_polygon(PackedVector2Array([
+			c + tip + dir * 1.6,
+			c + tip - dir * 2.2 + perp * 1.9,
+			c + tip - dir * 2.2 - perp * 1.9]), ink)
+
+
 func _draw_star(tgt: CanvasItem, c: Vector2, r: float, col: Color) -> void:
 	tgt.draw_circle(c, r + 2.0, Color(0, 0, 0, 0.55))
 	var pts := PackedVector2Array()
@@ -3978,6 +4024,7 @@ func _node_icon(typ: String) -> Texture2D:
 		"event": return GameTheme.tex_node_event
 		"boss": return GameTheme.tex_node_boss
 		"treasure": return GameTheme.tex_node_treasure
+		"arsenal": return GameTheme.tex_node_shop
 		"recruit": return GameTheme.tex_node_recruit
 		"wayside": return GameTheme.tex_node_wayside
 	return null
@@ -4063,3 +4110,58 @@ func _draw_wayside_glyph(tgt: CanvasItem, c: Vector2, s: float,
 				Vector2(s * 0.24, s * 0.22)), ink)
 			return true
 	return false
+
+
+## Every captured stop keeps one quiet quartermaster bundle; the current stop
+## also carries the company tent. This is campaign state, so it belongs in the
+## per-open ink bake beside the claimed medallion, never in the 30 Hz overlay.
+## Shape (crate, cross-brace, tent ridge) carries the read without colour.
+func _draw_claimed_bivouac(tgt: CanvasItem, p: Vector2, nd: Dictionary) -> void:
+	var row_n := int(nd.get("row", 0))
+	var col_n := int(nd.get("col", 0))
+	var side := -1.0 if (row_n + col_n) % 2 == 0 else 1.0
+	var bundle := p + Vector2(23.0, 15.0 * side)
+	var ink := Color(0.075, 0.055, 0.035, 0.92)
+	var canvas := Color(0.61, 0.49, 0.29, 0.94)
+	var lit := Color(0.88, 0.73, 0.43, 0.72)
+
+	# A short guy-line ties the bundle to the captured medallion; without it the
+	# little box can read as a stray terrain mark at chart zoom.
+	var tether_from := p + (bundle - p).normalized() * 13.0
+	tgt.draw_line(tether_from, bundle + Vector2(-5.0, 0.0), ink, 1.2, true)
+	var crate := Rect2(bundle + Vector2(-5.5, -4.5), Vector2(11.0, 9.0))
+	var crate_shadow := Rect2(crate.position + Vector2(1.2, 1.5),
+		crate.size)
+	tgt.draw_rect(crate_shadow,
+		Color(0.0, 0.0, 0.0, 0.30), true)
+	tgt.draw_rect(crate, canvas, true)
+	tgt.draw_rect(crate, ink, false, 1.4)
+	tgt.draw_line(crate.position, crate.end, ink, 1.0, true)
+	tgt.draw_line(Vector2(crate.end.x, crate.position.y),
+		Vector2(crate.position.x, crate.end.y), ink, 1.0, true)
+	tgt.draw_line(bundle + Vector2(-7.0, 5.5), bundle + Vector2(7.0, 5.5),
+		lit, 1.3, true)
+
+	# Older captures keep only their supply mark. The active camp gets one
+	# unmistakable ridge tent, making the army's present operation larger than
+	# the trail of garrisons it left behind.
+	var is_current := _has_player and p.distance_squared_to(_player_pos) < 4.0
+	if not is_current:
+		return
+	var tent_c := p + Vector2(-23.0, 16.0 * -side)
+	var shadow := PackedVector2Array([
+		tent_c + Vector2(-11, 6) + Vector2(1.5, 1.8),
+		tent_c + Vector2(0, -8) + Vector2(1.5, 1.8),
+		tent_c + Vector2(11, 6) + Vector2(1.5, 1.8),
+	])
+	tgt.draw_colored_polygon(shadow, Color(0.0, 0.0, 0.0, 0.32))
+	var tent := PackedVector2Array([
+		tent_c + Vector2(-11, 6), tent_c + Vector2(0, -8),
+		tent_c + Vector2(11, 6),
+	])
+	tgt.draw_colored_polygon(tent, Color(0.48, 0.31, 0.16, 0.96))
+	var outline := tent.duplicate()
+	outline.append(tent[0])
+	tgt.draw_polyline(outline, ink, 1.5, true)
+	tgt.draw_line(tent_c + Vector2(0, -8), tent_c + Vector2(0, 6),
+		lit, 1.4, true)

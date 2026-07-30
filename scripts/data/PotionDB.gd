@@ -48,7 +48,7 @@ const POTIONS: Dictionary = {
 		"effect": "draw", "color": Color(0.80, 0.65, 0.95)},
 	"phoenix_brew": {
 		"id": "phoenix_brew", "name": "Phoenix Brew",
-		"desc": "Summon the last friendly creature to die as a 1/1 in your foremost empty lane. Keeps its keywords.",
+		"desc": "Summon the last friendly creature that died as a 1/1 in your first empty lane. It keeps its keywords.",
 		"usable_in": "combat", "targeting": "none",
 		"effect": "revive_last_dead", "color": Color(1.00, 0.70, 0.25)},
 
@@ -63,27 +63,27 @@ const POTIONS: Dictionary = {
 		"effect": "grant_rampage", "color": Color(0.85, 0.30, 0.18)},
 	"vampiric_draught": {
 		"id": "vampiric_draught", "name": "Vampiric Draught",
-		"desc": "A friendly creature heals you for the damage it deals in battle this fight. Heal 4 HP now.",
+		"desc": "Heal 4 HP. A friendly creature gains Lifesteal this fight.",
 		"usable_in": "combat", "targeting": "friendly_creature",
 		"effect": "grant_lifelink", "color": Color(0.82, 0.24, 0.32)},
 	"chain_flask": {
 		"id": "chain_flask", "name": "Chain-Lightning Flask",
-		"desc": "A bolt arcs 4 times, dealing 2 damage to a random enemy creature each jump.",
+		"desc": "Deal 2 damage to a random enemy creature 4 times.",
 		"usable_in": "combat", "targeting": "none",
 		"effect": "chain_lightning", "color": Color(0.55, 0.80, 1.00)},
 	"doomsday_draught": {
 		"id": "doomsday_draught", "name": "Doomsday Draught",
-		"desc": "Every friendly Doom creature detonates right now. No more waiting for the clock.",
+		"desc": "Detonate all friendly Doom creatures now.",
 		"usable_in": "combat", "targeting": "none",
 		"effect": "detonate_doom_all", "color": Color(1.00, 0.32, 0.16)},
 	"aegis_brew": {
 		"id": "aegis_brew", "name": "Aegis Brew",
-		"desc": "Raise a shield wall: every friendly creature gains Shield, blocking the next hit it takes.",
+		"desc": "All friendly creatures gain Shield.",
 		"usable_in": "combat", "targeting": "none",
 		"effect": "shield_wall", "color": Color(0.70, 0.85, 1.00)},
 	"conscript_brew": {
 		"id": "conscript_brew", "name": "Conscription Brew",
-		"desc": "Two 3/3 Recruits muster into your empty lanes. Bodies on demand.",
+		"desc": "Summon two 3/3 Recruits in empty lanes.",
 		"usable_in": "combat", "targeting": "none",
 		"effect": "summon_recruits", "color": Color(0.82, 0.70, 0.48)},
 
@@ -97,7 +97,7 @@ const POTIONS: Dictionary = {
 		"effect": "sacrifice_for_command", "color": Color(0.88, 0.36, 0.30)},
 	"grave_diggers_nip": {
 		"id": "grave_diggers_nip", "name": "Grave-Digger's Nip",
-		"desc": "Bury every Curse in your hand. Draw a card for each one buried.",
+		"desc": "Exhaust every Curse in your hand. Draw 1 card for each.",
 		"usable_in": "combat", "targeting": "none",
 		"effect": "purge_hand_curses", "color": Color(0.62, 0.78, 0.52)},
 }

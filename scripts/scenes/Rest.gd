@@ -68,41 +68,41 @@ var _accent_wake: Color
 # Trivial to extend — add new heroes or new choices by adding entries here.
 const HERO_FLAVOR := {
 	"raider": {
-		"rest":    "The road weighs heavy. Even goblins sleep.",
-		"upgrade": "Sharpen the edge. The next fight comes fast.",
-		"reforge": "Two strikes ready. Twice the heat.",
-		"wake":    "Fast ones first over the wall. Say the name.",
+		"rest":    "Rest now. The next fight comes soon.",
+		"upgrade": "Improve one card for the road ahead.",
+		"reforge": "Improve two cards with the Whetstone.",
+		"wake":    "Choose one fallen soldier for the next fight.",
 	},
 	"stalwart": {
-		"rest":    "Plant the shield. Tend the wounds.",
-		"upgrade": "A better tool outlasts a sharper one.",
-		"reforge": "Forge both blade and breastplate. Endure twice.",
-		"wake":    "The line holds because the dead still stand in it.",
+		"rest":    "Lower your shield and tend your wounds.",
+		"upgrade": "Improve one card for the road ahead.",
+		"reforge": "Improve two cards with the Whetstone.",
+		"wake":    "Choose one fallen soldier for the next fight.",
 	},
 	"acolyte": {
-		"rest":    "The fire remembers names. Mine. Yours.",
-		"upgrade": "Sigils deepen by firelight. Trace another.",
-		"reforge": "Twin rites. Twin promises. Twin debts.",
-		"wake":    "Death is a door. Tonight we knock from this side.",
+		"rest":    "Rest beside the fire and recover.",
+		"upgrade": "Improve one card for the road ahead.",
+		"reforge": "Improve two cards with the Whetstone.",
+		"wake":    "Choose one fallen soldier for the next fight.",
 	},
 	"pyromancer": {
-		"rest":    "Even fire needs ash to be born from.",
-		"upgrade": "Boil the spell down. Less smoke, more burn.",
-		"reforge": "Stoke twice. Two spells, two suns.",
-		"wake":    "Nothing burns twice. Almost nothing.",
+		"rest":    "Let the fire settle while you recover.",
+		"upgrade": "Improve one card for the road ahead.",
+		"reforge": "Improve two cards with the Whetstone.",
+		"wake":    "Choose one fallen soldier for the next fight.",
 	},
 	"kindler": {
-		"rest":    "Bank the coals. Even a fire-tender sleeps.",
-		"upgrade": "Feed the forge something that remembers being bright.",
-		"reforge": "Two irons in the fire. Tend both.",
-		"wake":    "Every fire I've fed is still burning somewhere.",
+		"rest":    "Bank the coals and recover.",
+		"upgrade": "Improve one card for the road ahead.",
+		"reforge": "Improve two cards with the Whetstone.",
+		"wake":    "Choose one fallen soldier for the next fight.",
 	},
 }
 const FLAVOR_FALLBACK := {
-	"rest":    "Rest by the fire. Heal what hurt today.",
-	"upgrade": "Tend the blade. Tomorrow asks more.",
-	"reforge": "Twice-forged. The Whetstone hums.",
-	"wake":    "Read a name off the roll. The column remembers.",
+	"rest":    "Rest by the fire and heal.",
+	"upgrade": "Improve one card.",
+	"reforge": "Improve two cards with the Whetstone.",
+	"wake":    "Choose one fallen soldier for the next fight.",
 }
 
 enum Mode { CHOOSE, PICK_CARD, CONFIRM_UPGRADE }
@@ -126,7 +126,7 @@ func _ready() -> void:
 	_swap_background_for_act()
 	GameTheme.add_atmosphere(self, "rest", true, _time_of_day_mood_override())
 	GameTheme.fade_in(self, 0.26)
-	AudioBank.play_music_random(["rest", "rest_b", "rest_c"])
+	AudioBank.play_music_random(["rest", "rest_b", "rest_c", "rest_d"])
 	# Looping fire crackle — silently no-ops if assets/audio/sfx/fire_crackle/
 	# is empty (player will hear only the music until the asset ships).
 	AudioBank.play_ambience("fire_crackle")
@@ -196,10 +196,18 @@ func _build_choice_ui() -> void:
 	_mode = Mode.CHOOSE
 	_clear_ui()
 
+	# Left command column — title, the march's health, the camp actions
+	# stacked beneath (Hades/StS scene-screen grammar, and the house
+	# left-aligned aesthetic). The old bottom-center banner row squatted
+	# directly ON the painted campfire; now the fire, tent, and wagon own
+	# the right two-thirds of the screen.
 	var title = GameTheme.make_screen_title("MAKE CAMP", GameTheme.GILT_BRIGHT)
-	title.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	title.offset_top = 26
-	title.offset_bottom = 90
+	title.anchor_left = 0.0
+	title.anchor_right = 0.0
+	title.offset_left = 64
+	title.offset_right = 464
+	title.offset_top = 138
+	title.offset_bottom = 210
 	add_child(title)
 	GameTheme.deal_in(title, 0.02)
 
@@ -207,25 +215,27 @@ func _build_choice_ui() -> void:
 		"♥ %d / %d" % [RunState.hero_hp, RunState.hero_max_hp],
 		20, GameTheme.IVORY)
 	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	subtitle.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	subtitle.offset_top = 96
-	subtitle.offset_bottom = 124
+	subtitle.anchor_left = 0.0
+	subtitle.anchor_right = 0.0
+	subtitle.offset_left = 64
+	subtitle.offset_right = 464
+	subtitle.offset_top = 218
+	subtitle.offset_bottom = 246
 	add_child(subtitle)
 	GameTheme.deal_in(subtitle, 0.08)
 
 	_add_hero_silhouette()
 
-	# Banner row along the bottom third. HBoxContainer centered horizontally
-	# so 3 vs 4 banners both look intentional (Reforge appears only when the
-	# Whetstone relic is owned AND not yet used this act).
-	var row := HBoxContainer.new()
-	row.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
-	row.offset_left = 60
-	row.offset_right = -60
-	row.offset_top = -260
-	row.offset_bottom = -90
-	row.add_theme_constant_override("separation", 22)
-	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	# Banner column down the left edge. Worst case is four banners (REST +
+	# FORGE + disabled FORGE TWO + WAKE) — 4×145 + 3×12 = 616px from y 262,
+	# which still clears the bottom of the 900px canvas.
+	var row := VBoxContainer.new()
+	row.anchor_left = 0.0
+	row.anchor_right = 0.0
+	row.offset_left = 64
+	row.offset_right = 464
+	row.offset_top = 262
+	row.add_theme_constant_override("separation", 12)
 	add_child(row)
 
 	_add_choice_rest(row)
@@ -238,6 +248,36 @@ func _build_choice_ui() -> void:
 		_add_choice_upgrade(row)
 	_add_choice_reforge_if_available(row)
 	_add_choice_wake_if_available(row)
+
+	_center_camp_column(title, subtitle, row)
+
+
+## Slide the camp column so title + HP + banners sit centered on the canvas as
+## one group. The offsets above are sized for the WORST case (four banners), but
+## the common camp shows two — which left the column hugging the upper-left with
+## ~350px of dead frame beneath it. (Screen audit 2026-07-21.)
+##
+## Two frames of wait, not call_deferred: deferred still runs before anchors are
+## resolved, so both `size.y` (the scene's own height) and `row.size.y` read 0
+## and the centering silently no-ops — which is exactly what the first attempt
+## did.
+func _center_camp_column(title: Control, subtitle: Control, row: Control) -> void:
+	await get_tree().process_frame
+	await get_tree().process_frame
+	for c in [title, subtitle, row]:
+		if c == null or not is_instance_valid(c):
+			return
+	if size.y <= 1.0 or row.size.y <= 1.0:
+		return
+	var group_top: float = title.offset_top
+	var group_h: float = (row.offset_top - group_top) + row.size.y
+	var delta: float = (size.y - group_h) * 0.5 - group_top
+	# Never push the column off the top; a four-banner camp stays where it is.
+	if delta <= 1.0:
+		return
+	for c in [title, subtitle, row]:
+		c.offset_top += delta
+		c.offset_bottom += delta
 
 
 func _add_hero_silhouette() -> void:
@@ -256,7 +296,9 @@ func _add_hero_silhouette() -> void:
 	sil.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	# Anchor near the left edge of the fire, sized to look like a seated
 	# figure. Slight modulate so the painted background reads through.
-	sil.position = Vector2(420, 460)
+	# Shifted right of the old spot so the left banner column owns the left
+	# edge and the hero sits between tent and fire.
+	sil.position = Vector2(555, 470)
 	sil.size = Vector2(220, 280)
 	# The vignette paintings are full rectangles with their own night-black
 	# ground — composited raw they read as a foreign box over the scene.
@@ -289,7 +331,7 @@ void fragment() {
 	return sh
 
 
-func _add_choice_rest(row: HBoxContainer) -> void:
+func _add_choice_rest(row: BoxContainer) -> void:
 	var disabled_reason := ""
 	if RunState.has_downside("no_rest_heal"):
 		disabled_reason = "Can't heal at camp (Hairshirt)."
@@ -301,11 +343,11 @@ func _add_choice_rest(row: HBoxContainer) -> void:
 	var desc := "%s\n♥ Heal to %d / %d" % [
 		_flavor_for("rest", ""), _rest_heal_target(), RunState.hero_max_hp]
 	var banner = GameTheme.make_choice_banner("REST", desc, _accent_rest,
-		ICON_REST, Vector2(340, 160), disabled_reason)
+		ICON_REST, Vector2(400, 145), disabled_reason)
 	_wire_banner(banner, row, _accent_rest, _do_heal)
 
 
-func _add_choice_upgrade(row: HBoxContainer) -> void:
+func _add_choice_upgrade(row: BoxContainer) -> void:
 	var disabled_reason := ""
 	if RunState.has_downside("no_upgrade"):
 		disabled_reason = "Can't forge here (Cracked Anvil)."
@@ -322,7 +364,7 @@ func _add_choice_upgrade(row: HBoxContainer) -> void:
 			disabled_reason = "Every card already forged."
 	var desc := "%s\n⚒ Forge a + version" % _flavor_for("upgrade", "")
 	var banner = GameTheme.make_choice_banner("FORGE", desc, _accent_upgrade,
-		ICON_UPGRADE, Vector2(340, 160), disabled_reason)
+		ICON_UPGRADE, Vector2(400, 145), disabled_reason)
 	_wire_banner(banner, row, _accent_upgrade, _start_upgrade_mode)
 
 
@@ -348,7 +390,7 @@ func _reforge_is_live() -> bool:
 # plain FORGE banner while live (disabled states show beside FORGE instead, so
 # the player reads why the double is off). Lets the player pick TWO cards in
 # sequence to upgrade — see _start_reforge_mode for the flow.
-func _add_choice_reforge_if_available(row: HBoxContainer) -> void:
+func _add_choice_reforge_if_available(row: BoxContainer) -> void:
 	if not RunState.has_relic("whetstone"):
 		return
 	var disabled_reason := ""
@@ -368,7 +410,7 @@ func _add_choice_reforge_if_available(row: HBoxContainer) -> void:
 			disabled_reason = "Need 2+ unforged cards."
 	var desc := "%s\n◈ Forge two + versions (Whetstone)" % _flavor_for("reforge", "")
 	var banner = GameTheme.make_choice_banner("FORGE TWO", desc, _accent_reforge,
-		ICON_REFORGE, Vector2(340, 160), disabled_reason)
+		ICON_REFORGE, Vector2(400, 145), disabled_reason)
 	_wire_banner(banner, row, _accent_reforge, _start_reforge_mode)
 
 
@@ -377,15 +419,15 @@ func _add_choice_reforge_if_available(row: HBoxContainer) -> void:
 # sits right before the keep, so the wake usually arms the boss fight). The
 # banner is HIDDEN with an empty roll (no dead options), and disabled when an
 # event has already promised the next fight's opening slot.
-func _add_choice_wake_if_available(row: HBoxContainer) -> void:
+func _add_choice_wake_if_available(row: BoxContainer) -> void:
 	if RunState.fallen.is_empty():
 		return
 	var disabled_reason := ""
 	if not RunState.next_combat_gift_creature.is_empty():
 		disabled_reason = "The next fight is already spoken for."
-	var desc := "%s\n◈ A fallen soldier's shade joins the next fight" % _flavor_for("wake", "")
+	var desc := "%s\n◈ A fallen soldier joins your front row in the next fight." % _flavor_for("wake", "")
 	var banner = GameTheme.make_choice_banner("HOLD A WAKE", desc, _accent_wake,
-		ICON_WAKE, Vector2(340, 160), disabled_reason)
+		ICON_WAKE, Vector2(400, 145), disabled_reason)
 	_wire_banner(banner, row, _accent_wake, _start_wake_mode)
 
 
@@ -431,7 +473,7 @@ func _start_wake_mode() -> void:
 	GameTheme.deal_in(title, 0.02)
 
 	var sub = GameTheme.make_label(
-		"Speak one name over the fire. The shade stands in your line next fight.",
+		"Choose a fallen soldier. They join your front row in the next fight.",
 		16, GameTheme.IVORY)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	sub.position = Vector2(400, 74)
@@ -494,7 +536,7 @@ func _make_wake_tile(cand: Dictionary) -> Button:
 	var where := "Fell at %s — Act %d, round %d" % [
 		String(entry.get("enc", "an unnamed field")),
 		int(entry.get("act", 1)), int(entry.get("round", 1))]
-	var where_lbl := GameTheme.make_label(where, 15, GameTheme.DESC_DIM)
+	var where_lbl := GameTheme.make_label(where, 18, GameTheme.DESC_DIM)
 	where_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vbox.add_child(where_lbl)
 
@@ -532,13 +574,13 @@ func _do_wake(cand: Dictionary) -> void:
 # Shared banner wiring: adds the hotspot glow behind the banner's eventual
 # position, parents it to the row, hooks up the click handler, and animates
 # the hotspot so it pulses subtly to suggest the painted scene is "alive."
-func _wire_banner(banner: Control, row: HBoxContainer, accent: Color, on_click: Callable) -> void:
+func _wire_banner(banner: Control, row: BoxContainer, accent: Color, on_click: Callable) -> void:
 	var deal_delay := 0.12 + float(row.get_child_count()) * 0.06
 	row.add_child(banner)
 	var click_btn := banner.get_node("ClickButton") as Button
 	if click_btn != null and not click_btn.disabled:
 		click_btn.pressed.connect(_on_choice_banner_pressed.bind(banner, click_btn, on_click))
-		_wire_hover_motion(click_btn, banner, 1.025)
+		GameTheme.hover_lift(click_btn, 1.025, banner)
 	# Hotspot glow — a soft radial gradient tinted by the banner's accent.
 	# Parented inside the banner so it follows layout without needing manual
 	# coords, but z-indexed below the panel so it bleeds out the edges.
@@ -582,26 +624,6 @@ func _claim_hold() -> float:
 	if UserSettings != null and UserSettings.reduce_motion:
 		return 0.01
 	return 0.10
-
-
-func _wire_hover_motion(source: Control, target: Control, lift: float = 1.03) -> void:
-	if source == null or target == null:
-		return
-	if UserSettings != null and UserSettings.reduce_motion:
-		return
-	source.mouse_entered.connect(func():
-		if not is_instance_valid(target):
-			return
-		target.pivot_offset = target.size * 0.5
-		var tw := target.create_tween()
-		tw.tween_property(target, "scale", Vector2(lift, lift), 0.12) \
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
-	source.mouse_exited.connect(func():
-		if not is_instance_valid(target):
-			return
-		var tw := target.create_tween()
-		tw.tween_property(target, "scale", Vector2.ONE, 0.14) \
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
 
 
 func _make_hotspot_glow(accent: Color) -> TextureRect:
@@ -752,23 +774,15 @@ func _do_heal() -> void:
 		GameTheme.spawn_floating_text(self, Vector2(vp.x * 0.5, vp.y * 0.40),
 			"+%d HP" % healed, GameTheme.HEALTH_GREEN, true)
 		AudioBank.play_sfx("heal")
-		if UserSettings == null or UserSettings.particles:
-			var motes := CPUParticles2D.new()
-			motes.position = Vector2(vp.x * 0.5, vp.y * 0.52)
-			motes.one_shot = true
-			motes.explosiveness = 0.7
-			motes.amount = 22
-			motes.lifetime = 1.0
-			motes.direction = Vector2(0, -1)
-			motes.spread = 32.0
-			motes.gravity = Vector2(0, -60.0)
-			motes.initial_velocity_min = 40.0
-			motes.initial_velocity_max = 110.0
-			motes.scale_amount_min = 2.0
-			motes.scale_amount_max = 4.0
-			motes.color = Color(0.55, 0.95, 0.55, 0.85)
-			motes.emitting = true
-			add_child(motes)
+		# A breath of green motes lifts with the heal (rises like ash, but a
+		# softer column — bespoke numbers over the factory's base preset).
+		Motion.burst(self, Vector2(vp.x * 0.5, vp.y * 0.52), "base", {
+			"z_index": 0, "explosiveness": 0.7, "amount": 22, "lifetime": 1.0,
+			"spread": 32.0, "gravity": Vector2(0, -60.0),
+			"velocity_min": 40.0, "velocity_max": 110.0,
+			"scale_min": 2.0, "scale_max": 4.0,
+			"color": Color(0.98, 0.82, 0.42, 0.85),   # forge sparks are gilt, not green
+		})
 		await get_tree().create_timer(0.6).timeout
 	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 
@@ -850,7 +864,7 @@ func _begin_pick_card_for_upgrade() -> void:
 		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
 		click_btn.pressed.connect(_on_upgrade_card_pressed.bind(wrapper, click_btn, i))
-		_wire_hover_motion(click_btn, wrapper, 1.025)
+		GameTheme.hover_lift(click_btn, 1.025, wrapper)
 		wrapper.add_child(click_btn)
 		grid.add_child(wrapper)
 		GameTheme.deal_in(wrapper, 0.16 + float(pick_idx) * 0.025)
@@ -978,7 +992,7 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	btn_row.add_child(upgrade_btn)
 	GameTheme.hover_lift(upgrade_btn, 1.03)
 
-	var back_btn = GameTheme.make_back_button("← Back", Vector2(180, 60), 18)
+	var back_btn = GameTheme.make_back_button("Back", Vector2(180, 60), 18)
 	back_btn.pressed.connect(_back_to_pick_card)
 	btn_row.add_child(back_btn)
 	GameTheme.hover_lift(back_btn, 1.03)
@@ -997,9 +1011,12 @@ func _add_preview_card(parent: Container, data: Dictionary, is_upgraded_preview:
 	# Green halo behind the upgraded card. Procedural radial gradient, parented
 	# at z=-1 so it sits behind the Card2D panel.
 	if is_upgraded_preview:
+		# Gilt, matching `_accent_upgrade` (KEYWORD_GOLD) which this screen already
+		# declares as the forge's colour. The halo was the one place the forge lit
+		# up green — its own hero moment contradicting its own accent.
 		var grad := Gradient.new()
-		grad.set_color(0, Color(0.30, 0.95, 0.40, 0.55))
-		grad.set_color(1, Color(0.10, 0.40, 0.15, 0.0))
+		grad.set_color(0, Color(0.95, 0.76, 0.30, 0.55))
+		grad.set_color(1, Color(0.40, 0.28, 0.08, 0.0))
 		var grad_tex := GradientTexture2D.new()
 		grad_tex.gradient = grad
 		grad_tex.fill = GradientTexture2D.FILL_RADIAL

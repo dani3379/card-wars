@@ -59,7 +59,7 @@ func _test_draft_triplets(legal: Array, ss: Node, cdb: Node) -> void:
 		"weighted buckets carry no starter tier (act rewards never offer starters)")
 
 	var weights: Array = cdb.act_rarity_weights(ss.DRAFT_ACT)
-	_check(weights == [30, 50, 20], "draft rolls at act-3 weights 30/50/20 (got %s)" % str(weights))
+	_check(weights == [45, 42, 13], "draft rolls at act-3 weights 45/42/13 (got %s)" % str(weights))
 
 	# Reproducible from the seed: same seed → identical opening triplet.
 	var rng_a := RandomNumberGenerator.new(); rng_a.seed = 777
@@ -69,7 +69,8 @@ func _test_draft_triplets(legal: Array, ss: Node, cdb: Node) -> void:
 	_check(first_a == first_b and first_a.size() == 3,
 		"same seed → identical triplet (deterministic): %s" % str(first_a))
 
-	# Tally the rarity mix over a long run of triplets; it should land near 30/50/20.
+	# Tally the rarity mix over a long run of triplets; it should land near 45/42/13
+	# (the act-3 weights, flattened 2026-07-16 — commons stay the majority of offers).
 	var rng := RandomNumberGenerator.new(); rng.seed = 123456
 	var bags: Dictionary = {}
 	var counts := {"common": 0, "uncommon": 0, "rare": 0}
@@ -92,9 +93,9 @@ func _test_draft_triplets(legal: Array, ss: Node, cdb: Node) -> void:
 	var pr := 100.0 * float(counts["rare"]) / denom
 	print("     rarity mix over %d draws: %.1f%% common / %.1f%% uncommon / %.1f%% rare"
 		% [total, pc, pu, pr])
-	_check(absf(pc - 30.0) <= 6.0, "commons land near 30%% (got %.1f%%)" % pc)
-	_check(absf(pu - 50.0) <= 6.0, "uncommons land near 50%% (got %.1f%%)" % pu)
-	_check(absf(pr - 20.0) <= 6.0, "rares land near 20%% (got %.1f%%)" % pr)
+	_check(absf(pc - 45.0) <= 6.0, "commons land near 45%% (got %.1f%%)" % pc)
+	_check(absf(pu - 42.0) <= 6.0, "uncommons land near 42%% (got %.1f%%)" % pu)
+	_check(absf(pr - 13.0) <= 6.0, "rares land near 13%% (got %.1f%%)" % pr)
 
 
 func _test_quick_deck(legal: Array, ss: Node) -> void:

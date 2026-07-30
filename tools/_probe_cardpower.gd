@@ -35,6 +35,12 @@ var _only: Array = []
 # fewer creatures than baseline + redundant draws — grade those at --copies=1 ("is
 # ONE worth a card slot, given bodies to act on?").
 var _copies: int = COPIES
+# --wide : grade over the 9-fight act-1 gauntlet instead of the 2-fight default.
+# The 2-fight GAUNTLET is fine for a coarse 130-card sweep but far too thin to
+# RANK a small slate against itself — one unlucky enemy opening moves a card
+# several places. Costs ~4.5x the wall time; use it whenever the question is
+# "which of these ~20 is out of line?" rather than "sweep everything".
+var _wide: bool = false
 # [encounter, rng_seed] — the seed is FIXED per encounter and reused across every
 # card (common random numbers), so two cards face identical enemy draws/placement
 # and the margin gap is attributable to the CARD, not luck. Combat's 98 global
@@ -62,12 +68,86 @@ const MODAL := ["familiar", "scholar", "treasure_hunter", "adaptable", "copycat"
 # biggest threat; snipers/siege engines shelter in the back row; sacrifice
 # outlets feed the cheapest body, never the best attacker; heals go to the
 # wounded veteran; army-wide support waits until there IS an army.
-const SAC_FODDER := ["dark_pact", "offering"]   # eat the least valuable body
+const SAC_FODDER := ["dark_pact", "offering", "last_due"]   # eat the least valuable body
 const SAC_CANNON := ["fuel_the_pyre"]           # hurl a heavy hitter that's dying anyway
 const HEAL_SPELLS := ["patch_up"]               # mend the wounded veteran
+# ── Retinue starters (2026-07-28) need INTENT targeting, not "highest ATK" ──
+# Measured: with the generic `friendly_creature -> _best_friendly()` rule these
+# four cards were graded while doing the OPPOSITE of their purpose, which is the
+# single largest source of a false "the new decks are weak" reading:
+#   last_due       sacrificed the deck's BEST attacker every cast (now SAC_FODDER)
+#   read_the_will  fired at the highest-ATK body, which almost never carries an
+#                  on_death, so the spell resolved as a no-op ~every cast
+#   touchpaper     fired at a body with no Doom -> "NO FUSE TO LIGHT", a dead card
+#   close_ranks    fired at the biggest attacker rather than the best-connected
+#                  body, wasting most of the adjacency payout
+# NOTE these bypass Combat._target_contract_available (this probe calls
+# _resolve_spell directly), so the pickers below must return null themselves
+# when the board cannot honour the card — that is what holds the card instead
+# of burning it.
+const WILL_SPELLS := ["read_the_will"]          # needs a body that HAS an on_death
+const DOOM_SPELLS := ["touchpaper"]             # needs a body that HAS a fuse
+const ADJACENCY_SPELLS := ["close_ranks_order"]  # wants the best-connected body
+const RETREAT_SPELLS := ["countermarch_levy"]   # pull a hurt body out of the front
+
+# ── DECK MODE (2026-07-28) ──────────────────────────────────────────────────
+# `--decks` swaps the per-card sweep for an A/B of whole 10-card OPENING decks
+# over a real act-1 gauntlet. Built to answer "did the hero-retinue rewrite make
+# the openers weaker?" without the biases baked into _probe_autorun's table
+# (which scores on enemy_hp<=0 and so mostly measures how many untargeted burn
+# spells a deck holds).
+#
+# The NEW arm is read LIVE from the HeroDB autoload, so it is always exactly
+# what ships. The OLD arm is transcribed from `git show HEAD:scripts/data/HeroDB.gd`.
+#
+# READ THIS BEFORE QUOTING ANY NUMBER FROM THIS MODE — HEAD is 2026-07-09 for
+# HeroDB.gd, i.e. NINETEEN DAYS and several balance passes stale. The old decks
+# below are therefore "the last COMMITTED openers", not "the openers as they
+# stood the day before the rewrite" (that intermediate state was never committed
+# and no longer exists anywhere). They are also being run against TODAY's
+# CardDB, in which several of their own cards have since changed
+# (goblin 1/2 -> 2/1, levy_rider 1/2 -> 2/1, mourner 1/2 -> 1/3). So this is an
+# honest A/B of two card lists under one ruleset; it is NOT a regression test
+# against a known-good historical build.
+const OLD_DECKS := {
+	"raider": {
+		"deck": ["goblin", "goblin", "levy_rider", "levy_rider", "ratling", "ratling",
+			"brute", "brute", "fireball", "fireball"],
+		"relic": "veterans_medal"},
+	"stalwart": {
+		"deck": ["troll", "troll", "brute", "brute", "naga", "naga",
+			"palisade", "palisade", "strike", "strike"],
+		"relic": "iron_buckler"},
+	"acolyte": {
+		"deck": ["ratling", "ratling", "ratling", "brute", "goblin", "goblin",
+			"mourner", "mourner", "strike", "strike"],
+		"relic": "soul_lantern"},
+	"pyromancer": {
+		"deck": ["fireball", "fireball", "fireball", "strike", "strike", "strike",
+			"spark", "spark", "troll", "troll"],
+		"relic": "worn_spellbook"},
+	"kindler": {
+		"deck": ["cinder_pup", "cinder_pup", "kindling", "kindling", "ash_hound",
+			"ash_hound", "burning_martyr", "burning_martyr", "fireball", "strike"],
+		"relic": "ember_censer"},
+}
+# Every act-1 combat encounter, plus six act-2 kits as a STRESS tier.
+#
+# Act 1 alone does not discriminate: measured 2026-07-28, both the old and the
+# new Raider opener won 8 of 9 act-1 fights, so win-rate sat at the ceiling and
+# could not have shown a difference of any size. The act-2 half is deliberately
+# unfair to a bare 10-card opener (in a real run you would arrive with ~15 cards
+# and two more relics) and exists purely to put the measurement back on a part
+# of the curve where a deck can actually separate from another one.
+# Read act-1 and act-2 win rates separately; do not average them into one number.
+const DECK_GAUNTLET := ["goblin_scouts", "wolf_pack", "bandit_camp", "mushroom_grove",
+	"stone_sentinels", "harpy_nest", "boar_herd", "scarecrow_field", "powderkeg_run"]
+const DECK_GAUNTLET_A2 := ["cultist_enclave", "mercenary_company", "haunted_crypt",
+	"oathbroken_knights", "carrion_choir", "grass_that_hunts"]
 
 var RS: Node
 var EDB: Node
+var HDB: Node
 var US: Node
 var SS: Node
 var CDB: Node
@@ -88,7 +168,7 @@ func _run() -> void:
 	print("[cardpow] start")
 	RS = root.get_node_or_null("RunState"); EDB = root.get_node_or_null("EncounterDB")
 	US = root.get_node_or_null("UserSettings"); SS = root.get_node_or_null("SkirmishState")
-	CDB = root.get_node_or_null("CardDB")
+	CDB = root.get_node_or_null("CardDB"); HDB = root.get_node_or_null("HeroDB")
 	if RS == null or EDB == null or CDB == null:
 		print("[cardpow] FATAL autoloads"); quit(1); return
 	if US != null:
@@ -97,6 +177,11 @@ func _run() -> void:
 		US.reduce_motion = true
 	if SS != null:
 		SS.combat_mode = SS.CombatMode.SOLO
+
+	for arg0 in OS.get_cmdline_user_args():
+		if String(arg0) == "--decks":
+			await _run_decks()
+			return
 
 	# Build the testable card list: draftable creatures + spells, minus curses,
 	# enemy-only, the filler itself, and modal (un-auto-playable) cards.
@@ -126,12 +211,14 @@ func _run() -> void:
 		elif arg.begins_with("--filler="): _filler = arg.substr(9)
 		elif arg.begins_with("--only="): _only = arg.substr(7).split(",", false)
 		elif arg.begins_with("--copies="): _copies = maxi(1, int(arg.substr(9)))
+		elif arg == "--wide": _wide = true
 	from_i = clampi(from_i, 0, test_ids.size())
 	to_i = clampi(to_i, from_i, test_ids.size())
 	# --only wins: grade exactly the listed ids (any rarity), skipping the sweep.
 	var chunk: Array = _only if _only.size() > 0 else test_ids.slice(from_i, to_i)
+	var gaunt_desc: String = ("WIDE: %d act-1 fights" % DECK_GAUNTLET.size()) if _wide else str(GAUNTLET)
 	print("[cardpow] shell=%s | testing %s over gauntlet %s (%d copies + %d filler, cap %d rounds)"
-		% [_filler, ("only " + str(_only) if _only.size() > 0 else "[%d..%d) of %d" % [from_i, to_i, test_ids.size()]), str(GAUNTLET), _copies, 10 - _copies, MAX_ROUNDS])
+		% [_filler, ("only " + str(_only) if _only.size() > 0 else "[%d..%d) of %d" % [from_i, to_i, test_ids.size()]), gaunt_desc, _copies, 10 - _copies, MAX_ROUNDS])
 
 	# Baseline: a pure 10-filler deck — the reference line for THIS shell.
 	_baseline = await _score_deck([])
@@ -168,11 +255,164 @@ func _run() -> void:
 	quit(0)
 
 
+# ── Deck A/B mode ───────────────────────────────────────────────────────────
+
+## Run every hero's OLD and NEW opener over the act-1 gauntlet and report both
+## the result AND the run-to-run spread, because a single pass proves nothing.
+##
+## Flags (all after a bare `--`):
+##   --decks              enter this mode
+##   --seeds=N            seed blocks per deck (default 3). Each block replays
+##                        the WHOLE gauntlet under a different RNG seed, and the
+##                        block-to-block spread IS the noise estimate.
+##   --heroes=a,b         restrict to these heroes
+##   --no-relic           run the deck WITHOUT its signature relic, isolating
+##                        the card list from the doctrine relic
+func _run_decks() -> void:
+	var seeds := 3
+	var only_heroes: Array = []
+	var use_relic := true
+	for a in OS.get_cmdline_user_args():
+		var s := String(a)
+		if s.begins_with("--seeds="): seeds = maxi(1, int(s.substr(8)))
+		elif s.begins_with("--heroes="): only_heroes = s.substr(9).split(",", false)
+		elif s == "--no-relic": use_relic = false
+	var heroes: Array = ["raider", "stalwart", "acolyte", "pyromancer", "kindler"]
+	if only_heroes.size() > 0: heroes = only_heroes
+	print("[decks] gauntlet=%d act-1 fights x %d seed blocks | relic=%s"
+		% [DECK_GAUNTLET.size(), seeds, str(use_relic)])
+
+	var rows: Array = []
+	for hero in heroes:
+		for arm in ["old", "new"]:
+			var deck: Array = []
+			var relic := ""
+			if arm == "old":
+				deck = (OLD_DECKS[hero]["deck"] as Array).duplicate()
+				relic = String(OLD_DECKS[hero]["relic"])
+			else:
+				var h: Dictionary = HDB.get_hero(String(hero))
+				deck = (h.get("deck", []) as Array).duplicate()
+				relic = String(h.get("relic", ""))
+			if not use_relic: relic = ""
+			var blocks: Array = []
+			for b in range(seeds):
+				var w1 := 0; var n1 := 0; var m1 := 0.0
+				var w2 := 0; var n2 := 0; var m2 := 0.0
+				for tier in [1, 2]:
+					var list: Array = DECK_GAUNTLET if tier == 1 else DECK_GAUNTLET_A2
+					for enc in list:
+						# Seed is a pure function of (encounter, block) and NOT of
+						# the deck, so both arms meet identical enemy draws —
+						# common random numbers, the same trick the card sweep uses.
+						var sd: int = hash(String(enc)) + b * 7919
+						var r = await _fight_deck(String(enc), sd, String(hero), deck, relic)
+						if r == null: continue
+						if tier == 1:
+							n1 += 1; m1 += float(r["margin"])
+							if bool(r["win"]): w1 += 1
+						else:
+							n2 += 1; m2 += float(r["margin"])
+							if bool(r["win"]): w2 += 1
+				blocks.append({"w1": w1, "n1": n1, "m1": m1 / float(maxi(1, n1)),
+					"w2": w2, "n2": n2, "m2": m2 / float(maxi(1, n2))})
+				print("[decks]   %-11s %-3s block %d: act1 %d/%d (%+.1f) | act2 %d/%d (%+.1f)"
+					% [hero, arm, b, w1, n1, m1 / float(maxi(1, n1)),
+						w2, n2, m2 / float(maxi(1, n2))])
+			rows.append({"hero": hero, "arm": arm, "blocks": blocks})
+
+	# ── Report ──
+	print("\n[decks] ================= RESULT =================")
+	print("[decks] hero        arm   act1 W/N   margin |  act2 W/N   margin | act1 blocks / act2 blocks")
+	var noise1: Array = []
+	var noise2: Array = []
+	var mnoise: Array = []
+	for r in rows:
+		var w1 := 0; var n1 := 0; var s1 := 0.0
+		var w2 := 0; var n2 := 0; var s2 := 0.0
+		var p1: Array = []; var p2: Array = []
+		var lo1 := 999; var hi1 := -999; var lo2 := 999; var hi2 := -999
+		var mlo := 9999.0; var mhi := -9999.0
+		for b in r["blocks"]:
+			w1 += int(b["w1"]); n1 += int(b["n1"]); s1 += float(b["m1"])
+			w2 += int(b["w2"]); n2 += int(b["n2"]); s2 += float(b["m2"])
+			p1.append(int(b["w1"])); p2.append(int(b["w2"]))
+			lo1 = mini(lo1, int(b["w1"])); hi1 = maxi(hi1, int(b["w1"]))
+			lo2 = mini(lo2, int(b["w2"])); hi2 = maxi(hi2, int(b["w2"]))
+			var bm: float = (float(b["m1"]) + float(b["m2"])) * 0.5
+			mlo = minf(mlo, bm); mhi = maxf(mhi, bm)
+		noise1.append(hi1 - lo1); noise2.append(hi2 - lo2); mnoise.append(mhi - mlo)
+		var nb: float = float(maxi(1, r["blocks"].size()))
+		print("[decks] %-11s %-3s   %2d/%-3d  %+7.1f | %2d/%-3d  %+7.1f | %s / %s"
+			% [r["hero"], r["arm"], w1, n1, s1 / nb, w2, n2, s2 / nb, str(p1), str(p2)])
+	# The honest headline: how far the SAME deck moves between identical-quality
+	# seed blocks. Any old-vs-new gap smaller than this is not a result.
+	var worst1 := 0; var worst2 := 0; var worstm := 0.0
+	for x in noise1: worst1 = maxi(worst1, int(x))
+	for x in noise2: worst2 = maxi(worst2, int(x))
+	for x in mnoise: worstm = maxf(worstm, float(x))
+	print("[decks] NOISE (widest swing for a FIXED deck across seed blocks):")
+	print("[decks]   act1 wins +-%d of %d | act2 wins +-%d of %d | mean margin +-%.1f HP"
+		% [worst1, DECK_GAUNTLET.size(), worst2, DECK_GAUNTLET_A2.size(), worstm])
+	print("[decks] Any old-vs-new gap below those figures is NOT a result.")
+	print("[decks] DONE")
+	quit(0)
+
+
+## One fight with an explicitly installed deck + relic. Mirrors _fight but does
+## not stack copies of a test card and does not blanket-clear the relic list.
+func _fight_deck(enc_id: String, rng_seed: int, hero: String, deck: Array, relic: String):
+	RS.start_new_run(hero, 0, 4242)
+	RS.current_encounter_id = enc_id
+	var enc: Dictionary = EDB.get_encounter(enc_id)
+	RS.current_node_type = String(enc.get("type", "combat"))
+	RS.current_act_idx = clampi(int(enc.get("act", 1)), 1, 3) - 1
+	RS.relics.clear()
+	if relic != "": RS.relics.append(relic)
+	RS.deck.clear(); RS.deck_uids.clear()
+	for id in deck:
+		RS.add_card(String(id))
+	seed(rng_seed)
+	combat = load("res://scenes/combat.tscn").instantiate()
+	root.add_child(combat)
+	if not await _wait_turn():
+		await _teardown(); return null
+	var rounds := 0
+	while is_instance_valid(combat) and combat.phase != combat.Phase.GAME_OVER and rounds < MAX_ROUNDS:
+		await _auto_play_turn()
+		if not is_instance_valid(combat): break
+		combat._end_turn_confirmed = true
+		if combat.phase == combat.Phase.PLAYER_TURN:
+			combat._on_end_turn()
+		rounds += 1
+		if not await _wait_turn(): break
+	var out = null
+	if is_instance_valid(combat):
+		var php := int(combat.player_hp)
+		var ehp := int(combat.enemy_hp)
+		var margin: int = maxi(0, php) - maxi(0, ehp)
+		if php <= NEAR_DEATH_HP: margin -= NEAR_DEATH_PENALTY
+		# A WIN is the enemy dead with the player still standing. Reported
+		# alongside margin on purpose: margin alone hides whether a deck is
+		# winning cleanly or losing narrowly, and win-rate alone hides how far
+		# from the line a losing deck actually is.
+		out = {"win": ehp <= 0 and php > 0, "margin": margin, "rounds": rounds}
+	await _teardown()
+	return out
+
+
 ## Mean HP margin for a deck = COPIES×extra_ids + goblins to 10, across the gauntlet.
 func _score_deck(extra_ids: Array) -> float:
+	var lineup: Array = GAUNTLET
+	if _wide:
+		lineup = []
+		for enc in DECK_GAUNTLET:
+			# Seed derived from the encounter name, so it is fixed per encounter
+			# and shared by every card — common random numbers, as above.
+			lineup.append([enc, hash(String(enc))])
 	var total := 0.0
 	var fights := 0
-	for pair in GAUNTLET:
+	for pair in lineup:
 		var m = await _fight(String(pair[0]), int(pair[1]), extra_ids)
 		if m != null:
 			total += float(m)
@@ -185,6 +425,9 @@ func _fight(enc_id: String, rng_seed: int, extra_ids: Array):
 	RS.current_encounter_id = enc_id
 	var enc: Dictionary = EDB.get_encounter(enc_id)
 	RS.current_node_type = String(enc.get("type", "combat"))
+	# See _probe_autorun: without the act flag, get_act() answers 1 and
+	# act-2/act-3 kits are scaled down to act-1 strength before the fight.
+	RS.current_act_idx = clampi(int(enc.get("act", 1)), 1, 3) - 1
 	RS.relics.clear()   # neutralize the hero's signature relic — isolate the card
 	# Install the controlled 10-card deck.
 	RS.deck.clear(); RS.deck_uids.clear()
@@ -225,12 +468,32 @@ func _fight(enc_id: String, rng_seed: int, extra_ids: Array):
 	return margin
 
 
+## Poll until the scene is really ready for input, or the fight is over.
+##
+## `round_number >= 1` is NOT decoration — dropping it silently voids every
+## number this probe prints. `Phase.PLAYER_TURN` is enum 0, which is also
+## `phase`'s DEFAULT, so a freshly instantiated Combat answers "ready for input"
+## on the very first poll, before `_ready` has built anything. That was
+## survivable while the opening was one synchronous block; it stopped being
+## survivable when the 2026-07-26 cold-open pass made the build INTERLEAVED
+## (`_build_hud` is now a coroutine that hands the frame back).
+##
+## MEASURED FAILURE (2026-07-28): without this guard the probe played into a
+## half-built scene, `_on_end_turn` died on a null `_end_turn_btn` at
+## Combat.gd:3774 before it ever reached `_do_combat()`, and EVERY fight ran to
+## the MAX_ROUNDS cap having resolved no clash at all. The reported margin was
+## then just `player_hp(30) - encounter_hp` — a constant. The whole sweep came
+## back at exactly +9.0 for every card ((30-20 + 30-22)/2 over the gauntlet),
+## which reads as "saturated / no signal" but was actually "no game was played".
+## `_probe_autorun._wait_for_player_turn` carries the same guard for the same
+## reason; keep them in step.
 func _wait_turn() -> bool:
 	var w := 0
 	while w < TURN_WAIT_TICKS:
 		if not is_instance_valid(combat): return false
 		if combat.phase == combat.Phase.GAME_OVER: return true
-		if combat.phase == combat.Phase.PLAYER_TURN: return true
+		if combat.phase == combat.Phase.PLAYER_TURN and int(combat.round_number) >= 1:
+			return true
 		await create_timer(TICK).timeout
 		w += 1
 	return false
@@ -238,8 +501,8 @@ func _wait_turn() -> bool:
 
 func _auto_play_turn() -> void:
 	# Human turn shape from the playlogs: creatures first, spells after (so
-	# removal/buffs see the real board), then one more creature pass in case a
-	# mana spell (Coin/Turbo/Offering) opened up another body.
+	# removal/buffs see the real board), then one more creature pass in case the
+	# skirmish-only Coin opened up another body.
 	await _play_creatures()
 	await _play_spells()
 	await _play_creatures()
@@ -318,6 +581,10 @@ func _smart_target(cd: Dictionary) -> Object:
 	if id in SAC_FODDER: return _sac_fodder()
 	if id in SAC_CANNON: return _sac_cannon()
 	if id in HEAL_SPELLS: return _wounded_veteran()
+	if id in WILL_SPELLS: return _bequest_body()
+	if id in DOOM_SPELLS: return _shortest_fuse()
+	if id in ADJACENCY_SPELLS: return _best_connected()
+	if id in RETREAT_SPELLS: return _wounded_front()
 	var stype := String(spell.get("type", ""))
 	var supportive: bool = stype in ["buff_atk", "buff_hp", "heal", "shield", "regen", "buff_all_atk"] \
 		or targeting == "friendly_creature"
@@ -366,6 +633,74 @@ func _wounded_veteran() -> Object:
 		var missing: int = int(c.card_data.get("hp", c.current_hp)) - int(c.current_hp)
 		var s: int = missing * 2 + c.effective_atk()
 		if missing > 0 and s > best_s: best_s = s; best = c
+	return best
+
+
+func _bequest_body() -> Object:
+	# Read the Will: the only sane target is a body that actually HAS a will to
+	# read. Prefer the fattest bequest we can measure cheaply (a summon or an
+	# area effect beats a 1-damage ping), then the sturdiest carrier so the
+	# creature survives to die properly later.
+	var deny: Array = []
+	if "READ_THE_WILL_DENY" in combat:
+		deny = combat.READ_THE_WILL_DENY.keys()
+	var best: Object = null
+	var best_s := -1
+	for c in combat._all_player_creatures():
+		if not is_instance_valid(c) or c.current_hp <= 0: continue
+		var will: Dictionary = c.card_data.get("on_death", {})
+		if will.is_empty(): continue
+		if String(will.get("type", "")) in deny: continue
+		var s: int = int(will.get("value", 1)) * 3 + int(c.current_hp)
+		if String(will.get("type", "")) == "summon": s += 10
+		if s > best_s: best_s = s; best = c
+	return best
+
+
+func _shortest_fuse() -> Object:
+	# Touchpaper: only a Doom body has a fuse at all. Pull the SHORTEST one, so
+	# the tick is most likely to convert into an actual detonation this round
+	# rather than being spent on a timer that had rounds left to run anyway.
+	var best: Object = null
+	var best_d := 99999
+	for c in combat._all_player_creatures():
+		if not is_instance_valid(c) or c.current_hp <= 0: continue
+		if not c.has_keyword("doom"): continue
+		var d: int = int(c.card_data.get("doom", 99))
+		if "doom_counter" in c and int(c.doom_counter) != -999:
+			d = int(c.doom_counter)
+		if d < best_d: best_d = d; best = c
+	return best
+
+
+func _best_connected() -> Object:
+	# Dress the Line pays per BODY it touches (the named one plus its adjacent
+	# allies), so the target is the best-connected creature, not the biggest.
+	var best: Object = null
+	var best_s := -1
+	for c in combat._all_player_creatures():
+		if not is_instance_valid(c) or c.current_hp <= 0: continue
+		var pos: Dictionary = combat._find_creature_position(c)
+		if pos.is_empty(): continue
+		var n := 0
+		for a in combat._adjacent_creatures(false, int(pos.row), int(pos.lane)):
+			if a != null and is_instance_valid(a) and a.current_hp > 0: n += 1
+		# Ties to the body with the most ATK riding on the extra HP.
+		var s: int = n * 100 + c.effective_atk()
+		if s > best_s: best_s = s; best = c
+	return best
+
+
+func _wounded_front() -> Object:
+	# Change Step is a retreat: pull the most badly hurt FRONT body out of the
+	# line (it also gains +1 HP). Nobody hurt in front = hold the card.
+	var best: Object = null
+	var best_missing := 0
+	for lane in range(combat.LANES_PER_ROW):
+		var c = combat._row_array(false, combat.ROW_FRONT)[lane]
+		if c == null or not is_instance_valid(c) or c.current_hp <= 0: continue
+		var missing: int = int(c.card_data.get("hp", c.current_hp)) - int(c.current_hp)
+		if missing > best_missing: best_missing = missing; best = c
 	return best
 
 

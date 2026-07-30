@@ -11,7 +11,7 @@ func _name(id: String) -> String:
 func _initialize() -> void:
 	var draftable := ["starter", "common", "uncommon", "rare"]
 
-	# resolved-art-path → { "draft": [ids], "enemy": [ids], "type": "creature"/"spell" }
+	# resolved-art-path → { "draft": [ids], "enemy": [ids], "type": card type }
 	var groups: Dictionary = {}
 	var total := 0
 	for id in CardDB.CARD_POOL.keys():
@@ -21,7 +21,7 @@ func _initialize() -> void:
 			continue   # not real draft/enemy portraits
 		total += 1
 		var tex: Texture2D = null
-		if ctype == "spell":
+		if ctype in ["spell", "armament"]:
 			tex = CardArtAliases.try_load_spell_art(id)
 		else:
 			tex = CardArtAliases.try_load_creature_art(id)

@@ -143,6 +143,9 @@ func _fight(hero: String, enc_id: String, etype: String) -> Dictionary:
 	RS.start_new_run(hero, 0, 4242)
 	RS.current_encounter_id = enc_id
 	RS.current_node_type = etype if etype in ["combat", "elite", "boss"] else "combat"
+	# See _probe_autorun: without the act flag, get_act() answers 1 and
+	# act-2/act-3 kits are scaled down to act-1 strength before the fight.
+	RS.current_act_idx = clampi(int(EDB.get_encounter(enc_id).get("act", 1)), 1, 3) - 1
 	if _draft:
 		for cid in DRAFT_PACKAGE:
 			RS.add_card(cid)

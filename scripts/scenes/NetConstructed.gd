@@ -28,7 +28,7 @@ var _saved_option: OptionButton   # saved-deck picker
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "reward")
-	AudioBank.play_music_random(["map_c", "map_d", "rest_c"])  # muster pool
+	AudioBank.play_music_random(["net_lobby", "net_lobby_b", "rest_c"])  # muster pool
 
 	if not NetMatch.is_connected_to_peer():
 		get_tree().change_scene_to_file(MENU_SCENE)
@@ -46,6 +46,9 @@ func _ready() -> void:
 	_build_scaffold()
 	_refresh_all()
 	_install_net_chrome()
+	# Every net game opens with the shared arsenal stage (3 relics + 2 potions);
+	# the overlay sits above the deck builder until the picks are made.
+	_begin_arsenal()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -84,66 +87,39 @@ func _build_scaffold() -> void:
 
 	_root.add_child(GameTheme.make_screen_title("BUILD YOUR WARBAND", GILT_BRIGHT))
 
-	_header = GameTheme.make_label("Pick any 20 cards from the muster roll.", 17, IVORY)
+	_header = GameTheme.make_label("Choose any 20 cards from the full card pool.", 17, IVORY)
 	_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_root.add_child(_header)
 
-	# Two columns: pool (left) and current deck (right).
+	# Two column plates: the muster roll (left) and the working warband (right).
 	var cols := HBoxContainer.new()
-	cols.add_theme_constant_override("separation", 28)
+	cols.add_theme_constant_override("separation", 22)
 	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_root.add_child(cols)
 
 	# ── Pool column ──
-	var pool_col := VBoxContainer.new()
-	pool_col.add_theme_constant_override("separation", 6)
-	pool_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	pool_col.size_flags_stretch_ratio = 1.4
-	cols.add_child(pool_col)
-
-	var pool_hdr := GameTheme.make_label("MUSTER ROLL", 15, GILT_BRIGHT)
-	pool_col.add_child(pool_hdr)
-
-	var pool_scroll := ScrollContainer.new()
-	pool_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	pool_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	pool_col.add_child(pool_scroll)
-
-	_pool_box = HFlowContainer.new()
-	_pool_box.add_theme_constant_override("h_separation", 10)
-	_pool_box.add_theme_constant_override("v_separation", 10)
-	_pool_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	pool_scroll.add_child(_pool_box)
+	var pool := _make_builder_column("CARD POOL", 1.4)
+	cols.add_child(pool.panel)
+	_pool_box = pool.flow
 	# Streamed bake-then-build (see _populate_pool) so the ~N Card2D thumbnails come
 	# in cheap (baked) and top-down instead of hitching the frame as live layouts.
 	_populate_pool()
 
 	# ── Deck column ──
-	var deck_col := VBoxContainer.new()
-	deck_col.add_theme_constant_override("separation", 6)
-	deck_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	cols.add_child(deck_col)
+	var deck := _make_builder_column("WARBAND  0 / %d" % _target, 1.0)
+	cols.add_child(deck.panel)
+	_deck_count_lbl = deck.header
+	_deck_box = deck.flow
 
-	_deck_count_lbl = GameTheme.make_label("WARBAND  0 / %d" % _target, 15, IVORY)
-	deck_col.add_child(_deck_count_lbl)
-
-	var deck_scroll := ScrollContainer.new()
-	deck_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	deck_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	deck_col.add_child(deck_scroll)
-
-	_deck_box = HFlowContainer.new()
-	_deck_box.add_theme_constant_override("h_separation", 8)
-	_deck_box.add_theme_constant_override("v_separation", 8)
-	_deck_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	deck_scroll.add_child(_deck_box)
+	# Running cost histogram — the build readout that earns the column's air.
+	(deck.col as VBoxContainer).add_child(_make_curve_strip())
 
 	# Deck-tools row.
 	var tools := HBoxContainer.new()
 	tools.add_theme_constant_override("separation", 10)
-	deck_col.add_child(tools)
+	(deck.col as VBoxContainer).add_child(tools)
 	var fill_btn := GameTheme.make_themed_button("FILL RANDOM",
-		Color(0.20, 0.24, 0.34), Vector2(140, 32), 13)
+		Color(0.20, 0.17, 0.13), Vector2(140, 32), 13)
 	fill_btn.pressed.connect(_on_fill_random)
 	tools.add_child(fill_btn)
 	var clear_btn := GameTheme.make_themed_button("CLEAR",
@@ -155,22 +131,20 @@ func _build_scaffold() -> void:
 	# LOAD / DELETE to reuse one without drafting or rebuilding.
 	var saved := HBoxContainer.new()
 	saved.add_theme_constant_override("separation", 6)
-	deck_col.add_child(saved)
-	_name_field = LineEdit.new()
-	_name_field.placeholder_text = "Deck name"
-	_name_field.custom_minimum_size = Vector2(120, 30)
-	if GameTheme.font_body:
-		_name_field.add_theme_font_override("font", GameTheme.font_body)
+	(deck.col as VBoxContainer).add_child(saved)
+	_name_field = _make_ink_field("", 120, "Deck name")
 	saved.add_child(_name_field)
 	var save_btn := GameTheme.make_themed_button("SAVE",
-		Color(0.18, 0.30, 0.22), Vector2(72, 32), 14)
+		Color(0.20, 0.17, 0.13), Vector2(72, 32), 14)
 	save_btn.pressed.connect(_on_save_deck)
 	saved.add_child(save_btn)
 	_saved_option = OptionButton.new()
-	_saved_option.custom_minimum_size = Vector2(140, 30)
+	_saved_option.custom_minimum_size = Vector2(150, 32)
+	_saved_option.fit_to_longest_item = false
+	_style_option_chip(_saved_option)
 	saved.add_child(_saved_option)
 	var load_btn := GameTheme.make_themed_button("LOAD",
-		Color(0.20, 0.24, 0.34), Vector2(72, 32), 14)
+		Color(0.20, 0.17, 0.13), Vector2(72, 32), 14)
 	load_btn.pressed.connect(_on_load_deck)
 	saved.add_child(load_btn)
 	var del_btn := GameTheme.make_themed_button("DEL",
@@ -179,21 +153,20 @@ func _build_scaffold() -> void:
 	saved.add_child(del_btn)
 	_refresh_saved_options()
 
-	_root.add_child(GameTheme.make_separator(
-		Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.30), 500.0))
-
 	# Bottom: READY + status.
 	var bottom := HBoxContainer.new()
 	bottom.alignment = BoxContainer.ALIGNMENT_CENTER
 	bottom.add_theme_constant_override("separation", 18)
 	_root.add_child(bottom)
 
+	# Ember commit tile, matching every other skirmish screen. (Audit 2026-07-21.)
 	_ready_btn = GameTheme.make_themed_button("READY",
-		Color(0.18, 0.36, 0.18), Vector2(180, 44), 17)
+		Color(0.34, 0.22, 0.08), Vector2(180, 44), 17)
 	_ready_btn.pressed.connect(_on_ready_pressed)
 	bottom.add_child(_ready_btn)
 
 	_status = GameTheme.make_label("", 16, ASH)
+	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_root.add_child(_status)
 
 
@@ -390,6 +363,12 @@ func _refresh_deck_panel() -> void:
 		if ca != cb:
 			return ca < cb
 		return String(CardDB.get_card_data(a).get("name", a)) < String(CardDB.get_card_data(b).get("name", b)))
+	if ids.is_empty():
+		var hint := GameTheme.make_label(
+			"Click cards in the pool to add them to your deck.", 14, ASH)
+		hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_deck_box.add_child(hint)
 	for id in ids:
 		var n := int(_counts[id])
 		if n <= 0:
@@ -410,6 +389,7 @@ func _refresh_deck_panel() -> void:
 
 
 func _update_ready() -> void:
+	_refresh_curve(_deck)
 	if _deck_count_lbl != null:
 		_deck_count_lbl.text = "WARBAND  %d / %d" % [_deck.size(), _target]
 		_deck_count_lbl.add_theme_color_override("font_color",
@@ -441,7 +421,9 @@ func _on_ready_pressed() -> void:
 		SkirmishState.add_card_to(SkirmishState.local_index, id)
 	# Ship the full deck to the peer (same "finished" contract as the draft).
 	NetMatch.send_draft_event({"t": "finished",
-		"cards": SkirmishState.local_slot().deck.duplicate()})
+		"cards": SkirmishState.local_slot().deck.duplicate(),
+		"relics": SkirmishState.local_slot().relics.duplicate(),
+		"potions": SkirmishState.local_slot().potions.duplicate()})
 	# Bake the sealed warband's textures behind the waiting screen (idle time).
 	ScenePreload.warm_card_ids(_deck, true)
 	if _ready_btn != null:
@@ -456,6 +438,10 @@ func _on_draft_event(event: Dictionary) -> void:
 		"finished":
 			_remote_finished = true
 			_store_opponent_deck(event.get("cards", []))
+			var opp_slot := SkirmishState.get_slot(SkirmishState.opponent_index())
+			if opp_slot != null:
+				opp_slot.relics = event.get("relics", [])
+				opp_slot.potions = event.get("potions", [])
 			_update_status()
 			_maybe_begin_combat()
 
@@ -499,7 +485,7 @@ func _on_peer_lost(_id: int = 0) -> void:
 	if _root == null:
 		return
 	if _header != null:
-		_header.text = "Opponent disconnected."
+		_header.text = "Opponent disconnected — the match is off."
 		_header.add_theme_color_override("font_color", RED_WARN)
 	if _status != null:
 		_status.text = ""

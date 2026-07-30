@@ -1,6 +1,8 @@
 extends Node
 ## RunState.gd — autoload singleton. Holds the current run's persistent data.
-## Generates a branching map across 3 acts. Tracks deck, relics, gold, upgrades.
+## Owns run persistence/navigation. CampaignMapGenerator builds map topology.
+
+const CampaignMapGenerator = preload("res://scripts/campaign/CampaignMapGenerator.gd")
 
 # ── Hero ──
 var hero_max_hp: int = 30
@@ -38,10 +40,18 @@ var creature_kills: Dictionary = {}
 var fallen: Array = []
 
 # Kill thresholds for the veterancy milestones.
-const VETERAN_EPITHET_KILLS := 3   # earns a name
+#
+# THE LADDER MOVED FORWARD (2026-07-30). The choosing rung used to sit at 10
+# kills, which measured out to "most runs never see it": a card has to survive
+# and win ten separate clashes, and the reward for doing so was the first time
+# the player got to say anything about it. So the CHOICE moved to the first rung
+# and a second, tribe-shaped choice took over the tenth — the front of the ladder
+# is where a decision changes how the rest of the run is played.
+const VETERAN_EPITHET_KILLS := 3   # earns a name AND the first war school
 const VETERAN_RANK_KILLS := 6      # earns +1/+1
-const VETERAN_SCHOOL_KILLS := 10   # earns the war school — a CHOSEN keyword
-# (Combat offers Armored/Swift/Thorns; the pick writes a "war_school" mod
+const VETERAN_DOCTRINE_KILLS := 10 # earns the tribe's doctrine — a 2nd chosen keyword
+# (Combat offers Armored/Swift/Thorns at the first rung and the creature's own
+# tribe doctrine at the third; each pick writes a "war_school" / "doctrine" mod
 # entry so it folds like any other permanent card change and never re-asks.)
 # Epithet table — deterministic per uid (hash pick), so a name never rerolls
 # across save/load. Written in the campaign's multi-register voice.
@@ -54,6 +64,23 @@ const VETERAN_EPITHETS: Array[String] = [
 
 # ── Relics ──
 var relics: Array[String] = []
+# Run-wide General tally (unlike holds_broken_in_act, this never resets between
+# acts). Heads on Pikes reads it, and its offer gate requires at least one.
+var generals_broken_run: int = 0
+# The Articles of War is chosen after acquisition on the map. Empty means the
+# choice is still pending; Combat never applies a discount until it is set.
+var articles_of_war_tribe: String = ""
+# ── Season winds (2026-07-21) — the run's draft weather. Two tribes roll
+# "mustering this season" at run start (seeded off run_seed, so a daily or
+# custom-seed march deals every player the same season). Recruit's affinity
+# scoring leans slates toward them, so two runs of the same hero walk
+# different roads. Announced on the war chest and at each muster. Empty on
+# legacy saves — the lean simply doesn't apply.
+var season_tribes: Array = []
+# The tribe declared at THE MUSTER. Empty only on a legacy v4 save that began
+# before banners existed; new runs always normalize to BannerDB.DEFAULT_BANNER.
+var current_banner_tribe: String = ""
+
 # Per-act choice stash for "Each act, pick X" relics. The MapView picker writes
 # the choice + the act it was made for; a mismatch with get_act() re-prompts at
 # the start of the next act. Empty string = no choice made yet this act.
@@ -88,6 +115,16 @@ var current_bridge: bool = false
 # (node.wayside_id) so the chart can advertise the stop; copied here by
 # visit_node so the Wayside scene knows which screen to build.
 var current_wayside_id: String = ""
+# Which SET-PIECE (named action) a visited hold is, if any — SetPieceDB id,
+# "" for an ordinary hold. Assigned at map gen (node.setpiece_id) so the chart
+# can advertise the ground before the player commits; copied here by
+# visit_node. A set-piece is a `combat` node wearing this field — the same
+# precedent as wayside_id / mutator_id — so every routing, save, medallion and
+# reward path keeps working untouched. See scripts/data/SetPieceDB.gd.
+var current_setpiece_id: String = ""
+# Named actions already carried this run, so the GameOver chronicle can list
+# them and a re-entered save never re-pays a trophy.
+var setpieces_carried: Array[String] = []
 # Run statistics — surfaced on the GameOver recap screen. Reset by
 # start_new_run, updated by Combat on each victory / death, persisted in
 # the save file so a quit-mid-run resume keeps the running counts.
@@ -95,6 +132,10 @@ var fights_won: int = 0
 var mutators_survived: Array[String] = []
 var cause_of_death: String = ""  # encounter name that killed the player
 var events_seen: Array[String] = []
+# Stable, choice-aware continuity flags. `events_seen` remains the room-level
+# anti-repeat/history signal; these flags are only written after a player
+# commits the specific action a later callback refers to.
+var event_choice_flags: Array[String] = []
 # Fight-spoils potion pity ladder: +10% drop chance per dry fight, reset on a
 # drop (Combat victory payout). Persisted so save/reload can't reroll it.
 var potion_drop_misses: int = 0
@@ -106,11 +147,11 @@ var potion_drop_misses: int = 0
 var muster_rerolls_left: int = 0
 
 # ── Successor Wars: rivals & kingdoms ──
-# The three rival lords this run marches on (hero ids; index = act_idx) and
-# the spared fourth who waits on the throne as the finale amalgam. act_faction
-# mirrors rival_lords with each lord's faction id — the kingdom each act
-# takes place in. All dealt by _select_rivals() from run_seed; empty arrays
-# mean a legacy save (pre-conquest), and consumers must fall back gracefully.
+# Three road rivals (index = act_idx) plus the lord who CURRENTLY waits at the
+# throne. THE NEXT MARCH may swap that candidate back onto the road; whichever
+# lord remains unchosen after the second choice becomes the true finale.
+# act_faction always mirrors rival_lords. Empty arrays mean a legacy save
+# (pre-conquest), and consumers must fall back gracefully.
 var rival_lords: Array[String] = []
 var finale_rival: String = ""
 var act_faction: Array[String] = []
@@ -118,6 +159,9 @@ var act_faction: Array[String] = []
 # HOLDS_TO_OPEN_LORD broken holds (incremented by Combat on victory, reset by
 # advance_act). Kept in RunState so it saves with the run.
 var holds_broken_in_act: int = 0
+# Run-wide copy for balance telemetry. Unlike the gate counter above, this does
+# not reset between kingdoms.
+var holds_broken_run: int = 0
 # The boss gate (§15.1 #5): the keep is visible from the first step but
 # locked until this many holds have fallen. Map generation guarantees every
 # route to the keep carries at least this many fight nodes (no softlock).
@@ -173,6 +217,9 @@ var pawned_cards: Array = []
 # MainMenu right after start_new_run; persisted with the run save.
 var is_daily_run: bool = false
 var daily_mutator_id: String = ""
+# Calendar date whose seed opened this Daily March. Persisting the origin lets a
+# run finished after midnight update the attempt it actually belongs to.
+var daily_date: String = ""
 # Ascension level chosen for this run (0..MetaState.unlocked_ascension).
 # Set in start_new_run; never modified mid-run.
 var current_ascension: int = 0
@@ -187,11 +234,11 @@ var current_ascension: int = 0
 #   A5 Combat._scale_enemy_hp   — lords' keep faces +25% HP (bosses ONLY)
 const ASCENSION_RULES: Array[String] = [
 	"",
-	"Pressed marches — the enemy commits reserves one round earlier.",
-	"Short rations — camp rest heals 60% of what's missing, not to full.",
-	"The ledger follows — begin each act with a War-Debt in your deck.",
-	"Veteran garrisons — Generals' and lords' creatures enter with +1 ATK.",
-	"Kings at bay — lords defend their keeps with 25% more HP.",
+	"Enemy reinforcements arrive one round earlier.",
+	"Camp Rest heals 60% of missing HP instead of healing to full.",
+	"Begin each act with a War-Debt in your deck.",
+	"General and lord creatures enter with +1 ATK.",
+	"Lord fights have 25% more HP.",
 ]
 
 
@@ -210,11 +257,11 @@ const ACTS: int = 3
 # stops per gap, the Inscryption cadence — every gap between holds is a
 # pair of waysides drawn from event/verb/recruit/shop/treasure).
 # _generate_act_map enforces a 24–36-site window with an acceptance loop.
-const MAP_WIDTH: int = 7
-const MAP_HEIGHT: int = 18
-const BOSS_ROW: int = 17
-const REST_ROW: int = 16
-const NUM_PATHS: int = 3
+const MAP_WIDTH: int = CampaignMapGenerator.MAP_WIDTH
+const MAP_HEIGHT: int = CampaignMapGenerator.MAP_HEIGHT
+const BOSS_ROW: int = CampaignMapGenerator.BOSS_ROW
+const REST_ROW: int = CampaignMapGenerator.REST_ROW
+const NUM_PATHS: int = CampaignMapGenerator.NUM_PATHS
 
 # Row skeleton (Kaycee's-Mod model, 2026-06-12; lengthened 2026-07-07): every
 # row carries a fixed BEAT — fight rows alternate with wayside PAIRS — so the
@@ -226,8 +273,8 @@ const NUM_PATHS: int = 3
 # too short for the deck, veterancy, and relics to snowball. Now 18 rows /
 # 7 combats: 4 plain holds + 2 elite spikes + keep, all extra length being
 # between-fights tissue. See _assign_node_types for the band content.
-const FIGHT_ROWS: Array[int] = [0, 3, 9, 15]   # plain holds; R6 & R12 = elite bands
-const ELITE_ROWS: Array[int] = [6, 12]          # the act's two mid-road spikes
+const FIGHT_ROWS: Array[int] = CampaignMapGenerator.FIGHT_ROWS
+const ELITE_ROWS: Array[int] = CampaignMapGenerator.ELITE_ROWS
 
 # First-run on-ramp (CLARITY_AUDIT P1#5): on a player's very first campaign
 # (MetaState.total_runs == 0 — no run has ever been finished), the Act-1
@@ -238,7 +285,7 @@ const ELITE_ROWS: Array[int] = [6, 12]          # the act's two mid-road spikes
 # muddy first trades, no resource/heal/regen trap, and a trivial 1/1 Swift
 # reinforcement. The matching "drag a creature onto a lane" coach tip is
 # wired separately in Combat (P1#5, other lane).
-const FIRST_RUN_OPENER_ENCOUNTER: String = "goblin_scouts"
+const FIRST_RUN_OPENER_ENCOUNTER: String = CampaignMapGenerator.FIRST_RUN_OPENER_ENCOUNTER
 
 
 func get_act() -> int:
@@ -289,6 +336,36 @@ func seed_from_string(s: String) -> int:
 #   hero.deck (unlocked by a victory at Ascension 4+).
 var pending_signature_relic: String = ""
 var pending_deck_variant: String = ""
+# Declared banner on the still-reversible setup screen. Consumed at commit.
+var pending_banner_tribe: String = ""
+
+
+# What the LIVE run actually mustered with, recorded by start_new_run as the
+# pending picks are consumed. The pending fields are cleared at run start, so
+# without these the muster choice is unrecoverable — which is what made MARCH
+# AGAIN quietly drop unlocked variants.
+var current_signature_relic: String = ""
+var current_deck_variant: String = ""
+
+## Pure opener composition used by THE ROLL preview and start_new_run alike.
+## Keeping one function on both sides of the commit boundary is what makes the
+## visible eleven-card roll an honest preview rather than a second deck recipe.
+static func opening_deck_for(hero_id: String, use_alt_deck: bool = false,
+		banner_tribe: String = BannerDB.DEFAULT_BANNER) -> Array[String]:
+	var hero: Dictionary = HeroDB.get_hero(hero_id)
+	var source: Array = hero.get("deck", CardDB.STARTER_DECK)
+	if use_alt_deck:
+		var alt: Dictionary = hero.get("deck_alt", {})
+		if not alt.is_empty():
+			source = alt.get("deck", source)
+	var out: Array[String] = []
+	for cid in source:
+		out.append(String(cid))
+	var banner_card := BannerDB.card_id(BannerDB.normalize(banner_tribe))
+	if banner_card != "":
+		out.append(banner_card)
+	return out
+
 
 
 func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int = 0) -> void:
@@ -307,10 +384,15 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	pawned_cards = []
 	is_daily_run = false
 	daily_mutator_id = ""
+	daily_date = ""
 	map_plate_cache.clear()
 	# Campaign memory starts blank — a new march, a fresh ledger.
 	creature_kills = {}
 	fallen = []
+	generals_broken_run = 0
+	articles_of_war_tribe = ""
+	current_banner_tribe = ""
+	season_tribes = []
 	# Default to player's highest unlocked tier if caller didn't pick one.
 	if ascension < 0:
 		current_ascension = MetaState.unlocked_ascension
@@ -333,13 +415,32 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	deck_uids = []
 	card_upgrades = {}
 	_next_uid = 0
-	# Muster options: the A4+ alternate deck swaps the whole 10-card list; the
-	# first-win alternate signature relic swaps the opening relic. Both are
-	# consumed here (and cleared) so an abandoned setup can't leak into a later
-	# rematch or legacy start_new_run call.
-	var deck_list: Array = hero.get("deck", CardDB.STARTER_DECK)
-	if pending_deck_variant == "alt" and hero.has("deck_alt"):
-		deck_list = hero.deck_alt.get("deck", deck_list)
+	# Muster options are consumed here and cleared so an abandoned setup cannot
+	# leak into a later rematch or legacy start_new_run call. The first win opens
+	# the authored pair; mastery is the later permission to split that pair.
+	# Direct callers pass through the same authorization as the setup screen.
+	# First-win authorization is a bound doctrine; A4 mastery opens the two axes.
+	# Normalize here as well as in MainMenu so direct callers cannot smuggle a
+	# pre-mastery mixed loadout into a run.
+	var alt_deck: Dictionary = hero.get("deck_alt", {})
+	var alt_relic := String(hero.get("relic_alt", ""))
+	var doctrine_unlocked := MetaState.hero_wins(hero_key) >= 1 \
+		and not alt_deck.is_empty() and alt_relic != ""
+	var mastery_unlocked := doctrine_unlocked \
+		and MetaState.hero_best_asc(hero_key) >= 4
+	var requested_alt_deck := pending_deck_variant == "alt"
+	var requested_alt_relic := pending_signature_relic == alt_relic
+	var use_alt_deck := false
+	var use_alt_relic := false
+	if mastery_unlocked:
+		use_alt_deck = requested_alt_deck
+		use_alt_relic = requested_alt_relic
+	elif doctrine_unlocked and requested_alt_deck and requested_alt_relic:
+		use_alt_deck = true
+		use_alt_relic = true
+
+	var declared_banner := BannerDB.normalize(pending_banner_tribe)
+	var deck_list: Array[String] = opening_deck_for(hero_key, use_alt_deck, declared_banner)
 	for id in deck_list:
 		add_card(id)
 	# A3 "The ledger follows" — every act opens with a War-Debt in the deck
@@ -347,16 +448,21 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	if asc_active(3):
 		add_card("war_debt")
 	relics = []
-	var hero_relic: String = hero.get("relic", "")
-	if pending_signature_relic != "" \
-			and not RelicDB.get_relic(pending_signature_relic).is_empty():
-		hero_relic = pending_signature_relic
+	var hero_relic := alt_relic if use_alt_relic \
+		else String(hero.get("relic", ""))
 	if hero_relic != "":
 		relics.append(hero_relic)
+	# Record the resolved choice before clearing the pending fields. Save/load
+	# and MARCH AGAIN use these canonical values rather than trying to infer the
+	# doctrine from a deck that may already have transformed during the run.
+	current_signature_relic = hero_relic
+	current_deck_variant = "alt" if use_alt_deck else ""
 	pending_signature_relic = ""
 	pending_deck_variant = ""
+	current_banner_tribe = declared_banner
 	current_floor = 0
 	current_act_idx = 0
+	pending_banner_tribe = ""
 	map_position = {"row": -1, "col": -1}
 	current_encounter_id = ""
 	current_node_type = ""
@@ -364,19 +470,24 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	current_terrain = ""
 	current_bridge = false
 	current_wayside_id = ""
+	current_setpiece_id = ""
+	setpieces_carried = []
 	fights_won = 0
 	mutators_survived = []
 	cause_of_death = ""
 	events_seen = []
+	event_choice_flags = []
 	potion_drop_misses = 0
 	muster_rerolls_left = 0
 	holds_broken_in_act = 0
+	holds_broken_run = 0
 	finale_stage = 0
 	run_active = true
 	# seed_override of 0 means "roll a fresh random seed". Non-zero values come
 	# from daily_seed() / seed_from_string() so the map is reproducible.
 	run_seed = seed_override if seed_override != 0 else randi()
 	_select_rivals()
+	_roll_season()
 	CardTextureCache.clear()
 	_generate_map()
 	# PlayLog: open a per-run telemetry session now that deck + relics are built.
@@ -385,11 +496,10 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 		"deck": deck.duplicate(), "relics": relics.duplicate()})
 
 
-## Successor Wars rival deal. The pool is every hero the player didn't pick;
-## a run_seed-derived shuffle deals the first three as act bosses (index =
-## act_idx) and spares the fourth for the throne. Seeded order for now — the
-## player-chosen order screen (CONQUEST_REDESIGN.md §15.1 #4) will re-deal
-## the remaining acts at each act transition once it exists.
+## The seeded deal fixes Act 1 so the existing run opening needs no extra modal.
+## Two provisional road rivals and one provisional finale candidate complete
+## the deal. After Act 1, THE NEXT MARCH offers all three living lords; after
+## Act 2 it offers both survivors. The last unchosen lord takes the throne.
 func _select_rivals() -> void:
 	rival_lords = []
 	act_faction = []
@@ -409,11 +519,85 @@ func _select_rivals() -> void:
 	# Sub-seed (same trick as _generate_act_map) so the rival deal and the map
 	# generator draw from independent streams of the same run seed.
 	rng.seed = run_seed ^ 0x52495641
-	_shuffle_array(pool, rng)
+	CampaignMapGenerator.shuffle_array(pool, rng)
 	for i in range(ACTS):
 		rival_lords.append(String(pool[i]))
 		act_faction.append(HeroDB.get_faction(String(pool[i])))
 	finale_rival = String(pool[ACTS])
+
+
+## Pure rival deal for THE MUSTER preview. It deliberately mirrors
+## _select_rivals' sub-seed and shuffle; the focused probe compares both sides
+## so a future drift cannot ship a false preview.
+static func preview_rival_deal(hero_id: String, seed_value: int) -> Dictionary:
+	var exclude: String = hero_id if HeroDB.has_hero(hero_id) else HeroDB.DEFAULT_HERO
+	var pool: Array = []
+	for hid in HeroDB.HERO_ORDER:
+		if hid != exclude:
+			pool.append(hid)
+	if pool.size() < ACTS + 1:
+		return {"rival_lords": [], "act_faction": [], "finale_rival": ""}
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_value ^ 0x52495641
+	CampaignMapGenerator.shuffle_array(pool, rng)
+	var rivals: Array[String] = []
+	var factions: Array[String] = []
+	for i in range(ACTS):
+		var hid := String(pool[i])
+		rivals.append(hid)
+		factions.append(HeroDB.get_faction(hid))
+	return {
+		"rival_lords": rivals, "act_faction": factions,
+		"finale_rival": String(pool[ACTS]),
+	}
+
+
+# Season winds source data. Pool = the six live tribes; names are the prose
+# forms the announce line uses (COPY_STYLE: name things plainly).
+const SEASON_TRIBE_POOL: Array = ["soldier", "beast", "dead", "warlock", "bastion", "stray"]
+const SEASON_TRIBE_NAMES := {"soldier": "Soldiers", "beast": "Beasts",
+	"dead": "the Dead", "warlock": "Warlocks", "bastion": "Bastions", "stray": "Strays"}
+
+
+## Deal the run's season: two distinct tribes muster strong. Sub-seeded off
+## run_seed (same trick as _select_rivals) so seeded/daily runs reproduce it.
+func _roll_season() -> void:
+	season_tribes = preview_season_tribes(run_seed, current_banner_tribe)
+
+
+## Pure season deal shared by preview and commit. A valid declaration is fixed
+## in slot zero; the war deals a different second tribe from the same sub-seed.
+static func preview_season_tribes(seed_value: int, declared_tribe: String = "") -> Array:
+	var pool: Array = SEASON_TRIBE_POOL.duplicate()
+	var declared := declared_tribe if declared_tribe in SEASON_TRIBE_POOL else ""
+	if declared != "":
+		pool.erase(declared)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_value ^ 0x5345534F
+	CampaignMapGenerator.shuffle_array(pool, rng)
+	if declared != "":
+		return [declared, pool[0]]
+	return [pool[0], pool[1]]
+
+
+
+## The announce sentence for the war chest / muster screens. "" when no
+## season is dealt (legacy save) so call sites can simply hide the label.
+func season_line() -> String:
+	if season_tribes.size() < 2:
+		return ""
+	var a: String = String(SEASON_TRIBE_NAMES.get(season_tribes[0], season_tribes[0]))
+	var b: String = String(SEASON_TRIBE_NAMES.get(season_tribes[1], season_tribes[1]))
+	return "This season, %s and %s appear more often at Recruit Camps." % [a, b]
+
+
+## Format a pending season without mutating the live run.
+static func season_line_for(tribes: Array) -> String:
+	if tribes.size() < 2:
+		return ""
+	var a: String = String(SEASON_TRIBE_NAMES.get(tribes[0], tribes[0]))
+	var b: String = String(SEASON_TRIBE_NAMES.get(tribes[1], tribes[1]))
+	return "This season, %s and %s appear more often at Recruit Camps." % [a, b]
 
 
 ## Faction id of the kingdom the current act takes place in ("" on legacy
@@ -431,46 +615,96 @@ func get_act_rival() -> String:
 	return ""
 
 
-## Successor Wars: the player picks which remaining rival to march on next
-## (boss Reward, between acts — the player-chosen rival order). Swaps that
-## lord into the next act's slot and keeps act_faction mirrored. The act maps
-## are all baked up-front at start_new_run, and visit_node reads each boss
-## node's BAKED encounter_id — so the swapped acts' boss nodes must be
-## re-stamped here, or the map dresses in the new rival's colours while the
-## fight stays the originally-dealt lord (the choice would be a no-op).
-func choose_next_rival(hero_id: String) -> void:
+## Every still-living rival offered by THE NEXT MARCH. Completed act slots are
+## excluded; the provisional finale is included so the player never makes a
+## fake two-way choice while a third living kingdom is silently withheld.
+func get_next_march_candidates() -> Array[String]:
+	var out: Array[String] = []
 	var next_idx := current_act_idx + 1
 	for i in range(next_idx, rival_lords.size()):
+		var lord := String(rival_lords[i])
+		if lord != "" and lord != current_hero_id and not out.has(lord):
+			out.append(lord)
+	if finale_rival != "" and finale_rival != current_hero_id \
+			and not out.has(finale_rival):
+		out.append(finale_rival)
+	return out
+
+
+## Choose which living rival rules the next act. Choosing the provisional
+## finale swaps the displaced next-act lord onto the throne. Then all untouched
+## future acts are re-dealt from their now-current factions, not just new bosses.
+func choose_next_rival(hero_id: String) -> void:
+	var next_idx := current_act_idx + 1
+	var candidates := get_next_march_candidates()
+	if next_idx < 0 or next_idx >= rival_lords.size() \
+			or not candidates.has(hero_id):
+		push_warning("RunState: choose_next_rival('%s') not in living deal" % hero_id)
+		return
+
+	var displaced := String(rival_lords[next_idx])
+	var road_idx := -1
+	for i in range(next_idx, rival_lords.size()):
 		if rival_lords[i] == hero_id:
-			if i != next_idx:
-				rival_lords[i] = rival_lords[next_idx]
-				rival_lords[next_idx] = hero_id
-				act_faction[i] = HeroDB.get_faction(rival_lords[i])
-				act_faction[next_idx] = HeroDB.get_faction(hero_id)
-				# Both swapped slots changed rulers — re-derive their boss kits.
-				_rebake_boss_node(next_idx)
-				_rebake_boss_node(i)
-			return
-	push_warning("RunState: choose_next_rival('%s') not in remaining deal" % hero_id)
+			road_idx = i
+			break
+	if road_idx >= 0:
+		rival_lords[next_idx] = hero_id
+		rival_lords[road_idx] = displaced
+	elif finale_rival == hero_id:
+		rival_lords[next_idx] = hero_id
+		finale_rival = displaced
+
+	_sync_act_factions()
+	_redeal_untouched_future_acts(next_idx)
 
 
-## Re-stamp one act's boss-node encounter_id from the CURRENT rival deal.
-## Needed after choose_next_rival swaps who rules an act post-generation:
-## visit_node reads the baked node id, not the live deal, so without this the
-## boss fight wouldn't match the chosen rival or the faction-skinned map.
-## act_idx is 0-based (map_data index); _boss_encounter_for_act takes 1-based.
+func _sync_act_factions() -> void:
+	act_faction = []
+	for lord in rival_lords:
+		act_faction.append(HeroDB.get_faction(String(lord)))
+
+
+## Re-deal only the future maps nobody has entered. The sub-seed depends on
+## run seed + act + ruler, so identical choices survive save/resume exactly.
+func _redeal_untouched_future_acts(first_idx: int) -> void:
+	var last_idx := mini(map_data.size(), rival_lords.size())
+	var generator = _make_map_generator()
+	for act_idx in range(first_idx, last_idx):
+		if not _act_map_is_untouched(act_idx):
+			push_warning("RunState: future act %d already touched; encounter deal preserved" \
+				% (act_idx + 1))
+			continue
+		var faction := String(act_faction[act_idx])
+		var rng := RandomNumberGenerator.new()
+		rng.seed = run_seed ^ 0x4D415243 ^ ((act_idx + 1) * 7919) \
+			^ seed_from_string("kingdom:" + faction)
+		generator.redeal_encounters(map_data[act_idx], act_idx + 1, rng)
+		map_plate_cache.erase(act_idx + 1)
+
+
+func _act_map_is_untouched(act_idx: int) -> bool:
+	if act_idx < 0 or act_idx >= map_data.size():
+		return false
+	for row in map_data[act_idx]:
+		for node in row:
+			if bool(node.get("visited", false)):
+				return false
+	return true
+
+
+## Compatibility helper for diagnostics that only restamp one boss. Normal
+## THE NEXT MARCH flow uses _redeal_untouched_future_acts above.
 func _rebake_boss_node(act_idx: int) -> void:
 	if act_idx < 0 or act_idx >= map_data.size():
 		return
-	# Deterministic local stream — only consulted by the stand-in fallback,
-	# which never fires while all five rival kits are authored, but keep it
-	# seeded so a thin-faction stand-in stays stable across re-bakes.
 	var rng := RandomNumberGenerator.new()
 	rng.seed = run_seed ^ (0x424F5353 + act_idx)
 	for row in map_data[act_idx]:
-		for n in row:
-			if String(n.get("type", "")) == "boss":
-				n["encounter_id"] = _boss_encounter_for_act(act_idx + 1, rng)
+		for node in row:
+			if String(node.get("type", "")) == "boss":
+				node["encounter_id"] = _make_map_generator().boss_encounter_for_act(
+					act_idx + 1, rng)
 				return
 
 
@@ -494,7 +728,7 @@ func end_run(victorious: bool) -> void:
 ## what order, who was spared, and how many holds the act had fallen.
 const _RUN_LOG_HEADER: String = ("ended_at,result,hero,ascension,seed,act," +
 	"floor,hp,max_hp,gold,fights_won,deck_size,relics,cause_of_death," +
-	"rival_act1,rival_act2,rival_act3,finale_rival,holds_broken")
+	"rival_act1,rival_act2,rival_act3,finale_rival,holds_broken_run")
 
 
 func _append_run_log(victorious: bool) -> void:
@@ -530,7 +764,7 @@ func _append_run_log(victorious: bool) -> void:
 		get_act(), current_floor, hero_hp, hero_max_hp, gold,
 		fights_won, deck.size(), relics.size(),
 		cause_of_death.replace(",", ";"),
-		r1, r2, r3, finale_rival, holds_broken_in_act])
+		r1, r2, r3, finale_rival, holds_broken_run])
 	f.close()
 
 
@@ -661,6 +895,24 @@ func get_kills(uid: int) -> int:
 	return int(creature_kills.get(uid, 0))
 
 
+func veteran_epithet_kills() -> int:
+	return 2 if has_relic("drill_book") else VETERAN_EPITHET_KILLS
+
+
+## The war school now rides the epithet rung — deliberately the SAME accessor, so
+## every existing call site (the tally line, the catch-up sweep, the kill handler)
+## moved with the ladder in one edit instead of thirteen.
+func veteran_school_kills() -> int:
+	return veteran_epithet_kills()
+
+
+## The tribe doctrine takes over the threshold the school vacated, drill_book
+## shave included, so the relic still shortens the whole ladder rather than only
+## its front half.
+func veteran_doctrine_kills() -> int:
+	return 7 if has_relic("drill_book") else VETERAN_DOCTRINE_KILLS
+
+
 ## The creature's earned name at VETERAN_EPITHET_KILLS — deterministic per uid
 ## so it never rerolls across save/load or re-draws.
 func veteran_epithet(uid: int) -> String:
@@ -701,7 +953,7 @@ func get_upgraded_card_data(deck_index: int) -> Dictionary:
 	# stack (folded above with the other upgrades).
 	if kills > 0 and d.get("type", "") == "creature":
 		d["veteran_kills"] = kills
-		if kills >= VETERAN_EPITHET_KILLS:
+		if kills >= veteran_epithet_kills():
 			d.name = String(d.name) + " " + veteran_epithet(uid)
 			# Letters Patent relic: the epithet comes with a grant of arms —
 			# +1/+1, folded here so every future draw wears the knighthood.
@@ -771,11 +1023,20 @@ func _apply_upgrade(d: Dictionary, upgrade: Dictionary) -> Dictionary:
 					and not d.keywords.has(upgrade.keyword):
 				d.keywords.append(upgrade.keyword)
 		"war_school":
-			# Veterancy rung 3 (10 kills): the keyword the player CHOSE for this
-			# soldier. Same fold as grant_kw; a separate path so "already
+			# Veterancy rung 1 (3 kills, was 10): the keyword the player CHOSE for
+			# this soldier. Same fold as grant_kw; a separate path so "already
 			# schooled" is unambiguous (a transferred banner must not eat the
 			# rung). An empty keyword is the honorary rank — the veteran already
 			# carried all three schools when the choice came up.
+			if d.type == "creature" and String(upgrade.get("keyword", "")) != "" \
+					and not d.keywords.has(upgrade.keyword):
+				d.keywords.append(upgrade.keyword)
+		"doctrine":
+			# Veterancy rung 3 (10 kills): the second chosen keyword, drawn from
+			# this creature's OWN tribe's doctrine rather than from the universal
+			# three. Folded identically and kept on its own path for the same
+			# reason war_school is — so "already has a doctrine" is a question with
+			# an unambiguous answer, and a school pick can never satisfy it.
 			if d.type == "creature" and String(upgrade.get("keyword", "")) != "" \
 					and not d.keywords.has(upgrade.keyword):
 				d.keywords.append(upgrade.keyword)
@@ -908,7 +1169,8 @@ func _apply_plus_upgrade(d: Dictionary) -> Dictionary:
 	# Tail-effect bonus fields that custom resolvers consult by name. These
 	# only matter if the card's resolver reads them — declaring them here is
 	# free for cards that don't (it's just a no-op merge).
-	for k in ["dmg_bonus", "slay_draw", "slay_gold", "slay_mana",
+	for k in ["dmg_bonus", "slay_draw", "slay_gold", "slay_mana", "atk_bonus",
+			"hp_bonus", "spell_ping_bonus", "extra_reveal", "doom_atk_bonus", "doom_tick",
 			"extra_draw", "extra_mana", "ricochet_hits"]:
 		if u.has(k):
 			d[k] = int(u[k])
@@ -967,12 +1229,18 @@ func _pandoras_box_transform() -> void:
 			rare_creatures.append(cid)
 	if rare_creatures.is_empty():
 		return
+	var transformed := 0
 	for i in deck.size():
 		var entry: String = deck[i]
 		var data: Dictionary = CardDB.get_card_data(entry)
 		if data.get("type", "") == "creature" and data.get("rarity", "") == "starter":
 			deck[i] = rare_creatures[randi() % rare_creatures.size()]
 			card_upgrades.erase(deck_uids[i])
+			transformed += 1
+	# Selling every starter before finding the Coffer should not turn a boss
+	# reward into blank cardboard. Its floor is one new rare body.
+	if transformed == 0:
+		add_card(rare_creatures[randi() % rare_creatures.size()])
 
 
 func _calling_bell_grant() -> void:
@@ -1015,6 +1283,18 @@ func gain_gold(amount: int) -> void:
 	if has_downside("no_gold"):
 		return
 	gold += amount
+
+
+func record_event_choice(flag: String) -> void:
+	var clean := flag.strip_edges()
+	if clean.is_empty() or event_choice_flags.has(clean):
+		return
+	event_choice_flags.append(clean)
+
+
+func has_event_choice(flag: String) -> bool:
+	var clean := flag.strip_edges()
+	return not clean.is_empty() and event_choice_flags.has(clean)
 
 
 ## Jittered fight reward (±25% around `base`) so payouts land on odd numbers, not fixed amounts.
@@ -1134,6 +1414,7 @@ func visit_node(row: int, col: int) -> void:
 			current_terrain = String(n.get("terrain", ""))
 			current_bridge = bool(n.get("bridge", false))
 			current_wayside_id = String(n.get("wayside_id", ""))
+			current_setpiece_id = String(n.get("setpiece_id", ""))
 			current_floor += 1
 			save_run()  # checkpoint: player is committing to enter a room
 			return
@@ -1268,6 +1549,7 @@ func advance_act() -> void:
 	current_terrain = ""
 	current_bridge = false
 	current_wayside_id = ""
+	current_setpiece_id = ""
 	# Per-act rest counters reset so the time-of-day shader tint (dusk → night)
 	# restarts each act, and Whetstone's "first rest of act" payoff re-arms.
 	rests_visited_in_act = 0
@@ -1314,6 +1596,7 @@ func enter_finale() -> void:
 	finale_stage = 1
 	current_encounter_id = "amalgam_" + finale_rival
 	current_mutator_id = ""
+	current_setpiece_id = ""
 	save_run()
 
 
@@ -1327,462 +1610,22 @@ func is_final_boss() -> bool:
 # ── Map generation ──
 
 func _generate_map() -> void:
-	map_data = []
-	var rng = RandomNumberGenerator.new()
-	rng.seed = run_seed
-	for act in range(1, ACTS + 1):
-		map_data.append(_generate_act_map(act, rng))
+	map_data = _make_map_generator().generate(run_seed, ACTS)
 
 
-## Generates a single act map:
-##   1. Walk NUM_PATHS paths from row 0 up to REST_ROW, ±1 column per step,
-##      with a no-crossing constraint and a 3x merge bias (trunk + branches).
-##   2. Stamp the Kaycee's-Mod row skeleton over the lattice — fight rows
-##      alternating with wayside bands; guarantees placed, not rolled
-##      (see _assign_node_types).
-##   3. Add a single boss node at the BOSS_ROW center, with every populated
-##      REST_ROW node connecting up to it.
-##   4. Walk through and assign encounter IDs to combat/elite/boss nodes.
+func _make_map_generator():
+	return CampaignMapGenerator.new(self, EncounterDB, MutatorDB, HeroDB, MetaState, SetPieceDB)
+
+
+# Diagnostic compatibility facades. Generation logic stays in the dedicated
+# object, while existing invariant probes can continue exercising one act.
 func _generate_act_map(act: int, rng: RandomNumberGenerator) -> Array:
-	# Acceptance loop: only acts with 24–36 sites (incl. boss) read as a
-	# campaign over the plate — fewer is degenerate, more re-grows the
-	# lattice. (Window scaled with the 2026-07-07 skeleton lengthening: 18 rows
-	# walk more stations than the old 12.) One value is drawn from the shared
-	# rng per act so later acts stay deterministic regardless of attempts.
-	var base_seed: int = rng.randi()
-	var flat: Array = []
-	for attempt in range(60):
-		var arng := RandomNumberGenerator.new()
-		arng.seed = base_seed + attempt * 7919
-		var grid: Array = []
-		for r in range(MAP_HEIGHT):
-			var row: Array = []
-			for c in range(MAP_WIDTH):
-				row.append(null)
-			grid.append(row)
-		_generate_paths(grid, arng)
-		_assign_node_types(grid, arng)
-		_add_boss_node(grid)
-		_assign_encounters(grid, act, arng)
-		flat = _flatten_grid(grid)
-		var n: int = 0
-		for row_nodes in flat:
-			n += (row_nodes as Array).size()
-		# Site-count window AND boss-gate guarantee: the worst route a player
-		# can walk must still pass HOLDS_TO_OPEN_LORD fight nodes, or the
-		# locked keep could softlock the act. (The skeleton makes the fight
-		# minimum 4 by construction — the DFS check stays as a tripwire.)
-		if n >= 24 and n <= 36 and _min_fights_to_rest(flat) >= HOLDS_TO_OPEN_LORD \
-				and _war_road_ok(flat):
-			return flat
-	return flat
+	return _make_map_generator().generate_act(act, rng)
 
 
-## The route-variance guarantee (2026-07-07): the optional third General
-## landed on a wide fight row (the war-road fork), AND at least one elite
-## band is ≥2 lanes so the mid-road spike can be dodged too. Lattices where
-## every route walks the same fights are rejected — that sameness is exactly
-## what this kills. Landing rules in _assign_node_types keep the extra spike
-## avoidable by construction (only rows with ≥2 lanes are eligible).
-func _war_road_ok(flat: Array) -> bool:
-	var extra := false
-	for r in FIGHT_ROWS:
-		if r >= flat.size():
-			continue
-		for nd in (flat[r] as Array):
-			if String(nd.type) == "elite":
-				extra = true
-	var wide_band := false
-	for r in ELITE_ROWS:
-		if r < flat.size() and (flat[r] as Array).size() >= 2:
-			wide_band = true
-	return extra and wide_band
-
-
-## Minimum number of combat/elite nodes along ANY root→rest-row route — the
-## fewest fights a player can reach the keep with. Memoized DFS over the DAG.
 func _min_fights_to_rest(flat: Array) -> int:
-	if flat.is_empty() or (flat[0] as Array).is_empty():
-		return 0
-	var memo: Dictionary = {}
-	var best: int = 999
-	for start in flat[0]:
-		best = mini(best, _min_fights_from(flat, 0, int(start.col), memo))
-	return best
+	return _make_map_generator().min_fights_to_rest(flat)
 
-
-func _min_fights_from(flat: Array, row: int, col: int, memo: Dictionary) -> int:
-	var node: Dictionary = _find_node_by_col(flat[row], col)
-	if node.is_empty():
-		return 999
-	var key: int = row * 100 + col
-	if memo.has(key):
-		return memo[key]
-	var self_cost: int = 1 if String(node.type) in ["combat", "elite"] else 0
-	if row >= REST_ROW:
-		memo[key] = self_cost
-		return self_cost
-	var best: int = 999
-	for nc in node.connections:
-		best = mini(best, _min_fights_from(flat, row + 1, int(nc), memo))
-	var total: int = self_cost + (best if best < 999 else 0)
-	memo[key] = total
-	return total
-
-
-func _generate_paths(grid: Array, rng: RandomNumberGenerator) -> void:
-	var starts: Array[int] = []
-	for p in range(NUM_PATHS):
-		var start_col: int = _pick_start_col(rng, starts, p)
-		starts.append(start_col)
-		_walk_path(grid, start_col, rng)
-
-
-func _pick_start_col(rng: RandomNumberGenerator, prev_starts: Array,
-		path_idx: int) -> int:
-	# STS rule: the first two paths must originate from different columns so
-	# the player always has a meaningful first choice.
-	var avail: Array[int] = []
-	for c in range(MAP_WIDTH):
-		if path_idx == 1 and prev_starts.size() > 0 and c == prev_starts[0]:
-			continue
-		avail.append(c)
-	return avail[rng.randi() % avail.size()]
-
-
-func _walk_path(grid: Array, start_col: int,
-		rng: RandomNumberGenerator) -> void:
-	var cur_col: int = start_col
-	if grid[0][cur_col] == null:
-		grid[0][cur_col] = _make_node(cur_col, 0)
-	for r in range(REST_ROW):
-		var next_col: int = _pick_next_col(grid, r, cur_col, rng)
-		if grid[r + 1][next_col] == null:
-			grid[r + 1][next_col] = _make_node(next_col, r + 1)
-		var conns: Array = grid[r][cur_col]["connections"]
-		if not conns.has(next_col):
-			conns.append(next_col)
-		cur_col = next_col
-
-
-func _make_node(col: int, row: int) -> Dictionary:
-	return {
-		"type": "",
-		"encounter_id": "",
-		"mutator_id": "",
-		"visited": false,
-		"connections": [],
-		"row": row,
-		"col": col,
-	}
-
-
-func _pick_next_col(grid: Array, r: int, cur_col: int,
-		rng: RandomNumberGenerator) -> int:
-	# Step diagonally to ±1 or stay in the same column. Never produce an edge
-	# that crosses an existing one (no X-shaped intersections). Candidates
-	# whose destination cell is already populated get double weight, so paths
-	# prefer to merge into existing nodes — this reduces total node count and
-	# gives the map a more organic feel (STS2-style convergent landmarks).
-	var candidates: Array[int] = []
-	for d in [-1, 0, 1]:
-		var nc: int = cur_col + d
-		if nc < 0 or nc >= MAP_WIDTH:
-			continue
-		if _would_cross(grid, r, cur_col, nc):
-			continue
-		candidates.append(nc)
-		if grid[r + 1][nc] != null:
-			# Strong merge bias (3×): paths converge into a trunk road with
-			# branches — the validated campaign-map look.
-			candidates.append(nc)
-			candidates.append(nc)
-	if candidates.is_empty():
-		return cur_col
-	return candidates[rng.randi() % candidates.size()]
-
-
-func _would_cross(grid: Array, r: int, from_col: int, to_col: int) -> bool:
-	# Two diagonals form an X when the cell at the destination column already
-	# has an edge pointing to our source column. Straight-up steps never cross.
-	if to_col == from_col:
-		return false
-	var partner = grid[r][to_col]
-	if partner == null:
-		return false
-	return partner["connections"].has(from_col)
-
-
-func _assign_node_types(grid: Array, rng: RandomNumberGenerator) -> void:
-	# The row skeleton. Fight rows and the rest row are uniform; the elite
-	# band gets exactly one elite (the act's stronghold spike — forced onto
-	# every route when the band is a single merge point, avoidable when the
-	# row is wider); wayside rows deal their band's flavors round-robin so
-	# siblings differ wherever the row has width. Every between-fight gap is
-	# a PAIR of wayside rows — the Inscryption cadence: two stops of
-	# different kinds between every hold.
-	#   R0 fight (the landing — lightest deal, see apply_terrain_redeal)
-	#   R1 wayside: the landing tissue — events, a verb, maybe a muster
-	#   R2 wayside: roadside verbs and omens
-	#   R3 fight
-	#   R4 wayside: the muster band — recruit guaranteed, shop beside it
-	#   R5 wayside: events, sometimes a second muster
-	#   R6 fight: the FIRST elite band (mid-road spike)
-	#   R7 wayside: the spoils band — treasure guaranteed after the spike
-	#   R8 wayside: outfitting — shop leads the pool
-	#   R9 fight (the mid hold)
-	#   R10 wayside: the second muster band — recruit guaranteed
-	#   R11 wayside: events and verbs
-	#   R12 fight: the SECOND elite band (the escalation before the keep)
-	#   R13 wayside: the second spoils band — treasure guaranteed
-	#   R14 wayside: last outfitting — shop in the pool
-	#   R15 fight (the approach hold)
-	#   R16 rest (the war-council breather)   R17 keep
-	for c in range(MAP_WIDTH):
-		if grid[REST_ROW][c] != null:
-			grid[REST_ROW][c]["type"] = "rest"
-	for r in FIGHT_ROWS:
-		for node in _row_nodes(grid, r):
-			node["type"] = "combat"
-	# Each elite band is a fight row where exactly one node becomes the General;
-	# the rest of the band stays a plain hold (avoidable when the row is wider
-	# than the single spike).
-	for elite_row in ELITE_ROWS:
-		var band: Array = _row_nodes(grid, elite_row)
-		for node in band:
-			node["type"] = "combat"
-		if not band.is_empty():
-			band[rng.randi() % band.size()]["type"] = "elite"
-	# THE WAR ROAD (2026-07-07): one plain fight row per act hides a THIRD,
-	# optional General — the StS elite-hunt trade the flat skeleton lacked
-	# (every route used to walk the same fights, so the fork never mattered).
-	# A greedy road can now break 3 Generals for 3 relic drops; a quiet road
-	# dodges down to whatever the merges force. Only rows wide enough to
-	# route around (≥2 lanes) are eligible, and never the landing row — the
-	# extra spike must always be a CHOICE read off the chart, not an ambush.
-	# The acceptance loop re-rolls lattices where it couldn't land (see
-	# _war_road_ok), so the fork is a guarantee, not a prayer.
-	var war_rows: Array = [3, 9, 15]
-	_shuffle_array(war_rows, rng)
-	for wr in war_rows:
-		var wband: Array = _row_nodes(grid, wr)
-		if wband.size() >= 2:
-			wband[rng.randi() % wband.size()]["type"] = "elite"
-			break
-	var wayside_rows: Array[int] = [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
-	_fill_wayside_row(grid, 1, ["event", "wayside", "recruit"], rng)
-	_fill_wayside_row(grid, 2, ["wayside", "event"], rng)
-	_fill_wayside_row(grid, 4, ["shop", "event"], rng)
-	_fill_wayside_row(grid, 5, ["event", "wayside", "recruit"], rng)
-	_fill_wayside_row(grid, 7, ["event", "wayside"], rng)
-	_fill_wayside_row(grid, 8, ["shop", "event", "wayside"], rng)
-	_fill_wayside_row(grid, 10, ["event", "wayside", "recruit"], rng)
-	_fill_wayside_row(grid, 11, ["wayside", "event"], rng)
-	_fill_wayside_row(grid, 13, ["event", "wayside"], rng)
-	_fill_wayside_row(grid, 14, ["shop", "event", "wayside"], rng)
-	# A row offers at most one muster — a narrow pool can round-robin
-	# recruit twice across a 3-wide row. Demoting duplicates to events keeps
-	# camps at one per band (early/mid => never more than 3 per act).
-	for r in wayside_rows:
-		var seen_recruit := false
-		for node in _row_nodes(grid, r):
-			if String(node["type"]) == "recruit":
-				if seen_recruit:
-					node["type"] = "event"
-				seen_recruit = true
-	# Wayside halts get their verb at gen so the chart can tell you what
-	# the stop IS before you commit (tooltip intel, same as mutators). The
-	# act's halts deal from a shuffled verb pool so two never repeat
-	# within an act unless the act has more halts than verbs.
-	# (muster_scale retired 2026-07-02 — shop-lite; selling now lives at the
-	# sutler's buy-back. Wayside.gd keeps its handler for legacy saves.)
-	var verbs: Array = ["drill_yard", "standard_bearer", "supply_cache"]
-	_shuffle_array(verbs, rng)
-	var vi: int = 0
-	for r in wayside_rows:
-		for node in _row_nodes(grid, r):
-			if String(node["type"]) == "wayside":
-				node["wayside_id"] = verbs[vi % verbs.size()]
-				vi += 1
-	# Placed guarantees (not prayed-for rolls): a muster camp and a treasure in
-	# EACH half of the longer road (front R4/R7, back R10/R13), and at least one
-	# shop somewhere. Two treasures/act also feed the relic economy — relics only
-	# drop at elites/treasure/shops/boss, and the old single-treasure act left the
-	# 87-relic combat pool badly diluted. R1/R5/R11 pools can add further musters;
-	# deck growth lives at camps in the conquest economy (fights pay gold, not
-	# cards), so expected musters stay ~2-4 across the act's two halves.
-	_force_one(grid, 4, "recruit", rng)
-	_force_one(grid, 10, "recruit", rng)
-	_force_one(grid, 7, "treasure", rng)
-	_force_one(grid, 13, "treasure", rng)
-	if _count_type(grid, "shop") == 0:
-		for r in [8, 14, 4, 5]:
-			if _force_one(grid, r, "shop", rng):
-				break
-
-
-func _row_nodes(grid: Array, r: int) -> Array:
-	var out: Array = []
-	for c in range(MAP_WIDTH):
-		if grid[r][c] != null:
-			out.append(grid[r][c])
-	return out
-
-
-## Deal a wayside band's flavors across the row, round-robin from a random
-## offset — siblings differ whenever the row is wider than one site.
-func _fill_wayside_row(grid: Array, r: int, pool: Array,
-		rng: RandomNumberGenerator) -> void:
-	var i: int = rng.randi() % pool.size()
-	for node in _row_nodes(grid, r):
-		node["type"] = pool[i % pool.size()]
-		i += 1
-
-
-## Stamp `t` onto one PLAIN node (event/shop) of row `r` — never onto an
-## already-placed guarantee (a single-site muster row must not lose its
-## recruit to the shop fallback). Falls back to eating a wayside halt when
-## the row dealt no plain slot (a 1-wide spoils row that rolled "wayside"
-## must still yield its treasure). Returns false if the row has neither.
-func _force_one(grid: Array, r: int, t: String,
-		rng: RandomNumberGenerator) -> bool:
-	for pool in [["event", "shop"], ["wayside"]]:
-		var plain: Array = []
-		for node in _row_nodes(grid, r):
-			if String(node["type"]) in pool:
-				plain.append(node)
-		if not plain.is_empty():
-			var picked: Dictionary = plain[rng.randi() % plain.size()]
-			picked["type"] = t
-			picked.erase("wayside_id")
-			return true
-	return false
-
-
-func _count_type(grid: Array, t: String) -> int:
-	var n: int = 0
-	for r in range(MAP_HEIGHT):
-		for c in range(MAP_WIDTH):
-			if grid[r][c] != null and String(grid[r][c]["type"]) == t:
-				n += 1
-	return n
-
-
-func _add_boss_node(grid: Array) -> void:
-	var boss_col: int = MAP_WIDTH / 2
-	grid[BOSS_ROW][boss_col] = _make_node(boss_col, BOSS_ROW)
-	grid[BOSS_ROW][boss_col]["type"] = "boss"
-	for c in range(MAP_WIDTH):
-		if grid[REST_ROW][c] != null:
-			grid[REST_ROW][c]["connections"] = [boss_col]
-
-
-func _assign_encounters(grid: Array, act: int,
-		rng: RandomNumberGenerator) -> void:
-	# Successor Wars: every hold in the kingdom belongs to the act's faction
-	# (the rival being marched on). Thin factions borrow their own fights
-	# from other acts — Combat rescales them via the target_act rails. On a
-	# legacy run with no rival deal, faction is "" and the pools fall back
-	# to the unfiltered act lists (get_kingdom_pool passes through).
-	var faction: String = act_faction[act - 1] if act - 1 < act_faction.size() else ""
-	var combat_ids: Array = EncounterDB.get_kingdom_pool(act, "combat", faction)
-	_shuffle_array(combat_ids, rng)
-	var elite_ids: Array = EncounterDB.get_kingdom_pool(act, "elite", faction)
-	_shuffle_array(elite_ids, rng)
-	# First-run on-ramp (P1#5): only the very first campaign's opening hold —
-	# Act 1, row 0 (FIGHT_ROWS[0]) — gets the hand-picked gentle fight with no
-	# mutator. Every later act, later row, and every subsequent run keeps the
-	# shuffled pool + 35% mutator roll untouched. Identity-only: this never
-	# touches the skeleton/site counts the acceptance loop guards.
-	var first_run_opener: bool = act == 1 and MetaState.total_runs == 0
-	var combat_idx: int = 0
-	var elite_idx: int = 0
-	for r in range(MAP_HEIGHT):
-		for c in range(MAP_WIDTH):
-			var node = grid[r][c]
-			if node == null:
-				continue
-			match node["type"]:
-				"combat":
-					if first_run_opener and r == FIGHT_ROWS[0]:
-						node["encounter_id"] = FIRST_RUN_OPENER_ENCOUNTER
-						node["mutator_id"] = ""
-						continue
-					if combat_ids.size() > 0:
-						node["encounter_id"] = combat_ids[combat_idx % combat_ids.size()]
-						combat_idx += 1
-					node["mutator_id"] = MutatorDB.roll(0.35, rng)
-				"elite":
-					if elite_ids.size() > 0:
-						node["encounter_id"] = elite_ids[elite_idx % elite_ids.size()]
-						elite_idx += 1
-					node["mutator_id"] = MutatorDB.roll(0.65, rng)
-				"boss":
-					node["encounter_id"] = _boss_encounter_for_act(act, rng)
-					# Bosses keep their own complex passives — no mutator on boss
-					# fights to avoid stacking too many parallel rule changes.
-
-
-## The act's boss fight: the rival lord's kit if authored (rival_<hero>),
-## else a stand-in boss from his own faction (nearest act first, rescaled by
-## the cross-act rails), else the legacy unfiltered act roll. Stand-ins keep
-## runs completable while the five lord kits are authored one at a time.
-func _boss_encounter_for_act(act: int, rng: RandomNumberGenerator) -> String:
-	var rival: String = rival_lords[act - 1] if act - 1 < rival_lords.size() else ""
-	if rival != "":
-		var kit_id := "rival_%s" % rival
-		if EncounterDB.ENCOUNTERS.has(kit_id):
-			return kit_id
-		var stand_ins: Array = EncounterDB.get_kingdom_pool(
-			act, "boss", HeroDB.get_faction(rival))
-		# get_kingdom_pool can top up from the unfiltered act pool when a
-		# faction has no boss anywhere (grasswake) — that's fine here too:
-		# better an off-banner boss than no keep to take.
-		if not stand_ins.is_empty():
-			return stand_ins[rng.randi() % stand_ins.size()]
-	var boss_ids: Array = EncounterDB.get_ids_for(act, "boss")
-	if boss_ids.is_empty():
-		# Last resort so the keep never stamps an empty encounter id (which would
-		# softlock the act): pull a boss from any act, else any non-special fight.
-		for other_act in [1, 2, 3]:
-			var any_boss: Array = EncounterDB.get_ids_for(other_act, "boss")
-			if not any_boss.is_empty():
-				boss_ids = any_boss
-				break
-		if boss_ids.is_empty():
-			for id in EncounterDB.ENCOUNTERS:
-				var sid := String(id)
-				if not sid.begins_with("rival_") and not sid.begins_with("amalgam_"):
-					boss_ids = [id]
-					break
-		if boss_ids.is_empty():
-			return ""
-	_shuffle_array(boss_ids, rng)
-	return boss_ids[0]
-
-
-func _flatten_grid(grid: Array) -> Array:
-	# Compact the sparse grid into per-row arrays of only the populated nodes.
-	# Each node keeps its grid `col` for visuals and for connection lookups.
-	var rows: Array = []
-	for r in range(MAP_HEIGHT):
-		var row_nodes: Array = []
-		for c in range(MAP_WIDTH):
-			if grid[r][c] != null:
-				row_nodes.append(grid[r][c])
-		rows.append(row_nodes)
-	return rows
-
-
-func _shuffle_array(arr: Array, rng: RandomNumberGenerator) -> void:
-	for i in range(arr.size() - 1, 0, -1):
-		var j: int = rng.randi() % (i + 1)
-		var temp = arr[i]
-		arr[i] = arr[j]
-		arr[j] = temp
-
-
-# ════════════════════════════════════════════════════════════════════
 #  SAVE / RESUME
 # ════════════════════════════════════════════════════════════════════
 # Persists the in-progress run as JSON across SAVE_SLOTS slots. The save is
@@ -1796,7 +1639,12 @@ func _shuffle_array(arr: Array, rng: RandomNumberGenerator) -> void:
 # v3: Successor Wars — rival_lords / finale_rival / act_faction /
 # holds_broken_in_act enter the schema. A v2 save has no rival deal, so its
 # kingdoms and boss would silently fall back to legacy pools mid-run; retire.
-const SAVE_VERSION: int = 3
+# v4: the 2026-07-07 act lengthening (map 8→18 rows) plus set-piece holds
+# (current_setpiece_id / setpieces_carried) and the muster field. A v3 save
+# written before those carries an 8/10/12-row map_data that self-navigates but
+# resumes a short, wrong-cadence act with no setpieces and mis-tuned hold gates;
+# the strict check below never fired because the schema grew without this bump.
+const SAVE_VERSION: int = 4
 const SAVE_SLOTS: int = 3
 const LEGACY_SAVE_PATH: String = "user://run.save"
 
@@ -1815,27 +1663,39 @@ func _save_path_for_slot(slot: int) -> String:
 	return "user://run_%d.save" % slot
 
 
-# Migrates a pre-multislot save (user://run.save) into slot 0 so existing
-# players don't lose their in-progress run. Idempotent: no-op once migrated.
+# Migrates a pre-multislot save (user://run.save) into the first physically
+# empty slot. The source is deleted only after a validated, byte-identical
+# SaveIO round trip; occupied or incompatible data is left recoverable.
 func _migrate_legacy_save() -> void:
 	if not FileAccess.file_exists(LEGACY_SAVE_PATH):
-		return
-	var target := _save_path_for_slot(0)
-	if FileAccess.file_exists(target):
-		# Slot 0 already has a save — drop the legacy file rather than overwrite.
-		DirAccess.remove_absolute(ProjectSettings.globalize_path(LEGACY_SAVE_PATH))
 		return
 	var src := FileAccess.open(LEGACY_SAVE_PATH, FileAccess.READ)
 	if src == null:
 		return
 	var text := src.get_as_text()
 	src.close()
-	var dst := FileAccess.open(target, FileAccess.WRITE)
-	if dst == null:
+	var parsed = JSON.parse_string(text)
+	if not (parsed is Dictionary) or int(parsed.get("version", 0)) != SAVE_VERSION:
+		push_warning("RunState: legacy run.save is incompatible; left untouched")
 		return
-	dst.store_string(text)
-	dst.close()
-	DirAccess.remove_absolute(ProjectSettings.globalize_path(LEGACY_SAVE_PATH))
+	var target := ""
+	for slot in range(SAVE_SLOTS):
+		var candidate := _save_path_for_slot(slot)
+		if not FileAccess.file_exists(candidate) \
+				and not FileAccess.file_exists(candidate + ".bak") \
+				and not FileAccess.file_exists(candidate + ".tmp"):
+			target = candidate
+			break
+	if target == "":
+		push_warning("RunState: no empty slot for legacy run.save; left untouched")
+		return
+	if not SaveIO.write_text(target, text) or SaveIO.read_text(target) != text:
+		push_warning("RunState: legacy run.save copy did not verify; source kept")
+		return
+	var remove_err := DirAccess.remove_absolute(
+		ProjectSettings.globalize_path(LEGACY_SAVE_PATH))
+	if remove_err != OK:
+		push_warning("RunState: migrated legacy save but could not remove source (err=%d)" % remove_err)
 
 
 func _ready() -> void:
@@ -1866,6 +1726,9 @@ func save_run() -> void:
 		"creature_kills": creature_kills,
 		"fallen": fallen,
 		"relics": relics,
+		"generals_broken_run": generals_broken_run,
+		"articles_of_war_tribe": articles_of_war_tribe,
+		"season_tribes": season_tribes,
 		"map_data": map_data,
 		"current_act_idx": current_act_idx,
 		"map_position": map_position,
@@ -1875,10 +1738,13 @@ func save_run() -> void:
 		"current_terrain": current_terrain,
 		"current_bridge": current_bridge,
 		"current_wayside_id": current_wayside_id,
+		"current_setpiece_id": current_setpiece_id,
+		"setpieces_carried": setpieces_carried,
 		"fights_won": fights_won,
 		"mutators_survived": mutators_survived,
 		"cause_of_death": cause_of_death,
 		"events_seen": events_seen,
+		"event_choice_flags": event_choice_flags,
 		"potion_drop_misses": potion_drop_misses,
 		"muster_rerolls_left": muster_rerolls_left,
 		"base_max_mana": base_max_mana,
@@ -1890,10 +1756,14 @@ func save_run() -> void:
 		"pawned_cards": pawned_cards,
 		"current_ascension": current_ascension,
 		"current_hero_id": current_hero_id,
+		"current_signature_relic": current_signature_relic,
+		"current_banner_tribe": current_banner_tribe,
+		"current_deck_variant": current_deck_variant,
 		"rival_lords": rival_lords,
 		"finale_rival": finale_rival,
 		"act_faction": act_faction,
 		"holds_broken_in_act": holds_broken_in_act,
+		"holds_broken_run": holds_broken_run,
 		"finale_stage": finale_stage,
 		"rests_visited_in_act": rests_visited_in_act,
 		"rests_visited_total": rests_visited_total,
@@ -1905,6 +1775,7 @@ func save_run() -> void:
 		"bottled_talisman_uid": bottled_talisman_uid,
 		"is_daily_run": is_daily_run,
 		"daily_mutator_id": daily_mutator_id,
+		"daily_date": daily_date,
 		"saved_at": int(Time.get_unix_time_from_system()),
 	}
 	var path := _save_path_for_slot(active_slot)
@@ -1921,7 +1792,8 @@ func has_save(slot: int = -1) -> bool:
 	var path := _save_path_for_slot(s)
 	# The .bak generation counts: if a crash landed between SaveIO's two
 	# renames the main file is briefly absent but the run is still recoverable.
-	return FileAccess.file_exists(path) or FileAccess.file_exists(path + ".bak")
+	return FileAccess.file_exists(path) or FileAccess.file_exists(path + ".bak") \
+		or FileAccess.file_exists(path + ".tmp")
 
 
 func clear_save(slot: int = -1) -> void:
@@ -1966,15 +1838,22 @@ func _read_slot(slot: int) -> Dictionary:
 func get_slot_summary(slot: int) -> Dictionary:
 	var data := _read_slot(slot)
 	if data.is_empty():
-		return {"has_save": false}
+		# Preserve the distinction between an empty slot and physical data that is
+		# incompatible, corrupt, or temporarily unreadable. The menu must never
+		# turn a failed parse into an automatic delete.
+		return {"has_save": false, "unreadable": has_save(slot)}
 	return {
 		"has_save": true,
+		"unreadable": false,
 		"act": int(data.get("current_act_idx", 0)) + 1,
 		"floor": int(data.get("current_floor", 0)),
 		"hp": int(data.get("hero_hp", 0)),
 		"max_hp": int(data.get("hero_max_hp", 25)),
 		"gold": int(data.get("gold", 0)),
 		"ascension": int(data.get("current_ascension", 0)),
+		"hero": String(data.get("current_hero_id", "")),
+		"is_daily_run": bool(data.get("is_daily_run", false)),
+		"daily_date": String(data.get("daily_date", "")),
 		"saved_at": int(data.get("saved_at", 0)),
 	}
 
@@ -1985,6 +1864,7 @@ func load_run(slot: int = -1) -> bool:
 	if data.is_empty():
 		return false
 
+	pending_banner_tribe = ""
 	hero_max_hp = int(data.get("hero_max_hp", 25))
 	hero_hp = int(data.get("hero_hp", 25))
 	gold = int(data.get("gold", 0))
@@ -2041,8 +1921,16 @@ func load_run(slot: int = -1) -> bool:
 	for id in data.get("relics", []):
 		# Drop retired ids (2026-07-07 pool cut) so an old save can't carry a
 		# ghost relic into the HUD strip / reward filters / effect checks.
-		if RelicDB.RELICS.has(String(id)):
-			relics.append(String(id))
+		var relic_id := String(id)
+		if RelicDB.RELICS.has(relic_id) \
+				and not bool(RelicDB.RELICS[relic_id].get("retired", false)):
+			relics.append(relic_id)
+	generals_broken_run = int(data.get("generals_broken_run", 0))
+	articles_of_war_tribe = String(data.get("articles_of_war_tribe", ""))
+	var saved_banner := String(data.get("current_banner_tribe", ""))
+	current_banner_tribe = saved_banner if BannerDB.has_banner(saved_banner) else ""
+
+	season_tribes = Array(data.get("season_tribes", []))
 	map_data = data.get("map_data", [])
 	map_plate_cache.clear()
 	current_act_idx = int(data.get("current_act_idx", 0))
@@ -2053,6 +1941,12 @@ func load_run(slot: int = -1) -> bool:
 	current_terrain = String(data.get("current_terrain", ""))
 	current_bridge = bool(data.get("current_bridge", false))
 	current_wayside_id = String(data.get("current_wayside_id", ""))
+	current_setpiece_id = String(data.get("current_setpiece_id", ""))
+	# Named actions already carried — a resumed save must never re-pay
+	# a trophy for ground it already holds.
+	setpieces_carried = []
+	for sp_id in data.get("setpieces_carried", []):
+		setpieces_carried.append(String(sp_id))
 	fights_won = int(data.get("fights_won", 0))
 	potion_drop_misses = int(data.get("potion_drop_misses", 0))
 	muster_rerolls_left = int(data.get("muster_rerolls_left", 0))
@@ -2063,6 +1957,9 @@ func load_run(slot: int = -1) -> bool:
 	events_seen = []
 	for id in data.get("events_seen", []):
 		events_seen.append(String(id))
+	event_choice_flags = []
+	for flag in data.get("event_choice_flags", []):
+		record_event_choice(String(flag))
 	base_max_mana = int(data.get("base_max_mana", 3))
 	current_floor = int(data.get("current_floor", 0))
 	run_seed = int(data.get("run_seed", 0))
@@ -2074,6 +1971,21 @@ func load_run(slot: int = -1) -> bool:
 		pawned_cards.append(String(pid))
 	current_ascension = int(data.get("current_ascension", 0))
 	current_hero_id = String(data.get("current_hero_id", HeroDB.DEFAULT_HERO))
+	# Optional v4 doctrine fields. Old saves recover the signature from the
+	# starting-tier relic they already hold and treat the deck as Standard.
+	var saved_signature := String(data.get("current_signature_relic", ""))
+	if saved_signature == "" or not relics.has(saved_signature):
+		saved_signature = ""
+		for rid in relics:
+			var rd: Dictionary = RelicDB.get_relic(String(rid))
+			if String(rd.get("tier", "")) == "starting":
+				saved_signature = String(rid)
+				break
+	if saved_signature == "":
+		saved_signature = String(HeroDB.get_hero(current_hero_id).get("relic", ""))
+	current_signature_relic = saved_signature
+	current_deck_variant = "alt" \
+		if String(data.get("current_deck_variant", "")) == "alt" else ""
 	rival_lords = []
 	for hid in data.get("rival_lords", []):
 		rival_lords.append(String(hid))
@@ -2082,6 +1994,7 @@ func load_run(slot: int = -1) -> bool:
 	for fid in data.get("act_faction", []):
 		act_faction.append(String(fid))
 	holds_broken_in_act = int(data.get("holds_broken_in_act", 0))
+	holds_broken_run = int(data.get("holds_broken_run", holds_broken_in_act))
 	finale_stage = int(data.get("finale_stage", 0))
 	rests_visited_in_act = int(data.get("rests_visited_in_act", 0))
 	rests_visited_total = int(data.get("rests_visited_total", 0))
@@ -2093,6 +2006,12 @@ func load_run(slot: int = -1) -> bool:
 	bottled_talisman_uid = int(data.get("bottled_talisman_uid", -1))
 	is_daily_run = bool(data.get("is_daily_run", false))
 	daily_mutator_id = String(data.get("daily_mutator_id", ""))
+	daily_date = String(data.get("daily_date", ""))
+	# v4 daily saves predate daily_date. Recover their origin from the matching
+	# marching ledger when possible; otherwise leave it blank and MetaState uses
+	# today's date as the compatibility fallback.
+	if is_daily_run and daily_date == "":
+		daily_date = MetaState.daily_date_for_run(current_hero_id, s)
 	run_active = true
 	active_slot = s
 	CardTextureCache.clear()

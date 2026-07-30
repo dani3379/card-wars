@@ -8,6 +8,20 @@ extends Control
 const MAP_SCENE = "res://scenes/map.tscn"
 const COMBAT_SCENE = "res://scenes/combat.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+const CAMPAIGN_STANDARD = preload("res://scripts/ui/painters/CampaignStandard.gd")
+const ACT_VICTORY_STRIP = preload("res://scripts/ui/painters/ActVictoryStrip.gd")
+
+# The spoils sheet's own inks. PARCHMENT is the SHOP-SHELF ink and is
+# deliberately not used on the spoil tiles — a prize lit the same as a
+# merchant's stock is the whole reason this screen read quieter than the
+# roadside Reliquary. See _spoil_style.
+const SPOIL_FILL := Color(0.155, 0.115, 0.078, 0.96)
+const SPOIL_EMBER := Color(1.0, 0.56, 0.20)
+# The painting, not the box, is the prize. Two of these out-weigh the single
+# find on the Treasure screen, which is the order the road should present them
+# in: a General's death pays better than a hole in the ground.
+const SPOIL_ICON_PX := 160
+const SPOIL_TILE_W := 340.0
 
 var _relic_choices: Array[String] = []
 var _is_elite_reward: bool = false
@@ -20,6 +34,8 @@ var _forge_done: bool = false
 var _forge_card_nodes: Array[Control] = []
 var _forge_picking: bool = false
 var _march_picking: bool = false
+var _spoil_claiming: bool = false
+var _company_standard_anchor: Control = null
 
 
 func _ready() -> void:
@@ -42,7 +58,8 @@ func _ready() -> void:
 	if is_boss:
 		_relic_choices = RelicDB.roll_boss_relics(RunState.relics, RunState.current_hero_id)
 	elif _is_elite_reward:
-		_relic_choices = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
+		_relic_choices = RelicDB.roll_field_relics(2, RunState.relics,
+			RunState.current_hero_id)
 
 	# Olympian's Mark: after every General falls, upgrade one random unforged
 	# creature/spell in the deck for free. Applies the same "+" upgrade the
@@ -53,7 +70,7 @@ func _ready() -> void:
 		for i in RunState.deck.size():
 			if not RunState.has_upgrade_path(i, "plus"):
 				var d: Dictionary = CardDB.get_card_data(RunState.deck[i])
-				if d.get("type", "") in ["creature", "spell"] \
+				if d.get("type", "") in ["creature", "spell", "armament"] \
 						and CardDB.is_upgradeable(RunState.deck[i]):
 					candidates.append(i)
 		if candidates.size() > 0:
@@ -75,6 +92,8 @@ func _unhandled_input(event: InputEvent) -> void:
 func _build_ui() -> void:
 	_forge_card_nodes.clear()
 	_forge_picking = false
+	_spoil_claiming = false
+	_company_standard_anchor = null
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
@@ -87,16 +106,76 @@ func _build_ui() -> void:
 	margin.add_theme_constant_override("margin_bottom", 40)
 	add_child(margin)
 
+	# Center the spoils as one group. The relic row used to be EXPAND_FILL, which
+	# soaked all the vertical space and left the tiles floating mid-screen with a
+	# long gap down to Continue; now the whole stack sits centered and balanced.
 	var outer := VBoxContainer.new()
+	outer.alignment = BoxContainer.ALIGNMENT_CENTER
 	outer.add_theme_constant_override("separation", 26)
 	margin.add_child(outer)
 
-	# Title
-	var title = GameTheme.make_screen_title(
-		"VICTORY  —  Province %d" % RunState.current_floor, GameTheme.GILT_BRIGHT,
-		GameTheme.FONT_TITLE)
-	outer.add_child(title)
+	# The spoils belong to the company, not a detached menu. Its standard carries
+	# completed-march seals, General ribbons, and mourning cloth into this scene;
+	# the chosen relic physically flies back to it below.
+	var is_boss := RunState.current_node_type == "boss"
+	var faction_id: String = RunState.get_act_faction()
+	var faction_info: Dictionary = HeroDB.faction_info(faction_id) \
+		if faction_id != "" else {}
+	var route_color: Color = _heraldry_ink(
+		faction_info.get("color", GameTheme.GILT_BRIGHT))
+	var hero_faction: String = HeroDB.get_faction(RunState.current_hero_id)
+	var hero_info: Dictionary = HeroDB.faction_info(hero_faction)
+	var standard_color: Color = _heraldry_ink(
+		hero_info.get("color", GameTheme.GILT_BRIGHT))
+	var ceremony_row := HBoxContainer.new()
+	ceremony_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	ceremony_row.add_theme_constant_override("separation", 18)
+	outer.add_child(ceremony_row)
+
+	var standard = CAMPAIGN_STANDARD.new()
+	standard.name = "CompanyStandard"
+	var completed_acts: int = RunState.current_act_idx + (1 if is_boss else 0)
+	standard.configure(completed_acts, RunState.generals_broken_run,
+		RunState.fallen.size(), standard_color)
+	ceremony_row.add_child(standard)
+	_company_standard_anchor = standard
+	GameTheme.deal_in(standard, 0.02)
+
+	var title_stack := VBoxContainer.new()
+	title_stack.custom_minimum_size = Vector2(790, 0)
+	title_stack.add_theme_constant_override("separation", 5)
+	ceremony_row.add_child(title_stack)
+	var march_names := ["FIRST", "SECOND", "LAST"]
+	var title_text := "GENERAL BROKEN  /  PROVINCE %d" % RunState.current_floor
+	if is_boss:
+		title_text = "THE %s MARCH  /  KEEP TAKEN" % \
+			march_names[clampi(RunState.current_act_idx, 0, 2)]
+	var title = GameTheme.make_screen_title(title_text, GameTheme.GILT_BRIGHT,
+		GameTheme.FONT_TITLE if not is_boss else GameTheme.FONT_HEADER)
+	title_stack.add_child(title)
 	GameTheme.deal_in(title, 0.03)
+
+	var subtitle_text := "Take one Combat relic. Then forge one card."
+	if is_boss:
+		var kingdom: String = String(faction_info.get("name", "The rival kingdom"))
+		subtitle_text = "%s is broken.  %d holds  |  %d Generals  |  %d fallen  |  HP %d/%d" % [
+			kingdom, RunState.holds_broken_in_act,
+			_count_visited_current_act("elite"), RunState.fallen.size(),
+			RunState.hero_hp, RunState.hero_max_hp]
+	var subtitle := GameTheme.make_label(subtitle_text, 17, GameTheme.DESC_DIM)
+	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	subtitle.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	title_stack.add_child(subtitle)
+	GameTheme.deal_in(subtitle, 0.08)
+
+	# Boss rewards retain the conquered route long enough to read it. The line
+	# inks itself from camp to the lord's seal before the next map is dealt.
+	if is_boss:
+		var route = ACT_VICTORY_STRIP.new()
+		route.name = "ActVictoryRoute"
+		route.configure(RunState.get_current_act_map(), route_color)
+		route.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		outer.add_child(route)
 
 	# Relic choices
 	if _is_elite_reward and _relic_choices.size() > 0 and not _relic_taken:
@@ -108,38 +187,49 @@ func _build_ui() -> void:
 		var relic_row = HBoxContainer.new()
 		relic_row.add_theme_constant_override("separation", 40)
 		relic_row.alignment = BoxContainer.ALIGNMENT_CENTER
-		relic_row.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		outer.add_child(relic_row)
 
+		var spoil_tiles: Array[Button] = []
 		var relic_i := 0
 		for id in _relic_choices:
-			# Chart-look tile: dark-ink PARCHMENT body → document tile (gilt rule,
-			# small corners) with the painted relic icon on top, not a flat slab.
-			# Big tiles (340×300): the three spoils floated tiny in a sea of empty
-			# space at 220×172 — grow them to fill the row and let the rules read.
-			var btn = GameTheme.make_relic_card(id, GameTheme.PARCHMENT,
-				Vector2(340, 300))
+			var btn := _make_spoil_tile(id)
 			# Shrink-center: the row owns the freed vertical space now that
 			# the card rack is gone, and HBox children stretch by default —
 			# without this the relic panels render as full-height columns.
 			btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 			btn.pressed.connect(_pick_relic.bind(id, btn))
 			relic_row.add_child(btn)
-			GameTheme.deal_in(btn, 0.10 + relic_i * 0.08)
+			spoil_tiles.append(btn)
+			var deal_at := 0.10 + relic_i * 0.08
+			GameTheme.deal_in(btn, deal_at)
+			# The shine is the pull's own announcement (commons no-op by design).
+			# It waits out deal_in rather than racing it — both verbs drive
+			# `modulate` on the same node, and overlapping them makes the rare
+			# kiss fight the entrance fade.
+			GameTheme.rarity_reveal(btn, RelicDB.get_relic_rarity(id),
+				deal_at + 0.36)
 			GameTheme.hover_lift(btn)
 			relic_i += 1
+		# One offer, one baseline: the tiles close onto their own content, so a
+		# two-line rule beside a one-line rule would otherwise leave the pair
+		# hanging at different heights.
+		var tallest := 0.0
+		for t in spoil_tiles:
+			tallest = maxf(tallest, t.custom_minimum_size.y)
+		for t in spoil_tiles:
+			t.custom_minimum_size.y = tallest
 
 	# The General's Forge — Generals only (bosses hand out the boss tier and
 	# an act transition; the forge is the elite ladder's own rung).
-	if RunState.current_node_type == "elite" and not _forge_done \
+	if RunState.current_node_type == "elite" \
+			and (_relic_taken or _relic_choices.is_empty()) and not _forge_done \
 			and _forge_candidates().size() > 0:
 		var forge_header := _make_section_header(
-			"The General's Forge — temper one card")
+			"The General's Forge — pick a card to forge")
 		outer.add_child(forge_header)
 		GameTheme.deal_in(forge_header, 0.18)
 		var scroll := ScrollContainer.new()
 		scroll.custom_minimum_size = Vector2(0, 240)
-		scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		outer.add_child(scroll)
 		var grid := HBoxContainer.new()
 		grid.add_theme_constant_override("separation", 14)
@@ -186,6 +276,67 @@ func _build_ui() -> void:
 	outer.add_child(skip_btn)
 	GameTheme.deal_in(skip_btn, 0.40)
 	GameTheme.hover_lift(skip_btn, 1.04)
+
+
+## The kingdom dyes exist to tell five factions apart on the war table, and two
+## of the five (Grasswake's teal, Lanternhall's blue) are cool. On the spoils
+## sheet — blood, ash and gilt — a cool banner stops reading as heraldry and
+## starts reading as an unpainted placeholder icon. Warm the dye into the
+## screen's own ink: enough of it survives to tell the companies apart, but no
+## flag can come out bluer than the fire behind it.
+func _heraldry_ink(dye: Color) -> Color:
+	return dye.lerp(GameTheme.GILT, 0.55)
+
+
+## Rest / hover / pressed faces of a spoil tile, one lever (0 = rest, 1 = hot).
+## The ember bleed is the stylebox's OWN shadow retinted — the kit's hover-glow
+## lever — rather than a gradient pasted behind the tile.
+func _spoil_style(lift: float) -> StyleBox:
+	var s := GameTheme.make_panel_style(
+		SPOIL_FILL.lightened(lift * 0.10),
+		GameTheme.GILT.lerp(GameTheme.GILT_BRIGHT, lift), 2, 5, true, true)
+	s.set("shadow_color", Color(SPOIL_EMBER.r, SPOIL_EMBER.g, SPOIL_EMBER.b,
+		0.20 + 0.16 * lift))
+	s.set("shadow_size", 16.0 + 8.0 * lift)
+	return s
+
+
+## A spoil tile. GameTheme.make_relic_card sizes its icon from the BOX
+## (min_size.y * 0.38, capped at 128), a recipe that only balances around a
+## ~147px tile — at the sizes a spoils screen asks for, a third of the tile is
+## air, and that air is exactly what reads as a flat dark panel. This cuts it
+## the other way round: pick the size of the painting first, then let
+## fit_tile_height close the box onto it. Mirrored in Treasure._make_spoil_tile
+## (the same duplication the two screens already carry for _make_section_header).
+func _make_spoil_tile(rid: String) -> Button:
+	var r: Dictionary = RelicDB.get_relic(rid)
+	var skel: Dictionary = GameTheme.make_tile_skeleton(Vector2(SPOIL_TILE_W, 0), 6)
+	var btn: Button = skel.button
+	btn.tooltip_text = "%s — %s" % [r.get("name", rid), r.get("desc", "")]
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	btn.add_theme_stylebox_override("normal", _spoil_style(0.0))
+	btn.add_theme_stylebox_override("hover", _spoil_style(1.0))
+	btn.add_theme_stylebox_override("pressed", _spoil_style(0.45))
+
+	var col: VBoxContainer = skel.col
+	# The chip keeps its own StS rich hover (it is the only part of the tile
+	# that carries the tier halo), exactly as it did under make_relic_card.
+	var chip := GameTheme.make_relic_chip(rid, SPOIL_ICON_PX)
+	chip.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	col.add_child(chip)
+
+	var name_lbl := GameTheme.make_label(r.get("name", rid), 22,
+		GameTheme.KEYWORD_GOLD)
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(name_lbl)
+
+	var desc_lbl := GameTheme.make_label(r.get("desc", ""), 18, GameTheme.IVORY)
+	desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	col.add_child(desc_lbl)
+
+	GameTheme.fit_tile_height(btn, col)
+	return btn
 
 
 func _add_forge_candidate_halo(wrapper: Control) -> void:
@@ -244,16 +395,30 @@ func _pick_forge_candidate(deck_index: int, wrapper: Control = null) -> void:
 		GameTheme.claim_pop(wrapper)
 		for other in _forge_card_nodes:
 			if other != wrapper and other is Control and is_instance_valid(other):
-				var tw := other.create_tween()
-				tw.tween_property(other, "modulate:a", 0.0, 0.18) \
-					.set_ease(Tween.EASE_IN)
+				GameTheme.fade_exit(other, 0.18)
 		await get_tree().create_timer(0.20).timeout
 	_show_forge_confirm(deck_index)
 	_forge_picking = false
 
 
+## Back out of the forge confirm and put the slate back the way it was.
+## fade_exit only tweens modulate.a — it does NOT free the node or stop it taking
+## the mouse. Without this restore, cancelling left the passed-over candidates
+## invisible but still hoverable and still clickable, so the player saw one card
+## and a row of ghosts (reported as "you can't see the other options if you press
+## cancel"). _forge_card_nodes is only rebuilt in _build_ui, so it is still valid
+## here. Any future pick→confirm→cancel flow on this screen must call this.
+func _restore_forge_slate() -> void:
+	for other in _forge_card_nodes:
+		if other is Control and is_instance_valid(other):
+			other.modulate.a = 1.0
+			other.scale = Vector2.ONE
+			other.z_index = 0
+	_forge_picking = false
+
+
 ## Deck indices eligible for the General's Forge — same filter as the rest
-## site and Olympian's Mark: unforged, upgradeable, a real creature/spell.
+## site and Olympian's Mark: unforged, upgradeable, a real playable card.
 func _forge_candidates() -> Array[int]:
 	var out: Array[int] = []
 	for i in RunState.deck.size():
@@ -262,7 +427,7 @@ func _forge_candidates() -> Array[int]:
 		if not CardDB.is_upgradeable(RunState.deck[i]):
 			continue
 		var d: Dictionary = CardDB.get_card_data(RunState.deck[i])
-		if d.get("type", "") in ["creature", "spell"]:
+		if d.get("type", "") in ["creature", "spell", "armament"]:
 			out.append(i)
 	return out
 
@@ -332,7 +497,7 @@ func _show_forge_confirm(deck_index: int) -> void:
 	btns.alignment = BoxContainer.ALIGNMENT_CENTER
 	btns.add_theme_constant_override("separation", 24)
 	col.add_child(btns)
-	var go = GameTheme.make_themed_button("FORGE IT", Color(0.14, 0.10, 0.05),
+	var go = GameTheme.make_themed_button("⚒ Forge +", Color(0.14, 0.10, 0.05),
 		Vector2(180, 48), 19)
 	go.pressed.connect(func():
 		RunState.upgrade_card(deck_index, "plus")
@@ -345,7 +510,10 @@ func _show_forge_confirm(deck_index: int) -> void:
 	)
 	btns.add_child(go)
 	var back = GameTheme.make_back_button("Back", Vector2(140, 48), 18)
-	back.pressed.connect(func(): dim.queue_free())
+	back.pressed.connect(func():
+		dim.queue_free()
+		_restore_forge_slate()
+	)
 	btns.add_child(back)
 
 
@@ -399,23 +567,30 @@ func _after_spoil_taken() -> void:
 
 
 func _pick_relic(id: String, tile: Control = null) -> void:
+	if _spoil_claiming:
+		return
+	_spoil_claiming = true
 	RunState.add_relic(id)
 	_relic_taken = true
 	if AudioBank != null:
 		AudioBank.play_sfx("coin")
-	# The claim beat: the chosen spoil flares and pops while its unpicked
-	# rivals bow out, THEN the screen moves on. Without it the tile vanished
-	# on the same frame it was clicked and the pick never registered as an event.
-	if tile != null and is_instance_valid(tile) \
-			and not (UserSettings != null and UserSettings.reduce_motion):
+	# The chosen spoil is physically taken: rivals bow out, then the relic dives
+	# into the company standard instead of disappearing during a UI rebuild.
+	if tile != null and is_instance_valid(tile):
 		GameTheme.claim_pop(tile)
 		if tile.get_parent() != null:
 			for sib in tile.get_parent().get_children():
 				if sib != tile and sib is Control:
-					var stw := (sib as Control).create_tween()
-					stw.tween_property(sib, "modulate:a", 0.0, 0.22) \
-						.set_ease(Tween.EASE_IN)
-		await get_tree().create_timer(0.38).timeout
+					GameTheme.fade_exit(sib, 0.22)
+		await get_tree().create_timer(0.10).timeout
+		if _company_standard_anchor != null \
+				and is_instance_valid(_company_standard_anchor):
+			var target := _company_standard_anchor.global_position \
+				+ _company_standard_anchor.size * 0.5
+			await GameTheme.pocket_away(tile, target, 0.34)
+			GameTheme.punch(_company_standard_anchor, 1.12)
+		else:
+			await get_tree().create_timer(0.28).timeout
 	if id == "bottled_talisman":
 		await GameTheme.bind_bottled_talisman(self)
 	# Don't march off with the General's Forge still hot — the screen stays
@@ -424,6 +599,8 @@ func _pick_relic(id: String, tile: Control = null) -> void:
 
 
 func _skip() -> void:
+	if _spoil_claiming:
+		return
 	_proceed()
 
 
@@ -432,14 +609,14 @@ func _skip() -> void:
 ## rival order). Everything else marches straight out.
 func _proceed() -> void:
 	if RunState.current_node_type == "boss" and not RunState.should_enter_finale():
-		var next_idx: int = RunState.current_act_idx + 1
-		if RunState.rival_lords.size() - next_idx >= 2:
-			_show_march_choice(next_idx)
+		var candidates: Array[String] = RunState.get_next_march_candidates()
+		if candidates.size() >= 2:
+			_show_march_choice(candidates)
 			return
 	_go_to_map()
 
 
-func _show_march_choice(next_idx: int) -> void:
+func _show_march_choice(candidates: Array[String]) -> void:
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
@@ -469,19 +646,19 @@ func _show_march_choice(next_idx: int) -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 36)
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	outer.add_child(row)
 
 	# Lord tiles (2026-07-02): the campaign's biggest narrative decision used
-	# to be two generic text banners — now each remaining rival stands as a
+	# to be two generic text banners — now each living rival stands as a
 	# portrait plaque in his faction's color: face, name, title, kingdom, and
-	# how his army fights.
-	for i in range(next_idx, RunState.rival_lords.size()):
-		var lord: String = RunState.rival_lords[i]
+	# how his army fights. The provisional finale candidate joins the slate;
+	# whichever lord survives the Act 2 choice takes the throne.
+	for i in candidates.size():
+		var lord: String = candidates[i]
 		var tile := _make_lord_tile(lord)
 		tile.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		row.add_child(tile)
-		GameTheme.deal_in(tile, 0.12 + (i - next_idx) * 0.10)
+		GameTheme.deal_in(tile, 0.12 + i * 0.10)
 		GameTheme.hover_lift(tile)
 
 
@@ -580,6 +757,15 @@ func _make_lord_tile(lord: String) -> Button:
 	return btn
 
 
+func _count_visited_current_act(node_type: String) -> int:
+	var count := 0
+	for row in RunState.get_current_act_map():
+		for node in row:
+			if bool(node.get("visited", false)) \
+					and String(node.get("type", "")) == node_type:
+				count += 1
+	return count
+
 func _make_section_header(text: String) -> HBoxContainer:
 	# A ruled subheader plaque: tan rule — gold caption — tan rule. Echoes the
 	# chart furniture (make_screen_title's divider) so the cue reads as a
@@ -622,9 +808,7 @@ func _pick_march(lord: String, tile: Control = null) -> void:
 		if tile.get_parent() != null:
 			for sib in tile.get_parent().get_children():
 				if sib != tile and sib is Control:
-					var tw := (sib as Control).create_tween()
-					tw.tween_property(sib, "modulate:a", 0.0, 0.22) \
-						.set_ease(Tween.EASE_IN)
+					GameTheme.fade_exit(sib, 0.22)
 		await get_tree().create_timer(0.34).timeout
 	RunState.choose_next_rival(lord)
 	_go_to_map()

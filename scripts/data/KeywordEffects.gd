@@ -4,27 +4,28 @@ extends Node
 
 const KEYWORDS: Dictionary = {
 	"armored":    {"display": "Armored",     "desc": "Takes 1 less damage from each hit (minimum 1)."},
-	"swift":      {"display": "Swift",       "desc": "Attacks first each round, before enemies can strike back."},
+	"swift":      {"display": "Swift",       "desc": "Attacks before the main clash. A newly played Swift creature can attack a creature this round, but not enemy face."},
+	"charge":     {"display": "Charge",      "desc": "Attacks during the round it is played, including against enemy face."},
 	"thorns":     {"display": "Thorns",      "desc": "Deals 1 damage back to each creature that attacks this."},
 	"regenerate": {"display": "Regenerate",  "desc": "Heals 1 HP at the start of each round."},
 	"summon":     {"display": "Summon",      "desc": "When played, also summons a 1/1 token in an adjacent empty lane."},
 	"last_stand": {"display": "Last Stand",  "desc": "Survives the first killing blow at 1 HP. Once per fight."},
 	"piercing":   {"display": "Piercing",    "desc": "When this kills its target, leftover damage carries to the creature behind it, then to enemy face."},
-	"sniper":     {"display": "Sniper",      "desc": "After the clash, hits the lowest-HP enemy creature. If it kills, it shoots again."},
+	"sniper":     {"display": "Sniper",      "desc": "After the clash, attacks a chosen enemy. Drag it onto a target; otherwise it attacks the weakest. It attacks again after each kill."},
 	"sacrifice":  {"display": "Sacrifice",   "desc": "Cost: destroy one of your own creatures to play this card."},
 	"exhaust":    {"display": "Exhaust",     "desc": "Once played, this card is gone for the rest of the fight."},
 	"retain":     {"display": "Retain",      "desc": "Stays in your hand at end of turn instead of being discarded."},
 	"wither":     {"display": "Wither N",    "desc": "Loses N ATK at the start of each round."},
-	"on_enter":   {"display": "On-Enter",    "desc": "Effect triggers the moment this creature is placed on the board."},
+	"on_enter":   {"display": "On-Enter",    "desc": "Triggers when this creature is placed on the board."},
 	"on_death":   {"display": "On-Death",    "desc": "Effect triggers when this creature dies (HP reaches 0)."},
-	"adj_buff":   {"display": "Adj. Buff",   "desc": "Adjacent friendlies — left, right, and its column-mate in the other row — get a stat bonus while this is in play."},
+	"adj_buff":   {"display": "Adj. Buff",   "desc": "Friendlies beside it or in the other slot of its column gain a stat bonus while this remains in play."},
 	"poison":     {"display": "Poison",      "desc": "Any creature it damages dies, no matter its remaining HP."},
 	"shield":     {"display": "Shield",      "desc": "Absorbs the first hit completely, then Shield is removed."},
 	"guardian":   {"display": "Guardian",    "desc": "Enemies to its left and right must attack this creature."},
 	"structure":  {"display": "Structure",   "desc": "Can't be attacked or targeted by spells."},
-	"slay":       {"display": "Slay",        "desc": "An effect that fires when this kills the creature it's fighting."},
-	"adjacent":   {"display": "Adjacent",    "desc": "The creatures beside it — to its left and right, and its column-mate in the other row."},
-	"doom":       {"display": "Doom N",      "desc": "Counts down 1 per round. At 0, deals its ATK to enemy face, then dies."},
+	"slay":       {"display": "Slay",        "desc": "Triggers when this kills the creature it is fighting."},
+	"adjacent":   {"display": "Adjacent",    "desc": "Creatures to the left, right, or in the other row of the same column."},
+	"doom":       {"display": "Doom N",      "desc": "Forms up, then counts down 1 per round. At 0 it hits enemy face for its ATK and dies. Killed early, bursts in-lane."},
 	"rampage":    {"display": "Rampage",     "desc": "Gains +1 ATK this fight each time it kills an enemy creature (more if a number is shown)."},
 	"lifelink":   {"display": "Lifesteal",   "desc": "You heal HP equal to the damage this deals in battle."},
 	"overrun":    {"display": "Overrun",     "desc": "Start of each round: +1 ATK this round if no enemy stands directly across."},
@@ -207,6 +208,9 @@ static func dispatch_on_enter(card, lane_idx: int, is_enemy: bool, ctx) -> void:
 	# summon pass — this is the single dispatch point for both sides.
 	var summon_on_play: bool = data.has("keywords") and data.keywords.has("summon")
 	if data.has("on_enter"):
+		# The trigger's material beat (tribe-coloured pulse / tracer / wave) —
+		# fired BEFORE resolution so target derivation sees the living board.
+		ctx._play_trigger_fx(data.on_enter, card, lane_idx, is_enemy, "enter")
 		_run_on_enter(data.on_enter, card, lane_idx, is_enemy, ctx)
 		# Name the battlecry on the creature that cast it, so the visible result
 		# (a card drawn, the foe's face ticking down) ties back to its cause.
@@ -234,6 +238,10 @@ static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx, row: in
 		death_anchor = card.global_position + Vector2(
 			card.size.x * card.scale.x * 0.5, card.size.y * card.scale.y * 0.06)
 		have_anchor = true
+	# The deathrattle's material beat, anchored where the body fell (the node
+	# may be freed before a staggered beat lands — an anchor can't go invalid).
+	ctx._play_trigger_fx(effect, card, lane_idx, was_enemy, "death",
+		death_anchor if have_anchor else Vector2.ZERO, row)
 	# Griffin (return_to_hand_once): identity- and once-based — resolve it HERE while
 	# the dying `card` (and its deck uid) is still in scope, never via the value-based
 	# _run_on_death doubling loop (returning to hand twice is nonsense, and the shared
@@ -251,12 +259,14 @@ static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx, row: in
 	# The Undying (undying_grow): identity-based like Griffin — writes a
 	# permanent +1/+1 mod against the dying card's deck uid (RunState mod
 	# stack), so every future draw of THIS copy — this fight and every fight
-	# after — comes back bigger. Tokens/net bodies (uid < 0) no-op; doubling
-	# a permanent ledger write is nonsense, so it resolves before the
-	# value-based loop.
+	# after — comes back bigger. Tokens/net bodies (uid < 0) no-op. Passive
+	# field-wide doubling stays disabled, but Offering's explicit extra trigger
+	# adds a second growth write so the card text remains honest.
 	if String(effect.get("type", "")) == "undying_grow":
 		if not was_enemy and card is Control and int(card.deck_uid) >= 0:
-			RunState.grow_undying(card.deck_uid)
+			var undying_times := 1 + maxi(0, card.state.offering_extra_on_death)
+			for _i in undying_times:
+				RunState.grow_undying(card.deck_uid)
 			if have_anchor and ctx.has_method("spawn_trigger_callout"):
 				ctx.spawn_trigger_callout(death_anchor, "RISES +1/+1", true)
 		return
@@ -276,6 +286,18 @@ static func dispatch_on_death(card, lane_idx: int, was_enemy: bool, ctx, row: in
 	if was_enemy and ctx.has_method("mutator_doubles_enemy_on_death") \
 			and ctx.mutator_doubles_enemy_on_death():
 		times = 2
+	# Grave Bell is personal rather than field-wide. Existing double effects and
+	# the Bell cap at two together; Offering is applied afterward and therefore
+	# still adds its promised third trigger.
+	if card is Control and is_instance_valid(card):
+		var equipped: Dictionary = data.get("equipped_armament", {})
+		if String(equipped.get("effect", "")) == "double_on_death":
+			times = maxi(times, 2)
+	# Offering adds one extra copy of a repeatable death effect. Apply it after
+	# the normal doubling rules so "one extra" stays additive (2 -> 3). Griffin
+	# stays one-shot; Undying handles Offering's explicit extra growth above.
+	if card is Control and is_instance_valid(card):
+		times += maxi(0, card.state.offering_extra_on_death)
 	for i in times:
 		_run_on_death(effect, lane_idx, was_enemy, ctx, row)
 	if have_anchor and ctx.has_method("spawn_trigger_callout"):
@@ -306,9 +328,28 @@ static func dispatch_start_of_round(ctx) -> void:
 					ctx.spawn_keyword_callout_kw(card, "wither", " -%d" % w)
 		# Doom: tick the per-creature countdown. At 0 the creature is queued to
 		# detonate (damage opposing face + destroy via the canonical routine).
+		#
+		# THE FUSE IS NOT LIT UNTIL THE BODY HAS FORMED UP (2026-07-28). A body
+		# that Combat._start_round's sweep readied THIS round is about to fight
+		# its first clash — its fuse starts burning after that, so "Doom N" means
+		# N clashes, which is what the printed number promises. The 2026-07-21
+		# muster delay had silently cut every Doom body from N swings to N-1
+		# (Doom 2 meant exactly ONE swing, ever) and nobody retuned the numbers;
+		# this restores them without touching a single printed value, and it is
+		# symmetric for both sides for free because CombatNet routes its round
+		# starts through the same _start_round. Swift/Charge bodies are never in
+		# the set — they fight on arrival and were never delayed.
+		#
+		# The held round is ANNOUNCED: a countdown that refuses to move with no
+		# explanation reads as a bug, which is the exact defect the status-rider
+		# pass existed to kill.
 		if card.has_keyword("doom"):
 			if card.has_method("_ensure_doom_init"):
 				card._ensure_doom_init()
+			if ctx._mustered_this_round.has(card.get_instance_id()):
+				if ctx.has_method("spawn_keyword_callout_kw"):
+					ctx.spawn_keyword_callout_kw(card, "fuse_unlit")
+				continue
 			card.doom_counter -= 1
 			if card.has_method("update_doom_display"):
 				card.update_doom_display()
@@ -372,7 +413,25 @@ static func dispatch_start_of_round(ctx) -> void:
 									"FORMATION +%d/+%d" % [fm, fm], Color(0.62, 0.78, 0.95), false)
 
 
-const COMBAT_KEYWORDS := ["armored", "swift", "thorns", "regenerate", "last_stand", "piercing", "sniper", "poison", "shield", "guardian"]
+const COMBAT_KEYWORDS := ["armored", "swift", "thorns", "regenerate", "last_stand", "piercing", "sniper", "poison", "shield", "guardian", "charge"]
+
+
+static func _copy_source_without_armament(src: Dictionary) -> Dictionary:
+	# Equipment belongs to one live bearer. Copies may inherit the creature, but
+	# never the attached card or the max-HP/keyword deltas folded into its data.
+	var clean: Dictionary = src.duplicate(true)
+	var gear: Dictionary = clean.get("equipped_armament", {})
+	if gear.is_empty():
+		return clean
+	var applied_hp: int = maxi(0, int(gear.get("applied_hp", 0)))
+	if applied_hp > 0:
+		clean["hp"] = maxi(1, int(clean.get("hp", 1)) - applied_hp)
+	var clean_keywords: Array = clean.get("keywords", [])
+	for kw in gear.get("granted_keywords", []):
+		clean_keywords.erase(kw)
+	clean["keywords"] = clean_keywords
+	clean.erase("equipped_armament")
+	return clean
 
 
 static func _copy_abilities_partial(card, src: Dictionary) -> void:
@@ -381,6 +440,7 @@ static func _copy_abilities_partial(card, src: Dictionary) -> void:
 	# Adds on_death / adj_buff / passive / wither only if the card doesn't
 	# already have one — so Mirror Knight keeps its own swap_atk floop while
 	# inheriting the defender's death-rattles, auras, and stat-keywords.
+	src = _copy_source_without_armament(src)
 	for kw in src.get("keywords", []):
 		if kw in COMBAT_KEYWORDS and not card.card_data.keywords.has(kw):
 			card.card_data.keywords.append(kw)
@@ -403,6 +463,13 @@ static func _copy_creature_onto(card, src: Dictionary) -> void:
 	# original reason this function was abilities-blind. The card now actually
 	# *becomes* the source instead of grafting only its ATK/HP and a couple of
 	# combat keywords.
+	# A full transform breaks any Armament on the destination too. Its live stats
+	# are overwritten below; remove only keywords that attachment itself granted.
+	var old_gear: Dictionary = card.card_data.get("equipped_armament", {})
+	for old_kw in old_gear.get("granted_keywords", []):
+		card.card_data.get("keywords", []).erase(old_kw)
+	card.card_data.erase("equipped_armament")
+	src = _copy_source_without_armament(src)
 	var atk := int(src.get("atk", card.current_atk))
 	var hp := int(src.get("hp", card.current_hp))
 	card.card_data.atk = atk
@@ -449,7 +516,7 @@ static func _effect_label(effect: Dictionary, is_death: bool, side_is_enemy: boo
 			"damage_opposing_lane", "damage_opposing": return "DEATH BLOW %d" % v
 			"damage_all_enemies":    return "DEATH NOVA %d" % v
 			"summon":                return "SUMMON"
-			"bonus_mana":            return "" if side_is_enemy else "+%d COMMAND" % v
+			"draw":                  return "" if side_is_enemy else "DRAW %d" % v
 			"return_to_hand_once":   return "" if side_is_enemy else "RETURN"
 			"heal_enemy_face":       return "" if side_is_enemy else "FOE HEALS %d" % v
 			"steal_opposing":        return "" if side_is_enemy else "DESERTION"
@@ -457,6 +524,9 @@ static func _effect_label(effect: Dictionary, is_death: bool, side_is_enemy: boo
 			"debuff_all_player_atk": return ("WEAKEN ALL %d" % v) if side_is_enemy else ""
 			"damage_adjacent":       return "BACKLASH %d" % v
 			"grant_shield_adjacent": return "SHIELDS UP"
+			"gain_gold":             return ("+%d GOLD" % v) if not side_is_enemy else ""
+			"bonus_mana_next_turn":  return ("+%d COMMAND" % v) if not side_is_enemy else ""
+			"betray_opposing":       return "BETRAYAL"
 		return ""
 	match t:
 		"damage_opposing", "damage_opposing_draw", "damage_random_player":
@@ -473,6 +543,11 @@ static func _effect_label(effect: Dictionary, is_death: bool, side_is_enemy: boo
 		"look_top":               return "SCRY" if not side_is_enemy else ""
 		"cast_random_spell":      return "CAST" if not side_is_enemy else ""
 		"glutton_devour":         return "DEVOUR"
+		"buff_per_ctype":         return "THE PACK"
+		"buff_ctype_hp":          return "FORTIFY +%d HP" % v
+		"hero_pay":               return "BLOOD PRICE %d" % v
+		"ram_row_back":           return "RAM"
+		"arm_grave":              return "OPEN THE GRAVE"
 	return ""
 
 
@@ -513,6 +588,39 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 						ally.update_stat_display()
 					if ctx.has_method("log_status"):
 						ctx.log_status(ally, "gains %s" % g_kw.capitalize())
+		"arm_grave":
+			# The Sexton opens the grave for the rest of the fight. The flag
+			# lives on Combat (not this body), so the Second Wave keeps rising
+			# after the Sexton's own death. Forged (tier 2) = a faster wave.
+			var sexton_tier: int = 2 if (card is Control and bool(card.card_data.get("is_upgraded", false))) else 1
+			var sexton_side: int = int(is_enemy)
+			ctx._grave_armed[sexton_side] = maxi(ctx._grave_armed[sexton_side], sexton_tier)
+		"arm_works":
+			# The Siege-Bastion fortifies the works for the rest of the fight — every
+			# friendly Bastion reflects the HP it loses when struck. Same arming trick
+			# as the grave above: the flag is Combat's, not this body's, so the works
+			# keep biting after the keystone itself has fallen.
+			var works_tier: int = 2 if (card is Control and bool(card.card_data.get("is_upgraded", false))) else 1
+			var works_side: int = int(is_enemy)
+			ctx._works_fortified[works_side] = maxi(ctx._works_fortified[works_side], works_tier)
+		"arm_ledger":
+			# The Magister opens the Ledger for the rest of the fight — the round's
+			# second working is paid on the board by the whole coven. Forged, it opens
+			# on the FIRST working instead.
+			var ledger_tier: int = 2 if (card is Control and bool(card.card_data.get("is_upgraded", false))) else 1
+			var ledger_side: int = int(is_enemy)
+			ctx._ledger_open[ledger_side] = maxi(ctx._ledger_open[ledger_side], ledger_tier)
+		"strike_the_order":
+			# COUNTERORDERS (2026-07-30) — the arrival that punishes a committed foe.
+			# Reads ctx._wears_an_order, the one predicate the whole package shares, so
+			# the condition can never drift from the badge the player is looking at.
+			# Falls through to nothing when the column is empty or the foe is simply
+			# swinging: the body is still a plain body, which is the positivity floor.
+			var order_t = ctx.get_opposing_card(lane_idx, is_enemy)
+			if order_t != null and is_instance_valid(order_t) 					and ctx.has_method("_wears_an_order") and ctx._wears_an_order(order_t):
+				order_t.take_damage(effect.get("value", 4) + on_enter_bonus)
+				if ctx.has_method("log_status"):
+					ctx.log_status(order_t, "caught out of position")
 		"damage_opposing":
 			var target = ctx.get_opposing_card(lane_idx, is_enemy)
 			if target != null:
@@ -527,10 +635,122 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 			# "From the placer's perspective, hit a random opposing creature." 4x4: both rows.
 			var opponents = ctx._all_friendly(not is_enemy)
 			if opponents.size() > 0:
-				opponents[randi() % opponents.size()].take_damage(effect.value + on_enter_bonus)
+				ctx._combat_ops.pick(opponents).take_damage(effect.value + on_enter_bonus)
 		"damage_all_enemies":
-			for c in ctx._all_friendly(not is_enemy):
-				c.take_damage(effect.value + on_enter_bonus)
+			# Dragon Hatchling: `per_ctype` scales the breath — +1 damage per
+			# OTHER living friendly of the printed tribe, on top of the base;
+			# `per_cap` bounds the bonus and `scope: "front"` narrows the blast
+			# to the enemy FRONT line (2026-07-15 sweep: a board-wide scaling
+			# breath ran +35-45 lift, 4-5x the pool ceiling — the front-line
+			# strafe halves the value and lets the back row hide from it).
+			var aoe_dmg: int = int(effect.value) + on_enter_bonus
+			var aoe_ct := String(effect.get("per_ctype", ""))
+			if aoe_ct != "":
+				var aoe_bonus: int = 0
+				for pk in ctx._all_friendly(is_enemy):
+					if pk != card and is_instance_valid(pk) and pk.current_hp > 0 \
+							and String(pk.card_data.get("ctype", "")) == aoe_ct:
+						aoe_bonus += 1
+				var aoe_cap: int = int(effect.get("per_cap", 0))
+				if aoe_cap > 0:
+					aoe_bonus = mini(aoe_bonus, aoe_cap)
+				aoe_dmg += aoe_bonus
+			if String(effect.get("scope", "")) == "front":
+				for c in ctx._row_array(not is_enemy, ctx.ROW_FRONT):
+					if c != null and is_instance_valid(c) and c.current_hp > 0:
+						c.take_damage(aoe_dmg)
+			else:
+				for c in ctx._all_friendly(not is_enemy):
+					c.take_damage(aoe_dmg)
+		"buff_per_ctype":
+			# Heartwood Elder: arrives bigger for each other friendly of the
+			# tribe already fielded — banked instantly, so the value survives
+			# the fast-death pacing (and Bloodmoon Alpha's encore counts twice).
+			var bp_ct := String(effect.get("ctype", ""))
+			var bp_n: int = 0
+			for pk in ctx._all_friendly(is_enemy):
+				if pk != card and is_instance_valid(pk) and pk.current_hp > 0 \
+						and String(pk.card_data.get("ctype", "")) == bp_ct:
+					bp_n += 1
+			if bp_n > 0 and card is Control:
+				card.current_atk += bp_n * int(effect.get("atk", 1))
+				var bp_hp: int = bp_n * int(effect.get("hp", 1))
+				card.card_data.hp = int(card.card_data.hp) + bp_hp
+				card.current_hp += bp_hp
+				card.update_stat_display()
+		"buff_per_deficit":
+			# Last Levy: musters to the size of the odds against it — +1/+1 per
+			# enemy body MORE than your own. The anti-win-more lever in its honest
+			# form: it counts how far BEHIND you are, so it is a blank on an even
+			# opening board and a monster on the turn after a wipe.
+			#
+			# (Its first shape counted your own EMPTY lanes; the sim graded that
+			# +13 lift — a turn-1 board is 7 lanes empty, so it read as a 9/9 for
+			# two Command. Same concept, honest trigger. Deliberately NOT "per
+			# friendly fallen" — Oathkeeper already owns that axis.)
+			var le_mine: int = 0
+			for le_c in ctx._all_friendly(is_enemy):
+				if le_c != card and is_instance_valid(le_c) and le_c.current_hp > 0:
+					le_mine += 1
+			var le_theirs: int = 0
+			for le_e in ctx._all_friendly(not is_enemy):
+				if is_instance_valid(le_e) and le_e.current_hp > 0:
+					le_theirs += 1
+			var le_deficit: int = maxi(0, le_theirs - le_mine)
+			if le_deficit > 0 and card is Control:
+				card.current_atk += le_deficit * int(effect.get("atk", 1))
+				var le_hp: int = le_deficit * int(effect.get("hp", 1))
+				card.card_data.hp = int(card.card_data.hp) + le_hp
+				card.current_hp += le_hp
+				card.update_stat_display()
+		"buff_ctype_hp":
+			# Warding Stone: every friendly Bastion already standing — including
+			# the Stone itself — gains max/current HP for this fight. This mutates
+			# only the live bodies, so it stacks cleanly without touching RunState.
+			# On the host, max/current HP ride the ordinary board snapshot.
+			var bh_ct := String(effect.get("ctype", ""))
+			var bh_gain: int = maxi(0, int(effect.get("value", 0)))
+			if bh_gain > 0:
+				for ally in ctx._all_friendly(is_enemy):
+					if ally == null or not is_instance_valid(ally) or ally.current_hp <= 0:
+						continue
+					if String(ally.card_data.get("ctype", "")) != bh_ct:
+						continue
+					ally.card_data["hp"] = int(ally.card_data.get("hp", ally.current_hp)) + bh_gain
+					ally.current_hp += bh_gain
+					ally.update_stat_display()
+		"hero_pay":
+			# Bloodsworn: the pact's price — the OWNER's hero pays `value` HP.
+			# Sides routed explicitly: solo _hurt_opposing_hero always bills the
+			# enemy face (its owner_is_enemy leg is net-only), so it can't carry
+			# a self-inflicted cost.
+			var pay: int = int(effect.get("value", 2))
+			if ctx._is_net():
+				ctx._net_damage_hero(is_enemy, pay)
+			elif is_enemy:
+				ctx.damage_enemy_hero(pay)
+			else:
+				ctx.damage_player_hero(pay)
+		"ram_row_back":
+			# The Leveler: the whole opposing front line is rammed back a row.
+			# Universal push rule: a body that cannot fall back CRASHES for
+			# `value`, and an occupying blocker takes the crash too. Structures
+			# are bolted down — they block, but never move or take crash damage.
+			var ram_dmg: int = int(effect.get("value", 3))
+			for ram_lane in ctx.LANES_PER_ROW:
+				var ram_c = ctx._row_array(not is_enemy, ctx.ROW_FRONT)[ram_lane]
+				if ram_c == null or not is_instance_valid(ram_c) or ram_c.current_hp <= 0:
+					continue
+				if ram_c.has_keyword("structure"):
+					continue
+				var ram_block = ctx._row_array(not is_enemy, ctx.ROW_BACK)[ram_lane]
+				if ram_block == null:
+					ctx._relocate_creature(ram_c, not is_enemy, ctx.ROW_BACK, ram_lane)
+				else:
+					ram_c.take_damage(ram_dmg)
+					if is_instance_valid(ram_block) and ram_block.current_hp > 0 \
+							and not ram_block.has_keyword("structure"):
+						ram_block.take_damage(ram_dmg)
 		"draw":
 			ctx._battlecry_draw(is_enemy, int(effect.value))
 		"gain_gold":
@@ -552,7 +772,7 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 				target.update_stat_display()
 		"discard_random":
 			if is_enemy and ctx._hand.size() > 0:
-				var idx = randi() % ctx._hand.size()
+				var idx = ctx._combat_ops.index(ctx._hand.size())
 				var c = ctx._hand[idx]
 				ctx._hand.remove_at(idx)
 				ctx._player_discard_pile.append(ctx._pile_entry(c.card_id, c.deck_uid))
@@ -580,7 +800,7 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 						if c != card:
 							pool.append(c)
 					if pool.size() > 0:
-						_copy_creature_onto(card, pool[randi() % pool.size()].card_data)
+						_copy_creature_onto(card, ctx._combat_ops.pick(pool).card_data)
 				else:
 					ctx._show_copy_friendly_picker(card)
 		"copy_opposing_keywords":
@@ -716,6 +936,34 @@ static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ct
 		"damage_all_enemies":
 			for c in ctx._all_friendly(not was_enemy):
 				c.take_damage(effect.value + on_death_bonus)
+		"buff_in_front":
+			# Grave-Goods: the back-row larder. Its bequest goes to the COLUMN-MATE
+			# in the front row (the body it was standing behind). An ENABLER, not a
+			# payoff — the +HP is what makes the front body survive the clash that
+			# would otherwise kill it, which is the whole point given how fast
+			# creatures die here. Silently does nothing from the front row.
+			if row == ctx.ROW_BACK or row == -1:
+				var gg_front: Array = ctx._row_array(was_enemy, ctx.ROW_FRONT)
+				if lane_idx >= 0 and lane_idx < gg_front.size():
+					var gg = gg_front[lane_idx]
+					if gg != null and is_instance_valid(gg) and gg.current_hp > 0:
+						var gg_hp: int = int(effect.get("hp", 2))
+						gg.current_atk += int(effect.get("atk", 2))
+						gg.card_data["hp"] = int(gg.card_data.get("hp", gg.current_hp)) + gg_hp
+						gg.current_hp += gg_hp
+						gg.update_stat_display()
+		"starter_buff_column_ally":
+			# Burial Goods (the Owed's affinity starter): the kit is willed to
+			# whoever is still standing in the dead soldier's column — front seat
+			# first, then the back. Unlike buff_in_front above it reads from EITHER
+			# row, because the levy is a 0/2 that can be posted anywhere.
+			#
+			# The dying card's slot is nulled before dispatch, so there is nothing
+			# to exclude. Shares Combat._buff_column_survivor with the Ledger Seal
+			# relic so "a surviving friendly in its column" has exactly one reading
+			# and one set of stat writes.
+			ctx._buff_column_survivor(was_enemy, lane_idx, null,
+				int(effect.get("atk", 1)), int(effect.get("hp", 1)))
 		"summon":
 			# Old Bones (diminish): the token inherits a smaller summon of its
 			# own, chaining down one size per death until the 1/1 stays dead.
@@ -746,11 +994,10 @@ static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ct
 				if c != null and is_instance_valid(c) and c.current_hp > 0 \
 						and c.has_keyword("doom"):
 					ctx._detonate_doom(c)
-		"bonus_mana":
-			# Mourner: +value max Command on the OWNER's next turn. Routed through
-			# the battlecry channel so a client-owned death in net pays the CLIENT —
-			# the bare `if not was_enemy` bump this replaced was host-only.
-			ctx._battlecry_bonus_mana_next_turn(was_enemy, effect.value)
+		"draw":
+			# Mourner: draw for the OWNER. The battlecry channel routes a client-owned
+			# death to the client's private hand rather than drawing on the host.
+			ctx._battlecry_draw(was_enemy, int(effect.get("value", 0)))
 			# (return_to_hand_once / Griffin and undying_grow / The Undying are
 			# resolved in dispatch_on_death, above — they need the dying card's
 			# identity, which this value-based path lacks.)
@@ -794,6 +1041,22 @@ static func _run_on_death(effect: Dictionary, lane_idx: int, was_enemy: bool, ct
 					ally.state.has_shield = true
 					if ally.has_method("_spawn_keyword_chip"):
 						ally._spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0))
+		"gain_gold":
+			# Scavenger: loot the body. Player-side only — the foe has no purse
+			# (and the card is skirmish-denylisted with the rest of the gold set).
+			if not was_enemy:
+				RunState.gain_gold(int(effect.get("value", 0)))
+		"bonus_mana_next_turn":
+			# Mourner: the funeral dues — the owner banks Command for next turn.
+			# _battlecry_bonus_mana_next_turn routes a client-owned death to the
+			# client's own pool over the wire.
+			ctx._battlecry_bonus_mana_next_turn(was_enemy, int(effect.get("value", 1)))
+		"betray_opposing":
+			# Tallow Doll: the creature across from the grave turns on its own
+			# line (or its commander when no ally remains). Combat owns the strike
+			# because it needs board geometry, counters, VFX and net-side routing.
+			if ctx.has_method("_resolve_tallow_betrayal"):
+				ctx._resolve_tallow_betrayal(lane_idx, was_enemy)
 		_:
 			pass
 
@@ -819,7 +1082,7 @@ static func _do_summon(lane_idx: int, is_enemy: bool, ctx, row: int = 0) -> void
 	# those are full fall back to the other row's diagonal lanes, so a summon on a
 	# busy board still lands beside the summoner instead of whiffing.
 	var seats: Array = ctx._adjacent_empty_seats(is_enemy, row, lane_idx)
-	seats.shuffle()
+	ctx._combat_ops.shuffle(seats)
 	if not seats.is_empty():
 		ctx.summon_token(1, 1, int(seats[0].lane), is_enemy, int(seats[0].row))
 		return
@@ -829,5 +1092,5 @@ static func _do_summon(lane_idx: int, is_enemy: bool, ctx, row: int = 0) -> void
 		if adj >= 0 and adj < 4 and ctx._row_array(is_enemy, other)[adj] == null:
 			diag.append(adj)
 	if not diag.is_empty():
-		diag.shuffle()
+		ctx._combat_ops.shuffle(diag)
 		ctx.summon_token(1, 1, diag[0], is_enemy, other)

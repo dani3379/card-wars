@@ -13,9 +13,15 @@ const DRAFT_SCENE := "res://scenes/net_draft.tscn"   # built in Phase 1
 const GILT_BRIGHT := Color(1.0, 0.85, 0.45, 1.0)
 const IVORY := Color(0.96, 0.92, 0.78, 1.0)
 const ASH := Color(0.62, 0.58, 0.52, 1.0)
-const GREEN := Color(0.55, 0.85, 0.45, 1.0)
+# The lobby's two accents used to be a saturated web-green and web-blue — the
+# only cool, fully-saturated inks in a sepia/gilt/ember game, sitting dead
+# centre of the screen. They read as unstyled default UI. Both now speak in
+# world: VERDIGRIS is the aged-copper "go / open / connected" ink events already
+# use for blue options, and JOIN takes the affirmative gilt every other primary
+# action in the game wears. The crown/sword tile icons still tell them apart.
+const GREEN := Color(0.55, 0.78, 0.70, 1.0)   # verdigris — host / ready / connected
 const RED := Color(0.90, 0.45, 0.35, 1.0)
-const AZURE := Color(0.52, 0.68, 0.95, 1.0)   # join accent (answer-the-call blue)
+const AZURE := Color(0.86, 0.72, 0.34, 1.0)   # join accent — affirmative gilt
 const EMBER := Color(0.90, 0.62, 0.30, 1.0)   # practice / drill accent
 
 # ── UI refs ──
@@ -36,8 +42,6 @@ var _start_btn: Button
 var _back_btn: Button               # outer "leave to menu" — hidden while the practice sub-panel owns the back
 var _connect_panel: VBoxContainer   # host/join controls (hidden once connected)
 var _ready_panel: VBoxContainer     # ready/start controls (shown once connected)
-var _you_ready_label: Label
-var _opp_ready_label: Label
 var _relay_host: String = ""        # resolved relay address (empty = online disabled)
 
 # ── Mode / format picker (host picks; client sees the choice) ──
@@ -60,18 +64,38 @@ var _vsbot_mode_buttons: Dictionary = {}
 var _vsbot_bo_buttons: Dictionary = {}
 var _vsbot_style_buttons: Dictionary = {}
 
-# ── Lord pick (your character — portrait + emote voice, both players see it) ──
-var _hero_buttons: Dictionary = {}        # hero id -> Button (ready panel)
-var _vsbot_hero_buttons: Dictionary = {}  # hero id -> Button (practice panel)
-var _opp_hero_label: Label = null         # "Their lord: …" readout (ready panel)
+# ── Lord pick + the two banner plates (your standard vs the challenger's).
+# The pick is cosmetic identity (portrait + emote voice, both players see it);
+# the flanking plates are the lobby's stage and refresh from the same signals
+# (hero_state_changed → _refresh_hero_ui, ready_state_changed → seals).
+var _hero_buttons: Dictionary = {}        # hero id -> Button (left plate chips)
 var _selected_hero: String = ""
+var _your_portrait: TextureRect = null
+var _your_name_label: Label = null
+var _your_tagline: Label = null
+var _your_seal: Label = null              # your ready state, stamped on your plate
+var _your_glow: TextureRect = null        # breathing lamplight over your portrait
+var _opp_portrait: TextureRect = null
+var _opp_empty_box: Control = null        # engraved mark while the seat is empty
+var _opp_name_label: Label = null
+var _opp_tagline: Label = null
+var _opp_seal: Label = null               # opponent ready state, on their plate
+var _opp_glow: TextureRect = null
+var _opp_shown: bool = false              # is the challenger portrait currently up
+var _challenger_is_bot: bool = false      # practice panel open → plate shows the bot
+var _code_plate: Control = null           # the watchword docket (shareable room code)
+var _code_caption: Label = null           # docket caption — flips to COPIED feedback
+var _room_code_raw := ""                  # unspaced code, for the clipboard
+var _code_copy_gen := 0                   # stale-restore guard on the caption flip
+var _lamp_glow_tex: Texture2D = null      # shared radial lamplight texture
+var _lan_default_open: bool = false       # direct-IP panel starts open (no-relay build)
 
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "main_menu")
 	# The muster pool: quiet war-council medieval, shared by every skirmish
 	# prep screen (lobby, quick-match, draft, sealed, constructed).
-	AudioBank.play_music_random(["map_c", "map_d", "rest_c"])
+	AudioBank.play_music_random(["net_lobby", "net_lobby_b", "rest_c"])
 	_relay_host = NetMatch.get_relay_host()
 	# Fresh lobby: drop any stale connection from a previous visit. The lord pick
 	# survives leave() (sticky), so a rematch lobby reopens on your last lord.
@@ -96,6 +120,11 @@ func _unhandled_input(event: InputEvent) -> void:
 # ─────────────────────────────────────────────────────────────────────────
 
 func _build_ui() -> void:
+	# The stage: two banner plates flank a central war-table column — your
+	# standard on the left, the challenger's seat on the right. The center
+	# column carries the state panels (connect / practice / ready) unchanged.
+	_build_banner_plates()
+
 	var col := VBoxContainer.new()
 	col.name = "Lobby"
 	col.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -113,7 +142,7 @@ func _build_ui() -> void:
 	col.add_child(GameTheme.make_screen_title("SKIRMISH", GILT_BRIGHT))
 
 	var blurb := GameTheme.make_label(
-		"Duel a friend anywhere — or drill against a bot.", 16, ASH)
+		"Play against a friend or practice against a bot.", 16, ASH)
 	blurb.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(blurb)
 
@@ -123,47 +152,55 @@ func _build_ui() -> void:
 	_connect_panel.add_theme_constant_override("separation", 11)
 	col.add_child(_connect_panel)
 
-	# Whether the relay is wired into this build. When it isn't, the two online
-	# tiles render greyed with the reason printed on them (honest dead-state)
-	# rather than as live-looking buttons that only flash a red error on click.
+	# Composition follows whether the relay is wired into THIS build. When it is,
+	# the online duel headlines. When it isn't, we don't parade two dead grey
+	# blocks in the centre — the paths that actually work (a practice drill, and a
+	# direct connection to a friend) lead instead.
 	var online_ok := _relay_host != ""
-	var online_reason := "" if online_ok else \
-		"Online isn't wired into this build yet — use the direct-IP option below."
 
-	# ── Face a friend: HOST and JOIN as two matched chart panels, side by side ──
-	_connect_panel.add_child(GameTheme.make_section_divider("FACE A FRIEND", GameTheme.GILT, 17, 130.0))
+	if online_ok:
+		# ── Relay wired: the online duel is the headline ──
+		_connect_panel.add_child(GameTheme.make_section_divider(
+			"PLAY A FRIEND", GameTheme.GILT, 17, 130.0))
+		var duel_row := HBoxContainer.new()
+		duel_row.alignment = BoxContainer.ALIGNMENT_CENTER
+		duel_row.add_theme_constant_override("separation", 18)
+		_connect_panel.add_child(duel_row)
+		var host_tile := _build_host_tile(true, "")
+		_host_online_btn = host_tile.get_node("ClickButton")
+		_host_online_btn.pressed.connect(_on_host_online_pressed)
+		duel_row.add_child(host_tile)
+		duel_row.add_child(_build_join_tile(true, ""))
 
-	var duel_row := HBoxContainer.new()
-	duel_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	duel_row.add_theme_constant_override("separation", 18)
-	_connect_panel.add_child(duel_row)
+		_connect_panel.add_child(GameTheme.make_section_divider(
+			"OR PRACTICE SOLO", GameTheme.GILT, 17, 130.0))
+		_connect_panel.add_child(_build_practice_banner(Vector2(802, 90)))
 
-	var host_tile := _build_host_tile(online_ok, online_reason)
-	_host_online_btn = host_tile.get_node("ClickButton")
-	_host_online_btn.pressed.connect(_on_host_online_pressed)
-	duel_row.add_child(host_tile)
+		# Advanced: the direct-IP fallback stays folded behind a quiet toggle.
+		_lan_toggle = GameTheme.make_back_button("Same network / direct IP  ▾",
+			Vector2(300, 32), 14, ASH)
+		_lan_toggle.tooltip_text = "Play over a LAN or a Tailscale address with no relay — best on the same WiFi."
+		_lan_toggle.pressed.connect(_on_lan_toggle_pressed)
+		_connect_panel.add_child(_lan_toggle)
+		_lan_panel = _build_lan_panel()
+		_connect_panel.add_child(_lan_panel)
+	else:
+		# ── No relay in this build: lead with what works. ──
+		_connect_panel.add_child(GameTheme.make_section_divider(
+			"START A MATCH", GameTheme.GILT, 17, 130.0))
+		# Practice is the hero here — a taller, warmer banner that deals in.
+		var hero := _build_practice_banner(Vector2(760, 110))
+		_connect_panel.add_child(hero)
+		GameTheme.deal_in(hero, 0.22)
 
-	duel_row.add_child(_build_join_tile(online_ok, online_reason))
-
-	# ── Or drill solo: one wide practice banner ──
-	_connect_panel.add_child(GameTheme.make_section_divider("OR DRILL SOLO", GameTheme.GILT, 17, 130.0))
-	var bot_banner := GameTheme.make_choice_banner(
-		"PRACTICE vs BOT",
-		"Play any mode against a local AI opponent — no connection needed.",
-		EMBER, "res://assets/icons/shield.png", Vector2(802, 90))
-	_vs_bot_btn = bot_banner.get_node("ClickButton")
-	_vs_bot_btn.pressed.connect(_on_vs_bot_pressed)
-	_connect_panel.add_child(bot_banner)
-
-	# ── Advanced: quiet frameless toggle that unfolds the direct-IP controls ──
-	_lan_toggle = GameTheme.make_back_button("Same network / direct IP  ▾",
-		Vector2(300, 32), 14, ASH)
-	_lan_toggle.tooltip_text = "Play over a LAN or a Tailscale address with no relay — best on the same WiFi."
-	_lan_toggle.pressed.connect(_on_lan_toggle_pressed)
-	_connect_panel.add_child(_lan_toggle)
-
-	_lan_panel = _build_lan_panel()
-	_connect_panel.add_child(_lan_panel)
+		# A direct connection is the real "face a friend" path with no relay, so
+		# it sits open — not buried under a toggle a player has to discover.
+		_connect_panel.add_child(GameTheme.make_section_divider(
+			"OR PLAY A FRIEND — SAME NETWORK", GameTheme.GILT, 14, 96.0))
+		_lan_default_open = true
+		_lan_panel = _build_lan_panel()
+		_lan_panel.visible = true
+		_connect_panel.add_child(_lan_panel)
 
 	# ── Practice-vs-bot sub-panel (offline mode/format pick, shown on demand) ──
 	_vs_bot_panel = VBoxContainer.new()
@@ -173,17 +210,16 @@ func _build_ui() -> void:
 	col.add_child(_vs_bot_panel)
 
 	# ── Ready panel (after connect) ──
+	# The lord pick and both ready seals live on the flanking banner plates, so
+	# the column carries only the terms of the duel and the two big actions.
 	_ready_panel = VBoxContainer.new()
 	_ready_panel.alignment = BoxContainer.ALIGNMENT_CENTER
 	_ready_panel.add_theme_constant_override("separation", 10)
 	_ready_panel.visible = false
 	col.add_child(_ready_panel)
 
-	# Lord pick — both players choose the character they march as; the picks are
-	# synced so each side sees the other's portrait in combat (built once; the
-	# highlight + "Their lord" line refresh via hero_state_changed).
-	_ready_panel.add_child(_build_hero_picker(_hero_buttons, true))
-	_ready_panel.add_child(GameTheme.make_separator(GILT_BRIGHT, 300.0))
+	_ready_panel.add_child(GameTheme.make_section_divider(
+		"MATCH SETTINGS", GameTheme.GILT, 17, 130.0))
 
 	# Mode / format picker — populated on connect (host gets buttons, client a
 	# read-only label) since is_host isn't known until host/join completes.
@@ -192,15 +228,6 @@ func _build_ui() -> void:
 	_mode_panel.add_theme_constant_override("separation", 6)
 	_ready_panel.add_child(_mode_panel)
 	_ready_panel.add_child(GameTheme.make_separator(GILT_BRIGHT, 300.0))
-
-	var ready_row := HBoxContainer.new()
-	ready_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	ready_row.add_theme_constant_override("separation", 40)
-	_ready_panel.add_child(ready_row)
-	_you_ready_label = GameTheme.make_label("You: not ready", 16, ASH)
-	ready_row.add_child(_you_ready_label)
-	_opp_ready_label = GameTheme.make_label("Opponent: —", 16, ASH)
-	ready_row.add_child(_opp_ready_label)
 
 	_ready_btn = GameTheme.make_back_button("READY", Vector2(300, 46), 20, GREEN)
 	_ready_btn.pressed.connect(_on_ready_pressed)
@@ -219,11 +246,11 @@ func _build_ui() -> void:
 	_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(_status_label)
 
-	# Big shareable room code (host, online). Hidden until the relay assigns one.
-	_code_label = GameTheme.make_label("", 40, GILT_BRIGHT)
-	_code_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_code_label.visible = false
-	col.add_child(_code_label)
+	# The watchword docket — the shareable room code staged as a parchment chit
+	# (host, online). Hidden until the relay assigns one.
+	_code_plate = _build_code_plate()
+	_code_plate.visible = false
+	col.add_child(_code_plate)
 
 	_hint_label = GameTheme.make_label("", 13, ASH)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -235,6 +262,265 @@ func _build_ui() -> void:
 	_back_btn = GameTheme.make_back_button("BACK", Vector2(160, 42), 16)
 	_back_btn.pressed.connect(_on_back_pressed)
 	col.add_child(_back_btn)
+
+
+## The PRACTICE vs BOT banner (built at two sizes: a secondary strip when online
+## leads, or a taller hero when the relay is unavailable). Wires _vs_bot_btn.
+func _build_practice_banner(min_size: Vector2) -> Control:
+	var banner := GameTheme.make_choice_banner(
+		"PRACTICE vs BOT",
+		"Play any mode against a local AI opponent — no connection needed.",
+		EMBER, "res://assets/icons/shield.png", min_size)
+	_vs_bot_btn = banner.get_node("ClickButton")
+	_vs_bot_btn.pressed.connect(_on_vs_bot_pressed)
+	return banner
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  BANNER PLATES — the two standards flanking the war table. Left = your
+#  lord (portrait + the pick chips); right = the challenger's seat (empty
+#  mark → their portrait + ready seal once someone answers).
+# ─────────────────────────────────────────────────────────────────────────
+
+func _build_banner_plates() -> void:
+	var left := _make_banner_plate("YOU", -745.0, -465.0)
+	var lrefs: Dictionary = left.get_meta("refs")
+	_your_portrait = lrefs.portrait
+	_your_name_label = lrefs.name_label
+	_your_tagline = lrefs.tagline
+	_your_seal = lrefs.seal
+	_your_glow = lrefs.glow
+	(lrefs.body as VBoxContainer).add_child(_build_hero_chips())
+
+	var right := _make_banner_plate("OPPONENT", 465.0, 745.0)
+	var rrefs: Dictionary = right.get_meta("refs")
+	_opp_portrait = rrefs.portrait
+	_opp_empty_box = rrefs.empty_box
+	_opp_name_label = rrefs.name_label
+	_opp_tagline = rrefs.tagline
+	_opp_seal = rrefs.seal
+	_opp_glow = rrefs.glow
+
+	# The chips row refreshed before the right plate existed — run the full
+	# repaint now that both plates hold their refs.
+	_refresh_hero_ui()
+
+	GameTheme.deal_in(left, 0.08)
+	GameTheme.deal_in(right, 0.16)
+	# Breathe once layout has a real portrait size to pivot the Ken-Burns on.
+	call_deferred("_start_plate_life")
+
+
+## One flanking plate: header word, framed portrait well, name, tagline, seal.
+## Returns the PanelContainer with a "refs" meta dict for the refreshers.
+func _make_banner_plate(header_text: String, off_l: float, off_r: float) -> PanelContainer:
+	var plate := PanelContainer.new()
+	var style := GameTheme.make_panel_style(
+		Color(0.055, 0.048, 0.040, 0.94), Color(0.60, 0.51, 0.34, 0.80), 1, 6)
+	style.content_margin_left = 16
+	style.content_margin_right = 16
+	style.content_margin_top = 12
+	style.content_margin_bottom = 12
+	plate.add_theme_stylebox_override("panel", style)
+	plate.anchor_left = 0.5
+	plate.anchor_right = 0.5
+	plate.anchor_top = 0.5
+	plate.anchor_bottom = 0.5
+	plate.offset_left = off_l
+	plate.offset_right = off_r
+	plate.offset_top = -285.0
+	plate.offset_bottom = 285.0
+	add_child(plate)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 8)
+	plate.add_child(vb)
+
+	var head := GameTheme.make_label(header_text, 16, GameTheme.GILT)
+	head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(head)
+	vb.add_child(GameTheme.make_separator(Color(GILT_BRIGHT.r, GILT_BRIGHT.g,
+		GILT_BRIGHT.b, 0.30), 180.0))
+
+	# Portrait well: dark recess with a gilt hairline; the painting sits inset,
+	# and an engraved-mark box (hidden by default) covers the empty-seat state.
+	# clip_contents so the portrait's slow Ken-Burns zoom is masked to the well.
+	var well := PanelContainer.new()
+	well.custom_minimum_size = Vector2(236, 296)
+	well.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	well.clip_contents = true
+	var well_style := StyleBoxFlat.new()
+	well_style.bg_color = Color(0.03, 0.025, 0.02, 0.92)
+	well_style.border_color = Color(0.60, 0.51, 0.34, 0.65)
+	well_style.set_border_width_all(1)
+	well.add_theme_stylebox_override("panel", well_style)
+	vb.add_child(well)
+
+	var port := TextureRect.new()
+	port.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	port.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	port.clip_contents = true
+	port.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	well.add_child(port)
+
+	# Breathing lamplight: a warm radial glow, additive over the portrait, biased
+	# to the top like a hanging lamp. Held steady under Reduce Motion; pulses
+	# otherwise (see _start_plate_life).
+	var glow := TextureRect.new()
+	glow.texture = _lamp_glow_texture()
+	glow.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	glow.stretch_mode = TextureRect.STRETCH_SCALE
+	glow.set_anchors_preset(Control.PRESET_FULL_RECT)
+	glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	glow.modulate = Color(1.0, 0.74, 0.36, 0.13)
+	var glow_mat := CanvasItemMaterial.new()
+	glow_mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	glow.material = glow_mat
+	well.add_child(glow)
+
+	var empty_box := Control.new()
+	empty_box.custom_minimum_size = Vector2(96, 96)
+	empty_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_add_engraved_icon(empty_box, "res://assets/icons/sword.png", true)
+	var empty_center := CenterContainer.new()
+	empty_center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	empty_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	empty_center.visible = false     # the refresher toggles this wrapper
+	empty_center.add_child(empty_box)
+	well.add_child(empty_center)
+
+	var name_lbl := GameTheme.make_label("", 22, GILT_BRIGHT)
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	if GameTheme.font_display:
+		name_lbl.add_theme_font_override("font", GameTheme.font_display)
+	vb.add_child(name_lbl)
+
+	var tagline := GameTheme.make_label("", 13, ASH)
+	tagline.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	tagline.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	tagline.custom_minimum_size = Vector2(230, 0)
+	vb.add_child(tagline)
+
+	var seal := GameTheme.make_label("", 15, ASH)
+	seal.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(seal)
+
+	plate.set_meta("refs", {"body": vb, "portrait": port, "empty_box": empty_center,
+		"name_label": name_lbl, "tagline": tagline, "seal": seal, "glow": glow})
+	return plate
+
+
+## Shared radial lamplight texture — a soft warm disc biased to the upper third,
+## so an additive copy over a portrait reads as a lamp hung above it.
+func _lamp_glow_texture() -> Texture2D:
+	if _lamp_glow_tex != null:
+		return _lamp_glow_tex
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
+	g.colors = PackedColorArray([
+		Color(1, 1, 1, 1.0), Color(1, 1, 1, 0.32), Color(1, 1, 1, 0.0)])
+	var t := GradientTexture2D.new()
+	t.gradient = g
+	t.fill = GradientTexture2D.FILL_RADIAL
+	t.fill_from = Vector2(0.5, 0.32)
+	t.fill_to = Vector2(1.18, 1.12)
+	t.width = 128
+	t.height = 160
+	_lamp_glow_tex = t
+	return _lamp_glow_tex
+
+
+## Kick the plates to life once layout has settled: a slow Ken-Burns breath on
+## each portrait and a gentle lamplight pulse over each well. Deferred so the
+## portraits have a real size to pivot on. Reduce Motion holds it all steady.
+func _start_plate_life() -> void:
+	# Let layout settle so the portraits have a real size to pivot the zoom on.
+	await get_tree().process_frame
+	await get_tree().process_frame
+	for port in [_your_portrait, _opp_portrait]:
+		if port != null and is_instance_valid(port) and port.size.x > 1.0:
+			GameTheme.ken_burns(port, port.size * 0.5, 1.05, 15.0)
+	for glow in [_your_glow, _opp_glow]:
+		_pulse_glow(glow)
+	# The empty seat breathes: a slow dim/lift on the engraved sword, so an
+	# unclaimed seat reads as waiting rather than dead. Runs on the hidden
+	# wrapper harmlessly once a challenger fills the seat.
+	if _opp_empty_box != null and is_instance_valid(_opp_empty_box) \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		var tw := _opp_empty_box.create_tween().set_loops()
+		tw.tween_property(_opp_empty_box, "modulate:a", 0.45, 2.6) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		tw.tween_property(_opp_empty_box, "modulate:a", 1.0, 2.6) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+
+## Loop a warm lamp pulse on a glow overlay (decorative — held steady otherwise).
+func _pulse_glow(glow: TextureRect) -> void:
+	if glow == null or not is_instance_valid(glow):
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	var tw := glow.create_tween().set_loops()
+	tw.tween_property(glow, "modulate:a", 0.21, 2.4) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	tw.tween_property(glow, "modulate:a", 0.09, 2.9) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+
+## The watchword docket: caption + the big spaced room code on a parchment chit.
+func _build_code_plate() -> Control:
+	var wrap := CenterContainer.new()
+	var chit := PanelContainer.new()
+	var style := GameTheme.make_panel_style(GameTheme.PARCHMENT,
+		Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.70), 1, 5)
+	style.content_margin_left = 30
+	style.content_margin_right = 30
+	style.content_margin_top = 8
+	style.content_margin_bottom = 10
+	chit.add_theme_stylebox_override("panel", style)
+	# The docket is the thing you hand to your friend — clicking it copies the
+	# code so "share this" is one gesture, not six keystrokes read aloud.
+	chit.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	chit.tooltip_text = "Copy the room code."
+	chit.gui_input.connect(_on_code_chit_input.bind(chit))
+	wrap.add_child(chit)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 0)
+	chit.add_child(vb)
+
+	var cap := GameTheme.make_label("ROOM CODE", 12, GameTheme.GILT)
+	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(cap)
+	_code_caption = cap
+
+	_code_label = GameTheme.make_label("", 40, GILT_BRIGHT)
+	_code_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	if GameTheme.font_display:
+		_code_label.add_theme_font_override("font", GameTheme.font_display)
+	vb.add_child(_code_label)
+	return wrap
+
+
+func _on_code_chit_input(ev: InputEvent, chit: Control) -> void:
+	if not (ev is InputEventMouseButton and ev.pressed
+			and ev.button_index == MOUSE_BUTTON_LEFT):
+		return
+	if _room_code_raw == "":
+		return
+	DisplayServer.clipboard_set(_room_code_raw)
+	GameTheme.punch(chit, 1.05)
+	if _code_caption == null or not is_instance_valid(_code_caption):
+		return
+	# The caption flip is the confirmation (informational — survives Reduce
+	# Motion); the pulse is just the flash on top.
+	_code_caption.text = "COPIED — SEND IT TO YOUR FRIEND"
+	GameTheme.pulse_label(_code_caption)
+	_code_copy_gen += 1
+	var gen := _code_copy_gen
+	await get_tree().create_timer(1.8).timeout
+	if is_instance_valid(_code_caption) and gen == _code_copy_gen:
+		_code_caption.text = "ROOM CODE"
 
 
 ## Shared skeleton for the two FACE-A-FRIEND tiles (HOST and JOIN) so they read
@@ -386,18 +672,13 @@ func _build_lan_panel() -> Control:
 	return panel
 
 
-## Chart-language panel stylebox — the dark-ink body + tan rule + drop shadow
-## used across the map tooltips and choice banners, so the lobby's custom tiles
-## sit in the same material world as make_choice_banner.
-func _chart_panel_style(dim: bool) -> StyleBoxFlat:
-	var s := StyleBoxFlat.new()
-	s.bg_color = Color(0.055, 0.048, 0.040, 0.96 if not dim else 0.60)
-	s.border_color = Color(0.60, 0.51, 0.34, 0.90 if not dim else 0.35)
-	s.set_border_width_all(1)
-	s.set_corner_radius_all(3)
-	s.shadow_color = Color(0, 0, 0, 0.65)
-	s.shadow_size = 8
-	s.shadow_offset = Vector2(0, 4)
+## Chart-language panel stylebox — the house hand-cut plate (ChartPanelStyle:
+## deckled edges, corner tacks, drop shadow) so the lobby's tiles sit in the
+## same material world as every other screen's document furniture.
+func _chart_panel_style(dim: bool) -> StyleBox:
+	var s := GameTheme.make_panel_style(
+		Color(0.055, 0.048, 0.040, 0.96 if not dim else 0.60),
+		Color(0.60, 0.51, 0.34, 0.90 if not dim else 0.35), 1, 3)
 	s.content_margin_left = 14
 	s.content_margin_right = 14
 	s.content_margin_top = 12
@@ -489,39 +770,44 @@ func _make_pick_chip(text: String, tooltip: String = "") -> Button:
 	hover.border_color = GILT_BRIGHT
 	b.add_theme_stylebox_override("hover", hover)
 	b.add_theme_stylebox_override("pressed", hover)
+	# Selected face: gilt rule + a lit ground, swapped in by _set_chip_selected —
+	# the chosen term reads as chosen, not as the only enabled button.
+	var sel := normal.duplicate() as GameTheme.ChartPanelStyle
+	sel.border_color = GILT_BRIGHT
+	sel.bg_color = Color(0.115, 0.095, 0.062, 0.96)
+	b.set_meta("style_rest", normal)
+	b.set_meta("style_sel", sel)
 	return b
+
+
+## Selected-state swap for a pick chip (mode / format / battle style).
+func _set_chip_selected(b: Button, on: bool) -> void:
+	if b == null or not is_instance_valid(b) or not b.has_meta("style_rest"):
+		return
+	var style: StyleBox = b.get_meta("style_sel") if on else b.get_meta("style_rest")
+	b.add_theme_stylebox_override("normal", style)
+	b.add_theme_stylebox_override("focus", style)
+	b.modulate = Color.WHITE if on else Color(0.62, 0.62, 0.62)
 
 
 # ─────────────────────────────────────────────────────────────────────────
 #  LORD PICKER — pick the character you march as. Cosmetic identity (your
 #  portrait on both screens + your emote voice); decks come from the mode.
+#  Lives on YOU plate as a row of small chips under the big portrait.
 # ─────────────────────────────────────────────────────────────────────────
 
-## One row of the five lords as portrait chips. `buttons` is the caller's
-## dictionary to register into (the ready panel and the vs-bot panel each keep
-## their own — the vs-bot panel is rebuilt on every open). with_opp adds the
-## "you march as X · their lord: Y" readout under the row (net lobby only).
-func _build_hero_picker(buttons: Dictionary, with_opp: bool) -> Control:
-	buttons.clear()
-	var box := VBoxContainer.new()
-	box.alignment = BoxContainer.ALIGNMENT_CENTER
-	box.add_theme_constant_override("separation", 6)
-
-	# Title INLINE with the chips (not stacked) — the ready panel is the lobby's
-	# tallest state and a stacked heading pushed BACK off the 900px canvas.
+## The row of five lord chips (left plate). Clicking one repaints the plate's
+## big portrait and ships the pick to the opponent.
+func _build_hero_chips() -> Control:
+	_hero_buttons.clear()
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.add_theme_constant_override("separation", 10)
-	box.add_child(row)
-
-	var title := GameTheme.make_label("MARCH AS", 14, GILT_BRIGHT)
-	title.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	row.add_child(title)
+	row.add_theme_constant_override("separation", 5)
 
 	for hid in HeroDB.HERO_ORDER:
 		var hero := HeroDB.get_hero(hid)
 		var b := Button.new()
-		b.custom_minimum_size = Vector2(52, 68)
+		b.custom_minimum_size = Vector2(44, 56)
 		b.focus_mode = Control.FOCUS_NONE
 		b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 		b.tooltip_text = "%s — %s" % [String(hero.get("name", hid)),
@@ -554,42 +840,99 @@ func _build_hero_picker(buttons: Dictionary, with_opp: bool) -> Control:
 			b.text = String(hero.get("name", hid)).strip_edges().left(1).to_upper()
 			if GameTheme.font_display:
 				b.add_theme_font_override("font", GameTheme.font_display)
-			b.add_theme_font_size_override("font_size", 30)
+			b.add_theme_font_size_override("font_size", 24)
 			b.add_theme_color_override("font_color", GILT_BRIGHT)
 		b.pressed.connect(_on_hero_chosen.bind(hid))
 		row.add_child(b)
-		buttons[hid] = b
-
-	if with_opp:
-		_opp_hero_label = GameTheme.make_label("", 14, ASH)
-		_opp_hero_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		box.add_child(_opp_hero_label)
+		_hero_buttons[hid] = b
 
 	_refresh_hero_ui()
-	return box
+	return row
 
 
 func _on_hero_chosen(hid: String) -> void:
 	_selected_hero = hid
 	NetMatch.set_local_hero(hid)   # stores locally + ships to the opponent
 	_refresh_hero_ui()
+	if AudioBank != null:
+		AudioBank.play_sfx("card_play")
+	# A small pop on the banner sells the swap — the standard reacts to the pick.
+	if _your_portrait != null and is_instance_valid(_your_portrait):
+		_flash_pick(_your_portrait.get_parent() as Control)
 
 
-## Highlight the picked chip in BOTH picker instances (only one is visible at a
-## time, but the selection is shared) and refresh the two-lords readout.
+## Quick scale pop (decorative — held still under Reduce Motion). Scale is a
+## render transform, so it never reflows the plate.
+func _flash_pick(node: Control) -> void:
+	if node == null or not is_instance_valid(node):
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	node.pivot_offset = node.size * 0.5
+	var tw := node.create_tween()
+	tw.tween_property(node, "scale", Vector2(1.04, 1.04), 0.10) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(node, "scale", Vector2.ONE, 0.16).set_trans(Tween.TRANS_SINE)
+
+
+## Repaint both banner plates: your portrait/name/tagline + chip highlight on
+## the left, the challenger's seat (empty mark / bot / their lord) on the right.
 func _refresh_hero_ui() -> void:
-	for d in [_hero_buttons, _vsbot_hero_buttons]:
-		for hid in d:
-			var b: Button = d[hid]
-			if is_instance_valid(b):
-				b.modulate = Color.WHITE if hid == _selected_hero \
-					else Color(0.45, 0.45, 0.45)
-	if _opp_hero_label != null and is_instance_valid(_opp_hero_label):
-		var mine := String(HeroDB.get_hero(_selected_hero).get("name", _selected_hero))
-		var theirs := "—"
-		if NetMatch.remote_hero != "":
-			theirs = String(HeroDB.get_hero(NetMatch.remote_hero).get("name", "—"))
-		_opp_hero_label.text = "You march as %s   ·   Their lord: %s" % [mine, theirs]
+	for hid in _hero_buttons:
+		var b: Button = _hero_buttons[hid]
+		if is_instance_valid(b):
+			b.modulate = Color.WHITE if hid == _selected_hero \
+				else Color(0.45, 0.45, 0.45)
+
+	if _your_portrait != null and is_instance_valid(_your_portrait):
+		var mine := HeroDB.get_hero(_selected_hero)
+		_set_plate_portrait(_your_portrait, _selected_hero)
+		_your_name_label.text = String(mine.get("name", _selected_hero)).to_upper()
+		_your_tagline.text = String(mine.get("tagline", ""))
+
+	_refresh_challenger_plate()
+
+
+## The right plate's three states: empty seat / practice bot / a live opponent.
+func _refresh_challenger_plate() -> void:
+	if _opp_portrait == null or not is_instance_valid(_opp_portrait):
+		return
+	# Only a live opponent with a chosen lord fills the seat with a portrait; the
+	# bot and the empty/awaiting states keep the engraved sword.
+	var shown := false
+	if _challenger_is_bot:
+		_opp_name_label.text = "THE PRACTICE BOT"
+		_opp_tagline.text = "It fights for free and holds no grudge."
+	elif not NetMatch.remote_present:
+		_opp_name_label.text = "—"
+		_opp_tagline.text = "The seat stands empty."
+	elif NetMatch.remote_hero == "":
+		_opp_name_label.text = "…"
+		_opp_tagline.text = "Choosing their lord."
+	else:
+		var theirs := HeroDB.get_hero(NetMatch.remote_hero)
+		_set_plate_portrait(_opp_portrait, NetMatch.remote_hero)
+		_opp_name_label.text = String(theirs.get("name", NetMatch.remote_hero)).to_upper()
+		_opp_tagline.text = String(theirs.get("tagline", ""))
+		shown = true
+
+	_opp_portrait.visible = shown
+	_opp_empty_box.visible = not shown
+	if _opp_glow != null and is_instance_valid(_opp_glow):
+		_opp_glow.visible = shown
+
+	# When a challenger's portrait first rises into the empty seat, fade it in.
+	if shown and not _opp_shown \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		_opp_portrait.modulate.a = 0.0
+		_opp_portrait.create_tween().tween_property(
+			_opp_portrait, "modulate:a", 1.0, 0.4).set_trans(Tween.TRANS_SINE)
+	_opp_shown = shown
+
+
+func _set_plate_portrait(port: TextureRect, hid: String) -> void:
+	var path := "res://assets/portraits/hero_portrait_%s.png" % hid
+	port.texture = load(path) if ResourceLoader.exists(path) else null
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -608,6 +951,7 @@ func _wire_net_signals() -> void:
 	NetMatch.match_config_changed.connect(_on_match_config_changed)
 	NetMatch.room_created.connect(_on_room_created)
 	NetMatch.room_error.connect(_on_room_error)
+	NetMatch.protocol_rejected.connect(_on_protocol_rejected)
 
 
 # ── Button handlers ──
@@ -615,11 +959,11 @@ func _wire_net_signals() -> void:
 ## Online HOST: open a room on the relay; the code arrives via `room_created`.
 func _on_host_online_pressed() -> void:
 	if _relay_host == "":
-		_set_status("Online play isn't set up in this build yet — use Same network / direct IP below.", RED)
+		_set_status("Online play isn't available — use Same network / direct IP instead.", RED)
 		return
 	var err := NetMatch.host_via_relay(_relay_host, NetMatch.RELAY_PORT_DEFAULT)
 	if err != OK:
-		_set_status("Couldn't reach the relay (error %d). Try again, or use direct IP." % err, RED)
+		_set_status("Couldn't reach the relay (error %d) — check your connection, or use direct IP." % err, RED)
 		return
 	_set_status("Opening a room on the relay…", GILT_BRIGHT)
 	_set_connect_buttons_enabled(false)
@@ -628,7 +972,7 @@ func _on_host_online_pressed() -> void:
 ## Online JOIN: connect to the relay and claim the friend's room by its code.
 func _on_join_online_pressed() -> void:
 	if _relay_host == "":
-		_set_status("Online play isn't set up in this build yet — use Same network / direct IP below.", RED)
+		_set_status("Online play isn't available — use Same network / direct IP instead.", RED)
 		return
 	var code := _code_field.text.strip_edges().to_upper()
 	if code.length() != NetMatch.ROOM_CODE_LEN:
@@ -636,7 +980,7 @@ func _on_join_online_pressed() -> void:
 		return
 	var err := NetMatch.join_via_relay(_relay_host, NetMatch.RELAY_PORT_DEFAULT, code)
 	if err != OK:
-		_set_status("Couldn't reach the relay (error %d). Try again, or use direct IP." % err, RED)
+		_set_status("Couldn't reach the relay (error %d) — check your connection, or use direct IP." % err, RED)
 		return
 	_set_status("Joining room %s…" % code, GILT_BRIGHT)
 	_set_connect_buttons_enabled(false)
@@ -660,7 +1004,7 @@ func _on_host_pressed() -> void:
 	var port := _read_port()
 	var err := NetMatch.host(port)
 	if err != OK:
-		_set_status("Could not host on port %d (error %d)." % [port, err], RED)
+		_set_status("Port %d wouldn't open (error %d) — another program may be using it." % [port, err], RED)
 		return
 	_set_status("Hosting on port %d — waiting for a friend…" % port, GILT_BRIGHT)
 	_hint_label.text = _host_address_hint(port)
@@ -702,8 +1046,8 @@ func _host_address_hint(port: int) -> String:
 	if not other.is_empty():
 		lines.append("Other:  %s : %d" % [", ".join(other), port])
 	if tailscale.is_empty():
-		lines.append("No Tailscale address found — for play across different WiFi, "
-			+ "install Tailscale on both PCs, then this line will show your 100.x address.")
+		lines.append("No Tailscale address found — to play across different WiFi, "
+			+ "install Tailscale on both PCs and this line will show the address to send.")
 	lines.append("Your friend picks JOIN and enters the matching address + port.")
 	return "\n".join(lines)
 
@@ -716,7 +1060,7 @@ func _on_join_pressed() -> void:
 	var port := _read_port()
 	var err := NetMatch.join(ip, port)
 	if err != OK:
-		_set_status("Could not start connection (error %d)." % err, RED)
+		_set_status("Couldn't start the connection (error %d) — check the address and port." % err, RED)
 		return
 	_set_status("Connecting to %s:%d…" % [ip, port], GILT_BRIGHT)
 	_host_btn.disabled = true
@@ -741,13 +1085,15 @@ func _on_back_pressed() -> void:
 ## Relay assigned our shareable room code (host, online). Show it large and move on
 ## to the ready panel — the host reads the code to their friend while waiting.
 func _on_room_created(code: String) -> void:
+	_room_code_raw = code
 	var spaced := ""
 	for ch in code:
 		spaced += String(ch) + "  "
 	_code_label.text = spaced.strip_edges()
-	_code_label.visible = true
+	_code_plate.visible = true
+	GameTheme.deal_in(_code_plate)
 	_set_status("Room open — share this code with your friend:", GREEN)
-	_hint_label.text = "Your friend picks JOIN ONLINE and types this code. Then both ready up and you press START MATCH."
+	_hint_label.text = "Your friend picks JOIN, enters this code, and presses CONNECT. Then both ready up and you press START MATCH."
 	_connect_panel.visible = false
 	_show_ready_panel()
 
@@ -759,31 +1105,43 @@ func _on_room_error(reason: String) -> void:
 	_set_connect_buttons_enabled(true)
 
 
+## A version-mismatch handshake tears the link down silently (NetMatch calls
+## leave(), which emits no failure signal), so the lobby used to sit on
+## "Connecting…" forever with nothing to act on. Surface that one case — the rest
+## of the protocol_rejected reasons are per-message diagnostics, not lobby states.
+func _on_protocol_rejected(reason: String) -> void:
+	if reason != "protocol_handshake":
+		return
+	var why := NetMatch.last_error
+	_set_status(why if why != "" else "The other player is running a different version of the game.", RED)
+	_reset_to_connect_panel()
+
+
 func _on_peer_joined(_id: int) -> void:
-	_set_status("A friend connected!", GREEN)
+	_set_status("Your challenger has arrived.", GREEN)
 	_hint_label.text = "Both ready up, then you (host) press START MATCH."
 	_show_ready_panel()
 
 
 func _on_connected_to_host() -> void:
-	_set_status("Connected to host!", GREEN)
+	_set_status("Connected — you're in the host's room.", GREEN)
 	_hint_label.text = "Ready up — the host starts the match."
 	_connect_panel.visible = false
 	_show_ready_panel()
 
 
 func _on_connection_failed() -> void:
-	_set_status("Connection failed — check the address and that the host is up.", RED)
+	_set_status("No answer — check the address, and that your friend is still hosting.", RED)
 	_reset_to_connect_panel()
 
 
 func _on_host_closed() -> void:
-	_set_status("Host closed the match.", RED)
+	_set_status("The host closed the room. Join another, or open your own.", RED)
 	_reset_to_connect_panel()
 
 
 func _on_peer_left(_id: int) -> void:
-	_set_status("Your opponent disconnected.", RED)
+	_set_status("Your opponent disconnected — host or join again to play on.", RED)
 	_reset_to_connect_panel()
 
 
@@ -794,10 +1152,10 @@ func _on_match_starting(_seed: int) -> void:
 	if ResourceLoader.exists(scene):
 		get_tree().change_scene_to_file(scene)
 	elif ResourceLoader.exists(DRAFT_SCENE):
-		_set_status("That mode isn't in this build — starting a draft.", GREEN)
+		_set_status("That mode is unavailable — starting a Draft instead.", GREEN)
 		get_tree().change_scene_to_file(DRAFT_SCENE)
 	else:
-		_set_status("Connected & ready — deck screens land with the mode build.", GREEN)
+		_set_status("Ready — but no warband screen could be opened. Press BACK.", RED)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -839,7 +1197,7 @@ func _populate_mode_panel() -> void:
 
 
 func _build_host_mode_picker() -> void:
-	var ml := GameTheme.make_label("MODE", 14, GILT_BRIGHT)
+	var ml := GameTheme.make_label("MODE", 16, GILT_BRIGHT)
 	ml.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_mode_panel.add_child(ml)
 
@@ -859,7 +1217,7 @@ func _build_host_mode_picker() -> void:
 		mode_row.add_child(b)
 		_mode_buttons[mode] = b
 
-	var fl := GameTheme.make_label("FORMAT", 14, GILT_BRIGHT)
+	var fl := GameTheme.make_label("FORMAT", 16, GILT_BRIGHT)
 	fl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_mode_panel.add_child(fl)
 
@@ -873,7 +1231,7 @@ func _build_host_mode_picker() -> void:
 		bo_row.add_child(b2)
 		_bo_buttons[bo] = b2
 
-	var sl := GameTheme.make_label("BATTLE STYLE", 14, GILT_BRIGHT)
+	var sl := GameTheme.make_label("BATTLE STYLE", 16, GILT_BRIGHT)
 	sl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_mode_panel.add_child(sl)
 
@@ -914,14 +1272,11 @@ func _on_style_chosen(st: int) -> void:
 
 func _refresh_host_picker_highlight() -> void:
 	for mode in _mode_buttons:
-		(_mode_buttons[mode] as Button).modulate = \
-			Color.WHITE if mode == _selected_mode else Color(0.5, 0.5, 0.5)
+		_set_chip_selected(_mode_buttons[mode], mode == _selected_mode)
 	for bo in _bo_buttons:
-		(_bo_buttons[bo] as Button).modulate = \
-			Color.WHITE if bo == _selected_best_of else Color(0.5, 0.5, 0.5)
+		_set_chip_selected(_bo_buttons[bo], bo == _selected_best_of)
 	for st in _style_buttons:
-		(_style_buttons[st] as Button).modulate = \
-			Color.WHITE if st == _selected_style else Color(0.5, 0.5, 0.5)
+		_set_chip_selected(_style_buttons[st], st == _selected_style)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -934,6 +1289,9 @@ func _on_vs_bot_pressed() -> void:
 	if _lan_panel != null:
 		_lan_panel.visible = false
 	_vs_bot_panel.visible = true
+	# The challenger plate takes the bot's seat while the drill is being set up.
+	_challenger_is_bot = true
+	_refresh_challenger_plate()
 	# The sub-panel carries its own BACK (returns to the lobby choices), so hide
 	# the outer leave-to-menu BACK — one back button, one meaning.
 	if _back_btn != null:
@@ -948,14 +1306,10 @@ func _populate_vs_bot_panel() -> void:
 	_vsbot_mode_buttons.clear()
 	_vsbot_bo_buttons.clear()
 
-	var title := GameTheme.make_label("PRACTICE vs BOT", 20, GILT_BRIGHT)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_vs_bot_panel.add_child(title)
+	_vs_bot_panel.add_child(GameTheme.make_section_divider(
+		"THE DRILL", GameTheme.GILT, 17, 130.0))
 
-	# Same lord picker as the net lobby (the bot rolls its own rival lord on BEGIN).
-	_vs_bot_panel.add_child(_build_hero_picker(_vsbot_hero_buttons, false))
-
-	var ml := GameTheme.make_label("MODE", 14, GILT_BRIGHT)
+	var ml := GameTheme.make_label("MODE", 16, GILT_BRIGHT)
 	ml.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_vs_bot_panel.add_child(ml)
 	var mode_row := HBoxContainer.new()
@@ -972,7 +1326,7 @@ func _populate_vs_bot_panel() -> void:
 		mode_row.add_child(b)
 		_vsbot_mode_buttons[mode] = b
 
-	var fl := GameTheme.make_label("FORMAT", 14, GILT_BRIGHT)
+	var fl := GameTheme.make_label("FORMAT", 16, GILT_BRIGHT)
 	fl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_vs_bot_panel.add_child(fl)
 	var bo_row := HBoxContainer.new()
@@ -985,7 +1339,7 @@ func _populate_vs_bot_panel() -> void:
 		bo_row.add_child(b2)
 		_vsbot_bo_buttons[bo] = b2
 
-	var sl := GameTheme.make_label("BATTLE STYLE", 14, GILT_BRIGHT)
+	var sl := GameTheme.make_label("BATTLE STYLE", 16, GILT_BRIGHT)
 	sl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_vs_bot_panel.add_child(sl)
 	var style_row := HBoxContainer.new()
@@ -1029,19 +1383,22 @@ func _on_vsbot_style_chosen(st: int) -> void:
 
 func _refresh_vsbot_highlight() -> void:
 	for mode in _vsbot_mode_buttons:
-		(_vsbot_mode_buttons[mode] as Button).modulate = \
-			Color.WHITE if mode == _vsbot_mode else Color(0.5, 0.5, 0.5)
+		_set_chip_selected(_vsbot_mode_buttons[mode], mode == _vsbot_mode)
 	for bo in _vsbot_bo_buttons:
-		(_vsbot_bo_buttons[bo] as Button).modulate = \
-			Color.WHITE if bo == _vsbot_bo else Color(0.5, 0.5, 0.5)
+		_set_chip_selected(_vsbot_bo_buttons[bo], bo == _vsbot_bo)
 	for st in _vsbot_style_buttons:
-		(_vsbot_style_buttons[st] as Button).modulate = \
-			Color.WHITE if st == _vsbot_style else Color(0.5, 0.5, 0.5)
+		_set_chip_selected(_vsbot_style_buttons[st], st == _vsbot_style)
 
 
 func _on_vs_bot_back() -> void:
 	_vs_bot_panel.visible = false
 	_connect_panel.visible = true
+	_challenger_is_bot = false
+	_refresh_challenger_plate()
+	# Restore the direct-IP panel to its default open/closed state (open in the
+	# no-relay build, where it's the friend path; collapsed behind the toggle otherwise).
+	if _lan_panel != null:
+		_lan_panel.visible = _lan_default_open
 	if _back_btn != null:
 		_back_btn.visible = true
 	_refresh_state()
@@ -1084,51 +1441,62 @@ func _on_match_config_changed() -> void:
 func _reset_to_connect_panel() -> void:
 	_connect_panel.visible = true
 	_ready_panel.visible = false
-	_code_label.visible = false
+	_code_plate.visible = false
+	_room_code_raw = ""
 	_set_connect_buttons_enabled(true)
 	_start_btn.disabled = true
+	_refresh_ready_labels()
+	_refresh_challenger_plate()
 
 
-## Enable/disable all four connect buttons together. Online buttons stay disabled
-## when no relay address is configured in this build.
+## Enable/disable the connect buttons together. Online tiles are only built when
+## a relay is configured, so their refs may be null (guarded); the direct-IP
+## HOST/JOIN in the LAN panel are always present.
 func _set_connect_buttons_enabled(on: bool) -> void:
 	var online_ok := on and _relay_host != ""
-	_host_online_btn.disabled = not online_ok
-	_join_online_btn.disabled = not online_ok
-	_host_btn.disabled = not on
-	_join_btn.disabled = not on
+	if _host_online_btn != null:
+		_host_online_btn.disabled = not online_ok
+	if _join_online_btn != null:
+		_join_online_btn.disabled = not online_ok
+	if _host_btn != null:
+		_host_btn.disabled = not on
+	if _join_btn != null:
+		_join_btn.disabled = not on
 
 
 func _refresh_state() -> void:
-	# The HOST/JOIN tiles already print the online-unavailable reason on themselves
-	# (greyed), so the bottom hint stays quiet here — it fills with the host address
-	# / room code once a match is actually being set up.
+	# The status line stays quiet at rest — it fills with the host address / room
+	# code once a match is actually being set up.
 	if _relay_host == "":
-		_set_status("Drill against the bot, or open the direct-IP option to play a friend.", IVORY)
+		_set_status("Drill against the bot, or connect directly to a friend on your network.", IVORY)
 	else:
 		_set_status("Host a room and share the code, or join a friend's.", IVORY)
 	_hint_label.text = ""
 	_set_connect_buttons_enabled(true)
 
 
+## The ready states are stamped as seals on the two banner plates (the column
+## keeps only the READY / START actions).
 func _refresh_ready_labels() -> void:
-	_you_ready_label.text = "You: " + ("READY" if NetMatch.local_ready else "not ready")
-	_you_ready_label.add_theme_color_override("font_color",
-		GREEN if NetMatch.local_ready else ASH)
-
-	var opp_txt: String
-	var opp_col: Color
-	if not NetMatch.remote_present:
-		opp_txt = "Opponent: —"
-		opp_col = ASH
-	elif NetMatch.remote_ready:
-		opp_txt = "Opponent: READY"
-		opp_col = GREEN
-	else:
-		opp_txt = "Opponent: not ready"
-		opp_col = ASH
-	_opp_ready_label.text = opp_txt
-	_opp_ready_label.add_theme_color_override("font_color", opp_col)
+	var in_lobby := _ready_panel != null and _ready_panel.visible
+	if _your_seal != null and is_instance_valid(_your_seal):
+		_your_seal.text = ("READY" if NetMatch.local_ready else "not ready") \
+			if in_lobby else ""
+		_your_seal.add_theme_color_override("font_color",
+			GREEN if NetMatch.local_ready else ASH)
+	if _opp_seal != null and is_instance_valid(_opp_seal):
+		var opp_txt := ""
+		var opp_col := ASH
+		if in_lobby:
+			if not NetMatch.remote_present:
+				opp_txt = "—"
+			elif NetMatch.remote_ready:
+				opp_txt = "READY"
+				opp_col = GREEN
+			else:
+				opp_txt = "not ready"
+		_opp_seal.text = opp_txt
+		_opp_seal.add_theme_color_override("font_color", opp_col)
 
 	if _ready_btn != null:
 		_ready_btn.text = "UNREADY" if NetMatch.local_ready else "READY"

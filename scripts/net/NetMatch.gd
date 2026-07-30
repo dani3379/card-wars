@@ -1,4 +1,10 @@
 extends Node
+
+const WireProtocol = preload("res://scripts/net/NetProtocol.gd")
+const NetPlayerRules = preload("res://scripts/net/NetPlayerState.gd")
+## Bump this whenever online combat/resolver logic changes without changing one
+## of the data registries included in _compatibility_snapshot().
+const COMPAT_RULESET_REVISION: int = 1
 ## NetMatch.gd — autoload singleton. The networking + match brain for the
 ## online 1-v-1 Skirmish mode (see docs/MULTIPLAYER_SKIRMISH_PLAN.md).
 ##
@@ -31,6 +37,7 @@ signal ready_state_changed              # local_ready or remote_ready changed
 signal hero_state_changed               # local_hero or remote_hero changed
 signal match_starting(seed: int)        # host pressed start; both sides should advance
 signal match_config_changed             # host changed the mode / best-of selection
+signal protocol_rejected(reason: String) # malformed/stale wire message was dropped
 
 # ── Gameplay signals (consumed by NetDraft / Combat in later phases) ──
 signal draft_event_received(event: Dictionary)    # both directions, draft messages
@@ -54,7 +61,14 @@ enum Transport { DIRECT, RELAY }
 const RELAY_HOST_DEFAULT: String = ""
 const RELAY_PORT_DEFAULT: int = 7717
 const RELAY_MAX_PEERS: int = 1024     # plenty of concurrent 1-v-1 rooms
-const ROOM_CODE_LEN: int = 4
+const RELAY_MAX_ROOMS: int = 512
+const ROOM_CODE_LEN: int = 6
+const RELAY_RATE_WINDOW_MS: int = 10000
+const RELAY_RATE_MAX_MESSAGES: int = 120
+const RELAY_RATE_MAX_BYTES: int = 1048576
+const RELAY_CONTROL_MAX_REQUESTS: int = 8
+const RELAY_OPEN_ROOM_TTL_MS: int = 10 * 60 * 1000
+const RELAY_PAIRED_IDLE_TTL_MS: int = 2 * 60 * 60 * 1000
 ## Unambiguous code alphabet — no 0/O/1/I/L so a code is easy to read aloud / type.
 const ROOM_CODE_ALPHABET: String = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 ## One-line override file holding the relay address — point at your VPS (or
@@ -80,14 +94,14 @@ static func get_relay_host() -> String:
 
 # Relay envelope kinds (a partner→partner message forwarded by the relay). These
 # carry the SAME payloads the DIRECT @rpc functions send; only the routing differs.
-const _RK_READY := "ready"
-const _RK_HERO := "hero"
-const _RK_MATCH_START := "mstart"
-const _RK_MATCH_CONFIG := "mcfg"
-const _RK_DRAFT := "draft"
-const _RK_INTENT := "intent"
-const _RK_EVENT := "event"
-const _RK_LAUNCH := "launch"
+const _RK_READY := WireProtocol.KIND_READY
+const _RK_HERO := WireProtocol.KIND_HERO
+const _RK_MATCH_START := WireProtocol.KIND_MATCH_START
+const _RK_MATCH_CONFIG := WireProtocol.KIND_MATCH_CONFIG
+const _RK_DRAFT := WireProtocol.KIND_DRAFT
+const _RK_INTENT := WireProtocol.KIND_INTENT
+const _RK_EVENT := WireProtocol.KIND_EVENT
+const _RK_LAUNCH := WireProtocol.KIND_LAUNCH
 
 # Pending role while a player's ENet link to the relay is still opening.
 enum _RelayRole { NONE, CREATE, JOIN }
@@ -99,7 +113,8 @@ const IN_PLAY_CREATURE := "play_creature"
 const IN_PLAY_SPELL := "play_spell"
 const IN_TOGGLE_FLOOP := "toggle_floop"
 const IN_REPOSITION := "reposition"
-const IN_USE_POTION := "use_potion"  # client → host: I drank a host-authoritative potion (heal) — {effect,value}
+const IN_SNIPER_AIM := "sniper_aim"  # client → host: sniper {eid} takes aim at {tgt} (-1 = clear)
+const IN_USE_POTION := "use_potion"  # client → host request: consume remaining {pid,target?}
 const IN_END_ACTIONS := "end_actions"
 const IN_REMATCH := "rematch"        # client → host: I want to play again
 const IN_CHOICE := "choice"          # client → host: my pick for an EV_CHOICE prompt (Copycat / Adaptable)
@@ -116,9 +131,8 @@ const EV_HAND_COUNT := "hand_count"
 # Both directions (host→event, client→intent, like EV_HAND_COUNT): "I discarded
 # N cards at my turn commit" — count only, so the foe can show the beat.
 const EV_DISCARD_FX := "discard_fx"
-# Both directions: "I drank potion <pid>" — the foe shows a drink beat (never
-# affects their state; the potion's own effect resolves caster-side or, for the
-# host-authoritative heal, via IN_USE_POTION below).
+# Host → client presentation: the host drank <pid>. Accepted client drinks are
+# shown host-side directly after IN_USE_POTION validation.
 const EV_POTION_FX := "potion_fx"
 # Both directions: "my relic <rid> just triggered" — the receiver pulses that
 # chip on its foe-arsenal rail, Hearthstone-trinket-style. Presentation only,
@@ -131,8 +145,10 @@ const EV_RELIC_FX := "relic_fx"
 # touches game state. Rides the generic event/intent envelopes (no relay change).
 const EV_EMOTE := "emote"
 const EV_MANA := "mana_change"
-const EV_DRAW := "draw"               # host → client: draw N from your own pile (caster-side spell draw)
-const EV_GIVE_CARD := "give_card"     # host → client: add card {id,uid} to your hand (Grave Robbery / Grave Pact)
+# Compatibility-only granular private events; live host authority normally sends
+# the complete owning-client EV_HAND_SET after these mutations.
+const EV_DRAW := "draw"
+const EV_GIVE_CARD := "give_card"
 const EV_CARD_ENTERED := "card_entered"
 const EV_CARD_LEFT := "card_left"
 const EV_TAG := "tag_change"
@@ -189,6 +205,16 @@ var _connected: bool = false
 ## Host-side: the connected client's ENet peer id (0 = no client). Set when the
 ## client connects; used by send_to_client to target the one client directly.
 var client_peer_id: int = 0
+## Application session + monotonically increasing wire sequence. Engine-level
+## reliable ordering does not identify a stale prior match after a scene swap.
+var session_id: String = ""
+var _out_sequence: int = 0
+var _last_in_sequence: int = 0
+var _remote_loadout_received: bool = false
+var _compatibility_fingerprint_cache: String = ""
+var _compatibility_confirmed: bool = false
+var _pending_session_id: String = ""
+var _pending_remote_fingerprint: String = ""
 
 ## ── Combat-message buffering (startup-race guard) ──
 ## Combat events/intents arrive over the wire as soon as the peer sends them, but
@@ -223,6 +249,9 @@ var _pending_room_code: String = ""
 var _relay_rooms: Dictionary = {}      # code -> {host:int, client:int}
 var _relay_peer_room: Dictionary = {}  # peer_id -> code
 var _relay_partner: Dictionary = {}    # peer_id -> partner peer_id
+var _relay_last_sequence: Dictionary = {} # peer_id -> last accepted wire seq
+var _relay_rate: Dictionary = {}       # peer_id -> sliding-window counters
+var _relay_maintenance_accum: float = 0.0
 
 # ── Lobby handshake state ──
 var local_ready: bool = false
@@ -252,6 +281,137 @@ func _ready() -> void:
 	multiplayer.server_disconnected.connect(_on_server_disconnected)
 
 
+func _process(delta: float) -> void:
+	if not is_relay:
+		return
+	_relay_maintenance_accum += delta
+	if _relay_maintenance_accum < 5.0:
+		return
+	_relay_maintenance_accum = 0.0
+	_relay_expire_rooms()
+
+
+func _new_session_id() -> String:
+	var crypto := Crypto.new()
+	return crypto.generate_random_bytes(16).hex_encode()
+
+
+func _reset_wire_session(new_id: String) -> void:
+	session_id = new_id
+	_out_sequence = 0
+	_last_in_sequence = 0
+
+
+## Stable across Dictionary insertion order and machines. Data changes are picked
+## up automatically; COMPAT_RULESET_REVISION covers resolver-only code changes.
+func compatibility_fingerprint() -> String:
+	if _compatibility_fingerprint_cache.is_empty():
+		_compatibility_fingerprint_cache = WireProtocol.compatibility_fingerprint(
+			_compatibility_snapshot())
+	return _compatibility_fingerprint_cache
+
+
+func _compatibility_snapshot() -> Dictionary:
+	return {
+		"ruleset_revision": COMPAT_RULESET_REVISION,
+		"protocol": WireProtocol.VERSION,
+		"cards": {
+			"pool": CardDB.CARD_POOL,
+			"upgrades": CardDB.UPGRADES,
+		},
+		"relics": RelicDB.RELICS,
+		"potions": PotionDB.POTIONS,
+		"heroes": HeroDB.HEROES,
+		"keywords": {
+			"definitions": KeywordEffects.KEYWORDS,
+			"combat": KeywordEffects.COMBAT_KEYWORDS,
+		},
+		"skirmish": {
+			"start_hp": SkirmishState.START_HP,
+			"base_max_mana": SkirmishState.BASE_MAX_MANA,
+			"deck_target": SkirmishState.DECK_TARGET,
+			"draft_act": SkirmishState.DRAFT_ACT,
+			"rarity_tiers": SkirmishState.SKIRMISH_RARITY_TIERS,
+			"draft_weights": SkirmishState.SKIRMISH_DRAFT_WEIGHTS,
+			"rarity_overrides": SkirmishState.SKIRMISH_RARITY_OVERRIDES,
+			"modes": SkirmishState.MODE_DEFS,
+			"denylist": SkirmishState.SKIRMISH_DENYLIST,
+			"draftable_rarities": SkirmishState.DRAFTABLE_RARITIES,
+			"relic_pool": SkirmishState.NET_RELIC_POOL,
+			"potion_pool": SkirmishState.NET_POTION_POOL,
+			"spell_types": SkirmishState.NET_SPELL_TYPES,
+			"spell_customs": SkirmishState.NET_SPELL_CUSTOMS,
+			"max_hand": NetPlayerRules.MAX_HAND_SIZE,
+			"hand_refill": NetPlayerRules.HAND_REFILL_TARGET,
+			"max_banked_mana": NetPlayerRules.MAX_BANKED_MANA,
+			"curse_ids": NetPlayerRules.CURSE_IDS,
+			"battle_styles": [STYLE_ALTERNATING, STYLE_SEALED],
+		},
+	}
+
+
+func _compatibility_error(protocol_version: int, fingerprint: Variant) -> String:
+	if protocol_version != WireProtocol.VERSION:
+		return "protocol_version"
+	if not WireProtocol.valid_fingerprint(fingerprint):
+		return "fingerprint_invalid"
+	if String(fingerprint) != compatibility_fingerprint():
+		return "content_mismatch"
+	return ""
+
+
+func _compatibility_message(reason: String) -> String:
+	if reason == "protocol_version":
+		return "The other player is running a different network version of the game."
+	return "The other player is using different cards or combat rules. Update both copies to the same game build."
+
+
+func _reject_direct_compatibility(reason: String) -> void:
+	last_error = _compatibility_message(reason)
+	protocol_rejected.emit("protocol_handshake")
+	leave()
+
+
+func _next_wire(kind: String, payload: Dictionary = {}) -> Dictionary:
+	if session_id.is_empty():
+		return {}
+	_out_sequence += 1
+	return WireProtocol.make_envelope(kind, payload, session_id, _out_sequence)
+
+
+## Validate the common envelope and enforce exactly-once, in-session application
+## ordering before an RPC handler unwraps its payload. Returns null on rejection.
+func _accept_wire(wire: Variant, expected_kind: String) -> Variant:
+	var reason := "session_unset" if session_id.is_empty() \
+		else WireProtocol.validate_envelope(wire, session_id)
+	if reason == "" and WireProtocol.kind(wire) != expected_kind:
+		reason = "unexpected_kind"
+	if reason == "":
+		var incoming_seq := WireProtocol.sequence(wire)
+		if incoming_seq <= _last_in_sequence:
+			reason = "sequence_stale"
+		else:
+			_last_in_sequence = incoming_seq
+	if reason != "":
+		protocol_rejected.emit(reason)
+		return null
+	return WireProtocol.payload(wire)
+
+
+func _valid_match_config(mode: int, bo: int, style: int) -> bool:
+	return mode >= SkirmishState.MatchMode.DRAFT \
+		and mode <= SkirmishState.MatchMode.SEALED \
+		and bo in [1, 3] \
+		and style in [STYLE_ALTERNATING, STYLE_SEALED]
+
+
+func _draft_direction_allowed(event: Dictionary, sender_is_host: bool) -> bool:
+	var event_type := String(event.get("t", ""))
+	if event_type == "cfg":
+		return sender_is_host
+	return event_type in ["pick", "ready", "finished"]
+
+
 # ─────────────────────────────────────────────────────────────────────────
 #  HOST / JOIN
 # ─────────────────────────────────────────────────────────────────────────
@@ -259,6 +419,8 @@ func _ready() -> void:
 ## Start hosting. Returns OK or an Error code (the lobby surfaces failures).
 func host(port: int = DEFAULT_PORT) -> int:
 	leave()
+	last_error = ""
+	_reset_wire_session(_new_session_id())
 	_peer = ENetMultiplayerPeer.new()
 	var err := _peer.create_server(port, MAX_CLIENTS)
 	if err != OK:
@@ -274,6 +436,8 @@ func host(port: int = DEFAULT_PORT) -> int:
 ## Join a host by address. Returns OK or an Error code.
 func join(address: String, port: int = DEFAULT_PORT) -> int:
 	leave()
+	last_error = ""
+	_reset_wire_session("")
 	_peer = ENetMultiplayerPeer.new()
 	var err := _peer.create_client(address, port)
 	if err != OK:
@@ -307,6 +471,7 @@ func join_via_relay(relay_addr: String, relay_port: int, code: String) -> int:
 
 func _connect_to_relay(addr: String, port: int, role: int, code: String) -> int:
 	leave()
+	last_error = ""
 	_peer = ENetMultiplayerPeer.new()
 	var err := _peer.create_client(addr, port)
 	if err != OK:
@@ -341,14 +506,21 @@ func run_as_relay(port: int = RELAY_PORT_DEFAULT) -> int:
 
 ## Generate a room code not currently in use (relay side).
 func _relay_make_code() -> String:
+	var crypto := Crypto.new()
+	var alphabet_size: int = ROOM_CODE_ALPHABET.length()
+	var unbiased_ceiling: int = floori(256.0 / float(alphabet_size)) * alphabet_size
 	for _attempt in 64:
 		var s := ""
-		for _i in ROOM_CODE_LEN:
-			s += ROOM_CODE_ALPHABET[randi() % ROOM_CODE_ALPHABET.length()]
+		while s.length() < ROOM_CODE_LEN:
+			for byte in crypto.generate_random_bytes(16):
+				if int(byte) < unbiased_ceiling:
+					s += ROOM_CODE_ALPHABET[int(byte) % alphabet_size]
+					if s.length() == ROOM_CODE_LEN:
+						break
 		if not _relay_rooms.has(s):
 			return s
-	# Astronomically unlikely fallback: widen with a numeric suffix.
-	return "X" + str(randi() % 100000)
+	# 31^6 makes exhausting 64 collision retries effectively impossible.
+	return ""
 
 
 ## Tear down any active connection and reset lobby state. Safe to call anytime.
@@ -363,6 +535,11 @@ func leave() -> void:
 	local_player_index = -1
 	_connected = false
 	client_peer_id = 0
+	_reset_wire_session("")
+	_remote_loadout_received = false
+	_compatibility_confirmed = false
+	_pending_session_id = ""
+	_pending_remote_fingerprint = ""
 	local_ready = false
 	remote_ready = false
 	remote_present = false
@@ -383,11 +560,14 @@ func leave() -> void:
 	_relay_rooms.clear()
 	_relay_peer_room.clear()
 	_relay_partner.clear()
+	_relay_last_sequence.clear()
+	_relay_rate.clear()
+	_relay_maintenance_accum = 0.0
 	lobby_reset.emit()
 
 
 func is_connected_to_peer() -> bool:
-	return vs_bot or (_connected and remote_present)
+	return vs_bot or (_connected and remote_present and _compatibility_confirmed)
 
 
 ## Fresh session entropy, kept separate from the global randi stream so repeated
@@ -405,10 +585,12 @@ func fresh_seed() -> int:
 ## (auto-finishes with a bot deck) and Combat drives slot 1 via SkirmishBot.
 func start_vs_bot(mode: int, bo: int) -> void:
 	leave()                      # clean slate (also clears any relay/peer state)
+	_reset_wire_session(_new_session_id())
 	vs_bot = true
 	is_host = true
 	local_player_index = 0
 	_connected = true
+	_compatibility_confirmed = true
 	remote_present = false
 	match_mode = mode
 	best_of = bo
@@ -433,19 +615,15 @@ func _on_peer_connected(peer_id: int) -> void:
 		# Player on the relay: this is the relay itself (peer 1). The opponent's
 		# presence is driven by the room-pairing RPC, not this signal.
 		return
-	# DIRECT: on the host this fires when the client arrives; on the client it
-	# fires for the server (id 1). Either way it means "the other side is here."
-	remote_present = true
-	# Re-send our current ready state so a peer that connects after we toggled
-	# still learns it. (No-op if we haven't toggled.)
-	if local_ready:
-		_send_ready(local_ready)
-	if local_hero != "":
-		_send_hero(local_hero)   # same late-join catch-up for the lord pick
-	if is_host:
-		# Remember the single client's peer id for targeted (redacted) sends.
-		client_peer_id = peer_id
-		peer_joined.emit(peer_id)
+	# DIRECT: a raw ENet link is not a present opponent yet. The host opens a
+	# compatibility round trip; both sides become visible only after it succeeds.
+	if not is_host:
+		return
+	client_peer_id = peer_id
+	remote_present = false
+	_compatibility_confirmed = false
+	_rpc_session_open.rpc_id(peer_id, session_id, WireProtocol.VERSION,
+		compatibility_fingerprint())
 
 
 func _on_peer_disconnected(peer_id: int) -> void:
@@ -459,6 +637,9 @@ func _on_peer_disconnected(peer_id: int) -> void:
 	# DIRECT:
 	remote_present = false
 	remote_ready = false
+	_compatibility_confirmed = false
+	_pending_session_id = ""
+	_pending_remote_fingerprint = ""
 	if peer_id == client_peer_id:
 		client_peer_id = 0
 	peer_left.emit(peer_id)
@@ -471,12 +652,14 @@ func _on_connected_to_server() -> void:
 		# Reached the RELAY, not the opponent yet. Ask for our room; pairing (or a
 		# room_error) follows. Do NOT signal connected_to_host here.
 		match _pending_relay_role:
-			_RelayRole.CREATE: _rpc_create_room.rpc_id(1)
-			_RelayRole.JOIN:   _rpc_join_room.rpc_id(1, _pending_room_code)
+			_RelayRole.CREATE:
+				_rpc_create_room.rpc_id(1, WireProtocol.VERSION,
+					compatibility_fingerprint())
+			_RelayRole.JOIN:
+				_rpc_join_room.rpc_id(1, _pending_room_code, WireProtocol.VERSION,
+					compatibility_fingerprint())
 		return
-	# DIRECT: we reached the host directly.
-	remote_present = true
-	connected_to_host.emit()
+	# DIRECT waits for _rpc_session_result before exposing the opponent.
 
 
 func _on_connection_failed() -> void:
@@ -492,6 +675,82 @@ func _on_server_disconnected() -> void:
 	leave()
 
 
+@rpc("authority", "call_remote", "reliable")
+func _rpc_session_open(new_id: String, protocol_version: int,
+		host_fingerprint: String) -> void:
+	if transport != Transport.DIRECT or is_host:
+		return
+	if new_id.is_empty() or new_id.length() > 64:
+		_reject_direct_compatibility("protocol_version")
+		return
+	var reason := _compatibility_error(protocol_version, host_fingerprint)
+	if reason in ["protocol_version", "fingerprint_invalid"]:
+		_reject_direct_compatibility(reason)
+		return
+	_pending_session_id = new_id
+	_pending_remote_fingerprint = host_fingerprint
+	# Confirm our independently computed fingerprint. A content mismatch still
+	# completes this one control round trip so host and joiner both get a clear
+	# rejection instead of one side seeing only a generic disconnect.
+	_rpc_session_confirm.rpc_id(1, WireProtocol.VERSION, compatibility_fingerprint())
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func _rpc_session_confirm(protocol_version: int, client_fingerprint: String) -> void:
+	if transport != Transport.DIRECT or not is_host:
+		return
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != client_peer_id or sender == 0:
+		protocol_rejected.emit("protocol_handshake")
+		return
+	var reason := _compatibility_error(protocol_version, client_fingerprint)
+	if reason != "":
+		var message := _compatibility_message(reason)
+		_rpc_session_result.rpc_id(sender, false, message)
+		last_error = message
+		protocol_rejected.emit("protocol_handshake")
+		# Give the reliable rejection RPC one process frame to enter ENet's queue.
+		await get_tree().process_frame
+		if client_peer_id == sender and not _compatibility_confirmed:
+			leave()
+		return
+	_compatibility_confirmed = true
+	remote_present = true
+	_rpc_session_result.rpc_id(sender, true, "")
+	peer_joined.emit(sender)
+	# Catch up choices made while the compatibility round trip was in flight.
+	if local_ready:
+		_send_ready(local_ready)
+	if local_hero != "":
+		_send_hero(local_hero)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_session_result(accepted: bool, message: String) -> void:
+	if transport != Transport.DIRECT or is_host:
+		return
+	if not accepted:
+		last_error = message if message != "" else _compatibility_message("content_mismatch")
+		protocol_rejected.emit("protocol_handshake")
+		leave()
+		return
+	var reason := _compatibility_error(WireProtocol.VERSION,
+		_pending_remote_fingerprint)
+	if _pending_session_id.is_empty() or reason != "":
+		_reject_direct_compatibility(reason if reason != "" else "protocol_version")
+		return
+	_reset_wire_session(_pending_session_id)
+	_pending_session_id = ""
+	_pending_remote_fingerprint = ""
+	_compatibility_confirmed = true
+	remote_present = true
+	connected_to_host.emit()
+	if local_ready:
+		_send_ready(local_ready)
+	if local_hero != "":
+		_send_hero(local_hero)
+
+
 # ─────────────────────────────────────────────────────────────────────────
 #  LOBBY HANDSHAKE  (the Phase-0 round-trip demo)
 # ─────────────────────────────────────────────────────────────────────────
@@ -503,21 +762,25 @@ func set_local_ready(value: bool) -> void:
 
 
 func both_ready() -> bool:
-	return local_ready and remote_ready and remote_present
+	return local_ready and remote_ready and remote_present and _compatibility_confirmed
 
 
 func _send_ready(value: bool) -> void:
 	if not _can_send():
 		return
+	var wire := _next_wire(_RK_READY, {"value": value})
 	if transport == Transport.RELAY:
-		_relay_ship({"t": _RK_READY, "v": value})
+		_relay_ship(wire)
 	else:
-		_rpc_set_ready.rpc(value)
+		_rpc_set_ready.rpc(wire)
 
 
 @rpc("any_peer", "call_remote", "reliable")
-func _rpc_set_ready(value: bool) -> void:
-	_apply_remote_ready(value)
+func _rpc_set_ready(wire: Dictionary) -> void:
+	var payload = _accept_wire(wire, _RK_READY)
+	if payload == null:
+		return
+	_apply_remote_ready(bool(payload.get("value", false)))
 
 
 func _apply_remote_ready(value: bool) -> void:
@@ -536,18 +799,25 @@ func set_local_hero(hid: String) -> void:
 func _send_hero(hid: String) -> void:
 	if not _can_send():
 		return
+	var wire := _next_wire(_RK_HERO, {"hero": hid})
 	if transport == Transport.RELAY:
-		_relay_ship({"t": _RK_HERO, "h": hid})
+		_relay_ship(wire)
 	else:
-		_rpc_set_hero.rpc(hid)
+		_rpc_set_hero.rpc(wire)
 
 
 @rpc("any_peer", "call_remote", "reliable")
-func _rpc_set_hero(hid: String) -> void:
-	_apply_remote_hero(hid)
+func _rpc_set_hero(wire: Dictionary) -> void:
+	var payload = _accept_wire(wire, _RK_HERO)
+	if payload == null:
+		return
+	_apply_remote_hero(String(payload.get("hero", "")))
 
 
 func _apply_remote_hero(hid: String) -> void:
+	if not HeroDB.has_hero(hid):
+		protocol_rejected.emit("hero_unknown")
+		return
 	remote_hero = hid
 	hero_state_changed.emit()
 
@@ -555,7 +825,7 @@ func _apply_remote_hero(hid: String) -> void:
 ## True when there's a live link AND a present partner to receive a message —
 ## the shared guard for every player-side send (DIRECT and RELAY).
 func _can_send() -> bool:
-	return multiplayer.multiplayer_peer != null and remote_present
+	return multiplayer.multiplayer_peer != null and remote_present and not session_id.is_empty()
 
 
 ## Host-only: signal both sides to leave the lobby and start the draft. Picks the
@@ -569,23 +839,34 @@ func start_match() -> void:
 	# set_match_config send. The lord pair rides along as the canonical final word:
 	# picks were exchanged on click, but a pick racing the START press could leave
 	# the two machines disagreeing — the host's view wins at start.
+	var payload := {"seed": match_seed, "mode": match_mode, "bo": best_of,
+		"style": battle_style, "h0": local_hero, "h1": remote_hero}
+	var wire := _next_wire(_RK_MATCH_START, payload)
 	if transport == Transport.RELAY:
-		_relay_ship({"t": _RK_MATCH_START, "seed": match_seed, "mode": match_mode,
-			"bo": best_of, "style": battle_style, "h0": local_hero, "h1": remote_hero})
+		_relay_ship(wire)
 	else:
-		_rpc_match_start.rpc(match_seed, match_mode, best_of, battle_style,
-			local_hero, remote_hero)   # tell the client
+		_rpc_match_start.rpc(wire)   # tell the client
 	match_starting.emit(match_seed)    # tell ourselves (remote-only path)
 
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_match_start(seed: int, mode: int, bo: int, style: int = STYLE_ALTERNATING,
-		h0: String = "", h1: String = "") -> void:
-	_apply_match_start(seed, mode, bo, style, h0, h1)
+func _rpc_match_start(wire: Dictionary) -> void:
+	var payload = _accept_wire(wire, _RK_MATCH_START)
+	if payload == null:
+		return
+	_apply_match_start(int(payload.get("seed", 0)), int(payload.get("mode", 0)),
+		int(payload.get("bo", 1)), int(payload.get("style", STYLE_ALTERNATING)),
+		String(payload.get("h0", "")), String(payload.get("h1", "")))
 
 
 func _apply_match_start(seed: int, mode: int, bo: int, style: int = STYLE_ALTERNATING,
 		h0: String = "", h1: String = "") -> void:
+	if not _valid_match_config(mode, bo, style):
+		protocol_rejected.emit("match_start_config")
+		return
+	if (h0 != "" and not HeroDB.has_hero(h0)) or (h1 != "" and not HeroDB.has_hero(h1)):
+		protocol_rejected.emit("match_start_hero")
+		return
 	match_seed = seed
 	match_mode = mode
 	best_of = bo
@@ -606,24 +887,37 @@ func _apply_match_start(seed: int, mode: int, bo: int, style: int = STYLE_ALTERN
 func set_match_config(mode: int, bo: int, style: int = -1) -> void:
 	if not is_host:
 		return
+	var resolved_style := battle_style if style < 0 else style
+	if not _valid_match_config(mode, bo, resolved_style):
+		protocol_rejected.emit("local_match_config")
+		return
 	match_mode = mode
 	best_of = bo
 	if style >= 0:
-		battle_style = style
+		battle_style = resolved_style
 	if remote_present:
+		var wire := _next_wire(_RK_MATCH_CONFIG,
+			{"mode": mode, "bo": bo, "style": battle_style})
 		if transport == Transport.RELAY:
-			_relay_ship({"t": _RK_MATCH_CONFIG, "mode": mode, "bo": bo, "style": battle_style})
+			_relay_ship(wire)
 		else:
-			_rpc_match_config.rpc(mode, bo, battle_style)
+			_rpc_match_config.rpc(wire)
 	match_config_changed.emit()
 
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_match_config(mode: int, bo: int, style: int = STYLE_ALTERNATING) -> void:
-	_apply_match_config(mode, bo, style)
+func _rpc_match_config(wire: Dictionary) -> void:
+	var payload = _accept_wire(wire, _RK_MATCH_CONFIG)
+	if payload == null:
+		return
+	_apply_match_config(int(payload.get("mode", 0)), int(payload.get("bo", 1)),
+		int(payload.get("style", STYLE_ALTERNATING)))
 
 
 func _apply_match_config(mode: int, bo: int, style: int = STYLE_ALTERNATING) -> void:
+	if not _valid_match_config(mode, bo, style):
+		protocol_rejected.emit("match_config")
+		return
 	match_mode = mode
 	best_of = bo
 	battle_style = style
@@ -663,9 +957,16 @@ func send_draft_event(event: Dictionary) -> void:
 		# enters this branch and the live peer answers instead).
 		var t := String(event.get("t", ""))
 		if t == "finished":
-			# Deck handoff: answer with the bot's own randomly built warband.
+			# Deck handoff: answer with the bot's own randomly built warband, plus
+			# a drafted arsenal (3 board-authoritative relics; no potions — see
+			# SkirmishState.BOT_RELIC_POOL for why the bot never drinks).
 			var bot_cards := SkirmishBot.build_deck(match_seed ^ 0x80B0)
-			call_deferred("_apply_draft_event", {"t": "finished", "cards": bot_cards})
+			var bot_rng := RandomNumberGenerator.new()
+			bot_rng.seed = match_seed ^ 0xB07A
+			var bot_relics: Array = SkirmishState.deal_unique_cards(
+				SkirmishState.BOT_RELIC_POOL, 3, bot_rng)
+			call_deferred("_apply_draft_event", {"t": "finished", "cards": bot_cards,
+				"relics": bot_relics, "potions": []})
 		elif t == "ready":
 			# Quick Battle's both-ready gate: the bot is instantly ready, so echo it
 			# back. (Draft/Constructed/Sealed have no ready step — they go straight to
@@ -674,17 +975,56 @@ func send_draft_event(event: Dictionary) -> void:
 		return
 	if not _can_send():
 		return
+	var wire := _next_wire(_RK_DRAFT, {"event": event})
 	if transport == Transport.RELAY:
-		_relay_ship({"t": _RK_DRAFT, "event": event})
+		_relay_ship(wire)
 	else:
-		_rpc_draft_event.rpc(event)
+		_rpc_draft_event.rpc(wire)
 
 @rpc("any_peer", "call_remote", "reliable")
-func _rpc_draft_event(event: Dictionary) -> void:
+func _rpc_draft_event(wire: Dictionary) -> void:
+	var payload = _accept_wire(wire, _RK_DRAFT)
+	if payload == null:
+		return
+	var event: Dictionary = payload.get("event", {})
+	var sender_is_host := multiplayer.get_remote_sender_id() == 1
+	if not _draft_direction_allowed(event, sender_is_host):
+		protocol_rejected.emit("draft_direction")
+		return
 	_apply_draft_event(event)
 
 
 func _apply_draft_event(event: Dictionary) -> void:
+	var event_type := String(event.get("t", ""))
+	match event_type:
+		"pick":
+			var pick_count := int(event.get("n", -1))
+			if pick_count < 0 or pick_count > SkirmishState.DECK_TARGET:
+				protocol_rejected.emit("draft_pick_count")
+				return
+			if event.has("id") and String(event.get("id", "")) \
+					not in SkirmishState.skirmish_legal_pool():
+				protocol_rejected.emit("draft_pick_card")
+				return
+		"ready":
+			pass
+		"cfg":
+			if typeof(event.get("mirror", null)) != TYPE_BOOL \
+					or typeof(event.get("seed", null)) != TYPE_INT:
+				protocol_rejected.emit("draft_config")
+				return
+		"finished":
+			if _remote_loadout_received:
+				protocol_rejected.emit("loadout_duplicate")
+				return
+			var reason := SkirmishState.validate_loadout_event(event, match_mode)
+			if reason != "":
+				protocol_rejected.emit(reason)
+				return
+			_remote_loadout_received = true
+		_:
+			protocol_rejected.emit("draft_event_unknown")
+			return
 	draft_event_received.emit(event)
 
 
@@ -697,18 +1037,34 @@ func _apply_draft_event(event: Dictionary) -> void:
 func send_intent(intent: Dictionary) -> void:
 	if multiplayer.multiplayer_peer == null:
 		return
+	var wire := _next_wire(_RK_INTENT, {"intent": intent})
+	if wire.is_empty():
+		return
 	if transport == Transport.RELAY:
-		_relay_ship({"t": _RK_INTENT, "intent": intent})
+		_relay_ship(wire)
 	else:
-		_rpc_combat_intent.rpc_id(1, intent)
+		_rpc_combat_intent.rpc_id(1, wire)
 
 @rpc("any_peer", "call_remote", "reliable")
-func _rpc_combat_intent(intent: Dictionary) -> void:
+func _rpc_combat_intent(wire: Dictionary) -> void:
 	# Runs on the host. Surface the sender so the combat scene can attribute it.
-	_apply_combat_intent(multiplayer.get_remote_sender_id(), intent)
+	if not is_host:
+		protocol_rejected.emit("intent_to_non_host")
+		return
+	var payload = _accept_wire(wire, _RK_INTENT)
+	if payload == null:
+		return
+	_apply_combat_intent(multiplayer.get_remote_sender_id(), payload.get("intent", {}))
 
 
 func _apply_combat_intent(sender_id: int, intent: Dictionary) -> void:
+	if not is_host:
+		protocol_rejected.emit("intent_to_non_host")
+		return
+	var expected_sender := relay_partner_id if transport == Transport.RELAY else client_peer_id
+	if not vs_bot and (expected_sender == 0 or sender_id != expected_sender):
+		protocol_rejected.emit("intent_sender")
+		return
 	if not _combat_attached:
 		_combat_msg_buffer.append({"k": "intent", "sender": sender_id, "intent": intent})
 		return
@@ -719,17 +1075,24 @@ func _apply_combat_intent(sender_id: int, intent: Dictionary) -> void:
 func broadcast_event(event: Dictionary) -> void:
 	if not _can_send():
 		return
+	var wire := _next_wire(_RK_EVENT, {"event": event})
 	if transport == Transport.RELAY:
-		_relay_ship({"t": _RK_EVENT, "event": event})
+		_relay_ship(wire)
 	else:
-		_rpc_combat_event.rpc(event)
+		_rpc_combat_event.rpc(wire)
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_combat_event(event: Dictionary) -> void:
-	_apply_combat_event(event)
+func _rpc_combat_event(wire: Dictionary) -> void:
+	var payload = _accept_wire(wire, _RK_EVENT)
+	if payload == null:
+		return
+	_apply_combat_event(payload.get("event", {}))
 
 
 func _apply_combat_event(event: Dictionary) -> void:
+	if is_host:
+		protocol_rejected.emit("event_to_host")
+		return
 	if not _combat_attached:
 		_combat_msg_buffer.append({"k": "event", "event": event})
 		return
@@ -770,13 +1133,14 @@ func detach_combat() -> void:
 func send_to_client(event: Dictionary) -> void:
 	if not is_host or not remote_present:
 		return
+	var wire := _next_wire(_RK_EVENT, {"event": event})
 	if transport == Transport.RELAY:
 		# The relay forwards to the one room partner — same single recipient.
-		_relay_ship({"t": _RK_EVENT, "event": event})
+		_relay_ship(wire)
 	else:
 		if client_peer_id == 0:
 			return
-		_rpc_combat_event.rpc_id(client_peer_id, event)
+		_rpc_combat_event.rpc_id(client_peer_id, wire)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -792,15 +1156,19 @@ func launch_combat() -> void:
 	if vs_bot:
 		_enter_combat_local()   # no peer to signal — just drop into combat locally
 		return
+	var wire := _next_wire(_RK_LAUNCH)
 	if transport == Transport.RELAY:
-		_relay_ship({"t": _RK_LAUNCH})   # client enters via the relay
+		_relay_ship(wire)
 	else:
-		_rpc_launch_combat.rpc()         # client enters
+		_rpc_launch_combat.rpc(wire)
 	_enter_combat_local()                # host enters (the remote path is call_remote only)
 
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_launch_combat() -> void:
+func _rpc_launch_combat(wire: Dictionary) -> void:
+	var payload = _accept_wire(wire, _RK_LAUNCH)
+	if payload == null:
+		return
 	_enter_combat_local()
 
 
@@ -834,37 +1202,130 @@ func _enter_combat_local() -> void:
 # ─────────────────────────────────────────────────────────────────────────
 
 ## Player → relay: ship an envelope; the relay forwards it to our room partner.
-func _relay_ship(env: Dictionary) -> void:
-	if multiplayer.multiplayer_peer == null:
+func _relay_ship(wire: Dictionary) -> void:
+	if multiplayer.multiplayer_peer == null or wire.is_empty():
 		return
-	_rpc_relay_forward.rpc_id(1, env)
+	_rpc_relay_forward.rpc_id(1, wire)
+
+
+func _relay_rate_allowed(sender: int, encoded_bytes: int, control: bool) -> bool:
+	var now := Time.get_ticks_msec()
+	var rec: Dictionary = _relay_rate.get(sender,
+		{"start": now, "messages": 0, "bytes": 0, "control": 0, "violations": 0})
+	if now - int(rec.get("start", now)) >= RELAY_RATE_WINDOW_MS:
+		rec.start = now
+		rec.messages = 0
+		rec.bytes = 0
+		rec.control = 0
+	if control:
+		rec.control = int(rec.get("control", 0)) + 1
+	else:
+		rec.messages = int(rec.get("messages", 0)) + 1
+		rec.bytes = int(rec.get("bytes", 0)) + maxi(0, encoded_bytes)
+	_relay_rate[sender] = rec
+	return int(rec.control) <= RELAY_CONTROL_MAX_REQUESTS \
+		if control else (int(rec.messages) <= RELAY_RATE_MAX_MESSAGES \
+			and int(rec.bytes) <= RELAY_RATE_MAX_BYTES)
+
+
+func _relay_reject(sender: int, reason: String) -> void:
+	protocol_rejected.emit("relay_" + reason)
+	var now := Time.get_ticks_msec()
+	var rec: Dictionary = _relay_rate.get(sender,
+		{"start": now, "messages": 0, "bytes": 0, "control": 0, "violations": 0})
+	rec.violations = int(rec.get("violations", 0)) + 1
+	_relay_rate[sender] = rec
+	if int(rec.violations) >= 8:
+		var sm := multiplayer as SceneMultiplayer
+		if sm != null:
+			sm.disconnect_peer(sender)
+
+
+func _relay_sender_is_host(sender: int, room: Dictionary) -> bool:
+	return sender == int(room.get("host", 0))
+
+
+func _relay_direction_allowed(sender: int, room: Dictionary, wire: Dictionary) -> bool:
+	var sender_is_host := _relay_sender_is_host(sender, room)
+	var kind := WireProtocol.kind(wire)
+	if sender_is_host:
+		if kind not in [_RK_READY, _RK_HERO, _RK_MATCH_START, _RK_MATCH_CONFIG,
+				_RK_DRAFT, _RK_EVENT, _RK_LAUNCH]:
+			return false
+	else:
+		if kind not in [_RK_READY, _RK_HERO, _RK_DRAFT, _RK_INTENT]:
+			return false
+	if kind == _RK_DRAFT:
+		var payload := WireProtocol.payload(wire)
+		return _draft_direction_allowed(payload.get("event", {}), sender_is_host)
+	return true
 
 
 ## RELAY: forward a player's envelope to that player's room partner ONLY (no
 ## cross-room leakage — server_relay is off, so the engine never auto-broadcasts).
 @rpc("any_peer", "call_remote", "reliable")
-func _rpc_relay_forward(env: Dictionary) -> void:
+func _rpc_relay_forward(wire: Dictionary) -> void:
 	if not is_relay:
 		return
 	var sender := multiplayer.get_remote_sender_id()
+	var encoded_bytes := var_to_bytes(wire).size()
+	if not _relay_rate_allowed(sender, encoded_bytes, false):
+		_relay_reject(sender, "rate")
+		return
+	var code := String(_relay_peer_room.get(sender, ""))
+	if code.is_empty() or not _relay_rooms.has(code):
+		_relay_reject(sender, "room")
+		return
+	var room: Dictionary = _relay_rooms[code]
+	var reason := WireProtocol.validate_envelope(wire, String(room.get("sid", "")))
+	if reason != "":
+		_relay_reject(sender, reason)
+		return
+	var incoming_seq := WireProtocol.sequence(wire)
+	if incoming_seq <= int(_relay_last_sequence.get(sender, 0)):
+		_relay_reject(sender, "sequence_stale")
+		return
+	if not _relay_direction_allowed(sender, room, wire):
+		_relay_reject(sender, "direction")
+		return
 	var partner: int = int(_relay_partner.get(sender, 0))
-	if partner != 0:
-		_rpc_relay_deliver.rpc_id(partner, env)
+	if partner == 0:
+		_relay_reject(sender, "partner")
+		return
+	_relay_last_sequence[sender] = incoming_seq
+	room.last_ms = Time.get_ticks_msec()
+	_relay_rooms[code] = room
+	_rpc_relay_deliver.rpc_id(partner, wire)
 
 
 ## Player: the relay handed us our partner's envelope. Dispatch as though it had
 ## arrived over the matching DIRECT @rpc — reusing the same _apply_* bodies.
 @rpc("authority", "call_remote", "reliable")
-func _rpc_relay_deliver(env: Dictionary) -> void:
-	match String(env.get("t", "")):
-		_RK_READY:        _apply_remote_ready(bool(env.get("v", false)))
-		_RK_HERO:         _apply_remote_hero(String(env.get("h", "")))
-		_RK_MATCH_START:  _apply_match_start(int(env.get("seed", 0)), int(env.get("mode", 0)), int(env.get("bo", 1)), int(env.get("style", STYLE_ALTERNATING)), String(env.get("h0", "")), String(env.get("h1", "")))
-		_RK_MATCH_CONFIG: _apply_match_config(int(env.get("mode", 0)), int(env.get("bo", 1)), int(env.get("style", STYLE_ALTERNATING)))
-		_RK_DRAFT:        _apply_draft_event(env.get("event", {}))
-		_RK_INTENT:       _apply_combat_intent(relay_partner_id, env.get("intent", {}))
-		_RK_EVENT:        _apply_combat_event(env.get("event", {}))
-		_RK_LAUNCH:       _enter_combat_local()
+func _rpc_relay_deliver(wire: Dictionary) -> void:
+	var kind := WireProtocol.kind(wire)
+	var payload = _accept_wire(wire, kind)
+	if payload == null:
+		return
+	match kind:
+		_RK_READY:
+			_apply_remote_ready(bool(payload.get("value", false)))
+		_RK_HERO:
+			_apply_remote_hero(String(payload.get("hero", "")))
+		_RK_MATCH_START:
+			_apply_match_start(int(payload.get("seed", 0)), int(payload.get("mode", 0)),
+				int(payload.get("bo", 1)), int(payload.get("style", STYLE_ALTERNATING)),
+				String(payload.get("h0", "")), String(payload.get("h1", "")))
+		_RK_MATCH_CONFIG:
+			_apply_match_config(int(payload.get("mode", 0)), int(payload.get("bo", 1)),
+				int(payload.get("style", STYLE_ALTERNATING)))
+		_RK_DRAFT:
+			_apply_draft_event(payload.get("event", {}))
+		_RK_INTENT:
+			_apply_combat_intent(relay_partner_id, payload.get("intent", {}))
+		_RK_EVENT:
+			_apply_combat_event(payload.get("event", {}))
+		_RK_LAUNCH:
+			_enter_combat_local()
 
 
 # ── Room control: player → relay ──
@@ -874,10 +1335,25 @@ func _rpc_create_room() -> void:
 	if not is_relay:
 		return
 	var sender := multiplayer.get_remote_sender_id()
+	if not _relay_rate_allowed(sender, 0, true):
+		_relay_reject(sender, "control_rate")
+		return
+	if _relay_peer_room.has(sender):
+		_rpc_room_error.rpc_id(sender, "You already have a room open.")
+		return
+	if _relay_rooms.size() >= RELAY_MAX_ROOMS:
+		_rpc_room_error.rpc_id(sender, "The relay is full. Try again in a moment.")
+		return
 	var code := _relay_make_code()
-	_relay_rooms[code] = {"host": sender, "client": 0}
+	if code.is_empty():
+		_rpc_room_error.rpc_id(sender, "The relay could not open a room. Try again.")
+		return
+	var now := Time.get_ticks_msec()
+	var room_session := _new_session_id()
+	_relay_rooms[code] = {"host": sender, "client": 0, "sid": room_session,
+		"created_ms": now, "last_ms": now}
 	_relay_peer_room[sender] = code
-	_rpc_room_created.rpc_id(sender, code)
+	_rpc_room_created.rpc_id(sender, code, room_session, WireProtocol.VERSION)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -885,31 +1361,53 @@ func _rpc_join_room(code: String) -> void:
 	if not is_relay:
 		return
 	var sender := multiplayer.get_remote_sender_id()
+	if not _relay_rate_allowed(sender, code.to_utf8_buffer().size(), true):
+		_relay_reject(sender, "control_rate")
+		return
+	if _relay_peer_room.has(sender):
+		_rpc_room_error.rpc_id(sender, "You are already in a room.")
+		return
 	code = code.strip_edges().to_upper()
+	if code.length() != ROOM_CODE_LEN:
+		_rpc_room_error.rpc_id(sender, "That room code isn't valid — check it and retry.")
+		return
+	for ch in code:
+		if ROOM_CODE_ALPHABET.find(ch) < 0:
+			_rpc_room_error.rpc_id(sender, "That room code isn't valid — check it and retry.")
+			return
 	if not _relay_rooms.has(code):
-		_rpc_room_error.rpc_id(sender, "No open match with that code.")
+		_rpc_room_error.rpc_id(sender, "No room is open with that code.")
 		return
 	var room: Dictionary = _relay_rooms[code]
 	if int(room.get("client", 0)) != 0:
-		_rpc_room_error.rpc_id(sender, "That match is already full.")
+		_rpc_room_error.rpc_id(sender, "That room already has two players.")
 		return
 	var host_id := int(room.get("host", 0))
 	if host_id == 0 or host_id == sender:
-		_rpc_room_error.rpc_id(sender, "That match is no longer open.")
+		_rpc_room_error.rpc_id(sender, "That room is no longer open.")
 		return
 	room["client"] = sender
 	_relay_peer_room[sender] = code
 	_relay_partner[host_id] = sender
 	_relay_partner[sender] = host_id
+	_relay_last_sequence[host_id] = 0
+	_relay_last_sequence[sender] = 0
+	room.last_ms = Time.get_ticks_msec()
+	_relay_rooms[code] = room
 	# Pair: the room creator is index 0 (host), the joiner index 1 (client).
-	_rpc_room_paired.rpc_id(host_id, sender, 0)
-	_rpc_room_paired.rpc_id(sender, host_id, 1)
+	var room_session := String(room.get("sid", ""))
+	_rpc_room_paired.rpc_id(host_id, sender, 0, room_session, WireProtocol.VERSION)
+	_rpc_room_paired.rpc_id(sender, host_id, 1, room_session, WireProtocol.VERSION)
 
 
 # ── Room control: relay → player (authority = only the relay/peer-1 may call) ──
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_room_created(code: String) -> void:
+func _rpc_room_created(code: String, room_session: String, protocol_version: int) -> void:
+	if protocol_version != WireProtocol.VERSION or room_session.is_empty():
+		_rpc_room_error("The relay is running a different version of the game.")
+		return
+	_reset_wire_session(room_session)
 	relay_room_code = code
 	# Creating a room makes us its host (index 0). Pairing re-confirms this later;
 	# setting it now lets the lobby show the host's mode picker while we wait, and
@@ -920,7 +1418,15 @@ func _rpc_room_created(code: String) -> void:
 
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_room_paired(partner_id: int, my_index: int) -> void:
+func _rpc_room_paired(partner_id: int, my_index: int, room_session: String,
+		protocol_version: int) -> void:
+	if protocol_version != WireProtocol.VERSION or room_session.is_empty():
+		_rpc_room_error("The relay is running a different version of the game.")
+		return
+	if not session_id.is_empty() and session_id != room_session:
+		_rpc_room_error("The relay lost track of this room. Open a new one.")
+		return
+	_reset_wire_session(room_session)
 	relay_partner_id = partner_id
 	local_player_index = my_index
 	is_host = (my_index == 0)
@@ -963,14 +1469,57 @@ func _rpc_partner_left() -> void:
 
 # ── Relay-server cleanup when a peer drops ──
 
+func _relay_expire_rooms() -> void:
+	var now := Time.get_ticks_msec()
+	var expired_codes: Array[String] = []
+	for code_var in _relay_rooms:
+		var code := String(code_var)
+		var room: Dictionary = _relay_rooms[code]
+		var paired := int(room.get("client", 0)) != 0
+		var ttl := RELAY_PAIRED_IDLE_TTL_MS if paired else RELAY_OPEN_ROOM_TTL_MS
+		if now - int(room.get("last_ms", room.get("created_ms", now))) >= ttl:
+			expired_codes.append(code)
+	for code in expired_codes:
+		var room: Dictionary = _relay_rooms.get(code, {})
+		var host_id := int(room.get("host", 0))
+		var client_id := int(room.get("client", 0))
+		if client_id == 0:
+			if host_id != 0:
+				_rpc_room_error.rpc_id(host_id, "Your room sat open too long and closed. Open a new one.")
+		else:
+			if host_id != 0:
+				_rpc_partner_left.rpc_id(host_id)
+			if client_id != 0:
+				_rpc_partner_left.rpc_id(client_id)
+		_relay_forget_room(code)
+
+
+func _relay_forget_room(code: String) -> void:
+	if code.is_empty() or not _relay_rooms.has(code):
+		return
+	var room: Dictionary = _relay_rooms[code]
+	for peer_id in [int(room.get("host", 0)), int(room.get("client", 0))]:
+		if peer_id == 0:
+			continue
+		_relay_partner.erase(peer_id)
+		_relay_peer_room.erase(peer_id)
+		_relay_last_sequence.erase(peer_id)
+		_relay_rate.erase(peer_id)
+	_relay_rooms.erase(code)
+
+
 func _relay_on_peer_gone(peer_id: int) -> void:
 	var partner: int = int(_relay_partner.get(peer_id, 0))
 	if partner != 0:
 		_rpc_partner_left.rpc_id(partner)
 	var code: String = String(_relay_peer_room.get(peer_id, ""))
-	_relay_partner.erase(peer_id)
-	_relay_partner.erase(partner)
-	_relay_peer_room.erase(peer_id)
-	_relay_peer_room.erase(partner)
 	if code != "":
-		_relay_rooms.erase(code)
+		_relay_forget_room(code)
+	else:
+		_relay_partner.erase(peer_id)
+		_relay_partner.erase(partner)
+		_relay_peer_room.erase(peer_id)
+		_relay_peer_room.erase(partner)
+		_relay_last_sequence.erase(peer_id)
+		_relay_last_sequence.erase(partner)
+	_relay_rate.erase(peer_id)

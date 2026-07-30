@@ -71,7 +71,14 @@ func _process(_delta: float) -> bool:
 			_check(extra_elites == 1, tag + ": one war-road General on a fight row")
 			_check(ok_verbs, tag + ": every wayside halt carries a verb")
 			_check(n_sites >= 24 and n_sites <= 36, tag + ": %d sites in window" % n_sites)
-			_check(int(counts.get("treasure", 0)) >= 2, tag + ": two treasures placed")
+			# The act carries TWO forced spoil stops, and they are different
+			# node types: the Reliquary (row 7, type "treasure" — the fixed
+			# relic-bearing stop) and the Arsenal (row 13, type "arsenal" —
+			# forge/potions/gold). This assertion predates the Arsenal split
+			# and read `treasure >= 2`, which the generator has never
+			# satisfied since. Check for one of each, by name.
+			_check(int(counts.get("treasure", 0)) >= 1, tag + ": Reliquary placed")
+			_check(int(counts.get("arsenal", 0)) >= 1, tag + ": Arsenal placed")
 			_check(int(counts.get("recruit", 0)) >= 2, tag + ": two musters placed")
 			_check(int(counts.get("shop", 0)) >= 1, tag + ": shop placed")
 

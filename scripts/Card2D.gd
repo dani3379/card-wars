@@ -1,10 +1,7 @@
 extends PanelContainer
 class_name Card2D
-## Card2D.gd — 225x300 card. Three layout modes, picked in _build_layout:
-##   - v4 (USE_PROCEDURAL_FRAME on): pure Godot-drawn frame, no PNG dep
-##   - v3 (USE_NEW_FRAME on): painted PNG frame with POINT_*-anchored labels
-##   - v1/legacy: original gilt-banner layout
-## Compact battlefield mode swaps to an art-token layout (no rules text).
+## Card2D.gd — the live campaign-writ hand card and compact battlefield token.
+## Cached cards use the same writ as a static texture plus live stat overlays.
 
 signal played
 signal destroyed
@@ -40,6 +37,9 @@ signal dismiss_requested
 #       nearest empty friendly slot or snaps it back home.
 signal field_move_started
 signal field_move_dropped(global_pos: Vector2)
+#   aim_clear_requested — right-click on a friendly battlefield creature; Combat
+#       lifts a sniper's standing aim order (no-op for unmarked creatures).
+signal aim_clear_requested
 
 # ── Writ-kit painters (scripts/ui/painters/, extracted 2026-07-14) ──────────
 # Self-contained draw-only Controls for the card's physical material. The
@@ -53,620 +53,9 @@ const ParchmentPlate := preload("res://scripts/ui/painters/ParchmentPlate.gd")
 const TallyMarks := preload("res://scripts/ui/painters/TallyMarks.gd")
 const EmptyPlateSigil := preload("res://scripts/ui/painters/EmptyPlateSigil.gd")
 const WritDetailDiamond := preload("res://scripts/ui/painters/WritDetailDiamond.gd")
-
-
-# ─────────────────────────────────────────────────────────────────────────
-#  PolyBadge — procedurally drawn stat-orb shape.
-# ─────────────────────────────────────────────────────────────────────────
-#
-# Used by the v4 card layout for the cost orb (hex), ATK plate (heater
-# shield), HP plate (blood drop), rarity gem (diamond), and spell peak
-# (triangle/pentagon). Renders one of several silhouettes at any size, with a
-# fill colour + darker border + soft top-half highlight that mimics a glossy
-# gem. No texture asset — pure draw_colored_polygon calls.
-class PolyBadge extends Control:
-	var fill_color: Color = Color.WHITE
-	var border_color: Color = Color(0, 0, 0, 0.55)
-	var border_width: float = 1.5
-	var shape: String = "hex"   # hex / shield / drop / diamond / peak
-
-	func _ready() -> void:
-		mouse_filter = Control.MOUSE_FILTER_IGNORE
-
-	func _draw() -> void:
-		if size.x <= 0 or size.y <= 0:
-			return
-		var pts := _build_shape()
-		if pts.size() < 3:
-			return
-
-		# ── Layer 1: Drop shadow ───────────────────────────────────────────
-		# Offset polygon down/right, darkened. Lifts the orb off the card
-		# frame the way Hearthstone's stat gems sit "above" the card body.
-		var shadow_offset := Vector2(0, 2)
-		var shadow_pts := PackedVector2Array()
-		for p in pts:
-			shadow_pts.append(p + shadow_offset)
-		draw_colored_polygon(shadow_pts, Color(0, 0, 0, 0.50))
-
-		# ── Layer 2: Gradient fill ─────────────────────────────────────────
-		# Per-vertex colors — Godot interpolates across the polygon's
-		# triangulation. Top vertices get ~1.25× brightness, bottom ~0.70×.
-		# Reads as a directional light source from above (canonical for
-		# glossy gems in AAA card art).
-		var colors := PackedColorArray()
-		for p in pts:
-			var t = clampf(p.y / size.y, 0.0, 1.0)
-			var brightness = lerpf(1.28, 0.62, t)
-			colors.append(Color(
-				clampf(fill_color.r * brightness, 0.0, 1.0),
-				clampf(fill_color.g * brightness, 0.0, 1.0),
-				clampf(fill_color.b * brightness, 0.0, 1.0),
-				fill_color.a
-			))
-		draw_polygon(pts, colors)
-
-		# ── Layer 3: Top-half highlight wedge ──────────────────────────────
-		# Translucent white over upper half — boosts the gradient's "light
-		# from above" cue with a slight glossy band.
-		var hl := PackedVector2Array()
-		for p in pts:
-			if p.y < size.y * 0.5:
-				hl.append(p)
-		if hl.size() >= 3:
-			hl.append(Vector2(size.x * 0.5, size.y * 0.5))
-			draw_colored_polygon(hl, Color(1, 1, 1, 0.18))
-
-		# ── Layer 4: Specular dot ──────────────────────────────────────────
-		# Small bright circle near top-left — the "glass highlight" trick
-		# every AAA gem orb uses to read as polished/wet. Skipped on very
-		# small badges (rarity gem) where it'd just be a fuzzy pixel.
-		if minf(size.x, size.y) >= 18.0:
-			var spec_pos = Vector2(size.x * 0.34, size.y * 0.24)
-			var spec_radius = size.x * 0.12
-			draw_circle(spec_pos, spec_radius, Color(1, 1, 1, 0.65),
-				true, -1.0, true)
-			# Smaller, brighter core for extra glass feel
-			draw_circle(spec_pos - Vector2(spec_radius * 0.25, spec_radius * 0.25),
-				spec_radius * 0.45, Color(1, 1, 1, 0.85), true, -1.0, true)
-
-		# ── Layer 5: Bottom rim shadow ─────────────────────────────────────
-		# Vertices in the lower half get a slight dark overlay — gives the
-		# orb a "rim" of darker color at its base, matching how 3D-rendered
-		# gems pick up bounce-shadow at their underside.
-		var rim := PackedVector2Array()
-		for p in pts:
-			if p.y > size.y * 0.65:
-				rim.append(p)
-		if rim.size() >= 3:
-			rim.insert(0, Vector2(size.x * 0.5, size.y * 0.65))
-			draw_colored_polygon(rim, Color(0, 0, 0, 0.20))
-
-		# ── Layer 6: Beveled outline ───────────────────────────────────────
-		# Anti-aliased polyline; slightly darker than fill so the edge reads
-		# as a chiseled border, not a sticker outline.
-		if border_width > 0:
-			var closed := pts.duplicate()
-			closed.append(pts[0])
-			draw_polyline(closed, border_color, border_width, true)
-
-	func _build_shape() -> PackedVector2Array:
-		match shape:
-			"hex":     return _hex(size)
-			"shield":  return _shield(size)
-			"drop":    return _drop(size)
-			"diamond": return _diamond(size)
-			"peak":    return _peak(size)
-			_:         return _hex(size)
-
-	static func _hex(sz: Vector2) -> PackedVector2Array:
-		# Pointy-top hexagon (gem-like). 6 vertices.
-		var pts := PackedVector2Array()
-		var w := sz.x; var h := sz.y
-		pts.append(Vector2(w * 0.5, 0.0))        # top
-		pts.append(Vector2(w,       h * 0.30))
-		pts.append(Vector2(w,       h * 0.70))
-		pts.append(Vector2(w * 0.5, h))          # bottom
-		pts.append(Vector2(0.0,     h * 0.70))
-		pts.append(Vector2(0.0,     h * 0.30))
-		return pts
-
-	static func _shield(sz: Vector2) -> PackedVector2Array:
-		# Heater-shield silhouette: flat top with corners clipped, pointed
-		# bottom apex. Reads as "knight's shield" at hand-card scale.
-		var pts := PackedVector2Array()
-		var w := sz.x; var h := sz.y
-		pts.append(Vector2(w * 0.10, 0.0))
-		pts.append(Vector2(w * 0.90, 0.0))
-		pts.append(Vector2(w,        h * 0.22))
-		pts.append(Vector2(w * 0.92, h * 0.66))
-		pts.append(Vector2(w * 0.5,  h))
-		pts.append(Vector2(w * 0.08, h * 0.66))
-		pts.append(Vector2(0.0,      h * 0.22))
-		return pts
-
-	static func _drop(sz: Vector2) -> PackedVector2Array:
-		# Blood-drop silhouette: pointed top, rounded bottom (10-point smooth).
-		var pts := PackedVector2Array()
-		var w := sz.x; var h := sz.y
-		pts.append(Vector2(w * 0.5,  0.0))         # top point
-		pts.append(Vector2(w * 0.74, h * 0.18))
-		pts.append(Vector2(w * 0.93, h * 0.42))
-		pts.append(Vector2(w,        h * 0.62))
-		pts.append(Vector2(w * 0.88, h * 0.88))
-		pts.append(Vector2(w * 0.5,  h))           # rounded base
-		pts.append(Vector2(w * 0.12, h * 0.88))
-		pts.append(Vector2(0.0,      h * 0.62))
-		pts.append(Vector2(w * 0.07, h * 0.42))
-		pts.append(Vector2(w * 0.26, h * 0.18))
-		return pts
-
-	static func _diamond(sz: Vector2) -> PackedVector2Array:
-		# 4-point rhombus — rarity gem at art-bottom (Hearthstone position).
-		var pts := PackedVector2Array()
-		var w := sz.x; var h := sz.y
-		pts.append(Vector2(w * 0.5, 0.0))
-		pts.append(Vector2(w,       h * 0.5))
-		pts.append(Vector2(w * 0.5, h))
-		pts.append(Vector2(0.0,     h * 0.5))
-		return pts
-
-	static func _peak(sz: Vector2) -> PackedVector2Array:
-		# Pentagonal cap pointing up — used on spell cards above the banner so
-		# the silhouette differs from creatures (Slay-the-Spire convention).
-		var pts := PackedVector2Array()
-		var w := sz.x; var h := sz.y
-		pts.append(Vector2(w * 0.5, 0.0))      # apex
-		pts.append(Vector2(w,       h * 0.62))
-		pts.append(Vector2(w * 0.78, h))
-		pts.append(Vector2(w * 0.22, h))
-		pts.append(Vector2(0.0,     h * 0.62))
-		return pts
-
-	static func _circle(sz: Vector2, segments: int = 32) -> PackedVector2Array:
-		# 32-vertex polygon approximating a circle. Drives the GemOrb's per-
-		# vertex shading the same way hex / shield / drop do, but the dense
-		# vertex ring makes the silhouette read as a perfect orb at any size.
-		# Hearthstone / Marvel Snap / Card Wars all use circles for stat gems
-		# — geometric shapes (hex, shield, drop) clash with painted creature
-		# art the way the v1 prototype's flat ColorRect circles did. The orb
-		# is fantasy-canonical; the polygon-shape detour was a mistake.
-		var pts := PackedVector2Array()
-		var cx := sz.x * 0.5
-		var cy := sz.y * 0.5
-		# Slight Y inset (98 %) so the orb isn't perfectly tangent to its
-		# bounding box on top and bottom — leaves a hairline of breathing room
-		# that lets the drop shadow read against the card body without being
-		# clipped by overlapping siblings.
-		var rx := sz.x * 0.49
-		var ry := sz.y * 0.49
-		for i in range(segments):
-			var ang = TAU * float(i) / float(segments) - PI * 0.5
-			pts.append(Vector2(cx + rx * cos(ang), cy + ry * sin(ang)))
-		return pts
-
-
-# ─────────────────────────────────────────────────────────────────────────
-#  GemOrb — premium 3D stat orb (replaces PolyBadge for cost/atk/hp).
-# ─────────────────────────────────────────────────────────────────────────
-#
-# What makes a card-game stat orb look "expensive" (Hearthstone / STS /
-# MtG Arena) vs "flat" (early prototype, MtG paper):
-#
-#   1. Saturated colours need WHITE blending for highlights, not brightness
-#      multiplication. (1.4×red is just clipped red — same hue, no glow.)
-#   2. Drop shadow lifts the orb off the card surface. One layer reads as a
-#      sticker, three stacked layers read as floating glass.
-#   3. Outer dark rim (near-black, slightly larger silhouette) gives the
-#      chiseled edge AAA gems have, separately from any AA outline.
-#   4. Faceted bodies (flat planes of colour per triangle, sharp edges
-#      between) read as "cut crystal" — used for STS-style hex mana gems.
-#      Smooth bodies (per-vertex interpolation across a polygon) read as
-#      "polished glass dome" — used for Hearthstone-style shield / drop.
-#   5. Specular hotspot is a cluster, not a dot: wide soft halo + small
-#      bright core, offset toward the light. Sells "wet/polished".
-#   6. Inner bottom-rim shadow + top bevel highlight together describe the
-#      orb as a 3D object lit from upper-left, regardless of facet count.
-#
-# Pure draw API — no shader (project runs on GL Compatibility), no texture
-# dependency, no per-instance allocation beyond the Control itself.
-class GemOrb extends Control:
-	var fill_color: Color = Color.WHITE
-	var shape: String = "hex"             # hex / shield / drop / diamond / peak
-	var style: String = "faceted"         # "faceted" or "smooth"
-	var gloss: float = 1.0                # specular/bevel strength; <1 = calmer/matte
-	# Light direction (unit vector pointing FROM the light TO the surface).
-	# Upper-left light → vector points down-right. Stored as where the lit
-	# normal POINTS: (-0.40, -0.92) means the brightest facet faces up-left.
-	const LIGHT := Vector2(-0.40, -0.92)
-	const RIM_DARK := Color(0.04, 0.04, 0.08, 1.0)
-
-	func _ready() -> void:
-		mouse_filter = Control.MOUSE_FILTER_IGNORE
-
-	func _draw() -> void:
-		if size.x <= 0 or size.y <= 0:
-			return
-		var pts := _build_shape(size)
-		if pts.size() < 3:
-			return
-		var center := size * 0.5
-
-		# Emblem style routes to a separate, fully matte renderer — the
-		# glossy gem treatment below clashes with the painted parchment
-		# frame. Wax-seal / struck-coin look instead.
-		if style == "emblem":
-			_draw_emblem(pts, center)
-			return
-
-		# ── Layer 1: Drop shadow (3 stacked, decreasing alpha) ─────────────
-		# One layer reads as a sticker. Three give the orb real "floating"
-		# depth — same trick as iOS app icons and Hearthstone gems.
-		for i in range(3):
-			var off := Vector2(0, i + 2)
-			var grow := float(i) * 0.025
-			var shadow_pts := PackedVector2Array()
-			for p in pts:
-				shadow_pts.append(p + (p - center) * grow + off)
-			draw_colored_polygon(shadow_pts, Color(0, 0, 0, 0.28 - float(i) * 0.07))
-
-		# ── Layer 2: Outer dark rim (chiseled border) ─────────────────────
-		# Slightly enlarged polygon in near-black. Reads as the dark
-		# metal/stone setting of a gemstone. This is what separates an orb
-		# from "a coloured shape": rim contrast against the card body.
-		var rim_pts := PackedVector2Array()
-		for p in pts:
-			rim_pts.append(p + (p - center) * 0.07)
-		draw_colored_polygon(rim_pts, RIM_DARK)
-
-		# ── Layer 3: Body (faceted crystal OR smooth dome) ────────────────
-		if style == "faceted":
-			_draw_faceted_body(pts, center)
-		else:
-			_draw_smooth_body(pts, center)
-
-		# ── Layer 4: Specular hotspot cluster ─────────────────────────────
-		# Two-circle highlight: wide soft halo + sharp bright core, offset
-		# toward the light source. The cluster (not the single dot) is what
-		# sells "wet polished glass".
-		var min_dim := minf(size.x, size.y)
-		if min_dim >= 14.0:
-			var spec_pos := center + LIGHT * Vector2(size.x * 0.26, size.y * 0.28)
-			var rad_outer := min_dim * 0.20
-			var rad_inner := min_dim * 0.085
-			draw_circle(spec_pos, rad_outer, Color(1, 1, 1, 0.38 * gloss),
-				true, -1.0, true)
-			draw_circle(spec_pos + LIGHT * rad_inner * 0.35,
-				rad_inner, Color(1, 1, 1, 0.95 * gloss), true, -1.0, true)
-
-		# ── Layer 5: Bottom-right inner rim shadow ────────────────────────
-		# Wedge of the polygon facing away from the light gets an extra
-		# dark overlay — bounce-shadow at the underside of the gem.
-		var shadow_wedge := PackedVector2Array()
-		for p in pts:
-			var t = (p - center).normalized()
-			if t.dot(-LIGHT) > 0.25:
-				shadow_wedge.append(p)
-		if shadow_wedge.size() >= 3:
-			shadow_wedge.insert(0, center - LIGHT * size.x * 0.10)
-			draw_colored_polygon(shadow_wedge, Color(0, 0, 0, 0.32))
-
-		# ── Layer 6: Top bevel highlight (lit edge) ───────────────────────
-		# Bright hairline along the polygon edges facing the light. The
-		# "lit edge" cue that makes the orb feel like a 3D solid rather
-		# than a flat shape with shading painted on.
-		var n := pts.size()
-		for i in range(n):
-			var a := pts[i]
-			var b := pts[(i + 1) % n]
-			var edge_mid := (a + b) * 0.5
-			var edge_norm := (edge_mid - center).normalized()
-			if edge_norm.dot(LIGHT) > 0.10:
-				# Pull bevel slightly inward so the dark rim still reads.
-				var ai := a - (a - center) * 0.04
-				var bi := b - (b - center) * 0.04
-				draw_line(ai, bi, Color(1, 1, 1, 0.55 * gloss), 1.3, true)
-
-	# Faceted: each triangle (center → edge a → edge b) gets a flat colour
-	# based on its angular position. Saturated bases blend toward white
-	# (highlight) or near-black (shadow) instead of being brightness-
-	# multiplied, which clips on already-saturated colours like our HP red.
-	func _draw_faceted_body(pts: PackedVector2Array, center: Vector2) -> void:
-		var n := pts.size()
-		for i in range(n):
-			var a := pts[i]
-			var b := pts[(i + 1) % n]
-			var facet_center := (a + b + center) / 3.0
-			var dir := (facet_center - center).normalized()
-			var col := _shade_color(dir)
-			draw_colored_polygon(PackedVector2Array([center, a, b]), col)
-
-	# Smooth: per-vertex colours, Godot interpolates across the triangulation.
-	# Each vertex shaded via the same blend-toward-white/black model as
-	# faceted, so saturated colours retain their hue at full brightness.
-	func _draw_smooth_body(pts: PackedVector2Array, center: Vector2) -> void:
-		var colors := PackedColorArray()
-		for p in pts:
-			var dir = (p - center).normalized()
-			colors.append(_shade_color(dir))
-		draw_polygon(pts, colors)
-
-	# Shading model: blend toward white when normal faces the light, blend
-	# toward near-black when it faces away. Wider amplitude than the old
-	# brightness-multiply approach — saturated colours get real highlights
-	# rather than clipping at 1.0 with no hue shift.
-	func _shade_color(normal: Vector2) -> Color:
-		var lit = normal.dot(LIGHT)  # [-1, 1]
-		if lit >= 0.0:
-			# Facing light: lerp(base, white, lit * 0.65).
-			# 0.65 cap keeps the hue identifiable at peak highlight — pure
-			# white would lose the gem's colour identity entirely.
-			return fill_color.lerp(Color(1, 1, 1, fill_color.a), lit * 0.65)
-		else:
-			# Facing away: lerp(base, deep-dark, |lit| * 0.75).
-			var dark := Color(fill_color.r * 0.15, fill_color.g * 0.15,
-				fill_color.b * 0.18, fill_color.a)
-			return fill_color.lerp(dark, -lit * 0.75)
-
-	# Emblem renderer — flat, painted, matte. Built for the parchment/wood
-	# frame so the orbs read as wax-seal discs set into a gilt rim instead
-	# of glossy 3D gems. No specular, no bevel, no faceted shading.
-	#
-	# Construction (outer→inner):
-	#   1. Single soft drop shadow — orb sits on the card, doesn't float.
-	#   2. Antique-gold ring — ties the orb to the card's gilt trim.
-	#   3. Dark groove — chiseled separator between ring and disc face.
-	#   4. Disc fill — flat base colour.
-	#   5. Subtle vignette — barely-perceptible darkening toward the edge,
-	#      like ink pooling on parchment or wax cooling at the rim. NOT a
-	#      sphere gradient.
-	#   6. Faint top crescent — hint of paint catching the light. One soft
-	#      arc, no specular dot.
-	func _draw_emblem(pts: PackedVector2Array, center: Vector2) -> void:
-		var min_dim := minf(size.x, size.y)
-		var radius := min_dim * 0.5
-
-		# Layer 1 — one soft drop shadow.
-		var shadow_pts := PackedVector2Array()
-		for p in pts:
-			shadow_pts.append(p + Vector2(0, 2))
-		draw_colored_polygon(shadow_pts, Color(0, 0, 0, 0.42))
-
-		# Layer 2 — antique-gold outer ring (slightly expanded polygon).
-		# Colour matches the gilt trim seen elsewhere on the card frame.
-		var ring_gold := Color(0.62, 0.46, 0.18, 1.0)       # antique brass
-		var ring_gold_lit := Color(0.86, 0.69, 0.34, 1.0)   # lit edge
-		var ring_pts := PackedVector2Array()
-		for p in pts:
-			ring_pts.append(p + (p - center).normalized() * 1.0)
-		draw_colored_polygon(ring_pts, ring_gold)
-		# A faint lighter arc along the top half of the ring suggests a
-		# beveled metal edge catching the room light. Subtle — we're not
-		# trying to make a coin, we're making a stamped seal.
-		var n := pts.size()
-		for i in range(n):
-			var a := pts[i]
-			var b := pts[(i + 1) % n]
-			var mid := (a + b) * 0.5
-			if (mid - center).y < -radius * 0.15:
-				draw_line(a, b, ring_gold_lit, 1.2, true)
-
-		# Layer 3 — dark groove just inside the ring (1 px polyline).
-		# Reads as a chiseled valley where the wax/metal disc sits down
-		# into its setting.
-		var groove_pts := PackedVector2Array()
-		for p in pts:
-			groove_pts.append(center + (p - center) * 0.91)
-		var groove_closed := groove_pts.duplicate()
-		groove_closed.append(groove_pts[0])
-		draw_polyline(groove_closed, Color(0.08, 0.05, 0.03, 0.88), 1.4, true)
-
-		# Layer 4 — disc face. Slightly inset from the ring so the gold
-		# rim is visible all the way around.
-		var face_pts := PackedVector2Array()
-		for p in pts:
-			face_pts.append(center + (p - center) * 0.86)
-		draw_colored_polygon(face_pts, fill_color)
-
-		# Layer 5 — rim vignette: a darker polyline traced along the disc's
-		# inner edge. Reads as ink pooling at the rim or wax cooling
-		# slightly darker at the perimeter. NOT a sphere gradient.
-		var vignette_color := Color(fill_color.r * 0.55, fill_color.g * 0.55,
-			fill_color.b * 0.58, 0.35)
-		var vignette_closed := face_pts.duplicate()
-		vignette_closed.append(face_pts[0])
-		draw_polyline(vignette_closed, vignette_color, 2.5, true)
-
-		# Layer 6 — faint top crescent hinting at directional light.
-		# A short arc of slightly-lightened fill along the upper edge of
-		# the disc face. No specular hotspot — the goal is "painted on
-		# parchment", not "polished glass".
-		if min_dim >= 18.0:
-			var lit_color := fill_color.lerp(Color(1, 0.97, 0.88, 1), 0.22)
-			for i in range(n):
-				var a := pts[i]
-				var b := pts[(i + 1) % n]
-				var mid := (a + b) * 0.5
-				if (mid - center).y < -radius * 0.45:
-					var ai := center + (a - center) * 0.83
-					var bi := center + (b - center) * 0.83
-					draw_line(ai, bi, lit_color, 1.5, true)
-
-	func _build_shape(sz: Vector2) -> PackedVector2Array:
-		match shape:
-			"circle":  return PolyBadge._circle(sz)
-			"hex":     return PolyBadge._hex(sz)
-			"shield":  return PolyBadge._shield(sz)
-			"drop":    return PolyBadge._drop(sz)
-			"diamond": return PolyBadge._diamond(sz)
-			"peak":    return PolyBadge._peak(sz)
-			_:         return PolyBadge._circle(sz)
-
-
-# ─────────────────────────────────────────────────────────────────────────
-#  SphereOrb — glossy 3D sphere drawn purely via _draw() circle stacks.
-# ─────────────────────────────────────────────────────────────────────────
-#
-# The "make a simple circle look incredible" recipe (per
-# cssanimation.rocks/spheres + Lettier's 3D shader primer): the wow factor
-# comes from STACKING many subtle layers, not one fancy effect.
-#
-# Eight layers, back to front:
-#   1. Outer glow halo — soft colored bloom past the silhouette.
-#   2. Drop shadow — flattened circle below, anchors weight.
-#   3. Sphere edge fill — desaturated dark base colour at full radius.
-#   4. Directional gradient — ~18 nested circles drifting toward the light,
-#      each one a step brighter; fakes a per-pixel radial gradient without
-#      a shader and reads as smooth lit shading.
-#   5. Ambient-occlusion shadow — bottom-right dark blob, simulates light
-#      falloff on the side facing away from the source.
-#   6. Top rim arc — thin lit edge curving over the upper silhouette,
-#      catches the eye and disambiguates the orb from a flat shape.
-#   7. Specular halo — 4 concentric white circles at upper-left, the wide
-#      pool of light hitting the wet/glass surface.
-#   8. Specular core — small bright pinprick offset toward the light hot
-#      centre; sells the "polished glass" reading.
-# Optional pulse (set pulse_amount > 0) animates the outer glow with a
-# slow sine sweep — used on the cost orb so the mana gem visibly "breathes".
-#
-# Forward+ shaders would do this in 1/10th the lines but cause compile
-# errors on GL Compatibility (see commit be8ef2d); pure _draw is shader-
-# free and works on every renderer.
-class SphereOrb extends Control:
-	var fill_color: Color = Color.WHITE
-	var glow_color: Color = Color(0, 0, 0, 0)   # 0-alpha = auto-derive
-	var pulse_amount: float = 0.0               # 0 disables animation
-	# When true, _draw uses a 5-layer stripped-down recipe instead of
-	# the full 39-layer glossy stack. Each SphereOrb's _draw records its
-	# draw commands once but those commands are REPLAYED every frame as
-	# part of the CanvasItem render — with 122 cards × 3 orbs in the
-	# Card Gallery that was 122 × 3 × 39 = ~14 300 sub-draws/frame on
-	# the GL Compatibility renderer just for orbs. Simple mode cuts
-	# that to ~1 800 — visible orbs still read as 3D spheres, just
-	# without the 18-step directional gradient or the rim arc.
-	var simple_mode: bool = false
-	const LIGHT_DIR := Vector2(-0.45, -0.45)   # upper-left light source
-
-	func _ready() -> void:
-		mouse_filter = Control.MOUSE_FILTER_IGNORE
-		if pulse_amount > 0.0:
-			set_process(true)
-
-	func _process(_delta: float) -> void:
-		# Pulse-driven orbs redraw every frame so the glow breathes. 3 orbs
-		# x 60 fps = 180 redraws/sec — cheap on any renderer (each redraw
-		# is ~50 draw_circle calls and the GPU handles them in microseconds).
-		queue_redraw()
-
-	func _draw() -> void:
-		if size.x <= 0 or size.y <= 0:
-			return
-		if simple_mode:
-			_draw_simple()
-			return
-		var center := size * 0.5
-		var R: float = minf(size.x, size.y) * 0.42  # sphere radius
-		var spec_pos := center + LIGHT_DIR * Vector2(R, R)
-
-		# Pulse factor — 1.0 when pulse_amount = 0, oscillates otherwise.
-		var t := float(Time.get_ticks_msec()) / 1000.0
-		var pulse := sin(t * 1.6) * 0.5 + 0.5  # 0..1
-		var pulse_mul := 1.0 + (pulse - 0.5) * 2.0 * pulse_amount
-
-		# Effective glow color — fall back to fill_color if not overridden.
-		var glow: Color = glow_color
-		if glow.a < 0.001:
-			glow = Color(fill_color.r, fill_color.g, fill_color.b, 1.0)
-
-		# ── 1. Outer glow halo — concentric color-tinted rings ──────────
-		# 5 rings, alpha tapering outward. Pulse modulates intensity.
-		for i in range(5):
-			var ring_r := R * (1.06 + float(i) * 0.16)
-			var ring_a := (0.16 - float(i) * 0.028) * pulse_mul
-			if ring_a > 0.005:
-				draw_circle(center, ring_r,
-					Color(glow.r, glow.g, glow.b, ring_a), true, -1.0, true)
-
-		# ── 2. Drop shadow — flattened ovals below the orb ─────────────
-		# Faked with offset darker circles (no native ellipse in _draw).
-		var sh_pos := center + Vector2(0, R * 0.62)
-		for i in range(4):
-			var sh_r := R * (0.85 - float(i) * 0.11)
-			draw_circle(sh_pos, sh_r,
-				Color(0, 0, 0, 0.18 - float(i) * 0.04), true, -1.0, true)
-
-		# ── 3. Sphere edge — dark base, fills the silhouette ───────────
-		var edge_col := Color(fill_color.r * 0.28, fill_color.g * 0.28,
-			fill_color.b * 0.32, 1.0)
-		draw_circle(center, R, edge_col, true, -1.0, true)
-
-		# ── 4. Directional gradient — nested circles drifting toward
-		#      the light. 18 layers fakes a smooth radial gradient.
-		var bright_col := fill_color.lerp(Color(1, 1, 1, 1), 0.45)
-		var N := 18
-		for i in range(N):
-			var t_n := float(i) / float(N - 1)
-			var pos := center.lerp(spec_pos, t_n * 0.55)
-			var grad_r := R * (1.0 - t_n) * 0.95
-			var col := fill_color.lerp(bright_col, t_n)
-			if grad_r > 0.5:
-				draw_circle(pos, grad_r, col, true, -1.0, true)
-
-		# ── 5. Ambient-occlusion shadow — bottom-right dark blob ───────
-		var ao_pos := center + Vector2(R * 0.38, R * 0.40)
-		for i in range(4):
-			var ao_r := R * (0.55 - float(i) * 0.09)
-			draw_circle(ao_pos, ao_r, Color(0, 0, 0, 0.06),
-				true, -1.0, true)
-
-		# ── 6. Top rim arc — thin lit edge curving over the upper half ─
-		draw_arc(center, R * 0.93, deg_to_rad(200), deg_to_rad(340),
-			48, Color(1, 1, 1, 0.45), 1.6, true)
-
-		# ── 7. Specular halo — 4 concentric whites at the light position
-		for i in range(4):
-			var sp_r := R * (0.50 - float(i) * 0.10)
-			var sp_a := 0.12 + float(i) * 0.10
-			if sp_r > 0.5:
-				draw_circle(spec_pos, sp_r,
-					Color(1, 1, 1, sp_a), true, -1.0, true)
-
-		# ── 8. Specular core — tiny bright pinprick ────────────────────
-		# Offset slightly further toward the light from the halo centre
-		# so the two read as a cluster, not a single dot.
-		var core_pos := spec_pos + LIGHT_DIR * R * 0.12
-		if R >= 14.0:
-			draw_circle(core_pos, R * 0.10,
-				Color(1, 1, 1, 0.92), true, -1.0, true)
-			draw_circle(core_pos - Vector2(R * 0.02, R * 0.02), R * 0.05,
-				Color(1, 1, 1, 1.0), true, -1.0, true)
-
-	# Stripped-down 5-layer recipe for static_display contexts. Still
-	# reads as a 3D sphere (dark rim + lit centre + bright spec dot)
-	# but cuts ~34 draw_circle commands out of the per-frame budget.
-	# 122 cards × 3 orbs × 34 saved = ~12 500 fewer draws/frame in the
-	# Card Gallery, which is the dominant cost after pulse + shadows.
-	func _draw_simple() -> void:
-		var center := size * 0.5
-		var R: float = minf(size.x, size.y) * 0.42
-		var spec_pos := center + LIGHT_DIR * Vector2(R, R)
-		# 1. Drop shadow (single circle, no stack)
-		draw_circle(center + Vector2(0, R * 0.55), R * 0.78,
-			Color(0, 0, 0, 0.30), true, -1.0, true)
-		# 2. Sphere edge (dark base)
-		draw_circle(center, R,
-			Color(fill_color.r * 0.30, fill_color.g * 0.30,
-				fill_color.b * 0.35, 1.0), true, -1.0, true)
-		# 3. Inner lit body (single circle, slightly smaller + offset toward
-		#    light, brighter colour). Two-step gradient instead of 18.
-		draw_circle(center + LIGHT_DIR * R * 0.12, R * 0.85,
-			fill_color, true, -1.0, true)
-		# 4. Specular halo (single soft white)
-		draw_circle(spec_pos, R * 0.35,
-			Color(1, 1, 1, 0.30), true, -1.0, true)
-		# 5. Specular core (single bright pinprick)
-		draw_circle(spec_pos + LIGHT_DIR * R * 0.10, R * 0.10,
-			Color(1, 1, 1, 0.92), true, -1.0, true)
+const GemOrb := preload("res://scripts/ui/painters/StatGem.gd")
+const ArmoredEdge := preload("res://scripts/ui/painters/ArmoredEdge.gd")
+const LastStandCandle := preload("res://scripts/ui/painters/LastStandCandle.gd")
 
 
 @export var card_id: String = ""
@@ -678,18 +67,20 @@ var deck_uid: int = -1
 # host (NetMatch.issue_entity_id) at placement. -1 in single-player / in hand —
 # see docs/MULTIPLAYER_SKIRMISH_PLAN.md §8.
 var entity_id: int = -1
-@export var is_opponent: bool = false
-@export var is_on_battlefield: bool = false
+var state: CreatureInstance = CreatureInstance.new()
+@export var is_opponent: bool:
+	get: return state.is_opponent
+	set(value): state.is_opponent = value
+@export var is_on_battlefield: bool:
+	get: return state.is_on_battlefield
+	set(value): state.is_on_battlefield = value
 # When true, the card is being rendered in a non-interactive context
 # (Card Gallery, Deck Viewer, Reward preview, etc.). Set BEFORE add_child
-# so it's seen by _ready → _build_layout. Disables the SphereOrb pulse
-# animations — gallery scenes show 100+ cards at once, and per-frame
-# queue_redraw on every cost+HP orb chews ~12 000 draw_circle calls per
-# frame even when nothing is moving. Static display kills the animation
-# entirely for those contexts; combat cards keep their pulse.
+# so it's seen by _ready → _build_layout. Large gallery grids stay static and
+# avoid scheduling presentation work that cannot be seen.
 @export var static_display: bool = false
-# When true, _build_full_layout_v4 builds the orb spheres with empty stat
-# labels. Used by CardTextureCache.bake() — the snapshot becomes a card with
+# When true, the live writ renderer builds empty stat seals. Used by
+# CardTextureCache.bake() — the snapshot becomes a card with
 # blank cost/ATK/HP discs, and the live overlay layer painted over the top
 # fills in the actual numbers. Without this flag the baked numerals would
 # show through and clash with the live overlay text on any stat change.
@@ -709,11 +100,11 @@ var entity_id: int = -1
 # art/gradient/blank seals. Live cards overlay stats, statuses, Doom and effects.
 @export var compact_static_bake: bool = false
 # When true, _build_layout dispatches to _build_baked_overlay_layout instead
-# of the heavy v4 layout. That layout is just a TextureRect (pulled from
+# of the full live writ layout. That layout is just a TextureRect (pulled from
 # CardTextureCache) plus a handful of live overlay nodes (cost / atk / hp /
 # floop). update_stat_display still works through the same _cost_label /
 # _atk_label / _hp_label refs, so combat logic is unchanged. Falls back to
-# v4 silently if CardTextureCache hasn't pre-baked this card yet.
+# the live writ renderer if CardTextureCache has not pre-baked this card yet.
 @export var live_baked_mode: bool = false
 # Collection uses a native-resolution, non-mipmapped cache class. Keeping this
 # explicit prevents its cheap gallery snapshot from masquerading as a 3x hand
@@ -725,21 +116,6 @@ var entity_id: int = -1
 # preview sets it, so real in-hand/battlefield/reward faces keep the
 # no-glossary-on-face rule (teaching stays in tooltips). See _synthesized_rules_text.
 @export var synth_desc_if_empty: bool = false
-# Visual-redesign prototype path. ONLY set true by tools/render_cards harness.
-# When true, _build_layout dispatches to _build_redesign_proto so the live game
-# (which never sets this) is completely unaffected.
-@export var redesign_proto: bool = false
-# v7 "campaign document" frame A/B (takes precedence over redesign_proto).
-# Cards join the antique-chart material world of the map plate / tooltips /
-# rest banners: ink board, per-rarity metal rules, wax-seal stats, gilt
-# Cinzel nameplate. Harness-only until promoted.
-@export var chart_proto: bool = false
-# Keyword-treatment A/B for the redesign prototype only. 0 = pill shelf,
-# 1 = drop (no icon row), 2 = engraved recessed plaque, 3 = stamps on the
-# art's lower-left, 4 = 40px orb rail, 5 = 56px orbs (stat-orb parity).
-# 5 is the chosen default: the only size legible at 0.6x battlefield scale.
-@export var kw_variant: int = 5
-
 # Per-card font override (used by Collection gallery font A/B test).
 # When set, this Font replaces GameTheme.font_display for the name banner
 # and stat orbs on this card. Bypasses CardTextureCache (override is per-
@@ -747,302 +123,90 @@ var entity_id: int = -1
 @export var display_font_override: Font = null
 
 var card_data: Dictionary = {}
-var current_hp := 0
-var current_atk := 0
-var current_lane: int = -1
+var current_hp: int:
+	get: return state.current_hp
+	set(value): state.current_hp = value
+var current_atk: int:
+	get: return state.current_atk
+	set(value): state.current_atk = value
+var current_lane: int:
+	get: return state.lane
+	set(value): state.lane = value
 # Sentinel for "ATK never displayed yet" — used by update_stat_display to
 # emit a buff/debuff popup only on subsequent changes, not the first paint.
 var _displayed_effective_atk: int = -999
-# Typed gameplay state — receptacle for flags migrating off set_meta.
-# See scripts/state/CreatureInstance.gd for the migration map.
-var state: CreatureInstance = CreatureInstance.new()
-# ─────────────────────────────────────────────────────────────────────────
-#  CardCanvas — single-pass painter for the v5 card body.
-# ─────────────────────────────────────────────────────────────────────────
-#
-# Replaces v4's stack of Panels (banner + art-frame + description-well +
-# trim + halo + 6 depth overlays) with ONE _draw() call that paints the
-# entire card body as a single continuous surface. The banner is a tapered
-# ribbon polygon whose center sags into the art's top edge; the art/
-# description seam is a painted scroll divider with a small rosette at the
-# center — NOT a 1px ColorRect line. The eye reads "one painted card"
-# instead of "spreadsheet of stacked cells."
-#
-# Why this beats v4: the v4 forensic audit showed the card was 8+ axis-
-# aligned `Panel`s with shared 5%/95% X anchors. You could trace the cells
-# with a ruler. The fix isn't more overlays — it's making the elements
-# OVERLAP cell boundaries (tapered ribbon overruns the art's top edge,
-# stat orbs straddle the art/description seam, painted scroll divider
-# replaces the rectangular section break).
-class CardCanvas extends Control:
-	var rarity: String = "common"
-	var is_spell_card: bool = false
-	var trim_color: Color = Color(0.831, 0.745, 0.541, 1.0)
-	var ribbon_color: Color = Color(0.18, 0.12, 0.08, 0.95)
-	var divider_color: Color = Color(0.72, 0.55, 0.20, 0.90)
-	var parchment_tex: Texture2D
-	var compact_draw: bool = false
-	var frame_texture: Texture2D
-	# Render passes — set draw_back_only=true on the back-layer instance
-	# (added before art_clip), draw_ribbon_only=true on the front-layer
-	# instance (added after art_clip so its center sag visually overlaps
-	# the art window's top edge — the "break the cell" move).
-	var draw_back_only: bool = false
-	var draw_ribbon_only: bool = false
-
-	func _ready() -> void:
-		mouse_filter = MOUSE_FILTER_IGNORE
-
-	func _draw() -> void:
-		var W := size.x
-		var H := size.y
-		if W <= 0.0 or H <= 0.0:
-			return
-		if draw_ribbon_only:
-			_draw_ribbon(W, H)
-			return
-		_draw_body(W, H)
-		_draw_divider(W, H)
-		if not frame_texture:
-			_draw_art_inset(W, H)
-			_draw_edge_trim(W, H)
-		if not draw_back_only:
-			_draw_ribbon(W, H)
-
-	func _draw_body(W: float, H: float) -> void:
-		if not compact_draw:
-			draw_rect(Rect2(Vector2(0, 5), Vector2(W, H)),
-				Color(0, 0, 0, 0.32), true)
-		if frame_texture:
-			draw_texture_rect(frame_texture, Rect2(Vector2.ZERO, Vector2(W, H)), false)
-			return
-		var body_color := Color(0.918, 0.842, 0.682, 1.0)  # warm parchment
-		if is_spell_card:
-			body_color = Color(0.840, 0.825, 0.928, 1.0)  # cooled spell wash
-		var silhouette := _rounded_rect(Rect2(Vector2(0, 0), Vector2(W, H)), 8.0)
-		draw_colored_polygon(silhouette, body_color)
-		# One continuous parchment texture stretched across the whole body
-		# (NOT 6 stacked TextureRect overlays at low alpha). Done as a
-		# textured polygon so the rounded corners clip the texture.
-		if parchment_tex:
-			var tw := float(parchment_tex.get_width())
-			var th := float(parchment_tex.get_height())
-			var uvs := PackedVector2Array()
-			for p in silhouette:
-				uvs.append(Vector2(p.x / tw, p.y / th))
-			var cs := PackedColorArray()
-			for i in range(silhouette.size()):
-				cs.append(Color(1, 1, 1, 0.42))
-			draw_polygon(silhouette, cs, uvs, parchment_tex)
-		# Soft top-warm / bottom-cool wash — fakes a hint of light direction
-		# without stacking 4 separate TextureRect gradients.
-		if not compact_draw:
-			var top := PackedVector2Array([
-				Vector2(0, 0), Vector2(W, 0),
-				Vector2(W, H * 0.48), Vector2(0, H * 0.48),
-			])
-			draw_colored_polygon(top, Color(1.0, 0.97, 0.84, 0.06))
-			var bot := PackedVector2Array([
-				Vector2(0, H * 0.55), Vector2(W, H * 0.55),
-				Vector2(W, H), Vector2(0, H),
-			])
-			draw_colored_polygon(bot, Color(0.25, 0.15, 0.07, 0.16))
-
-	func _draw_ribbon(W: float, H: float) -> void:
-		# Tapered ribbon banner — fishtail ends extend past the rectangular
-		# banner zone at left/right; the center sags down into the art
-		# window's top edge. THIS is the move that kills "cell stacked on
-		# cell": the ribbon's silhouette overlaps the art's silhouette.
-		var top := H * 0.058
-		var mid := H * 0.118
-		var sag := H * 0.160       # overlaps art zone (starts at 0.168)
-		var inner_l := W * 0.06
-		var inner_r := W * 0.94
-		var fish_l := W * 0.030
-		var fish_r := W * 0.970
-		# Bumped sag from 0.160 → 0.190 so the center clearly dips INTO
-		# the art zone (which starts at 0.172). The art_clip will hide
-		# half of it unless this CardCanvas is rendered AFTER the art —
-		# see draw_ribbon_only mode and the front-pass instance in v5.
-		var sag_deep := H * 0.190
-
-		var ribbon := PackedVector2Array([
-			Vector2(fish_l, top + 4),             # 0 left fishtail
-			Vector2(inner_l + 6, top),            # 1
-			Vector2(W * 0.5, top - 1),            # 2 top center
-			Vector2(inner_r - 6, top),            # 3
-			Vector2(fish_r, top + 4),             # 4 right fishtail
-			Vector2(inner_r - 2, mid),            # 5
-			Vector2(inner_r - 8, sag),            # 6
-			Vector2(W * 0.62, sag_deep - 4),
-			Vector2(W * 0.5,  sag_deep),          # 8 center sag (into art)
-			Vector2(W * 0.38, sag_deep - 4),
-			Vector2(inner_l + 8, sag),            # 10
-			Vector2(inner_l + 2, mid),            # 11
-		])
-
-		# Shadow under the ribbon
-		if not compact_draw:
-			var sh := PackedVector2Array()
-			for p in ribbon:
-				sh.append(p + Vector2(0, 3))
-			draw_colored_polygon(sh, Color(0, 0, 0, 0.40))
-
-		# Fill
-		draw_colored_polygon(ribbon, ribbon_color)
-
-		# Thin highlight band along the top — fakes the bevel without an
-		# emboss-line ColorRect Panel child.
-		var hl := PackedVector2Array([
-			Vector2(inner_l + 8, top + 1.5),
-			Vector2(inner_r - 8, top + 1.5),
-			Vector2(inner_r - 8, top + 3),
-			Vector2(inner_l + 8, top + 3),
-		])
-		draw_colored_polygon(hl, Color(1, 1, 1, 0.18))
-
-		# Gilt trim around the ribbon polygon
-		var closed := ribbon.duplicate()
-		closed.append(ribbon[0])
-		draw_polyline(closed, trim_color, 1.3, true)
-
-		# Triangular notch cut into each fishtail end — turns the pointy
-		# ends into "swallow-tail" cuts, the period-correct banner shape.
-		var notch_l := PackedVector2Array([
-			Vector2(fish_l + 1, top + 4),
-			Vector2(inner_l + 2, top + 7),
-			Vector2(inner_l + 2, top + 1),
-		])
-		draw_colored_polygon(notch_l, Color(0, 0, 0, 0.55))
-		var notch_r := PackedVector2Array([
-			Vector2(fish_r - 1, top + 4),
-			Vector2(inner_r - 2, top + 7),
-			Vector2(inner_r - 2, top + 1),
-		])
-		draw_colored_polygon(notch_r, Color(0, 0, 0, 0.55))
-
-	func _draw_divider(W: float, H: float) -> void:
-		# Painted scroll divider — two tapered gold strokes flanking a
-		# rosette. NOT a 1px ColorRect rule. The seam between art and
-		# description is a painted feature, not a stroke between Panels.
-		var y := H * 0.612
-		var li := W * 0.10
-		var ri := W * 0.90
-		var c := W * 0.5
-
-		# Left tapered stroke
-		var ls := PackedVector2Array([
-			Vector2(li, y - 1.5),
-			Vector2(c - 20, y - 0.5),
-			Vector2(c - 20, y + 0.5),
-			Vector2(li, y + 1.5),
-		])
-		draw_colored_polygon(ls, divider_color)
-		# Right tapered stroke
-		var rs := PackedVector2Array([
-			Vector2(c + 20, y - 0.5),
-			Vector2(ri, y - 1.5),
-			Vector2(ri, y + 1.5),
-			Vector2(c + 20, y + 0.5),
-		])
-		draw_colored_polygon(rs, divider_color)
-
-		# Center rosette — two crossed ellipses + a dark dot
-		var v_petal := PackedVector2Array()
-		for i in range(18):
-			var ang = TAU * float(i) / 18.0
-			v_petal.append(Vector2(c + cos(ang) * 2.2, y + sin(ang) * 6.5))
-		draw_colored_polygon(v_petal, divider_color)
-		var h_petal := PackedVector2Array()
-		for i in range(18):
-			var ang = TAU * float(i) / 18.0
-			h_petal.append(Vector2(c + cos(ang) * 6.5, y + sin(ang) * 2.2))
-		draw_colored_polygon(h_petal, divider_color)
-		draw_circle(Vector2(c, y), 1.6, Color(0.18, 0.10, 0.04, 0.95),
-			true, -1.0, true)
-
-	func _draw_art_inset(W: float, H: float) -> void:
-		# Painted dark outline around the art zone — no `Panel.border_width`.
-		# Just a 1.4 px polyline + a 3 px gradient strip at top to fake
-		# the recessed-window feeling.
-		var l := W * 0.075
-		var r := W * 0.925
-		var t := H * 0.168
-		var b := H * 0.572
-		var out := PackedVector2Array([
-			Vector2(l, t), Vector2(r, t),
-			Vector2(r, b), Vector2(l, b), Vector2(l, t),
-		])
-		draw_polyline(out, Color(0.12, 0.07, 0.04, 0.85), 1.4, true)
-		if not compact_draw:
-			var top_strip := PackedVector2Array([
-				Vector2(l + 1, t + 1),
-				Vector2(r - 1, t + 1),
-				Vector2(r - 1, t + 4),
-				Vector2(l + 1, t + 4),
-			])
-			draw_colored_polygon(top_strip, Color(0, 0, 0, 0.30))
-
-	func _draw_edge_trim(W: float, H: float) -> void:
-		# Gilt trim around the card silhouette; rares get a second darker
-		# hairline just inside so the gilt reads as a metal groove edge,
-		# not a stuck-on outline.
-		var silhouette := _rounded_rect(Rect2(Vector2(0, 0), Vector2(W, H)), 8.0)
-		var closed := silhouette.duplicate()
-		closed.append(silhouette[0])
-		draw_polyline(closed, trim_color, 1.6, true)
-		if rarity == "white" or rarity == "rare":
-			var inner := _rounded_rect(Rect2(Vector2(2, 2), Vector2(W - 4, H - 4)), 6.0)
-			var ic := inner.duplicate()
-			ic.append(inner[0])
-			draw_polyline(ic, Color(0.06, 0.03, 0.01, 0.55), 1.0, true)
-
-	func _rounded_rect(rect: Rect2, radius: float) -> PackedVector2Array:
-		var pts := PackedVector2Array()
-		var r := radius
-		var x0 := rect.position.x
-		var y0 := rect.position.y
-		var x1 := rect.position.x + rect.size.x
-		var y1 := rect.position.y + rect.size.y
-		var segs := 5
-		for i in range(segs + 1):
-			var ang = PI + (PI * 0.5) * (float(i) / float(segs))
-			pts.append(Vector2(x0 + r + cos(ang) * r, y0 + r + sin(ang) * r))
-		for i in range(segs + 1):
-			var ang = -PI * 0.5 + (PI * 0.5) * (float(i) / float(segs))
-			pts.append(Vector2(x1 - r + cos(ang) * r, y0 + r + sin(ang) * r))
-		for i in range(segs + 1):
-			var ang = 0.0 + (PI * 0.5) * (float(i) / float(segs))
-			pts.append(Vector2(x1 - r + cos(ang) * r, y1 - r + sin(ang) * r))
-		for i in range(segs + 1):
-			var ang = PI * 0.5 + (PI * 0.5) * (float(i) / float(segs))
-			pts.append(Vector2(x0 + r + cos(ang) * r, y1 - r + sin(ang) * r))
-		return pts
-
-
-var current_row: int = 0  # 0 = front, 1 = back (4x4 board)
-var has_attacked_this_turn: bool = false
-var will_floop: bool = false
-var has_flooped_this_turn: bool = false
-var last_stand_used: bool = false
-var is_token: bool = false
-var temp_atk_buff: int = 0
+# Same sentinel for HP (C2): the first paint of a fresh card must not read as
+# a heal. See update_stat_display for the gain-only float rule.
+var _displayed_hp: int = -999
+var current_row: int:
+	get: return state.row
+	set(value): state.row = clampi(value, 0, 1)
+var has_attacked_this_turn: bool:
+	get: return state.has_attacked_this_turn
+	set(value): state.has_attacked_this_turn = value
+var will_floop: bool:
+	get: return state.will_floop
+	set(value): state.will_floop = value
+var has_flooped_this_turn: bool:
+	get: return state.has_flooped_this_turn
+	set(value): state.has_flooped_this_turn = value
+var last_stand_used: bool:
+	get: return state.last_stand_used
+	set(value): state.last_stand_used = value
+var is_token: bool:
+	get: return state.is_token
+	set(value): state.is_token = value
+# Oathbound Squire (bodyguard): the ward standing in this creature's column —
+# damage this creature would take strikes the ward instead. State-derived by
+# Combat._refresh_adjacency_buffs at every board mutation (null when unguarded,
+# and always null on the net client, whose damage arrives pre-resolved).
+var _ward_ref: WeakRef = null
+var ward_by: Control:
+	get:
+		return _ward_ref.get_ref() as Control if _ward_ref != null else null
+	set(value):
+		_ward_ref = weakref(value) if value != null else null
+var temp_atk_buff: int:
+	get: return state.temp_atk_buff
+	set(value): state.temp_atk_buff = value
 # Persistent ATK buff (e.g. from Butcher's Cleaver) — counted in effective_atk
 # but NOT wiped at end of turn. `persistent_atk_buff_rounds` decrements at
 # start of each round (in Combat); when it reaches 0 the bonus is removed.
-var persistent_atk_buff: int = 0
-var persistent_atk_buff_rounds: int = 0
+var persistent_atk_buff: int:
+	get: return state.persistent_atk_buff
+	set(value): state.persistent_atk_buff = value
+var persistent_atk_buff_rounds: int:
+	get: return state.persistent_atk_buff_rounds
+	set(value): state.persistent_atk_buff_rounds = maxi(0, value)
 # Adjacency ATK buff (Battle Drummer / Bannerman / Wolf Pack, etc.) — the live
 # sum of neighbouring `adj_buff` sources, recomputed by Combat whenever the board
 # changes (Combat._refresh_adjacency_buffs). Stored here so it shows on the ATK
 # numeral, rides the net board snapshot (which serialises effective_atk), and
 # applies to BOTH sides. Combat owns the value; the client leaves it 0 and reads
 # the host's already-buffed atk straight off the snapshot.
-var adj_atk_buff: int = 0
+var adj_atk_buff: int:
+	get: return state.adjacency_atk_buff
+	set(value): state.adjacency_atk_buff = value
+# Relic ATK bonus — the live sum of the six relics that change what a creature
+# swings for (swift_boots, glass_cannon, linked_banner, champions_belt,
+# phalanx_stone, and steady_banner's round-1 −1). It lives here for one reason:
+# until 2026-07-28 those six were added inside Combat._effective_attack, OUTSIDE
+# this card, so the wax ATK seal and the hover provenance line both printed a
+# number the creature did not actually swing for whenever the player held one
+# (§4 #2 of COMBAT_LEGIBILITY_20260728 — "not a missing cue, a false one").
+# Combat owns the value and rewrites it in _refresh_adjacency_buffs at every
+# board mutation, exactly like adj_atk_buff above; the net client leaves it 0 and
+# reads the host's already-folded atk off the snapshot. It may be NEGATIVE
+# (steady_banner) — effective_atk() floors the TOTAL, never the component.
+var relic_atk_buff: int:
+	get: return state.relic_atk_buff
+	set(value): state.relic_atk_buff = value
 # Doom keyword — per-creature countdown to detonation. Lazily seeded from
 # card_data.doom the first time it's needed (card_data is often assigned AFTER
 # _ready, e.g. enemy placement), via _ensure_doom_init(). -999 = "not yet seeded".
-var doom_counter: int = -999
+var doom_counter: int:
+	get: return state.doom_counter
+	set(value): state.doom_counter = value
 # Doom badge widgets, built in the compact battlefield layout. The badge shows
 # the live countdown; the panel gives the red disc its frame.
 var _doom_badge: Control = null
@@ -1050,6 +214,9 @@ var _doom_label: Label = null
 # The compact layout's root control, kept so a mid-fight Doom grant (Mark of
 # Ash) can build the countdown badge late — it's normally built with the layout.
 var _compact_root: Control = null
+# The battlefield token's baked body (one TextureRect). Null on cards that
+# aren't compact-with-cache — the death burn falls back when it is.
+var _compact_face: TextureRect = null
 # Live status rail (battlefield tokens): the top-right keyword roundels are
 # rebuilt whenever the creature's keywords or transient statuses change, so a
 # mid-fight Shield / Frozen / war-school Armored is visible on the token.
@@ -1115,6 +282,31 @@ var _unplayable_veil: ColorRect = null
 static var _any_card_dragging: bool = false
 var _is_playing := false
 var _drag_offset := Vector2.ZERO
+
+# ── Card lean (C1 of docs/ANIMATION_AUDIT_20260716.md §6) ─────────────
+# The card leans into the hand it's held by. Two drivers, one damped owner:
+# a DRAG leans into cursor velocity (you're swinging a piece of card stock
+# around — it should trail), and a HOVER tilts toward the cursor's offset
+# from the card's centre (you're pressing a finger on one corner of it).
+# Both are the same technique every reference title uses (Balatro, HS, Snap,
+# MTGA) and the thing that makes a card read as an object instead of a decal
+# stuck to the pointer.
+#
+# OWNERSHIP: `rotation` has exactly one writer at a time. `_process` owns it
+# only while `_lean_active` (a hand card being dragged or hovered) — the
+# hover/hand tweens never tween rotation during that window, and the handoff
+# back is clean: mouse-exit disables the lean and lets the existing
+# hover-exit tween carry rotation from wherever the lean left it home to
+# `_hand_target_rotation` (an interruption a tween handles fine because it
+# reads the live value). Decorative: Reduce Motion never arms it.
+const LEAN_DRAG_PER_VEL: float = 0.00040  # rad per px/sec of cursor speed
+const LEAN_DRAG_MAX: float = 0.35         # rad — the doc's ±0.35 clamp
+const LEAN_HOVER_MAX: float = 0.10        # rad — a tilt, not a spin
+const LEAN_DAMP_DRAG: float = 14.0        # e-fold rate; higher = snappier
+const LEAN_DAMP_HOVER: float = 9.0        # hover settles softer than drag
+var _lean_active := false
+var _lean_target := 0.0
+var _lean_last_mouse_x := 0.0
 # Battlefield move-drag state — distinct from the hand "play" drag above.
 var _field_grabbing := false      # a left-press is active on a board creature
 var _field_lifted := false        # the grab crossed the threshold → real drag
@@ -1123,6 +315,22 @@ const FIELD_MOVE_THRESHOLD := 10.0  # px the cursor must travel to start a move
 # Gate for board interaction (move-drag). Combat sets this false while combat
 # resolves / the enemy acts, so the player can't grab mid-swing.
 static var board_interactive := true
+
+# Witch-Shot (bridge_watcher relic, 2026-07-16): Combat raises this around a
+# damage-spell resolve so take_damage lets the hit pass through ENEMY Armored
+# and Shield. Static so every custom resolver's take_damage call is covered
+# without threading a parameter through dozens of sites; Combat clears it after
+# the resolve and defensively at every turn start.
+static var spell_pierce_active: bool = false
+# WHITELIST flag for effect-immune creatures (The Old King's Body, 2026-07-20).
+# `take_damage` has ~120 call sites and no source parameter, so asking "was this
+# an effect?" is unanswerable — but the INVERSE has exactly two answer points:
+# the strike and the counter-strike inside _creature_attacks_creature. Combat
+# raises this around those two lines only, so an effect_immune creature rejects
+# everything else BY DEFAULT and no future effect can accidentally slip through.
+# Same scoped-flag shape as spell_pierce_active above, including the defensive
+# clear at every turn start.
+static var strike_damage_active: bool = false
 # Gate for playing cards OUT of hand (the play-drag). In skirmish Combat sets
 # this false during the opponent's turn so hand cards can't be lifted (paired
 # with the grey "unplayable" veil) — you shouldn't be able to grab a card while
@@ -1160,6 +368,11 @@ var _hand_tween: Tween = null
 var _lunge_tween: Tween = null
 var _lunge_scale_tween: Tween = null
 var _recoil_tween: Tween = null
+# True while hold_lunge_apex has the lunge tweens PAUSED (★8 killing blow).
+# _combat_tween_active must treat the held lunge as live — a paused tween
+# reports is_running() == false, and the idle bob would otherwise reclaim
+# position.y mid-hold and drag the frozen killer back toward its rest bob.
+var _lunge_hold_active: bool = false
 # Set true just before a sacrificed creature is destroyed so _die() plays the
 # "ash away upward" ritual variant instead of the normal shrink-and-fade.
 var _sacrifice_death: bool = false
@@ -1274,11 +487,11 @@ const SIZE_STAT     := Vector2(48, 36)    # shared by ATK and HP
 const SIZE_FLOOP    := Vector2(150, 24)
 
 # Vertical pixel nudge applied to the cost / ATK / HP numeral labels inside
-# their SphereOrb containers. Positive = move text DOWN, negative = move UP.
+# their stat seal containers. Positive = move text DOWN, negative = move UP.
 # Why this exists: Godot's Label vertical_alignment = CENTER centers on the
 # font's full line box (ascent + descent), but caps/digits don't occupy the
 # descender region — they visually sit in the UPPER portion of the line box,
-# so the rendered character appears HIGH inside the orb. The SphereOrb's
+# so the rendered character appears HIGH inside the orb. The stat seal's
 # drop shadow below the sphere also shifts the painted "visual center" of
 # the orb DOWNWARD relative to the container's geometric center. Both
 # effects compound to put numerals visibly above the orb's bright center.
@@ -1293,6 +506,11 @@ func _ready() -> void:
 	size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	mouse_filter = Control.MOUSE_FILTER_STOP
+	# _process is the card LEAN's driver (C1) and nothing else — it stays OFF
+	# until a drag/hover arms it, so the hand, the board, the gallery and the
+	# bake pipeline don't pay N per-frame callbacks for a transform that isn't
+	# moving. Same discipline as the shared battlefield visual timer.
+	set_process(false)
 	if compact_mode:
 		_apply_compact_layout()
 	mouse_entered.connect(_on_mouse_entered)
@@ -1340,6 +558,9 @@ func set_compact_mode(enabled: bool) -> void:
 	_doom_badge = null
 	_doom_label = null
 	_compact_root = null
+	_compact_face = null
+	_baked_face = null
+	_gilt_mat = null
 	for child in get_children():
 		child.free()
 	_build_layout()
@@ -1369,6 +590,9 @@ func rebuild_face() -> void:
 	_doom_badge = null
 	_doom_label = null
 	_compact_root = null
+	_compact_face = null
+	_baked_face = null
+	_gilt_mat = null
 	_lift_shadow = null
 	_unplayable_veil = null
 	_discard_mark = null
@@ -1407,6 +631,9 @@ func is_creature() -> bool:
 func is_spell() -> bool:
 	return card_data.get("type", "") == "spell"
 
+func is_armament() -> bool:
+	return card_data.get("type", "") == "armament"
+
 func has_keyword(kw: String) -> bool:
 	if not card_data.has("keywords"):
 		return false
@@ -1423,6 +650,8 @@ func has_keyword(kw: String) -> bool:
 ## as the fallback when there is no contract and no economy to declare. The
 ## retired INSTANT filler named a timing distinction this game doesn't have.
 func _spell_footer_text() -> String:
+	if is_armament():
+		return "ARMAMENT · ALLY · EXHAUST"
 	if CardDB.is_curse(String(card_data.get("id", ""))):
 		return "CURSE"
 	var contract := ""
@@ -1431,6 +660,10 @@ func _spell_footer_text() -> String:
 		"friendly_creature": contract = "TARGET ALLY"
 		"any_creature":      contract = "ANY CREATURE"
 		"any":               contract = "ANY TARGET"
+		"lane":              contract = "TARGET LANE"
+		"friendly_then_enemy": contract = "ALLY · ENEMY"
+		"two_enemies":       contract = "TWO ENEMIES"
+		"friendly_lane":     contract = "ALLY · LANE"
 		_:                   contract = String(card_data.get("scope", ""))
 	var parts: Array[String] = []
 	if contract != "":
@@ -1455,6 +688,10 @@ func _spell_target_label() -> String:
 		"friendly_creature": return "FRIENDLY"
 		"any_creature":      return "ANY CREATURE"
 		"any":               return "ANY TARGET"
+		"lane":              return "LANE"
+		"friendly_then_enemy": return "ALLY THEN ENEMY"
+		"two_enemies":       return "TWO ENEMIES"
+		"friendly_lane":     return "ALLY THEN LANE"
 		_:                   return ""
 
 func has_floop() -> bool:
@@ -1462,7 +699,50 @@ func has_floop() -> bool:
 	# local screenshot tool still probes it.
 	return card_data.has("floop")
 
+## Swift is the muster delay's exception — the Cross Blitz "Swiftstrike" role.
+## It keeps its existing meaning (strikes in the pre-phase, before the main
+## clash) and gains a second one: a Swift body is ready the round it arrives.
+## The two readings agree — Swift has always meant "this one is already moving."
+## Swift and Charge both fight the round they arrive; they differ in REACH.
+##   Swift  — strikes in the pre-phase (before the clash), bodies only.
+##   Charge — no pre-phase, but it may reach the enemy themselves.
+## So Swift is the better trader and Charge is the better closer, and neither is
+## strictly the other's upgrade.
+func ignores_muster_delay() -> bool:
+	return has_keyword("swift") or has_keyword("charge") \
+		or bool(state.war_cry_swift) or bool(state.drummer_swift)
+
+
+## Force the status rail to re-read after the muster sweep. The rail is
+## signature-polled, but the sweep runs at the top of the round when nothing
+## else about the body changes — without this the Mustering mark lingers for a
+## poll after the creature is actually ready, which is the kind of stale badge
+## players correctly report as a bug.
+func refresh_muster_mark() -> void:
+	_refresh_status_rail()
+
+
+## An INERT structure is scenery: it fills a back-row slot, holds a charge
+## counter, and nothing can touch it. An ATTACKABLE one (card_data.attackable) is
+## a real obstacle — it still never swings, but creatures can hit it and spells
+## can target it, so the charge counter it displays is an affordance the player
+## can actually race.
+##
+## Added 2026-07-28. The Trebuchet shipped as a 0/99 inert structure that
+## displayed a live "CHARGE n/3" badge — a visible, incrementing threat with no
+## way to interact with it at all. That is the worst shape a mechanic can take:
+## it teaches the player to look for counterplay and then punishes them for
+## looking. Prefer attackable for anything that shows a countdown.
+func is_inert_structure() -> bool:
+	if not has_keyword("structure"):
+		return false
+	return not bool(card_data.get("attackable", false))
+
+
 func can_attack() -> bool:
+	# The muster delay: a body that entered play this round has not formed up and
+	# does not swing in the clash that ends its arrival round.
+	if not state.ready_to_swing and not ignores_muster_delay(): return false
 	if has_attacked_this_turn: return false
 	if will_floop: return false
 	if has_flooped_this_turn: return false
@@ -1470,12 +750,24 @@ func can_attack() -> bool:
 	# Structures are board objects (Pyres, Mausoleums, Altars) — they hold
 	# charge counters and trigger encounter effects but never swing themselves.
 	if has_keyword("structure"): return false
+	# Fortifications are attackable battlefield objectives, not soldiers.
+	# They block a lane and take damage but never initiate or counter a strike.
+	if bool(card_data.get("fortification", false)): return false
 	if card_data.get("passive", "") == "cannot_attack_wall": return false
 	if card_data.get("passive", "") == "siege": return true
 	return true
 
+## What this creature ACTUALLY swings for — the one number the seal, the hover
+## provenance line and every strike site are allowed to disagree about never.
+## `relic_atk_buff` joined the sum on 2026-07-28; it is the only component that
+## can be negative (steady_banner's round-1 −1), so the total is floored here
+## rather than at the call sites. Combat._effective_attack already ended in
+## maxi(0, atk), so this only moves the floor to where the number is BORN: a seal
+## reading "-1" would be a fresh lie, and `take_damage(effective_atk())` — a real
+## call shape in six places — would have HEALED its target on a negative.
 func effective_atk() -> int:
-	return current_atk + temp_atk_buff + persistent_atk_buff + adj_atk_buff
+	return maxi(0, current_atk + temp_atk_buff + persistent_atk_buff
+		+ adj_atk_buff + relic_atk_buff)
 
 
 # ═══════════════════════════════════════════
@@ -1511,7 +803,7 @@ func _find_card_art() -> Texture2D:
 	var cid = card_data.get("id", "")
 	var name_id = card_data.get("name", "").to_lower().replace(" ", "_").replace("'", "")
 	var art: Texture2D = null
-	if is_spell():
+	if is_spell() or is_armament():
 		art = CardArtAliases.try_load_spell_art(cid)
 		if art == null:
 			art = CardArtAliases.try_load_spell_art(name_id)
@@ -1527,47 +819,16 @@ func _find_card_art() -> Texture2D:
 func _build_layout() -> void:
 	if card_data.is_empty():
 		return
-	if chart_proto:
-		_build_chart_proto()
-		return
-	if redesign_proto:
-		_build_redesign_proto()
-		return
-	# Reset stat base colours each build; v4 overrides per-plate so its ATK
-	# reads dark-on-gold and HP light-on-red. Other layouts keep the
-	# legacy Color.WHITE.
 	_atk_base_color = Color.WHITE
 	_hp_base_color = Color.WHITE
 	if compact_mode:
-		# compact_mode takes priority — once a card is played to the
-		# battlefield it switches to a token-style render that doesn't
-		# benefit from baking (already ~10 nodes total).
 		_build_compact_layout()
 	elif live_baked_mode and (
 			CardTextureCache.has_gallery(card_data) if gallery_baked_mode
 			else CardTextureCache.has(card_data)):
-		# Only enter the fast path if the texture is actually cached. On a
-		# cache miss we fall through to the full layout — the next time the
-		# same card is drawn after CardTextureCache.bake_many runs, the
-		# cache hit kicks us into the cheap render.
 		_build_baked_overlay_layout()
-	elif GameTheme.USE_PROCEDURAL_FRAME:
-		if GameTheme.USE_V5_OVERLAP_PAINT:
-			_build_full_layout_v5()
-		else:
-			_build_full_layout_v4()
-	elif GameTheme.USE_NEW_FRAME:
-		# v7 "campaign document" frame promoted to live (was the v6 proto —
-		# kept selectable via redesign_proto for reference). The in-hand card
-		# and every static card display flow through this branch; so does the
-		# CardTextureCache bake (it sets static_display + bake_strip_stats but
-		# no layout flag), so the baked texture is the chart frame with blank
-		# numerals and the baked-overlay live labels land on the wax seals
-		# (same 56px corner boxes as v3/v6). Battlefield tokens use
-		# compact_mode above.
-		_build_chart_proto()
 	else:
-		_build_full_layout()
+		_build_chart_proto()
 
 
 # ═══════════════════════════════════════════
@@ -1711,6 +972,7 @@ func _build_compact_layout() -> void:
 	# LIVE — a keyword or status gained mid-fight (war-school Armored, a granted
 	# Shield, Frozen/Stunned) re-renders it; see _refresh_status_rail.
 	_refresh_status_rail(true)
+	_build_fortification_tag(root)
 	# The rail re-checks itself on a throttled shared-clock poll (cheap signature
 	# diff) so the ~30 keyword-mutation sites in Combat.gd don't each need an
 	# explicit refresh call. Register even in reduce-motion / no-bob paths so the
@@ -1746,6 +1008,7 @@ func _build_compact_cached_background(root: Control, texture: Texture2D) -> void
 	# The snapshot includes an 8 px logical gutter so edge shading and wax
 	# seals never clip. The live token keeps its 200x150 lane footprint.
 	var face := TextureRect.new()
+	face.name = "CompactFace"
 	face.texture = texture
 	face.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	face.stretch_mode = TextureRect.STRETCH_SCALE
@@ -1757,11 +1020,21 @@ func _build_compact_cached_background(root: Control, texture: Texture2D) -> void
 	face.offset_bottom = 8.0
 	face.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(face)
+	# The token's whole body in ONE CanvasItem — which is what lets the death
+	# burn be a shader at all (see Motion.burn_away). Held so _die can set it
+	# alight without walking the tree.
+	_compact_face = face
 	# Art is already flattened into the cached face.
 	_art_rect = null
 
 
 func _on_battlefield_texture_ready(key: String) -> void:
+	# A bake landing on a DYING card would free _compact_root — and with it the
+	# face the death burn is tweening — so the burn's queue_free would never
+	# fire and the corpse would linger on the board forever. The card is on its
+	# way out; it has no use for a fresh face.
+	if _dead:
+		return
 	if not compact_mode or compact_static_bake or not is_inside_tree() \
 			or key != CardTextureCache.battlefield_cache_key(card_data):
 		return
@@ -1775,6 +1048,9 @@ func _on_battlefield_texture_ready(key: String) -> void:
 	# children remain intact while every cached widget reference is refreshed.
 	_compact_root.free()
 	_compact_root = null
+	_compact_face = null
+	_baked_face = null
+	_gilt_mat = null
 	_atk_label = null
 	_hp_label = null
 	_atk_badge = null
@@ -1856,18 +1132,48 @@ func _finish_compact_live_layout(root: Control) -> void:
 	_floop_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(_floop_indicator)
 	_refresh_status_rail(true)
+	_build_fortification_tag(root)
 	_register_battlefield_visuals()
 	if has_keyword("doom"):
 		_build_doom_badge(root)
 
+
+
+func _build_fortification_tag(root: Control) -> void:
+	# Compact cards normally omit names, so an objective gets one short live
+	# label that survives both cached and uncached battlefield rendering.
+	if not bool(card_data.get("fortification", false)):
+		return
+	var tag := Label.new()
+	tag.text = "GATE"
+	tag.anchor_left = 0.22
+	tag.anchor_right = 0.78
+	tag.anchor_top = 0.0
+	tag.anchor_bottom = 0.0
+	tag.offset_top = 7.0
+	tag.offset_bottom = 32.0
+	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	tag.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	tag.add_theme_font_size_override("font_size", 18)
+	if GameTheme.font_title != null:
+		tag.add_theme_font_override("font", GameTheme.font_title)
+	tag.add_theme_color_override("font_color", Color(1.0, 0.91, 0.66))
+	tag.add_theme_color_override("font_outline_color", Color(0.04, 0.025, 0.015, 0.98))
+	tag.add_theme_constant_override("outline_size", 5)
+	tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(tag)
 
 const _STATUS_RAIL_CAP := 5
 
 func _status_signature() -> String:
 	# Cheap change-detector for the rail. Anything that should alter the rail
 	# must be folded in here.
+	# Match the set the rail actually RENDERS (include_badged=false). Doom is
+	# badged separately and never appears in the rail, so folding its live value
+	# into the signature only forced a needless teardown+rebuild of an identical
+	# rail on every doom tick.
 	var parts: PackedStringArray = []
-	for entry in _active_effect_entries(true):
+	for entry in _active_effect_entries(false):
 		parts.append("%s:%s" % [String(entry.get("id", "")), String(entry.get("display", ""))])
 	return ",".join(parts)
 
@@ -1881,13 +1187,119 @@ func _active_effect_entries(include_badged: bool = true) -> Array:
 		_add_active_effect(out, seen, "frozen")
 	if state.stunned:
 		_add_active_effect(out, seen, "stunned")
+	# The muster delay. Same family as Frozen/Stunned — "does not swing this
+	# round" — and it MUST be shown: a body that silently refuses to fight reads
+	# as a bug, which is the whole reason this rail exists.
+	if is_on_battlefield and not state.ready_to_swing and not ignores_muster_delay():
+		_add_active_effect(out, seen, "mustering")
+
+	# ROUND-SCOPED RIDERS (2026-07-28). A spell or a passive can rewrite what a
+	# body DOES for a round — strike in the Swift pre-phase, hit every opposing
+	# lane, swing twice, soak an ally's blow — and until now NONE of it touched
+	# the token. The rule changed and the card said nothing, which is the same
+	# defect the muster mark above was added to fix: a body that behaves
+	# differently from what it prints reads as a bug. They ride this rail rather
+	# than inventing a second surface, and each names its own device because the
+	# id is a STATE, not a registered keyword.
+	if is_on_battlefield:
+		if (state.war_cry_swift or state.drummer_swift) \
+				and not card_data.get("keywords", []).has("swift"):
+			_add_active_effect(out, seen, "granted_swift", "", "swift")
+		if state.charges_this_turn:
+			_add_active_effect(out, seen, "charging", "", "charge")
+		if state.battle_order_second_strike:
+			_add_active_effect(out, seen, "double_strike", "", "rampage")
+		if state.redirecting:
+			_add_active_effect(out, seen, "redirecting", "", "guardian")
+		if state.challenge_any_lane:
+			_add_active_effect(out, seen, "challenging", "", "overrun")
+		if state.hp_floor:
+			_add_active_effect(out, seen, "warded", "", "last_stand")
+		# ward_by is hp_floor's SIBLING — Honor Guard's column_ward floors the HP,
+		# Oathbound Squire's bodyguard eats the blow outright — and shipping one
+		# marked while the other stayed invisible would be worse than marking
+		# neither: the player would learn to read the absence of a mark as "no
+		# protection here" and be wrong half the time.
+		if ward_by != null and is_instance_valid(ward_by) and ward_by.current_hp > 0:
+			_add_active_effect(out, seen, "guarded", "", "guardian")
+		# Sword on Credit's bill. The sword is already in the line and the
+		# reckoning lands NEXT round — a cost the player must plan Command around
+		# while it is still avoidable, which makes it exactly the wrong thing to
+		# reveal only at the moment it is charged.
+		if int(state.credit_due_round) < 999999:
+			_add_active_effect(out, seen, "debt_due", "", "sacrifice")
+		# The Old King's Body. This one is the player's MONEY: every spell,
+		# potion and ability aimed at it is thrown away, so the refusal has to be
+		# legible BEFORE the cast, not discovered by wasting a card on it.
+		if state.effect_immune:
+			_add_active_effect(out, seen, "effect_immune", "", "structure")
+		# THE FIGHT'S OWN RULE (2026-07-29, COMBAT_LEGIBILITY §4 #10). An encounter
+		# passive can lend the enemy line Piercing or Thorns — the Nexus's bristle
+		# round, the boar herd's charge, a Mercenary that crosses 4 ATK — and the
+		# grant is resolved by LOOKUP at the moment of the blow, so until now it
+		# reached no device and no orb: the token was pixel-identical to an
+		# unbuffed one. Combat mirrors the live answer into `encounter_grants` (its
+		# own card_data key, deliberately NOT `keywords` — see
+		# Combat._refresh_encounter_keyword_grants for the reasons), and this is its
+		# only reader.
+		#
+		# Enemy-side only, because the rule is: a deserter carries its whole
+		# card_data across to your banner (Combat._desert_enemy_to_player), and an
+		# orb promising a rule that no longer applies to that body is the same lie
+		# pointed the other way.
+		if is_opponent:
+			var printed: Array = card_data.get("keywords", [])
+			for g in card_data.get("encounter_grants", []):
+				var gid := String(g)
+				# A body that already PRINTS the keyword takes its own gilt device
+				# from the keyword loop below — two orbs for one rule reads as two
+				# rules (the same guard granted Swift makes against War Cry).
+				if printed.has(gid):
+					continue
+				_add_active_effect(out, seen, "granted_%s" % gid, "", gid)
+
+	# Armaments live on the creature's combat copy. Keep a named entry in the
+	# hover/status data so the attachment remains visible even when its effect
+	# is not itself a keyword (Bell, Witchbrand, Forked Spear, Arbalest).
+	var gear: Dictionary = card_data.get("equipped_armament", {})
+	if not gear.is_empty():
+		var gear_id := "armament_%s" % String(gear.get("id", "equipped"))
+		var icon_kw := String(gear.get("icon", ""))
+		out.append({
+			"id": gear_id,
+			"display": String(gear.get("name", "Armament")),
+			"desc": String(gear.get("desc", "Equipped for this fight.")),
+			"tex": GameTheme.get_keyword_icon(icon_kw),
+			"glyph": GameTheme.GILT_BRIGHT,
+			"rim": Color(0.72, 0.52, 0.22, 0.92),
+		})
+		seen[gear_id] = true
+
+	# TRIGGER MARKS (2026-07-25). A battlefield token is 104×136 and prints stats
+	# + keyword devices only — a creature's on_death / passive / aura rules were
+	# invisible on the board, which is the "I can't tell what the enemy's cards
+	# do" complaint. These marks are deliberately FUTURE-FACING: on_enter and
+	# on_play have already resolved by the time a body is standing, so surfacing
+	# them would be history, not a threat. Hand cards print their full rules text
+	# and need none of this, hence the is_on_battlefield gate.
+	if is_on_battlefield:
+		_add_trigger_effect_entries(out, seen)
 
 	var kws: Array = card_data.get("keywords", [])
-	if bool(get_meta("temp_armored", false)) and not kws.has("armored"):
+	if state.temp_armored and not kws.has("armored"):
 		_add_active_effect(out, seen, "armored", " (this round)")
-	if (bool(get_meta("temp_thorns", false)) or int(get_meta("bonus_thorns", 0)) > 0 \
-			or bool(get_meta("shield_wall_thorns", false))) and not kws.has("thorns"):
+	# Venom Tip's grant. It reached the rail through the keyword loop below, which
+	# meant a one-round envenoming printed as a PERMANENT rule — the rail claiming
+	# a card is something it isn't is worse than the rail staying quiet.
+	if state.temp_poison:
+		_add_active_effect(out, seen, "poison", " (this round)")
+	if (state.temp_thorns or state.bonus_thorns > 0 \
+			or state.shield_wall_thorns) and not kws.has("thorns"):
 		_add_active_effect(out, seen, "thorns", " (this round)")
+	# Pike Square's Thorns is not "this round" — it holds exactly as long as the
+	# square stays closed, so it gets its own suffix rather than a false clock.
+	elif state.square_thorns and not kws.has("thorns"):
+		_add_active_effect(out, seen, "thorns", " (square held)")
 
 	for kw in kws:
 		var k := String(kw)
@@ -1903,8 +1315,84 @@ func _active_effect_entries(include_badged: bool = true) -> Array:
 	return out
 
 
+## Rail entries for standing rules that are NOT keywords, so nothing else on a
+## battlefield token can show them. `wither` / `doom` are registered keywords and
+## get their own orbs from the keyword loop — adding them here would double-stamp
+## the rail, so they are deliberately absent.
+##
+## `on_death` is the exception, and it is why this used to lie (2026-07-27). It IS
+## a registered keyword, so a PLAYER card printing it gets its orb from that loop.
+## An ENEMY never does: `EncounterDB.make_card_data` builds `keywords` from the
+## `kw` list alone while copying `on_death` into its own key — so 118 of 653 enemy
+## entries carried a death trigger that was STRUCTURALLY incapable of reaching the
+## rail (the act-2 Standard Bearer debuffs your whole line's ATK when it dies, and
+## nothing on the token ever said so). We mark it here only when the keyword loop
+## won't, so the two paths can never double-stamp.
+##
+## Only standing/future effects qualify: on_enter and on_play have already
+## resolved by the time a body is standing, so surfacing them would be history
+## rather than a threat.
+func _add_trigger_effect_entries(out: Array, seen: Dictionary) -> void:
+	# One shared rim/glyph pair keeps these a family, distinct from the transient
+	# status tints above and the gilt printed keywords below.
+	var rim := Color(0.68, 0.46, 0.60, 0.92)
+	var glyph := Color(0.94, 0.80, 0.92)
+	var kws: Array = card_data.get("keywords", [])
+	var marks: Array = []
+	# `passive` is a bare String field with no keyword and no device — a Royal
+	# Guard's or Siegewright's standing order was completely unreadable on board.
+	if String(card_data.get("passive", "")) != "":
+		marks.append({"id": "trig_passive", "kw": "formation", "display": "Standing Order"})
+	# The death rider. Guarded on `kws` so a player card that prints the keyword
+	# takes the keyword loop's orb instead and this never fires — see the block
+	# comment above for why the enemy always falls through.
+	# A SPENT Reborn is not a death rider any more. Reborn is a once-per-body
+	# on_death `type` rather than a keyword, so the dict stays on the card after
+	# it has already fired — and the mark went on promising a revive that could
+	# never happen again. Same family as the temp-grant lie: a mark claiming an
+	# effect the body no longer has is worse than no mark at all.
+	var death_rider: Dictionary = card_data.get("on_death", {})
+	var reborn_spent: bool = String(death_rider.get("type", "")) == "reborn" \
+		and state.reborn_used
+	if not kws.has("on_death") and not death_rider.is_empty() and not reborn_spent:
+		marks.append({
+			"id": "trig_on_death", "kw": "on_death",
+			"display": str(KeywordEffects.KEYWORDS.get("on_death", {}).get("display", "On-Death")),
+			"desc": str(KeywordEffects.KEYWORDS.get("on_death", {}).get("desc", "")),
+		})
+	# The aura fields only earn a mark when the card doesn't already print the
+	# adj_buff keyword (several do), or the rail would show the same device twice.
+	if not kws.has("adj_buff"):
+		if not Dictionary(card_data.get("adj_buff", {})).is_empty():
+			marks.append({"id": "trig_adj_buff", "kw": "adj_buff", "display": "Bannered Aura"})
+		elif not Dictionary(card_data.get("type_buff", {})).is_empty():
+			marks.append({"id": "trig_type_buff", "kw": "adj_buff", "display": "Warchief's Aura"})
+	for m in marks:
+		var mid := String(m["id"])
+		if seen.has(mid):
+			continue
+		var tex: Texture2D = GameTheme.get_keyword_icon(String(m["kw"]))
+		if tex == null:
+			continue   # unregistered device — the rail drops null-texture entries anyway
+		# Enemy card_data carries an empty `desc`, so a mark that can land on an
+		# enemy must bring its own or the hover reads blank.
+		out.append({
+			"id": mid,
+			"display": String(m["display"]),
+			"desc": String(m.get("desc", card_data.get("desc", ""))),
+			"tex": tex,
+			"glyph": glyph,
+			"rim": rim,
+		})
+		seen[mid] = true
+
+
+## `icon_id` names the device to borrow when the entry's own id is a STATE rather
+## than a registered keyword (the round-scoped riders). The rail drops
+## null-texture entries, so an id with no device of its own would silently never
+## appear — which is exactly the failure these entries exist to fix.
 func _add_active_effect(out: Array, seen: Dictionary, id: String,
-		display_suffix: String = "") -> void:
+		display_suffix: String = "", icon_id: String = "") -> void:
 	if id == "" or seen.has(id):
 		return
 	var colors := _active_effect_colors(id)
@@ -1913,7 +1401,7 @@ func _add_active_effect(out: Array, seen: Dictionary, id: String,
 		"id": id,
 		"display": display,
 		"desc": _active_effect_desc(id),
-		"tex": GameTheme.get_keyword_icon(id),
+		"tex": GameTheme.get_keyword_icon(icon_id if icon_id != "" else id),
 		"glyph": colors["glyph"],
 		"rim": colors["rim"],
 	})
@@ -1937,6 +1425,30 @@ func _active_effect_display(id: String) -> String:
 			return "Frozen"
 		"stunned":
 			return "Stunned"
+		"mustering":
+			return "Forming Up"
+		"granted_swift":
+			return "Swift"
+		"granted_piercing":
+			return "Piercing"
+		"granted_thorns":
+			return "Thorns"
+		"charging":
+			return "Charging"
+		"double_strike":
+			return "Battle Order"
+		"redirecting":
+			return "Covering"
+		"challenging":
+			return "Challenging"
+		"warded":
+			return "Warded"
+		"guarded":
+			return "Guarded"
+		"debt_due":
+			return "Bill Due"
+		"effect_immune":
+			return "Untouchable"
 		"doom":
 			return "Doom %d" % _live_doom_value()
 		"wither":
@@ -1952,6 +1464,30 @@ func _active_effect_desc(id: String) -> String:
 			return "Skips combat this round, then thaws."
 		"stunned":
 			return "Skips combat this round."
+		"mustering":
+			return "Cannot attack this round. Can attack next round."
+		"granted_swift":
+			return "Strikes in the Swift pre-phase this round, before the clash."
+		"granted_piercing":
+			return "The fight's own rule lends it Piercing: a killing blow reads on past the body it fells."
+		"granted_thorns":
+			return "The fight's own rule lends it Thorns: it bites back at whatever strikes it."
+		"charging":
+			return "Attacks every opposing lane this round. Each target strikes back."
+		"double_strike":
+			return "Attacks twice this round. Each target strikes back."
+		"redirecting":
+			return "Takes the blows aimed at the creatures beside it this round."
+		"challenging":
+			return "May attack any lane this round, not just the one across."
+		"warded":
+			return "Its HP cannot be driven below 1 while the ward stands."
+		"guarded":
+			return "A bodyguard in its column takes the blows aimed at it."
+		"debt_due":
+			return "The reckoning for this sword comes due next round."
+		"effect_immune":
+			return "Only a creature's strike touches it. Spells, abilities, keywords, potions and relics do nothing."
 	if KeywordEffects.KEYWORDS.has(id):
 		return str(KeywordEffects.KEYWORDS[id].get("desc", ""))
 	return ""
@@ -1965,10 +1501,32 @@ func _active_effect_colors(id: String) -> Dictionary:
 			return {"glyph": Color(0.78, 0.94, 1.0), "rim": Color(0.60, 0.85, 1.0, 0.9)}
 		"stunned":
 			return {"glyph": Color(1.0, 0.80, 0.32), "rim": Color(0.95, 0.72, 0.28, 0.9)}
+		"mustering":
+			# Cold bone — a body waiting, not a body harmed. Deliberately away
+			# from Stunned's amber so "not ready yet" never reads as "crippled".
+			return {"glyph": Color(0.82, 0.78, 0.68), "rim": Color(0.66, 0.62, 0.52, 0.9)}
 		"armored":
 			return {"glyph": Color(0.72, 0.82, 0.95), "rim": Color(0.60, 0.72, 0.90, 0.9)}
 		"thorns":
 			return {"glyph": Color(0.72, 0.92, 0.60), "rim": Color(0.58, 0.82, 0.50, 0.9)}
+		# The round-scoped riders share ONE hot ember tint so they read as a family
+		# — "this body is doing something extra this round" — distinct from the
+		# cold transient statuses above and the gilt printed keywords below.
+		# granted_piercing / granted_thorns are the encounter's LENT keywords. They
+		# take the ember family rather than their own keyword tints (Thorns' green,
+		# Piercing's gilt) on purpose: the whole point of the orb is that this rule
+		# is not printed on the card, and matching the printed colour would hide it.
+		"granted_swift", "charging", "double_strike", "challenging", "granted_piercing", "granted_thorns":
+			return {"glyph": Color(1.0, 0.72, 0.36), "rim": Color(0.95, 0.58, 0.24, 0.92)}
+		# Protective riders take the shield family's blue instead — a ward is not
+		# an attack, and colouring it like one would mislead at a glance.
+		"redirecting", "warded", "guarded", "effect_immune":
+			return {"glyph": Color(0.74, 0.88, 1.0), "rim": Color(0.58, 0.78, 0.98, 0.92)}
+		# A bill is neither an attack nor a protection — it is a LIABILITY, and it
+		# gets the only warning colour on the rail so it cannot be mistaken for
+		# either family at a glance.
+		"debt_due":
+			return {"glyph": Color(1.0, 0.52, 0.42), "rim": Color(0.92, 0.40, 0.30, 0.92)}
 	return {"glyph": GameTheme.GILT_BRIGHT, "rim": Color(0.62, 0.50, 0.26, 0.85)}
 
 
@@ -1978,18 +1536,265 @@ func _live_doom_value() -> int:
 	return int(card_data.get("doom", 0))
 
 
+## Ids whose glossary line names the BEAT but not the EFFECT. "On-Death: effect
+## triggers when this creature dies" tells the player a rite is armed and nothing
+## whatsoever about what it does — and on a battlefield token, which prints no
+## rules text at all, that was the entire read. These get the card's own printed
+## rules appended so the mark answers "what happens", not just "when".
+const _TRIGGER_RAIL_IDS := {
+	"on_death": true, "doom": true, "wither": true, "adj_buff": true,
+	"trig_passive": true, "trig_adj_buff": true, "trig_type_buff": true,
+}
+
+
 func _active_effect_tooltip(entry: Dictionary) -> String:
 	var display := String(entry.get("display", ""))
 	var desc := String(entry.get("desc", ""))
+	if is_on_battlefield and _TRIGGER_RAIL_IDS.has(String(entry.get("id", ""))):
+		var rules := String(card_data.get("desc", ""))
+		# Skip when the rules ARE the glossary line (a vanilla keyword-only card)
+		# so the tooltip never prints the same sentence twice.
+		if rules != "" and rules != desc:
+			desc = rules if desc == "" else "%s\n%s" % [desc, rules]
 	if desc == "":
 		return "Active now: %s" % display
 	return "Active now: %s\n%s" % [display, desc]
+
+
+# ── KEYWORD COSTUMES ───────────────────────────────────────────────────────
+# A keyword whose only expression is a chip flying past has to be re-learned
+# every single time it fires. A COSTUME inverts that trade: the rule becomes a
+# visible property of the BODY before it ever triggers, so firing is a CHANGE TO
+# A FAMILIAR OBJECT rather than the arrival of an unfamiliar one. That is why
+# Divine Shield reads with no text on it, and a costume costs ZERO at fire time.
+#
+# The status rail cannot do this job and it is worth writing down why: its
+# roundel is 30px with a 6px inset, so the glyph inside is 18px — below this
+# project's own documented ~20px mush floor. The rail is an inventory you HOVER,
+# not a costume you read across the board.
+#
+# A costume must therefore break the SILHOUETTE, own a LARGE contiguous area, or
+# alter an object already >= 38px. Both costumes here take the third route, which
+# is also why neither needed new art.
+var _shield_seal: Control = null
+var _swift_rake: Control = null
+var _armored_edge: Control = null
+var _last_stand_candle: Control = null
+
+
+func _refresh_costumes() -> void:
+	if _compact_root == null or not is_instance_valid(_compact_root):
+		return
+	if not is_on_battlefield or static_display:
+		return
+
+	# ARMORED is part of the body's construction, not a fact that arrives only
+	# after the hit. Printed and round-scoped grants both reach has_keyword()
+	# because the latter are added to the live card_data for their duration.
+	var want_armored: bool = has_keyword("armored")
+	var have_armored: bool = _armored_edge != null and is_instance_valid(_armored_edge)
+	if want_armored and not have_armored:
+		_build_armored_edge()
+	elif not want_armored and have_armored:
+		_clear_armored_edge()
+
+	# LAST STAND is one visible reserve. The candle exists only while that save
+	# remains armed; consuming it changes the active-effect signature and gutters
+	# it on this same refresh.
+	var want_candle: bool = has_keyword("last_stand") and not last_stand_used
+	var have_candle: bool = _last_stand_candle != null \
+		and is_instance_valid(_last_stand_candle)
+	if want_candle and not have_candle:
+		_build_last_stand_candle()
+	elif not want_candle and have_candle:
+		_clear_last_stand_candle(last_stand_used)
+
+	var want_seal: bool = state.has_shield
+	var have_seal: bool = _shield_seal != null and is_instance_valid(_shield_seal)
+	if want_seal and not have_seal:
+		_build_shield_seal()
+	elif not want_seal and have_seal:
+		_break_shield_seal()
+
+	# SWIFT is the one rider that earns a costume rather than a rail orb, and the
+	# reason is scale: War Cry moves the WHOLE LINE into the pre-phase, so the
+	# question the player is asking is not "what does this one body do" but "who
+	# strikes first this round" — a board-wide question the 18px rail glyph
+	# cannot answer (see the costume header). A granted-Swift body therefore grows
+	# a hard bright bar down its LEADING edge, pointing the way it will strike.
+	# Granted only: a body that PRINTS Swift is a known quantity the player drafted
+	# and already reads by its keyword device — the costume is for the CHANGE.
+	var want_rake: bool = (state.war_cry_swift or state.drummer_swift) \
+		and not card_data.get("keywords", []).has("swift")
+	var have_rake: bool = _swift_rake != null and is_instance_valid(_swift_rake)
+	if want_rake and not have_rake:
+		_build_swift_rake()
+	elif not want_rake and have_rake:
+		_clear_swift_rake()
+
+
+## SHIELD — the writ is SEALED SHUT. 52px of wax at full opacity, deliberately
+## off-centre and off-axis like a real seal pressed by a hand in a hurry.
+##
+## This reverses a documented revert. The previous attempt drew an 8px crack
+## INSIDE the 38px HP stat seal, which was unreadable and was pulled. The lesson
+## was not "seals don't work" — it was CHANGE THE SILHOUETTE, don't add detail
+## inside something already small. So this is its own 52px blob carrying no
+## numeral, and when it goes it goes by BREAKING, which is a silhouette event.
+func _build_shield_seal() -> void:
+	var s: Control = WaxSeal.new()
+	s.name = "ShieldSeal"
+	# Cold seal-blue, DARK and desaturated. The first pass used a light saturated
+	# blue and read as a glossy plastic pill — the exact "jelly button" failure
+	# WaxSeal's own header says the 2026-07-19 rework existed to kill. Wax is a
+	# dark matte material that earns its highlight from one ridge, so the base
+	# colour has to sit well below the lit edge it is about to grow.
+	s.wax = Color(0.17, 0.29, 0.44)
+	s.seed_text = "shield_%s" % String(card_data.get("id", "x"))
+	s.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# ON THE SCRIM, not over the art. The token carries a 118x45 dark band between
+	# the ATK and HP seals that exists for badge legibility and that nothing has
+	# ever used. Putting the seal there costs ZERO art occlusion — the player
+	# recognises a creature by its painting, and the first pass sat squarely on
+	# this one's face — and the dark ground gives the wax its best contrast.
+	# STRADDLING the art/scrim boundary, and larger than the 38px stat seals. On
+	# the scrim alone, at stat-seal size and in line with them, it read as a THIRD
+	# STAT — an empty blue orb beside ATK and HP. A seal is not a circle in a row
+	# of circles: it is pressed across an edge, at its own size, off the axis
+	# everything else is aligned to.
+	s.position = Vector2(76, 86)
+	s.size = Vector2(48, 48)
+	s.pivot_offset = Vector2(24, 24)
+	s.rotation = -0.26
+	s.z_index = 6
+	_compact_root.add_child(s)
+	_shield_seal = s
+	# Decorative entrance only — the seal's PRESENCE is the information and it is
+	# already on screen by the end of this frame either way.
+	if not (UserSettings != null and UserSettings.reduce_motion):
+		s.scale = Vector2(1.45, 1.45)
+		s.modulate.a = 0.0
+		var tw := s.create_tween().set_parallel(true)
+		tw.tween_property(s, "scale", Vector2.ONE, Motion.time(0.13)) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		tw.tween_property(s, "modulate:a", 1.0, Motion.time(0.10))
+
+
+## GRANTED SWIFT — the body is already leaning into the charge.
+##
+## Takes the "own a LARGE contiguous area" route rather than the silhouette one,
+## because a granted-Swift beat can land on eight bodies at once and eight
+## changed silhouettes would read as a board glitch rather than an order. A full-
+## height bar on the LEADING edge (right for your line, left for the foe's) is
+## large enough to survive the mush floor, points the direction the blow travels,
+## and costs no art occlusion — the token's edge carries nothing.
+func _build_swift_rake() -> void:
+	var bar := Panel.new()
+	bar.name = "SwiftRake"
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb := StyleBoxFlat.new()
+	# The rider family's ember, run hot at the striking edge and falling away —
+	# a flat bar reads as UI chrome, a graded one reads as speed.
+	sb.bg_color = Color(1.0, 0.78, 0.42, 0.95)
+	sb.border_color = Color(1.0, 0.55, 0.18, 0.85)
+	sb.border_width_top = 0
+	sb.border_width_bottom = 0
+	sb.set_corner_radius_all(2)
+	sb.shadow_color = Color(1.0, 0.50, 0.14, 0.55)
+	sb.shadow_size = 7
+	bar.add_theme_stylebox_override("panel", sb)
+	# Leading edge: the side the blow travels toward. An enemy body strikes left.
+	var lead_right: bool = not is_opponent
+	bar.anchor_top = 0.0
+	bar.anchor_bottom = 1.0
+	bar.anchor_left = 1.0 if lead_right else 0.0
+	bar.anchor_right = bar.anchor_left
+	bar.offset_left = -5.0 if lead_right else 0.0
+	bar.offset_right = 0.0 if lead_right else 5.0
+	bar.offset_top = 6.0
+	bar.offset_bottom = -6.0
+	bar.z_index = 7
+	_compact_root.add_child(bar)
+	_swift_rake = bar
+	# Decorative entrance only — the bar's PRESENCE is the information, so under
+	# Reduce Motion it simply exists from this frame.
+	if not (UserSettings != null and UserSettings.reduce_motion):
+		bar.modulate.a = 0.0
+		bar.scale = Vector2(1.0, 0.55)
+		bar.pivot_offset = Vector2(2.5, bar.size.y * 0.5)
+		var tw := bar.create_tween().set_parallel(true)
+		tw.tween_property(bar, "modulate:a", 1.0, Motion.time(0.12))
+		tw.tween_property(bar, "scale", Vector2.ONE, Motion.time(0.18)) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+func _clear_swift_rake() -> void:
+	if _swift_rake == null or not is_instance_valid(_swift_rake):
+		_swift_rake = null
+		return
+	var bar := _swift_rake
+	_swift_rake = null
+	if UserSettings != null and UserSettings.reduce_motion:
+		bar.queue_free()
+		return
+	var tw := bar.create_tween()
+	tw.tween_property(bar, "modulate:a", 0.0, Motion.time(0.14))
+	tw.tween_callback(bar.queue_free)
+
+
+## The seal is BROKEN. Originally two clip_contents halves flying apart — but
+## clipping is unreliable on gl_compatibility (this project already learned that
+## with clip_children), and unclipped each "half" drew a WHOLE seal on top of the
+## other, so a shot of the break was indistinguishable from the intact seal.
+##
+## So: no clipping. The wax bulges once under the strain, splits along a bright
+## fracture, and bursts into fragments. It reads as "that seal is gone" without
+## depending on a renderer feature this backend does not honour.
+func _break_shield_seal() -> void:
+	var old := _shield_seal
+	_shield_seal = null
+	if old == null or not is_instance_valid(old):
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		old.queue_free()
+		return
+	var host: Node = _compact_root if _compact_root != null else self
+	var centre: Vector2 = old.global_position + old.size * 0.5 * old.scale
+	# The fracture: a hard pale line splitting the blob, drawn for one beat.
+	var crack := Line2D.new()
+	crack.width = 3.0
+	crack.default_color = Color(0.86, 0.94, 1.0, 0.95)
+	crack.z_index = 7
+	crack.points = PackedVector2Array([
+		old.position + Vector2(6, 30), old.position + Vector2(42, 16)])
+	host.add_child(crack)
+	var ctw := crack.create_tween()
+	ctw.tween_property(crack, "width", 0.5, Motion.time(0.16))
+	ctw.parallel().tween_property(crack, "modulate:a", 0.0, Motion.time(0.20))
+	ctw.tween_callback(crack.queue_free)
+	# The wax gives: a brief bulge, then the blob drops away broken.
+	var tw := old.create_tween()
+	tw.tween_property(old, "scale", Vector2(1.18, 0.86), Motion.time(0.07)) 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(old, "scale", Vector2(0.72, 1.16), Motion.time(0.20)) 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tw.parallel().tween_property(old, "modulate:a", 0.0, Motion.time(0.20)) 		.set_ease(Tween.EASE_IN)
+	tw.parallel().tween_property(old, "rotation", old.rotation + 0.5, Motion.time(0.20))
+	tw.tween_callback(old.queue_free)
+	# Fragments, through the one burst funnel — seal-blue so they read as the wax
+	# that just failed rather than as another spark.
+	Motion.burst(host, centre, "impact", {
+		"color": Color(0.42, 0.62, 0.84), "amount": 14,
+		"spread": 180.0, "velocity_max": 190.0,
+	})
 
 
 func _refresh_status_rail(initial_build: bool = false) -> void:
 	if _compact_root == null or not is_instance_valid(_compact_root):
 		return
 	var sig := _status_signature()
+	# Presentation context is not part of the rail signature. Refresh these
+	# idempotent checks before the early-out so a card compacted after its face
+	# was built can never leave a live costume missing.
+	_refresh_costumes()
 	if not initial_build and sig == _status_rail_sig:
 		return
 	_status_rail_sig = sig
@@ -1999,23 +1804,10 @@ func _refresh_status_rail(initial_build: bool = false) -> void:
 	_status_orbs.clear()
 
 	# Collect rail entries — transient statuses FIRST (they're what the player
-	# must react to this turn), then printed/granted keywords.
+	# must react to this turn), then printed/granted keywords. Both come from
+	# _active_effect_entries (its keyword loop appends the active printed ones);
+	# floop/doom/shield are already excluded there or badged separately.
 	var entries: Array = _active_effect_entries(false)
-	var kws: Array = []
-	var seen: Dictionary = {}
-	for kw in kws:
-		var k := String(kw)
-		# floop owns its own indicator; doom its countdown badge. A printed
-		# Shield icon would lie once the bubble pops — the status entry above
-		# owns the glyph while the shield holds.
-		if k in ["floop", "doom", "shield"] or seen.has(k):
-			continue
-		seen[k] = true
-		var icon_tex: Texture2D = GameTheme.get_keyword_icon(k)
-		if icon_tex == null:
-			continue
-		entries.append({"tex": icon_tex, "glyph": GameTheme.GILT_BRIGHT,
-			"rim": Color(0.62, 0.50, 0.26, 0.85)})
 	entries = entries.filter(func(e): return e["tex"] != null)
 	if entries.size() > _STATUS_RAIL_CAP:
 		entries.resize(_STATUS_RAIL_CAP)
@@ -2075,14 +1867,13 @@ func _refresh_status_rail(initial_build: bool = false) -> void:
 # ═══════════════════════════════════════════
 #
 # Fast path for hand cards (and any other context where a pre-baked texture
-# exists in CardTextureCache). The heavy v4 frame / art / banner / well /
-# orb-sphere visuals are flattened into a single ImageTexture; only the
+# exists in CardTextureCache). The full writ frame, art, banner, well, and
+# stat-seal visuals are flattened into a single ImageTexture; only the
 # dynamic numerals (cost/atk/hp), floop indicator, and an invisible border
 # panel remain as live nodes. Per-card render cost drops from ~40 sub-draws
 # to ~6 (1 TextureRect quad + ~3 Label glyph batches + 1 Panel border).
 #
-# Anchor positions for the overlay labels mirror the v4 orb positions exactly
-# so they land inside the orb spheres painted in the bake.
+# Anchor positions for the overlay labels mirror the live stat seals exactly.
 
 func _build_baked_overlay_layout() -> void:
 	var root := Control.new()
@@ -2111,10 +1902,14 @@ func _build_baked_overlay_layout() -> void:
 	tex_rect.offset_top = -float(CardTextureCache.TEX_H) * 0.5
 	tex_rect.offset_bottom = float(CardTextureCache.TEX_H) * 0.5
 	tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# ★2 — a rare's gilt catches the light as the card tilts. Held so the lean
+	# driver can sweep the highlight; see _apply_gilt_foil.
+	_baked_face = tex_rect
+	_apply_gilt_foil()
 	root.add_child(tex_rect)
 
 	# ── Live overlay: cost orb numeral ──
-	# Wrapper Control concentric with the cost SphereOrb painted into the baked
+	# Wrapper Control concentric with the cost stat seal painted into the baked
 	# texture. The bake uses the v3 layout, whose orbs are 56px (anchor 0,0 with
 	# -9..47 offsets, sphere center at card-local 19px) — so the slot MUST use
 	# the same 56px box, not the old v4 44px box (-9..35), or the numeral lands
@@ -2175,7 +1970,12 @@ func _build_baked_overlay_layout() -> void:
 	# Same geometry the v9 live layout (_build_chart_proto) uses for its desc, so it
 	# lands exactly on the blank vellum panel baked underneath. Because it's the font
 	# renderer (not a baked raster), it stays razor-sharp when the card is lifted or
-	# zoomed — the fix for "I can't read the card text."
+	# zoomed — the fix for "I can't read the card text." Drawn at every scale,
+	# including the 0.36 deck strip: a 2026-07-21 pass filled this well with a
+	# re-cropped copy of the card art instead, but a landscape painting has nothing
+	# left to show below the art window, so the second crop only read as the same
+	# picture stamped twice ("the pictures are glitched"). Crisp small text beats a
+	# duplicated image — and a deck the player is reading wants its rules visible.
 	var od_clip := Control.new()
 	od_clip.clip_contents = true
 	od_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -2186,7 +1986,7 @@ func _build_baked_overlay_layout() -> void:
 	# 265 since the one-line footer) so the live text lands on the vellum panel
 	# baked underneath by chart_proto.
 	od_clip.offset_top = 176
-	od_clip.offset_bottom = 265 if is_spell() else 258
+	od_clip.offset_bottom = 265 if not is_creature() else 258
 	root.add_child(od_clip)
 	var od_center := CenterContainer.new()
 	od_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -2215,22 +2015,20 @@ func _build_baked_overlay_layout() -> void:
 	var od_raw: String = card_data.get("desc", "")
 	if od_raw == "" and synth_desc_if_empty:
 		od_raw = _synthesized_rules_text()
-	# Ramp MUST match _build_chart_proto's dsz block (17 / 16 / 15, 14px floor).
-	var od_sz := 17
-	if od_raw.length() > 115:
-		od_sz = 15
-	elif od_raw.length() > 85:
-		od_sz = 16
+	# Body copy matches the live renderer: a fixed 18px reading size.
+	var od_sz := 18
 	od_rt.add_theme_font_size_override("normal_font_size", od_sz)
 	od_rt.add_theme_font_size_override("bold_font_size", od_sz)
 	od_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
 	# decorate_keywords = gild + inline device stamps + [hint] glossary. Stamp
-	# size keys to the ramp, mirroring the chart_proto desc block.
+	# size keys to the ramp, mirroring the chart_proto desc block. Drawn at every
+	# thumbnail scale (down to the 0.36 deck strip): the vector text stays crisp
+	# and legible where a re-cropped copy of the art only read as a duplication.
 	var od_bb := KeywordEffects.decorate_keywords(od_raw, od_sz - 3).replace(
 		KeywordEffects.KEYWORD_GOLD, "#7a4f10")
 	od_rt.text = "[center]%s[/center]" % od_bb
 	od_center.add_child(od_rt)
-	_fit_desc_to_box.call_deferred(od_rt, 87.0 if is_spell() else 80.0)
+	_fit_desc_to_box.call_deferred(od_rt, 87.0 if not is_creature() else 80.0)
 
 	# ── Live overlay: NAME (StS model — drawn live over the baked cartouche) ──
 	# The bake paints the swallowtail banner but blanks the name (bake_strip_name);
@@ -2248,11 +2046,11 @@ func _build_baked_overlay_layout() -> void:
 	elif nm_is_upg:
 		nm_col = Color(1.0, 0.886, 0.541)
 	var nm_text := String(card_data.get("name", ""))
-	var nm_size := 14
+	var nm_size := 16
 	if nm_text.length() > 17:
-		nm_size = 12
+		nm_size = 14
 	elif nm_text.length() > 13:
-		nm_size = 13
+		nm_size = 15
 	_name_label = _make_styled_label(nm_text, nm_font, nm_size, nm_col)
 	_name_label.add_theme_constant_override("outline_size", 0)
 	_name_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.55))
@@ -2317,1159 +2115,6 @@ func _build_baked_overlay_layout() -> void:
 #  FULL (HAND) LAYOUT — name banner, art, description, footer stats
 # ═══════════════════════════════════════════
 
-func _build_full_layout() -> void:
-	var root := Control.new()
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(root)
-
-	# ── Layer 1: Card art clipped inside frame window ──
-	var card_art: Texture2D = _find_card_art()
-	if card_art:
-		var art_clip := Control.new()
-		art_clip.clip_contents = true
-		art_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		art_clip.anchor_left = 0.06
-		art_clip.anchor_right = 0.94
-		art_clip.anchor_top = 0.05
-		art_clip.anchor_bottom = 0.54
-		root.add_child(art_clip)
-		_art_rect = art_clip
-
-		var art_tex := TextureRect.new()
-		art_tex.texture = card_art
-		art_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		art_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		art_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
-		art_tex.anchor_bottom = 1.5
-		art_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		art_clip.add_child(art_tex)
-	else:
-		# Semantic icon placeholder for the hand-card layout's art window.
-		_art_rect = _build_placeholder_art(root, 0.06, 0.94, 0.05, 0.54)
-
-	# ── Layer 2: Ornate frame overlay ──
-	if GameTheme.tex_card_frame_ornate:
-		_frame_tex = TextureRect.new()
-		_frame_tex.texture = GameTheme.tex_card_frame_ornate
-		_frame_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		_frame_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		_frame_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_frame_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		if is_spell():
-			_frame_tex.self_modulate = Color(0.85, 0.78, 1.0)
-		elif is_opponent:
-			_frame_tex.self_modulate = Color(1.0, 0.82, 0.78)
-		root.add_child(_frame_tex)
-
-	# ── Layer 3: Name banner (top, over art) ──
-	var banner := PanelContainer.new()
-	banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	banner.anchor_left = 0.06
-	banner.anchor_right = 0.94
-	banner.anchor_top = 0.04
-	banner.anchor_bottom = 0.16
-	var bs := StyleBoxFlat.new()
-	bs.bg_color = Color(0.06, 0.05, 0.04, 0.88)
-	bs.border_color = Color(0.65, 0.50, 0.25, 0.8)
-	bs.set_border_width_all(1)
-	bs.set_corner_radius_all(3)
-	bs.content_margin_left = 2
-	bs.content_margin_right = 4
-	bs.content_margin_top = 0
-	bs.content_margin_bottom = 0
-	banner.add_theme_stylebox_override("panel", bs)
-	root.add_child(banner)
-
-	var banner_row := HBoxContainer.new()
-	banner_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	banner_row.add_theme_constant_override("separation", 3)
-	banner.add_child(banner_row)
-
-	_cost_badge = _make_circle_badge(GameTheme.MANA_BLUE, 18)
-	banner_row.add_child(_cost_badge)
-	_cost_label = _make_badge_label(str(card_data.cost), 11)
-	_cost_badge.add_child(_cost_label)
-
-	_name_label = Label.new()
-	_name_label.text = card_data.name
-	if GameTheme.font_display:
-		_name_label.add_theme_font_override("font", GameTheme.font_display)
-	_name_label.add_theme_font_size_override("font_size", 11)
-	_name_label.add_theme_color_override("font_color", GameTheme.get_name_color(card_data))
-	_name_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
-	_name_label.add_theme_constant_override("outline_size", 2)
-	_name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_name_label.clip_text = true
-	_name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	banner_row.add_child(_name_label)
-
-	# ── Gold divider at art-text boundary ──
-	var divider := ColorRect.new()
-	divider.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	divider.anchor_left = 0.07
-	divider.anchor_right = 0.93
-	divider.anchor_top = 0.555
-	divider.anchor_bottom = 0.565
-	divider.color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.6)
-	root.add_child(divider)
-
-	# ── Layer 4: Content in stone area ──
-	var content := VBoxContainer.new()
-	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	content.add_theme_constant_override("separation", 1)
-	content.anchor_left = 0.07
-	content.anchor_right = 0.93
-	content.anchor_top = 0.57
-	content.anchor_bottom = 0.97
-	root.add_child(content)
-
-	_rarity_strip = ColorRect.new()
-	_rarity_strip.custom_minimum_size = Vector2(0, 2)
-	_rarity_strip.color = GameTheme.rarity_color(card_data.get("rarity", "common"))
-	_rarity_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	content.add_child(_rarity_strip)
-
-	if is_spell():
-		_type_label = Label.new()
-		_type_label.text = "SPELL"
-		if GameTheme.font_display:
-			_type_label.add_theme_font_override("font", GameTheme.font_display)
-		_type_label.add_theme_font_size_override("font_size", 9)
-		_type_label.add_theme_color_override("font_color", GameTheme.SPELL_PURPLE)
-		_type_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		_type_label.custom_minimum_size = Vector2(0, 10)
-		_type_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		content.add_child(_type_label)
-
-	_desc_label = Label.new()
-	_desc_label.text = card_data.get("desc", "")
-	if GameTheme.font_body:
-		_desc_label.add_theme_font_override("font", GameTheme.font_body)
-	_desc_label.add_theme_font_size_override("font_size", 9)
-	_desc_label.add_theme_color_override("font_color", GameTheme.DESC_DIM)
-	_desc_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_desc_label.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_desc_label.clip_text = true
-	_desc_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	content.add_child(_desc_label)
-
-	_floop_indicator = Label.new()
-	_floop_indicator.text = "FLOOP"
-	if GameTheme.font_display:
-		_floop_indicator.add_theme_font_override("font", GameTheme.font_display)
-	_floop_indicator.add_theme_font_size_override("font_size", 9)
-	_floop_indicator.add_theme_color_override("font_color", GameTheme.FLOOP_BLUE)
-	_floop_indicator.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_floop_indicator.custom_minimum_size = Vector2(0, 10)
-	_floop_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_floop_indicator.visible = false
-	content.add_child(_floop_indicator)
-
-	if is_creature():
-		var footer := HBoxContainer.new()
-		footer.custom_minimum_size = Vector2(0, 20)
-		footer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		content.add_child(footer)
-
-		_atk_badge = GameTheme.make_icon_stat(
-			GameTheme.tex_icon_sword, str(current_atk),
-			GameTheme.ATK_RED, 15)
-		footer.add_child(_atk_badge)
-		_atk_label = _atk_badge.get_child(1) as Label
-
-		var spacer := Control.new()
-		spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		footer.add_child(spacer)
-
-		_hp_badge = GameTheme.make_icon_stat(
-			GameTheme.tex_icon_heart, str(current_hp),
-			GameTheme.HEALTH_GREEN, 15)
-		footer.add_child(_hp_badge)
-		_hp_label = _hp_badge.get_child(1) as Label
-	else:
-		var spell_foot := Label.new()
-		spell_foot.text = "— SPELL —"
-		if GameTheme.font_display:
-			spell_foot.add_theme_font_override("font", GameTheme.font_display)
-		spell_foot.add_theme_font_size_override("font_size", 9)
-		spell_foot.add_theme_color_override("font_color", GameTheme.SPELL_PURPLE)
-		spell_foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		spell_foot.custom_minimum_size = Vector2(0, 14)
-		spell_foot.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		content.add_child(spell_foot)
-
-
-# ═══════════════════════════════════════════
-#  V3 LAYOUT — aligned to the new procedural frame texture.
-#  Frame painted zones (normalized): banner y 0.07-0.21, art y 0.22-0.62,
-#  type-strip y 0.62-0.69, description well y 0.70-0.92,
-#  cost orb top-left, atk/hp chips at bottom corners.
-# ═══════════════════════════════════════════
-
-func _build_full_layout_v3() -> void:
-	var root := Control.new()
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(root)
-
-	# ── Layer 1: Frame overlay — per-card variant (rarity + type) ──
-	# Placed first (below the art) so the art_clip below can render ON TOP,
-	# covering the frame's dark fill in the art window region. The painted
-	# border of the art window stays visible because art_clip is inset
-	# slightly from the painted edge.
-	var v3_frame: Texture2D = GameTheme.get_card_frame(card_data)
-	if v3_frame:
-		_frame_tex = TextureRect.new()
-		_frame_tex.texture = v3_frame
-		_frame_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		_frame_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		_frame_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_frame_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		# Rarity tint via self_modulate — v5 frames are visually identical
-		# across rarity, so we tint the whole frame here to differentiate.
-		# Uncommon = cool blue wash, rare = warm gold wash, starter = neutral.
-		var rarity_str := String(card_data.get("rarity", "common"))
-		match rarity_str:
-			"uncommon": _frame_tex.self_modulate = Color(0.85, 0.95, 1.05)
-			"rare":     _frame_tex.self_modulate = Color(1.10, 0.95, 0.78)
-			"starter":  _frame_tex.self_modulate = Color(0.92, 0.92, 0.94)
-			_:          pass
-		# Spells get a slight purple wash so they read different from creatures.
-		if is_spell():
-			var s := _frame_tex.self_modulate
-			_frame_tex.self_modulate = Color(s.r * 0.95, s.g * 0.92, s.b * 1.10)
-		# Opponent tint applied last so it dominates over rarity.
-		if is_opponent:
-			_frame_tex.self_modulate = Color(1.0, 0.82, 0.78)
-		root.add_child(_frame_tex)
-
-	# ── Layer 1.5: Flatten the painted text well rectangle ──────────────
-	# The frame PNG has a recessed rectangle painted around the description
-	# area. This overlay covers it with the card body color so the text
-	# floats on the card surface — Slay the Spire / Griftlands approach.
-	# Hard text panels chop the card into separate sections; unified body
-	# reads as one continuous surface.
-	var text_overlay := Panel.new()
-	text_overlay.anchor_left = 0.067   # covers painted border on the sides
-	text_overlay.anchor_right = 0.933
-	text_overlay.anchor_top = 0.625    # just below the banner shadow
-	text_overlay.anchor_bottom = 0.920 # just above the bottom painted edge
-	text_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var to_style := StyleBoxFlat.new()
-	# #393540 — sampled card body color (RGB 57,53,64 from frame_v5_b at y=100).
-	to_style.bg_color = Color(0.2235, 0.2078, 0.2510, 1.0)
-	to_style.border_color = Color(0, 0, 0, 0)
-	to_style.set_border_width_all(0)
-	to_style.set_corner_radius_all(0)
-	text_overlay.add_theme_stylebox_override("panel", to_style)
-	# Paper grain texture overlay — gives the dark body subtle texture so it
-	# doesn't read as a flat black rectangle. Same tex_card_grain used by v4.
-	# Without this the lower half feels empty / cheap; with it the body
-	# reads as "painted parchment in shadow" instead of "untextured surface".
-	if GameTheme.tex_card_grain:
-		var grain_overlay := TextureRect.new()
-		grain_overlay.texture = GameTheme.tex_card_grain
-		grain_overlay.stretch_mode = TextureRect.STRETCH_TILE
-		# EXPAND_IGNORE_SIZE drops the 256x256 texture min-size so FULL_RECT anchors
-		# can shrink the rect to the parent panel; without it the grain keeps its
-		# texture size and spills out below/beside the card (visible band in Reward).
-		grain_overlay.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		grain_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-		grain_overlay.modulate = Color(1, 1, 1, 0.20)
-		grain_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		text_overlay.add_child(grain_overlay)
-	# Match the frame's rarity tint so the overlay color shifts with it.
-	var rarity_for_overlay := String(card_data.get("rarity", "common"))
-	match rarity_for_overlay:
-		"uncommon": text_overlay.modulate = Color(0.85, 0.95, 1.05)
-		"rare":     text_overlay.modulate = Color(1.10, 0.95, 0.78)
-		"starter":  text_overlay.modulate = Color(0.92, 0.92, 0.94)
-		_:          pass
-	if is_spell():
-		var sm := text_overlay.modulate
-		text_overlay.modulate = Color(sm.r * 0.95, sm.g * 0.92, sm.b * 1.10)
-	if is_opponent:
-		text_overlay.modulate = Color(1.0, 0.82, 0.78)
-	root.add_child(text_overlay)
-
-	# ── Layer 2: Art with rounded corners (shader-masked) ────────────────
-	# Art fills the full upper half from card edge to card edge. A canvas_item
-	# shader discards pixels in the corners outside an ellipse, producing
-	# rounded corners that match the painted card silhouette. Only the TOP
-	# corners are visually relevant — the bottom edge sits against the banner.
-	#
-	# radius_x / radius_y are in UV space (0-1 normalized). For a card-edge-
-	# to-card-edge art rect (~210px wide, ~140px tall in card pixels), a
-	# 12px corner radius is ~0.057 in X and ~0.085 in Y. The ellipse-based
-	# math makes the visual corner read as circular despite the aspect.
-	var card_art: Texture2D = _find_card_art()
-	if card_art:
-		var art_clip := Control.new()
-		art_clip.clip_contents = true
-		art_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		# Edge-to-edge anchors. 1.5% inset on sides leaves room for the
-		# painted outer trim line of the card silhouette.
-		art_clip.anchor_left = 0.020
-		art_clip.anchor_right = 0.980
-		art_clip.anchor_top = 0.015
-		art_clip.anchor_bottom = 0.490
-		root.add_child(art_clip)
-		_art_rect = art_clip
-
-		var art_tex := TextureRect.new()
-		art_tex.texture = card_art
-		art_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		art_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		art_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
-		art_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-
-		# Rounded-corner shader. Only rounds the TOP two corners so the art
-		# meets the banner with a straight bottom edge — "art is the top half
-		# of the card, banner cuts across" read. Rounding the bottom corners
-		# too made the art look like a separate floating tile.
-		var art_shader := Shader.new()
-		art_shader.code = """
-shader_type canvas_item;
-
-uniform float radius_x : hint_range(0.0, 0.5) = 0.057;
-uniform float radius_y : hint_range(0.0, 0.5) = 0.085;
-
-void fragment() {
-	vec2 uv = UV;
-	float d_x = min(uv.x, 1.0 - uv.x);
-	float d_y = uv.y;  // distance from TOP edge only — bottom stays square
-	if (d_x < radius_x && d_y < radius_y) {
-		vec2 offset = vec2(radius_x - d_x, radius_y - d_y);
-		float ed = (offset.x * offset.x) / (radius_x * radius_x) +
-				   (offset.y * offset.y) / (radius_y * radius_y);
-		if (ed > 1.0) {
-			COLOR.a = 0.0;
-		}
-	}
-}
-"""
-		var art_mat := ShaderMaterial.new()
-		art_mat.shader = art_shader
-		art_mat.set_shader_parameter("radius_x", 0.057)
-		art_mat.set_shader_parameter("radius_y", 0.085)
-		art_tex.material = art_mat
-
-		art_clip.add_child(art_tex)
-	else:
-		_art_rect = _build_placeholder_art(root, 0.020, 0.980, 0.015, 0.490)
-
-	# Every text label below is placed via _center_at_point() using the POINT_*
-	# and SIZE_* constants at the top of this file. To move a label, edit its
-	# POINT_* coords — there are no other position numbers anywhere else.
-
-	# ── Layer 3: Cost orb + label (top-left corner) ──────────────────────
-	# 56px orb hanging 9px past the top-left corner (Hearthstone convention).
-	# Direct corner anchors instead of _center_at_point so the orb sits
-	# OUTSIDE the card silhouette like a stat gem rather than INSIDE the body.
-	var v3_cost_orb := _make_stat_orb(GameTheme.COST_BLUE_GEM, 0.0,
-		static_display)
-	v3_cost_orb.anchor_left = 0.0; v3_cost_orb.anchor_right = 0.0
-	v3_cost_orb.anchor_top = 0.0; v3_cost_orb.anchor_bottom = 0.0
-	v3_cost_orb.offset_left = -9; v3_cost_orb.offset_right = 47
-	v3_cost_orb.offset_top = -9; v3_cost_orb.offset_bottom = 47
-	root.add_child(v3_cost_orb)
-	# bake_strip_stats blanks the numeral during baking — the live overlay
-	# label paints it on top of the orb. Without this check we'd burn the
-	# number into the cached texture AND overlay it, causing "22" doubling.
-	var stat_font: Font = display_font_override if display_font_override else GameTheme.font_stat
-	# Numerals at 14 pt — matches the compact battlefield's label size so hand
-	# cards and field tokens read with consistent number weight. (Earlier
-	# experiment at 22 pt looked "giga" relative to the battlefield because
-	# the 56 px hand orbs are visibly larger than the 30 px field orbs to
-	# begin with — equal font size keeps the absolute glyph height matched.)
-	# PRESET_FULL_RECT + CENTER alignment puts the glyph at the orb's visual
-	# center; GameTheme.font_stat's FontVariation sets spacing_bottom = −5 so
-	# caps/numerals optically center inside the line box instead of sitting high.
-	_cost_label = _make_styled_label(
-		"" if bake_strip_stats else str(card_data.cost),
-		stat_font, 14, Color(0.996, 0.941, 0.800))  # #FEF0CC
-	_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-	# Shift the label rect DOWN to optically center the numeral on the orb's
-	# painted bright center (see ORB_NUMERAL_Y_OFFSET docs above).
-	_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
-	_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
-	_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	v3_cost_orb.add_child(_cost_label)
-
-	# ── Layer 4: Name label inside the painted banner ──
-	# DARK text on the CREAM banner — tribe-tinted. Each tribe color was hand-
-	# tuned for ≥4.5:1 contrast on the cream banner (soldier amber, wretch rust,
-	# beast forest, fae teal, undead crimson, construct slate, spell violet,
-	# neutral warm brown). No outline — a 3px black outline around tiny dark
-	# glyphs blobs them out, fusing letters into illegible smears (the old bug).
-	# At ≥4.5:1 contrast Lilita's heavy weight stands on its own. Soft drop
-	# shadow adds depth without darkening. Ellipsis-trim handles long names
-	# like "Collector's Champion" gracefully when they overflow the banner.
-	var display_font: Font = display_font_override if display_font_override else GameTheme.font_display
-	_name_label = _make_styled_label(card_data.name, display_font,
-		13, GameTheme.get_name_color(card_data))
-	_name_label.add_theme_constant_override("outline_size", 0)
-	_name_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.30))
-	_name_label.add_theme_constant_override("shadow_offset_x", 0)
-	_name_label.add_theme_constant_override("shadow_offset_y", 1)
-	_name_label.clip_text = true
-	_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	_center_at_point(_name_label, POINT_NAME, SIZE_NAME)
-	root.add_child(_name_label)
-
-	# ── Layer 5: Keyword medallion strip ──
-	# RE-ENABLED to fill the empty space between banner and description that
-	# made cards feel bare (especially vanilla creatures with no description).
-	# Shows colored medallions for each keyword the card has (Floop, Wither,
-	# On-enter, etc.) — adds gameplay info AT A GLANCE + fills visual void.
-	_type_label = Label.new()
-	_type_label.visible = false
-	_type_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_type_label)
-
-	var kw_strip := HBoxContainer.new()
-	kw_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	kw_strip.alignment = BoxContainer.ALIGNMENT_CENTER
-	kw_strip.add_theme_constant_override("separation", 3)
-	_center_at_point(kw_strip, POINT_TYPE, Vector2(200, 24))
-	root.add_child(kw_strip)
-
-	var icon_px := 18
-	var keywords: Array = card_data.get("keywords", [])
-	var shown := 0
-	for k in keywords:
-		if shown >= 5:
-			break
-		var k_str := String(k)
-		var icon_tex: Texture2D = GameTheme.get_keyword_icon(k_str)
-		if icon_tex == null:
-			continue
-		# Each medallion = PanelContainer with cream-rounded background + dark icon
-		var bsb := StyleBoxFlat.new()
-		bsb.bg_color = Color(0.96, 0.88, 0.65, 0.90)
-		bsb.set_corner_radius_all(icon_px)
-		bsb.border_color = Color(0.50, 0.34, 0.14, 0.90)
-		bsb.set_border_width_all(1)
-		bsb.content_margin_left = 1
-		bsb.content_margin_right = 1
-		bsb.content_margin_top = 1
-		bsb.content_margin_bottom = 1
-		var medallion := PanelContainer.new()
-		medallion.add_theme_stylebox_override("panel", bsb)
-		medallion.mouse_filter = Control.MOUSE_FILTER_STOP
-		medallion.tooltip_text = KeywordEffects.tooltip_for(k_str)
-		kw_strip.add_child(medallion)
-
-		var ic := TextureRect.new()
-		ic.texture = icon_tex
-		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		ic.custom_minimum_size = Vector2(icon_px, icon_px)
-		ic.modulate = Color(0.10, 0.05, 0.02, 1.0)  # near-black — max contrast
-		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		medallion.add_child(ic)
-		shown += 1
-
-	# ── Layer 6: Description — RichTextLabel with BBCode keyword highlight ──
-	# Hidden stub Label kept for _desc_label external references; actual
-	# rendering uses RichTextLabel so keyword display names are bolded in gold.
-	_desc_label = Label.new()
-	_desc_label.visible = false
-	_desc_label.text = card_data.get("desc", "")
-	_desc_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_desc_label)
-
-	var desc_rt := RichTextLabel.new()
-	desc_rt.bbcode_enabled = true
-	desc_rt.fit_content = false
-	desc_rt.scroll_active = false
-	desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	# Description: GameTheme.font_body for normal text, font_body_bold for
-	# [b] keyword highlights. The PREVIOUS code set bold_font = font_body
-	# which meant keywords got NO weight bump — only a color shift. That
-	# made the description look flat ("effects still with this text").
-	# Using the dedicated bold variant gives keywords the AAA weight pop.
-	var desc_font: Font = display_font_override if display_font_override else GameTheme.font_body
-	var desc_bold_font: Font = display_font_override if display_font_override else GameTheme.font_body_bold
-	if desc_font:
-		desc_rt.add_theme_font_override("normal_font", desc_font)
-		desc_rt.add_theme_font_override("bold_font",
-			desc_bold_font if desc_bold_font else desc_font)
-	# Font size 11 in 300x400 ref → 8.25px screen (×0.75 scale). Was 8 ref
-	# (6px screen) — illegible. 11 ref / 8 screen matches Slay the Spire's
-	# body-text density at hand-size cards.
-	desc_rt.add_theme_font_size_override("normal_font_size", 11)
-	desc_rt.add_theme_font_size_override("bold_font_size", 11)
-	# WARM CREAM on dark text well (was inverted before — dark on dark is
-	# illegible). #E8DCC4 = warm cream, contrast 8.9:1 on #4E4956 (AAA).
-	desc_rt.add_theme_color_override("default_color", Color(0.910, 0.863, 0.769))
-	# Center-align the description visually (RichTextLabel respects [center]).
-	var raw_desc: String = card_data.get("desc", "")
-	var colorized: String = KeywordEffects.colorize_keywords(raw_desc)
-	desc_rt.text = "[center]%s[/center]" % colorized
-	_center_at_point(desc_rt, POINT_DESC, SIZE_DESC)
-	root.add_child(desc_rt)
-
-	# ── Layer 7: ATK / HP orbs + labels (bottom corners) ─────────────────
-	# 56px orbs hanging 9px past the bottom corners (Hearthstone convention).
-	# Direct anchors to bottom-left / bottom-right instead of _center_at_point.
-	# Text colors per WCAG contrast research:
-	#   ATK: #FFF4D6 warm off-white on bronze → 6.9:1 AAA (large text)
-	#   HP:  #FFF0E5 warm porcelain on oxblood → 8.4:1 AAA
-	if is_creature():
-		var v3_atk_orb := _make_stat_orb(GameTheme.ATK_GOLD_SHIELD, 0.0,
-			static_display)
-		v3_atk_orb.anchor_left = 0.0; v3_atk_orb.anchor_right = 0.0
-		v3_atk_orb.anchor_top = 1.0; v3_atk_orb.anchor_bottom = 1.0
-		v3_atk_orb.offset_left = -9; v3_atk_orb.offset_right = 47
-		v3_atk_orb.offset_top = -47; v3_atk_orb.offset_bottom = 9
-		root.add_child(v3_atk_orb)
-		_atk_label = _make_styled_label(
-			"" if bake_strip_stats else str(current_atk),
-			stat_font, 14, Color(1.000, 0.957, 0.839))  # #FFF4D6
-		_atk_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_atk_label.offset_top = ORB_NUMERAL_Y_OFFSET
-		_atk_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
-		_atk_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		v3_atk_orb.add_child(_atk_label)
-
-		var v3_hp_orb := _make_stat_orb(GameTheme.HEALTH_RED_DROP, 0.0,
-			static_display)
-		v3_hp_orb.anchor_left = 1.0; v3_hp_orb.anchor_right = 1.0
-		v3_hp_orb.anchor_top = 1.0; v3_hp_orb.anchor_bottom = 1.0
-		v3_hp_orb.offset_left = -47; v3_hp_orb.offset_right = 9
-		v3_hp_orb.offset_top = -47; v3_hp_orb.offset_bottom = 9
-		root.add_child(v3_hp_orb)
-		_hp_label = _make_styled_label(
-			"" if bake_strip_stats else str(current_hp),
-			stat_font, 14, Color(1.000, 0.941, 0.898))  # #FFF0E5
-		_hp_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_hp_label.offset_top = ORB_NUMERAL_Y_OFFSET
-		_hp_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
-		_hp_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		v3_hp_orb.add_child(_hp_label)
-
-	# ── Floop indicator — between the orbs, shown when player toggles will_floop
-	_floop_indicator = _make_styled_label("FLOOP", GameTheme.font_display,
-		8, GameTheme.FLOOP_BLUE)
-	_center_at_point(_floop_indicator, POINT_FLOOP, SIZE_FLOOP)
-	_floop_indicator.visible = false
-	root.add_child(_floop_indicator)
-
-	# ── Spell targeting tag — fills empty bottom space on spell cards ──
-	if is_spell():
-		var tgt_text: String = _spell_target_label()
-		if tgt_text != "":
-			var tgt_lbl: Label = _make_styled_label(
-				tgt_text, GameTheme.font_display, 9, Color(0.18, 0.10, 0.04))
-			tgt_lbl.add_theme_color_override("font_outline_color",
-				Color(1, 0.93, 0.78, 0.50))
-			tgt_lbl.add_theme_constant_override("outline_size", 1)
-			_center_at_point(tgt_lbl, POINT_SPELL_TARGET, SIZE_FLOOP)
-			root.add_child(tgt_lbl)
-
-	# Rarity strip — kept as a hidden placeholder so external code that reads
-	# this reference (color updates, etc.) doesn't null-deref.
-	_rarity_strip = ColorRect.new()
-	_rarity_strip.custom_minimum_size = Vector2(0, 1)
-	_rarity_strip.color = GameTheme.rarity_color(card_data.get("rarity", "common"))
-	_rarity_strip.visible = false
-	_rarity_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_rarity_strip)
-
-
-# ═══════════════════════════════════════════
-#  REDESIGN PROTOTYPE (v6) — visual-audit mockup, gated by `redesign_proto`.
-#  Builds on the v3 painted frame + PD-master art (the game's strongest
-#  assets) and resolves the four unfinished zones from the design review:
-#    1. Rarity is now a card-wide language — colored glow rim + a faceted
-#       rarity gem (uncommon/rare only), not just a faint frame tint.
-#    2. Keyword medallions are seated on an engraved SHELF instead of
-#       floating as mystery glyphs in dead space.
-#    3. Description sits on an aged-parchment page, vertically centered, so
-#       short cards don't leave a void and the text reads as "a page."
-#    4. Spells own their bottom with a forged footer cartouche (targeting /
-#       INSTANT / EXHAUST) flanked by gems — no more empty orb wells.
-#  NOTE: the painted filigree corners + forged nameplate in the full vision
-#  are MJ-commissioned art; this proto fakes them procedurally to show layout.
-# ═══════════════════════════════════════════
-
-func _build_redesign_proto() -> void:
-	var root := Control.new()
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(root)
-
-	var rarity := String(card_data.get("rarity", "common"))
-	var is_sp := is_spell()
-	var glow_col: Color = GameTheme.rarity_color(rarity)
-
-	# ── Layer -1: soft neutral seat shadow ───────────────────────────────
-	# A large, soft, rarity-independent dark halo so the hard card edge melts
-	# into whatever it sits on instead of stopping abruptly. This is the
-	# "transition to the background" — every card casts the same gentle seat;
-	# the rarity glow (Layer 0) then adds colour on top for rares/uncommons.
-	var seat := Panel.new()
-	seat.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	seat.anchor_left = 0.06; seat.anchor_right = 0.94
-	seat.anchor_top = 0.04; seat.anchor_bottom = 0.965
-	var seat_st := StyleBoxFlat.new()
-	seat_st.bg_color = Color(0, 0, 0, 0.0)
-	seat_st.set_corner_radius_all(22)
-	seat_st.set_border_width_all(0)
-	seat_st.shadow_color = Color(0, 0, 0, 0.55)
-	seat_st.shadow_size = 18
-	seat_st.shadow_offset = Vector2(0, 4)
-	seat.add_theme_stylebox_override("panel", seat_st)
-	root.add_child(seat)
-
-	# ── Layer 0: rarity glow rim (behind everything) ─────────────────────
-	# A rounded panel inset to the painted silhouette whose colored drop
-	# shadow bleeds past the card edge → an unmistakable rarity halo. Rare
-	# burns gold, uncommon glows cool blue, common barely whispers.
-	var glow_size := 4
-	match rarity:
-		"rare":     glow_size = 16
-		"uncommon": glow_size = 10
-		"common":   glow_size = 4
-		"starter":  glow_size = 2
-	var glow := Panel.new()
-	glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	glow.anchor_left = 0.035; glow.anchor_right = 0.965
-	glow.anchor_top = 0.02; glow.anchor_bottom = 0.985
-	var gs := StyleBoxFlat.new()
-	gs.bg_color = Color(glow_col.r, glow_col.g, glow_col.b, 0.0)
-	gs.set_corner_radius_all(20)
-	gs.set_border_width_all(0)
-	gs.shadow_color = Color(glow_col.r, glow_col.g, glow_col.b, 0.6)
-	gs.shadow_size = glow_size
-	glow.add_theme_stylebox_override("panel", gs)
-	root.add_child(glow)
-
-	# ── Layer 1: painted frame, tinted per rarity (Marvel-Snap read) ─────
-	var v3_frame: Texture2D = GameTheme.get_card_frame(card_data)
-	if v3_frame:
-		_frame_tex = TextureRect.new()
-		_frame_tex.texture = v3_frame
-		_frame_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		_frame_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		_frame_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_frame_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var fm := Color(1, 1, 1)
-		match rarity:
-			"rare":     fm = Color(1.18, 0.98, 0.58)  # hot gold
-			"uncommon": fm = Color(0.74, 0.86, 1.10)  # cool steel-blue
-			"common":   fm = Color(1.02, 0.96, 0.88)  # warm neutral
-			"starter":  fm = Color(0.86, 0.84, 0.80)  # muted pewter
-		if is_sp:
-			fm = Color(fm.r * 0.90, fm.g * 0.84, fm.b * 1.16)  # violet bias
-		_frame_tex.self_modulate = fm
-		root.add_child(_frame_tex)
-
-	# ── Layer 2: aged-parchment description page ─────────────────────────
-	# Replaces v3's flat dark overlay. A warm tan page with a dark-brown
-	# engraved border + grain — dark text on it reads as a real page, which
-	# is the single biggest "this card is finished" upgrade.
-	var page := Panel.new()
-	page.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	page.anchor_left = 0.105; page.anchor_right = 0.895
-	page.anchor_top = 0.620; page.anchor_bottom = 0.905
-	var pst := StyleBoxFlat.new()
-	pst.bg_color = Color(0.737, 0.651, 0.494, 0.98)  # #BCA67E aged parchment
-	pst.set_corner_radius_all(7)
-	pst.border_color = Color(0.286, 0.196, 0.094, 0.95)  # dark walnut edge
-	pst.set_border_width_all(2)
-	pst.shadow_color = Color(0, 0, 0, 0.45)
-	pst.shadow_size = 4
-	page.add_theme_stylebox_override("panel", pst)
-	root.add_child(page)
-	# Aged-parchment surface: a clipped overlay stack — paper-fiber grain →
-	# warm sunlit top sheen → walnut gravity-shade at the bottom → darkened
-	# corner vignette — turns the flat tan fill into a lit, weathered page.
-	# All baked Gradient/Noise textures (no shaders → GL-compat safe). Added
-	# before the description so the text always sits on top.
-	var page_surf := Control.new()
-	page_surf.clip_contents = true
-	page_surf.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	page_surf.anchor_left = 0.0; page_surf.anchor_right = 1.0
-	page_surf.anchor_top = 0.0; page_surf.anchor_bottom = 1.0
-	page_surf.offset_left = 2; page_surf.offset_right = -2
-	page_surf.offset_top = 2; page_surf.offset_bottom = -2
-	page.add_child(page_surf)
-	if GameTheme.tex_card_grain:
-		var pg := TextureRect.new()
-		pg.texture = GameTheme.tex_card_grain
-		pg.stretch_mode = TextureRect.STRETCH_TILE
-		pg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		pg.set_anchors_preset(Control.PRESET_FULL_RECT)
-		pg.modulate = Color(0.33, 0.22, 0.10, 0.34)  # browner, stronger fiber
-		pg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		page_surf.add_child(pg)
-	if GameTheme.tex_card_top_light:
-		var tl := TextureRect.new()
-		tl.texture = GameTheme.tex_card_top_light
-		tl.stretch_mode = TextureRect.STRETCH_SCALE
-		tl.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		tl.set_anchors_preset(Control.PRESET_FULL_RECT)
-		tl.modulate = Color(1.0, 0.95, 0.80, 0.30)  # warm sunlit top edge
-		tl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		page_surf.add_child(tl)
-	if GameTheme.tex_card_bottom_shade:
-		var bs := TextureRect.new()
-		bs.texture = GameTheme.tex_card_bottom_shade
-		bs.stretch_mode = TextureRect.STRETCH_SCALE
-		bs.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		bs.set_anchors_preset(Control.PRESET_FULL_RECT)
-		bs.modulate = Color(0.28, 0.18, 0.09, 0.34)  # walnut gravity-shade
-		bs.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		page_surf.add_child(bs)
-	if GameTheme.tex_card_vignette:
-		var vg := TextureRect.new()
-		vg.texture = GameTheme.tex_card_vignette
-		vg.stretch_mode = TextureRect.STRETCH_SCALE
-		vg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		vg.set_anchors_preset(Control.PRESET_FULL_RECT)
-		vg.modulate = Color(0.22, 0.13, 0.06, 0.30)  # aged darkened edges
-		vg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		page_surf.add_child(vg)
-
-	# ── Layer 3: art with rounded top corners (reused v3 shader) ─────────
-	var card_art: Texture2D = _find_card_art()
-	if card_art:
-		var art_clip := Control.new()
-		art_clip.clip_contents = true
-		art_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		art_clip.anchor_left = 0.020; art_clip.anchor_right = 0.980
-		art_clip.anchor_top = 0.015; art_clip.anchor_bottom = 0.470
-		root.add_child(art_clip)
-		_art_rect = art_clip
-		var art_tex := TextureRect.new()
-		art_tex.texture = card_art
-		art_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		art_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		art_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
-		art_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var art_shader := Shader.new()
-		art_shader.code = """
-shader_type canvas_item;
-uniform float radius_x : hint_range(0.0, 0.5) = 0.057;
-uniform float radius_y : hint_range(0.0, 0.5) = 0.085;
-void fragment() {
-	vec2 uv = UV;
-	float d_x = min(uv.x, 1.0 - uv.x);
-	float d_y = uv.y;
-	if (d_x < radius_x && d_y < radius_y) {
-		vec2 offset = vec2(radius_x - d_x, radius_y - d_y);
-		float ed = (offset.x * offset.x) / (radius_x * radius_x) +
-				   (offset.y * offset.y) / (radius_y * radius_y);
-		if (ed > 1.0) { COLOR.a = 0.0; }
-	}
-}
-"""
-		var art_mat := ShaderMaterial.new()
-		art_mat.shader = art_shader
-		art_mat.set_shader_parameter("radius_x", 0.090)
-		art_mat.set_shader_parameter("radius_y", 0.135)
-		art_tex.material = art_mat
-		art_clip.add_child(art_tex)
-	else:
-		# No dedicated art → a deliberately-styled "empty plate" so it reads as
-		# an intentional sealed frame, not a failed image load. Rounded top
-		# corners (native StyleBox, matches the real-art window) + muted slate
-		# fill + a ghosted gilt monogram of the card's initial.
-		var ph := Panel.new()
-		ph.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		ph.anchor_left = 0.020; ph.anchor_right = 0.980
-		ph.anchor_top = 0.015; ph.anchor_bottom = 0.470
-		var phst := StyleBoxFlat.new()
-		phst.bg_color = Color(0.169, 0.157, 0.192)
-		phst.corner_radius_top_left = 16
-		phst.corner_radius_top_right = 16
-		phst.shadow_color = Color(0, 0, 0, 0.0)
-		ph.add_theme_stylebox_override("panel", phst)
-		root.add_child(ph)
-		_art_rect = ph
-		var ph_name := String(card_data.get("name", "")).strip_edges()
-		var mono_ch := ph_name.substr(0, 1).to_upper() if ph_name.length() > 0 else "?"
-		var mono := _make_styled_label(mono_ch, GameTheme.font_display, 40,
-			Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.26))
-		mono.add_theme_constant_override("outline_size", 0)
-		_center_at_point(mono, Vector2(150, 96), Vector2(80, 80))
-		ph.add_child(mono)
-
-	var stat_font: Font = GameTheme.font_stat
-	var display_font: Font = GameTheme.font_display
-
-	# ── Layer 4: cost gem (top-left, reused) ─────────────────────────────
-	# Full glossy orb (not simple_mode): the prototype renders only 8 cards,
-	# so the perf reason for the flat recipe doesn't apply here — the full
-	# stack (glow halo + drop shadow + rim + specular) makes each orb read as
-	# a distinct 3D object sitting ON the card, so neighbouring orbs no longer
-	# bleed into one another.
-	var cost_orb := _make_stat_orb(GameTheme.COST_BLUE_GEM, 0.0, false)
-	cost_orb.anchor_left = 0.0; cost_orb.anchor_right = 0.0
-	cost_orb.anchor_top = 0.0; cost_orb.anchor_bottom = 0.0
-	cost_orb.offset_left = -9; cost_orb.offset_right = 47
-	cost_orb.offset_top = -9; cost_orb.offset_bottom = 47
-	root.add_child(cost_orb)
-	_cost_label = _make_styled_label(
-		"" if bake_strip_stats else str(card_data.get("cost", 0)),
-		stat_font, 14, Color(0.996, 0.941, 0.800))
-	_cost_label.add_theme_constant_override("outline_size", 4)
-	_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
-	_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
-	_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	cost_orb.add_child(_cost_label)
-
-	# ── Layer 4b: rarity gem (top-right) — only uncommon / rare ──────────
-	if rarity == "white" or rarity == "uncommon" or rarity == "rare":
-		# Rare's rarity_color is a lemon-gold that read cheap on the faceted
-		# gem; push it to a warm amber/topaz. Uncommon keeps its sapphire.
-		var gem_col: Color = glow_col
-		if rarity == "white":
-			gem_col = Color(0.92, 0.98, 1.0)
-		elif rarity == "rare":
-			gem_col = Color(0.949, 0.616, 0.137)
-		var gem := _make_stat_orb(gem_col, 0.0, false)
-		gem.anchor_left = 1.0; gem.anchor_right = 1.0
-		gem.anchor_top = 0.0; gem.anchor_bottom = 0.0
-		gem.offset_left = -38; gem.offset_right = 6
-		gem.offset_top = -6; gem.offset_bottom = 38
-		root.add_child(gem)
-
-	# ── Layer 5: name in the painted banner (nudged to true center) ──────
-	# Spells get a deep-aubergine ink instead of the mid-violet tribe colour.
-	# Mid-violet (0.38,0.18,0.55) on the cream banner was the weakest text on
-	# the card; this is the same hue family darkened to ~5.5:1 contrast so the
-	# spell name reads as crisply as the dark-brown creature names.
-	var name_col: Color = GameTheme.get_name_color(card_data)
-	if is_sp:
-		name_col = Color(0.212, 0.063, 0.290)
-	_name_label = _make_styled_label(card_data.get("name", ""), display_font,
-		13, name_col)
-	_name_label.add_theme_constant_override("outline_size", 0)
-	_name_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.30))
-	_name_label.add_theme_constant_override("shadow_offset_x", 0)
-	_name_label.add_theme_constant_override("shadow_offset_y", 1)
-	_name_label.clip_text = true
-	_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	_center_at_point(_name_label, Vector2(150, 213), SIZE_NAME)
-	root.add_child(_name_label)
-
-	# ── Layer 6: keyword treatment (A/B via kw_variant) ──────────────────
-	# `medallions` = every keyword that has an icon. `combat_meds` drops floop,
-	# which has its own battlefield indicator and is always spelled "Floop:" in
-	# the description, so it's pure redundancy in an icon row.
-	var medallions: Array = []
-	var combat_meds: Array = []
-	for k in card_data.get("keywords", []):
-		var k_str := String(k)
-		var icon_tex: Texture2D = GameTheme.get_keyword_icon(k_str)
-		if icon_tex == null:
-			continue
-		medallions.append(icon_tex)
-		if k_str != "floop":
-			combat_meds.append(icon_tex)
-		if medallions.size() >= 5:
-			break
-	if not is_sp:
-		match kw_variant:
-			1:
-				pass  # DROP — keywords already named (colorized) in description.
-			2:
-				_kw_shelf_engraved(root, combat_meds)
-			3:
-				_kw_stamps_on_art(root, combat_meds)
-			4:
-				_kw_orbs_rail(root, combat_meds)
-			5:
-				_kw_orbs_rail(root, combat_meds, 48.0)
-			_:
-				_kw_shelf_pill(root, medallions)
-
-	# ── Layer 7: description, vertically centered on the parchment page ──
-	var center_box := CenterContainer.new()
-	center_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	center_box.anchor_left = 0.0; center_box.anchor_right = 1.0
-	center_box.anchor_top = 0.0; center_box.anchor_bottom = 1.0
-	center_box.offset_left = 7; center_box.offset_right = -7
-	center_box.offset_top = 5; center_box.offset_bottom = -5
-	page.add_child(center_box)
-
-	var desc_rt := RichTextLabel.new()
-	desc_rt.bbcode_enabled = true
-	desc_rt.fit_content = true
-	desc_rt.scroll_active = false
-	desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	desc_rt.custom_minimum_size = Vector2(150, 0)
-	var desc_font: Font = GameTheme.font_body
-	var desc_bold_font: Font = GameTheme.font_body_bold
-	if desc_font:
-		desc_rt.add_theme_font_override("normal_font", desc_font)
-		desc_rt.add_theme_font_override("bold_font",
-			desc_bold_font if desc_bold_font else desc_font)
-	# Auto-shrink long descriptions so 4-5 line rares stay inside the page.
-	var raw_desc: String = card_data.get("desc", "")
-	var dsz := 11
-	if raw_desc.length() > 105:
-		dsz = 9
-	elif raw_desc.length() > 72:
-		dsz = 10
-	desc_rt.add_theme_font_size_override("normal_font_size", dsz)
-	desc_rt.add_theme_font_size_override("bold_font_size", dsz)
-	# DARK ink on the light parchment page (inverted from v3's cream-on-dark).
-	desc_rt.add_theme_color_override("default_color", Color(0.176, 0.118, 0.063))
-	desc_rt.text = "[center]%s[/center]" % KeywordEffects.colorize_keywords(raw_desc)
-	center_box.add_child(desc_rt)
-
-	# ── Layer 8: creature ATK/HP orbs OR spell footer cartouche ──────────
-	if is_creature():
-		var atk_orb := _make_stat_orb(GameTheme.ATK_GOLD_SHIELD, 0.0, false)
-		atk_orb.anchor_left = 0.0; atk_orb.anchor_right = 0.0
-		atk_orb.anchor_top = 1.0; atk_orb.anchor_bottom = 1.0
-		atk_orb.offset_left = -9; atk_orb.offset_right = 47
-		atk_orb.offset_top = -47; atk_orb.offset_bottom = 9
-		root.add_child(atk_orb)
-		_atk_label = _make_styled_label(
-			"" if bake_strip_stats else str(current_atk), stat_font, 14,
-			Color(1.000, 0.957, 0.839))
-		_atk_label.add_theme_constant_override("outline_size", 4)
-		_atk_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_atk_label.offset_top = ORB_NUMERAL_Y_OFFSET
-		_atk_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
-		_atk_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		atk_orb.add_child(_atk_label)
-
-		var hp_orb := _make_stat_orb(GameTheme.HEALTH_RED_DROP, 0.0, false)
-		hp_orb.anchor_left = 1.0; hp_orb.anchor_right = 1.0
-		hp_orb.anchor_top = 1.0; hp_orb.anchor_bottom = 1.0
-		hp_orb.offset_left = -47; hp_orb.offset_right = 9
-		hp_orb.offset_top = -47; hp_orb.offset_bottom = 9
-		root.add_child(hp_orb)
-		_hp_label = _make_styled_label(
-			"" if bake_strip_stats else str(current_hp), stat_font, 14,
-			Color(1.000, 0.941, 0.898))
-		_hp_label.add_theme_constant_override("outline_size", 4)
-		_hp_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_hp_label.offset_top = ORB_NUMERAL_Y_OFFSET
-		_hp_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
-		_hp_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		hp_orb.add_child(_hp_label)
-	else:
-		var footer_text := "INSTANT"
-		var kws: Array = card_data.get("keywords", [])
-		if CardDB.is_curse(String(card_data.get("id", ""))):
-			footer_text = "CURSE"
-		else:
-			match String(card_data.get("targeting", "none")):
-				"enemy_creature":    footer_text = "TARGET ENEMY"
-				"friendly_creature": footer_text = "TARGET ALLY"
-				"any_creature":      footer_text = "ANY CREATURE"
-				"any":               footer_text = "ANY TARGET"
-				_:
-					if "exhaust" in kws:
-						footer_text = "EXHAUST"
-					elif "retain" in kws:
-						footer_text = "RETAIN"
-		var footer := Panel.new()
-		footer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		_center_at_point(footer, Vector2(150, 374), Vector2(150, 28))
-		var fst := StyleBoxFlat.new()
-		fst.bg_color = Color(0.110, 0.075, 0.110, 0.92)  # arcane near-black
-		fst.set_corner_radius_all(13)
-		fst.border_color = Color(0.65, 0.52, 0.85, 0.85)  # violet trim
-		fst.set_border_width_all(1)
-		fst.shadow_color = Color(0.4, 0.2, 0.6, 0.35)
-		fst.shadow_size = 4
-		footer.add_theme_stylebox_override("panel", fst)
-		root.add_child(footer)
-		var ftl := _make_styled_label(footer_text, display_font, 9,
-			Color(0.92, 0.86, 1.0))
-		ftl.add_theme_constant_override("outline_size", 2)
-		_center_at_point(ftl, Vector2(150, 374), Vector2(140, 24))
-		root.add_child(ftl)
-		# flanking arcane gems
-		for sx in [110.0, 190.0]:
-			var fg := _make_stat_orb(Color(0.55, 0.35, 0.75), 0.0, true)
-			_center_at_point(fg, Vector2(sx, 374), Vector2(14, 14))
-			root.add_child(fg)
-
-
-# Keyword-treatment variants for the redesign prototype (selected by
-# kw_variant). All three sit in the banner→parchment gap or on the art.
-
-# Variant 0 (default): bright-gilt glyphs inlaid in a rounded dark pill.
-func _kw_shelf_pill(root: Control, meds: Array) -> void:
-	if meds.is_empty():
-		return
-	var shelf_w: float = float(meds.size()) * 27.0 + 16.0
-	var shelf := Panel.new()
-	shelf.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_center_at_point(shelf, Vector2(150, 238), Vector2(shelf_w, 25))
-	var shst := StyleBoxFlat.new()
-	shst.bg_color = Color(0.070, 0.054, 0.042, 0.92)
-	shst.set_corner_radius_all(12)
-	shst.border_color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.75)
-	shst.set_border_width_all(1)
-	shst.shadow_color = Color(0, 0, 0, 0.40)
-	shst.shadow_size = 3
-	shelf.add_theme_stylebox_override("panel", shst)
-	root.add_child(shelf)
-	var kw_strip := HBoxContainer.new()
-	kw_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	kw_strip.alignment = BoxContainer.ALIGNMENT_CENTER
-	kw_strip.add_theme_constant_override("separation", 9)
-	_center_at_point(kw_strip, Vector2(150, 238), Vector2(shelf_w, 22))
-	root.add_child(kw_strip)
-	for icon_tex in meds:
-		var ic := TextureRect.new()
-		ic.texture = icon_tex
-		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		ic.custom_minimum_size = Vector2(17, 17)
-		ic.modulate = GameTheme.GILT_BRIGHT
-		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		kw_strip.add_child(ic)
-
-
-# Variant 2: a recessed engraved plaque — rectangular, dark inner edge (no
-# bright ring), antique-gold glyphs. Reads as carved INTO the frame, not a
-# button stuck ON it.
-func _kw_shelf_engraved(root: Control, meds: Array) -> void:
-	if meds.is_empty():
-		return
-	var w: float = float(meds.size()) * 26.0 + 14.0
-	var slot := Panel.new()
-	slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_center_at_point(slot, Vector2(150, 238), Vector2(w, 21))
-	var st := StyleBoxFlat.new()
-	st.bg_color = Color(0.055, 0.043, 0.034, 0.80)
-	st.set_corner_radius_all(4)
-	st.border_color = Color(0.015, 0.010, 0.008, 0.90)  # dark top lip → recessed
-	st.border_width_top = 2
-	st.border_width_left = 1
-	st.border_width_right = 1
-	st.border_width_bottom = 0
-	slot.add_theme_stylebox_override("panel", st)
-	root.add_child(slot)
-	var strip := HBoxContainer.new()
-	strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	strip.alignment = BoxContainer.ALIGNMENT_CENTER
-	strip.add_theme_constant_override("separation", 9)
-	_center_at_point(strip, Vector2(150, 238), Vector2(w, 19))
-	root.add_child(strip)
-	for icon_tex in meds:
-		var ic := TextureRect.new()
-		ic.texture = icon_tex
-		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		ic.custom_minimum_size = Vector2(15, 15)
-		ic.modulate = GameTheme.GILT  # antique, not bright
-		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		strip.add_child(ic)
-
-
-# Variant 3: small gold "set-symbol" coins stamped into the art's lower-left,
-# away from the text entirely. Each coin is a dark disc (guaranteed contrast on
-# any art) with a gilt glyph.
-func _kw_stamps_on_art(root: Control, meds: Array) -> void:
-	var n := meds.size()
-	if n == 0:
-		return
-	for i in range(n):
-		var px := 24.0 + float(i) * 25.0
-		var coin := Panel.new()
-		coin.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		_center_at_point(coin, Vector2(px, 175), Vector2(22, 22))
-		var cst := StyleBoxFlat.new()
-		cst.bg_color = Color(0.050, 0.040, 0.030, 0.82)
-		cst.set_corner_radius_all(11)
-		cst.border_color = Color(GameTheme.GILT.r, GameTheme.GILT.g, GameTheme.GILT.b, 0.70)
-		cst.set_border_width_all(1)
-		cst.shadow_color = Color(0, 0, 0, 0.55)
-		cst.shadow_size = 2
-		coin.add_theme_stylebox_override("panel", cst)
-		root.add_child(coin)
-		var ic := TextureRect.new()
-		ic.texture = meds[i]
-		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		ic.set_anchors_preset(Control.PRESET_FULL_RECT)
-		ic.offset_left = 3; ic.offset_right = -3
-		ic.offset_top = 3; ic.offset_bottom = -3
-		ic.modulate = GameTheme.GILT_BRIGHT
-		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		coin.add_child(ic)
-
-
-func _kw_orbs_rail(root: Control, meds: Array, box: float = 40.0) -> void:
-	# Keyword affordance as a vertical rail of glossy orbs on the card's right
-	# edge, growing downward from just below the rarity gem. Unlike a text shelf
-	# or flat stamps, big solid spheres stay readable at the 0.6x battlefield
-	# scale — the same reason the four stat orbs survive the shrink while the
-	# description text turns to mush. Arcane-violet so they never read as a stat
-	# orb (cost=blue, atk=gold, hp=red, rarity=amber). The caller passes
-	# combat_meds (floop already dropped — it owns the floop border + indicator
-	# on the field), capped at 3 so the rail clears the bottom ATK/HP orbs.
-	# `box` is the orb diameter: 40 = subordinate rail, 56 = stat-orb parity
-	# (most legible at field scale). Top-anchored so a bigger box never collides
-	# with the rarity gem (which ends at ~y=38) — the rail just grows downward.
-	var n: int = min(meds.size(), 3)
-	if n == 0:
-		return
-	var pitch: float = box + 8.0
-	const TOP0 := 46.0        # just below the rarity gem
-	var inset: float = box * 0.225   # ~9 px at box=40, scales with the orb
-	for i in range(n):
-		# Same deep-violet, low-gloss GemOrb as the battlefield token's keyword
-		# orbs (_build_compact_layout) so hand and field read consistently — not
-		# the bright glossy SphereOrb from _make_stat_orb.
-		var orb := GemOrb.new()
-		orb.shape = "circle"
-		orb.style = "smooth"
-		orb.fill_color = Color(0.247, 0.153, 0.376)  # deep arcane violet
-		orb.gloss = 0.42  # calmer than stat orbs so the gilt glyph reads
-		orb.anchor_left = 1.0; orb.anchor_right = 1.0
-		orb.anchor_top = 0.0; orb.anchor_bottom = 0.0
-		orb.offset_right = -3
-		orb.offset_left = -3 - box
-		orb.offset_top = TOP0 + float(i) * pitch
-		orb.offset_bottom = orb.offset_top + box
-		orb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		root.add_child(orb)
-		var glyph := TextureRect.new()
-		glyph.texture = meds[i]
-		glyph.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		glyph.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		glyph.set_anchors_preset(Control.PRESET_FULL_RECT)
-		glyph.offset_left = inset; glyph.offset_right = -inset
-		glyph.offset_top = inset; glyph.offset_bottom = -inset
-		glyph.modulate = GameTheme.GILT_BRIGHT
-		glyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		orb.add_child(glyph)
-
-
-# ═══════════════════════════════════════════
-#  V8 "CAMPAIGN WRIT" — gated by `chart_proto` (evolved in place from the
-#  v7 dark-board draft; git history holds v7).
-#  The card IS the campaign paper now: the same aged parchment the Sicily
-#  plate and the tooltips are printed on, with the document furniture set
-#  ON the material — per-rarity METAL double rules over an ink keyline,
-#  the painted art mounted big as an ink-matted, gilt-filleted plate, a
-#  dark-ink name cartouche with a gilt Cinzel name, the rules text written
-#  straight onto the ruled page (no floating well), keyword devices
-#  ink-stamped in the bottom margin (never pinned over the painting), and
-#  the stats as real pressed WAX SEALS with seeded irregular silhouettes.
-#  Cost/ATK/HP seal boxes keep the exact v3/v6 56px corner seats, so the
-#  bake-overlay contract is untouched.
-# ═══════════════════════════════════════════
-
-# ═══════════════════════════════════════════
-
-## Border/rule metal per rarity — the quiet rarity language (plus the glow).
 func _chart_metal(rarity: String) -> Color:
 	if CardDB.is_curse(String(card_data.get("id", ""))):
 		return Color(0.55, 0.52, 0.45)            # weathered bone
@@ -3614,15 +2259,15 @@ func _kw_stamp_row(root: Control, meds: Array, metal: Color,
 
 
 func _fit_desc_to_box(rt_obj: Variant, max_h: float) -> void:
-	# Step the body font down (to a 14px floor) until the rules text fits the
+	# Rules text is fixed at the 18px reading floor. The deferred check reports
 	# clip box. RichTextLabel.get_content_height() validates the line cache, so
-	# the loop re-measures correctly after each size change. 14px is the hard
+	# overflow but never makes the player trade readability for fitting.
 	# legibility floor on the ~225px card — at the real windowed (1600×900,
 	# no global scaling) size the rules text was the #1 "too small to read"
 	# complaint, so we'd rather clip the rare 5-line card than render any
-	# card's rules below 14px. The taller rules box + tightened leading (see
+	# The taller rules box + tightened leading keep the rewritten short copy
 	# _build_chart_proto) means even long cards rarely need to step down this far.
-	# The ramp now STARTS at 17/16/15, so this is a true safety net for the few
+	# at the same 18px size on every card.
 	# very wordy cards — most cards render at their full ramp size.
 	# rt_obj is deliberately UNTYPED: this runs via call_deferred, and a layout
 	# rebuild in the same frame (chart proto → baked overlay swap) frees the
@@ -3639,7 +2284,7 @@ func _fit_desc_to_box(rt_obj: Variant, max_h: float) -> void:
 		if rt.get_content_height() <= max_h:
 			return
 		var cur := int(rt.get_theme_font_size("normal_font_size"))
-		if cur <= 14:
+		if cur <= 18:
 			return
 		rt.add_theme_font_size_override("normal_font_size", cur - 1)
 		rt.add_theme_font_size_override("bold_font_size", cur - 1)
@@ -3652,7 +2297,9 @@ func _build_chart_proto() -> void:
 	add_child(root)
 
 	var rarity := String(card_data.get("rarity", "common"))
-	var is_sp := is_spell()
+	# Armaments use the statless document geometry, just like spells, while their
+	# own footer/type line keeps the gameplay distinction explicit.
+	var is_sp := not is_creature()
 	var is_curse_card := CardDB.is_curse(String(card_data.get("id", "")))
 	# Forged-card glance cue (P3): RunState stamps is_upgraded:true when a card
 	# is "+"-forged. The lone " +" name suffix can be ellipsized away, so we add
@@ -3935,11 +2582,11 @@ func _build_chart_proto() -> void:
 	# bake_strip_name: leave the cartouche text BLANK in the bake — the live
 	# overlay draws the name with the font renderer so it stays crisp at any zoom.
 	var nm := "" if bake_strip_name else String(card_data.get("name", ""))
-	var nm_size := 14
+	var nm_size := 16
 	if nm.length() > 17:
-		nm_size = 12
+		nm_size = 14
 	elif nm.length() > 13:
-		nm_size = 13
+		nm_size = 15
 	_name_label = _make_styled_label(nm, name_font, nm_size, name_col)
 	_name_label.add_theme_constant_override("outline_size", 0)
 	_name_label.add_theme_color_override("font_shadow_color",
@@ -3982,7 +2629,7 @@ func _build_chart_proto() -> void:
 		stock.offset_right = -16
 		# Taller, higher vellum band (was 183→256) — the rules text now starts
 		# ~8px higher and runs ~4px lower for ~13px more height, so the larger
-		# (17/16/15) ramp fits without shrinking on the typical card.
+		# fixed 18px body fits without shrinking on the typical card.
 		stock.offset_top = 175
 		stock.offset_bottom = 266 if is_sp else 259
 		var sst := StyleBoxFlat.new()
@@ -4073,16 +2720,12 @@ func _build_chart_proto() -> void:
 		raw_desc = _synthesized_rules_text()
 	# Bigger, more readable body text. The 15/14/13 ramp was still the #1
 	# "too small to read" complaint at the real windowed (1600×900, no global
-	# scaling) card size, so the ramp is lifted to 17/16/15: short/medium descs
-	# read at 17px, wordy cards step to 15px here and a 14px floor in
-	# _fit_desc_to_box. The taller band + tightened leading above absorb the
+	# scaling) card size. Rewritten descriptions now use a fixed 18px size;
+	# the fitter below is an overflow check, not a shrinking path.
+	# The taller band + tightened leading above absorb the
 	# growth. Keep this ramp IDENTICAL to the baked-overlay path below — they
 	# draw the same live text and must not diverge.
-	var dsz := 17
-	if raw_desc.length() > 115:
-		dsz = 15
-	elif raw_desc.length() > 85:
-		dsz = 16
+	var dsz := 18
 	desc_rt.add_theme_font_size_override("normal_font_size", dsz)
 	desc_rt.add_theme_font_size_override("bold_font_size", dsz)
 	desc_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
@@ -4090,13 +2733,16 @@ func _build_chart_proto() -> void:
 	# paper. Re-ink the same markup in dark bronze — keyword identity kept,
 	# document contrast won (~5.5:1 on the leaf). decorate_keywords also
 	# ink-stamps each keyword's device inline before its first mention
-	# (2026-07-10 — replaces the bottom-margin roundel row).
+	# (2026-07-10 — replaces the bottom-margin roundel row). Written at every
+	# scale, including the 0.36 deck strip: a deck strip hits this live path
+	# whenever CardTextureCache is still cold (a freshly opened run-setup screen),
+	# and small crisp text reads better than the duplicated art it used to show.
 	var desc_bbcode := KeywordEffects.decorate_keywords(
 		raw_desc, dsz - 3).replace(KeywordEffects.KEYWORD_GOLD, "#7a4f10")
 	desc_rt.text = "[center]%s[/center]" % desc_bbcode
 	center_box.add_child(desc_rt)
 	# Shrink-to-fit safety net: once laid out, if the written text overflows the
-	# clip box, step the body size down (to the 14px floor) until it fits —
+	# clip box, report it while preserving the 18px reading floor.
 	# so a line is never cut top or bottom by the CenterContainer clip.
 	_fit_desc_to_box.call_deferred(desc_rt, 87.0 if is_sp else 80.0)
 
@@ -4292,1008 +2938,6 @@ func _build_chart_proto() -> void:
 #    • Description on light-tan parchment well at 10pt (≥WCAG AAA contrast)
 #    • Spell cards: pentagonal peak above banner + SPELL tag at bottom
 # ═══════════════════════════════════════════
-
-func _build_full_layout_v4() -> void:
-	var root := Control.new()
-	root.set_anchors_preset(Control.PRESET_FULL_RECT)
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(root)
-
-	var rarity: String = String(card_data.get("rarity", "common"))
-	var trim_color: Color = GameTheme.rarity_frame_trim(rarity)
-	var is_curse: bool = (CardDB.is_curse(String(card_data.get("id", "")))
-		or String(card_data.get("type", "")) == "curse")
-	if is_curse:
-		trim_color = Color(0.55, 0.25, 0.55, 1.0)
-
-	# ── Layer 1: Outer frame (walnut body + rarity-tinted border) ────────
-	# Carries the base hue + drop shadow only. The depth-overlay cluster
-	# (Layer 2) is what turns this flat fill into something that reads as
-	# real lit parchment.
-	var outer := Panel.new()
-	outer.set_anchors_preset(Control.PRESET_FULL_RECT)
-	outer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var outer_style := StyleBoxFlat.new()
-	outer_style.bg_color = Color(0.219, 0.157, 0.110, 1.0)
-	if is_spell():
-		# Purple-walnut wash so spells read colder than creatures, same
-		# luminance so they don't look "underexposed" side by side.
-		outer_style.bg_color = Color(0.180, 0.145, 0.227, 1.0)
-	outer_style.border_color = trim_color
-	# Frame thickness ladders by rarity so the card silhouette itself
-	# encodes rarity at thumbnail size (Marvel Snap convention): rare = 4 px
-	# gold ring, uncommon = 3 px blue ring, common/starter = 2 px gilt.
-	# Combined with the rarity-tinted name plate this is two redundant
-	# colour cues — enough to read rarity from across the table.
-	var outer_border_w := 2
-	if rarity == "white" or rarity == "rare":
-		outer_border_w = 5  # bumped from 4 — rares get a chunkier ring
-	elif rarity == "uncommon":
-		outer_border_w = 3
-	outer_style.set_border_width_all(outer_border_w)
-	# Bumped 10 → 14 — softer card silhouette. A 10 px radius on a
-	# 225×300 rect still reads as "rounded rectangle" / Slack-message
-	# shape at thumbnail size; 14 starts to read as "card object". Going
-	# further (18+) crosses into "pill" territory which loses the card
-	# feel. 14 is the sweet spot for this aspect ratio.
-	outer_style.set_corner_radius_all(14)
-	# Default drop shadow for common / uncommon / starter — sits the card
-	# above the board. Rare gets a coloured outer halo instead, applied
-	# via a sibling Panel below so we keep both effects.
-	# StyleBoxFlat blurs its shadow on the GPU every frame even when the
-	# content is static — with ~5 shadowed panels per card and 100+ cards
-	# in the gallery / deck viewer that's ~500-600 blur ops per frame,
-	# which alone tanks the GL Compatibility renderer to single-digit FPS.
-	# In static_display contexts we skip all shadow blurs (silhouette
-	# still reads fine because the rarity-tinted border carries it).
-	outer_style.shadow_color = Color(0, 0, 0, 0.80)
-	outer_style.shadow_size = 0 if static_display else 8
-	outer_style.shadow_offset = Vector2(0, 3)
-	outer.add_theme_stylebox_override("panel", outer_style)
-
-	# ── Rare-only outer halo ───────────────────────────────────────────
-	# Rare cards radiate a soft gold bloom past their silhouette — the
-	# canonical "legendary glow" used in Hearthstone, MtG Arena foils,
-	# and Marvel Snap variant cards. Achieved with a sibling Panel sized
-	# slightly larger than `outer`, with a transparent body and a thick
-	# gold drop-shadow centred at offset (0, 0). The shadow renders
-	# around the (invisible) rect → glow that wraps the whole card.
-	#
-	# Skipped in static_display contexts — the 18 px shadow blur per
-	# rare card adds another ~12 GPU blurs / frame to the gallery on
-	# top of the 5 per card we already cut. Gallery players see rare
-	# cards on hover (z_index pop) where pulse+halo can be re-enabled.
-	if (rarity == "white" or rarity == "rare") and not static_display:
-		var rare_halo := Panel.new()
-		rare_halo.anchor_left = 0.0; rare_halo.anchor_right = 1.0
-		rare_halo.anchor_top = 0.0; rare_halo.anchor_bottom = 1.0
-		rare_halo.offset_left = -3; rare_halo.offset_right = 3
-		rare_halo.offset_top = -3; rare_halo.offset_bottom = 3
-		rare_halo.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var halo_style := StyleBoxFlat.new()
-		halo_style.bg_color = Color(0, 0, 0, 0)  # invisible body
-		halo_style.set_corner_radius_all(17)  # matches outer 14 + 3 inset
-		halo_style.shadow_color = Color(0.86, 0.96, 1.0, 0.55) if rarity == "white" else Color(1.0, 0.85, 0.26, 0.55)
-		halo_style.shadow_size = 18
-		halo_style.shadow_offset = Vector2(0, 0)
-		rare_halo.add_theme_stylebox_override("panel", halo_style)
-		root.add_child(rare_halo)
-	root.add_child(outer)
-
-	# ── Rare-only inner hairline ───────────────────────────────────────
-	# A 1 px black ring tucked just inside the gold outer border — the
-	# dark hairline between gold and the warm walnut body cranks the
-	# gold's apparent contrast (the AA-pixels on the gold's inner edge
-	# get a darker neighbour, so the gold reads more saturated than it
-	# is). Standard trick in jewelry rendering and AAA card frames.
-	if rarity == "white" or rarity == "rare":
-		var hairline := Panel.new()
-		hairline.anchor_left = 0.0; hairline.anchor_right = 1.0
-		hairline.anchor_top = 0.0; hairline.anchor_bottom = 1.0
-		hairline.offset_left = float(outer_border_w)
-		hairline.offset_right = -float(outer_border_w)
-		hairline.offset_top = float(outer_border_w)
-		hairline.offset_bottom = -float(outer_border_w)
-		hairline.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var hairline_style := StyleBoxFlat.new()
-		hairline_style.bg_color = Color(0, 0, 0, 0)
-		hairline_style.border_color = Color(0.05, 0.04, 0.02, 0.90)
-		hairline_style.set_border_width_all(1)
-		hairline_style.set_corner_radius_all(9)  # tracks outer 14 - border_w
-		hairline.add_theme_stylebox_override("panel", hairline_style)
-		root.add_child(hairline)
-
-	# ── Layer 2: Surface depth overlays ─────────────────────────────────
-	# Four stacked textures stop the body reading as a flat fill:
-	#   grain (paper fiber) → top_light (directional sheen) →
-	#   bottom_shade (gravity shadow) → vignette (corner darkening).
-	# Each modulated to a low alpha; together they sell the surface as
-	# parchment under directional light. Inset 3 px from the card edge so
-	# the rectangular overlays never poke past the rounded corners (the
-	# StyleBox's corner_radius=10 clips its bg to rounded but children
-	# would render to the axis-aligned rect without this inset).
-	var depth_layer := Control.new()
-	depth_layer.anchor_left = 0.0; depth_layer.anchor_right = 1.0
-	depth_layer.anchor_top = 0.0; depth_layer.anchor_bottom = 1.0
-	depth_layer.offset_left = 3; depth_layer.offset_right = -3
-	depth_layer.offset_top = 3; depth_layer.offset_bottom = -3
-	depth_layer.clip_contents = true
-	depth_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	outer.add_child(depth_layer)
-	if GameTheme.tex_card_grain:
-		var grain := TextureRect.new()
-		grain.texture = GameTheme.tex_card_grain
-		grain.stretch_mode = TextureRect.STRETCH_TILE
-		grain.set_anchors_preset(Control.PRESET_FULL_RECT)
-		grain.modulate = Color(1, 1, 1, 0.16)
-		grain.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		depth_layer.add_child(grain)
-	# Anisotropic wood-grain layer on top of the fine grain. The 256×32
-	# texture tiles ~8× vertically across the card, producing horizontal
-	# striations that read as wood grain rather than digital noise. Low
-	# alpha so the fine grain underneath still contributes its fiber.
-	# Skipped in static_display — see header comment at top of layer 2.
-	if GameTheme.tex_card_wood_grain and not static_display:
-		var wood := TextureRect.new()
-		wood.texture = GameTheme.tex_card_wood_grain
-		wood.stretch_mode = TextureRect.STRETCH_TILE
-		wood.set_anchors_preset(Control.PRESET_FULL_RECT)
-		wood.modulate = Color(1, 1, 1, 0.12)
-		wood.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		depth_layer.add_child(wood)
-	# Top-light + bottom-shade + vignette + rarity wash all skipped in
-	# static_display contexts. Each is a per-frame TextureRect draw — 4
-	# of them per card × 100+ cards = ~500 fewer CanvasItem submissions
-	# per frame in the gallery / deck viewer. The card body still reads
-	# as wooden via the StyleBox base colour + the fine grain above.
-	if not static_display and GameTheme.tex_card_top_light:
-		var top_light := TextureRect.new()
-		top_light.texture = GameTheme.tex_card_top_light
-		top_light.set_anchors_preset(Control.PRESET_FULL_RECT)
-		top_light.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		top_light.stretch_mode = TextureRect.STRETCH_SCALE
-		top_light.modulate = Color(1, 1, 1, 0.10)
-		top_light.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		depth_layer.add_child(top_light)
-	if not static_display and GameTheme.tex_card_bottom_shade:
-		var bot_shade := TextureRect.new()
-		bot_shade.texture = GameTheme.tex_card_bottom_shade
-		bot_shade.set_anchors_preset(Control.PRESET_FULL_RECT)
-		bot_shade.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		bot_shade.stretch_mode = TextureRect.STRETCH_SCALE
-		bot_shade.modulate = Color(1, 1, 1, 0.22)
-		bot_shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		depth_layer.add_child(bot_shade)
-	if not static_display and GameTheme.tex_card_vignette:
-		var vig := TextureRect.new()
-		vig.texture = GameTheme.tex_card_vignette
-		vig.set_anchors_preset(Control.PRESET_FULL_RECT)
-		vig.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		vig.stretch_mode = TextureRect.STRETCH_SCALE
-		vig.modulate = Color(1, 1, 1, 0.30)
-		vig.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		depth_layer.add_child(vig)
-	# Painted brush-stroke edge — noise-perturbed border darkening on top of
-	# the smooth vignette. Smooth vignette alone reads "digital rectangle";
-	# this layer turns the dark-edge boundary into a brush-irregular ink wash
-	# so the card body stops reading as flat geometry and starts reading as
-	# painted-on-parchment. One baked ImageTexture, modulate-only.
-	if not static_display and GameTheme.tex_card_brush_edge:
-		var brush := TextureRect.new()
-		brush.texture = GameTheme.tex_card_brush_edge
-		brush.set_anchors_preset(Control.PRESET_FULL_RECT)
-		brush.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		brush.stretch_mode = TextureRect.STRETCH_SCALE
-		brush.modulate = Color(1, 1, 1, 0.55)
-		brush.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		depth_layer.add_child(brush)
-	# Faint full-card colour wash — uncommons cool, rares warm, commons none.
-	# Alpha ≤ 0.07 so the wood/parchment stays the dominant surface.
-	var card_tint: Color = GameTheme.rarity_card_tint(rarity)
-	if not static_display and card_tint.a > 0.0:
-		var tint := ColorRect.new()
-		tint.color = card_tint
-		tint.set_anchors_preset(Control.PRESET_FULL_RECT)
-		tint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		depth_layer.add_child(tint)
-
-	# ── Layer 3: Inner trim line (rarity-tinted accent) ─────────────────
-	# Skipped in static_display — one fewer Panel + StyleBoxFlat border
-	# draw per card. The outer gold border already carries the rarity
-	# colour cue, so the inner accent is decorative-only.
-	if not static_display:
-		var trim := Panel.new()
-		trim.anchor_left = 0.02; trim.anchor_right = 0.98
-		trim.anchor_top = 0.02;  trim.anchor_bottom = 0.98
-		trim.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var trim_style := StyleBoxFlat.new()
-		trim_style.bg_color = Color(0, 0, 0, 0)
-		var trim_alpha: float = 0.85 if (rarity == "white" or rarity == "rare") else 0.50
-		trim_style.border_color = Color(trim_color.r, trim_color.g,
-			trim_color.b, trim_alpha)
-		trim_style.set_border_width_all(2 if (rarity == "white" or rarity == "rare") else 1)
-		trim_style.set_corner_radius_all(11)
-		trim.add_theme_stylebox_override("panel", trim_style)
-		root.add_child(trim)
-
-	# ── Layer 4: Art window ──────────────────────────────────────────────
-	# 13.5–64% Y → ~50.5% of card height. The old layout reserved 59–65%
-	# for a frame band that hosted the diamond rarity gem; that band is
-	# gone (rarity moved to the name plate) so the art gets ~4.5% more
-	# vertical real estate without crowding the description well.
-	var art_frame := Panel.new()
-	art_frame.anchor_left = 0.05; art_frame.anchor_right = 0.95
-	art_frame.anchor_top = 0.135; art_frame.anchor_bottom = 0.64
-	art_frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var art_frame_style := StyleBoxFlat.new()
-	art_frame_style.bg_color = Color(0.04, 0.03, 0.025, 1.0)
-	art_frame_style.border_color = Color(0, 0, 0, 0.85)
-	art_frame_style.set_border_width_all(1)
-	art_frame_style.set_corner_radius_all(3)
-	# Drop shadow + dark border together make the window read as recessed
-	# into the card body, not pasted on top of it.
-	art_frame_style.shadow_color = Color(0, 0, 0, 0.55)
-	art_frame_style.shadow_size = 0 if static_display else 2
-	art_frame_style.shadow_offset = Vector2(0, 1)
-	art_frame.add_theme_stylebox_override("panel", art_frame_style)
-	root.add_child(art_frame)
-
-	var art_clip := Control.new()
-	art_clip.clip_contents = true
-	art_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	art_clip.anchor_left = 0.0; art_clip.anchor_right = 1.0
-	art_clip.anchor_top = 0.0;  art_clip.anchor_bottom = 1.0
-	art_clip.offset_left = 2; art_clip.offset_right = -2
-	art_clip.offset_top = 2; art_clip.offset_bottom = -2
-	art_frame.add_child(art_clip)
-	_art_rect = art_clip
-
-	var card_art: Texture2D = _find_card_art()
-	if card_art:
-		var art_tex := TextureRect.new()
-		art_tex.texture = card_art
-		art_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		art_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		art_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
-		# Subtle warm color grade — multiply by (0.94, 0.90, 0.83) pulls
-		# every illustration toward the card's walnut palette. Light/cool
-		# art (Sprite, Ratling, Naga with grey backgrounds) reads as
-		# "painted in the same world" as dark/warm art (Goblin, Bloodhound)
-		# instead of as photo cutouts pasted on a wooden card. STS and
-		# Hearthstone both apply this kind of palette unification in
-		# post-processing — without it, mixed art sources fight each other.
-		art_tex.modulate = Color(0.94, 0.90, 0.83, 1.0)
-		art_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		art_clip.add_child(art_tex)
-	else:
-		_build_placeholder_art(art_clip, 0.0, 1.0, 0.0, 1.0)
-
-	# Inner shadow gradients inside the art window — top + bottom darkening
-	# so the window reads as glass under recessed paper, not a flat photo.
-	if not static_display:
-		_add_art_inner_shadow(art_clip)
-
-	# Transitional treatment between art and frame — radial vignette +
-	# warm sepia wash + crisp inner frame line. Bridges the gap so that
-	# art with light/grey natural backgrounds (the Sprite/Ratling cases
-	# from the gallery screenshot) stops reading as a bright photo
-	# floating in a dark wood frame. Together with the art_tex modulate
-	# above this gives every card the same "matted illustration" feel
-	# regardless of which source the art came from.
-	if not static_display:
-		_add_art_unify_treatment(art_clip)
-
-	# ── Layer 5: Name banner (rarity-tinted plate) ───────────────────────
-	# Rarity is signaled HERE — bg tint + border colour — instead of bolting
-	# a separate gem onto the frame. STS / Marvel Snap convention.
-	var banner := Panel.new()
-	banner.anchor_left = 0.05; banner.anchor_right = 0.95
-	banner.anchor_top = 0.030; banner.anchor_bottom = 0.135
-	banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var bs := StyleBoxFlat.new()
-	bs.bg_color = GameTheme.rarity_plate_bg(rarity)
-	bs.border_color = GameTheme.rarity_plate_border(rarity)
-	# Banner border thickness ladders alongside the outer frame: rare = 3 px
-	# gold, uncommon = 2 px blue, common/starter = 1 px gilt. Reads as
-	# "more elaborate name plate = more important card".
-	var banner_border_w := 1
-	if rarity == "white" or rarity == "rare":
-		banner_border_w = 3
-	elif rarity == "uncommon":
-		banner_border_w = 2
-	bs.set_border_width_all(banner_border_w)
-	bs.corner_radius_top_left = 6
-	bs.corner_radius_top_right = 6
-	bs.corner_radius_bottom_left = 8
-	bs.corner_radius_bottom_right = 8
-	bs.shadow_color = Color(0, 0, 0, 0.55)
-	bs.shadow_size = 0 if static_display else 4
-	bs.shadow_offset = Vector2(0, 2)
-	banner.add_theme_stylebox_override("panel", bs)
-	root.add_child(banner)
-	if not static_display:
-		_add_emboss_lines(banner)
-
-	_name_label = Label.new()
-	var name_text: String = card_data.get("name", "")
-	_name_label.text = name_text
-	if GameTheme.font_display:
-		_name_label.add_theme_font_override("font", GameTheme.font_display)
-	# Auto-shrink: Cinzel SemiBold caps render at ~7 px/char at 12 pt; the
-	# banner's text region is ~130 px wide once the cost gem is inset. Long
-	# names ("Overwhelming Force", "Collector's Champion") drop to 10–9 pt.
-	var name_size := 12
-	if name_text.length() >= 19:
-		name_size = 9
-	elif name_text.length() >= 15:
-		name_size = 10
-	_name_label.add_theme_font_size_override("font_size", name_size)
-	# Engraved-into-the-plate treatment. Three layers stacked via Label's
-	# theme overrides (back → front in render order):
-	#   1. Drop shadow at (0, 1) in pure black — the "deep interior" of
-	#      each carved letter where the stroke recedes into the plate.
-	#   2. Outline in warm walnut-dark — the "sides" of the engraving, a
-	#      hue shift from the cream glyph instead of a flat black halo.
-	#      Reads as wood-tone shadow on the engraved edges, not as a
-	#      sticker outline.
-	#   3. Bright cream glyph fill — the "lit top" of the carved letter
-	#      catching light from above. Slightly brighter than the previous
-	#      cream so the engraved effect reads as 3D.
-	# Combined: cream-on-walnut-on-black gives a clear three-tone gradient
-	# from top of each letter (bright) → side (walnut) → bottom (deep
-	# shadow), exactly the cue our eye uses to see relief in real
-	# engraved metal / wood. Beats the previous flat outline treatment
-	# on every rarity background tested (cool blue plate, warm gold
-	# plate, neutral walnut, brass).
-	# Tribe accent: the engraved top-light hue shifts to the card's tribe
-	# color (soldier gold / undead red / fae cyan / etc.) so faction reads
-	# at a glance. The walnut + black shadow layers keep the 3D relief.
-	_name_label.add_theme_color_override("font_color",
-		GameTheme.get_name_color(card_data))
-	_name_label.add_theme_color_override("font_outline_color",
-		Color(0.18, 0.10, 0.05, 0.95))  # warm walnut shadow, not pure black
-	_name_label.add_theme_constant_override("outline_size", 3)
-	_name_label.add_theme_color_override("font_shadow_color",
-		Color(0, 0, 0, 0.85))
-	_name_label.add_theme_constant_override("shadow_offset_x", 0)
-	_name_label.add_theme_constant_override("shadow_offset_y", 1)
-	_name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_name_label.clip_text = true
-	_name_label.anchor_left = 0.18; _name_label.anchor_right = 0.98
-	_name_label.anchor_top = 0.0;   _name_label.anchor_bottom = 1.0
-	_name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	banner.add_child(_name_label)
-
-	# ── Layer 6: Cost orb — glossy 3D blue sphere (SphereOrb) ──────────
-	# Eight-layer draw stack (outer glow → drop shadow → directional
-	# gradient → AO shadow → rim light → specular halo → specular core)
-	# turns a flat circle into a polished mana gem. Pulse on so the
-	# glow breathes — visually says "energy / mana" without text. Skip
-	# the pulse in static-display contexts (Card Gallery, Deck Viewer)
-	# where per-frame queue_redraw on 100+ cards causes visible lag.
-	var cost_pulse: float = 0.0 if static_display else 0.18
-	var cost_orb := _make_stat_orb(GameTheme.COST_BLUE_GEM, cost_pulse,
-		static_display)
-	cost_orb.anchor_left = 0.0; cost_orb.anchor_right = 0.0
-	cost_orb.anchor_top = 0.0;  cost_orb.anchor_bottom = 0.0
-	# 44 px sphere hanging ~9 px past the top-left corner. Sized to
-	# ~24 % of card width (Hearthstone mana-gem proportion); was 56 px /
-	# 31 % which dominated the name banner. Card2D extends PanelContainer
-	# (clip_contents = false) so children render past the panel rect.
-	cost_orb.offset_left = -9;  cost_orb.offset_right = 35
-	cost_orb.offset_top = -9;   cost_orb.offset_bottom = 35
-	_cost_badge = cost_orb
-	root.add_child(cost_orb)
-
-	# Cream numeral with a saturated cyan-blue halo — matches the cost
-	# sphere's hue and reads as "the number is made of mana". Blanked in
-	# bake_strip_stats so CardTextureCache snapshots the empty sphere; the
-	# live overlay paints the number on top.
-	_cost_label = _make_stat_number(
-		"" if bake_strip_stats else str(card_data.get("cost", 0)),
-		Color(1, 0.98, 0.90), 0,
-		Color(0.30, 0.65, 1.00, 0.85))
-	cost_orb.add_child(_cost_label)
-
-	# Keywords are highlighted inline in the description (gold bold) per
-	# Hearthstone/MtG convention — no separate icon strip. Hover panel
-	# carries full keyword tooltips.
-
-	# ── Layer 6.5: Ornamental divider between art and well ─────────────
-	# Two short gilt rules flanking a small gold gem at the centre. Breaks
-	# up the long rectangular silhouette of the card body (without
-	# blocking the stat orbs at the corners). Same trick used by old MtG
-	# and Renaissance illuminated manuscripts to mark section breaks on
-	# otherwise-uniform parchment.
-	if not static_display:
-		_add_ornamental_divider(root, 0.650, GameTheme.FRAME_TRIM_COMMON)
-
-	# ── Layer 7: Description well (parchment) ───────────────────────────
-	# The ornamental divider above marks the boundary; the well's own
-	# emboss + parchment colour distinguishes it from the dark frame body.
-	var well := Panel.new()
-	well.anchor_left = 0.05; well.anchor_right = 0.95
-	well.anchor_top = 0.660; well.anchor_bottom = 0.865
-	well.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var ws := StyleBoxFlat.new()
-	ws.bg_color = GameTheme.PARCHMENT_LIGHT
-	ws.border_color = Color(0.42, 0.28, 0.10, 0.90)
-	ws.set_border_width_all(1)
-	ws.set_corner_radius_all(5)
-	ws.shadow_color = Color(0, 0, 0, 0.30)
-	ws.shadow_size = 0 if static_display else 2
-	ws.shadow_offset = Vector2(0, 1)
-	well.add_theme_stylebox_override("panel", ws)
-	root.add_child(well)
-	# Lighter emboss on the parchment — its surface is bright, so the top
-	# highlight pops harder and the bottom shadow can be softer.
-	if not static_display:
-		_add_emboss_lines(well, Color(1, 1, 1, 0.55), Color(0, 0, 0, 0.18))
-
-	var desc_rt := RichTextLabel.new()
-	desc_rt.bbcode_enabled = true
-	desc_rt.fit_content = false
-	desc_rt.scroll_active = false
-	desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_rt.clip_contents = true
-	desc_rt.set_anchors_preset(Control.PRESET_FULL_RECT)
-	desc_rt.offset_left = 5
-	desc_rt.offset_right = -5
-	desc_rt.offset_top = 3
-	desc_rt.offset_bottom = -3
-	desc_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	if GameTheme.font_body:
-		desc_rt.add_theme_font_override("normal_font", GameTheme.font_body)
-		# bold_font is a heavier-embolden variation so [b]keyword[/b] tags
-		# emitted by KeywordEffects.colorize_keywords get a real weight bump,
-		# not just a colour shift.
-		desc_rt.add_theme_font_override("bold_font",
-			GameTheme.font_body_bold if GameTheme.font_body_bold else GameTheme.font_body)
-	var raw_desc: String = card_data.get("desc", "")
-	# Auto-shrink: well is ~53 px tall × 152 px wide once padded.
-	var desc_size := 11
-	if raw_desc.length() > 110:
-		desc_size = 8
-	elif raw_desc.length() > 85:
-		desc_size = 9
-	elif raw_desc.length() > 60:
-		desc_size = 10
-	desc_rt.add_theme_font_size_override("normal_font_size", desc_size)
-	desc_rt.add_theme_font_size_override("bold_font_size", desc_size)
-	desc_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
-	# Faint dark outline thickens rendered strokes — AA-pixels on the edge
-	# of each glyph get a darker neighbour, keeping small body text crisp.
-	desc_rt.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.35))
-	desc_rt.add_theme_constant_override("outline_size", 2)
-	# KeywordEffects emits a light gold (#c89e4a) — washed out on this
-	# light tan well. Swap for a deep saturated crimson against near-black
-	# body text — the strong hue shift is what makes keywords pop here.
-	var colorized: String = KeywordEffects.colorize_keywords(raw_desc) \
-		.replace("#c89e4a", "#9a1a1a")
-	desc_rt.text = "[center]%s[/center]" % colorized
-	well.add_child(desc_rt)
-
-	# Stub hidden Label so external code reading _desc_label doesn't crash.
-	_desc_label = Label.new()
-	_desc_label.visible = false
-	_desc_label.text = raw_desc
-	_desc_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_desc_label)
-
-	# NO RARITY GEM — rarity reads from the name plate (Layer 5) plus the
-	# outer trim colour (Layer 1). The old PolyBadge diamond fought with
-	# the cost orb for the eye and squeezed into a 6 % band that no
-	# longer exists.
-
-	# ── Layer 8: ATK / HP plates (creatures) ─────────────────────────────
-	if is_creature():
-		# Glossy 3D gold sphere — same SphereOrb stack as the cost gem
-		# but tinted gold. No pulse: ATK shouldn't draw the eye away
-		# from the cost orb's "energy is changing" cue.
-		var atk_plate := _make_stat_orb(GameTheme.ATK_GOLD_SHIELD, 0.0,
-			static_display)
-		atk_plate.anchor_left = 0.0; atk_plate.anchor_right = 0.0
-		atk_plate.anchor_top = 1.0;  atk_plate.anchor_bottom = 1.0
-		# 44 px sphere hanging ~9 px past the bottom-left (matches cost
-		# orb proportions; was 56 px which crowded the card body).
-		atk_plate.offset_left = -9;  atk_plate.offset_right = 35
-		atk_plate.offset_top = -35;  atk_plate.offset_bottom = 9
-		root.add_child(atk_plate)
-
-		_atk_base_color = Color(0.10, 0.07, 0.02)  # near-black — reads dark on gold
-		# Dark numeral with a warm amber halo — the gold sphere already
-		# provides the warmth, the halo extends it past the orb silhouette
-		# so the number "glows like an ember" instead of sitting flat.
-		# Blanked under bake_strip_stats — see cost_label comment.
-		_atk_label = _make_stat_number(
-			"" if bake_strip_stats else str(current_atk),
-			_atk_base_color, 0, Color(1.00, 0.78, 0.20, 0.90))
-		atk_plate.add_child(_atk_label)
-		_atk_badge = null  # v4 doesn't use the legacy HBox stat-badge ref
-
-		# Glossy 3D red sphere — same recipe, red tint, slow pulse
-		# (heartbeat-feel for HP). Slower than cost's mana pulse so the
-		# two animations read as distinct beats rather than competing.
-		# Static-display contexts get no pulse — see cost_pulse comment.
-		var hp_pulse: float = 0.0 if static_display else 0.10
-		var hp_plate := _make_stat_orb(GameTheme.HEALTH_RED_DROP, hp_pulse,
-			static_display)
-		hp_plate.anchor_left = 1.0; hp_plate.anchor_right = 1.0
-		hp_plate.anchor_top = 1.0;  hp_plate.anchor_bottom = 1.0
-		# 44 px sphere hanging ~9 px past the bottom-right.
-		hp_plate.offset_left = -35; hp_plate.offset_right = 9
-		hp_plate.offset_top = -35;  hp_plate.offset_bottom = 9
-		root.add_child(hp_plate)
-
-		_hp_base_color = Color(1, 0.97, 0.92)  # near-white on the red sphere
-		# Near-white numeral with a deep crimson halo — reads as the
-		# number "bleeding" outward from the orb, matching the HP idiom.
-		# Blanked under bake_strip_stats — see cost_label comment.
-		_hp_label = _make_stat_number(
-			"" if bake_strip_stats else str(current_hp),
-			_hp_base_color, 0, Color(1.00, 0.30, 0.20, 0.90))
-		hp_plate.add_child(_hp_label)
-		_hp_badge = null  # v4 doesn't use the legacy HBox stat-badge ref
-
-		# Creature subtype pill — KEYWORD_GOLD text on a dark pill so the
-		# subtype reads against any card body colour underneath (the bottom
-		# strip varies from dark walnut to warm wash by rarity). Narrower
-		# horizontal anchor than the spell pill so the ATK and HP orbs at
-		# the corners stay clear.
-		# Anchor band 0.910–0.985 centers the pill at ~y=284 on a 300 px
-		# card — same vertical centre as the ATK/HP orb visual midpoints
-		# (orbs span y=217–261, centre y=239). Earlier 0.890–0.960 floated
-		# the pill ~6 px above the orbs, which read as misaligned.
-		_type_plate = _make_type_pill(
-			_creature_type_text(),
-			GameTheme.KEYWORD_GOLD,
-			0.910, 0.985, 0.18, 0.82)
-		root.add_child(_type_plate)
-	else:
-		# Spell pill — same dark pill format with brighter purple text so
-		# the gold = creature, purple = spell hue distinction stays clear.
-		# Wider anchor than creatures since no stat orbs are in the way.
-		var tgt_raw: String = _spell_target_label()
-		var spell_text := "SPELL"
-		if tgt_raw != "":
-			spell_text = "SPELL · %s" % tgt_raw
-		_type_plate = _make_type_pill(
-			spell_text,
-			Color(0.88, 0.70, 1.00),
-			0.870, 0.945, 0.04, 0.96)
-		root.add_child(_type_plate)
-
-	# ── Layer 10: FLOOP indicator (between stat plates, toggled visible) ─
-	_floop_indicator = Label.new()
-	_floop_indicator.text = "FLOOP"
-	if GameTheme.font_display:
-		_floop_indicator.add_theme_font_override("font", GameTheme.font_display)
-	_floop_indicator.add_theme_font_size_override("font_size", 10)
-	_floop_indicator.add_theme_color_override("font_color", GameTheme.FLOOP_BLUE)
-	_floop_indicator.add_theme_color_override("font_outline_color",
-		Color(0, 0, 0, 0.95))
-	_floop_indicator.add_theme_constant_override("outline_size", 3)
-	_floop_indicator.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_floop_indicator.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_floop_indicator.anchor_left = 0.24; _floop_indicator.anchor_right = 0.76
-	_floop_indicator.anchor_top = 0.925; _floop_indicator.anchor_bottom = 1.0
-	_floop_indicator.visible = false
-	_floop_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_floop_indicator)
-
-	# Stub legacy refs — external code reading _type_label / _rarity_strip
-	# must not null-deref.
-	_type_label = Label.new()
-	_type_label.visible = false
-	_type_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_type_label)
-	_rarity_strip = ColorRect.new()
-	_rarity_strip.visible = false
-	_rarity_strip.color = GameTheme.rarity_color(rarity)
-	_rarity_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_rarity_strip)
-
-
-# ═══════════════════════════════════════════
-#  V5 LAYOUT — "overlap and paint the seams."
-#  Replaces v4's stack of Panels (banner + art-frame + well + trim + halo
-#  + 6 depth overlays + ornamental divider + type pill) with one CardCanvas
-#  drawing the entire body + tapered ribbon banner + scroll divider in a
-#  single _draw(). Stat orbs straddle the art/description seam (also fixes
-#  the UX bug where ATK/HP sat below the hand-peek line at 0.8 scale).
-#
-#  Per the council research (Slay the Spire / Across the Obelisk / Roguebook):
-#  cells are fine — but the seams between cells must be PAINTED FEATURES
-#  (gold scroll, tapered ribbon, fishtail banner) and at least one element
-#  must OVERLAP a seam (stat orb half-on-art half-on-description). That's
-#  what kills the spreadsheet read.
-# ═══════════════════════════════════════════
-
-func _build_full_layout_v5() -> void:
-	var root := Control.new()
-	root.set_anchors_preset(Control.PRESET_FULL_RECT)
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(root)
-
-	var rarity: String = String(card_data.get("rarity", "common"))
-
-	# ── 1. Frame texture ──
-	var frame_tex: Texture2D = GameTheme.get_card_frame(card_data)
-	if frame_tex:
-		var frame := TextureRect.new()
-		frame.texture = frame_tex
-		frame.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		frame.stretch_mode = TextureRect.STRETCH_SCALE
-		frame.set_anchors_preset(Control.PRESET_FULL_RECT)
-		frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		root.add_child(frame)
-
-	# ── 2. Art window ──
-	var art_clip := Control.new()
-	art_clip.anchor_left = 0.165; art_clip.anchor_right = 0.835
-	art_clip.anchor_top = 0.21; art_clip.anchor_bottom = 0.60
-	art_clip.clip_contents = true
-	art_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(art_clip)
-	_art_rect = art_clip
-
-	var card_art: Texture2D = _find_card_art()
-	if card_art == null:
-		var placeholder_path := "res://assets/creatures/kindling_alt.png"
-		if ResourceLoader.exists(placeholder_path):
-			card_art = load(placeholder_path)
-	if card_art:
-		var art_tex := TextureRect.new()
-		art_tex.texture = card_art
-		art_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		art_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		art_tex.set_anchors_preset(Control.PRESET_FULL_RECT)
-		art_tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		art_clip.add_child(art_tex)
-
-	# ── 3. Name label ──
-	_name_label = Label.new()
-	var name_text: String = card_data.get("name", "")
-	_name_label.text = name_text
-	if GameTheme.font_display:
-		_name_label.add_theme_font_override("font", GameTheme.font_display)
-	var name_size := 12
-	if name_text.length() > 16:
-		name_size = 11
-	if name_text.length() > 20:
-		name_size = 10
-	if name_text.length() > 24:
-		name_size = 9
-	_name_label.add_theme_font_size_override("font_size", name_size)
-	# Tribe accent wins over the old rarity override — rarity is still readable
-	# from the frame trim, but tribe was previously not encoded anywhere.
-	_name_label.add_theme_color_override("font_color",
-		GameTheme.get_name_color(card_data))
-	_name_label.add_theme_color_override("font_outline_color",
-		Color(0, 0, 0, 0.85))
-	_name_label.add_theme_constant_override("outline_size", 3)
-	_name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_name_label.clip_text = true
-	_name_label.anchor_left = 0.18; _name_label.anchor_right = 0.82
-	_name_label.anchor_top = 0.13; _name_label.anchor_bottom = 0.20
-	_name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_name_label)
-
-	# ── 4. Description text ──
-	var desc_rt := RichTextLabel.new()
-	desc_rt.bbcode_enabled = true
-	desc_rt.fit_content = false
-	desc_rt.scroll_active = false
-	desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_rt.anchor_left = 0.18; desc_rt.anchor_right = 0.82
-	desc_rt.anchor_top = 0.63;  desc_rt.anchor_bottom = 0.86
-	desc_rt.offset_top = 2
-	desc_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	if GameTheme.font_body:
-		desc_rt.add_theme_font_override("normal_font", GameTheme.font_body)
-		desc_rt.add_theme_font_override("bold_font",
-			GameTheme.font_body_bold if GameTheme.font_body_bold else GameTheme.font_body)
-	var raw_desc: String = card_data.get("desc", "")
-	var desc_size := 10
-	if raw_desc.length() > 95:
-		desc_size = 9
-	desc_rt.add_theme_font_size_override("normal_font_size", desc_size)
-	desc_rt.add_theme_font_size_override("bold_font_size", desc_size)
-	desc_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
-	desc_rt.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.30))
-	desc_rt.add_theme_constant_override("outline_size", 2)
-	var colorized: String = KeywordEffects.colorize_keywords(raw_desc) \
-		.replace("#c89e4a", "#9a1a1a")
-	desc_rt.text = "[center]%s[/center]" % colorized
-	root.add_child(desc_rt)
-	_desc_label = Label.new()
-	_desc_label.visible = false
-	_desc_label.text = raw_desc
-	_desc_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_desc_label)
-
-	# ── 5. Cost orb (top-left) ──
-	var cost_pulse: float = 0.0 if static_display else 0.18
-	var cost_orb := _make_stat_orb(GameTheme.COST_BLUE_GEM, cost_pulse,
-		static_display)
-	cost_orb.anchor_left = 0.0; cost_orb.anchor_right = 0.0
-	cost_orb.anchor_top = 0.0;  cost_orb.anchor_bottom = 0.0
-	cost_orb.offset_left = -9;  cost_orb.offset_right = 35
-	cost_orb.offset_top = -9;   cost_orb.offset_bottom = 35
-	_cost_badge = cost_orb
-	root.add_child(cost_orb)
-	_cost_label = _make_stat_number(
-		"" if bake_strip_stats else str(card_data.get("cost", 0)),
-		Color(1, 0.98, 0.90), 0, Color(0.30, 0.65, 1.00, 0.85))
-	cost_orb.add_child(_cost_label)
-
-	# ── 6. ATK / HP orbs (bottom corners, creatures only) ──
-	if is_creature():
-		var atk := _make_stat_orb(GameTheme.ATK_GOLD_SHIELD, 0.0,
-			static_display)
-		atk.anchor_left = 0.0; atk.anchor_right = 0.0
-		atk.anchor_top = 1.0;  atk.anchor_bottom = 1.0
-		atk.offset_left = -9;  atk.offset_right = 35
-		atk.offset_top = -35;  atk.offset_bottom = 9
-		root.add_child(atk)
-		_atk_base_color = Color(0.08, 0.05, 0.02)
-		_atk_label = _make_stat_number(
-			"" if bake_strip_stats else str(current_atk),
-			_atk_base_color, 0, Color(1.00, 0.78, 0.20, 0.90))
-		atk.add_child(_atk_label)
-		_atk_badge = null
-
-		var hp_pulse: float = 0.0 if static_display else 0.10
-		var hp := _make_stat_orb(GameTheme.HEALTH_RED_DROP, hp_pulse,
-			static_display)
-		hp.anchor_left = 1.0; hp.anchor_right = 1.0
-		hp.anchor_top = 1.0;  hp.anchor_bottom = 1.0
-		hp.offset_left = -35; hp.offset_right = 9
-		hp.offset_top = -35;  hp.offset_bottom = 9
-		root.add_child(hp)
-		_hp_base_color = Color(1, 0.97, 0.92)
-		_hp_label = _make_stat_number(
-			"" if bake_strip_stats else str(current_hp),
-			_hp_base_color, 0, Color(1.00, 0.30, 0.20, 0.90))
-		hp.add_child(_hp_label)
-		_hp_badge = null
-
-	# ── 7. Floop indicator (hidden by default) ──
-	_floop_indicator = Label.new()
-	_floop_indicator.text = "FLOOP"
-	if GameTheme.font_display:
-		_floop_indicator.add_theme_font_override("font", GameTheme.font_display)
-	_floop_indicator.add_theme_font_size_override("font_size", 10)
-	_floop_indicator.add_theme_color_override("font_color", GameTheme.FLOOP_BLUE)
-	_floop_indicator.add_theme_color_override("font_outline_color",
-		Color(0, 0, 0, 0.95))
-	_floop_indicator.add_theme_constant_override("outline_size", 3)
-	_floop_indicator.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_floop_indicator.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_floop_indicator.anchor_left = 0.30; _floop_indicator.anchor_right = 0.70
-	_floop_indicator.anchor_top = 0.585; _floop_indicator.anchor_bottom = 0.640
-	_floop_indicator.visible = false
-	_floop_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_floop_indicator)
-
-	# Legacy stubs — external code reads these refs.
-	_type_label = Label.new()
-	_type_label.visible = false
-	_type_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_type_label)
-	_rarity_strip = ColorRect.new()
-	_rarity_strip.visible = false
-	_rarity_strip.color = GameTheme.rarity_color(rarity)
-	_rarity_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_rarity_strip)
-
-
-# ── Layout helpers ──
-
-func _add_emboss_lines(panel: Control,
-		top_color: Color = Color(1, 1, 1, 0.18),
-		bot_color: Color = Color(0, 0, 0, 0.32)) -> void:
-	# Adds a 1 px highlight line at the panel's top inside edge and a 1 px
-	# shadow line at the bottom inside edge — the "chisel" trick every
-	# painted-frame UI uses to fake bevel depth without a real 3D pass.
-	# Anchored panel-relative, so the lines follow the panel's actual rect
-	# (not the card root) and survive layout reflows.
-	var top_hl := ColorRect.new()
-	top_hl.color = top_color
-	top_hl.anchor_left = 0.0; top_hl.anchor_right = 1.0
-	top_hl.anchor_top = 0.0; top_hl.anchor_bottom = 0.0
-	top_hl.offset_left = 2; top_hl.offset_right = -2
-	top_hl.offset_top = 1; top_hl.offset_bottom = 2
-	top_hl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	panel.add_child(top_hl)
-
-	var bot_sh := ColorRect.new()
-	bot_sh.color = bot_color
-	bot_sh.anchor_left = 0.0; bot_sh.anchor_right = 1.0
-	bot_sh.anchor_top = 1.0; bot_sh.anchor_bottom = 1.0
-	bot_sh.offset_left = 2; bot_sh.offset_right = -2
-	bot_sh.offset_top = -2; bot_sh.offset_bottom = -1
-	bot_sh.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	panel.add_child(bot_sh)
-
-
-func _add_art_inner_shadow(container: Control) -> void:
-	# Top + bottom dark-gradient strips inside the art window — makes it
-	# read as recessed (light hitting a deeper plane) instead of pasted on
-	# top of the frame. Reuses the GameTheme bottom_shade gradient texture
-	# (transparent→black); the top strip flips it so the dark end is at
-	# top. Falls back to a single dark line if the gradient texture isn't
-	# loaded (e.g. GameTheme failed to init).
-	if GameTheme.tex_card_bottom_shade == null:
-		var fallback := ColorRect.new()
-		fallback.color = Color(0, 0, 0, 0.40)
-		fallback.anchor_left = 0.0; fallback.anchor_right = 1.0
-		fallback.anchor_top = 0.0; fallback.anchor_bottom = 0.0
-		fallback.offset_bottom = 3
-		fallback.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		container.add_child(fallback)
-		return
-
-	var top_shadow := TextureRect.new()
-	top_shadow.texture = GameTheme.tex_card_bottom_shade
-	top_shadow.flip_v = true  # dark end at top
-	top_shadow.anchor_left = 0.0; top_shadow.anchor_right = 1.0
-	top_shadow.anchor_top = 0.0; top_shadow.anchor_bottom = 0.0
-	top_shadow.offset_bottom = 14
-	top_shadow.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	top_shadow.stretch_mode = TextureRect.STRETCH_SCALE
-	top_shadow.modulate = Color(1, 1, 1, 0.55)
-	top_shadow.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	container.add_child(top_shadow)
-
-	var bot_shadow := TextureRect.new()
-	bot_shadow.texture = GameTheme.tex_card_bottom_shade
-	bot_shadow.anchor_left = 0.0; bot_shadow.anchor_right = 1.0
-	bot_shadow.anchor_top = 1.0; bot_shadow.anchor_bottom = 1.0
-	bot_shadow.offset_top = -14
-	bot_shadow.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	bot_shadow.stretch_mode = TextureRect.STRETCH_SCALE
-	bot_shadow.modulate = Color(1, 1, 1, 0.55)
-	bot_shadow.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	container.add_child(bot_shadow)
-
-
-func _add_ornamental_divider(parent: Control, anchor_y: float,
-		color: Color) -> void:
-	# Renders a centered ornamental divider at the given vertical anchor:
-	# two short gilt rules flanking a small rotated-square gem. Together
-	# they read as a single decorative break across the card.
-	#
-	# Pure Control nodes — no custom _draw, no shaders. Uses Panel's
-	# StyleBoxFlat for the gem (with corner_radius=0 + rotation_degrees=45
-	# to turn a tiny square into a diamond) and ColorRect for the two rules.
-
-	# Left gilt rule
-	var left_rule := ColorRect.new()
-	left_rule.anchor_left = 0.18; left_rule.anchor_right = 0.43
-	left_rule.anchor_top = anchor_y; left_rule.anchor_bottom = anchor_y
-	left_rule.offset_top = -1; left_rule.offset_bottom = 1
-	left_rule.color = Color(color.r, color.g, color.b, 0.85)
-	left_rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	parent.add_child(left_rule)
-
-	# Right gilt rule (mirror)
-	var right_rule := ColorRect.new()
-	right_rule.anchor_left = 0.57; right_rule.anchor_right = 0.82
-	right_rule.anchor_top = anchor_y; right_rule.anchor_bottom = anchor_y
-	right_rule.offset_top = -1; right_rule.offset_bottom = 1
-	right_rule.color = Color(color.r, color.g, color.b, 0.85)
-	right_rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	parent.add_child(right_rule)
-
-	# Centre gem — 9 px square Panel rotated 45° into a diamond. Pivot at
-	# its own centre so the rotation stays anchored to the divider line.
-	var gem := Panel.new()
-	gem.anchor_left = 0.5; gem.anchor_right = 0.5
-	gem.anchor_top = anchor_y; gem.anchor_bottom = anchor_y
-	gem.offset_left = -4; gem.offset_right = 5  # 9 px wide
-	gem.offset_top = -4; gem.offset_bottom = 5  # 9 px tall
-	gem.pivot_offset = Vector2(4.5, 4.5)
-	gem.rotation = deg_to_rad(45)
-	var gs := StyleBoxFlat.new()
-	gs.bg_color = Color(0.961, 0.784, 0.259, 1.0)  # vivid gold
-	gs.border_color = Color(0.20, 0.12, 0.03, 0.95)
-	gs.set_border_width_all(1)
-	gs.set_corner_radius_all(0)  # crisp diamond, not rounded
-	gem.add_theme_stylebox_override("panel", gs)
-	gem.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	parent.add_child(gem)
-
-
-func _add_art_unify_treatment(container: Control) -> void:
-	# Three overlay layers stacked on top of whatever sits in the art clip
-	# (TextureRect for real art, _build_placeholder_art for missing-art
-	# cards). Together they bridge the gap between disparate art sources
-	# and the walnut frame — STS-style "matted illustration" feel.
-	#
-	# Layering (back → front, applied AFTER _add_art_inner_shadow):
-	#   1. Radial vignette — corners darker than centre. Reuses the same
-	#      vignette texture the card body uses, so the visual language
-	#      is consistent. This is the layer doing most of the work:
-	#      light-background art (Sprite, Ratling, etc.) loses its bright
-	#      corners and stops reading as a photo on a card.
-	#   2. Warm sepia wash — very low alpha (~7%) walnut multiply over
-	#      the whole art. Pulls cool/grey art toward the card's palette
-	#      without destroying the natural colour of well-painted dark
-	#      art. Combined with the modulate on art_tex this is a
-	#      two-stage palette unification.
-	#   3. Inner frame line — 1 px dark border just inside the art clip
-	#      edge. Crisps the boundary so the art reads as matted into
-	#      the frame, not bleeding under it. Same trick gallery framers
-	#      use to make wildly-different paintings hang as a coherent set.
-
-	# 1. Radial vignette overlay
-	if GameTheme.tex_card_vignette:
-		var vig := TextureRect.new()
-		vig.texture = GameTheme.tex_card_vignette
-		vig.set_anchors_preset(Control.PRESET_FULL_RECT)
-		vig.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		vig.stretch_mode = TextureRect.STRETCH_SCALE
-		# 0.55 alpha — strong enough to dim a white background to dark
-		# walnut at the corners, weak enough that the centre of the art
-		# stays clear and readable.
-		vig.modulate = Color(1, 1, 1, 0.55)
-		vig.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		container.add_child(vig)
-
-	# 2. Warm sepia wash — translucent walnut over the whole art
-	var tint := ColorRect.new()
-	tint.set_anchors_preset(Control.PRESET_FULL_RECT)
-	# Warm wood tone at 7% alpha. Was tempted to go to 10-12% but that
-	# starts visibly muddying the good dark art (Bloodhound, Goblin) and
-	# we'd lose the contrast we already have. 7% is the sweet spot —
-	# enough to nudge cool/grey art warm, invisible on warm/dark art.
-	tint.color = Color(0.50, 0.36, 0.22, 0.07)
-	tint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	container.add_child(tint)
-
-	# 3. Inner frame line — thin dark hairline just inside the art clip
-	var frame_line := Panel.new()
-	frame_line.set_anchors_preset(Control.PRESET_FULL_RECT)
-	frame_line.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var fls := StyleBoxFlat.new()
-	fls.bg_color = Color(0, 0, 0, 0)
-	# Warm-dark walnut at 80% — same hue as the card body so the line
-	# reads as a tiny inset matte rather than a flat black stripe.
-	fls.border_color = Color(0.08, 0.05, 0.03, 0.80)
-	fls.set_border_width_all(1)
-	fls.set_corner_radius_all(2)
-	frame_line.add_theme_stylebox_override("panel", fls)
-	container.add_child(frame_line)
-
-
-# ── Stat-orb factory (painted-icon flavour) ──
-# These two helpers replace the GemOrb procedural draw calls for cost / ATK
-# / HP. The painted PNGs carry the visual weight; the helpers just position
-# the icon and overlay the numeral. Used 3× per creature card and 1× per
-# spell card (cost only).
-
-func _make_stat_orb(fill_color: Color, pulse: float = 0.0,
-		simple: bool = false) -> Control:
-	# Returns a SphereOrb — glossy 3D sphere drawn via stacked _draw
-	# circles. The caller sets anchor + offsets to position it, and adds a
-	# numeral label as a child.
-	#
-	# fill_color drives the sphere's base hue. pulse > 0 animates the
-	# outer halo. simple = true switches to a 5-layer recipe instead of
-	# the full 39-layer stack — used in static_display contexts (Card
-	# Gallery, Deck Viewer) where 100+ orbs replaying 39 sub-draws each
-	# every frame is the dominant lag source on the GL Compatibility
-	# renderer.
-	var orb := SphereOrb.new()
-	orb.fill_color = fill_color
-	orb.pulse_amount = pulse
-	orb.simple_mode = simple
-	orb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	return orb
-
 
 func _make_stat_number(text: String, color: Color, vertical_offset: int = 0,
 		glow_color: Color = Color(0, 0, 0, 0)) -> Label:
@@ -5645,6 +3289,18 @@ func _build_orb_number_label(text: String, font_sz: int,
 
 func update_stat_display() -> void:
 	if _hp_label:
+		# A GAIN in HP (heal, +N/+N buff, Regenerate tick, a keystone aura
+		# landing) had no beat at all before C2 — the numeral just was a
+		# different number next frame, so the thing the tribe keystones exist to
+		# do was the thing the board never showed. Losses are NOT floated here:
+		# every path that lowers HP runs through take_damage /
+		# take_damage_bypass_armor, which spawn their own damage number, and a
+		# second float would double-count the hit.
+		if _displayed_hp != -999 and current_hp != _displayed_hp:
+			if current_hp > _displayed_hp:
+				_spawn_hp_change_popup(current_hp - _displayed_hp)
+			_punch_seal(_hp_label)
+		_displayed_hp = current_hp
 		_hp_label.text = str(max(current_hp, 0))
 		if current_hp < card_data.hp:
 			_hp_label.add_theme_color_override("font_color", GameTheme.HP_DAMAGED)
@@ -5654,6 +3310,7 @@ func update_stat_display() -> void:
 		var display_atk = effective_atk()
 		if _displayed_effective_atk != -999 and display_atk != _displayed_effective_atk:
 			_spawn_atk_change_popup(display_atk - _displayed_effective_atk)
+			_punch_seal(_atk_label)
 		_displayed_effective_atk = display_atk
 		_atk_label.text = str(display_atk)
 		if display_atk > card_data.atk:
@@ -5759,6 +3416,83 @@ func _build_doom_badge(parent: Control) -> void:
 	_doom_badge.add_child(_doom_label)
 
 
+var _fuse_cord: Control = null
+
+func set_fuse_glow(n: int) -> void:
+	# Slow Match (S5 of docs/SPELL_FX_PLAN_20260717.md): the writ IS a slow
+	# match, and the fuse it banks while waiting in hand was invisible outside
+	# the targeting hover — the card hits harder every round and nothing on the
+	# face said so. A burning cord creeps across the top margin, one glowing
+	# knot per banked point (cap 4), the lit head marching toward the cost
+	# seal. INFORMATIONAL by the reduce-motion contract (it carries game
+	# state), so it always renders; only the flicker breathe gates.
+	if n <= 0:
+		if _fuse_cord != null and is_instance_valid(_fuse_cord):
+			_fuse_cord.visible = false
+		return
+	if _fuse_cord == null or not is_instance_valid(_fuse_cord):
+		_fuse_cord = Control.new()
+		_fuse_cord.name = "FuseCord"
+		_fuse_cord.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_fuse_cord.position = Vector2.ZERO
+		_fuse_cord.size = Vector2(size.x, 34.0)
+		_fuse_cord.draw.connect(_draw_fuse_cord)
+		add_child(_fuse_cord)
+		if not (UserSettings != null and UserSettings.reduce_motion):
+			var tw := _fuse_cord.create_tween().set_loops()
+			tw.tween_property(_fuse_cord, "modulate:a", 0.72, Motion.LOOP * 0.4) \
+				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+			tw.tween_property(_fuse_cord, "modulate:a", 1.0, Motion.LOOP * 0.4) \
+				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_fuse_cord.visible = true
+	_fuse_cord.set_meta("fuse_n", n)
+	_fuse_cord.queue_redraw()
+
+
+func _draw_fuse_cord() -> void:
+	if _fuse_cord == null or not is_instance_valid(_fuse_cord):
+		return
+	var n: int = int(_fuse_cord.get_meta("fuse_n", 0))
+	if n <= 0:
+		return
+	# Cord runs right→left along the top margin, tied near the top-right
+	# corner (inboard of it — the hand fan overlaps neighbours' corners),
+	# burning toward the wax cost seal. Lit head position = charge gauge.
+	# Sizes are generous: rest-state hand cards render well under full scale
+	# and the first cut's 9px ember vanished at rest (shot-verified).
+	var y := 17.0
+	var x_start: float = size.x - 28.0
+	var x_end := 66.0   # stops short of the 56px cost-seal corner box
+	var lit_x: float = lerpf(x_start, x_end, clampf(float(n) / 4.0, 0.0, 1.0))
+	# Unburnt cord ahead of the flame — dark line with a slight rope sag.
+	var cord := Color(0.16, 0.12, 0.09, 0.92)
+	var prev := Vector2(lit_x, y)
+	for i in range(1, 9):
+		var f := float(i) / 8.0
+		var p := Vector2(lerpf(lit_x, x_end, f), y + sin(f * PI) * 3.5)
+		_fuse_cord.draw_line(prev, p, cord, 3.4, true)
+		prev = p
+	# Charred tail behind the head: one glowing knot per banked point (the lit
+	# head is the last), so the COUNT reads without a numeral. The hover
+	# prediction already prints the exact total (card-honesty rule).
+	for i in range(n):
+		var kx: float = lerpf(x_start, lit_x, (float(i) + 1.0) / float(n))
+		var head: bool = i == n - 1
+		var kp := Vector2(kx, y)
+		if head:
+			_fuse_cord.draw_circle(kp, 13.0, Color(1.0, 0.45, 0.10, 0.26), true, -1.0, true)
+			_fuse_cord.draw_circle(kp, 7.5, Color(1.0, 0.62, 0.16, 0.65), true, -1.0, true)
+			_fuse_cord.draw_circle(kp, 4.0, Color(1.0, 0.93, 0.58, 1.0), true, -1.0, true)
+		else:
+			_fuse_cord.draw_circle(kp, 5.0, Color(0.9, 0.38, 0.10, 0.35), true, -1.0, true)
+			_fuse_cord.draw_circle(kp, 2.6, Color(1.0, 0.58, 0.18, 0.9), true, -1.0, true)
+	# Ash flecks between knots — the cord has visibly BURNED, not just lit.
+	var ash := Color(0.38, 0.33, 0.28, 0.55)
+	for i in range(3):
+		var bx: float = lerpf(x_start, lit_x, (float(i) + 0.5) / 3.0)
+		_fuse_cord.draw_circle(Vector2(bx, y + 2.5), 1.8, ash, true, -1.0, true)
+
+
 func ensure_doom_badge() -> void:
 	# Mark of Ash brands Doom onto a creature mid-fight — the badge is normally
 	# built with the compact layout, so build it late here. No-op off the
@@ -5832,34 +3566,104 @@ func _apply_shield_rage() -> void:
 	_spawn_keyword_chip("RAGE +%d" % rage, Color(1.0, 0.55, 0.25))
 
 
-func take_damage(amount: int) -> void:
+func take_damage(amount: int, from_ward: bool = false) -> void:
+	# The Old King's Body (effect_immune): ONLY a creature's strike lands. Combat
+	# raises strike_damage_active around the two strike lines and nowhere else, so
+	# spells, battlecries, on-deaths, Thorns, Poison, potions and relics all bounce
+	# here without any of them needing to know this creature exists. The 99+ kill
+	# convention is deliberately NOT exempted — "unaffected by effects" has to beat
+	# Offering and the ritual outlets too, or it is not the promise it prints.
+	if state.effect_immune and not strike_damage_active:
+		return
+	var siege_blow := bool(card_data.get("fortification", false)) and amount >= 99
+	# Oathbound Squire (ward_by): a bodyguard in this creature's column takes
+	# the hit instead. One hop only (from_ward), so two squires sharing a column
+	# swap hits rather than bouncing one forever. Kill-convention damage (99+ —
+	# rituals, Offering's 999) always lands: a sacrifice cannot be bodyguarded.
+	if not from_ward and amount < 99 and ward_by != null and is_instance_valid(ward_by) \
+			and ward_by.current_hp > 0:
+		# NAME THE PROTECTOR (COMBAT_LEGIBILITY_20260728 §4 #3). This redirect used
+		# to be `ward_by.take_damage(); return` and nothing else: you struck card A
+		# and card B silently lost HP, with no chip, no log row and no cause named
+		# anywhere on screen — the worst kind of defect, since the player's model of
+		# the board is simply wrong afterwards. The chip fires on the WARD because
+		# the ward is the body the player just watched lose life; the struck body
+		# already carries the standing "Guarded" orb on its status rail, so the two
+		# halves of the rule read from opposite ends. INFORMATIONAL — it always
+		# plays (Combat.spawn_keyword_callout never gates on Reduce Motion) and
+		# _spawn_keyword_chip mirrors it into the chronicle through log_status.
+		# Deliberately carries NO number: the ward prints its own damage numeral for
+		# what it actually lost (it may be Armored, or Shielded), and a raw-blow
+		# figure beside it would put two different numbers for one hit on one body —
+		# the same arithmetic-must-add-up rule as the OVERKILL note below.
+		# Only when there is something to take: a 0-ATK body still calls in here,
+		# and a chip announcing a redirect of nothing is noise in a channel whose
+		# whole problem is quantity.
+		if amount > 0:
+			ward_by._spawn_keyword_chip("TAKES IT", Color(0.65, 0.85, 1.0), "guardian")
+		ward_by.take_damage(amount, true)
+		return
+	# Kill-convention damage represents banish, sacrifice or unconditional
+	# destruction. It cannot be bodyguarded; against a fortification it becomes
+	# four raw damage, exactly 3 through the gate's printed Armored.
+	if siege_blow:
+		amount = 4
+		_spawn_keyword_chip("SIEGE 3", Color(0.94, 0.72, 0.32))
+	# Witch-Shot (bridge_watcher id): while the player's damage spell resolves,
+	# ENEMY Armored and Shield are ignored — the shot passes straight through
+	# (the Shield is NOT consumed; the spell never touched it). Enemy-only so
+	# recoil landing on the player's own wards during the cast can't pierce.
+	var pierced: bool = spell_pierce_active and is_opponent and not siege_blow
+	if pierced and amount > 0:
+		_spawn_keyword_chip("PIERCED", Color(0.80, 0.55, 1.0))
 	# Shield: absorb the entire first hit, then pop the shield.
-	if state.has_shield:
+	if state.has_shield and not pierced:
 		state.has_shield = false
-		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0), "shield")
+		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0), "shield", true)
 		_apply_shield_rage()
 		update_stat_display()
 		_flash_hit()
 		return
 	var original := amount
-	if has_keyword("armored"):
+	if has_keyword("armored") and not pierced:
 		amount = maxi(1, amount - 1)
 		var blocked: int = original - amount
 		if blocked > 0:
-			_spawn_keyword_chip("BLOCKED %d" % blocked, Color(0.55, 0.78, 1.0), "armored")
+			_spawn_keyword_chip("BLOCKED %d" % blocked,
+				Color(0.55, 0.78, 1.0), "armored", true)
 	if card_data.get("extra_damage", 0) > 0:
 		amount += card_data.extra_damage
+	# OVERKILL HONESTY (2026-07-28). The floating numeral must show what this body
+	# actually ABSORBED, not the raw blow. Before overkill shipped the excess
+	# vanished, so over-printing was harmless; now _apply_piercing_overflow deals
+	# that excess to the body behind, which prints its OWN numeral — so a 6-ATK
+	# killing a 2-HP blocker and carrying 4 read "-6" and "-4" on screen: ten
+	# damage from a six-power attacker. The arithmetic was visibly wrong, and the
+	# rule is only learnable from the numbers if the numbers add up.
+	var hp_before: int = current_hp
 	current_hp -= amount
 	if current_hp <= 0 and has_keyword("last_stand") and not last_stand_used:
 		current_hp = 1
 		last_stand_used = true
-		_spawn_keyword_chip("LAST STAND", Color(1.0, 0.85, 0.20), "last_stand")
+		_spawn_keyword_chip("LAST STAND",
+			Color(1.0, 0.85, 0.20), "last_stand", true)
 		_play_last_stand_flare()
 		last_stand_fired.emit()
 		if net_last_stand_cb.is_valid():
 			net_last_stand_cb.call(self)
+	# Honor Guard: the guarded column-mate cannot fall below 1.
+	# Repeatable (unlike Last Stand) — the flag is re-derived at every board
+	# mutation and clears the moment the guard dies. Kill-convention damage
+	# (99+) and Poison's direct current_hp writes still land.
+	if current_hp <= 0 and amount < 99 and state.hp_floor:
+		current_hp = 1
+		_spawn_keyword_chip("HELD", Color(1.0, 0.85, 0.20))
 	update_stat_display()
-	_spawn_damage_number(amount)
+	# Absorbed = the life this body actually lost. Reading current_hp AFTER the
+	# Last Stand / hp_floor clamps makes those cases honest for free (a Last Stand
+	# body at 2 HP taking 6 shows "-1", because that is what it lost). The raw blow
+	# still drives the shake — the haymaker was real even if the body was small.
+	_spawn_damage_number(hp_before - maxi(current_hp, 0), amount)
 	if amount > 0:
 		damaged.emit(amount)
 	if current_hp <= 0:
@@ -5874,10 +3678,19 @@ func take_damage(amount: int) -> void:
 
 
 func take_damage_bypass_armor(amount: int) -> void:
+	# Effect-immune: every caller of this path (Thorns recoil, venom) is a keyword
+	# effect, never a strike — so it never touches the Body. See take_damage.
+	if state.effect_immune:
+		return
 	# Bypasses Armored, but Shield still absorbs the whole hit and pops.
-	if state.has_shield:
+	# (No bodyguard redirect here: recoil damage — Thorns, venom — belongs to
+	# the body that caused it, not its ward.)
+	if bool(card_data.get("fortification", false)) and amount >= 99:
+		amount = 3
+		_spawn_keyword_chip("SIEGE 3", Color(0.94, 0.72, 0.32))
+	if state.has_shield and not (spell_pierce_active and is_opponent):
 		state.has_shield = false
-		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0), "shield")
+		_spawn_keyword_chip("SHIELD", Color(0.65, 0.85, 1.0), "shield", true)
 		_apply_shield_rage()
 		update_stat_display()
 		_flash_hit()
@@ -5886,17 +3699,24 @@ func take_damage_bypass_armor(amount: int) -> void:
 	# apply here too, or it's silently lost on Thorns/piercing/poison hits.
 	if int(card_data.get("extra_damage", 0)) > 0:
 		amount += int(card_data.extra_damage)
+	# See take_damage: the numeral prints life actually lost, not the raw blow.
+	var hp_before: int = current_hp
 	current_hp -= amount
 	if current_hp <= 0 and has_keyword("last_stand") and not last_stand_used:
 		current_hp = 1
 		last_stand_used = true
-		_spawn_keyword_chip("LAST STAND", Color(1.0, 0.85, 0.20), "last_stand")
+		_spawn_keyword_chip("LAST STAND",
+			Color(1.0, 0.85, 0.20), "last_stand", true)
 		_play_last_stand_flare()
 		last_stand_fired.emit()
 		if net_last_stand_cb.is_valid():
 			net_last_stand_cb.call(self)
+	# Honor Guard (hp_floor) holds on this path too — see take_damage.
+	if current_hp <= 0 and amount < 99 and state.hp_floor:
+		current_hp = 1
+		_spawn_keyword_chip("HELD", Color(1.0, 0.85, 0.20))
 	update_stat_display()
-	_spawn_damage_number(amount)
+	_spawn_damage_number(hp_before - maxi(current_hp, 0), amount)
 	if amount > 0:
 		damaged.emit(amount)
 	if current_hp <= 0:
@@ -5924,7 +3744,12 @@ func try_die() -> void:
 	_die()
 
 
-func _spawn_keyword_chip(text: String, color: Color, kw_id: String = "") -> void:
+## `costumed` = this keyword states itself ON THE BODY (see _refresh_costumes), so
+## the floating chip would be a second channel for one fact. The chronicle entry
+## below still lands either way, which is why retiring a chip never loses
+## anything — accountability is in the log, attribution is on the token.
+func _spawn_keyword_chip(text: String, color: Color, kw_id: String = "",
+		costumed: bool = false) -> void:
 	# Floats a labeled chip above the card so hidden keyword math (Armored
 	# blocking, Last Stand triggering, Piercing carrying) reads on-screen. Routes
 	# through Combat.spawn_keyword_callout — a styled pill carrying the keyword's
@@ -5938,6 +3763,8 @@ func _spawn_keyword_chip(text: String, color: Color, kw_id: String = "") -> void
 	# LAST STAND, POISON) is exactly what the chronicle should remember.
 	if vfx.has_method("log_status"):
 		vfx.log_status(self, text)
+	if costumed:
+		return
 	var anchor := global_position + Vector2(size.x * scale.x * 0.5, size.y * scale.y * 0.06)
 	if vfx.has_method("spawn_keyword_callout"):
 		var icon: Texture2D = GameTheme.get_keyword_icon(kw_id) if kw_id != "" else null
@@ -5964,24 +3791,65 @@ func _combat_vfx_target() -> Node:
 	return null
 
 
-func _spawn_damage_number(amount: int) -> void:
+## ── FLOAT ANCHORING (2026-07-28) ───────────────────────────────────────────
+## Combat.spawn_floating_number rises its numeral by a fixed number of SCREEN
+## pixels — 54, or 72 when `big` — over a 0.9 s life. That travel knows nothing
+## about how tall the body underneath it is, and a battlefield token is only
+## ~136 px tall, so a number spawned at 0.30 of its own card height had climbed
+## clear of that card before it faded. The frame capture caught it: at t=454 ms a
+## "−1" was floating over a DIFFERENT creature's art, which makes the numeral
+## worse than absent — it attributes the damage to the wrong body.
+##
+## The fix is placement, not duration: 0.9 s is right, so the SPAWN is set low
+## enough that the END of the rise lands back on the body that took the blow. The
+## numeral now travels from about the belt line to the shoulders and never leaves
+## the token's own footprint. These constants must track spawn_floating_number's
+## `rise` — they are the one place that knows the coupling.
+const FLOAT_RISE := 54.0        # Combat.spawn_floating_number, normal numeral
+const FLOAT_RISE_BIG := 72.0    # Combat.spawn_floating_number, `big` numeral
+const FLOAT_END_FRAC := 0.16    # where the rise ENDS, as a fraction of card height
+
+
+## Y offset from this card's top edge at which a float must START so the end of
+## its rise still sits on this body. Clamped so a tall hand card can't spawn its
+## numeral off the bottom edge and a small token can't spawn it under the seals.
+func _float_anchor_y(big: bool) -> float:
+	var card_h: float = maxf(size.y * scale.y, 1.0)
+	var rise: float = FLOAT_RISE_BIG if big else FLOAT_RISE
+	return clampf(card_h * FLOAT_END_FRAC + rise, card_h * 0.30, card_h * 0.84)
+
+
+## `amount` is the life this body actually LOST — what gets printed. `blow` is the
+## raw incoming damage, which may be far larger when the body was too small to
+## absorb it. The split matters because what the player READS has to add up
+## (see take_damage's OVERKILL HONESTY note) while what the player FEELS should
+## still carry the true force of the swing. Defaults to the honest value.
+func _spawn_damage_number(amount: int, blow: int = -1) -> void:
 	if amount <= 0 or static_display:
 		return
+	if blow < amount:
+		blow = amount
 	var vfx := _combat_vfx_target()
 	if vfx == null:
 		return
-	var anchor := global_position + Vector2(size.x * scale.x * 0.5, size.y * scale.y * 0.30)
 	# JUICE — scale the number's prominence to the blow so a 1-dmg plink and a
 	# 7-dmg haymaker don't read identically. Heavy hits get the "big" treatment
 	# (larger font in spawn_floating_number) and a hotter, gold-shifted red.
+	# Keyed off the PRINTED value: a big glyph over a small number reads as a
+	# mismatch, and overkill's drama belongs to the strike mark, not to inflating
+	# a numeral that says 2.
+	# Read BEFORE the anchor: a big numeral rises further, so it has to start
+	# lower to finish in the same place (see _float_anchor_y).
 	var heavy: bool = amount >= 5
+	var anchor := global_position + Vector2(size.x * scale.x * 0.5, _float_anchor_y(heavy))
 	var col := Color(1.0, 0.38, 0.26) if not heavy else Color(1.0, 0.62, 0.20)
 	vfx.spawn_floating_number(anchor, "-%d" % amount, col, heavy)
 	# Magnitude-scaled board shake routed through Combat so light chip damage
 	# barely ripples while big blows rock the screen. Guarded by has_method so
-	# non-combat scenes (gallery/bake) stay silent.
+	# non-combat scenes (gallery/bake) stay silent. Uses the RAW blow — a 9-power
+	# swing into a 2 HP body still hit like a 9-power swing.
 	if vfx.has_method("creature_hit_feedback"):
-		vfx.creature_hit_feedback(amount)
+		vfx.creature_hit_feedback(blow)
 
 
 func _spawn_death_burst() -> void:
@@ -6031,7 +3899,12 @@ func _spawn_atk_change_popup(delta: int) -> void:
 	var vfx := _combat_vfx_target()
 	if vfx == null:
 		return
-	var anchor := global_position + Vector2(size.x * scale.x * 0.25, size.y * scale.y * 0.12)
+	# Anchored through _float_anchor_y for the same reason as the damage numeral:
+	# spawning at 0.12 of the card height meant this one ended its rise a clear
+	# 38 px ABOVE the token, over whatever body stood behind it. The x split
+	# (left of centre, HP right of centre) is kept — that is what stops a +2/+2
+	# from stacking its two floats on one another.
+	var anchor := global_position + Vector2(size.x * scale.x * 0.25, _float_anchor_y(false))
 	var text: String
 	var color: Color
 	if delta > 0:
@@ -6043,36 +3916,201 @@ func _spawn_atk_change_popup(delta: int) -> void:
 	vfx.spawn_floating_number(anchor, text, color, false)
 
 
-func show_heal_number(amount: int) -> void:
-	# Called by Combat when a creature is healed, so the green number reads at
-	# the card's position. Also pulses the card green briefly.
-	if amount <= 0 or static_display:
+func _spawn_hp_change_popup(delta: int) -> void:
+	# Floating "+N HP" for every HP GAIN — heals, +N/+N buffs, Regenerate ticks,
+	# a keystone aura landing. Anchored right-of-centre (mirroring the ATK
+	# popup's left) so the two never overlap when a +2/+2 lands both at once,
+	# and clear of the damage number that spawns dead centre.
+	# Losses are NOT floated: they all run through take_damage /
+	# take_damage_bypass_armor, which own the damage number (see
+	# update_stat_display).
+	if delta <= 0 or static_display:
 		return
 	var vfx := _combat_vfx_target()
-	if vfx != null:
-		var anchor := global_position + Vector2(size.x * scale.x * 0.5, size.y * scale.y * 0.30)
-		vfx.spawn_floating_number(anchor, "+%d" % amount, Color(0.45, 1.0, 0.45), false)
+	if vfx == null:
+		return
+	# See _spawn_atk_change_popup: same rise, same anchoring rule, mirrored x.
+	var anchor := global_position + Vector2(size.x * scale.x * 0.75, _float_anchor_y(false))
+	vfx.spawn_floating_number(anchor, "+%d HP" % delta, GameTheme.HEALTH_GREEN, false)
+
+
+func _punch_seal(lbl: Label) -> void:
+	# The wax seal takes the news: a scale punch on the numeral's seal whenever
+	# the stat it carries changes (C2). Decorative emphasis — Motion.punch gates
+	# Reduce Motion itself, and the NUMBER still changes either way, so the
+	# information never depends on the beat. The seal is the label's parent (the
+	# same node _set_atk_caret hangs the caret on).
+	if static_display or lbl == null or not is_instance_valid(lbl):
+		return
+	var seal := lbl.get_parent()
+	if seal is Control:
+		Motion.punch(seal, 1.16)
+
+
+func show_heal_number(amount: int) -> void:
+	# The HEAL beat: a green wash over the body, so a heal reads differently
+	# from a generic stat gain. The "+N HP" float is NOT spawned here —
+	# update_stat_display owns every stat float by construction (C2), and both
+	# call sites refresh the display before calling this, so floating one here
+	# too would double-report the same heal.
+	if amount <= 0 or static_display:
+		return
 	var base := modulate
 	var tw := create_tween()
 	tw.tween_property(self, "modulate", Color(base.r * 0.6, base.g * 1.5, base.b * 0.6, base.a), 0.08)
 	tw.tween_property(self, "modulate", base, 0.25)
 
 
+# ── The clash phrase (C5) ──────────────────────────────────────────────
+# Strike audio climbs through a round's exchange. Static because the phrase
+# belongs to the CLASH, not to any one card — every struck creature reads the
+# same rising step. Combat owns the reset (once per round, at the top of the
+# round); if it ever stops calling reset_clash_pitch the step just saturates at
+# the cap rather than climbing forever, so a missed reset can't shriek.
+const CLASH_PITCH_STEP: float = 0.045  # per strike — a shade under a semitone
+const CLASH_PITCH_MAX: float = 0.28    # cap ≈ +4 semitones over ~6 strikes
+static var _clash_pitch_step: int = 0
+
+static func reset_clash_pitch() -> void:
+	_clash_pitch_step = 0
+
+
+static func _next_clash_pitch() -> float:
+	# Static: the phrase is the clash's, not any card's — and it keeps the step
+	# testable without standing up a Card2D (which drags CardDB in at compile
+	# time, before autoloads exist under --script).
+	var p: float = 1.0 + minf(float(_clash_pitch_step) * CLASH_PITCH_STEP, CLASH_PITCH_MAX)
+	_clash_pitch_step += 1
+	return p
+
+
 func _flash_hit() -> void:
 	if static_display:
 		return
-	# Quick red-tint punch on the card body, then back to its resting tint.
-	# Uses modulate (no child nodes) so it never fights the slot container.
-	var base := modulate
-	var tw := create_tween()
-	tw.tween_property(self, "modulate", Color(base.r * 1.8, base.g * 0.5, base.b * 0.45, base.a), 0.06)
-	tw.tween_property(self, "modulate", base, 0.22).set_ease(Tween.EASE_OUT)
+	if not _flash_face_hit():
+		# Fallback (hand cards, uncached tokens, headless): the historical
+		# red-tint punch on modulate. It can only fake red by DARKENING green
+		# and blue — modulate multiplies — which is exactly the defect ★4 fixes
+		# wherever a baked face exists.
+		var base := modulate
+		var tw := create_tween()
+		tw.tween_property(self, "modulate",
+			Color(base.r * 1.8, base.g * 0.5, base.b * 0.45, base.a), Motion.time(0.06))
+		tw.tween_property(self, "modulate", base, Motion.time(0.22)).set_ease(Tween.EASE_OUT)
 	if AudioBank != null:
 		# "hit_creature" is the bespoke creature-impact cue; it falls back to the
 		# generic "hit" until clips land (AudioBank.SFX_FALLBACKS). This is the
 		# SOLE owner of struck-survivor audio — Combat's clash path plays no hit
 		# cue of its own, or every strike would sound twice.
-		AudioBank.play_sfx("hit_creature")
+		#
+		# The cue RISES through a clash (C5): each successive strike in a round
+		# plays a step higher, so a long exchange reads as a building phrase
+		# instead of the same thump N times — Balatro's rising per-card scoring
+		# note, which is why its chains feel like they're going somewhere. The
+		# ±jitter still rides on top so equal steps never sound sequenced.
+		# Combat resets the step at each round's start (Card2D.reset_clash_pitch).
+		AudioBank.play_sfx("hit_creature", 0.05, 0.0, _next_clash_pitch())
+
+
+var _baked_face: TextureRect = null
+var _gilt_mat: ShaderMaterial = null
+
+func _apply_gilt_foil() -> void:
+	# ★2 — only rares and uncommons carry leaf, and only in the hand. The shine
+	# must stay INFORMATION ("this pull is good"), never wallpaper: if every
+	# card glinted, a rare would look like a common again, which is the whole
+	# defect this fixes. Same reasoning as rarity_reveal's commons no-op.
+	_gilt_mat = null
+	if _baked_face == null or not is_instance_valid(_baked_face):
+		return
+	if static_display or gallery_baked_mode:
+		return
+	if DisplayServer.get_name() == "headless":
+		return
+	var rarity := String(card_data.get("rarity", ""))
+	var strength := 0.0
+	if rarity == "rare":
+		strength = 1.0
+	elif rarity == "uncommon":
+		strength = 0.5
+	if strength <= 0.0:
+		return
+	_gilt_mat = Motion.gilt_material(strength)
+	_baked_face.material = _gilt_mat
+
+
+func _sweep_gilt(tilt: float) -> void:
+	# Called from the lean driver — the ONLY time the highlight needs to move
+	# (gold leaf doesn't shimmer on its own; it catches light when you move it).
+	if _gilt_mat != null:
+		_gilt_mat.set_shader_parameter("tilt", tilt)
+
+
+var _flash_mat: ShaderMaterial = null
+var _flash_tween: Tween = null
+
+## THE INK DARKENS AS THE PAPER LIGHTS (2026-07-28 legibility capture, item 4).
+## A cached battlefield token carries its WAX SEALS baked into the face texture —
+## only the numerals ride on top as live labels (see _build_compact_stat_layer's
+## "cached faces already contain the blank seals"). So flashing the face toward
+## white took the seals with it, and the capture caught the result at t=958 ms: a
+## struck survivor's "7 / 1" rendered near-white ink on a near-white seal at the
+## precise instant the new HP is the thing the player needs to read. The blow's
+## own feedback erased the blow's own consequence.
+##
+## The numerals are therefore driven from the SAME tween value as the flash —
+## paper up, ink down, one clock — so their contrast cannot drift out of step
+## whatever the animation-speed setting does to the timing. The flash keeps its
+## full 0.75 strength: this is a contrast fix, not a volume cut.
+const FLASH_INK := Color(0.20, 0.17, 0.14, 1.0)
+
+
+## Applies one point of the flash curve to both halves of the effect.
+func _apply_hit_flash(v: float) -> void:
+	if _flash_mat != null:
+		_flash_mat.set_shader_parameter("flash", v)
+	# modulate multiplies, so this darkens the glyph while leaving its black
+	# outline black — dark ink + black outline on hot paper reads at any point of
+	# the curve. Nothing else writes label modulate, so no state needs restoring
+	# beyond the tween's own return to white.
+	var ink := Color(1, 1, 1, 1).lerp(FLASH_INK, clampf(v, 0.0, 1.0))
+	for node in [_atk_label, _hp_label, _atk_caret]:
+		if node != null and is_instance_valid(node):
+			node.modulate = ink
+
+
+func _flash_face_hit() -> bool:
+	# ★4 — the sheet takes the blow: a real flash TOWARD hot white on the baked
+	# face, instead of a modulate tint that could only darken its way to "red".
+	# The ink (live numerals) deliberately does NOT flash — paper catches the
+	# light, writing doesn't.
+	#
+	# Returns false when there's no baked face to shade, so _flash_hit keeps its
+	# historical fallback. Never runs while the card is burning: the death shader
+	# owns the face's material from _die onward, and re-materialising it here
+	# would erase the burn mid-frontier.
+	if _compact_face == null or not is_instance_valid(_compact_face) or _dead:
+		return false
+	if DisplayServer.get_name() == "headless":
+		return false
+	if _flash_mat == null:
+		_flash_mat = Motion.flash_material()
+	# Re-arm on the material we own — a card struck twice in a clash must
+	# re-flash from full, not stack two tweens onto one parameter.
+	if _compact_face.material != _flash_mat:
+		_compact_face.material = _flash_mat
+	if _flash_tween != null and _flash_tween.is_valid():
+		_flash_tween.kill()
+	# Re-armed from zero, which also snaps the numerals back to full ink — a card
+	# struck twice in one clash must not inherit half a curve.
+	_apply_hit_flash(0.0)
+	_flash_tween = _compact_face.create_tween()
+	# 0.75, not a full wash: at 0.85 a bright card went ghost-white and read as
+	# a render error rather than a blow (caught in _shot_burn_seals).
+	_flash_tween.tween_method(_apply_hit_flash, 0.0, 0.75, Motion.time(0.05))
+	_flash_tween.tween_method(_apply_hit_flash, 0.75, 0.0, Motion.time(0.22)) \
+		.set_ease(Tween.EASE_OUT)
+	return true
 
 
 var _mortal_slumped: bool = false
@@ -6090,9 +4128,15 @@ func _mark_mortally_struck() -> void:
 	_mortal_slump_base = modulate
 	var b := _mortal_slump_base
 	var tw := create_tween()
-	tw.tween_property(self, "modulate", Color(b.r * 1.8, b.g * 0.5, b.b * 0.45, b.a), 0.06)
-	tw.tween_property(self, "modulate", Color(0.42, 0.38, 0.36, b.a), 0.30) \
-		.set_ease(Tween.EASE_OUT)
+	tw.tween_property(self, "modulate", Color(b.r * 1.8, b.g * 0.5, b.b * 0.45, b.a),
+		Motion.time(0.06))
+	# Deepened 2026-07-29. The clash is now serialized and a full board can hold its
+	# corpses for ~10 s before the flush, so "slightly gray" was not enough
+	# separation — a shot of the mass grave read as fourteen LIVE cards standing in
+	# ranks at 0 HP. Darker and part-transparent so spent bodies visibly RECEDE from
+	# the line while still being present (they must be: they still owe retaliation).
+	tw.tween_property(self, "modulate", Color(0.30, 0.27, 0.26, b.a * 0.78),
+		Motion.time(0.30)).set_ease(Tween.EASE_OUT)
 
 
 func _recover_from_mortal_slump() -> void:
@@ -6111,6 +4155,21 @@ func _die() -> void:
 	# Stop idle bob from writing position.y each frame — it would fight the death
 	# tween (and the sacrifice rise in particular).
 	_idle_bob_enabled = false
+	# ...and stop the CLASH tweens for the same reason, which the bob guard above
+	# has always implied but never covered (2026-07-30). A body dies mid-lunge on
+	# every mutual trade and mid-recoil on nearly every kill — the blow that killed
+	# it is what started the recoil — so `position` and `scale` were being written
+	# by the strike choreography and the death flourish at the same time for the
+	# remainder of the settle. Today the shrink happens to win; it is a real
+	# two-writer bug the moment anything else joins (the strike roll in
+	# docs/STRIKE_DESIGN_20260730.md would put `rotation` in the same state).
+	# _lunge_hold_active must clear too, or _combat_tween_active() keeps reporting
+	# true against a corpse — hold_lunge_apex only lowers it from a timer callback
+	# that a freed node will never see.
+	for tw in [_lunge_tween, _lunge_scale_tween, _recoil_tween]:
+		if tw != null and tw.is_valid():
+			tw.kill()
+	_lunge_hold_active = false
 	if static_display or not is_inside_tree():
 		if AudioBank != null and not death_cue_played:
 			AudioBank.play_sfx("death")
@@ -6126,25 +4185,95 @@ func _die() -> void:
 		# Sacrifice ritual: the body ashes away UPWARD — rises, stretches thin, and
 		# burns out to amber. Combat._sacrifice_creature plays the crimson veil,
 		# ember burst, and altar shake around it; this is the body dissolving.
+		var rise := Motion.time(0.6)
 		var stw := create_tween()
 		stw.set_parallel(true)
-		stw.tween_property(self, "position:y", position.y - 48.0, 0.6).set_ease(Tween.EASE_OUT)
-		stw.tween_property(self, "modulate", Color(1.0, 0.55, 0.20, 0.0), 0.6).set_ease(Tween.EASE_IN)
-		stw.tween_property(self, "scale", scale * Vector2(0.85, 1.15), 0.6).set_ease(Tween.EASE_IN)
-		stw.tween_property(self, "rotation", rotation + randf_range(-0.12, 0.12), 0.6)
+		stw.tween_property(self, "position:y", position.y - 48.0, rise).set_ease(Tween.EASE_OUT)
+		stw.tween_property(self, "modulate", Color(1.0, 0.55, 0.20, 0.0), rise).set_ease(Tween.EASE_IN)
+		stw.tween_property(self, "scale", scale * Vector2(0.85, 1.15), rise).set_ease(Tween.EASE_IN)
+		stw.tween_property(self, "rotation", rotation + randf_range(-0.12, 0.12), rise)
 		stw.chain().tween_callback(queue_free)
 		return
 	# Skipped when the clash path already sounded "creature_death" at the impact
 	# beat (death_cue_played) — the flush is the visual flourish, not a second hit.
 	if AudioBank != null and not death_cue_played:
 		AudioBank.play_sfx("death")
-	# Death flourish: fade to a dark red while shrinking + spinning slightly, then free.
+	if _play_burn_death():
+		return
+	# Fallback flourish — hand cards, uncached compact tokens, headless: fade to
+	# a dark red while shrinking + spinning slightly, then free.
+	var flourish := Motion.time(0.34)
 	var tw := create_tween()
 	tw.set_parallel(true)
-	tw.tween_property(self, "modulate", Color(0.35, 0.08, 0.08, 0.0), 0.34).set_ease(Tween.EASE_IN)
-	tw.tween_property(self, "scale", scale * 0.45, 0.34).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_BACK)
-	tw.tween_property(self, "rotation", rotation + randf_range(-0.5, 0.5), 0.34)
+	tw.tween_property(self, "modulate", Color(0.35, 0.08, 0.08, 0.0), flourish).set_ease(Tween.EASE_IN)
+	tw.tween_property(self, "scale", scale * 0.45, flourish).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_BACK)
+	tw.tween_property(self, "rotation", rotation + randf_range(-0.5, 0.5), flourish)
 	tw.chain().tween_callback(queue_free)
+
+
+func _play_burn_death() -> bool:
+	# ★1 — the writ burns. The parchment catches from below and is eaten upward
+	# behind an ember frontier, instead of the old shrink-spin-fade (which was
+	# the most generic beat in a game whose whole identity is paper and ink —
+	# and whose title is Burning Meadow).
+	#
+	# Returns false when it can't run (no baked face, headless) so _die falls
+	# back to the historical flourish — death must ALWAYS resolve and free.
+	#
+	# Reduce Motion: NOT gated. Death is informational by the contract — the
+	# board must show that this creature is gone — and this replaces an
+	# animation that was never gated either. It rides Motion.time() so the
+	# animation-speed setting still scales it.
+	if _compact_face == null or not is_instance_valid(_compact_face):
+		return false
+	# The hit flash (★4) and the burn both own the face's material. Death wins:
+	# stop the flash before burn_away re-materialises the face, or a strike
+	# landing on the same frame would keep driving a parameter on a material
+	# that's no longer mounted.
+	if _flash_tween != null and _flash_tween.is_valid():
+		_flash_tween.kill()
+	_flash_mat = null
+	var burn := Motion.time(0.52)
+	var ember_hot := Color(1.0, 0.92, 0.55)
+	var ember_cool := Color(1.0, 0.36, 0.07)
+	if is_opponent:
+		# The foe's writ burns oxblood where yours burns gilt — the same side
+		# language the log rims and arsenal chips already speak.
+		ember_hot = Color(1.0, 0.74, 0.42)
+		ember_cool = Color(0.86, 0.18, 0.10)
+	var tw := Motion.burn_away(_compact_face, burn, ember_hot, ember_cool)
+	if tw == null:
+		return false
+	# Card2D is a PanelContainer and paints its OWN panel behind the face. The
+	# shader discards consumed pixels, so without this the card burns away to
+	# reveal a black rounded rectangle — its own backing board — instead of the
+	# battlefield. Strip the panel so the hole is a real hole. (Verified in
+	# _shot_card_burn: this is exactly what the first capture showed.)
+	add_theme_stylebox_override("panel", StyleBoxEmpty.new())
+	# The ink goes first: numerals, seals and badges are the least of the sheet
+	# and would otherwise hang in the air over a hole. They're siblings of the
+	# face, so they can't ride the shader — fade them out ahead of the frontier.
+	for child in _compact_root.get_children():
+		if child == _compact_face or not (child is CanvasItem):
+			continue
+		var ink := (child as CanvasItem).create_tween()
+		ink.tween_property(child, "modulate:a", 0.0, Motion.time(0.20)) \
+			.set_ease(Tween.EASE_IN)
+	# Heat lifts the sheet a little as it goes. No spin, no shrink — paper
+	# doesn't recoil, it rises and is consumed.
+	var lift := create_tween()
+	lift.tween_property(self, "position:y", position.y - 14.0, burn) \
+		.set_ease(Tween.EASE_OUT)
+	tw.chain().tween_callback(queue_free)
+	# Belt and braces: the burn tween lives on a CHILD node, so anything that
+	# frees the face mid-burn would take the queue_free with it and strand a
+	# corpse on the board. A death must ALWAYS resolve — this timer is the one
+	# guarantee that doesn't depend on the face surviving. (Double queue_free is
+	# a safe no-op.)
+	get_tree().create_timer(burn + 0.6).timeout.connect(func():
+		if is_instance_valid(self):
+			queue_free())
+	return true
 
 
 # ═══════════════════════════════════════════
@@ -6287,6 +4416,8 @@ func _spawn_press_ring() -> void:
 ## don't fight — see the note there. Scale-only tweens are intentionally excluded
 ## (the bob writes position.y, not scale, so they can't conflict).
 func _combat_tween_active() -> bool:
+	if _lunge_hold_active:
+		return true
 	if _lunge_tween != null and _lunge_tween.is_valid() and _lunge_tween.is_running():
 		return true
 	if _recoil_tween != null and _recoil_tween.is_valid() and _recoil_tween.is_running():
@@ -6315,16 +4446,20 @@ func play_attack_lunge(strength: float = 1.0) -> void:
 		_lunge_tween.kill()
 	_lunge_tween = create_tween()
 	# Anticipation: a small hop backward (away from the foe) — very short so the
-	# strike still peaks on time.
-	_lunge_tween.tween_property(self, "position", rest - Vector2(0, dir * 7.0), 0.05) \
+	# strike still peaks on time. Durations come from the shared Motion clock
+	# (Combat awaits Motion.LUNGE_APEX = anticipation + strike, so the impact
+	# beat lands exactly at full extension) and scale with anim_speed.
+	_lunge_tween.tween_property(self, "position", rest - Vector2(0, dir * 7.0),
+			Motion.time(Motion.LUNGE_ANTICIPATION)) \
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 	# Strike: drive forward into the target. `strength` scales the drive so a
 	# heavy blow visibly travels deeper before snapping back (Combat passes
 	# _lunge_strength(atk); 1.0 = the historical 26px).
-	_lunge_tween.tween_property(self, "position", rest + Vector2(0, dir * 26.0 * strength), 0.08) \
+	_lunge_tween.tween_property(self, "position", rest + Vector2(0, dir * 26.0 * strength),
+			Motion.time(Motion.LUNGE_STRIKE)) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	# Settle home.
-	_lunge_tween.tween_property(self, "position", rest, 0.16) \
+	_lunge_tween.tween_property(self, "position", rest, Motion.time(Motion.LUNGE_SETTLE)) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	# Secondary motion (own tween so it can't perturb the position timing above):
 	# a subtle squash-&-stretch — the body stretches along the line of travel as it
@@ -6335,10 +4470,48 @@ func play_attack_lunge(strength: float = 1.0) -> void:
 		_lunge_scale_tween.kill()
 	_lunge_scale_tween = create_tween()
 	var stretch := Vector2(1.0 - 0.04 * strength, 1.0 + 0.07 * strength)
-	_lunge_scale_tween.tween_property(self, "scale", rest_scale * stretch, 0.13) \
+	# Stretch peaks at the apex (anticipation + strike), same clock as position.
+	_lunge_scale_tween.tween_property(self, "scale", rest_scale * stretch,
+			Motion.time(Motion.LUNGE_APEX)) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	_lunge_scale_tween.tween_property(self, "scale", rest_scale, 0.17) \
+	_lunge_scale_tween.tween_property(self, "scale", rest_scale, Motion.time(0.17)) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+func hold_lunge_apex(extra: float) -> void:
+	# ★8 (docs/ANIMATION_COOL_PITCH_20260717.md §5b): the blow that ends the
+	# fight holds the killer at FULL EXTENSION while the world stops. This
+	# PAUSES the running lunge tweens rather than adding a second writer on
+	# position/scale — the lunge stays the sole owner, time simply stops for it
+	# and resumes. Call it right after the lethal damage lands (the strike is
+	# just entering its settle phase, so the pause catches peak extension).
+	# Decorative emphasis by the reduce-motion contract: the verdict banner
+	# carries the information, so Reduce Motion skips the hold entirely.
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	if extra <= 0.0 or not is_inside_tree():
+		return
+	if _lunge_tween == null or not _lunge_tween.is_valid() \
+			or not _lunge_tween.is_running():
+		return
+	_lunge_hold_active = true
+	_lunge_tween.pause()
+	if _lunge_scale_tween != null and _lunge_scale_tween.is_valid() \
+			and _lunge_scale_tween.is_running():
+		_lunge_scale_tween.pause()
+	# Capture the tweens + a weakref so the resume can't touch a freed card
+	# (the scene may fade to GameOver/Reward while the hold is pending).
+	var tw_pos := _lunge_tween
+	var tw_scale := _lunge_scale_tween
+	var me: WeakRef = weakref(self)
+	get_tree().create_timer(Motion.time(extra)).timeout.connect(func():
+		var live := me.get_ref() as Card2D
+		if live != null:
+			live._lunge_hold_active = false
+		if tw_pos != null and tw_pos.is_valid():
+			tw_pos.play()
+		if tw_scale != null and tw_scale.is_valid():
+			tw_scale.play())
 
 
 func play_hit_recoil(push_down: bool) -> void:
@@ -6356,15 +4529,19 @@ func play_hit_recoil(push_down: bool) -> void:
 		_recoil_tween.kill()
 	_recoil_tween = create_tween()
 	_recoil_tween.set_parallel(true)
-	# Shove away from the attacker, then ease home.
-	_recoil_tween.tween_property(self, "position", rest + Vector2(0, dir * 13.0), 0.05) \
+	# Shove away from the attacker, then ease home. Same shared clock as the
+	# lunge so recoil scales with anim_speed in step with the pacing pauses.
+	_recoil_tween.tween_property(self, "position", rest + Vector2(0, dir * 13.0),
+			Motion.time(Motion.RECOIL_SHOVE)) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	_recoil_tween.chain().tween_property(self, "position", rest, 0.18) \
+	_recoil_tween.chain().tween_property(self, "position", rest,
+			Motion.time(Motion.RECOIL_SETTLE)) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	# Quick scale punch for the impact pop (scale isn't touched by idle bob).
-	_recoil_tween.tween_property(self, "scale", rest_scale * Vector2(1.12, 0.9), 0.05) \
+	_recoil_tween.tween_property(self, "scale", rest_scale * Vector2(1.12, 0.9),
+			Motion.time(Motion.RECOIL_SHOVE)) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	_recoil_tween.chain().tween_property(self, "scale", rest_scale, 0.20) \
+	_recoil_tween.chain().tween_property(self, "scale", rest_scale, Motion.time(0.20)) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 
@@ -6905,7 +5082,15 @@ func _on_mouse_entered() -> void:
 		_hover_tween = create_tween().set_parallel(true)
 		_hover_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 		_hover_tween.tween_property(self, "scale", Vector2(1.15, 1.15), 0.11)
-		_hover_tween.tween_property(self, "rotation", 0.0, 0.11)
+		# Rotation is NOT tweened here: the lean (C1) owns it while hovered and
+		# damps the fan angle out toward the cursor tilt, which subsumes the old
+		# "straighten to 0" beat. Reduce Motion doesn't arm the lean, so restore
+		# the historical straighten in that case — the card must not sit fanned
+		# under a hover with nothing to level it.
+		if _lean_can_arm():
+			_arm_lean()
+		else:
+			_hover_tween.tween_property(self, "rotation", 0.0, 0.11)
 		# -96 tracks Combat._layout_hand's PEEK 92 (was -80 at PEEK 76): the
 		# resting fan tucked 16px lower, so the lift grew 16px to keep the
 		# hovered pose at the same screen height.
@@ -6937,6 +5122,9 @@ func _on_mouse_exited() -> void:
 	if _is_being_dragged or _is_playing:
 		return
 	_is_hovered = false
+	# Hand `rotation` back to the settle tween below, which carries it from
+	# wherever the tilt left it home to _hand_target_rotation (C1).
+	_disarm_lean()
 	# Floop is hard-gated dead code (see update_floop_display, P1#10): the old
 	# will_floop / has_floop() cyan-border branches here are removed so a stray
 	# floop key can never paint a cyan affordance on hover-out. Always restore
@@ -7001,6 +5189,10 @@ func _gui_input(event: InputEvent) -> void:
 		if not is_on_battlefield and not is_opponent and not static_display \
 				and not _is_being_dragged:
 			dismiss_requested.emit()
+		elif is_on_battlefield and not is_opponent and not static_display \
+				and not _field_grabbing:
+			# Friendly board creature: right-click lifts a sniper's aim order.
+			aim_clear_requested.emit()
 	elif event is InputEventMouseMotion:
 		if _field_grabbing:
 			_update_field_grab(event.global_position)
@@ -7125,7 +5317,11 @@ func _start_drag(mouse_pos: Vector2) -> void:
 	# Straighten the card on grab. Hand cards carry a fan rotation; a tilted
 	# card stuck under the cursor reads as a glitch. (Hover already zeroes this,
 	# but a fast grab or touch press can skip the hover step.)
+	# From here rotation is the LEAN's (C1) — it damps away from this 0 into
+	# cursor velocity and back. Under Reduce Motion the lean never arms and the
+	# card stays straight, as it did before.
 	rotation = 0.0
+	_arm_lean()
 	# Pivot to centre so the dragged card scales around its middle, then place
 	# that middle under the cursor. With a CENTRED pivot the card's on-screen
 	# centre is global_position + size*0.5 INDEPENDENT of scale — so the offset
@@ -7148,11 +5344,72 @@ func _update_drag(mouse_pos: Vector2) -> void:
 	dragging.emit(global_position + size * 0.5)
 
 
+# ── Lean driver (C1) ──────────────────────────────────────────────────
+
+func _lean_can_arm() -> bool:
+	# Decorative — Reduce Motion leaves the card rigid, and callers fall back to
+	# the historical tweened rotation so `rotation` still has an owner.
+	if static_display:
+		return false
+	if UserSettings != null and UserSettings.reduce_motion:
+		return false
+	return true
+
+
+func _arm_lean() -> void:
+	if not _lean_can_arm():
+		return
+	_lean_active = true
+	_lean_target = 0.0
+	_lean_last_mouse_x = get_global_mouse_position().x
+	set_process(true)
+
+
+func _disarm_lean() -> void:
+	# Hands `rotation` back to the tweens (hover-exit / _end_drag restore it
+	# from wherever the lean left it — no snap, and no second writer).
+	_lean_active = false
+	_lean_target = 0.0
+	set_process(false)
+
+
+func _process(delta: float) -> void:
+	if not _lean_active:
+		set_process(false)
+		return
+	if _is_being_dragged:
+		# Lean into cursor VELOCITY: the card trails the hand that swings it.
+		var mx := get_global_mouse_position().x
+		var vel_x := (mx - _lean_last_mouse_x) / maxf(delta, 0.0001)
+		_lean_last_mouse_x = mx
+		_lean_target = clampf(vel_x * LEAN_DRAG_PER_VEL, -LEAN_DRAG_MAX, LEAN_DRAG_MAX)
+	elif _is_hovered:
+		# Tilt toward the CURSOR's offset from centre: press a corner, that
+		# corner dips. Normalised by half-width so the tilt is size-agnostic.
+		var centre_x: float = global_position.x + size.x * scale.x * 0.5
+		var off: float = (get_global_mouse_position().x - centre_x) \
+			/ maxf(size.x * scale.x * 0.5, 1.0)
+		_lean_target = clampf(off, -1.0, 1.0) * LEAN_HOVER_MAX
+	else:
+		_disarm_lean()
+		return
+	# Frame-rate-independent exponential damp toward the target — the card
+	# never snaps to a lean, it eases into and out of one, and a direction
+	# reversal mid-drag is handled natively (no tween to kill and restart).
+	var rate: float = LEAN_DAMP_DRAG if _is_being_dragged else LEAN_DAMP_HOVER
+	rotation = lerpf(rotation, _lean_target, 1.0 - exp(-rate * delta))
+	# The leaf catches the light off the SAME angle (★2) — the lean is already
+	# the one place per frame that knows how the card is moving, so the foil
+	# rides it for free rather than arming a second driver.
+	_sweep_gilt(rotation)
+
+
 func _end_drag() -> void:
 	if not _is_being_dragged:
 		return
 	_is_being_dragged = false
 	_any_card_dragging = false
+	_disarm_lean()
 	z_index = 0
 	drag_ended.emit()
 	var viewport_h = get_viewport_rect().size.y
@@ -7584,7 +5841,10 @@ func _wd_build(cd: Dictionary) -> Control:
 
 	# ── type • rarity line ── (sepia ink, not the rarity metal: the gem + glow +
 	# cartouche already carry rarity, and grey starter-metal washes out on vellum)
-	var type_text := "Creature" if is_creature_card else "Spell"
+	var type_text := "Creature"
+	match String(cd.get("type", "")):
+		"spell": type_text = "Spell"
+		"armament": type_text = "Armament"
 	var tl := _wd_label("%s   •   %s" % [type_text, rarity.capitalize()], body_font, 14,
 		Color(0.31, 0.22, 0.11))
 	tl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -7748,16 +6008,16 @@ func _wd_veteran_line(cd: Dictionary) -> String:
 	var kills := int(cd.get("veteran_kills", 0))
 	if kills <= 0:
 		return ""
-	if kills < RunState.VETERAN_EPITHET_KILLS:
-		return "Campaign: %d kills, %d to an earned name." % [
-			kills, RunState.VETERAN_EPITHET_KILLS - kills]
+	if kills < RunState.veteran_epithet_kills():
+		return "Campaign: %d kills, %d to an earned name and a war school." % [
+			kills, RunState.veteran_epithet_kills() - kills]
 	if kills < RunState.VETERAN_RANK_KILLS:
 		return "Campaign: %d kills, %d to +1/+1." % [
 			kills, RunState.VETERAN_RANK_KILLS - kills]
-	if kills < RunState.VETERAN_SCHOOL_KILLS:
-		return "Campaign: %d kills, %d to war school." % [
-			kills, RunState.VETERAN_SCHOOL_KILLS - kills]
-	return "Campaign: %d kills, war school earned." % kills
+	if kills < RunState.veteran_doctrine_kills():
+		return "Campaign: %d kills, %d to a doctrine." % [
+			kills, RunState.veteran_doctrine_kills() - kills]
+	return "Campaign: %d kills, fully trained." % kills
 
 
 func _wd_label(text: String, font: Font, size: int, col: Color) -> Label:
@@ -7881,15 +6141,18 @@ func _describe_trigger(data: Dictionary) -> String:
 		"damage_random_player": return "Deal %d damage to a random friendly creature" % v
 		"damage_all_enemies": return "Deal %d damage to all enemy creatures" % v
 		"damage_face": return "Deal %d damage to enemy face" % v
-		"draw": return "Draw %d card(s)" % v
+		"draw": return "Draw a card" if v == 1 else "Draw %d cards" % v
 		"gain_gold": return "Gain %d gold" % v
 		"debuff_opposing_atk": return "The opposing creature gets -%d ATK" % v
-		"discard_random": return "Discard %d random card(s)" % v
+		"discard_random": return "Discard a random card" if v == 1 \
+			else "Discard %d random cards" % v
 		"damage_opposing_lane": return "Deal %d damage to the opposing lane" % v
 		"summon": return "Summon a %d/%d token" % [data.get("atk", 1), data.get("hp", 1)]
 		"bonus_mana": return "Gain %d bonus Command" % v
 		"debuff_all_player_atk": return "All friendlies get -%d ATK" % v
 		"damage_adjacent": return "Deal %d damage to adjacent creatures" % v
+		"buff_ctype_hp": return "Your %s gain +%d HP this fight" % [String(data.get("ctype", "creature")).capitalize(), v]
+		"betray_opposing": return "The opposing enemy attacks its nearest ally or its own face"
 		"damage_any": return "Deal %d damage to any target" % v
 		"summon_random": return "Summon a random creature"
 		"kill_adjacent_summon": return "Kill adjacent, summon in its place"
@@ -7931,3 +6194,74 @@ func _synthesized_rules_text() -> String:
 		var kd := str(kdef.get("desc", ""))
 		lines.append("%s — %s" % [disp, kd] if kd != "" else disp)
 	return "\n".join(lines)
+
+
+## ARMORED: the writ is strapped into a riveted edge. The painter carries the
+## rule in repeated hardware and edge silhouette, so it survives grayscale and
+## compact-token scale without occupying the creature's identifying artwork.
+func _build_armored_edge() -> void:
+	var edge := ArmoredEdge.new()
+	edge.name = "ArmoredEdge"
+	edge.seed_text = "armored_%s" % String(card_data.get("id", "x"))
+	edge.set_anchors_preset(Control.PRESET_FULL_RECT)
+	edge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	edge.z_index = 0
+	_compact_root.add_child(edge)
+	_armored_edge = edge
+	# The state is present immediately. A short material settle only calls
+	# attention to a mid-fight grant and is omitted under Reduce Motion.
+	if not (UserSettings != null and UserSettings.reduce_motion):
+		edge.modulate.a = 0.0
+		var tw := edge.create_tween()
+		tw.tween_property(edge, "modulate:a", 1.0, Motion.time(0.12))
+
+
+func _clear_armored_edge() -> void:
+	if _armored_edge == null or not is_instance_valid(_armored_edge):
+		_armored_edge = null
+		return
+	# Protection is already gone in the rules, so its frame leaves immediately
+	# rather than lying for the duration of a decorative fade.
+	_armored_edge.queue_free()
+	_armored_edge = null
+
+
+## LAST STAND: a purpose-built token candle mounted on the trailing edge. It
+## clears the leading edge for granted Swift and avoids Doom/keyword furniture
+## at the top plus the stat seals at the bottom.
+func _build_last_stand_candle() -> void:
+	var candle := LastStandCandle.new()
+	candle.name = "LastStandCandle"
+	candle.seed_text = "last_stand_%s" % String(card_data.get("id", "x"))
+	candle.size = Vector2(44, 68)
+	candle.position = Vector2(164, 40) if is_opponent else Vector2(-8, 40)
+	candle.pivot_offset = candle.size * 0.5
+	candle.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	candle.z_index = 5
+	_compact_root.add_child(candle)
+	_last_stand_candle = candle
+	if not (UserSettings != null and UserSettings.reduce_motion):
+		candle.modulate.a = 0.0
+		candle.scale = Vector2(0.86, 0.86)
+		var tw := candle.create_tween().set_parallel(true)
+		tw.tween_property(candle, "modulate:a", 1.0, Motion.time(0.10))
+		tw.tween_property(candle, "scale", Vector2.ONE, Motion.time(0.16)) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+func _clear_last_stand_candle(spent: bool) -> void:
+	if _last_stand_candle == null or not is_instance_valid(_last_stand_candle):
+		_last_stand_candle = null
+		return
+	var old := _last_stand_candle
+	_last_stand_candle = null
+	if spent:
+		# Information changes on the first frame: the flame is out before the
+		# spent hardware fades, so the brief exit can never imply a second save.
+		old.set("flame_strength", 0.0)
+	if UserSettings != null and UserSettings.reduce_motion:
+		old.queue_free()
+		return
+	var tw := old.create_tween()
+	tw.tween_property(old, "modulate:a", 0.0, Motion.time(0.16))
+	tw.tween_callback(old.queue_free)

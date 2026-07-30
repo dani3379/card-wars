@@ -17,7 +17,7 @@ const SAVE_PATH := "user://settings.save"
 # `window_width − 544`, so a canvas narrower than ~1360px overflows the play area
 # and the lanes collide with the side UI. Gating the minimum is the chosen
 # stopgap; the proper fix is a fixed design canvas (stretch=canvas_items).
-const MIN_RES := Vector2i(1366, 768)
+const MIN_RES := Vector2i(1024, 576)
 const DEFAULT_RES := Vector2i(1600, 900)
 
 var master_volume: float = 1.0
@@ -71,6 +71,39 @@ var brightness: float = 0.0
 # Animation speed multiplier. 0.5 = slow, 1.0 = normal, 1.5 = fast, 3.0 = instant.
 # Combat pause helpers and tween durations divide their base time by this.
 var anim_speed: float = 1.0
+# The discrete stops the settings screen offers, slowest → fastest. They live
+# HERE rather than in SettingsOverlay so that load-time normalisation and the
+# dropdown's selected index read the same table and can never disagree — the
+# old split let the row display "Slow" while the stored value was something
+# else entirely. Discrete named stops (Celeste's Assist Mode ships six, 50–100%)
+# beat a continuous slider: a named state is one a player can describe, return
+# to, and reason about.
+const ANIM_SPEED_STEPS := [0.34, 0.5, 1.0, 1.5, 3.0]
+const ANIM_SPEED_MIN := 0.34
+const ANIM_SPEED_MAX := 3.0
+
+# ── Clash dwell ──────────────────────────────────────────────────────────────
+# Multiplier on Combat's per-lane clash dwell — how long the clash HOLDS on a
+# lane before the spotlight moves to the next one. 0.0 = no dwell at all.
+#
+# WHY THIS IS A SEPARATE SETTING AND NOT FOLDED INTO anim_speed:
+#   * anim_speed scales EVERY tween in the game — menu slides, card deals, map
+#     pans, hover lifts, the whole shell. It answers "how fast should this
+#     software move".
+#   * the clash dwell is dead time ON PURPOSE: the pause that lets the eye land
+#     on one lane and read the exchange there (see
+#     docs/COMBAT_LEGIBILITY_20260728.md §7 — the serialized clash). It answers
+#     "how long do I get to read".
+# Those are different questions and players answer them differently. Someone who
+# has watched the deal animation a thousand times wants snappy tweens AND a long
+# read on the clash; a player who finds the board busy may want the reverse.
+# One dial forces a trade neither of them asked for. Speed is also never allowed
+# to be an engine-chosen ramp here (the Hearthstone Battlegrounds auto-
+# acceleration failure the legibility doc cites) — it is player-owned, always.
+var clash_dwell_scale: float = 1.0
+const CLASH_DWELL_STEPS := [0.0, 0.6, 1.0, 1.5, 2.0]
+const CLASH_DWELL_MIN := 0.0
+const CLASH_DWELL_MAX := 2.0
 # Tooltip / hover-popup delay in seconds. 0 = instant.
 var tooltip_delay: float = 0.0
 # Color blind palette mode: "off" (default red/green), "deuteranopia" (red→orange,
@@ -88,6 +121,9 @@ var end_turn_warning: bool = true
 var combat_telegraph: bool = true
 # Mute audio when the window loses focus.
 var mute_on_focus_loss: bool = true
+# Combat field-ground style: 0 war table / 1 meadow / 2 obsidian / 3 battle-plan.
+# Read by Combat._default_field_style at board build; applies from the next fight.
+var field_style: int = 0
 var resolution: Vector2i = DEFAULT_RES
 # Persistent tutorial flags — once dismissed, never shown again.
 var floop_tutorial_seen: bool = false
@@ -211,8 +247,13 @@ func _clamp_resolution_to_screen() -> void:
 	# unusable. Snap to DEFAULT_RES clamped to screen size in that case.
 	var screen := DisplayServer.window_get_current_screen()
 	var screen_size := DisplayServer.screen_get_size(screen)
+	if screen_size.x <= 0 or screen_size.y <= 0:
+		return
+	var screen_floor := Vector2i(
+		mini(MIN_RES.x, screen_size.x),
+		mini(MIN_RES.y, screen_size.y))
 	var changed := false
-	if resolution.x < MIN_RES.x or resolution.y < MIN_RES.y:
+	if resolution.x < screen_floor.x or resolution.y < screen_floor.y:
 		resolution = Vector2i(
 			min(DEFAULT_RES.x, screen_size.x),
 			min(DEFAULT_RES.y, screen_size.y))
@@ -237,7 +278,9 @@ func get_available_resolutions(candidates: Array) -> Array:
 		if r.x <= screen_size.x and r.y <= screen_size.y:
 			out.append(r)
 	if out.is_empty() and candidates.size() > 0:
-		out.append(candidates[0])
+		out.append(Vector2i(
+			mini(DEFAULT_RES.x, screen_size.x),
+			mini(DEFAULT_RES.y, screen_size.y)))
 	return out
 
 
@@ -366,9 +409,11 @@ func _apply_resolution() -> void:
 	# Clamp to the monitor's usable area (excludes Windows taskbar) and to a
 	# floor of MIN_RES so a corrupt value can never produce a tiny window.
 	var usable := _get_usable_rect()
+	var min_width := mini(MIN_RES.x, usable.size.x)
+	var min_height := mini(MIN_RES.y, usable.size.y)
 	var clamped := Vector2i(
-		clampi(resolution.x, MIN_RES.x, usable.size.x),
-		clampi(resolution.y, MIN_RES.y, usable.size.y))
+		clampi(resolution.x, min_width, usable.size.x),
+		clampi(resolution.y, min_height, usable.size.y))
 	get_window().size = clamped
 	# Center within the current monitor's usable rect — `usable.position` is
 	# non-zero on a secondary monitor, so the naive (screen - window)/2 formula
@@ -567,8 +612,79 @@ func set_brightness(val: float) -> void:
 
 
 func set_anim_speed(val: float) -> void:
-	anim_speed = clampf(val, 0.5, 3.0)
+	# Slow end widened 0.5 -> 0.34 on 2026-07-28. The old floor meant the
+	# player-facing "slower" slider topped out at exactly 2x, which is not enough
+	# for someone learning the clash or reading a busy board — combat is eight
+	# duels resolving in sequence, and some players want to watch each one.
+	anim_speed = clampf(val, ANIM_SPEED_MIN, ANIM_SPEED_MAX)
 	save()
+
+
+## How long the clash holds on each lane, as a multiplier on Combat's base
+## per-lane dwell. 0.0 means "no dwell" — see the CLASH_DWELL_STEPS block above
+## for why this is deliberately not the same dial as anim_speed.
+func set_clash_dwell_scale(val: float) -> void:
+	clash_dwell_scale = clampf(val, CLASH_DWELL_MIN, CLASH_DWELL_MAX)
+	save()
+
+
+## Scaled per-lane clash dwell, in seconds. Same arithmetic Combat would write
+## inline, behind a name so the intent reads at the call site.
+##
+## Deliberately does NOT divide by anim_speed: the caller decides whether the
+## two compose (a dwell already routed through Motion.time()/anim_time() must
+## not be scaled twice). Callers must treat a 0.0 result as "skip the pause
+## entirely" and never await a zero-length timer for it.
+func clash_dwell_time(base_seconds: float) -> float:
+	return maxf(0.0, base_seconds * clash_dwell_scale)
+
+
+## Index into ANIM_SPEED_STEPS of the stop nearest the live value. Always a
+## valid index, so a settings row built from it can never show a word that
+## disagrees with the stored state.
+func anim_speed_step_index() -> int:
+	return maxi(0, _nearest_step_index(ANIM_SPEED_STEPS, anim_speed))
+
+
+## Index into CLASH_DWELL_STEPS of the stop nearest the live value.
+func clash_dwell_step_index() -> int:
+	return maxi(0, _nearest_step_index(CLASH_DWELL_STEPS, clash_dwell_scale))
+
+
+## Nearest offered stop by absolute distance. Ties go to the EARLIER (slower,
+## longer-dwell) entry — if we have to guess, guess toward legibility.
+## Returns -1 only for an empty table.
+func _nearest_step_index(steps: Array, val: float) -> int:
+	var best := -1
+	var best_d := INF
+	for i in steps.size():
+		var d: float = absf(float(steps[i]) - val)
+		if d < best_d:
+			best_d = d
+			best = i
+	return best
+
+
+## Read a persisted float, then clamp and snap it onto the offered stops.
+##
+## This exists because the SETTER is the only guarded door and a save file walks
+## straight past it: a value written by an older build, a hand edit, or a
+## corrupt/half-written file arrives raw. An out-of-range anim_speed is not
+## cosmetic — a negative one makes anim_time() return a NEGATIVE duration, which
+## breaks every tween in the game at once, and any unrecognised value used to
+## leave the settings row displaying a stop the player had not chosen.
+## `steps` must be sorted ascending; its ends are the legal range.
+func _load_step(parsed: Dictionary, key: String, steps: Array, def: float) -> float:
+	if steps.is_empty():
+		return def
+	var raw: Variant = parsed.get(key, def)
+	var val := def
+	if raw is float or raw is int:
+		val = float(raw)
+	var lo := float(steps[0])
+	var hi := float(steps[steps.size() - 1])
+	var idx := _nearest_step_index(steps, clampf(val, lo, hi))
+	return float(steps[idx]) if idx >= 0 else def
 
 
 func set_tooltip_delay(val: float) -> void:
@@ -607,6 +723,11 @@ func set_mute_on_focus_loss(val: bool) -> void:
 	save()
 
 
+func set_field_style(val: int) -> void:
+	field_style = clampi(val, 0, 3)
+	save()
+
+
 func set_display_mode(val: String) -> void:
 	display_mode = val
 	fullscreen = (val == "fullscreen")  # backward compat
@@ -622,6 +743,11 @@ func toggle_fullscreen() -> void:
 #   var t := UserSettings.anim_time(0.5)
 #   create_tween().tween_property(...).set_duration(t)
 # Or short-pause callers (Combat._short_pause) multiply by anim_speed.
+# Unchanged contract: divides by anim_speed only. The clash dwell is NOT routed
+# through here — it is a reading pause, not an animation, and rides
+# clash_dwell_scale instead. The near-zero guard below stays as the last line of
+# defence, but both write paths (set_anim_speed, load_settings) now clamp into
+# [ANIM_SPEED_MIN, ANIM_SPEED_MAX], so it can no longer be reached from a save.
 func anim_time(base_seconds: float) -> float:
 	if anim_speed <= 0.001:
 		return 0.001
@@ -657,12 +783,14 @@ func save() -> void:
 		"graphics_preset": graphics_preset,
 		"brightness": brightness,
 		"anim_speed": anim_speed,
+		"clash_dwell_scale": clash_dwell_scale,
 		"tooltip_delay": tooltip_delay,
 		"colorblind_mode": colorblind_mode,
 		"reduce_motion": reduce_motion,
 		"end_turn_warning": end_turn_warning,
 		"combat_telegraph": combat_telegraph,
 		"mute_on_focus_loss": mute_on_focus_loss,
+		"field_style": field_style,
 		"resolution_x": resolution.x,
 		"resolution_y": resolution.y,
 		"floop_tutorial_seen": floop_tutorial_seen,
@@ -701,13 +829,20 @@ func load_settings() -> void:
 		# a fresh install (no file at all → this block is skipped) keeps "auto".
 		graphics_preset = str(parsed.get("graphics_preset", "custom"))
 		brightness = float(parsed.get("brightness", 0.0))
-		anim_speed = float(parsed.get("anim_speed", 1.0))
+		# Both speed dials go through _load_step: clamped into range and snapped
+		# onto an offered stop, so a stale/corrupt value can neither poison
+		# anim_time() nor leave a settings row naming a state that isn't the one
+		# in force. Saves predating clash_dwell_scale get the 1.0 default.
+		anim_speed = _load_step(parsed, "anim_speed", ANIM_SPEED_STEPS, 1.0)
+		clash_dwell_scale = _load_step(
+			parsed, "clash_dwell_scale", CLASH_DWELL_STEPS, 1.0)
 		tooltip_delay = float(parsed.get("tooltip_delay", 0.0))
 		colorblind_mode = parsed.get("colorblind_mode", "off")
 		reduce_motion = parsed.get("reduce_motion", false)
 		end_turn_warning = parsed.get("end_turn_warning", true)
 		combat_telegraph = parsed.get("combat_telegraph", true)
 		mute_on_focus_loss = parsed.get("mute_on_focus_loss", true)
+		field_style = clampi(int(parsed.get("field_style", 0)), 0, 3)
 		var rx: int = int(parsed.get("resolution_x", 1600))
 		var ry: int = int(parsed.get("resolution_y", 900))
 		resolution = Vector2i(rx, ry)

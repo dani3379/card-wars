@@ -619,7 +619,10 @@ func _run_shop() -> void:
 			s._buy_card(cid, price)
 		# Buy relic if affordable.
 		if s._relic_stock.size() > 0:
-			s._buy_relic(s._relic_stock[0], s._price(s.RELIC_COST))
+			var rid: String = s._relic_stock[0]
+			var rarity: String = String(RDB.get_relic(rid).get("rarity", "common"))
+			var relic_price: int = s._price(int(s.RELIC_PRICES.get(rarity, 90)))
+			s._buy_relic(rid, relic_price)
 		# Buy potion.
 		s._buy_potion(s._price(s.POTION_COST))
 		# The sutler's buy-back (replaced the flat removal fee, 2026-07-02).

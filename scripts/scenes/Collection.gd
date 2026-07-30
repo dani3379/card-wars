@@ -21,10 +21,13 @@ const SECTIONS = [
 	{"label": "Common Spells", "rarity": "common", "type": "spell"},
 	{"label": "Uncommon Spells", "rarity": "uncommon", "type": "spell"},
 	{"label": "Rare Spells", "rarity": "rare", "type": "spell"},
+	{"label": "Common Armaments", "rarity": "common", "type": "armament"},
+	{"label": "Uncommon Armaments", "rarity": "uncommon", "type": "armament"},
+	{"label": "Rare Armaments", "rarity": "rare", "type": "armament"},
 ]
 
 const RELIC_TIERS = [
-	{"label": "Starting Relics", "tier": "starting"},
+	{"label": "Signature Relics", "tier": "starting"},
 	{"label": "Combat Relics", "tier": "combat"},
 	{"label": "Utility Relics", "tier": "utility"},
 	{"label": "Boss Relics", "tier": "boss"},
@@ -61,7 +64,20 @@ var _card_virtual_accum := 0.0
 
 
 func _ready() -> void:
-	GameTheme.add_atmosphere(self, "event")
+	# Lift the crushed backdrop. Two crushers were stacking (the same pair the
+	# GameOver page had): the .tscn pins Background.self_modulate to ~0.14
+	# brightness, and the "event" mood lays a heavy vignette over that. The
+	# result was a near-black void — there is a painted library back there
+	# (collection_library.png) and nobody had ever seen it. The trophy room
+	# gets a room. Kept well under the cards' own brightness so the collection
+	# still reads as the subject.
+	var bg := get_node_or_null("Background")
+	if bg != null:
+		bg.self_modulate = Color(0.40, 0.38, 0.42, 1.0)
+	GameTheme.add_atmosphere(self, "event", true, {
+		"vignette": 0.42,
+		"grad_outer": Color(0.02, 0.015, 0.03, 0.46),
+	})
 
 	var margin := MarginContainer.new()
 	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -104,6 +120,22 @@ func _ready() -> void:
 			b.add_theme_font_override("font", GameTheme.font_display)
 		b.add_theme_font_size_override("font_size", 19)
 		b.pressed.connect(show_tab.bind(t.id))
+		# The lit-tab bar, parented to the button and pinned to its bottom
+		# edge. Hidden until show_tab lights it.
+		var mark := ColorRect.new()
+		mark.name = "TabMark"
+		mark.color = GameTheme.GILT_BRIGHT
+		mark.visible = false
+		mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		mark.anchor_left = 0.0
+		mark.anchor_right = 1.0
+		mark.anchor_top = 1.0
+		mark.anchor_bottom = 1.0
+		mark.offset_left = 4
+		mark.offset_right = -4
+		mark.offset_top = -3
+		mark.offset_bottom = 0
+		b.add_child(mark)
 		tab_row.add_child(b)
 		_tab_buttons[t.id] = b
 	var rule := ColorRect.new()
@@ -112,10 +144,34 @@ func _ready() -> void:
 	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	outer.add_child(rule)
 
+	# The shelf the collection is laid out on. The painted library behind this
+	# screen is deliberately lit (see _ready above), but it was showing through
+	# every gap between tiles, so the cards competed with a tavern for the eye —
+	# on the one screen whose entire subject is the cards. An ink plate under the
+	# grid answers both at once: the room still frames the screen at the margins
+	# and behind the title, and the cards read as paper laid on a dark table.
+	# ChartPanelStyle's hand-cut edge and corner tacks keep it a document, not a
+	# black box.
+	var plate := PanelContainer.new()
+	plate.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var plate_sb: StyleBox = GameTheme.make_panel_style(
+		Color(0.055, 0.045, 0.038, 0.88),
+		Color(0.60, 0.51, 0.34, 0.50), 2, 8, true)
+	plate_sb.content_margin_left = 18
+	plate_sb.content_margin_right = 12
+	plate_sb.content_margin_top = 16
+	plate_sb.content_margin_bottom = 16
+	plate.add_theme_stylebox_override("panel", plate_sb)
+	outer.add_child(plate)
+
 	_scroll = ScrollContainer.new()
 	_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	outer.add_child(_scroll)
+	# The full rail, not the hairline: this screen is nothing BUT scrolling —
+	# 130+ card tiles down a single column — so the bar is primary navigation
+	# here, not the incidental side-list affordance style_thin_scrollbar serves.
+	GameTheme.style_rail_scrollbar(_scroll)
+	plate.add_child(_scroll)
 
 	_content = VBoxContainer.new()
 	_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -155,8 +211,15 @@ func show_tab(tab: String) -> void:
 	set_process(tab == "cards")
 	for id in _tab_buttons:
 		var b: Button = _tab_buttons[id]
+		var lit: bool = id == tab
 		b.add_theme_color_override("font_color",
-			GameTheme.GILT_BRIGHT if id == tab else Color(0.60, 0.53, 0.42))
+			GameTheme.GILT_BRIGHT if lit else Color(0.60, 0.53, 0.42))
+		# The lit tab also carries a gilt bar seated on the row's rule. Colour
+		# alone was doing all the work of saying which shelf you're looking at
+		# — and doing it in two tones of the same gold.
+		var mark: Control = b.get_node_or_null("TabMark")
+		if mark != null:
+			mark.visible = lit
 	for child in _content.get_children():
 		child.queue_free()
 	if _scroll != null:
@@ -207,8 +270,14 @@ func _build_cards(gen: int) -> void:
 		_content.add_child(_section_label("%s  (%d)" % [section.label, section_cards.size()]))
 
 		var grid := HFlowContainer.new()
-		grid.add_theme_constant_override("h_separation", 22)
-		grid.add_theme_constant_override("v_separation", 24)
+		# Gutters measured, not chosen: the plate's padding and the scroll rail
+		# eat 41px of the row, and at the old 22px h_separation six 225px writs
+		# no longer fit — the grid dropped to five per row and left a card-wide
+		# void down the right of the plate. 14 keeps six across with room to
+		# spare, and tighter gutters suit a plate anyway: the tiles read as one
+		# laid-out sheet instead of floating apart.
+		grid.add_theme_constant_override("h_separation", 14)
+		grid.add_theme_constant_override("v_separation", 20)
 		_content.add_child(grid)
 
 		section_cards.sort_custom(func(a, b): return a.get("cost", 0) < b.get("cost", 0))
@@ -379,85 +448,123 @@ func _hydrate_visible_card_tiles(gen: int) -> void:
 
 
 func _make_card_placeholder(card_data: Dictionary) -> PanelContainer:
+	# A GHOST of the illuminated writ, not a different object. The grid hydrates
+	# real Card2D bakes in the background; until one lands, this stands in. The
+	# old placeholder was a dark rectangle with a cost chip, a "2 / 3" text line
+	# and a flat colour band where the painting goes — it shared NOTHING with the
+	# card's silhouette, so a half-hydrated grid read as broken rather than
+	# loading (and scrolling fast is exactly when you see them). This mirrors the
+	# writ's furniture at the same proportions — art plate, name cartouche, rules
+	# well, corner seals — in unlit ink, so a card resolving reads as the page
+	# being illuminated. Still cheap: plain Panels and Labels, no seeded painters.
 	var rarity := String(card_data.get("rarity", "common"))
 	var accent: Color = GameTheme.rarity_color(rarity)
+	var is_spell := String(card_data.get("type", "")) == "spell"
+
 	var tile := PanelContainer.new()
 	tile.custom_minimum_size = CARD_TILE_SIZE
 	tile.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	tile.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var sb: StyleBox = GameTheme.make_panel_style(
-		Color(0.075, 0.058, 0.043, 0.92),
-		Color(accent.r, accent.g, accent.b, 0.70), 2, 6, false)
-	sb.content_margin_left = 12
-	sb.content_margin_right = 12
-	sb.content_margin_top = 12
-	sb.content_margin_bottom = 12
+	# The sheet, held back so a hydrated card visibly lights up beside it.
+	var sheet: Color = GameTheme.PARCHMENT_LIGHT.darkened(0.60)
+	var sb: StyleBox = GameTheme.make_panel_style(sheet,
+		Color(accent.r, accent.g, accent.b, 0.60), 2, 6, false)
+	sb.set_content_margin_all(0.0)
 	tile.add_theme_stylebox_override("panel", sb)
 
-	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 8)
-	tile.add_child(col)
+	var body := Control.new()
+	body.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tile.add_child(body)
 
-	var top := HBoxContainer.new()
-	top.add_theme_constant_override("separation", 8)
-	col.add_child(top)
+	var ink := Color(0.10, 0.078, 0.058, 1.0)
+	var well: Color = GameTheme.PARCHMENT_LIGHT.darkened(0.34)
 
-	top.add_child(_make_cost_badge(int(card_data.get("cost", 0)), accent))
+	# Art plate — the writ mounts the painting big across the top half.
+	_ghost_panel(body, Rect2(11, 12, 203, 134), ink.lightened(0.05),
+		Color(accent.r, accent.g, accent.b, 0.34), 1)
+	# Name cartouche band.
+	_ghost_panel(body, Rect2(11, 150, 203, 30), ink, Color(0, 0, 0, 0), 0)
+	# Rules well.
+	_ghost_panel(body, Rect2(13, 184, 199, 78), well, Color(0, 0, 0, 0), 0)
 
-	var name_lbl := Label.new()
-	name_lbl.text = String(card_data.get("name", card_data.get("id", ""))).to_upper()
+	var name_lbl := _ghost_label(body, Rect2(16, 154, 193, 22),
+		String(card_data.get("name", card_data.get("id", ""))),
+		16, GameTheme.GILT, HORIZONTAL_ALIGNMENT_CENTER, true)
 	name_lbl.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	if GameTheme.font_display:
-		name_lbl.add_theme_font_override("font", GameTheme.font_display)
-	name_lbl.add_theme_font_size_override("font_size", 17)
-	name_lbl.add_theme_color_override("font_color", GameTheme.GILT_BRIGHT)
-	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	top.add_child(name_lbl)
 
-	var type_lbl := Label.new()
-	var is_spell := String(card_data.get("type", "")) == "spell"
-	type_lbl.text = "SPELL" if is_spell else "%d / %d" % [
-		int(card_data.get("atk", 0)), int(card_data.get("hp", 0))
-	]
-	if GameTheme.font_body:
-		type_lbl.add_theme_font_override("font", GameTheme.font_body)
-	type_lbl.add_theme_font_size_override("font_size", 13)
-	type_lbl.add_theme_color_override("font_color", Color(0.91, 0.82, 0.62, 0.95))
-	type_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(type_lbl)
+	_ghost_label(body, Rect2(20, 190, 185, 68),
+		String(card_data.get("desc", "")), 14,
+		Color(0.20, 0.15, 0.10, 0.92), HORIZONTAL_ALIGNMENT_CENTER, false, true)
 
-	var band := ColorRect.new()
-	band.color = Color(accent.r, accent.g, accent.b, 0.16)
-	band.custom_minimum_size = Vector2(0, 76)
-	band.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(band)
+	# Cost seal, top-left, riding the card edge exactly as the writ prints it.
+	_ghost_seal(body, Rect2(4, 2, 38, 36), Color(0.16, 0.24, 0.42, 1.0),
+		str(int(card_data.get("cost", 0))))
 
-	var desc_lbl := Label.new()
-	desc_lbl.text = String(card_data.get("desc", ""))
-	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_lbl.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	desc_lbl.max_lines_visible = 5
-	if GameTheme.font_body:
-		desc_lbl.add_theme_font_override("font", GameTheme.font_body)
-	desc_lbl.add_theme_font_size_override("font_size", 14)
-	desc_lbl.add_theme_color_override("font_color", Color(0.88, 0.81, 0.69, 0.96))
-	desc_lbl.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	desc_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(desc_lbl)
-
-	var footer := Label.new()
-	footer.text = _placeholder_footer(card_data)
-	footer.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	footer.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	footer.max_lines_visible = 2
-	if GameTheme.font_body:
-		footer.add_theme_font_override("font", GameTheme.font_body)
-	footer.add_theme_font_size_override("font_size", 12)
-	footer.add_theme_color_override("font_color", Color(0.66, 0.58, 0.45, 0.92))
-	footer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(footer)
+	if is_spell:
+		# Spells declare a contract instead of stats — the writ's one-line footer.
+		_ghost_label(body, Rect2(14, 268, 197, 20), "SPELL", 13,
+			Color(0.62, 0.54, 0.42, 0.95), HORIZONTAL_ALIGNMENT_CENTER, true)
+	else:
+		_ghost_seal(body, Rect2(5, 258, 38, 36), Color(0.42, 0.33, 0.12, 1.0),
+			str(int(card_data.get("atk", 0))))
+		_ghost_seal(body, Rect2(182, 258, 38, 36), Color(0.44, 0.14, 0.12, 1.0),
+			str(int(card_data.get("hp", 0))))
+		# No rarity/keyword footer on creatures. The writ prints none — the footer
+		# is a casting contract, so spells declare and creatures don't — and the
+		# gap between the two stat seals is only ~139px, which clipped strings
+		# like "Uncommon / Swift, Piercing, Doom, On Death" by 126px. It was
+		# leftover debug furniture from the old placeholder either way.
 	return tile
+
+
+func _ghost_panel(parent: Control, rect: Rect2, bg: Color, border: Color,
+		border_w: int = 0) -> Panel:
+	var p := Panel.new()
+	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	p.add_theme_stylebox_override("panel",
+		GameTheme.make_panel_style(bg, border, border_w, 3, false))
+	# Geometry AFTER add_child: entering the tree re-applies the node's minimum
+	# size and clobbers a size assigned beforehand.
+	parent.add_child(p)
+	p.position = rect.position
+	p.size = rect.size
+	return p
+
+
+func _ghost_label(parent: Control, rect: Rect2, text: String, size: int,
+		color: Color, align: int, display_font: bool, wrap: bool = false) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.horizontal_alignment = align
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Wrap mode BEFORE the size is applied. An unwrapped Label's minimum width is
+	# its whole text, and minimum size wins over an assigned size — so setting
+	# autowrap afterwards left the rules line running out past the card edge.
+	if wrap:
+		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		l.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		l.max_lines_visible = 4
+	l.clip_text = not wrap
+	var f: Font = GameTheme.font_display if display_font else GameTheme.font_body
+	if f:
+		l.add_theme_font_override("font", f)
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	# Geometry AFTER add_child — a size set before entering the tree is replaced
+	# by the node's minimum size, which left autowrap with no width to wrap at
+	# (the rules line ran straight out of its well).
+	parent.add_child(l)
+	l.position = rect.position
+	l.size = rect.size
+	return l
+
+
+func _ghost_seal(parent: Control, rect: Rect2, tint: Color, value: String) -> void:
+	_ghost_panel(parent, rect, tint, Color(0.86, 0.78, 0.58, 0.55), 1)
+	var l := _ghost_label(parent, Rect2(rect.position.x, rect.position.y + 6.0,
+		rect.size.x, rect.size.y), value, 17, GameTheme.IVORY,
+		HORIZONTAL_ALIGNMENT_CENTER, true)
+	l.size.y = rect.size.y
 
 
 func _make_cost_badge(cost: int, accent: Color) -> PanelContainer:
@@ -485,18 +592,6 @@ func _make_cost_badge(cost: int, accent: Color) -> PanelContainer:
 	return badge
 
 
-func _placeholder_footer(card_data: Dictionary) -> String:
-	var parts: Array[String] = []
-	parts.append(String(card_data.get("rarity", "common")).capitalize())
-	var keywords: Array = card_data.get("keywords", [])
-	if not keywords.is_empty():
-		var names: Array[String] = []
-		for kw in keywords:
-			names.append(String(kw).capitalize())
-		parts.append(", ".join(names))
-	return " / ".join(parts)
-
-
 # ── RELICS ───────────────────────────────────────────────────────────────────
 
 func _build_relics(gen: int) -> void:
@@ -516,7 +611,7 @@ func _build_relics(gen: int) -> void:
 			return String(RelicDB.RELICS[a].get("name", a)) < String(RelicDB.RELICS[b].get("name", b)))
 		_content.add_child(_section_label("%s  (%d)" % [sec.label, ids.size()]))
 		var grid := HFlowContainer.new()
-		grid.add_theme_constant_override("h_separation", 14)
+		grid.add_theme_constant_override("h_separation", 12)
 		grid.add_theme_constant_override("v_separation", 12)
 		_content.add_child(grid)
 		for rid in ids:
@@ -539,7 +634,7 @@ func _build_potions() -> void:
 	var ids: Array[String] = PotionDB.all_ids()
 	_content.add_child(_section_label("Potions  (%d)" % ids.size()))
 	var grid := HFlowContainer.new()
-	grid.add_theme_constant_override("h_separation", 14)
+	grid.add_theme_constant_override("h_separation", 12)
 	grid.add_theme_constant_override("v_separation", 12)
 	_content.add_child(grid)
 	for pid in ids:
@@ -565,7 +660,11 @@ func _make_plaque(icon_node: Control, name_text: String, desc_text: String,
 	# Dark-ink tile with an accent left rule (the bark-scrim / map-tooltip
 	# language): icon, gilt name, dim effect text — readable without hovering.
 	var tile := PanelContainer.new()
-	tile.custom_minimum_size = Vector2(478, 86)
+	# 466, not 478, for the same reason the card gutters tightened: three plaques
+	# have to clear the plate's padding and the scroll rail, and at 478 they no
+	# longer did — the relic and potion shelves fell to two per row and left half
+	# the plate empty.
+	tile.custom_minimum_size = Vector2(466, 86)
 	var sb: StyleBox = GameTheme.make_panel_style(
 		Color(0.065, 0.052, 0.042, 0.80),
 		Color(accent.r, accent.g, accent.b, 0.55), 1, 4, false)

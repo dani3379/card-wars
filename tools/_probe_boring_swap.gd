@@ -4,11 +4,11 @@ extends SceneTree
 ## resolver / hook:
 ##   Testudo (was Shield Wall)      — front row gains Shield; forged reaches back
 ##   Turncoat (was Inspire)         — ≤3 ATK foe deserts (4 forged); strong foes stun
-##   Baggage Train (was Second Wind)— +3 Command NEXT turn (+4 forged)
+##   Countermarch (legacy adrenaline) — change rows + Shield; forged shields neighbours
 ##   Fetch Hound (was Hound)        — last spell in discard returns to hand;
 ##                                    curses stay buried; empty pile = draw 1
 ##   Shieldmaiden (interpose)       — face STRIKES land on her; effect damage passes
-##   The Apothecary (toxin_salve)   — a poison kill heals the owner's hero 2
+##   The Apothecary (tonic_vigor)   — a potion drink fortifies her +2/+2
 ##   Legacy shim                    — old spell ids fold onto the new arms
 ## Run: Godot.exe --headless --path "D:\Godot" --script res://tools/_probe_boring_swap.gd
 
@@ -57,13 +57,13 @@ func _run() -> void:
 	await _test_turncoat_desertion()
 	await _test_turncoat_strong_foe_stuns()
 	await _test_turncoat_forged_gate()
-	await _test_baggage_train()
+	await _test_countermarch()
 	_test_fetch_spell_returns_last_spell()
 	_test_fetch_spell_skips_curses()
 	_test_fetch_spell_empty_pile_draws()
 	_test_interpose_catches_strikes()
 	_test_interpose_lets_effects_through()
-	_test_toxin_salve()
+	_test_tonic_vigor()
 
 	print("[boring] ============ SUMMARY ============")
 	print("[boring] passed : %d" % _pass)
@@ -138,16 +138,29 @@ func _test_turncoat_forged_gate() -> void:
 		and _find_player_creature_named("Bought Man") != null)
 
 
-func _test_baggage_train() -> void:
+func _test_countermarch() -> void:
 	_clear_all()
-	var before: int = int(combat._bonus_mana_next_turn)
-	await combat._resolve_custom_spell("baggage_train", null, -1, {})
-	_assert("baggage train: +3 Command banked for next turn",
-		int(combat._bonus_mana_next_turn) == before + 3)
-	await combat._resolve_custom_spell("baggage_train", null, -1, {"is_upgraded": true})
-	_assert("baggage train+: the forged wagons bank 4",
-		int(combat._bonus_mana_next_turn) == before + 7)
-	combat._bonus_mana_next_turn = before
+	var target = _place(2, 4, 1, false, combat.ROW_FRONT)
+	var neighbour = _place(2, 4, 0, false, combat.ROW_BACK)
+	var mana_before: int = int(combat.player_mana)
+	await combat._resolve_custom_spell("baggage_train", target, -1, {})
+	_assert("countermarch: source row vacated",
+		combat._row_array(false, combat.ROW_FRONT)[1] == null)
+	_assert("countermarch: target crossed to the other row",
+		combat._row_array(false, combat.ROW_BACK)[1] == target)
+	_assert("countermarch: moved body gains Shield", target.state.has_shield)
+	_assert("countermarch: base writ does not shield its neighbour",
+		not neighbour.state.has_shield)
+	_assert("countermarch: no Command is created", int(combat.player_mana) == mana_before)
+
+	_clear_all()
+	target = _place(2, 4, 1, false, combat.ROW_FRONT)
+	neighbour = _place(2, 4, 0, false, combat.ROW_BACK)
+	await combat._resolve_custom_spell("baggage_train", target, -1,
+		{"is_upgraded": true})
+	_assert("countermarch+: moved body gains Shield", target.state.has_shield)
+	_assert("countermarch+: its new adjacent friendly gains Shield",
+		neighbour.state.has_shield)
 
 
 func _test_fetch_spell_returns_last_spell() -> void:
@@ -223,18 +236,18 @@ func _test_interpose_lets_effects_through() -> void:
 	combat.player_hp = hero0
 
 
-func _test_toxin_salve() -> void:
+func _test_tonic_vigor() -> void:
+	# The Apothecary (2026-07-15 rework): every potion her owner drinks
+	# fortifies her +2/+2 (fires per drink via _apply_tonic_vigor).
 	_clear_all()
 	var apoth = _place(1, 4, 0, false, combat.ROW_BACK)
-	apoth.card_data["passive"] = "toxin_salve"
-	combat.player_hp = 20
-	combat._apply_toxin_salve(true)    # an enemy body just dropped to Poison
-	_assert("toxin: the apothecary salved the hero (+2 HP)",
-		combat.player_hp == 22)
-	_clear_all()
-	combat.player_hp = 20
-	combat._apply_toxin_salve(true)    # no apothecary on the board
-	_assert("toxin: no apothecary, no salve", combat.player_hp == 20)
+	apoth.card_data["passive"] = "tonic_vigor"
+	combat._apply_tonic_vigor(false)
+	_assert("tonic: the apothecary drinks along (+2/+2 -> 3/6)",
+		int(apoth.current_atk) == 3 and int(apoth.current_hp) == 6)
+	combat._apply_tonic_vigor(true)    # the FOE drinking pays her nothing
+	_assert("tonic: a foe's drink pays her nothing",
+		int(apoth.current_atk) == 3 and int(apoth.current_hp) == 6)
 
 
 # --- helpers (same kit as _probe_removal_slate) ---

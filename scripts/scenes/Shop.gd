@@ -1,8 +1,8 @@
 extends Control
-## Shop.gd — THE SUTLER'S WAGON, the market that follows the army. Buy cards,
+## Shop.gd — THE TRADER'S WAGON, the market that follows the army. Buy cards,
 ## a relic, potions; sell ONE card per visit (the sutler's buy-back — he pays
 ## by weight, and lowballs). Prices: common 50g, uncommon 75g, rare 120g.
-## Relic 100g. Potion 40g. Merchant's License relic gives 25% discount on buys.
+## Relics use rarity pricing. Potion 40g. Merchant's License gives 25% off buys.
 ##
 ## 2026-07-02 rework: the anonymous "SHOP" grew a persona (name + barks) and
 ## the flat "pay 50g to remove" service became the buy-back — same bounded
@@ -17,7 +17,7 @@ const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 const BASE_PRICES: Dictionary = {
 	"common": 50, "uncommon": 75, "rare": 120,
 }
-const RELIC_COST := 100
+const RELIC_PRICES: Dictionary = {"common": 90, "uncommon": 120, "rare": 160}
 const POTION_COST := 40
 const POTION_HEAL := 8
 # The sutler's buy-back: one card per visit, paid by Command weight. He pays
@@ -27,13 +27,33 @@ const SELL_BASE := 10
 const SELL_PER_COST := 8
 const SELL_CURSE_PRICE := 5
 
+# The "Relics & Services" shelf is ONE set of tiles — relic cards, the potion,
+# and the sutler's buy-back all share the same dark-parchment document tile
+# (uniform size, gilt name → icon → body → price). The row used to mix a warm-
+# brown relic card (make_btn_style, no tacks) against dark inked service tiles
+# (make_panel_style, tacks) at two different widths; it read as three
+# unfinished styles rather than a merchant's shelf. PARCHMENT matches the Reward
+# screen's relic choices, so a relic looks the same wherever the road offers it.
+# 220 tall was sized for icon + name + up to four wrapped lines of rule text.
+# The rules moved to the hover, so the tile is re-cut to what it actually holds
+# now (icon + name + price) instead of keeping a hole where the text used to be.
+#
+# 2026-07-21: every ware on the shelf is now mounted on its own framed chip at
+# SVC_ICON_PX. The tiles read empty because the picture was small, not because
+# the box was big — the relics ran through make_relic_card, which derives its
+# icon from the BOX (min_size.y * 0.38), a recipe that only balances around a
+# ~147px tile and left a 67px painting adrift in a 272-wide shelf slot. Sizing
+# the picture first and cutting the box to it fills the same footprint.
+const SVC_ICON_PX := 108
+const SVC_TILE_SIZE := Vector2(272, 196)
+
 # One line of the sutler's patter per visit — picked once in _ready so UI
 # rebuilds (purchases) don't make him change the subject mid-sentence.
 const BARKS: Array = [
-	"\"Everything's for sale. Most of it was somebody's.\"",
-	"\"Prices follow the army. Blame the army.\"",
-	"\"No refunds. The road doesn't give them either.\"",
-	"\"Paid in advance is the only tense I stock.\"",
+	"\"Everything is for sale. Most of it belonged to someone else.\"",
+	"\"Prices rise during a war. Blame the war.\"",
+	"\"No refunds. The road does not offer them either.\"",
+	"\"I only accept payment in advance.\"",
 ]
 
 var _card_stock: Array[String] = []
@@ -66,7 +86,7 @@ func _ready() -> void:
 		"grad_inner": Color(0.12, 0.09, 0.05, 0.18),
 		"grad_outer": Color(0.03, 0.02, 0.01, 0.46),
 	})
-	AudioBank.play_music_random(["shop", "shop_b"])
+	AudioBank.play_music_random(["shop", "shop_b", "shop_c"])
 	_discount = 0.75 if RunState.has_relic("merchants_license") else 1.0
 	_bark = BARKS[randi() % BARKS.size()]
 	_roll_stock()
@@ -100,9 +120,14 @@ func _roll_stock() -> void:
 		var pick = pool[randi() % pool.size()]
 		if not _card_stock.has(pick):
 			_card_stock.append(pick)
-	_relic_stock = RelicDB.roll_relic_reward("combat", RunState.relics, RunState.current_hero_id)
-	if _relic_stock.size() > 1:
-		_relic_stock = [_relic_stock[0]]
+	# ONE relic on the shelf, not three (2026-07-28). The sutler used to stock two
+	# field relics plus a campaign relic every visit, which — stacked on the hero
+	# relic, the war chest, every General, the Reliquary and ten relic-paying
+	# events — put a typical greedy route at 8-9 relics by the act-1 boss and a
+	# best case at 11. Slay the Spire ships about four. A single shelf slot also
+	# makes the purchase a decision again: it is this relic or a card, not a menu.
+	_relic_stock = RelicDB.roll_field_relics(1, RunState.relics,
+		RunState.current_hero_id)
 	_shop_potion_id = PotionDB.roll_random_potion()
 
 
@@ -124,7 +149,7 @@ func _build_ui() -> void:
 		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
 
-	var title = GameTheme.make_screen_title("THE SUTLER'S WAGON", GameTheme.GILT_BRIGHT, GameTheme.FONT_TITLE)
+	var title = GameTheme.make_screen_title("THE TRADER'S WAGON", GameTheme.GILT_BRIGHT, GameTheme.FONT_TITLE)
 	title.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	title.offset_top = 18
 	title.offset_bottom = 74
@@ -177,14 +202,23 @@ func _build_ui() -> void:
 		slot.alignment = BoxContainer.ALIGNMENT_CENTER
 		card_row.add_child(slot)
 
+		# Plain-Control wrapper so the rarity shine has something to centre on:
+		# it parents itself to the node it decorates, and a Container re-fits its
+		# children every layout pass, which would drag the sunburst to the corner.
+		var card_wrap := Control.new()
+		card_wrap.custom_minimum_size = Vector2(Card2D.CARD_W, Card2D.CARD_H)
+		card_wrap.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		card_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		card_wrap.pivot_offset = card_wrap.custom_minimum_size * 0.5
+		slot.add_child(card_wrap)
+
 		var card = CARD_SCENE.instantiate()
 		card.card_data = data.duplicate(true)
 		card.card_id = id
 		card.is_on_battlefield = true  # no drag / hover-scale; static gallery card
 		card.live_baked_mode = true
 		CardTextureCache.bake(data)
-		card.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		slot.add_child(card)
+		card_wrap.add_child(card)
 
 		var buy_btn = _make_buy_button("Buy — %dg" % price,
 			RunState.gold >= price, _buy_card.bind(id, price, slot),
@@ -193,7 +227,14 @@ func _build_ui() -> void:
 		buy_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		slot.add_child(buy_btn)
 		if not _entered:
-			GameTheme.deal_in(slot, 0.08 + card_row.get_child_count() * 0.06)
+			var deal_at: float = 0.08 + card_row.get_child_count() * 0.06
+			GameTheme.deal_in(slot, deal_at)
+			# The shelf is a ROLLED offer, exactly like the muster slate and the
+			# reliquary — so a good roll announces itself here too (uncommons
+			# glint silver, rares erupt in gilt). Only on arrival: `_entered`
+			# keeps a re-shelf after a purchase from re-shining the leftovers.
+			GameTheme.rarity_reveal(card_wrap, String(data.get("rarity", "")),
+				deal_at + 0.36)
 
 	# Relic + Services — one centered row below the cards.
 	var svc_label = GameTheme.make_section_divider("Relics & Services", GameTheme.DESC_DIM, 22)
@@ -204,98 +245,106 @@ func _build_ui() -> void:
 	if not _entered:
 		GameTheme.deal_in(svc_label, 0.28)
 
-	add_child(_make_stage_panel(Rect2(350, 548, 900, 250),
+	# The shelf panel hugs the re-cut tiles — it was 250 tall to contain the old
+	# text-grown ones and left an empty band under the row once they shrank.
+	add_child(_make_stage_panel(Rect2(50, 548, 1500, 218),
 		Color(0.76, 0.50, 0.26, 0.95)))
 
 	var svc_row = HBoxContainer.new()
 	svc_row.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	svc_row.offset_top = 558
-	svc_row.offset_bottom = 786
+	svc_row.offset_top = 559
+	svc_row.offset_bottom = 755
 	svc_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	svc_row.add_theme_constant_override("separation", 40)
+	svc_row.add_theme_constant_override("separation", 20)
 	add_child(svc_row)
 
 	if _relic_stock.size() > 0:
+		var relic_i := 0
 		for id in _relic_stock:
-			var price = _price(RELIC_COST)
-			var btn = GameTheme.make_relic_card(id, Color(0.55, 0.30, 0.20),
-				Vector2(264, 216), price)
-			btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			var rarity: String = RelicDB.get_relic_rarity(id)
+			var price = _price(int(RELIC_PRICES.get(rarity, 90)))
+			var r: Dictionary = RelicDB.get_relic(id)
+			# Relics ride the SAME slot builder as the potion and the buy-back
+			# now: the rule text lives in the shared hover tip, so every tile is
+			# exactly SVC_TILE_SIZE and the prices share one baseline — and a
+			# relic differs from a potion by what's painted on it, not by how
+			# it's mounted. The chip carries the tier halo the shelf used to
+			# lose whenever a ware wasn't a relic.
+			var relic = _make_service_slot(
+				GameTheme.make_relic_chip(id, SVC_ICON_PX),
+				String(r.get("name", id)), String(r.get("desc", "")),
+				"— %dg —" % price, RelicDB.get_tier_color(id))
 			if RunState.gold >= price:
-				btn.pressed.connect(_buy_relic.bind(id, price, btn))
+				relic.button.pressed.connect(_buy_relic.bind(id, price, relic.button))
 			else:
-				_make_unavailable_tile(btn, "Need %d gold" % price)
-			svc_row.add_child(btn)
+				_set_tile_status(relic, "Need %d gold" % price)
+				_make_unavailable_tile(relic.button, "Need %d gold" % price)
+			svc_row.add_child(relic.slot)
 			if not _entered:
-				GameTheme.deal_in(btn, 0.34)
-			if RunState.gold >= price:
-				GameTheme.hover_lift(btn)
+				var relic_at: float = 0.34 + relic_i * 0.04
+				GameTheme.deal_in(relic.slot, relic_at)
+				# Same rolled-offer shine the reliquary and the spoils screen
+				# give their relics. The tile is a Button, not a Container, so
+				# it can carry the sunburst directly.
+				GameTheme.rarity_reveal(relic.slot, rarity, relic_at + 0.36)
+			relic_i += 1
+			# No hover_lift — _make_service_slot's rich hover already owns scale.
 
 	# Potion service: shop sells a single random potion type (rolled at
-	# _roll_stock). Icon falls back to the generic potion sprite if no per-type
-	# art exists.
+	# _roll_stock).
 	var potion_price = _price(POTION_COST)
 	var pdata: Dictionary = PotionDB.get_potion(_shop_potion_id)
 	var pname: String = pdata.get("name", "Healing Potion")
 	var pdesc: String = pdata.get("desc", "Heal 8 HP.")
 	var pcolor: Color = pdata.get("color", Color(0.25, 0.40, 0.20))
-	# Same convention as PotionDB.icon_for: painted PNG wins untinted, the white
-	# silhouette kit renders tinted by the potion's colour.
-	var picon_path := "res://assets/icons/potions/%s.png" % _shop_potion_id
-	var picon_tint := Color.WHITE
-	if not ResourceLoader.exists(picon_path):
-		var psvg := "res://assets/icons/potions/%s.svg" % _shop_potion_id
-		if ResourceLoader.exists(psvg):
-			picon_path = psvg
-			picon_tint = pcolor
-		else:
-			picon_path = "res://assets/icons/downloaded/potion1.png"
-	# Lead with the EFFECT + price (the icon already reads as a potion); the full
-	# name rides in the tooltip instead of cramming a 3-line name/desc/price block.
-	var potion = _make_service_slot(picon_path,
-		"%s\nBuy — %dg" % [pdesc, potion_price],
-		pcolor, picon_tint)
-	potion.button.tooltip_text = "%s — %s" % [pname, pdesc]
+	# Chip → name → price, the same fixed stack as the relic tiles beside it; the
+	# effect reads on hover. No tooltip_text — the rich hover replaces it, and
+	# both at once double-reports the same line. make_potion_chip owns the
+	# painted-PNG-wins-untinted / SVG-tints-by-colour convention, so the shop no
+	# longer keeps a second copy of it to drift out of sync with PotionDB.icon_for.
+	var potion = _make_service_slot(
+		GameTheme.make_potion_chip(_shop_potion_id, SVC_ICON_PX),
+		pname, pdesc, "— %dg —" % potion_price, pcolor)
 	if RunState.has_downside("no_potions"):
-		potion.label.text = "%s\nCan't buy potions (Temperance Vow)" % pname
-		_make_unavailable_tile(potion.button, "No potions")
+		_set_tile_status(potion, "Temperance Vow")
+		_make_unavailable_tile(potion.button, "Temperance Vow")
 	elif RunState.gold < potion_price:
+		_set_tile_status(potion, "Need %d gold" % potion_price)
 		_make_unavailable_tile(potion.button, "Need %d gold" % potion_price)
 	elif not RunState.can_add_potion():
-		potion.label.text = "%s\nPotion slots full" % pname
-		_make_unavailable_tile(potion.button, "Slots full")
+		_set_tile_status(potion, "Potion belt full")
+		_make_unavailable_tile(potion.button, "Potion belt full")
 	else:
 		potion.button.pressed.connect(_buy_potion.bind(potion_price, potion.slot))
 	svc_row.add_child(potion.slot)
 	if not _entered:
 		GameTheme.deal_in(potion.slot, 0.42)
-	if not RunState.has_downside("no_potions") and RunState.gold >= potion_price \
-			and RunState.can_add_potion():
-		GameTheme.hover_lift(potion.slot)
+	# No hover_lift — _make_service_slot's rich hover already owns scale.
 
 	# The sutler's buy-back — sell ONE card per visit, paid by weight. This is
 	# the deck-thinning verb now (replaced "pay 50g to remove"): still bounded
 	# per shop, but it's a trade with a person instead of a fee to a menu.
-	var sell = _make_service_slot("res://assets/icons/downloaded/cards1.png",
-		"The sutler buys\nSell 1 card — paid by Command cost",
-		Color(0.45, 0.15, 0.15))
-	sell.button.tooltip_text = "Sell 1 card per visit. He pays %d gold + %d per Command cost. Curses fetch %d gold. Gone for good." \
+	# The rates belong in the hover body, where the relic rules also live — the
+	# tile itself carries a price-shaped line so the shelf keeps one baseline.
+	var sell_body := "Sell one card per visit. He pays %d gold + %d per Command cost. Curses fetch %d gold. Gone for good." \
 		% [SELL_BASE, SELL_PER_COST, SELL_CURSE_PRICE]
 	if RunState.has_relic("scavengers_pouch"):
-		sell.button.tooltip_text += " Your Sutler's Marker doubles his rates."
+		sell_body += " Your Trader's Marker doubles these prices."
+	var sell = _make_service_slot(
+		_make_icon_chip("res://assets/icons/downloaded/cards1.png", SVC_ICON_PX),
+		"The Buy-Back", sell_body, "— by weight —", Color(0.45, 0.15, 0.15))
 	if _sold_this_visit:
-		sell.label.text = "The sutler buys\nOne a visit. He's bought his one."
-		_make_unavailable_tile(sell.button, "Already sold")
+		_set_tile_status(sell, "He's bought his one")
+		_make_unavailable_tile(sell.button, "He's bought his one")
 	elif RunState.deck.size() <= 1:
-		sell.label.text = "The sutler buys\nHe won't take your last card."
-		_make_unavailable_tile(sell.button, "Last card")
+		_set_tile_status(sell, "Won't take your last card")
+		_make_unavailable_tile(sell.button, "Won't take your last card")
 	else:
 		sell.button.pressed.connect(_start_sell_mode)
 	svc_row.add_child(sell.slot)
 	if not _entered:
 		GameTheme.deal_in(sell.slot, 0.50)
-	if not _sold_this_visit and RunState.deck.size() > 1:
-		GameTheme.hover_lift(sell.slot)
+	# No hover_lift — _make_service_slot's rich hover already owns scale.
 
 	# The sutler's patter — bottom-left, out of the wares' way.
 	var bark = GameTheme.make_label(_bark, 16, Color(0.72, 0.66, 0.55))
@@ -440,61 +489,103 @@ func _deny_transaction(ctrl: Control, message: String) -> void:
 		Color(1.0, 0.45, 0.30), false)
 
 
-func _make_service_slot(icon_path: String, text: String, color: Color,
-		icon_tint: Color = Color.WHITE) -> Dictionary:
-	# One cohesive parchment tile (same look as make_relic_card): warm panel +
-	# gilt border with the icon stacked above the service text INSIDE the tile.
-	# The `color` accent only tints the rest-state border so potion/removal read
-	# as a matched set with the relic card beside them — not garish solid-color
-	# pills in clashing hues. Returns {slot, button, label}: `slot` is added to
-	# the row, `button` carries disabled/pressed wiring, `label` lets callers
-	# swap the body text for disabled-state messaging.
-	# Inked document tile (dark ink body + tan rule + ~4px corners + deep shadow),
-	# the praised chart look enforced via the shared parchment panel helper. The
-	# `color` accent only tints the rest-state border so potion/removal read as a
-	# matched set with the relic card beside them — not pills in clashing hues.
-	# Same stacked-tile skeleton as the relic card beside it (one Button hit
-	# target + centered inset VBox) so potion/removal read as a matched set; only
-	# the stylebox differs — the inked-parchment panel instead of the relic's
-	# solid-fill button style.
-	var panel_bg := Color(0.055, 0.048, 0.040, 0.96)
-	var skel := GameTheme.make_tile_skeleton(Vector2(264, 216), 4)
+## A framed well for a ware with no chip factory of its own (the buy-back's
+## painted sprite), cut to match make_relic_chip / make_potion_chip so it isn't
+## the one unmounted picture on the shelf.
+func _make_icon_chip(icon_path: String, px: int) -> Panel:
+	var chip := Panel.new()
+	chip.custom_minimum_size = Vector2(px, px)
+	chip.add_theme_stylebox_override("panel",
+		GameTheme.make_btn_style(Color(0.06, 0.05, 0.04, 0.95), GameTheme.GILT, 4))
+	if ResourceLoader.exists(icon_path):
+		var tex := TextureRect.new()
+		tex.texture = load(icon_path)
+		tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+		for side in ["offset_left", "offset_top"]:
+			tex.set(side, 7)
+		for side in ["offset_right", "offset_bottom"]:
+			tex.set(side, -7)
+		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		chip.add_child(tex)
+	return chip
+
+
+func _make_service_slot(chip: Control, title: String, body: String,
+		footer: String, color: Color) -> Dictionary:
+	# The one shelf recipe — relics, the potion and the buy-back are all built
+	# here, so a ware differs from its neighbour by what's painted on it rather
+	# than by how it's mounted: shared dark PARCHMENT fill, the shared
+	# make_btn_style chamfer (no corner tacks), and the same stack — framed chip
+	# → gilt name → gilt footer, with the rule text on the shared hover. The
+	# `color` accent only tints the rest-state border so the tiles keep a faint
+	# personal hue without breaking the set. Returns
+	# {slot, button, title, label, footer}; `label` (the body) is what callers
+	# swap for disabled-state messaging.
+	var skel := GameTheme.make_tile_skeleton(SVC_TILE_SIZE, 3)
 	var btn: Button = skel.button
-	btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	var normal := GameTheme.make_panel_style(panel_bg,
-		color.lerp(GameTheme.GILT, 0.55), 1, 4, true, true)
-	btn.add_theme_stylebox_override("normal", normal)
-	var hover := GameTheme.make_panel_style(Color(0.085, 0.070, 0.052, 0.97),
-		GameTheme.GILT_BRIGHT, 1, 4, true, true)
-	btn.add_theme_stylebox_override("hover", hover)
-	var pressed := GameTheme.make_panel_style(Color(0.045, 0.038, 0.032, 0.96),
-		color.lerp(GameTheme.GILT, 0.55), 1, 4, true, true)
-	btn.add_theme_stylebox_override("pressed", pressed)
-	var disabled := GameTheme.make_panel_style(Color(0.05, 0.045, 0.04, 0.85),
-		Color(0.40, 0.30, 0.15, 0.55), 1, 4, true, true)
-	btn.add_theme_stylebox_override("disabled", disabled)
+	btn.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	# Keep the border in the relics' gold family — only a whisper of the tile's
+	# personal hue — so the five tiles read as one shelf, not five moods.
+	var accent := color.lerp(GameTheme.GILT, 0.8)
+	btn.add_theme_stylebox_override("normal",
+		GameTheme.make_btn_style(GameTheme.PARCHMENT, accent, 10))
+	btn.add_theme_stylebox_override("hover",
+		GameTheme.make_btn_style(GameTheme.PARCHMENT.lightened(0.06),
+			GameTheme.GILT_BRIGHT, 10))
+	btn.add_theme_stylebox_override("pressed",
+		GameTheme.make_btn_style(GameTheme.PARCHMENT.darkened(0.14), accent, 10))
+	btn.add_theme_stylebox_override("disabled",
+		GameTheme.make_btn_style(GameTheme.PARCHMENT.darkened(0.30),
+			Color(0.40, 0.30, 0.15, 0.55), 10))
 
 	var col: VBoxContainer = skel.col
 
-	var icon := TextureRect.new()
-	if ResourceLoader.exists(icon_path):
-		icon.texture = load(icon_path)
-	icon.modulate = icon_tint
-	icon.custom_minimum_size = Vector2(64, 64)
-	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	icon.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	col.add_child(icon)
+	# make_relic_chip / make_potion_chip attach their OWN rich hover. Mute the
+	# chip's, or the tip flickers as the cursor crosses from the tile onto the
+	# picture and back — the tile is the one thing on the shelf that speaks.
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	col.add_child(chip)
 
-	var lbl := GameTheme.make_label(text, 19, GameTheme.IVORY)
-	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	col.add_child(lbl)
-	# Long potion texts (4 wrapped lines + price) overflow the fixed 216px tile
-	# and printed the last line through the bottom border — grow to fit.
-	GameTheme.fit_tile_height(btn, col)
+	var title_lbl := GameTheme.make_label(title, 18, GameTheme.KEYWORD_GOLD)
+	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(title_lbl)
 
-	return {"slot": btn, "button": btn, "label": lbl}
+	# The effect line is NOT printed on the tile any more — it rides the shared
+	# rich hover with the relics beside it. Inline bodies of 1-4 lines pushed
+	# every tile to a different height and left the row's prices floating on four
+	# different baselines; a shelf should read as a shelf.
+	var status_lbl := GameTheme.make_label("", 16, Color(0.86, 0.52, 0.42))
+	status_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	status_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	status_lbl.visible = false
+	col.add_child(status_lbl)
+
+	var footer_lbl: Label = null
+	if footer != "":
+		footer_lbl = GameTheme.make_label(footer, GameTheme.FONT_BODY, GameTheme.GILT)
+		footer_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		col.add_child(footer_lbl)
+
+	# No fit_tile_height: the tile keeps exactly SVC_TILE_SIZE. hover_desc mode
+	# owns `scale`, so callers must not also hover_lift these.
+	GameTheme.attach_rich_hover(btn, title, body, "", accent, 1.03)
+
+	return {"slot": btn, "button": btn, "title": title_lbl, "label": status_lbl,
+		"status": status_lbl, "footer": footer_lbl}
+
+
+## Show why a ware can't be bought, in the slot the eye already uses for price.
+func _set_tile_status(tile: Dictionary, message: String) -> void:
+	var status: Label = tile.get("status")
+	if status != null:
+		status.text = message
+		status.visible = true
+	var footer: Label = tile.get("footer")
+	if footer != null:
+		footer.visible = false
 
 
 func _buy_card(id: String, price: int, slot: Control = null) -> void:
@@ -582,7 +673,7 @@ func _spawn_gold_spend(price: int) -> void:
 	_spawn_coin_sparks(Vector2(vp.x * 0.5, 102.0), false)
 	GameTheme.spawn_floating_text(self,
 		Vector2(vp.x * 0.5, 90.0),
-		"-%d g" % price,
+		"-%dg" % price,
 		Color(1.0, 0.55, 0.18),
 		true)
 	if AudioBank != null:
@@ -594,7 +685,7 @@ func _spawn_gold_gain(price: int) -> void:
 	_spawn_coin_sparks(Vector2(vp.x * 0.5, 102.0), true)
 	GameTheme.spawn_floating_text(self,
 		Vector2(vp.x * 0.5, 90.0),
-		"+%d g" % price,
+		"+%dg" % price,
 		Color(1.0, 0.85, 0.30),
 		false)
 	if AudioBank != null:
@@ -602,31 +693,15 @@ func _spawn_gold_gain(price: int) -> void:
 
 
 func _spawn_coin_sparks(pos: Vector2, gain: bool) -> void:
-	if UserSettings != null and (not UserSettings.particles or UserSettings.reduce_motion):
+	# Decorative — reduce_motion gates here; particles/headless gate in the
+	# factory. A sale chinks harder than a spend.
+	if UserSettings != null and UserSettings.reduce_motion:
 		return
-	if DisplayServer.get_name() == "headless":
-		return
-	var p := CPUParticles2D.new()
-	p.position = pos
-	p.z_index = 210
-	p.one_shot = true
-	p.explosiveness = 0.8
-	p.amount = 18 if gain else 12
-	p.lifetime = 0.62
-	p.direction = Vector2(0, -1)
-	p.spread = 70.0
-	p.gravity = Vector2(0, 430.0)
-	p.initial_velocity_min = 150.0 if gain else 90.0
-	p.initial_velocity_max = 300.0 if gain else 210.0
-	p.scale_amount_min = 1.5
-	p.scale_amount_max = 3.1
-	var ramp := Gradient.new()
-	ramp.set_color(0, Color(1.0, 0.90, 0.45, 1.0))
-	ramp.set_color(1, Color(0.95, 0.42, 0.12, 0.0))
-	p.color_ramp = ramp
-	add_child(p)
-	p.emitting = true
-	get_tree().create_timer(p.lifetime + 0.2).timeout.connect(p.queue_free)
+	Motion.burst(self, pos, "coin_spark", {
+		"amount": 18 if gain else 12,
+		"velocity_min": 150.0 if gain else 90.0,
+		"velocity_max": 300.0 if gain else 210.0,
+	})
 
 
 ## The sutler weighs a card by its Command cost. Curses fetch scrap-rate —

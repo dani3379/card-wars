@@ -81,6 +81,9 @@ func _run() -> void:
 	NM.local_player_index = 0
 	NM._connected = true
 	NM.remote_present = true
+	# All THREE terms of is_connected_to_peer(), or Combat boots SOLO and
+	# every net assertion below fails for a reason none of them name.
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0
 	NM.entities.clear()
 	NM._next_entity_id = 1
@@ -135,14 +138,38 @@ func _run() -> void:
 	if not is_instance_valid(combat):
 		print("[net-clash] FATAL: combat freed during clash"); _finish(1); return
 
+	# THE MUSTER ROUND (2026-07-21) rewrote what "both died in round 1" means, and
+	# this assertion went on testing the old world until 2026-07-28. A body does
+	# not swing in the clash that ends the round it ARRIVED in, so two 3/2s placed
+	# in round 1 form up and BOTH LIVE. Asserting they died did not catch a bug —
+	# it just failed forever, and the fix is not to force ready_to_swing (that
+	# would test a board state the game can never actually produce on round 1).
+	# The honest opening-strike test is therefore two-part: nothing dies to the
+	# muster clash, and the SAME pairing trades on the next one.
+	var host_alive_r1: bool = is_instance_valid(host_creature) and int(host_creature.current_hp) > 0
+	var client_alive_r1: bool = is_instance_valid(client_creature) and int(client_creature.current_hp) > 0
+	_check(host_alive_r1 and client_alive_r1,
+		">>> MUSTER ROUND: neither body swings the round it arrived (host_alive=%s client_alive=%s)" \
+			% [str(host_alive_r1), str(client_alive_r1)])
+
+	# Round 2: both lines are formed up. Commit both sides again and the pairing
+	# must trade — the strike/counter this probe exists to guard.
+	await combat._net_finish_placement(0)
+	await combat._net_finish_placement(1)
+	for _i in 12:
+		await create_timer(0.2).timeout
+		if not is_instance_valid(combat) or int(combat._net_turn_round) >= 3:
+			break
+	if not is_instance_valid(combat):
+		print("[net-clash] FATAL: combat freed during the round-2 clash"); _finish(1); return
 	var host_dead: bool = not is_instance_valid(host_creature) or int(host_creature.current_hp) <= 0
 	var client_dead: bool = not is_instance_valid(client_creature) or int(client_creature.current_hp) <= 0
 	_check(host_dead and client_dead,
-		">>> OPENING STRIKE: second player's first commit struck, defender countered — BOTH died (host_dead=%s client_dead=%s)" % [str(host_dead), str(client_dead)])
+		">>> OPENING STRIKE: formed-up bodies traded — striker AND counter both died (host_dead=%s client_dead=%s)" % [str(host_dead), str(client_dead)])
 	_check(not combat._net_match_over, "match still live after the mutual trade")
-	_check(int(combat._net_turn_round) == 2, "round advanced to 2 after the opening strike")
+	_check(int(combat._net_turn_round) == 3, "round advanced to 3 after the trade")
 	# Strict alternation: the fixed opener (host/0) opens every round.
-	_check(int(combat._net_active_index) == 0, "round 2 opens with the fixed opener (active=0, strict alternation)")
+	_check(int(combat._net_active_index) == 0, "the round opens with the fixed opener (active=0, strict alternation)")
 	# Neither hero should have taken face damage — the lane was blocked at clash start.
 	_check(int(combat.player_hp) == hp_host_hero and int(combat.enemy_hp) == hp_client_hero,
 		"no face leaked through the mutual trade (heroes still %d / %d)" % [int(combat.player_hp), int(combat.enemy_hp)])

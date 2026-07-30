@@ -1,7 +1,6 @@
 ﻿.godot/
 *.translation
 export.cfg
-export_presets.cfg
 
 # Build artifacts / export output (machine-local, never committed)
 build/
@@ -54,7 +53,6 @@ tools/_crop_*
 tools/_shot_*
 tools/_render_*
 tools/_v_*
-tools/_probe_parsecheck.*
 # Headless parse-check / probe run logs (regenerated on every run)
 tools/*.log
 
@@ -74,6 +72,7 @@ tools/_card_dump.txt
 
 # External-tool probe logs + scratch dumped at repo root (regenerated per run)
 /_codex_*
+/_verify_*.log
 /scratch_combat_err.txt
 # Stray self-contained-mode engine userdata dir
 /Godot/

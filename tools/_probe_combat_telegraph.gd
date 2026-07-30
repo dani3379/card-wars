@@ -76,6 +76,7 @@ func _run() -> void:
 	await _test_interpose_and_wall()
 	await _test_poison_and_recoil()
 	await _test_piercing_cleave_and_guardian()
+	await _test_overkill_forecast()
 	await _test_zero_attack_edges()
 	await _test_rescue_wording()
 	await _test_heal_projection_and_sniper_order()
@@ -153,7 +154,7 @@ func _test_attack_modifiers() -> void:
 	await _reset_board()
 	var attacker = _seat_plain(false, 1, 2, 5)
 	var target = _seat_plain(true, 1, 0, 8)
-	target.set_meta("marked", true)
+	target.state.marked = true
 	var read: Dictionary = combat._predict_lane_strike(attacker)
 	_check("Marked adds two damage",
 		int(read.get("damage", -1)) == 4 and int(read.get("hp_after", -1)) == 4,
@@ -191,7 +192,7 @@ func _test_disabled_and_intents() -> void:
 	await _reset_board()
 	attacker = _seat_plain(true, 0, 2, 5)
 	_seat_plain(false, 0, 0, 8)
-	attacker.set_meta("current_intent", "CHARGE")
+	attacker.state.current_intent = "CHARGE"
 	read = combat._predict_lane_strike(attacker)
 	_check("CHARGE includes its pending +1 ATK",
 		int(read.get("damage", -1)) == 3 and int(read.get("hp_after", -1)) == 5,
@@ -200,7 +201,7 @@ func _test_disabled_and_intents() -> void:
 	await _reset_board()
 	attacker = _seat_plain(true, 0, 2, 5)
 	_seat_plain(false, 0, 0, 8)
-	attacker.set_meta("current_intent", "ENRAGE")
+	attacker.state.current_intent = "ENRAGE"
 	read = combat._predict_lane_strike(attacker)
 	_check("ENRAGE includes its pending +2 ATK",
 		int(read.get("damage", -1)) == 4 and int(read.get("hp_after", -1)) == 4,
@@ -209,7 +210,7 @@ func _test_disabled_and_intents() -> void:
 	await _reset_board()
 	attacker = _seat_plain(true, 0, 2, 5)
 	_seat_plain(false, 0, 0, 8)
-	attacker.set_meta("current_intent", "HEAL")
+	attacker.state.current_intent = "HEAL"
 	read = combat._predict_lane_strike(attacker)
 	_check("HEAL intent spends the attack and has no forecast", read.is_empty(), str(read))
 
@@ -252,14 +253,42 @@ func _test_interpose_and_wall() -> void:
 		and int(read.get("damage", -1)) == 3 \
 		and String(read.get("text", "")).begins_with("INTERPOSES"), str(read))
 
+	# THE FACE WALL. This block used to seat `iron_bastion` and assert it blunted an
+	# open face strike by one. That was its `reduce_face_damage` passive, and BOTH
+	# halves of it are gone: the card was reworked into the Honor Guard rare in the
+	# 2026-07-15 interest slate (`passive: "column_ward"` — an HP floor on its
+	# COLUMN-MATE, nothing to do with the face), and the matching arm was deleted
+	# from Combat._get_wall_reduction (see the retirement note there, and the same
+	# note at _probe_skirmish_combat.gd:1935). No card in the pool carries
+	# `reduce_face_damage` today, so the assertion had been describing a mechanic
+	# that no longer exists and failing for that reason alone.
+	#
+	# What it was really guarding is worth keeping: the forecast must apply the SAME
+	# wall reduction the resolver applies (_forecast_face_strike and
+	# _creature_hits_face both call _get_wall_reduction), or the pre-commit read
+	# promises the player face damage the wall is going to eat. So it now exercises
+	# the arm that SURVIVED — `cannot_attack_wall`, which unlike the retired one is
+	# LANE-SCOPED (|wall lane - struck lane| <= 1) — from both sides: in range it
+	# must reduce, out of range it must not.
 	await _reset_board()
 	combat.player_hp = 20
 	attacker = _seat_plain(true, 0, 3, 5)
-	_seat_id("iron_bastion", false, 3, combat.ROW_BACK)
+	_seat_plain(false, 1, 0, 5, [], combat.ROW_BACK,
+		{"passive": "cannot_attack_wall"})
 	read = combat._predict_lane_strike(attacker)
-	_check("Iron Bastion reduces an open face strike by one",
+	_check("a wall one lane over blunts an open face strike by one",
 		bool(read.get("face", false)) and int(read.get("damage", -1)) == 2 \
 		and int(read.get("hp_after", -1)) == 18, str(read))
+
+	await _reset_board()
+	combat.player_hp = 20
+	attacker = _seat_plain(true, 0, 3, 5)
+	_seat_plain(false, 3, 0, 5, [], combat.ROW_BACK,
+		{"passive": "cannot_attack_wall"})
+	read = combat._predict_lane_strike(attacker)
+	_check("a wall three lanes away blunts nothing - the reduction is lane-scoped",
+		bool(read.get("face", false)) and int(read.get("damage", -1)) == 3 \
+		and int(read.get("hp_after", -1)) == 17, str(read))
 
 
 func _test_poison_and_recoil() -> void:
@@ -273,15 +302,58 @@ func _test_poison_and_recoil() -> void:
 		and int(read.get("damage", -1)) == 1 \
 		and String(read.get("text", "")).contains("DIES - POISON"), str(read))
 
+	# VIRULENCE THROUGH A SHIELD — THE RULE ITSELF CHANGED, so this assertion was
+	# asserting the old one. It used to demand a lethal "DIES - POISON" over a
+	# Shielded body, and that WAS the live answer: the resolver's poison branch was
+	# gated on `atk > 0`, so a blow the Shield swallowed whole still killed. The
+	# comment sitting directly above that branch had claimed "Shield absorbing the
+	# hit means no damage was dealt" the entire time — the code did not do what its
+	# own comment said. The strike funnel Combat._apply_creature_strike_poison
+	# settled it the comment's way: poison now requires HP ACTUALLY REMOVED
+	# (`damage_dealt <= 0` returns false), and _forecast_creature_impact moved onto
+	# the same rule (`poison_lands = state.damage > 0`, previously `atk > 0` for
+	# every kind but sniper). So the live answer flipped, and this is the new one.
+	#
+	# The positive control comes FIRST on purpose: "no poison" would pass for free
+	# if _virulence_active were ignored outright, so prove the flag still kills an
+	# unshielded body before asserting that a Shield stops it.
+	await _reset_board()
+	combat._virulence_active[0] = true
+	attacker = _seat_plain(false, 0, 1, 4)
+	target = _seat_plain(true, 0, 0, 7)
+	read = combat._predict_lane_strike(attacker)
+	_check("Virulence alone still forecasts a poison kill (control)",
+		read.get("target") == target and bool(read.get("lethal", false)) \
+		and int(read.get("damage", -1)) == 1 \
+		and String(read.get("text", "")).contains("DIES - POISON"), str(read))
+
 	await _reset_board()
 	combat._virulence_active[0] = true
 	attacker = _seat_plain(false, 0, 1, 4)
 	target = _seat_plain(true, 0, 0, 7, ["shield"])
 	read = combat._predict_lane_strike(attacker)
-	_check("Virulence matches the live Shield interaction",
-		read.get("target") == target and bool(read.get("lethal", false)) \
+	_check("a Shield swallows the whole blow, so Virulence poisons nothing",
+		read.get("target") == target and not bool(read.get("lethal", true)) \
 		and bool(read.get("shield_break", false)) and int(read.get("damage", -1)) == 0 \
-		and String(read.get("text", "")).contains("DIES - POISON"), str(read))
+		and int(read.get("hp_after", -1)) == 7 \
+		and not String(read.get("text", "")).contains("POISON"), str(read))
+
+	# ...and the same fixture pushed through the REAL funnels the clash uses —
+	# _deal_creature_strike_damage into _apply_creature_strike_poison, the two lines
+	# that decide this at strike time (Combat.gd, in _creature_attacks_creature).
+	# The forecast above is only honest if the board agrees, and the previous
+	# wording of this check ("matches the live Shield interaction") asserted that
+	# agreement without ever consulting the live side.
+	var live_dealt: int = combat._deal_creature_strike_damage(target, 1)
+	var live_poisoned: bool = combat._apply_creature_strike_poison(
+		attacker, target, false, live_dealt)
+	var live_alive: bool = is_instance_valid(target)
+	_check("...and the live strike funnel agrees - Shield spent, body untouched",
+		live_dealt == 0 and not live_poisoned and live_alive \
+		and int(target.current_hp) == 7 and not bool(target.state.has_shield),
+		"dealt=%d poisoned=%s hp=%s shield=%s" % [live_dealt, str(live_poisoned),
+			str(target.current_hp) if live_alive else "freed",
+			str(target.state.has_shield) if live_alive else "freed"])
 
 	await _reset_board()
 	attacker = _seat_plain(false, 0, 2, 1)
@@ -333,6 +405,111 @@ func _test_piercing_cleave_and_guardian() -> void:
 		str(read))
 
 
+func _test_overkill_forecast() -> void:
+	# THE FORECAST MUST NAME THE SPILL (docs/COMBAT_LEGIBILITY_20260728.md §4 #1).
+	#
+	# Before 2026-07-28 the forecast appended a spill line ONLY for Piercing. The
+	# universal OVERKILL rule — the whole blocker economy, where a body now REDUCES
+	# a blow by its own HP instead of negating a whole attack — was computed into
+	# state["overkill"] and then thrown away for everyone else. The pre-commit read
+	# said "SLAIN" and nothing more, at the exact moment the player is choosing
+	# which body to put in front.
+	#
+	# The two halves of the contract, and they are easy to collapse into each other:
+	#   OVERKILL spills into the body BEHIND the victim and STOPS there. The
+	#            forecast may only promise it when such a body exists and is alive,
+	#            or the chip advertises damage that goes nowhere.
+	#   PIERCING is the keyword that reads on to the FACE. If a Piercing blow ever
+	#            printed OVERKILL instead, the keyword would read as a downgrade.
+	print("[combat-telegraph] -- OVERKILL spill in the pre-commit forecast")
+
+	# 7 into a 2 HP screen with a live 9 HP body behind it: 5 excess, and it lands.
+	await _reset_board()
+	var attacker = _seat_plain(false, 1, 7, 9)
+	var screen = _seat_plain(true, 1, 0, 2, [], combat.ROW_FRONT)
+	_seat_plain(true, 1, 0, 9, [], combat.ROW_BACK)
+	var read: Dictionary = combat._predict_lane_strike(attacker)
+	var text := String(read.get("text", ""))
+	_check("lethal spill onto a screened body forecasts OVERKILL N",
+		read.get("target") == screen and bool(read.get("lethal", false)) \
+		and int(read.get("overkill", -1)) == 5 and text.contains("OVERKILL 5"),
+		str(read))
+	_check("...and does NOT claim to pierce (that word belongs to the keyword)",
+		not text.contains("PIERCES"), str(read))
+
+	# Same blow, nothing standing behind: the spill goes nowhere, so the forecast
+	# must stay silent about it. The NUMBER is still computed — it was never the
+	# arithmetic that was missing, only the line — so assert both halves.
+	await _reset_board()
+	attacker = _seat_plain(false, 1, 7, 9)
+	var lone = _seat_plain(true, 1, 0, 2, [], combat.ROW_FRONT)
+	read = combat._predict_lane_strike(attacker)
+	text = String(read.get("text", ""))
+	_check("an unscreened lethal blow forecasts NO overkill line (the spill stops at the body)",
+		read.get("target") == lone and bool(read.get("lethal", false)) \
+		and not text.contains("OVERKILL") and not text.contains("PIERCES"), str(read))
+	_check("...though the spill VALUE is still computed and exposed",
+		int(read.get("overkill", -1)) == 5, str(read))
+
+	# Piercing keeps its own word even with a body behind — same fixture, one keyword.
+	await _reset_board()
+	attacker = _seat_plain(false, 1, 7, 9, ["piercing"])
+	_seat_plain(true, 1, 0, 2, [], combat.ROW_FRONT)
+	_seat_plain(true, 1, 0, 9, [], combat.ROW_BACK)
+	read = combat._predict_lane_strike(attacker)
+	text = String(read.get("text", ""))
+	_check("Piercing still prints PIERCES, never demoted to OVERKILL",
+		text.contains("PIERCES 5") and not text.contains("OVERKILL"), str(read))
+
+	# A back-row victim has nothing behind it by construction (the back rank is the
+	# last rank), so the line must not print even though the excess is large.
+	await _reset_board()
+	attacker = _seat_plain(false, 2, 7, 9)
+	var backer = _seat_plain(true, 2, 0, 2, [], combat.ROW_BACK)
+	read = combat._predict_lane_strike(attacker)
+	text = String(read.get("text", ""))
+	_check("a lethal blow on an exposed BACK-row body forecasts no OVERKILL",
+		read.get("target") == backer and not text.contains("OVERKILL"), str(read))
+
+	# Exact lethal — zero excess. Never promise a spill of 0.
+	await _reset_board()
+	attacker = _seat_plain(false, 0, 2, 9)
+	var exact = _seat_plain(true, 0, 0, 2, [], combat.ROW_FRONT)
+	_seat_plain(true, 0, 0, 9, [], combat.ROW_BACK)
+	read = combat._predict_lane_strike(attacker)
+	text = String(read.get("text", ""))
+	_check("an EXACT lethal blow forecasts no overkill (spill of 0 is not a promise)",
+		read.get("target") == exact and bool(read.get("lethal", false)) \
+		and int(read.get("overkill", 0)) == 0 and not text.contains("OVERKILL"),
+		str(read))
+
+	# Non-lethal into a screen: nothing spills at all.
+	await _reset_board()
+	attacker = _seat_plain(false, 0, 3, 9)
+	var survivor = _seat_plain(true, 0, 0, 9, [], combat.ROW_FRONT)
+	_seat_plain(true, 0, 0, 9, [], combat.ROW_BACK)
+	read = combat._predict_lane_strike(attacker)
+	text = String(read.get("text", ""))
+	_check("a NON-lethal blow forecasts no overkill",
+		read.get("target") == survivor and not bool(read.get("lethal", true)) \
+		and not text.contains("OVERKILL"), str(read))
+
+	# The body behind must be ALIVE to be promised. A 0 HP corpse still standing in
+	# the back slot (defer_deaths holds them there mid-clash) is not a landing spot.
+	await _reset_board()
+	attacker = _seat_plain(false, 3, 7, 9)
+	_seat_plain(true, 3, 0, 2, [], combat.ROW_FRONT)
+	var corpse = _seat_plain(true, 3, 0, 2, [], combat.ROW_BACK)
+	corpse.current_hp = 0
+	corpse.update_stat_display()
+	read = combat._predict_lane_strike(attacker)
+	text = String(read.get("text", ""))
+	_check("a downed body behind is not a landing spot — no OVERKILL promised",
+		not text.contains("OVERKILL"), str(read))
+
+	await _reset_board()
+
+
 func _test_zero_attack_edges() -> void:
 	print("[combat-telegraph] -- zero-ATK Shield / Armored parity")
 	await _reset_board()
@@ -381,7 +558,7 @@ func _test_heal_projection_and_sniper_order() -> void:
 	var attacker = _seat_plain(false, 0, 3, 5)
 	var healer = _seat_plain(true, 0, 0, 5)
 	healer.current_hp = 1
-	healer.set_meta("current_intent", "HEAL")
+	healer.state.current_intent = "HEAL"
 	var read: Dictionary = combat._predict_lane_strike(attacker)
 	_check("pending HEAL is applied before forecast damage",
 		read.get("target") == healer and int(read.get("damage", -1)) == 3 \
@@ -392,7 +569,7 @@ func _test_heal_projection_and_sniper_order() -> void:
 	var sniper = _seat_plain(false, 3, 2, 4, ["sniper"])
 	healer = _seat_plain(true, 0, 0, 5)
 	healer.current_hp = 1
-	healer.set_meta("current_intent", "HEAL")
+	healer.state.current_intent = "HEAL"
 	var actual_weakest = _seat_plain(true, 2, 0, 2)
 	read = combat._predict_lane_strike(sniper)
 	_check("Sniper compares post-HEAL HP when choosing its target",
@@ -576,6 +753,13 @@ func _seat_data(data: Dictionary, is_enemy: bool, lane: int, row: int):
 	card.current_row = row
 	card.current_hp = int(data.get("hp", 1))
 	card.current_atk = int(data.get("atk", 0))
+	# THE MUSTER DELAY (2026-07-21) defaults ready_to_swing to FALSE on every new
+	# body, and _forecast_attacker_can_strike gates on can_attack(). Seating a
+	# fixture directly skips _start_round's ready-sweep, so without this every
+	# _predict_lane_strike below returned {} and all 37 checks failed for one
+	# reason that had nothing to do with what they test. In real play the sweep
+	# does this at the top of each round; here the probe stands in for it.
+	card.state.ready_to_swing = true
 	combat._row_array(is_enemy, row)[lane] = card
 	var slot = combat._slot_array(is_enemy, row)[lane]
 	combat._slot_set_card(slot, card)

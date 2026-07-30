@@ -84,6 +84,13 @@ func _test_legal_pool() -> void:
 		elif CDB.is_curse(id):
 			bad.append(id)
 	_check(bad.is_empty(), "every pool entry is a real creature/spell, no curses (bad: %s)" % str(bad))
+	var armament_leaks: Array = []
+	for id in ["hooked_pike", "tower_shield", "grave_bell", "witchbrand",
+			"forked_spear", "repeating_arbalest"]:
+		if pool.has(id):
+			armament_leaks.append(id)
+	_check(armament_leaks.is_empty(),
+		"campaign-only Armaments do not leak into skirmish (leaked: %s)" % str(armament_leaks))
 
 
 func _test_skirmish_rarity_weights() -> void:
@@ -106,8 +113,8 @@ func _test_skirmish_rarity_weights() -> void:
 			bad_overrides.append(id)
 	_check(bad_overrides.is_empty(),
 		"white rarity is MP-only and every override is legal (bad: %s)" % str(bad_overrides))
-	_check(white_bucket.size() == legal_overrides and white_bucket.size() >= 1,
-		"white bucket is populated from overrides (bucket %d, overrides %d)" % [
+	_check(white_bucket.size() == legal_overrides,
+		"white bucket exactly mirrors overrides, including an empty table (bucket %d, overrides %d)" % [
 			white_bucket.size(), legal_overrides])
 	_check(int(SS.SKIRMISH_DRAFT_WEIGHTS[2]) <= 10 and int(SS.SKIRMISH_DRAFT_WEIGHTS[3]) <= 2,
 		"skirmish rare/white weights are lower than campaign act-3 (%s)" % str(SS.SKIRMISH_DRAFT_WEIGHTS))
