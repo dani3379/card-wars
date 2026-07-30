@@ -1224,7 +1224,19 @@ func _make_muster_section(parent: Container, heading: String,
 func _make_muster_host_row(hid: String) -> Button:
 	var hero := HeroDB.get_hero(hid)
 	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(320, 70)
+	# The row stacked a name (18px display, ~24px line) over a tagline AND a
+	# pitch (14px, ~19px each) at zero separation — ~62px of text into 64px of
+	# usable box after the 3px insets. Every roster row rendered with its third
+	# line grazing the boundary, and on the focused hero the selection edge ran
+	# straight through the pitch like a strike-through. Ellipsis truncation was
+	# catching the horizontal overflow; nothing caught the vertical.
+	#
+	# Growing the row to fit three lines just moved the problem: it pushed TAKE
+	# THE FIELD off the bottom of the screen. The third line is the fix — it is a
+	# TRUNCATED DUPLICATE of the hero's desc, which THE COLUMN pane prints in
+	# full, unclipped, for whichever hero is focused. The list needs to identify
+	# and differentiate; the detail pane explains. Two lines do the first job.
+	btn.custom_minimum_size = Vector2(320, 66)
 	btn.focus_mode = Control.FOCUS_ALL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	for state in ["normal", "hover", "pressed", "focus"]:
@@ -1271,11 +1283,10 @@ func _make_muster_host_row(hid: String) -> Button:
 	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	tag.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	copy.add_child(tag)
-	var pitch := _make_display_label(String(hero.get("desc", "")), 14, Color(0.70, 0.66, 0.58))
-	pitch.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	pitch.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	pitch.tooltip_text = String(hero.get("desc", ""))
-	copy.add_child(pitch)
+	# (The truncated `desc` line lived here — see the row-height note above. It is
+	# printed in full by THE COLUMN pane, so the roster keeps the tooltip and
+	# drops the ellipsised copy.)
+	btn.tooltip_text = String(hero.get("desc", ""))
 	btn.mouse_entered.connect(_focus_hero.bind(hid))
 	btn.focus_entered.connect(_focus_hero.bind(hid))
 	btn.pressed.connect(_focus_hero.bind(hid))
@@ -1286,7 +1297,9 @@ func _make_muster_host_row(hid: String) -> Button:
 func _make_muster_banner_chip(bid: String) -> Button:
 	var data := BannerDB.get_banner(bid)
 	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(270, 48)
+	# 56, not 48: the chip stacks a name over a one-line rule, and at 48 the
+	# selected chip's highlight cut across the rule exactly like the host rows.
+	btn.custom_minimum_size = Vector2(270, 56)
 	btn.focus_mode = Control.FOCUS_ALL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	for state in ["normal", "hover", "pressed", "focus"]:
