@@ -1176,7 +1176,7 @@ func _show_hero_select() -> void:
 	writ_head.add_child(writ_rule)
 
 	_muster_writ_row = HBoxContainer.new()
-	_muster_writ_row.custom_minimum_size = Vector2(0, 120)
+	_muster_writ_row.custom_minimum_size = Vector2(0, 140)
 	_muster_writ_row.add_theme_constant_override("separation", 10)
 	_muster_writ_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	menu.add_child(_muster_writ_row)
@@ -1551,7 +1551,12 @@ func _build_muster_footer(parent: VBoxContainer) -> void:
 func _make_muster_writ_tile(entry: Dictionary) -> Button:
 	var id := String(entry.get("id", ""))
 	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(350, 116)
+	# 136, not 116 (2026-07-30). The terms are the single most consequential
+	# choice on this screen — they change your deck, your gear, the road, or cost
+	# you max HP — and the longest of them (THE PACT) ellipsised mid-clause at
+	# "Lose 6 ma...". A term you cannot finish reading is a term you cannot
+	# weigh. One more line, and the height to hold it.
+	btn.custom_minimum_size = Vector2(350, 136)
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	btn.focus_mode = Control.FOCUS_ALL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -1578,7 +1583,7 @@ func _make_muster_writ_tile(entry: Dictionary) -> Button:
 	var desc := _make_display_label(String(entry.get("desc", "")), 15, GameTheme.DESC_DIM)
 	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc.max_lines_visible = 2
+	desc.max_lines_visible = 3
 	desc.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	copy.add_child(desc)
 	btn.pressed.connect(_select_muster_writ.bind(id))
