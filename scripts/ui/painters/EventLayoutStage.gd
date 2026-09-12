@@ -275,8 +275,23 @@ func _draw_attention_echo() -> void:
 		"bargain": centre = Vector2(1210, 430)
 		"location": centre = Vector2(800, 435)
 		"ritual": centre = Vector2(800, 430)
+	# A SOFT BAND, NOT A WIRE (2026-09-10). This was ONE 3px arc — a hairline
+	# circle, the exact defect the combat ring engine was rebuilt to remove —
+	# and because it swells with `attention` it read as a loading spinner rather
+	# than as focus. It survived every circle sweep because the call is split
+	# across two lines and the width never reached the check; the hunt reads
+	# continuation lines now.
+	#
+	# There is no shader to reach for inside an immediate-mode `_draw()`, so the
+	# falloff is built the cheap way: concentric passes widening and fading
+	# outward, which is by hand what the ring shader's band does analytically.
 	var radius := lerpf(74.0, 104.0, attention)
-	draw_arc(centre, radius, 0.0, TAU, 48,
-		Color(accent.r, accent.g, accent.b, 0.18 * attention), 3.0)
+	for pass_i in 4:
+		var k := float(pass_i)
+		draw_arc(centre, radius + k * 2.6, 0.0, TAU, 48,
+			Color(accent.r, accent.g, accent.b,
+				0.20 * attention / (1.0 + k * 1.6)), 3.0 + k * 3.6)
+	# FILLED, not outlined. An outlined disc here was a second tiny wire circle
+	# sitting inside the first one.
 	draw_circle(centre, 10.0 + attention * 5.0,
-		Color(accent.r, accent.g, accent.b, 0.10 * attention), false, 2.0)
+		Color(accent.r, accent.g, accent.b, 0.13 * attention))

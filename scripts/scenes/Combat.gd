@@ -8,6 +8,7 @@ const CARD_SCENE = preload("res://scenes/card_2d.tscn")
 const REWARD_SCENE = "res://scenes/reward.tscn"
 const GAMEOVER_SCENE = "res://scenes/game_over.tscn"
 const MAP_SCENE = "res://scenes/map.tscn"
+const BATCHED_CHART_STYLE = preload("res://scripts/ui/BatchedChartPanelStyle.gd")
 const CLASH_LANE_FOCUS = preload("res://scripts/ui/painters/ClashLaneFocus.gd")
 
 # Custom spells whose primary resolution deals numeric enemy damage. Standard
@@ -46,6 +47,12 @@ func _init() -> void:
 	add_child(net)
 
 
+func _batched_chart_style(source: StyleBox) -> StyleBox:
+	# Dense persistent HUD furniture keeps the chart silhouette and interaction
+	# states while collapsing its face/rim/tacks into one indexed submission.
+	return BATCHED_CHART_STYLE.from_chart(source)
+
+
 enum Phase { PLAYER_TURN, RESOLVING, GAME_OVER }
 var phase := Phase.PLAYER_TURN
 var round_number := 0
@@ -66,6 +73,11 @@ var _net_first_player_override: int = -1
 # spent locally so the bot plays as a stand-in for an absent client.
 var _bot_hand: Array = []               # [{uid:int, id:String, data:Dictionary}]
 var _bot_deck_cursor: int = 0
+# True once the cursor has wrapped at least once. From then on every drawn card
+# takes a freshly issued id rather than its printed deck uid — entity_id IS the
+# deck uid for drafted creatures, so a second-lap copy under the original uid
+# would collide with the first copy while that one is still on the board.
+var _bot_deck_recycled: bool = false
 var _bot_banked_mana: int = 0
 var _bot_turns_taken: int = 0
 var _net_turn_round: int = 0            # combat ROUND counter (one simultaneous clash per round)
@@ -429,7 +441,6 @@ var _tallow_dolls_played: int = 0
 # persists for 2 rounds). Resets each turn.
 var _butchers_cleaver_armed: bool = false
 var _cards_played_this_turn: int = 0
-var _dismiss_tutorial_shown: bool = false
 # Battlefield repositions used this turn (see MOVES_PER_TURN). Reset each round.
 var _moves_used_this_turn: int = 0
 # [PACING] temp debug — flips true once any non-ATK intent badge shows this fight.
@@ -491,8 +502,8 @@ var _sigil_of_hunger_fired_this_round: bool = false
 ## (Mana Drunkard's spend-streak counters retired 2026-07-25 with the Command
 ## relics — Forced March is now a creature_played Swift grant and banks nothing.)
 # Mummified Hand: once-per-spell-cast, sets a random hand creature to cost 0
-# this turn. The marker lives in the creature's typed runtime state.
-var _mana_pearl_zero_cost_armed: bool = false
+# this turn. It keeps NO Combat-level state — the marker lives in the creature's
+# typed runtime state, which is why there is no latch for it here.
 var _phantom_veil_used: bool = false
 var _stampede_broken_logged: bool = false
 # Pyromancer's Scar: first spell each combat is cast twice (same target).
@@ -736,10 +747,65 @@ var _passive_speaking: bool = false
 var _info_queue: Array = []                  # pending info lines — see _show_info (same-frame callers used to clobber each other)
 var _info_showing: bool = false              # true while a line owns the label and its hold timer is running
 var _mana_bank_pips: Array = []              # banking carry-over pips under the Command seal
-var _banking_tutorial_shown: bool = false
-var _intents_tutorial_shown: bool = false
-var _pile_tutorial_shown: bool = false
-var _combat_model_tutorial_shown: bool = false
+
+enum FirstBattleTutorialStage {
+	INACTIVE,
+	PLAY_CREATURE,
+	END_TURN,
+	WAIT_FOR_BOARD,
+	READ_BOARD,
+}
+
+var _first_battle_tutorial_stage: int = FirstBattleTutorialStage.INACTIVE
+var _first_battle_tutorial_card: Control = null
+## THE COACHING LAYER (scripts/ui/TutorialCoach.gd). Owns the spotlight, the
+## breathing marks, the pointing arrows, the drag arc and the step panel.
+##
+## It replaced five members and three hand-rolled devices that shared one fault:
+## they were all built into `_hud_layer`, which is layer 12, while the hand is
+## layer 20 — so nothing the walkthrough drew could appear over a hand card. The
+## old "highlight" worked around that by setting the card's own `modulate` to a
+## flat 16% warm tint, which on warm parchment is close to nothing, and the old
+## "focus curtains" were two hardcoded rects that dimmed the rails and left the
+## rest of the screen at full strength. The coach sits above the hand and punches
+## real holes in a real scrim.
+var _coach: TutorialCoach = null
+var _opening_muster_forecast: Array[Control] = []
+
+
+## THE GUIDED WALKTHROUGH RUNS ONLY IN COACH_FULL. `should_teach` carries that
+## rule for every lesson in the game (a KIND_STEP needs the full mode), so asking
+## it here rather than re-testing `coaching_mode` keeps the one definition of
+## "off" in one place — this predicate is read at five sites and a second copy of
+## the rule is a second thing to forget.
+func _first_battle_tutorial_pending() -> bool:
+	return not _is_net() and RunState.current_node_type == "combat" \
+		and RunState.holds_broken_run <= 0 and UserSettings != null \
+		and TutorialCoach.should_teach("walk_play")
+
+
+## Lessons whose MOMENT is inside a clash — a killing blow spilling over, the
+## first blow that reaches the hero. Neither can be taught where it happens: the
+## info channel is carrying the fight's own captions and a tip posted there would
+## be read as combat text, then wiped by the next beat. They latch instead, and
+## the round ladder offers them at the next player turn, when the board they are
+## about to explain is still standing.
+var _overkill_lesson_armed: bool = false
+var _hero_hit_lesson_armed: bool = false
+
+## The tip currently owning _info_label, or "" — see _show_tutorial_tip. A
+## tutorial tip is a once-EVER message (its UserSettings flag is stamped the
+## moment it fires), so anything that can silently erase one costs a new player
+## a rule they will never be offered again.
+var _tutorial_tip_live: String = ""
+## Monotonic "something was put on screen" counter, bumped by the four one-shot
+## visual funnels: spawn_keyword_callout (every keyword / trigger / rider chip),
+## spawn_floating_number (every damage / heal / gold float), _show_info (every
+## banner line) and _spawn_vfx_ring (every combat ring, incl. the grace waves).
+## Read ONLY by _round_beat's skip test — see _round_visible_state. It counts
+## intent, not pixels: the funnels are called on the headless path too, which is
+## what keeps the test's answer identical in a probe and in front of a player.
+var _visible_beat_seq: int = 0
 
 # HUD
 var _hud_layer: CanvasLayer
@@ -795,6 +861,15 @@ var _mana_label: Label
 var _gold_label: Label = null   # combat gold readout (campaign only; absent in skirmish)
 var _gold_displayed: int = -1   # last shown gold, for the change-flash
 var _mana_seal_post: Control = null   # player Command instrument (hover → tooltip)
+## The struck part of each Command instrument: ONE wrapper holding the wax blob
+## AND the numeral pressed into it (✦1 of docs/CARD_PLAY_COOL_HUNT_20260803.md).
+## They are separate nodes, so squashing the seal alone would dip the wax out
+## from under a stationary digit — the wrapper is what makes them one object.
+## The caption, the carryover pips and the lamp aura are deliberately OUTSIDE it:
+## the bank is a shelf, not the seal, and the lamp does not move when the wax is
+## struck.
+var _mana_seal_press: Control = null       # player seal + numeral
+var _net_opp_seal_press: Control = null    # foe's mirror (skirmish only)
 var _bank_pips: HBoxContainer = null  # carryover dots on the seal's plinth shelf
 var _bank_pips_cap := -1
 var _bank_pips_lit := -1
@@ -1118,6 +1193,32 @@ func _combat_seed() -> int:
 		^ (int(RunState.current_floor) * 7919)
 
 
+## THE ARMY YOU FACE IS PART OF THE SEED (2026-08-01). Several encounters carry
+## authored `deck_variants` / `reinforcement_pool` alternatives, and both rolls
+## used to come off Godot's GLOBAL stream — so two players on the same Daily
+## March got the same map, the same opening hand and the same gifts, then fought
+## DIFFERENT lineups. Same class of bug as the writ-resolution seeding pass.
+##
+## Deliberately NOT `_combat_ops`: a composition roll must be a pure function of
+## (run seed × fight), never of how many gameplay draws happened to precede it.
+## Riding the shared stream would mean any new `_combat_ops` call added upstream
+## silently re-deals every variant encounter in the game, and it would let the
+## PRESENTATION-side rebuild in `_resolve_enemy_portrait` shift the whole
+## gameplay stream behind it. Reseeding from `_combat_seed()` per roll costs one
+## RNG init and makes each call site independently reproducible — which is why
+## the portrait fallback can safely reuse SALT_DECK and get, by construction,
+## the exact lineup the setup path would have built.
+const ENC_ROLL_SALT_DECK := 1
+const ENC_ROLL_SALT_REINFORCEMENT := 2
+
+var _encounter_rng := RandomNumberGenerator.new()
+
+
+func _encounter_roll_stream(salt: int) -> RandomNumberGenerator:
+	_encounter_rng.seed = _combat_seed() ^ (salt * 2654435761)
+	return _encounter_rng
+
+
 ## OPENING-COST TRACE. Silent unless the process was launched with
 ## `--combat_trace` (after a bare `--`). The opening is a chain of very
 ## different costs — a threaded art warm, one big synchronous build block, a
@@ -1154,11 +1255,6 @@ func _ready() -> void:
 	_combat_ops.reseed(_combat_seed())
 	_rebuild_relic_cache()
 	_compute_spell_tome()
-	_banking_tutorial_shown = UserSettings.banking_tutorial_seen
-	_intents_tutorial_shown = UserSettings.intents_tutorial_seen
-	_pile_tutorial_shown = UserSettings.pile_tutorial_seen
-	_combat_model_tutorial_shown = UserSettings.combat_model_tutorial_seen
-	_dismiss_tutorial_shown = UserSettings.dismiss_tutorial_seen
 	_swap_background_for_act()
 	_trace("background swapped")
 	_setup_fight_state()
@@ -1285,12 +1381,25 @@ func _ready() -> void:
 	# begins, after enemies are placed but before round 1 draws".
 	_apply_combat_start_relics()
 	_trace("combat-start relics applied — intro banner begins")
-	# Boss / elite encounters get a dramatic intro banner (name + passive)
-	# before the first round begins. Normal fights get a quick one only when
-	# there is something to announce — a fight passive, a mutator, or a
-	# faction wave schedule (the intro names the kingdom's engine, §15.2) —
-	# so the threat is read before it fires; untagged vanilla skirmishes
-	# still start instantly.
+	# Boss / General encounters get a dramatic intro banner (name + passive)
+	# before the first round begins. EVERY other fight gets the quick variant.
+	#
+	# THE "SKIP IT FOR UNTAGGED FIGHTS" BRANCH IS GONE (2026-08-01) because there
+	# is no such fight. It used to read
+	#     elif <has a passive / mutator / wave schedule / pursuit / preamble>:
+	#         await _show_encounter_intro(false, true)
+	#     else:
+	#         await _show_encounter_intro(false, true)
+	# — two identical arms — under a comment claiming "untagged vanilla skirmishes
+	# still start instantly", which had not been true for as long as the arms
+	# matched. MEASURED: of the 28 `type: "combat"` entries in EncounterDB,
+	# 9 in act 1 / 12 in act 2 / 7 in act 3, ZERO are untagged. Every single one
+	# carries a preamble AND a faction with a wave schedule, so the tagged arm was
+	# total and the untagged arm was dead code. Restoring the stated intent would
+	# therefore have bought exactly nothing; the honest fix is to say the intro is
+	# universal and make the quick variant cheap enough to deserve being universal
+	# (see the reading-scaled hold in _show_encounter_intro).
+	#
 	# node_type was already captured above for the music branch — reuse it.
 	# A NAMED ACTION gets a despatch to READ instead of a banner that flashes:
 	# it states the ground, the order, the trophy and the toll, and waits for
@@ -1299,9 +1408,6 @@ func _ready() -> void:
 		await _sp_show_despatch()
 	elif node_type == "boss" or node_type == "elite":
 		await _show_encounter_intro(node_type == "boss")
-	elif _encounter_passive_desc != "" or has_mutator() or _wave_schedule_active \
-			or _pursuit_tier() >= 1 or _encounter_preamble != "":
-		await _show_encounter_intro(false, true)
 	else:
 		await _show_encounter_intro(false, true)
 	_trace("intro banner done")
@@ -1681,11 +1787,27 @@ const COMBAT_BG_PATHS := {
 }
 
 
-## Skirmish must not inherit the act from the last campaign save. Every deck
-## acquisition format shares this neutral visual context; campaign follows its
-## live act.
+## Skirmish must not inherit the act from the last campaign save — but it should not
+## be stuck on ONE ground either (2026-08-04).
+##
+## This returned a hard 1 in every skirmish, so every match ever played was fought on
+## the act-1 burning meadow while the campaign moves through three painted arenas.
+## Music already rotates the WHOLE combat book in skirmish for exactly this reason
+## ("each game of a Bo3 gets a fresh song"); the ground it plays over stayed fixed,
+## which is a large part of why the two modes look like different games.
+##
+## Drawn from the shared MATCH SEED, not a local roll: the ground is a thing both
+## players are describing to each other, and two peers narrating different terrain is
+## worse than one repeated arena. The seed is the same value both sides already build
+## their reproducible slates from, so no handshake is needed — and a Bo3 keeps one
+## ground for the series, which is right: it is one battle, replayed.
 func _combat_visual_act() -> int:
-	return 1 if _is_net() else RunState.get_act()
+	if not _is_net():
+		return RunState.get_act()
+	var s: int = int(SkirmishState.rng_seed)
+	if s == 0:
+		return 1   # no seed settled yet (practice/bot boot order) — the house default
+	return 1 + absi(s) % 3
 
 
 func _swap_background_for_act() -> void:
@@ -1756,7 +1878,8 @@ func _setup_fight_state() -> void:
 				_siege_saved_passive_desc = _encounter_passive_desc
 				_encounter_passive = ""
 				_encounter_passive_desc = String(_siege_data.get("rule", ""))
-			_enemy_deck = EncounterDB.build_enemy_deck(enc_id, t_act)
+			_enemy_deck = EncounterDB.build_enemy_deck(enc_id, t_act,
+					_encounter_roll_stream(ENC_ROLL_SALT_DECK))
 			_combat_ops.shuffle(_enemy_deck)
 			# VANGUARD: an entry flagged `vanguard` is pulled back to the front
 			# AFTER the shuffle, so an encounter can guarantee its centrepiece is
@@ -1774,7 +1897,8 @@ func _setup_fight_state() -> void:
 			if not _van.is_empty():
 				_enemy_deck = _van
 				_enemy_deck.append_array(_rest)
-			_reinforcement = EncounterDB.get_reinforcement(enc_id, t_act)
+			_reinforcement = EncounterDB.get_reinforcement(enc_id, t_act,
+					_encounter_roll_stream(ENC_ROLL_SALT_REINFORCEMENT))
 			_boss_phases = EncounterDB.get_boss_phases(enc_id, RunState.rival_lords)
 			# A throne fight is authored by THIS run's conquests. Phase zero is
 			# already in force when combat opens, so replace the finale kit's
@@ -1820,13 +1944,21 @@ func _setup_fight_state() -> void:
 			return
 	var act = RunState.get_act()
 	var node_type = RunState.current_node_type
+	# THE DEFAULT ARM IS LOAD-BEARING. Without it an unrecognised (or empty)
+	# node type fell through every case and left enemy_max_hp at its int
+	# default of 0 — a foe that opens the fight already dead, a face plate
+	# reading "0 / 0", and a 0/0 division in _update_hud's bar fill. An empty
+	# node type is reachable: a scene driven straight to combat.tscn without
+	# RunState.visit_node (probes, a direct scene launch, a mode that boots
+	# solo by accident). Treat unknown as a normal hold, exactly as
+	# _fight_class() already does.
 	match node_type:
-		"combat":
-			enemy_max_hp = _scale_enemy_hp([12, 17, 21][act - 1] + _combat_ops.rangei(0, 3), "combat")
 		"elite":
 			enemy_max_hp = _scale_enemy_hp([18, 26, 30][act - 1] + _combat_ops.rangei(0, 3), "elite")
 		"boss":
 			enemy_max_hp = _scale_enemy_hp([25, 32, 40][act - 1], "boss")
+		_:
+			enemy_max_hp = _scale_enemy_hp([12, 17, 21][act - 1] + _combat_ops.rangei(0, 3), "combat")
 	_build_legacy_enemy_deck(act)
 	enemy_hp = enemy_max_hp
 
@@ -2994,7 +3126,7 @@ func _desert_player_to_enemy(card: Control) -> bool:
 	_refresh_adjacency_buffs()
 	spawn_trigger_callout(_card_center(card) + Vector2(0, -14),
 		"DESERTS", true, int(card.entity_id))
-	_log_event("%s deserts to the foe's line." % _log_card_ref(card),
+	_log_event("%s deserts to the enemy line." % _log_card_ref(card),
 		_log_data(card), _log_side(card))
 	return true
 
@@ -3016,7 +3148,7 @@ func _collect_sword_credit() -> void:
 			var opts := [
 				{"label": "Pay 2 Command", "desc": "Keep the sword in your line.",
 					"color": Color(0.24, 0.38, 0.20)},
-				{"label": "Default", "desc": "It deserts to the foe.",
+				{"label": "Don't pay", "desc": "It deserts to the enemy.",
 					"color": Color(0.42, 0.18, 0.15)},
 			]
 			var pick: int = await _pick_combat_option("SWORD ON CREDIT — the bill falls due",
@@ -3065,7 +3197,7 @@ func _try_body_snatch(dead_enemy: Control, lane: int) -> void:
 	snatcher.state.body_snatcher_used = true
 	if _player_back[lane] != null:
 		spawn_trigger_callout(_card_center(snatcher) + Vector2(0, -14),
-			"NO ROOM FOR THE BODY", true, int(snatcher.entity_id))
+			"NO EMPTY SLOT", true, int(snatcher.entity_id))
 		return
 	var risen_data: Dictionary = dead_enemy.card_data.duplicate(true)
 	# Arrival text belongs to the first life; the stolen corpse keeps its combat
@@ -3331,6 +3463,26 @@ func _deal_opening_muster() -> void:
 	#   packed  — clumped on one half of front (flanking pressure)
 	#   split   — half front, half back (ambush formation)
 	#   siege   — back row only (creates breathing room turn 1)
+	# THE INITIATIVE — the price of moving first (2026-07-30, reworked same day).
+	#
+	# The first version priced it with one extra body in reserve, and that was
+	# measurably the wrong price: this function does not read the player's board
+	# AT ALL (the formation below is a blind roll, deliberately — see the comment
+	# on it), so "letting them commit first" cost the player nothing whatever. The
+	# hold's deployment was byte-identical either way, which made LET THEM COME a
+	# strictly better option carrying information, a smaller line AND the Coin.
+	#
+	# The honest price for moving first is that the hold ANSWERS YOU. When the
+	# player has taken the field, the opening is dealt by the same reactive
+	# column-targeting drill the hold uses on every later round — it aims at the
+	# player's strongest creature's column instead of choosing a shape blind. That
+	# is what "they saw your line before they committed" actually means, and it
+	# costs no new numbers.
+	if _initiative == "field":
+		fill_order.append_array(_get_placement_priority_4x4(enc_type))
+		await _deal_opening_fill(fill_order, starting_count)
+		return
+
 	var formations: Array[String] = ["spread", "packed", "split"]
 	# Siege only makes sense with >=2 creatures, and only for non-boss fights.
 	if starting_count >= 2 and enc_type != "boss":
@@ -3365,7 +3517,16 @@ func _deal_opening_muster() -> void:
 			for l in _evenly_spread_lanes(starting_count):
 				fill_order.append({"row": ROW_BACK, "lane": l})
 
-	# Fallback / overflow — fill remaining lanes if formation runs short.
+	await _deal_opening_fill(fill_order, starting_count)
+
+
+## Complete a partial fill_order and seat the line. Shared by the blind-formation
+## opening and by THE INITIATIVE's reactive one, so both inherit the same
+## overflow rules, the same defensive occupancy check and the same one-body-at-a-
+## time pacing — the two paths cannot drift into placing bodies differently.
+func _deal_opening_fill(fill_order: Array, starting_count: int) -> void:
+	var placed := 0
+	# Fallback / overflow — fill remaining lanes if the caller's order runs short.
 	for l in range(LANES_PER_ROW):
 		if not _slot_in_list(fill_order, ROW_FRONT, l):
 			fill_order.append({"row": ROW_FRONT, "lane": l})
@@ -3400,41 +3561,6 @@ func _deal_opening_muster() -> void:
 				await get_tree().process_frame
 			elif await _rushable_pause(0.16):
 				_muster_rushed = true
-
-	# THE INITIATIVE's price for moving first, paid AFTER the formation is seated
-	# and paid strictly into RESERVE.
-	#
-	# It cannot be paid by raising starting_count, which was the first shape and is
-	# wrong: fill_order's overflow appends every unused FRONT lane before it ever
-	# reaches the back row, so a fourth body would seal the last lane and turn the
-	# price into the lid _deal_opening_muster's ceiling exists to forbid. The hold
-	# may answer the player's tempo with depth; it may not answer it by closing the
-	# board.
-	if _initiative == "field":
-		await _place_initiative_reserves(INITIATIVE_FIELD_RESERVES)
-
-
-## Seat up to `n` extra bodies in empty BACK-row lanes. Silent about running out
-## of room or out of deck — a hold with a full reserve simply cannot bill the
-## price, which is a strictly better failure than stacking or than a lid.
-func _place_initiative_reserves(n: int) -> void:
-	var lanes: Array = []
-	for l in range(LANES_PER_ROW):
-		lanes.append(l)
-	_combat_ops.shuffle(lanes)
-	var seated := 0
-	for l in lanes:
-		if seated >= n or _enemy_deck.is_empty():
-			break
-		if _row_array(true, ROW_BACK)[l] != null:
-			continue
-		var card_data = _enemy_deck.pop_front()
-		await _announce_enemy_muster(card_data)
-		_place_enemy_card(card_data, l, ROW_BACK, true)
-		seated += 1
-		if AudioBank != null:
-			AudioBank.play_sfx("card_play", 0.05, -3.0, 0.96)
-
 
 func _evenly_spread_lanes(n: int) -> Array:
 	# Returns up to n lane indices spread across the 4 lanes so the starting
@@ -3516,12 +3642,57 @@ func _start_round() -> void:
 	if round_number >= 2:
 		_champions_belt_active = false
 	# Tutorials — sequenced so new players see one tip per round, not a wall.
-	# Intents tip on round 1 (when intent badges first appear above enemies);
-	# pile tip on round 2 (when the discard pile is guaranteed non-empty).
+	# EACH TIP IS TAUGHT ON THE ROUND ITS SUBJECT IS ACTUALLY ON SCREEN, which
+	# the sequence had drifted away from since TAKE THE FIELD (2026-07-27):
+	#   R1 — the MUSTER. The hold's line does not exist yet, so round 1 is the
+	#        one round where nothing can be read off the board. What IS true is
+	#        that ending this turn produces no clash and then an enemy line —
+	#        the only genuinely unexplained beat in the fight.
+	#   R2 — the intents. This is the first round with enemies on the table, so
+	#        it is the first round with intent badges, forecast chips and an
+	#        incoming-damage read to point at. (It used to fire on round 1 and
+	#        described three things that were not on screen.)
+	#   R3 — the piles. Pushed one round back by the above; the discard pile is
+	#        still guaranteed non-empty by then.
+	# Rounds 2+ also carry the dismiss and banking tips, so _show_tutorial_tip
+	# is FIRST-CLAIM-WINS (see there) — without that, moving the intents tip to
+	# round 2 would simply have parked it under the dismiss tip.
+	#
+	# NO RUNG IS AN EXACT ROUND, and it must not be an `elif` chain either. Each
+	# _maybe_show_* is a no-op once its tip has landed, and _show_tutorial_tip
+	# refuses everything while one tip is live, so OFFERING them all in teaching
+	# order lets exactly one land per round and the ladder advance by itself.
+	# Written as `== 2` / `== 3` in an elif chain it had two ways to lose a tip
+	# forever: a tip refused on its one round was never re-offered (a tip's flag
+	# is once-EVER), and `elif round_number >= 3` after `elif round_number >= 2`
+	# is dead code — the pile tip could never fire at all.
 	if round_number == 1:
-		_maybe_show_intents_tutorial()
-	elif round_number == 2:
-		_maybe_show_pile_tutorial()
+		if not _first_battle_tutorial_pending():
+			_maybe_show_muster_tutorial()
+	else:
+		if _first_battle_tutorial_stage == FirstBattleTutorialStage.INACTIVE and not _first_battle_tutorial_pending():
+			if round_number >= 2:
+				_maybe_show_intents_tutorial()
+			if round_number >= 3:
+				_maybe_show_pile_tutorial()
+	# THE REST OF THE LADDER, offered every round in teaching order and gated on
+	# its subject being ON SCREEN rather than on a round number. Only one can win
+	# the channel per round (`_show_tutorial_tip` is first-claim-wins), so listing
+	# them all here is what lets the ladder advance by itself as fights go by —
+	# the same property the muster/intents/piles rungs above rely on.
+	#
+	# ORDER IS THE CURRICULUM. The two clash lessons come first because they are
+	# latched: they only exist at all when the thing they explain has just
+	# happened to this player, and a just-in-time lesson beats a scheduled one.
+	if _first_battle_tutorial_stage == FirstBattleTutorialStage.INACTIVE \
+			and not _first_battle_tutorial_pending():
+		_maybe_show_hero_hp_tutorial()
+		_maybe_show_overkill_tutorial()
+		_maybe_show_back_row_tutorial()
+		_maybe_show_keyword_tutorial()
+		_maybe_show_spell_tutorial()
+		_maybe_show_relic_tutorial()
+		_maybe_show_potion_tutorial()
 	_first_creature_played = false
 	_first_spell_this_turn = false
 	_spells_cast_this_turn = 0
@@ -3579,6 +3750,8 @@ func _start_round() -> void:
 	Card2D.spell_pierce_active = false   # defensive: never leak across turns
 	Card2D.strike_damage_active = false  # ditto — a stuck flag would un-immune the Body
 	_moves_used_this_turn = 0
+	if not _is_net():
+		_reset_free_moves_for_side(false)
 	_card_cost_discount = 0
 	_last_spell_played_this_turn = {}
 	_last_spell_target_ref = null
@@ -3606,6 +3779,10 @@ func _start_round() -> void:
 		if not _doctrine_queue.is_empty():
 			_offer_doctrine()
 
+	# GROUP 1 opens here. The mark is read before the group runs and handed to the
+	# beat that closes it, so the beat can tell whether it has two groups to
+	# separate or nothing at all — see _round_beat / _round_visible_state.
+	var beat_mark: Array = _round_visible_state()
 	# Start-of-round keyword ticks (Regenerate heal / Wither ATK-decay / Doom
 	# countdown) are HOST-AUTHORITATIVE in net. The client must NOT run them on its
 	# own placement turn: its _start_round is non-authoritative, so a local tick
@@ -3643,8 +3820,11 @@ func _start_round() -> void:
 	_enemy_arrivals_this_round = 0
 	# BEAT 1 — the body ticks have spoken (regen heals, wither decay, doom
 	# counters and their detonations, the army's rations). Let them land before
-	# the board passives start granting keywords on top.
-	await _round_beat()
+	# the board passives start granting keywords on top. Skipped when they said
+	# nothing at all: with no bodies on the board (round 1, or after a wipe) every
+	# one of those ticks iterates an empty list.
+	await _round_beat(beat_mark)
+	beat_mark = _round_visible_state()   # GROUP 2 opens
 	# Riteforge ramp + Warchief aura + Summoner muster — HOST-AUTHORITATIVE in net,
 	# same as the keyword ticks above. The host runs the client's side here via
 	# _net_start_turn's `_apply_start_round_passives(true)` hook and ships the result
@@ -3662,8 +3842,11 @@ func _start_round() -> void:
 	# bastion SIEGE), Summoner tokens, the Trebuchet's volley, and the
 	# encounter's own passive, which can itself damage the face, buff four bodies
 	# and summon two. That is the loudest group in the round; it gets its own
-	# moment rather than sharing a frame with the intents that follow.
-	await _round_beat()
+	# moment rather than sharing a frame with the intents that follow. This is the
+	# beat that must NOT be gated on round_number: an encounter passive can open a
+	# fight by striking the face across an empty board, and that IS a visible group.
+	await _round_beat(beat_mark)
+	beat_mark = _round_visible_state()   # GROUP 3 opens
 	# The clash phrase restarts each round: strike audio climbs through an
 	# exchange (Card2D._next_clash_pitch) and this is the one place that puts it
 	# back at the root note, so every round opens at the same pitch rather than
@@ -3703,8 +3886,9 @@ func _start_round() -> void:
 	# BEAT 3 — the fight-level beats are done (mutator tick, boss phase turn,
 	# scripted events and their banners). What follows is the read the player
 	# actually plans against, so it arrives on its own frame rather than buried
-	# under whatever the encounter just shouted.
-	await _round_beat()
+	# under whatever the encounter just shouted. If none of them fired there is
+	# nothing to hold apart FROM, and the intents can arrive immediately.
+	await _round_beat(beat_mark)
 
 	# Assign + display intents for every enemy so the player can always read
 	# what's coming. Non-boss enemies without intent cycles default to ATK
@@ -3723,7 +3907,7 @@ func _start_round() -> void:
 	_update_wave_telegraph()
 	_update_reserves_chip()
 	if _next_wave_count() >= 2 and _wave_surge_pending():
-		_show_info("Fire on the water — the Everflame surges")
+		_show_info("The Everflame surges — extra enemies arrive next round.")
 
 	# Escalation check
 	_check_escalation()
@@ -3781,7 +3965,10 @@ func _start_round() -> void:
 	_bandit_steal_fired_this_round = false
 	# Teach the dismissal once, on the first turn that actually HOLDS cards
 	# over (round 2+): that's the moment the persistent hand becomes visible.
-	if round_number == 2 and not _is_net():
+	# `>= 2` rather than `== 2` so it can retry: this fires ~250 lines AFTER the
+	# round's own lesson, and _show_tutorial_tip is first-claim-wins, so on an
+	# exact-round rung it would simply be lost whenever the round's lesson won.
+	if round_number >= 2 and not _is_net():
 		_maybe_show_dismiss_tutorial()
 	player_mana = player_max_mana + banked
 	# Marathoner's Sash partial: round 1 starts with 1 mana (the "ramp" trade
@@ -3902,9 +4089,16 @@ func _start_round() -> void:
 	# Board is interactive again — the player can reposition creatures (and floop)
 	# during their turn. Cleared in _on_end_turn so grabs can't start mid-combat.
 	Card2D.board_interactive = true
-	_end_turn_btn.disabled = false
+	if _end_turn_btn != null:
+		_end_turn_btn.disabled = false
 	_update_hud()
 	_show_turn_banner()
+	if round_number == 1 and not _is_net() and _opening_muster_pending:
+		call_deferred("_show_opening_muster_forecast")
+		if _first_battle_tutorial_pending():
+			call_deferred("_begin_first_battle_tutorial")
+	elif round_number == 2 and _first_battle_tutorial_stage == FirstBattleTutorialStage.WAIT_FOR_BOARD:
+		call_deferred("_show_first_battle_board_lesson")
 
 
 func _on_end_turn() -> void:
@@ -3913,12 +4107,30 @@ func _on_end_turn() -> void:
 	if _targeting_spell != null:
 		_cancel_targeting()
 		return
+	if _targeting_potion_idx >= 0:
+		_cancel_potion_targeting()
+		return
 	# Skirmish: the end-turn button is the DONE (finish placing) button. Once both
 	# sides have placed, the host runs one simultaneous clash. Host finishes its own
 	# placement directly; the client asks the host to.
 	if _is_net():
 		_net_on_done_placing()
 		return
+	if round_number == 1 and _first_battle_tutorial_pending() and _first_battle_tutorial_stage == FirstBattleTutorialStage.INACTIVE:
+		_show_info("Play a creature before ending the turn — the lit slots show you where.")
+		call_deferred("_begin_first_battle_tutorial")
+		return
+
+	if _first_battle_tutorial_stage == FirstBattleTutorialStage.PLAY_CREATURE:
+		# A REFUSAL HAS TO POINT SOMEWHERE. This used to re-set the step's copy to
+		# the identical string it already showed — i.e. it changed nothing on
+		# screen — and answer in the info line. Kick the marks instead: the card
+		# and the slots flare, so the answer to "why did that do nothing" is where
+		# the player has to act, not in a sentence at the top of the screen.
+		_first_battle_nudge_step()
+		_show_info("Play the lit creature before ending the turn.")
+		return
+	var guided_commit := _first_battle_tutorial_stage == FirstBattleTutorialStage.END_TURN
 	# PlayLog: record end-of-turn (deduped per round so the confirm re-entry
 	# and the warning path don't double-log).
 	if round_number != _pl_last_end_turn_round:
@@ -3929,7 +4141,7 @@ func _on_end_turn() -> void:
 	# exactly these moments. _end_turn_confirmed gates the recursive
 	# re-entry — set true ONLY when the player confirms in the dialog.
 	if UserSettings != null and UserSettings.end_turn_warning \
-			and not _end_turn_confirmed and _has_playable_action():
+			and not guided_commit and not _end_turn_confirmed and _has_playable_action():
 		GameTheme.show_confirm_dialog(self,
 			"End Turn?",
 			"You still have Command or an action available.\n(Disable in Settings)",
@@ -3938,10 +4150,24 @@ func _on_end_turn() -> void:
 			Callable(self, "_on_end_turn_confirmed"))
 		return
 	_end_turn_confirmed = false
+	if guided_commit:
+		_first_battle_tutorial_commit()
 	# First-run teaching: the simultaneous-combat model, taught the instant the
-	# player commits their first clash (before the swing resolves).
-	_maybe_show_combat_model_tutorial()
-	_end_turn_btn.disabled = true
+	# player commits their first clash (before the swing resolves). Round 1 is
+	# excluded because it is the one End Turn that produces NO clash — both lines
+	# are still mustering and the hold has not even taken the field — so "both
+	# sides attack each round" would be read against a round where neither did.
+	# Guarded rather than dropped: this retries on every End Turn until it lands.
+	if round_number >= 2 and _first_battle_tutorial_stage == FirstBattleTutorialStage.INACTIVE:
+		_maybe_show_combat_model_tutorial()
+	# Guarded like the six other sites that touch this button. It is built by
+	# `_build_hud()`, which is a COROUTINE the opening awaits — and a null property
+	# write ABORTS the enclosing function, so an End Turn arriving before the HUD
+	# lands would cancel the commit here, one line before `phase` flips, leaving
+	# the turn stuck in PLAYER_TURN with no clash. `_probe_balance` hit exactly
+	# that and spun every plain fight to MAX_ROUNDS while reporting a clean exit.
+	if _end_turn_btn != null:
+		_end_turn_btn.disabled = true
 	phase = Phase.RESOLVING
 	_clear_threat_flags()  # JUICE: drop the pre-combat threat outlines; the clash itself now reads
 	Card2D.board_interactive = false
@@ -4130,13 +4356,13 @@ func _resolve_on_play_ability(card: Control, lane_idx: int, is_enemy: bool) -> v
 						scout_data = _reinforcement
 					if not scout_data.is_empty():
 						var scout_name := String(scout_data.get("name", "?"))
-						_log_event("The Lookout espies the foe's next arrival: %s." \
+						_log_event("The Lookout spots the enemy's next arrival: %s." \
 							% scout_name, scout_data, 1)
 						spawn_floating_number(card.global_position \
 							+ Vector2(card.size.x * card.scale.x * 0.5, -10),
-							"ESPIED: %s" % scout_name.to_upper(), Color(0.75, 0.85, 1.0), false)
+							"SPOTTED: %s" % scout_name.to_upper(), Color(0.75, 0.85, 1.0), false)
 					else:
-						_log_event("The Lookout espies the road behind the foe: empty. No one else is coming.", {}, 0)
+						_log_event("The Lookout sees the road behind the enemy: empty. No one else is coming.", {}, 0)
 			"summon_back":
 				# Rat Piper: a rat scurries into the same lane's back seat
 				# (one size bigger once the piper is forged); if the back seat
@@ -4668,12 +4894,12 @@ func _do_combat() -> void:
 	# phase boundaries instead of one undifferentiated "CLASH".
 	Card2D.defer_deaths = true
 	if _rank_will_strike(ROW_FRONT):
-		_set_phase_caption("THE FRONT RANK")
+		_set_phase_caption("FRONT ROW ATTACKS")
 	for lane_idx in range(LANES_PER_ROW):
 		await _clash_lane_pass(lane_idx, ROW_FRONT, enemy_front_empty_at_start,
 			player_front_empty_at_start)
 	if _rank_will_strike(ROW_BACK):
-		_set_phase_caption("THE BACK RANK")
+		_set_phase_caption("BACK ROW ATTACKS")
 	for lane_idx in range(LANES_PER_ROW):
 		await _clash_lane_pass(lane_idx, ROW_BACK, enemy_front_empty_at_start,
 			player_front_empty_at_start)
@@ -4760,7 +4986,6 @@ func _run_doubled_hour_swing(player_front_empty: Array[bool],
 		if not _doubled_hour[1 if dh_enemy else 0]:
 			continue
 		_set_phase_caption("THE DOUBLED HOUR")
-		_net_log_caption("THE DOUBLED HOUR")   # mirror the caption to the client's replay
 		for c in _all_friendly(dh_enemy):
 			if is_instance_valid(c) and not c.state.stunned and not c.state.is_frozen:
 				c.has_attacked_this_turn = false
@@ -4850,7 +5075,6 @@ func _run_battle_order_strikes(player_front_empty: Array[bool],
 	if ordered.is_empty():
 		return
 	_set_phase_caption("RAIN OF BLOWS")
-	_net_log_caption("RAIN OF BLOWS")
 	Card2D.defer_deaths = true
 	for c in ordered:
 		if not is_instance_valid(c):
@@ -5015,6 +5239,15 @@ func _focus_combat_lane(lane_idx: int, enemy_strike: bool) -> void:
 	# full strength instead of ramping, so nothing animates. See the house rule in
 	# CLAUDE.md: informational animations always play; they hold steady rather than
 	# pulse under Reduce Motion.
+	#
+	# AND THE WATCHER GETS IT TOO (2026-08-04). The host has had the mark since
+	# 2026-07-29, but the client only ever saw a flat list of strikes, so the one
+	# thing that says WHICH COLUMN is being resolved was missing on exactly the
+	# screen that cannot infer it from a resolver it never runs. `lane_idx` is
+	# side-agnostic and `enemy_strike` is re-derived per peer from the striker's
+	# owner index (see _net_log_focus), so the mark lands on the same column and
+	# leans the same way on both machines.
+	_net_log_focus(lane_idx, enemy_strike)
 	var inv: Transform2D = _clash_lane_focus.get_global_transform().affine_inverse()
 	var player_rect: Rect2 = _lane_rect(false, lane_idx, inv)
 	var enemy_rect: Rect2 = _lane_rect(true, lane_idx, inv)
@@ -5026,17 +5259,26 @@ func _focus_combat_lane(lane_idx: int, enemy_strike: bool) -> void:
 	if lane_rect.size.x > 0.0 and lane_rect.size.y > 0.0:
 		_clash_lane_focus.focus_lane(lane_rect.grow(12.0), enemy_strike)
 
-## Resolve ONE column's exchange (both sides) and then let the eye rest on it.
-## This is the unit of the serialized clash: spotlight lands, both sides in this
-## column swing, the result holds long enough to read, then the spotlight moves on.
+## Resolve ONE column's exchange and then let the eye rest on it.
+## This is the unit of the serialized clash: spotlight lands, the column swings,
+## the result holds long enough to read, then the spotlight moves on.
+##
+## `side_filter` (2026-08-04) is what lets the SKIRMISH clash share this: solo and
+## sealed resolve both sides in a column (-1), while the alternating net style is
+## ONE-DIRECTIONAL — only the committing side swings, the defender answers on its
+## own turn. Passing the filter through rather than forking the loop is the whole
+## point: the dwell logic, the significance test and the spotlight cannot drift
+## between the two modes because there is only one copy of them.
 func _clash_lane_pass(lane_idx: int, row: int, enemy_front_empty: Array[bool],
-		player_front_empty: Array[bool]) -> void:
-	var acted := _lane_will_strike(lane_idx, row)
+		player_front_empty: Array[bool], side_filter: int = -1) -> void:
+	var acted := _lane_will_strike(lane_idx, row, side_filter)
 	var downed_before := _downed_count()
 	var face_before: int = player_hp + enemy_hp
 	var board_before := _total_board_hp()
-	await _resolve_column_attack(lane_idx, row, false, enemy_front_empty)
-	await _resolve_column_attack(lane_idx, row, true, player_front_empty)
+	if side_filter != 1:
+		await _resolve_column_attack(lane_idx, row, false, enemy_front_empty)
+	if side_filter != 0:
+		await _resolve_column_attack(lane_idx, row, true, player_front_empty)
 	if not acted:
 		return
 	# SPEND THE ATTENTION BUDGET WHERE THE INFORMATION IS (2026-07-29).
@@ -5055,12 +5297,29 @@ func _clash_lane_pass(lane_idx: int, row: int, enemy_front_empty: Array[bool],
 	var killed := _downed_count() > downed_before
 	var hit_face: bool = (player_hp + enemy_hp) != face_before
 	var swing: int = absi(board_before - _total_board_hp())
+	# The KIND, not the duration, is what crosses the wire — the watching peer runs
+	# its own `_lane_dwell` against its own Clash Pause dial and anim speed. Shipping
+	# seconds would impose the host's reading preference on the client, which is the
+	# one thing the dwell setting exists to prevent.
+	var kind: int = DWELL_MINOR
 	if killed:
-		await _lane_dwell(true)
+		kind = DWELL_KILL
 	elif hit_face or swing >= HEAVY_HIT_DAMAGE:
-		await _lane_dwell(false)
-	else:
-		await _lane_dwell_minor()
+		kind = DWELL_NORMAL
+	_net_log_dwell(kind)
+	await _run_lane_dwell(kind)
+
+
+## The three registration slots a resolved column can earn. Named so the clash log
+## can carry the CHOICE across the wire without carrying the host's clock.
+enum { DWELL_MINOR = 0, DWELL_NORMAL = 1, DWELL_KILL = 2 }
+
+
+func _run_lane_dwell(kind: int) -> void:
+	match kind:
+		DWELL_KILL:   await _lane_dwell(true)
+		DWELL_NORMAL: await _lane_dwell(false)
+		_:            await _lane_dwell_minor()
 
 
 ## Total HP standing on both boards — the cheap "did this lane actually do
@@ -5079,8 +5338,12 @@ func _total_board_hp() -> int:
 ## the same mistake as a phase caption naming an empty beat. Mirrors the guards at
 ## the top of _resolve_column_attack (spent / can't attack / sniper) so the two
 ## cannot disagree about whether this column is live.
-func _lane_will_strike(lane_idx: int, row: int) -> bool:
+func _lane_will_strike(lane_idx: int, row: int, side_filter: int = -1) -> bool:
 	for side_is_enemy in [false, true]:
+		# One-directional net pass: the defender standing in this column is not
+		# about to swing, so it must not buy the column a registration slot.
+		if side_filter >= 0 and (1 if side_is_enemy else 0) != side_filter:
+			continue
 		var c = _row_array(side_is_enemy, row)[lane_idx]
 		if c == null or not is_instance_valid(c):
 			continue
@@ -5093,9 +5356,9 @@ func _lane_will_strike(lane_idx: int, row: int) -> bool:
 
 
 ## True if any column in this rank is about to swing — gates the rank caption.
-func _rank_will_strike(row: int) -> bool:
+func _rank_will_strike(row: int, side_filter: int = -1) -> bool:
 	for lane_idx in range(LANES_PER_ROW):
-		if _lane_will_strike(lane_idx, row):
+		if _lane_will_strike(lane_idx, row, side_filter):
 			return true
 	return false
 
@@ -5233,6 +5496,22 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool) -> void:
 	# beating beside this creature (both meta flags — see _is_swift_attacker).
 	if not _is_swift_attacker(card):
 		return
+	# SNIPERS DO NOT FIGHT THEIR COLUMN — not in the clash, and not here either.
+	# This guard was missing until 2026-07-30, and its absence silently DELETED the
+	# snipe: a body with both keywords column-attacked in the pre-phase and set
+	# has_attacked_this_turn below, after which the clash skipped it (sniper) and
+	# the ranged phase skipped it (already attacked). Nothing fired.
+	#
+	# It became a live trap when the veterancy ladder moved: the war school offers
+	# SWIFT at 3 kills and the tribe doctrine offers SNIPER at 10, so the obvious
+	# pick order on a Stray bought a wholly dead reward with no feedback. It also
+	# switched off every sniper standing beside a Battle Drummer, every sniper
+	# under War Cry, and everything the Catapult Crew relic promotes.
+	#
+	# Returning WITHOUT spending the flag is the point: the body keeps its shot and
+	# takes it in the ranged phase where a sniper belongs.
+	if _is_sniper(card, is_enemy, row):
+		return
 	# RESOLVE THE TARGET BEFORE COMMITTING TO THE ANIMATION. This block used to sit
 	# AFTER the lunge and its LUNGE_APEX await, so a Swift body played into an
 	# empty column performed a full attack swing and then had _creature_hits_face
@@ -5242,9 +5521,19 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool) -> void:
 	var opp_front = _row_array(opp_is_enemy, ROW_FRONT)[lane_idx]
 	var opp_back = _row_array(opp_is_enemy, ROW_BACK)[lane_idx]
 	var opponent: Control = null
-	if opp_front != null:
+	# `current_hp > 0` mirrors the clash path (_resolve_column_attack), and it is
+	# NOT optional here: deaths are HELD for the whole Swift phase
+	# (Card2D.defer_deaths), so a body killed by the FRONT-row sweep is still
+	# sitting in the array when the BACK-row sweep runs. Without the check, a
+	# second Swift striker in the same column (War Cry rallies the whole line,
+	# the Drummer rallies its neighbours) aimed at the corpse: it spent its whole
+	# swing on a 0-HP body instead of reading through to the back row or the
+	# face, re-killed it for a second Rampage/Lifesteal/veterancy payout, and fed
+	# _apply_piercing_overflow an `excess` measured from the corpse's ALREADY
+	# negative HP — spilling far more than the blow was worth.
+	if opp_front != null and opp_front.current_hp > 0:
 		opponent = _redirect_target(opp_front, opp_is_enemy, lane_idx, ROW_FRONT, card)
-	elif opp_back != null and not opp_back.is_inert_structure():
+	elif opp_back != null and opp_back.current_hp > 0 and not opp_back.is_inert_structure():
 		# Structures are board objects — Swift attackers slip past them to
 		# face damage (handled below) instead of plinking the Pyre.
 		opponent = _redirect_target(opp_back, opp_is_enemy, lane_idx, ROW_BACK, card)
@@ -5293,7 +5582,7 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool) -> void:
 		_apply_creature_struck_growth(opponent, swift_dmg)
 		if is_instance_valid(opponent) and atk > 0:
 			_apply_struck_passives(opponent, card, not is_enemy, swift_dmg)
-		_net_log_hit(card, opponent, swift_hp_before)
+		_net_log_hit(card, opponent, swift_hp_before, false, atk)
 		var was_lethal: bool = opponent.current_hp <= 0
 		if is_instance_valid(card) and is_instance_valid(opponent):
 			_spawn_impact_burst(_strike_contact_point(card, opponent),
@@ -5315,9 +5604,9 @@ func _resolve_swift_attack(lane_idx: int, row: int, is_enemy: bool) -> void:
 		await _short_pause(_strike_read(atk, was_lethal))
 	else:
 		# Nothing standing in the column — same live read as the clash path, and
-		# for the same reason (see _resolve_column_attack's face arm). The Swift
-		# phase reaches it far less often: opponent is picked off a non-null slot
-		# regardless of HP, and defer_deaths keeps corpses in the array.
+		# for the same reason (see _resolve_column_attack's face arm). The target
+		# pick above skips 0-HP bodies, so a column emptied earlier in this same
+		# Swift phase reads through here rather than aiming at the held corpse.
 		await _creature_hits_face(card, lane_idx, is_enemy)
 	if is_instance_valid(card):
 		await _run_forked_spear_strikes(card, lane_idx, is_enemy)
@@ -5429,8 +5718,23 @@ func _apply_piercing_overflow(attacker: Control, victim: Control, lane_idx: int,
 		spill_is_enemy = bool(vpos["is_enemy"])
 		victim_is_front = int(vpos["row"]) == ROW_FRONT
 	# If we killed a front-row creature, spill to the back creature in its column.
+	# AN INERT STRUCTURE IS NOT A BODY. Every other targeting site in the file
+	# treats a non-attackable structure as though the seat were empty
+	# (_resolve_column_attack, _resolve_swift_attack, _sniper_pick_lowest,
+	# Card2D.is_inert_structure) — but the overflow read the raw slot, so a Pyre /
+	# Mausoleum / Altar parked behind a front-liner silently ATE the whole excess
+	# of a killing blow. Worst case it also cancelled the keyword: a Piercing
+	# attacker's spill stopped dead on scenery it is not even allowed to hit,
+	# printing blank instead of reading on to the face.
 	var back_card = _row_array(spill_is_enemy, ROW_BACK)[spill_lane]
-	var spills_to_body: bool = victim_is_front and back_card != null and back_card.current_hp > 0
+	var spills_to_body: bool = victim_is_front and back_card != null \
+		and is_instance_valid(back_card) and back_card.current_hp > 0 \
+		and not back_card.is_inert_structure()
+	# ARMED HERE AND TAUGHT LATER. Only when the spill reaches a real body: the
+	# lesson says damage carries into whatever stands behind, and a blow that
+	# carried nowhere is not the demonstration. See `_arm_overkill_lesson`.
+	if spills_to_body and not is_enemy:
+		_arm_overkill_lesson()
 	# THE RUBRIC (2026-07-28) — see scripts/ui/painters/RubricStroke.gd.
 	#
 	# The mark is drawn ONLY when the overflow actually reaches something, and it
@@ -5448,10 +5752,13 @@ func _apply_piercing_overflow(attacker: Control, victim: Control, lane_idx: int,
 		spawn_keyword_callout(pierce_pos, "PIERCING %d" % total,
 			_CALLOUT_STYLE["piercing"]["col"], GameTheme.get_keyword_icon("piercing"))
 		# Visual parity: replay this on the client too, anchored on the attacker eid
-		# (it survives a piercing kill, so it's a reliable anchor — see _net_fx_queue).
+		# (it survives a piercing kill, so it's a reliable anchor). Through the router,
+		# not straight onto the queue: overflow resolves INSIDE the clash, so the queue
+		# would have held this chip back to the trailing snapshot and the watcher would
+		# read PIERCING over a settled board, a whole clash after the blow that pierced.
 		if _is_host() and int(attacker.entity_id) >= 0:
 			var pc: Color = _CALLOUT_STYLE["piercing"]["col"]
-			_net_fx_queue.append({
+			_net_queue_fx_chip({
 				"eid": int(attacker.entity_id),
 				"label": "PIERCING %d" % total,
 				"col": [pc.r, pc.g, pc.b],
@@ -5848,6 +6155,8 @@ func _apply_struck_passives(defender: Control, attacker: Control,
 		defender_is_enemy: bool, damage_taken: int) -> void:
 	if defender == null or not is_instance_valid(defender):
 		return
+	var attacker_hp_at_entry: int = int(attacker.current_hp) \
+		if (attacker != null and is_instance_valid(attacker)) else 0
 	var survived: bool = defender.current_hp > 0
 	var anchor: Vector2 = defender.global_position \
 		+ Vector2(defender.size.x * defender.scale.x * 0.5, -12)
@@ -5892,6 +6201,13 @@ func _apply_struck_passives(defender: Control, attacker: Control,
 	#
 	# reflect_strike bodies are EXCLUDED — Iron Rampart already reflects on its own
 	# and would otherwise pay twice for one blow.
+	#
+	# PRINTED THORNS IS NOT EXCLUDED, AND THAT IS DELIBERATE (checked 2026-07-30:
+	# marker_stone, siegewright and bramble_stockade all print it). Thorns is a
+	# FLAT spike of a fixed size; reflect_strike is THIS SAME RULE under another
+	# name, so stacking it would literally double one blow while Thorns merely adds
+	# a different, smaller source. A spiked wall that also bites back reads as one
+	# wall doing two things, which is the intent.
 	var works_side: int = int(defender_is_enemy)
 	if damage_taken > 0 and _works_fortified[works_side] > 0 \
 			and String(defender.card_data.get("ctype", "")) == "bastion" \
@@ -5905,6 +6221,24 @@ func _apply_struck_passives(defender: Control, attacker: Control,
 		# recoil off the stonework, not a swing. Shield still catches it.
 		attacker.take_damage_bypass_armor(damage_taken)
 		_net_log_hit(defender, attacker, works_hp_before, true)
+	# A WALL THAT KILLS HAS KILLED (2026-07-30). `record_kill` has exactly one
+	# other call site — the strike funnel — and it credits only a body that
+	# personally landed a killing SWING. Most pool Bastions are `atk: 0` (Warding
+	# Stone, Iron Rampart, Bramble Stockade, Trebuchet, Rolling Tower, Marker
+	# Stone), so the walls tribe could never bank a single kill, and the doctrine
+	# rung added for it at 10 kills was literally unreachable by the creatures it
+	# was written for. A wall whose recoil kills its attacker has done the killing;
+	# the ledger should say so.
+	#
+	# Guards mirror the canonical site exactly: solo only, real deck creature, no
+	# tokens. The milestone MODALS are not fired from here — the round-1 catch-up
+	# sweep exists for precisely this case (a threshold crossed outside a player
+	# phase) and will offer the school or the doctrine next fight.
+	if not _is_net() and not defender_is_enemy and attacker != null \
+			and is_instance_valid(attacker) and attacker_hp_at_entry > 0 \
+			and attacker.current_hp <= 0 and not defender.is_token \
+			and int(defender.deck_uid) >= 0:
+		RunState.record_kill(int(defender.deck_uid))
 	# Bastion Lord: any friendly struck survivor adds a one-damage volley.
 	if survived and _has_passive_on_side("bulwark_lord", defender_is_enemy):
 		if defender_is_enemy:
@@ -6060,7 +6394,7 @@ func _apply_combat_strike_riders(attacker: Control, damage_dealt: int,
 		elif vk == RunState.veteran_doctrine_kills():
 			# Rung 3 — the tribe doctrine. Same deferral as the school.
 			_doctrine_queue.append(int(attacker.deck_uid))
-			spawn_trigger_callout(vk_pos, "MASTER OF THE FIELD", false)
+			spawn_trigger_callout(vk_pos, "DOCTRINE UNLOCKED", false)
 
 
 # Keywords a Defection kill may loot off a corpse — the combat keywords that
@@ -6258,7 +6592,7 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 	# Virulence (Unclean Blessing) makes the whole side's attacks poisonous.
 	_apply_creature_strike_poison(
 		attacker, defender, attacker_is_enemy, strike_damage)
-	_net_log_hit(attacker, defender, hp_before)
+	_net_log_hit(attacker, defender, hp_before, false, atk)
 	var was_lethal: bool = defender.current_hp <= 0
 
 	# Contact-point spark at the defender's struck edge, same visual beat as the
@@ -6421,10 +6755,15 @@ func _apply_mutual_retaliation(attacker: Control, defender: Control, attacker_is
 	# Log the counter as a strike from defender→attacker so the client replays it
 	# (tracer + damage chip + kill cue). is_counter=true tells the replay to skip the
 	# position recoil on the (still-lunging) attacker — same reason as above.
-	_net_log_hit(defender, attacker, a_hp_before, true)
+	_net_log_hit(defender, attacker, a_hp_before, true, retal)
 	var counter_lethal: bool = attacker.current_hp <= 0
 	if is_instance_valid(defender) and is_instance_valid(attacker):
-		_spawn_impact_burst(_card_center(attacker),
+		# The counter is the FOURTH strike path, and it was left behind when the other
+		# three moved onto the contact point (2026-07-31). It sprayed from
+		# _card_center(attacker) — the middle of the painting, the exact surface the
+		# contact point exists to keep clear. Solo pays for this too: a mustering
+		# defender counters in the campaign clash.
+		_spawn_impact_burst(_strike_contact_point(defender, attacker),
 			_card_center(attacker) - _card_center(defender), float(retal), counter_lethal)
 	# Kill cue at the impact beat (parity with the forward strike); death_cue_played
 	# stops the deferred flush from sounding the same kill twice.
@@ -6489,18 +6828,29 @@ func _creature_hits_face(card: Control, lane_idx: int, is_enemy: bool,
 			# an attack on the floor. The wall doing its job is a GOOD outcome and
 			# one of the few times defensive investment visibly pays; it should be
 			# the loudest small moment in the lane, not the quietest.
-			spawn_keyword_callout(_card_center(card), "WALL HOLDS",
-				Color(0.60, 0.78, 0.96), null)
+			#
+			# Through the kw funnel since 2026-08-04, which re-broadcasts it by eid:
+			# a bare callout is local, so in skirmish the beat fired on the defending
+			# player's screen and the ATTACKING player — the one whose swing had just
+			# evaporated, and so the one who most needs the explanation — saw the
+			# original nothing.
+			spawn_keyword_callout_kw(card, "wall_holds")
 	else:
 		# Host/player attacker → defender is the enemy/client. In net the CLIENT's walls
 		# blunt the hit (solo enemies have no wall passives, so this is a no-op there).
-		if _is_net():
-			atk = maxi(0, atk - _get_wall_reduction(lane_idx, true))
+		var foe_reduction: int = _get_wall_reduction(lane_idx, true) if _is_net() else 0
+		var atk_before_foe_wall: int = atk
+		atk = maxi(0, atk - foe_reduction)
 		if atk > 0:
 			_play_face_strike_vfx(card, lane_idx, is_enemy, atk)
 			_net_arm_face_hit_source(card, lane_idx, atk)
 			face_dmg = damage_enemy_hero(atk, false, lane_idx)
 			_net_clear_face_hit_source()
+		elif atk_before_foe_wall > 0 and foe_reduction > 0:
+			# The mirror of the branch above, which never existed: a skirmish blow
+			# blunted to nothing by the OPPOSING player's wall showed no beat on
+			# either screen. Same rule, same funnel, so both directions read alike.
+			spawn_keyword_callout_kw(card, "wall_holds")
 		# face_dmg is actual HP removed from a gate and/or the boss.
 
 	if consume_normal_attack:
@@ -6540,6 +6890,17 @@ func _resolve_hydra_attack(attacker: Control, lane_idx: int, is_enemy: bool) -> 
 		if t != null and t.current_hp > 0 and not t.has_keyword("structure"):
 			live.append(t)
 	if live.is_empty():
+		# THE RUSH RULE APPLIES TO THE SWEEP TOO. This was the fourth face path and
+		# the only one still spelling out no condition at all (cf. _creature_hits_face,
+		# _apply_piercing_overflow, _sniper_fire). It is reachable: a body that
+		# ignores the muster delay via GRANTED Swift (War Cry / a Battle Drummer)
+		# and is then handed a second swing — the Doubled Hour, Rain of Blows,
+		# a Repeating Arbalest — arrives here on its ARRIVAL round, and Charge!
+		# (charges_this_turn) turns any such body into this sweep. Swift breaks
+		# BODIES on arrival, never the enemy themselves; `charge` is the one
+		# keyword that buys the exception, and _can_reach_face already knows it.
+		if not _can_reach_face(attacker):
+			return
 		_play_face_strike_vfx(attacker, lane_idx, is_enemy, atk)
 		_net_arm_face_hit_source(attacker, lane_idx, atk)
 		var hydra_face_dmg: int = int(atk)
@@ -6868,7 +7229,14 @@ func _sniper_fire(card: Control, lane_idx: int, is_enemy: bool) -> void:
 		if target == null:
 			# Nothing to shoot: only the OPENING shot carries to face (a chain that
 			# already cleared the board doesn't keep plinking the hero).
-			if _shot == 0:
+			# THE RUSH RULE APPLIES TO THE SHOT TOO. This was the one face path with
+			# no _can_reach_face guard (cf. _creature_hits_face, _apply_piercing_overflow,
+			# _resolve_swift_attack). It is reachable: _resolve_swift_attack returns for
+			# snipers WITHOUT spending the attack, so a granted-Swift sniper — a veteran
+			# Stray carrying Swift from the war school and Sniper from the doctrine, a
+			# body under War Cry, one beside a Battle Drummer — arrived here unspent on
+			# its arrival round and shot the face on the turn it formed up.
+			if _shot == 0 and _can_reach_face(card):
 				_play_face_strike_vfx(card, lane_idx, is_enemy, atk)
 				_net_arm_face_hit_source(card, lane_idx, atk)
 				if is_enemy:
@@ -6898,7 +7266,7 @@ func _sniper_fire(card: Control, lane_idx: int, is_enemy: bool) -> void:
 			_log_data(card), _log_side(card))
 		var shot_dmg: int = _deal_creature_strike_damage(target, atk)
 		_apply_creature_strike_poison(card, target, is_enemy, shot_dmg)
-		_net_log_hit(card, target, hp_before)
+		_net_log_hit(card, target, hp_before, false, atk, true)
 		var killed: bool = not is_instance_valid(target) or target.current_hp <= 0
 		if is_instance_valid(card) and is_instance_valid(target):
 			_spawn_impact_burst(_strike_contact_point(card, target),
@@ -7552,17 +7920,32 @@ func _maybe_stampede(card: Control, is_enemy: bool) -> void:
 	if quarry == null or not is_instance_valid(quarry) or quarry.current_hp <= 0:
 		# FIZZLE, loudly. A silent no-op would read as a bug, and the player needs
 		# to learn that the charge wants a body in front of it.
-		spawn_trigger_callout(_card_center(card) + Vector2(0, -14), "NO QUARRY",
+		spawn_trigger_callout(_card_center(card) + Vector2(0, -14), "NO TARGET",
 			false, int(card.entity_id))
 		return
 	var dmg: int = maxi(1, card.effective_atk())
 	var hp_before: int = int(quarry.current_hp)
 	spawn_trigger_callout(_card_center(card) + Vector2(0, -14), "STAMPEDE",
 		false, int(card.entity_id))
-	if _hud_layer != null and DisplayServer.get_name() != "headless":
-		_trigger_fx_ring(_card_center(alpha), CTYPE_COLORS["beast"], 30.0, 218)
+	# Through ring_over so the watcher gets the charge too — this resolver is
+	# host-side, so the client can never draw its own (the STAMPEDE chip already
+	# crossed, which left the word with nothing erupting under it).
+	ring_over(alpha, CTYPE_COLORS["beast"], 30.0)
 	quarry.take_damage(dmg)
 	_net_log_hit(card, quarry, hp_before, false)
+	# THE CHARGE IS A STRIKE, so it reports to the shared on-kill funnel — the
+	# card says the Beast CHARGES a body, and a player who reads that and sees
+	# Rampage not grow, Lifesteal not drink, or The Interpreter not promote has
+	# been told a lie by the card text. Every other combat-damage path in the file
+	# converges here for exactly this reason.
+	#
+	# It deliberately does NOT route through _apply_piercing_overflow. Overkill
+	# would be defensible, but the face arm is threaded through that helper, and
+	# the one rule this passive must never break is that a Beast cannot reach the
+	# face on its arrival round. Not calling it at all is a stronger guarantee
+	# than calling it with the arm switched off.
+	_apply_combat_strike_riders(card, mini(dmg, hp_before),
+		quarry.current_hp <= 0, is_enemy, quarry)
 
 
 func _maybe_beast_encore(card: Control, is_enemy: bool) -> void:
@@ -7589,10 +7972,10 @@ func _maybe_beast_encore(card: Control, is_enemy: bool) -> void:
 	# body the first firing killed lands where it fell — the spell-grammar rule.)
 	spawn_trigger_callout(_card_center(card) + Vector2(0, -14), "ENCORE",
 		false, int(card.entity_id))
+	var be_col: Color = CTYPE_COLORS["beast"]
+	ring_over(alpha, be_col, 34.0)   # the howl, on both screens
 	if _hud_layer != null and DisplayServer.get_name() != "headless":
-		var be_col: Color = CTYPE_COLORS["beast"]
 		var howl: Vector2 = _card_center(alpha)
-		_trigger_fx_ring(howl, be_col, 34.0, 218)
 		Motion.ring(_hud_layer, howl, Color(be_col.r, be_col.g, be_col.b, 0.45),
 			{"radius": 24.0, "end_scale": 2.1, "duration": 0.44, "z_index": 218,
 			"width": 2.0, "delay": 0.12, "scale_time": true})
@@ -7600,11 +7983,20 @@ func _maybe_beast_encore(card: Control, is_enemy: bool) -> void:
 		# encores need nothing here — the _resolve_on_play_ability call below
 		# fires its own "play"-channel beat at re-resolution.
 		if card.card_data.has("on_enter"):
-			var be_card := card
+			# WEAKREF, never the node itself: the on_enter this echo replays runs
+			# immediately below and can kill its own arrival (a trade, a condemned
+			# lane resolving in the same beat), well inside 0.30 s. A Callable
+			# holding a freed Control errors while the engine marshals its
+			# captures — before the body runs — so the validity check inside cannot
+			# suppress it. Same idiom as _play_slot_claim_vfx.
+			var be_ref: WeakRef = weakref(card)
 			var be_lane: int = card.current_lane
 			var be_enemy := is_enemy
 			get_tree().create_timer(UserSettings.anim_time(0.30)).timeout.connect(func():
-				if is_inside_tree() and is_instance_valid(be_card):
+				if not is_inside_tree():
+					return
+				var be_card: Control = be_ref.get_ref() as Control
+				if be_card != null and is_instance_valid(be_card):
 					_play_trigger_fx(be_card.card_data.get("on_enter", {}), be_card,
 						be_lane, be_enemy, "enter"))
 	if card.card_data.has("on_enter"):
@@ -7647,11 +8039,12 @@ func _apply_start_round_passives(owner_is_enemy: bool) -> void:
 				ws_s.card_data.keywords.append("thorns")
 				ws_s.state.temp_thorns = true
 			ws_s.update_stat_display()
-			ws_fx.append(_card_center(ws_s))
+			ws_fx.append(ws_s)
 		# The wall grows teeth VISIBLY: a steel glint runs down the line, man by
 		# man, left to right — the keystone's payoff wave (soldier signature).
-		ws_fx.sort_custom(func(a: Vector2, b: Vector2): return a.x < b.x)
-		_trigger_fx_grace_wave(ws_fx, CTYPE_COLORS["soldier"])
+		# Through grace_wave_over so the WATCHER sees it too: this whole function is
+		# host-authoritative in net, so the client cannot draw its own.
+		grace_wave_over(ws_fx, CTYPE_COLORS["soldier"])
 		spawn_trigger_callout(_ws.global_position \
 			+ Vector2(_ws.size.x * _ws.scale.x * 0.5, -12), "HOLD", false, int(_ws.entity_id))
 		break
@@ -7697,12 +8090,17 @@ func _apply_start_round_passives(owner_is_enemy: bool) -> void:
 					vc_s.card_data.keywords.append("piercing")
 					vc_s.state.temp_piercing = true
 				vc_s.update_stat_display()
-				spawn_keyword_callout_kw(vc_s, "piercing")
-				vol_fx.append(_card_center(vc_s))
+				# NO per-body keyword callout here, deliberately. The rule-FX pass
+				# (2026-07-28) records the callout layer as a QUANTITY problem, and
+				# a full line is up to four Soldiers — four callouts stacked on the
+				# grace wave and the VOLLEY banner is noise, not legibility. The
+				# rider contract is still satisfied: the grace wave + banner are the
+				# MOMENT, and the granted Piercing keyword device that
+				# update_stat_display just painted is the STANDING STATE.
+				vol_fx.append(vc_s)
 			# The line fires as one: the wave runs left to right down the rank, the
 			# same reading direction warden_line's glint uses.
-			vol_fx.sort_custom(func(a: Vector2, b: Vector2): return a.x < b.x)
-			_trigger_fx_grace_wave(vol_fx, CTYPE_COLORS["soldier"])
+			grace_wave_over(vol_fx, CTYPE_COLORS["soldier"])
 			spawn_trigger_callout(_vc.global_position \
 				+ Vector2(_vc.size.x * _vc.scale.x * 0.5, -12), "VOLLEY",
 				false, int(_vc.entity_id))
@@ -7722,11 +8120,10 @@ func _apply_start_round_passives(owner_is_enemy: bool) -> void:
 			bs_ally.persistent_atk_buff += sw_g   # rest of fight; accumulates each round
 			bs_ally.persistent_atk_buff_rounds = 99
 			bs_ally.update_stat_display()
-			sw_fx.append(_card_center(bs_ally))
+			sw_fx.append(bs_ally)
 		# The walls learn it VISIBLY: a bronze pulse runs along the works, stone
 		# by stone — the keystone's payoff wave (bastion signature).
-		sw_fx.sort_custom(func(a: Vector2, b: Vector2): return a.x < b.x)
-		_trigger_fx_grace_wave(sw_fx, CTYPE_COLORS["bastion"])
+		grace_wave_over(sw_fx, CTYPE_COLORS["bastion"])
 		spawn_trigger_callout(_sw.global_position \
 			+ Vector2(_sw.size.x * _sw.scale.x * 0.5, -12), "SIEGE", false, int(_sw.entity_id))
 		break
@@ -7892,9 +8289,8 @@ func _apply_play_time_passives(card: Control, owner_is_enemy: bool) -> void:
 				continue
 			if String(tb_ally.card_data.get("ctype", "")) != tb_ct:
 				continue
-			tb_pts.append(_card_center(tb_ally))
-		tb_pts.sort_custom(func(a: Vector2, b: Vector2): return a.x < b.x)
-		_trigger_fx_grace_wave(tb_pts,
+			tb_pts.append(tb_ally)
+		grace_wave_over(tb_pts,
 			CTYPE_COLORS.get(tb_ct, Color(1.0, 0.82, 0.34)))
 
 
@@ -7984,17 +8380,14 @@ func _cleanup_dead_paced() -> void:
 	## and two things need separating. One beat before the first corpse is the
 	## cheapest possible fix and it is the difference between "it died" and "it died
 	## BECAUSE of that".
-	if _is_net() or DisplayServer.get_name() == "headless":
-		# Net keeps the synchronous flush (its clocks are not ours to stretch), but
-		# it can still have the NAMES — that is a label, not a beat, and skirmish
-		# has exactly the same "five bodies vanished and nothing said who" problem.
-		if _is_net():
-			for row in [ROW_FRONT, ROW_BACK]:
-				for is_enemy in [false, true]:
-					for lane_idx in range(LANES_PER_ROW):
-						var dead = _row_array(is_enemy, row)[lane_idx]
-						if dead != null and is_instance_valid(dead) and dead.current_hp <= 0:
-							_name_the_fallen(dead, is_enemy)
+	## SKIRMISH FLUSHES ON THE SAME BEATS (2026-08-04). The net branch here used to
+	## name the dead and then sweep them all on one frame. Naming them was the right
+	## half of the fix and the beats are the other half — a name chip that appears at
+	## the same instant as thirteen siblings is not read, it is wallpaper. The host's
+	## clash now awaits this like solo's does; the watching peer runs the naming half
+	## on its own clock inside the clash replay (CombatNet._net_replay_fallen), since
+	## its corpses are swept by the trailing snapshot rather than by `try_die`.
+	if DisplayServer.get_name() == "headless":
 		_cleanup_dead()
 		return
 	# A MASS GRAVE IS ONE EVENT, NOT SIXTEEN (2026-07-29). Measured on a full board:
@@ -8010,10 +8403,7 @@ func _cleanup_dead_paced() -> void:
 	# its full, readable 210 ms beats, while a wipe compresses toward a single
 	# swept-away event. Bounded either way.
 	var corpse_n: int = _downed_count()
-	var death_beat: float = DEATH_BEAT
-	if corpse_n > 2:
-		death_beat = clampf(FLUSH_BUDGET / float(corpse_n),
-			DEATH_BEAT_MIN, DEATH_BEAT)
+	var death_beat: float = _death_flush_beat(corpse_n)
 	if corpse_n > 0:
 		await _short_pause(death_beat)
 	var seen_one := false
@@ -8034,7 +8424,7 @@ func _cleanup_dead_paced() -> void:
 					# threshold the beat is "the line broke", not "these individuals
 					# fell": the ledger states the count and the chronicle keeps
 					# every name for anyone who wants them.
-					if death_beat >= DEATH_BEAT * NAME_SPREAD_FRACTION:
+					if _death_beat_names(death_beat):
 						_name_the_fallen(c, is_enemy)
 					c.try_die()
 	# Anything that died AS A RESULT of the pass above (an on_death that killed a
@@ -8042,6 +8432,23 @@ func _cleanup_dead_paced() -> void:
 	# Cheap, idempotent, and it preserves the original invariant that no 0-HP body
 	# survives this call.
 	_cleanup_dead()
+
+
+## How long one corpse gets in the flush, given how many are queued behind it.
+## Extracted 2026-08-04 so the skirmish client can reproduce the host's rhythm
+## exactly: its corpses are swept by the trailing board snapshot rather than by
+## `try_die`, so it runs the naming half of the flush against this same budget
+## instead of calling `_cleanup_dead_paced` (which would kill bodies the host owns).
+func _death_flush_beat(corpse_n: int) -> float:
+	if corpse_n <= 2:
+		return DEATH_BEAT
+	return clampf(FLUSH_BUDGET / float(corpse_n), DEATH_BEAT_MIN, DEATH_BEAT)
+
+
+## True when the flush is still spread out enough for a name chip to be read one
+## at a time — past this the beat is "the line broke", not a roll of individuals.
+func _death_beat_names(death_beat: float) -> bool:
+	return death_beat >= DEATH_BEAT * NAME_SPREAD_FRACTION
 
 
 ## One line summing up the clash that just ended.
@@ -8056,17 +8463,37 @@ func _cleanup_dead_paced() -> void:
 ## worse tax than the problem; the detail already lives in the battle log for
 ## anyone who wants it, and the corpses now name themselves as they fall.
 ## Silent on a bloodless clash — a ledger reporting nothing is noise.
-func _post_clash_ledger() -> void:
-	var ours: int = _friendly_deaths_this_round
-	var theirs: int = _enemy_deaths_this_round
+##
+## The baselines exist for SKIRMISH (2026-08-04). Solo clashes exactly once per
+## round, so the round tallies ARE the clash's. The alternating net style resolves
+## a one-directional pass at the end of each side's turn — two clashes per round —
+## and a ledger reading the round total would restate the first exchange's dead
+## alongside the second's, reporting casualties the player already mourned. Passing
+## the pre-clash tallies makes the line describe the clash that just happened.
+func _post_clash_ledger(ours_before: int = 0, theirs_before: int = 0) -> void:
+	var ours: int = _friendly_deaths_this_round - ours_before
+	var theirs: int = _enemy_deaths_this_round - theirs_before
 	if ours <= 0 and theirs <= 0:
 		return
+	# ONE FUNNEL, for the same reason _set_phase_caption is one (2026-08-04). The
+	# ledger is the clash's closing sentence, and the watcher never had it: the two
+	# death tallies are only ever incremented by a resolver, which a client does not
+	# run, so a skirmish clash simply ended on the client with nothing summing it up.
+	# Mirroring it beside this call rather than inside it is how the phase captions
+	# went blank for a month — every new site has to remember its twin, and none does.
+	_net_log_ledger(ours, theirs)
+	_show_info(_clash_ledger_line(ours, theirs))
+
+
+## The ledger's wording, shared so the host's screen and the watcher's cannot drift.
+## Takes the counts from the READER's point of view — see _net_log_ledger for the
+## swap that makes that true on the far side of the wire.
+func _clash_ledger_line(ours: int, theirs: int) -> String:
 	if theirs > 0 and ours <= 0:
-		_show_info("The line holds - %d of theirs down." % theirs)
-	elif ours > 0 and theirs <= 0:
-		_show_info("%d of ours down, none of theirs." % ours)
-	else:
-		_show_info("%d of ours down, %d of theirs." % [ours, theirs])
+		return "The line holds - %d of theirs down." % theirs
+	if ours > 0 and theirs <= 0:
+		return "%d of ours down, none of theirs." % ours
+	return "%d of ours down, %d of theirs." % [ours, theirs]
 
 
 ## Say the dead body's NAME over its slot as it falls.
@@ -8103,7 +8530,7 @@ func _on_friendly_death(card: Control, _lane_idx: int) -> void:
 	if String(card.card_id) == "pay_wagon":
 		var plundered: int = int(card.state.pay_wagon_gold)
 		if plundered > 0:
-			_show_info("The foe plunders %d gold from the Pay-Wagon." % plundered)
+			_show_info("The enemy plunders %d gold from the Pay-Wagon." % plundered)
 	# Campaign memory: a real deck creature falling is written into the Roll of
 	# the Fallen — name as worn at death (epithet included), where, and when.
 	# Solo campaign only; tokens have no identity to mourn.
@@ -8429,19 +8856,15 @@ func _apply_ally_death_passives(owner_is_enemy: bool, dead_card: Control = null)
 						# wisp leaves the corpse and arrives where the Wight
 						# stands (slot-anchored — the fresh token isn't laid out
 						# yet this frame).
-						if gp_row >= 0 and _hud_layer != null \
-								and DisplayServer.get_name() != "headless":
-							var gp_col: Color = CTYPE_COLORS["dead"]
-							var gp_to: Vector2 = _slot_array(owner_is_enemy,
-								gp_row)[gp_lane].get_global_rect().get_center()
-							_spawn_vfx_streak(_card_center(dead_card), gp_to,
-								Color(gp_col.r, gp_col.g, gp_col.b, 0.85),
-								4.0, 226, 0.40, 30.0)
-							Motion.ring(_hud_layer, gp_to,
-								Color(gp_col.r, gp_col.g, gp_col.b, 0.65),
-								{"radius": 16.0, "end_scale": 1.6, "duration": 0.30,
-								"z_index": 219, "width": 2.5, "delay": 0.20,
-								"scale_time": true})
+						if gp_row >= 0:
+							# SLOT-anchored at BOTH ends, and mirrored. Slots always
+							# exist, which is what makes this survivable on the wire:
+							# the corpse is despawned by the same snapshot that carries
+							# the fx, so an eid-anchored origin would resolve to null on
+							# the watcher exactly when it was needed.
+							wisp_between_slots(owner_is_enemy,
+								int(dead_card.current_row), int(dead_card.current_lane),
+								gp_row, gp_lane, CTYPE_COLORS["dead"])
 						spawn_trigger_callout(c.global_position \
 							+ Vector2(c.size.x * c.scale.x * 0.5, -12),
 							"REAP", false, int(c.entity_id))
@@ -8669,7 +9092,7 @@ func _post_combat_sequence() -> void:
 				and round_number >= _esc_round(ESCALATION_REINFORCE_ROUND):
 			if not _escalation_banner_shown:
 				_escalation_banner_shown = true
-				_show_combat_banner("THE TIDE TURNS",
+				_show_combat_banner("ENEMY REINFORCEMENTS",
 					"The hold commits its reserves", Color(0.85, 0.3, 0.15))
 			await _enemy_place_creatures()
 
@@ -8827,9 +9250,9 @@ const FACTION_WAVE_CAPTIONS: Dictionary = {
 	"grasswake": {"wave": "THE WAKE CRESTS", "none": "THE WAKE HAS PASSED"},
 	"last_wall": {"wave": "FRESH RANKS — TOUGHER", "none": "THE WALL HOLDS"},
 	"owed": {"wave": "THE OWED COLLECT", "none": "NO DEBTS TO COLLECT"},
-	"lanternhall": {"wave": "A MIRROR FLASHES", "none": "THE HALL ONLY WATCHES"},
+	"lanternhall": {"wave": "THEY CAST, NOT MUSTER", "none": "THE HALL ONLY WATCHES"},
 	"everflame": {"wave": "THE FUSE BURNS DOWN", "none": "THE EVERFLAME HOLDS",
-		"surge": "FIRE ON THE WATER"},
+		"surge": "THE EVERFLAME SURGES"},
 }
 
 
@@ -8926,7 +9349,7 @@ func _update_wave_telegraph() -> void:
 	_wave_chip_num.add_theme_color_override("font_color", col)
 	if _wave_chip_icon != null:
 		_wave_chip_icon.modulate = col
-	var st: GameTheme.ChartPanelStyle = _wave_chip.get_theme_stylebox("panel")
+	var st = _wave_chip.get_theme_stylebox("panel")
 	if st != null:
 		st.border_color = Color(col.r, col.g, col.b, 0.45) if n > 0 \
 			else Color(0.42, 0.33, 0.20, 0.85)
@@ -8972,8 +9395,8 @@ func _build_reserves_chip() -> void:
 	var chip := PanelContainer.new()
 	chip.name = "ReservesChip"
 	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var style := GameTheme.make_panel_style(
-		Color(0.10, 0.062, 0.046, 0.94), Color(0.42, 0.33, 0.20, 0.85), 1, 4, true)
+	var style := _batched_chart_style(GameTheme.make_panel_style(
+		Color(0.10, 0.062, 0.046, 0.94), Color(0.42, 0.33, 0.20, 0.85), 1, 4, true))
 	style.content_margin_left = 10
 	style.content_margin_right = 12
 	style.content_margin_top = 4
@@ -9021,8 +9444,8 @@ func _build_wave_chip() -> void:
 	# Same warm ink-plaque family as the incoming chip, now on the chart
 	# document kit; the border color is overwritten per wave count, so only
 	# the base material changes here.
-	var style := GameTheme.make_panel_style(
-		Color(0.10, 0.062, 0.046, 0.94), Color(0.42, 0.33, 0.20, 0.85), 1, 4, true)
+	var style := _batched_chart_style(GameTheme.make_panel_style(
+		Color(0.10, 0.062, 0.046, 0.94), Color(0.42, 0.33, 0.20, 0.85), 1, 4, true))
 	style.content_margin_left = 10
 	style.content_margin_right = 12
 	style.content_margin_top = 5
@@ -9187,6 +9610,7 @@ func _enemy_place_creatures() -> void:
 	# to the reinforcement drip and must not stack on top of the opening, or
 	# round 1 would deal the formation AND a wave.
 	if _opening_muster_pending:
+		_clear_opening_muster_forecast()
 		_opening_muster_pending = false
 		_set_phase_caption("ENEMY DEPLOYMENT")
 		await _deal_opening_muster()
@@ -9214,8 +9638,8 @@ func _enemy_place_creatures() -> void:
 			# climax-banner treatment (rides _show_combat_banner like
 			# Ignition / Lich Rises) so it never reads as random.
 			_wave_surge_fired = true
-			_show_combat_banner("THE FUSE CATCHES",
-				"The hold is half-broken — the Everflame surges", Color(1.0, 0.45, 0.20))
+			_show_combat_banner("THE EVERFLAME SURGES",
+				"The hold is half-broken — extra enemies arrive", Color(1.0, 0.45, 0.20))
 	elif round_number <= 2:
 		max_place = 1
 	elif enc_type == "elite" or enc_type == "boss":
@@ -9232,7 +9656,7 @@ func _enemy_place_creatures() -> void:
 		if not _pursuit_banner_shown:
 			_pursuit_banner_shown = true
 			_show_combat_banner("OUTRIDERS",
-				"The rival reinforces the hold — the road has eyes",
+				"The rival lord sends an extra enemy this round",
 				Color(0.85, 0.25, 0.18))
 
 	# THE HOLD'S HAND — clamp every source to one per-ROUND budget. `max_place`
@@ -9413,14 +9837,29 @@ func _place_enemy_card(data: Dictionary, lane_idx: int, row: int = ROW_FRONT,
 	card.current_lane = lane_idx
 	card.current_row = row
 	_row_array(true, row)[lane_idx] = card
-	var slot = _slot_array(true, row)[lane_idx]
-	_slot_set_card(slot, card)
+	# THE LOGICAL SEAT IS DONE ABOVE; THE SLOT IS THE VISUAL HALF. Read it
+	# defensively rather than indexing blind: `lane_idx` can have been REWRITTEN
+	# by the salted/closed-lane redirect further up, and the slot arrays are built
+	# by _build_board, which the interleaved opening yields inside. When the two
+	# disagreed this line raised "Out of bounds get index on base Array[Control]"
+	# and then CARRIED ON with a null slot — so the error cascaded into
+	# _slot_set_card (which wrote .text on a Nil) and again into the landing arc's
+	# slot.global_position. Guarding keeps every downstream beat (on-enter, the
+	# landing pop, the clash) exactly as it was and costs only the visual seat in
+	# a case that already had no slot to seat into.
+	var slots: Array = _slot_array(true, row)
+	var slot: Control = slots[lane_idx] if lane_idx >= 0 and lane_idx < slots.size() else null
+	if slot != null:
+		_slot_set_card(slot, card)
 	# Dealt creatures (opening board, reinforcement waves) arc in from above
 	# the enemy line so placement reads as an act, not a teleport. Cosmetic
 	# only — the card is already seated in the arrays, so combat logic never
 	# waits on the flight. Encounter-effect spawns (lich, wraiths, bombs)
-	# keep the plain drop-in.
-	if arc_in and DisplayServer.get_name() != "headless" \
+	# keep the plain drop-in. The point passed is the flight's start CENTRE
+	# (_play_landing_pop offsets to the origin itself); this always WAS a slot
+	# centre, it just used to be read as a top-left and dealt every card half a
+	# card off its lane.
+	if arc_in and slot != null and DisplayServer.get_name() != "headless" \
 			and not (UserSettings != null and UserSettings.reduce_motion):
 		var slot_center: Vector2 = slot.global_position + slot.size * 0.5
 		_play_landing_pop(card,
@@ -9433,7 +9872,7 @@ func _place_enemy_card(data: Dictionary, lane_idx: int, row: int = ROW_FRONT,
 	# the player is actually looking.
 	card.destroyed.connect(_on_card_destroyed.bind(card))
 	card.will_die.connect(_on_card_will_die.bind(card))
-	_log_event("The foe fields %s." % _log_card_ref(card),
+	_log_event("The enemy fields %s." % _log_card_ref(card),
 		_log_data(card), _log_side(card))
 	if not _is_fortification(card) and _has_relic("philosophers_stone"):
 		_relic_fired("philosophers_stone")
@@ -9877,6 +10316,18 @@ func _cancel_space_end_turn() -> void:
 ## Read the Will were allowed to point at The Undying.
 const READ_THE_WILL_DENY := {"return_to_hand_once": true, "undying_grow": true}
 
+func _target_contract_accepts(data: Dictionary, target) -> bool:
+	if target == null or not is_instance_valid(target):
+		return false
+	match String(data.get("id", "")):
+		"read_the_will":
+			var will: Dictionary = target.card_data.get("on_death", {})
+			return not will.is_empty() \
+				and not READ_THE_WILL_DENY.has(String(will.get("type", "")))
+		"touchpaper":
+			return target.has_keyword("doom")
+	return true
+
 
 func _target_contract_available(data: Dictionary) -> bool:
 	var targeting := String(data.get("targeting", "none"))
@@ -10003,7 +10454,21 @@ func _await_cinematic(tw: Tween, skip_surface: Control,
 	if tw == null or not tw.is_valid():
 		return
 	if DisplayServer.get_name() == "headless":
-		await tw.finished
+		# There is no click-to-skip surface headless, but this must NOT bare-await
+		# `finished`. A tween from `create_tween()` is bound to its node, and a
+		# bound tween is KILLED — not finished — when that node goes away, so a
+		# scene torn down mid-cinematic parks this coroutine and its caller
+		# forever. That is a leaked GDScriptFunctionState per intro, and enough of
+		# them segfault Godot's exit (2026-09-03); _probe_settings_differential
+		# alone stranded three. The interactive path below already gets this right
+		# via `tw.is_valid()` — the headless shortcut was the only branch missing
+		# it, which made it strictly weaker than the path it was shortcutting.
+		var done := {"v": false}
+		tw.finished.connect(func() -> void: done["v"] = true)
+		while not done["v"]:
+			await get_tree().process_frame
+			if not tw.is_valid():
+				return
 		return
 	var state := {"done": false, "click": false}
 	tw.finished.connect(func() -> void: state["done"] = true)
@@ -10139,8 +10604,20 @@ func _impact_hold(damage: int, was_lethal: bool) -> float:
 ## Deliberately BELOW the causality window, so a chip-damage lane reads as part of
 ## the same sweep as its neighbour rather than as its own event demanding a look.
 ## Still honours the player's Clash Pause dial.
+##
+## SKIRMISH PACES TOO (2026-08-04). These bailed on `_is_net()` on the reasoning
+## that the net clash's clocks were not ours to stretch. That reasoning does not
+## survive contact with the thing it produced: the campaign clash is a serialized,
+## spotlit, per-column read and the skirmish clash of the SAME creatures on the SAME
+## board was one undifferentiated burst, which is the single loudest reason the two
+## modes did not feel like one game. Nothing in the net layer is on a clock — there
+## is no turn timer anywhere in NetMatch, the host is authoritative and the client
+## replays a shipped log — so a longer clash costs a longer clash and nothing else.
+## The pacing is chosen PER PEER (each side runs its own dwell against its own
+## Clash Pause dial), which is the only way it can be: the beat is a reading aid and
+## the reader is local. See `_net_run_clash` (host) and `_net_replay_clash` (client).
 func _lane_dwell_minor() -> void:
-	if _is_net() or DisplayServer.get_name() == "headless":
+	if DisplayServer.get_name() == "headless":
 		return
 	var base: float = LANE_DWELL_MINOR
 	if UserSettings != null:
@@ -10151,7 +10628,7 @@ func _lane_dwell_minor() -> void:
 
 
 func _lane_dwell(produced_a_corpse: bool = false) -> void:
-	if _is_net() or DisplayServer.get_name() == "headless":
+	if DisplayServer.get_name() == "headless":
 		return
 	var base: float = LANE_DWELL_KILL if produced_a_corpse else LANE_DWELL
 	if UserSettings != null:
@@ -10161,7 +10638,35 @@ func _lane_dwell(produced_a_corpse: bool = false) -> void:
 	await _short_pause(base)
 
 
-func _round_beat() -> void:
+## Cheap snapshot of everything the round-open groups can visibly change.
+##
+## Three things, in one flat Array so `==` is a plain value compare:
+##   1. `_visible_beat_seq` — the one-shot layer. Bumped by the four funnels every
+##      chip / float / banner / ring in the game goes through, so a group that
+##      SPOKE is caught even when it changed no number (a keystone's HOLD callout,
+##      a boss-phase banner, a grace wave over an unchanged line).
+##   2. The board — one entry per body: identity, live ATK, live HP. Catches
+##      arrivals, deaths, regen/wither/rations, the ATK ramps and the buff aura,
+##      i.e. the standing layer the one-shot funnels do not describe.
+##   3. Both faces — the encounter passive's and the mutator's favourite target.
+##
+## Deliberately O(bodies ≤ 16) and allocation-light: it runs at most six times per
+## round open. Keyword GRANTS are not enumerated here on purpose — every grant
+## site in `_apply_start_round_passives` fires a callout or a grace wave first, so
+## (1) already covers them, and enumerating them would double the cost to restate
+## the same fact.
+func _round_visible_state() -> Array:
+	var out: Array = [_visible_beat_seq, player_hp, enemy_hp]
+	for c in _all_creatures_both_sides():
+		if c == null or not is_instance_valid(c):
+			continue
+		out.append(c.get_instance_id())
+		out.append(c.effective_atk())
+		out.append(c.current_hp)
+	return out
+
+
+func _round_beat(state_before: Variant = null) -> void:
 	## A breath between the round-open's VISIBLE groups. `_start_round` used to
 	## fire ~40 state changes on a SINGLE frame — every Regenerate/Wither/Doom
 	## tick, every Doom detonation, the tribe keystone grants, Summoner tokens,
@@ -10169,6 +10674,22 @@ func _round_beat() -> void:
 	## badges and a dozen relic branches — and then handed control back. The
 	## player had to read the whole round at once, unordered. Splitting it lets
 	## the round ASSEMBLE in front of them instead of arriving assembled.
+	##
+	## A BEAT THAT SEPARATES NOTHING FROM NOTHING IS DEAD TIME (2026-08-01). All
+	## three beats fired unconditionally, so round 1 — where both boards are empty
+	## and most of these groups have no bodies to act on — paid 600 ms to pace
+	## three empty groups, on top of the intro banner, before the player could
+	## touch a card.
+	##
+	## THE GUARD IS "THIS GROUP PRODUCED NO VISIBLE CHANGE", NOT `round_number == 1`.
+	## Round number is the wrong test in both directions: an encounter passive can
+	## strike the face on round 1 against an empty board (EncounterEffects'
+	## `strike_the_champion` falls back to the face), and a round 5 with a wiped
+	## board can be just as empty as round 1. Callers pass the state they read
+	## BEFORE their group ran; identical state after means nothing appeared,
+	## nothing spoke, no number moved — so there is nothing on either side of the
+	## beat for it to separate. A caller that passes nothing keeps the old
+	## unconditional behaviour, which is what the net/headless bails below rely on.
 	##
 	## MUST NOT SUSPEND IN NET. `_start_round` is called from CombatNet's
 	## `_sealed_open_orders_local` and `_net_local_turn_begin`, which are plain
@@ -10184,6 +10705,8 @@ func _round_beat() -> void:
 	if _is_net():
 		return
 	if DisplayServer.get_name() == "headless":
+		return
+	if state_before is Array and (state_before as Array) == _round_visible_state():
 		return
 	await _short_pause(ROUND_BEAT)
 
@@ -10250,17 +10773,101 @@ func _effective_cost(card: Control) -> int:
 	return cost
 
 
+## THE ONE WAY TO SAY NO TO A PLAY (2026-08-03).
+##
+## A refused drop used to be `_show_info(...)` + `_layout_hand()`, and that plain
+## reflow is the SAME motion a card makes when the hand closes a gap after a
+## successful play — so the game's answer to "you can't do that" was visually
+## identical to routine housekeeping. The only thing carrying the refusal was the
+## info line, which sits at the top of the screen while the player is looking at
+## their hand. `Card2D.play_return_to_hand` gives it a distinct recoil (overshoot
+## + head-shake) that lands exactly on the fan pose.
+##
+## This is a FUNNEL because there are seventeen refusal sites across
+## `_on_card_played` and `_play_creature` — occupied slot, closed ground, locked
+## orders, no legal target, no bearer, curse, Velvet Choker, not enough Command,
+## wrong phase, not your turn. Wiring them one by one guarantees the eighteenth
+## forgets. Call this instead of `_show_info` + `_layout_hand` for any path that
+## DENIES a play; pass an empty `msg` where the refusal needs no words.
+##
+## A refusal is INFORMATIONAL — it reports a state change (the play did not
+## happen), so it plays under Reduce Motion too. Card2D drops only the shake.
+##
+## ── IT MAKES A SOUND, AND THE INSTRUMENT THAT SAID NO PERFORMS IT ─────────
+## (✦7 of docs/CARD_PLAY_COOL_HUNT_20260803.md, 2026-08-04.)
+##
+## (a) Every play refusal was MUTE. The game's only "refused" cue guarded discard
+## marking, while wrong phase / no Command / occupied slot / closed ground / a
+## Curse / no legal target all said nothing at all. The cue belongs in the funnel
+## so the eighteenth site inherits it. `refused` aliases to a dry click in
+## AudioBank.SFX_FALLBACKS with a standing instruction that it must NEVER be a
+## sting, because a refusal is not an impact — hence the quiet level here.
+##
+## (b) `shortfall` is the commonest refusal by a distance, and it is a statement
+## about the SEAL, not about the card: the Command press comes down and nothing
+## takes (_strike_command_seal). One instrument, two beats, the same verb
+## succeeding and failing — which is why this half was built only after the
+## successful strike existed to contrast against. Explicitly passed rather than
+## re-derived from the card's cost: a gate that guesses its own reason drifts the
+## first time a discount or a mutator moves the arithmetic.
+##
+## Deliberately NOT built (R4 of the hunt): a stain, signature or counter-seal on
+## the hand card's own paper. The resting fan crops the sheet just above the
+## rules box, so a paper mark would live in a ~15px margin on the third of the
+## card that is off screen.
+func _refuse_play(card: Control, msg: String = "", shortfall: bool = false) -> void:
+	if msg != "":
+		_show_info(msg)
+	if AudioBank != null:
+		AudioBank.play_sfx("refused", 0.03, -8.0)
+	if shortfall:
+		_strike_command_seal(_mana_seal_press, true)
+	# Order matters: _layout_hand computes the card's _hand_target_* pose, and
+	# play_return_to_hand animates ONTO that pose. Reversed, the recoil aims at
+	# a stale slot.
+	_layout_hand()
+	if card != null and is_instance_valid(card) and card.has_method("play_return_to_hand"):
+		card.play_return_to_hand()
+
+
 func _on_card_played(card: Control) -> void:
 	if phase != Phase.PLAYER_TURN:
-		_layout_hand()  # bounce the dragged card back into the fan
+		_refuse_play(card)
 		return
 	# Skirmish: you may only play on your own turn (full-alternating model).
-	if _is_net() and _net_active_index != NetMatch.local_player_index:
-		_show_info("Not your turn.")
-		_layout_hand()
-		return
+	#
+	# SEALED ORDERS HAS NO "ACTIVE PLAYER" DURING ORDERS, AND THAT IS THE POINT.
+	# `_sealed_begin_round` sets `_net_active_index = -1` on purpose — both sides
+	# commit at once, so nobody holds the turn — which made this gate refuse EVERY
+	# card in the orders phase with "Not your turn." That is the entire mode: a
+	# sealed match could not seat a single creature on either peer, while the hand
+	# stayed lifted and draggable so the refusal read as a broken drop. The
+	# discard-mark gate (see _toggle_discard_mark) already carried the sealed
+	# branch; this one was missed. The windows in sealed are: ORDERS (open to both
+	# until I seal) and MY SPELL STEP (which does set _net_active_index, so the
+	# ordinary check is correct there). The per-kind refusals with the honest
+	# wording still live downstream — _play_creature's "Orders are locked" and
+	# _net_play_spell's "Spells wait for the reveal".
+	if _is_net():
+		if _is_sealed():
+			if _sorcery_active >= 0:
+				if _sorcery_active != NetMatch.local_player_index:
+					_refuse_play(card, "Your opponent's spell step — yours comes next.")
+					return
+			elif _sealed_await_foe:
+				_refuse_play(card, "Orders are sealed — waiting for your opponent.")
+				return
+		elif _net_active_index != NetMatch.local_player_index:
+			_refuse_play(card, "Not your turn.")
+			return
 	if _targeting_spell != null:
 		_cancel_targeting()
+	if _targeting_potion_idx >= 0:
+		_cancel_potion_targeting()
+
+	if _first_battle_tutorial_stage == FirstBattleTutorialStage.PLAY_CREATURE and card != _first_battle_tutorial_card:
+		_refuse_play(card, "Begin with the glowing creature.")
+		return
 
 	# Curses: "Can't be played" is enforced HERE, not just written on the card.
 	# (Before this gate a dragged Curse resolved as a free no-op spell and
@@ -10268,51 +10875,56 @@ func _on_card_played(card: Control) -> void:
 	# (Cowardice) carry curse_playable and fall through to the normal cost check.
 	if CardDB.is_curse(String(card.card_data.get("id", ""))) \
 			and not bool(card.card_data.get("curse_playable", false)):
-		_show_info("%s cannot be played. It stays in your hand until the fight ends." \
+		_refuse_play(card, "%s cannot be played. It stays in your hand until the fight ends." \
 			% String(card.card_data.get("name", "The Curse")))
-		_layout_hand()  # bounce the dragged card back into the fan
 		return
 	if card.is_armament():
 		if _is_net():
-			_show_info("Armaments aren't available in skirmish yet.")
-			_layout_hand()
+			_refuse_play(card, "Armaments aren't available in skirmish yet.")
 			return
 		if not _has_armament_bearer():
-			_show_info("No unequipped creature can bear this Armament.")
-			_layout_hand()
+			_refuse_play(card, "No unequipped creature can bear this Armament.")
 			return
-	elif card.is_spell() and not _target_contract_available(card.card_data):
-		_show_info("No legal targets for %s." % String(card.card_data.get("name", "that spell")))
-		_layout_hand()
-		return
+	elif card.is_spell():
+		# SEALED ORDERS: spellcraft belongs to the sorcery window after the reveal.
+		# The refusal has to land HERE, in the preflight, and not at the one further
+		# down in `_net_play_spell`: everything between this block and that one is
+		# the one-shot discount ledger (the Ironclad charge, Mana Tide, Sigil of
+		# Hunger, the Familiar's Quill, and Pact of Embers' zero-cost tag), and it is
+		# spent unconditionally on the way past. A refused cast that still burns a
+		# charge is the worst kind of no-op — it costs the player something and shows
+		# them nothing. The orders phase is the live case; the opponent's spell step
+		# already has `hand_interactive` off, so no drag can start there.
+		if _is_sealed() and _sorcery_active < 0:
+			_refuse_play(card, "Spells wait for the reveal — creatures only while orders are sealed.")
+			return
+		if not _target_contract_available(card.card_data):
+			_refuse_play(card, "No legal targets for %s." \
+				% String(card.card_data.get("name", "that spell")))
+			return
 	elif card.is_creature():
 		if card.has_keyword("sacrifice"):
-			_show_info("This creature needs a sacrifice target before it can be played.")
-			_layout_hand()
+			_refuse_play(card, "This creature needs a sacrifice target before it can be played.")
 			return
 		var preflight_drop = _nearest_player_slot(
 			card.global_position + card.size * 0.5)
 		var preflight_lane: int = int(preflight_drop.lane)
 		var preflight_row: int = int(preflight_drop.row)
 		if _row_array(false, preflight_row)[preflight_lane] != null:
-			_show_info("That slot is occupied.")
-			_layout_hand()
+			_refuse_play(card, "That slot is occupied.")
 			return
 		if _sp_lane_closed(preflight_lane):
-			_show_info("No footing there - the ground is closed this fight.")
-			_layout_hand()
+			_refuse_play(card, "No footing there - the ground is closed this fight.")
 			return
 		if _is_sealed() and not _sealed_in_orders():
-			_show_info("Orders are locked. Creatures must wait until your next turn.")
-			_layout_hand()
+			_refuse_play(card, "Orders are locked. Creatures must wait until your next turn.")
 			return
 
 	# Velvet Choker: max 5 cards per turn
 	if _has_relic("velvet_choker") and _cards_played_this_turn >= 5:
-		_show_info("Velvet Choker: can't play more than 5 cards!")
 		# A REFUSAL is a state change too — the rail names which relic said no.
 		_relic_fired("velvet_choker")
-		_layout_hand()  # bounce the dragged card back into the fan
+		_refuse_play(card, "Velvet Choker: can't play more than 5 cards!")
 		return
 
 	# Effective cost factors in mutators (Taxed +N), Ember Crown (free first
@@ -10324,8 +10936,9 @@ func _on_card_played(card: Control) -> void:
 	# a 1-cost Fireball looked "affordable" at 1 mana but failed to play.
 	var cost = _effective_cost(card)
 	if player_mana < cost:
-		_show_info("Not enough Command!")
-		_layout_hand()  # bounce the dragged card back into the fan
+		# The one refusal that is about the SEAL rather than the card: the press
+		# comes down and nothing takes. See _refuse_play (b).
+		_refuse_play(card, "Not enough Command!", true)
 		return
 	# Targeted Armaments have not resolved yet. Preserve the few generic
 	# one-shot discounts that _on_card_played consumes so right-click cancel is
@@ -10444,8 +11057,7 @@ func _apply_starter_creature_play_relics(card: Control, row: int, lane_idx: int)
 
 func _play_creature(card: Control, cost: int) -> void:
 	if card.has_keyword("sacrifice"):
-		_show_info("Click a creature to sacrifice for this card.")
-		_layout_hand()  # bounce the dragged card back into the fan
+		_refuse_play(card, "Click a creature to sacrifice for this card.")
 		return
 
 	# 4x4: derive both lane and row from the drop position. Use the card's CENTER
@@ -10460,14 +11072,12 @@ func _play_creature(card: Control, cost: int) -> void:
 	var row: int = drop.row
 	var field = _row_array(false, row)
 	if field[lane_idx] != null:
-		_show_info("That slot is occupied.")
-		_layout_hand()
+		_refuse_play(card, "That slot is occupied.")
 		return
 	# A set-piece's closed ground rejects the player's drop the same way it
 	# rejects an enemy arrival — the rule is symmetric or it is not a rule.
 	if _sp_lane_closed(lane_idx):
-		_show_info("No footing there — the ground is closed this fight.")
-		_layout_hand()
+		_refuse_play(card, "No footing there — the ground is closed this fight.")
 		return
 
 	# ── SEALED ORDERS: a play during the orders phase is a PRIVATE commitment —
@@ -10475,8 +11085,7 @@ func _play_creature(card: Control, cost: int) -> void:
 	# at the lane. Both bundles seat together at the reveal. ──
 	if _is_sealed():
 		if not _sealed_in_orders():
-			_show_info("Orders are locked. Creatures must wait until your next turn.")
-			_layout_hand()
+			_refuse_play(card, "Orders are locked. Creatures must wait until your next turn.")
 			return
 		_sealed_commit_creature(card, cost, lane_idx, row)
 		return
@@ -10486,8 +11095,7 @@ func _play_creature(card: Control, cost: int) -> void:
 	# board snapshot from the host (which runs its on-enter authoritatively). ──
 	if _is_client():
 		if _net_active_index != NetMatch.local_player_index:
-			_show_info("Not your turn.")
-			_layout_hand()
+			_refuse_play(card, "Not your turn.")
 			return
 		var c_uid: int = card.deck_uid
 		var c_id: String = card.card_id
@@ -10496,7 +11104,7 @@ func _play_creature(card: Control, cost: int) -> void:
 		var fly_origin: Vector2 = card.global_position + card.size * 0.5
 		var fly_data: Dictionary = card.card_data.duplicate(true)
 		player_mana -= cost
-		_pulse_mana_label(cost)
+		_pulse_mana_label(cost, false, MANA_SPEND_BEAT)
 		_hand.erase(card)
 		_hand_container.remove_child(card)
 		card.queue_free()
@@ -10523,12 +11131,14 @@ func _play_creature(card: Control, cost: int) -> void:
 	_log_event("You field %s." % _log_card_ref(card),
 		_log_data(card), _log_side(card))
 
-	# Capture hand position BEFORE remove_child so the landing arc knows where
-	# this card flew in from. Once removed, global_position no longer reflects
-	# the on-screen hand slot.
-	var play_start_global: Vector2 = card.global_position
+	# Capture where the card physically IS before remove_child, so the landing arc
+	# knows what it is correcting from. Once removed, global_position no longer
+	# reflects anything on screen. Stored as the card's visual CENTRE, which is
+	# what _play_landing_pop wants — the card is hand-sized right now and compact
+	# by the time it flies, so a top-left origin would not survive the change.
+	var play_start_global: Vector2 = card.global_position + card.size * 0.5
 	player_mana -= cost
-	_pulse_mana_label(cost)
+	_pulse_mana_label(cost, false, MANA_SPEND_BEAT)
 	_cards_played_this_turn += 1
 	if _is_net():
 		_net_cards_played[0] += 1   # host's per-side card tally (Ironclad Veteran)
@@ -10554,8 +11164,12 @@ func _play_creature(card: Control, cost: int) -> void:
 	card.current_row = row
 	_hand.erase(card)
 	_hand_container.remove_child(card)
-	if AudioBank != null:
-		AudioBank.play_sfx("card_play")
+	# THE PLAY CUE IS NOT FIRED HERE ANY MORE (2026-08-03). It used to sound on
+	# this exact frame — the card leaving the hand — which described the wrong
+	# event once the flight came back: "card_play" is a card meeting a TABLE, and
+	# it was playing while the card was still in the air. It now rides down with
+	# the placement as `land_sfx` and sounds on the wax press's bite. Still one
+	# cue, still owned by this function — moved, not layered.
 	# Hand → battlefield: shrink to the compact variant so the 4x4 grid fits.
 	card.set_compact_mode(true)
 
@@ -10726,11 +11340,18 @@ func _play_creature(card: Control, cost: int) -> void:
 		card.persistent_atk_buff += bc_value
 		card.persistent_atk_buff_rounds = 2
 		card.update_stat_display()
-	# with_arc=false: the player has already dragged the card to this slot,
-	# so the arc animation would loop back over their own gesture — at the
-	# slot itself it reads as a pointless circle. The scale-punch settle in
-	# _play_landing_pop's no-arc path is the right amount of feedback.
-	_place_card_in_slot(card, lane_idx, row, play_start_global, false)
+	# with_arc=TRUE since 2026-08-03. This was false, on the reasoning that flying
+	# a card back over the player's own drag reads as a pointless circle — which
+	# was true of the flight as it then stood: a flat 72 px apex over the ~40 px
+	# between a drop point and its slot's centre IS a loop. But switching it off
+	# left the player's own play as the ONLY placement in the game that teleports:
+	# you release the card wherever the drop tolerance allowed and it appears,
+	# instantly, snapped to the middle of the slot. Now that the apex and the hang
+	# time are derived from the real travel (see ARC_FULL_TRAVEL), a drop right on
+	# the slot is a near-flat ~0.13 s SEAT and a sloppier one is a visible, legible
+	# correction — the card is placed rather than pasted, and the drop tolerance
+	# becomes something the player can see rather than infer.
+	_place_card_in_slot(card, lane_idx, row, play_start_global, true, "card_play")
 	_apply_starter_creature_play_relics(card, row, lane_idx)
 	if String(card.card_id) == "sword_on_credit":
 		card.state.credit_due_round = round_number + 1
@@ -10872,6 +11493,8 @@ func _play_creature(card: Control, cost: int) -> void:
 	card.update_stat_display()
 	_update_hud()
 
+	if _first_battle_tutorial_stage == FirstBattleTutorialStage.PLAY_CREATURE:
+		_first_battle_tutorial_after_creature_play(card)
 	# ── Skirmish HOST: the host played its own creature (real local Card2D, real
 	# on-enter above). Stamp its network id (= deck uid) and push the new board to
 	# the client so the opponent sees it. ──
@@ -10891,14 +11514,17 @@ func _play_spell(card: Control, cost: int) -> void:
 	_pl_spell_pending = {"card": card.card_id, "uid": card.deck_uid, "cost": cost,
 		"targeting": card.card_data.get("targeting", "none"), "snap": _pl_snapshot()}
 	var targeting = card.card_data.get("targeting", "none")
-	# Capture hand position so the cast-ghost knows where the spell card flew
-	# from. For targeted spells the ghost lingers until the player clicks; for
-	# non-targeted spells it dissolves immediately above the play line.
-	var spell_start_global: Vector2 = card.global_position
+	# Capture where the card physically is, as a CENTRE, so the writ raised at the
+	# cast starts on the sheet the player just let go of. For a targeted spell that
+	# writ then HOLDS aloft until the click resolves or cancels it; for a
+	# non-targeted one it holds for the length of the resolution. Either way it is
+	# spent, not faded — see _dispose_spell_cast_ghost. (The old comment here
+	# claimed the lingering behaviour the code did not actually have.)
+	var spell_start_global: Vector2 = card.global_position + card.size * 0.5
 	if targeting != "none":
 		player_mana -= cost
 		_targeting_paid_cost = cost
-		_pulse_mana_label(cost)
+		_pulse_mana_label(cost, false, MANA_SPEND_BEAT)
 		_first_spell_this_turn = true
 		_cards_played_this_turn += 1
 		_hand.erase(card)
@@ -10921,7 +11547,7 @@ func _play_spell(card: Control, cost: int) -> void:
 
 	# Non-targeted spell: resolve immediately
 	player_mana -= cost
-	_pulse_mana_label(cost)
+	_pulse_mana_label(cost, false, MANA_SPEND_BEAT)
 	_first_spell_this_turn = true
 	_cards_played_this_turn += 1
 	_hand.erase(card)
@@ -10935,18 +11561,21 @@ func _play_armament(card: Control, cost: int) -> void:
 	# Armaments are a campaign card type, not spells. They use the familiar
 	# click-to-target interaction, but deliberately skip every spell counter,
 	# spell relic, reactive, Echo history, and first-spell discount.
+	# Both of these duplicate gates _on_card_played already funnels, and this has
+	# exactly one caller with nothing mutating in between — so no player can reach
+	# them today. They still route through _refuse_play: a refusal that comes home
+	# on the plain reflow tween is indistinguishable from the hand closing a gap,
+	# and the day this grows a second caller is not the day to remember that.
 	if _is_net():
-		_show_info("Armaments aren't available in skirmish yet.")
-		_layout_hand()
+		_refuse_play(card, "Armaments aren't available in skirmish yet.")
 		return
 	if not _has_armament_bearer():
-		_show_info("No unequipped creature can bear this Armament.")
-		_layout_hand()
+		_refuse_play(card, "No unequipped creature can bear this Armament.")
 		return
 
 	player_mana -= cost
 	_targeting_paid_cost = cost
-	_pulse_mana_label(cost)
+	_pulse_mana_label(cost, false, MANA_SPEND_BEAT)
 	_cards_played_this_turn += 1
 	_hand.erase(card)
 	_hand_container.remove_child(card)
@@ -11711,7 +12340,7 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 			var picked: Array = []
 			if max_disc > 0:
 				picked = await _show_discard_picker(max_disc,
-					"War Chant — discard up to %d to summon that many Soldiers" % max_disc, true)
+					"Call the Militia — discard up to %d to summon that many Soldiers" % max_disc, true)
 					# (one Soldier summoned per pitched card, below)
 				for c in picked:
 					_hand.erase(c)
@@ -12042,7 +12671,7 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 					inf_ids.append(inf_id)
 			if not inf_ids.is_empty():
 				var inf_pick: String = await _build_discover_overlay(inf_ids,
-					"The foe's next arrivals", "Strike it")
+					"The enemy's next arrivals", "Strike it")
 				for inf_i in range(mini(inf_n, _enemy_deck.size())):
 					if String(_enemy_deck[inf_i].get("id", "")) == inf_pick:
 						_log_event("The informer names [color=#f2e6c8]%s[/color] — removed from the next arrivals." \
@@ -12322,7 +12951,7 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 					# telegraph is a worded float — the player has to be able to
 					# see WHY the number doubled.
 					spawn_floating_number(_card_center(target) + Vector2(0, -14),
-						"CAUGHT IN THE OPEN", Color(1.0, 0.72, 0.36), false)
+						"YOU MOVED A FRIENDLY", Color(1.0, 0.72, 0.36), false)
 				target.take_damage(co_dmg)
 				_cleanup_dead()
 		"starter_close_ranks":
@@ -12564,10 +13193,19 @@ func _after_spell(card: Control) -> void:
 		await _resolve_spell(card.card_data.duplicate(true), tgt, tlane, primary_tgt)
 		_doubling_active_spell = false
 	var was_exhausted: bool = card.has_keyword("exhaust")
+	# The writ raised at the cast is SPENT here, and how it is spent states where
+	# the card actually went: an exhausted spell catches, anything else dives onto
+	# the discard stack. Returns where the sheet is right now — the EXHAUST word
+	# below then lands on the card it describes instead of on the hand slot that
+	# card left two beats ago (card.global_position has been stale since
+	# _play_spell removed it from the container).
+	var writ_at: Vector2 = _dispose_spell_cast_ghost("burn" if was_exhausted else "pile")
 	if was_exhausted:
 		_exhaust_pile.append(_pile_entry(card.card_id, card.deck_uid))
 		var ex_anchor := card.global_position \
 			+ Vector2(card.size.x * card.scale.x * 0.5, card.size.y * card.scale.y * 0.10)
+		if writ_at != Vector2.ZERO:
+			ex_anchor = writ_at
 		spawn_keyword_callout(ex_anchor, "EXHAUST",
 			_CALLOUT_STYLE["exhaust"]["col"], GameTheme.get_keyword_icon("exhaust"))
 		if AudioBank != null:
@@ -12778,16 +13416,18 @@ func _record_spell_cast_board_payoffs(spell_data: Dictionary = {}) -> void:
 					wl.persistent_atk_buff_rounds = 99
 					wl.update_stat_display()
 					if wl != spell_friend:
-						cv_fx.append(_card_center(wl))
+						cv_fx.append(wl)
 				# The working passes THROUGH the coven: the Mother pulses violet,
 				# then the incantation hops sister to sister (warlock signature).
-				if _hud_layer != null and DisplayServer.get_name() != "headless":
-					var cv_col: Color = CTYPE_COLORS["warlock"]
-					_spawn_vfx_ring(_card_center(spell_friend),
-						Color(cv_col.r, cv_col.g, cv_col.b, 0.70),
-						20.0, 1.55, 0.30, 218, 2.5)
-					cv_fx.sort_custom(func(a: Vector2, b: Vector2): return a.x < b.x)
-					_trigger_fx_grace_wave(cv_fx, cv_col)
+				var cv_col: Color = CTYPE_COLORS["warlock"]
+				# The Mother's own pulse crosses too — without it the watcher saw
+				# the hop start from a body that had not announced itself. `plain`
+				# keeps this site's original single soft ring: the mirroring is the
+				# change, the look is not.
+				ring_over(spell_friend, cv_col, 20.0, 218, true)
+				# Outside the local-render guard: grace_wave_over self-guards headless
+				# AND is what ships the hop to the watcher.
+				grace_wave_over(cv_fx, cv_col)
 				if bool(spell_friend.card_data.get("is_upgraded", false)):
 					_heal_owner_hero(false, 1)
 			"spark_on_spell":
@@ -12850,17 +13490,25 @@ func _maybe_pay_ledger(owner_is_enemy: bool, spells_before: int) -> void:
 		var hp_before: int = int(t.current_hp)
 		t.take_damage(2)
 		_net_log_hit(wl, t, hp_before, false)
-		struck.append(_card_center(wl))
+		struck.append(wl)
 	if struck.is_empty():
 		return
 	# Paid only when it actually landed. An empty board opposite is not a spent
 	# Ledger — the coven simply had nothing to aim at, and the player should get
 	# the payoff on their next working instead of losing it silently.
 	_ledger_paid_this_round[side] = true
-	if _hud_layer != null and DisplayServer.get_name() != "headless":
-		struck.sort_custom(func(a: Vector2, b: Vector2): return a.x < b.x)
-		_trigger_fx_grace_wave(struck, CTYPE_COLORS["warlock"])
-	spawn_trigger_callout(struck[0] + Vector2(0, -20), "THE LEDGER", false)
+	grace_wave_over(struck, CTYPE_COLORS["warlock"])
+	# The eid is what carries this to the watcher — without it the banner is local,
+	# and this resolver runs host-side for BOTH sides (see CombatNet's cast mirror),
+	# so the client would never have seen the Ledger pay at all.
+	#
+	# Re-validated: `struck` used to hold POINTS (immune to a body being freed) and now
+	# holds the bodies themselves, so the banner has to check before it dereferences.
+	# _card_center takes no guard of its own.
+	var led_anchor: Control = struck[0]
+	if led_anchor != null and is_instance_valid(led_anchor):
+		spawn_trigger_callout(_card_center(led_anchor) + Vector2(0, -20), "THE LEDGER",
+			false, int(led_anchor.entity_id))
 
 
 ## Canonical mid-fight Shield grant for the new formation/spell bridges. Shield
@@ -13175,6 +13823,13 @@ func _try_resolve_target(pos: Vector2) -> void:
 				continue
 			if _is_click_on_card(pos, p):
 				var spell_card := _targeting_spell
+				if not _target_contract_accepts(spell_card.card_data, p):
+					match String(spell_card.card_data.get("id", "")):
+						"touchpaper":
+							_info_label.text = "Touchpaper needs a friendly creature with Doom."
+						"read_the_will":
+							_info_label.text = "Read the Will needs a friendly creature with an eligible On-Death effect."
+					return
 				# Armaments borrow the targeting cursor only. An occupied bearer is
 				# an invalid target, so keep targeting armed without spending or
 				# discarding anything further.
@@ -13226,16 +13881,41 @@ func _use_combat_potion(index: int) -> void:
 	## Click handler for a combat HUD potion slot. Cancels any in-flight spell
 	## targeting (you can't target both at once). Non-targeted potions resolve
 	## immediately; targeted ones enter potion-targeting mode.
+	#
+	# The belt's buttons are never disabled — they stay lit and clickable through
+	# the whole clash — so this guard was the same dead button the net branch below
+	# was fixed for: the bottle took the click and nothing happened at all. The
+	# rule is real (drinking mid-clash would resolve into a board that is already
+	# being resolved), it just had no voice.
 	if phase != Phase.PLAYER_TURN:
+		_show_info("Not during the clash.")
+		AudioBank.play_sfx("refused", 0.03, -8.0)
 		return
 	# Net: only on your own active turn (the belt draws no potions the foe owns).
-	if _is_net() and _net_active_index != _net_my_index():
-		return
+	#
+	# A REFUSAL THE PLAYER CANNOT SEE IS A BUG. This was a bare `return`: the belt
+	# stayed lit, the bottle took the click, and nothing at all happened — which
+	# reads as a dead button, not as a rule. In SEALED the rule is real and worth
+	# stating (the host rejects IN_USE_POTION outside the sorcery window, so a
+	# drink during orders could never have resolved anyway); in ALTERNATING the
+	# opponent's turn is already loudly signposted, so it stays a quiet no.
+	if _is_net():
+		if _is_sealed():
+			if _sorcery_active < 0:
+				_show_info("Bottles keep until the reveal — orders first.")
+				return
+			if _sorcery_active != _net_my_index():
+				_show_info("Your opponent's spell step — yours comes next.")
+				return
+		elif _net_active_index != _net_my_index():
+			return
 	var belt: Array = _ctx_potions()
 	if index < 0 or index >= belt.size():
 		return
 	if _targeting_spell != null:
 		_cancel_targeting()
+	if _targeting_potion_idx >= 0:
+		_cancel_potion_targeting()
 	var pid: String = String(belt[index])
 	var data: Dictionary = PotionDB.get_potion(pid)
 	if data.is_empty() or data.get("usable_in", "combat") == "map":
@@ -13278,6 +13958,9 @@ func _use_combat_potion(index: int) -> void:
 
 
 func _try_resolve_potion_target(pos: Vector2) -> void:
+	if phase != Phase.PLAYER_TURN:
+		_cancel_potion_targeting()
+		return
 	if _targeting_potion_idx < 0:
 		return
 	# _ctx_potions() is the belt for BOTH modes (RunState in solo, the net slot in
@@ -13316,13 +13999,19 @@ func _cancel_potion_targeting() -> void:
 	_info_label.text = ""
 
 
+## The DRINKER's beat: the bottle lifts off the belt, tips as it flies, and a splash
+## of the draught's colour bursts where it lands (the target for targeted potions,
+## above the belt for self-draughts).
+##
+## SKIRMISH DRINKS TOO (2026-08-04). This bailed on `_is_net()` because the net layer
+## "has its own reveal" — but `_net_show_potion_reveal` is the beat you watch your
+## OPPONENT drink, staged over the enemy half of the board and drained off their
+## arsenal rail. Nothing at all played for your own quaff: the belt slot emptied and
+## a number moved. So the skirmish game showed the foe's consumables as an event and
+## your own as bookkeeping, which is precisely backwards from the side of the table
+## you are sitting on.
 func _play_potion_drink_fx(pid: String, target: Control) -> void:
-	## Solo drink beat: the bottle lifts off the belt, tips as it flies, and a
-	## splash of the draught's colour bursts where it lands (the target for
-	## targeted potions, above the belt for self-draughts). The net game has
-	## its own reveal (_net_show_potion_reveal) — this is the solo counterpart,
-	## so a quaff reads as an action instead of numbers changing.
-	if _hud_layer == null or DisplayServer.get_name() == "headless" or _is_net():
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
 		return
 	if UserSettings != null and UserSettings.reduce_motion:
 		return
@@ -13628,6 +14317,10 @@ func _cancel_targeting() -> void:
 		_first_spell_this_turn = (_net_spells_this_turn > 0) if _is_net() \
 			else (_spells_cast_this_turn > 0)
 	_pl_spell_pending = {}
+	# The writ comes back down with the card. Without this the sheet the player has
+	# been holding through the whole targeting window would simply stop existing on
+	# the right-click, which is the vanish this device exists to remove.
+	_dispose_spell_cast_ghost("return")
 	_hand_container.add_child(_targeting_spell)
 	_hand.append(_targeting_spell)
 	_targeting_spell = null
@@ -13658,28 +14351,518 @@ func _is_click_on_card(pos: Vector2, card: Control) -> bool:
 	return rect.has_point(pos)
 
 
+## The coach is built on demand and lives until the walkthrough is dismissed.
+## Its own CanvasLayer, so it is not a child of _hud_layer and cannot be buried
+## by the hand the way the thing it replaced was.
+func _ensure_coach() -> TutorialCoach:
+	if _coach != null and is_instance_valid(_coach):
+		return _coach
+	_coach = TutorialCoach.new()
+	_coach.name = "TutorialCoach"
+	add_child(_coach)
+	_coach.action_pressed.connect(_finish_first_battle_tutorial)
+	_coach.skip_pressed.connect(_skip_first_battle_tutorial)
+	return _coach
+
+
+## SKIP AND GOT IT END THE SAME WALKTHROUGH AND ARE NOT THE SAME EVENT. A player
+## who finished it knows what they learned; a player who skipped has just made
+## something vanish and has been given no account of where it went. The house
+## rule for a dismissal is that it must be recoverable AND the recovery must be
+## named at the moment of the dismissal — the note on step 1 says it before the
+## decision, this says it after, and one of the two will be the one they read.
+func _skip_first_battle_tutorial() -> void:
+	_finish_first_battle_tutorial()
+	_show_info("Coaching off for this walkthrough — replay it from Settings.")
+
+
+## Every open slot the player may legally set a body down on, front row first.
+## The walkthrough marks all of them and draws its gesture at ONE — teaching the
+## rule ("any open slot") and the verb ("this is what dragging looks like")
+## without implying the demonstrated slot is the only answer.
+func _first_battle_open_slots() -> Array[Control]:
+	var out: Array[Control] = []
+	for lane in range(LANES_PER_ROW):
+		if not _sp_lane_closed(lane) and _player_field[lane] == null:
+			out.append(_player_slots[lane])
+	for lane in range(LANES_PER_ROW):
+		if not _sp_lane_closed(lane) and _player_back[lane] == null:
+			out.append(_player_back_slots[lane])
+	return out
+
+
+func _begin_first_battle_tutorial() -> void:
+	if not _first_battle_tutorial_pending():
+		return
+	if _first_battle_tutorial_stage != FirstBattleTutorialStage.INACTIVE:
+		return
+	# Delayed refill cards land at 0.08-second intervals. Wait for the fan to
+	# settle so the highlighted card is both present and at its final hand pose.
+	await get_tree().create_timer(0.42).timeout
+	if not is_inside_tree() or phase != Phase.PLAYER_TURN or round_number != 1:
+		return
+	if _cards_played_this_turn > 0:
+		_first_battle_tutorial_stage = FirstBattleTutorialStage.END_TURN
+		_first_battle_step_end_turn()
+		return
+
+	var target: Control = null
+	for card in _hand:
+		if not is_instance_valid(card) or not card.is_creature():
+			continue
+		if card.has_keyword("sacrifice"):
+			continue
+		if int(card.card_data.get("cost", 0)) <= player_mana:
+			target = card
+			break
+	if target == null:
+		# Authored starter decks always have an affordable creature in a five-card
+		# opener. Keep a defensive fallback for migrated or modded decks.
+		UserSettings.mark_first_battle_tutorial_complete()
+		_maybe_show_muster_tutorial()
+		return
+	var slots := _first_battle_open_slots()
+	if slots.is_empty():
+		UserSettings.mark_first_battle_tutorial_complete()
+		_maybe_show_muster_tutorial()
+		return
+	_first_battle_tutorial_card = target
+	_first_battle_tutorial_stage = FirstBattleTutorialStage.PLAY_CREATURE
+
+	var coach := _ensure_coach()
+	coach.clear_marks()
+	# THE SPOTLIGHT OPENS ON EXACTLY TWO THINGS: the card to move, and the ground
+	# to move it to. Everything else on a first-ever combat screen — the relic
+	# rail, the piles, the encounter scroll, the enemy's banner — is noise the
+	# player has no use for until step 3.
+	var focus_on: Array = [target]
+	focus_on.append_array(slots)
+	coach.focus(focus_on, 0.62)
+	# Tight and hot rather than wide and soft: the card overlaps its neighbours in
+	# the fan, so a far-reaching halo lights the wrong card as well as the right
+	# one. The outline has to be ON the silhouette.
+	coach.mark(target, {"color": Color(1.0, 0.88, 0.44, 1.0), "pad": 18.0,
+		"corner": 10.0, "spread": 15.0, "rim": 3.4})
+	for slot in slots:
+		coach.mark(slot, {"color": Color(0.98, 0.78, 0.34, 0.85), "pad": 20.0,
+			"corner": 8.0, "spread": 15.0, "rim": 2.0, "delay": 0.12})
+	# The gesture goes to the open FRONT slot nearest the card, so the demonstrated
+	# drag is the short natural one rather than a diagonal across the whole table.
+	coach.gesture(target, _first_battle_gesture_slot(target, slots))
+	# THE NOTE IS THE SKIP'S RECEIPT, and it rides step 1 because step 1 is the
+	# only panel every player is guaranteed to see. A skip with nowhere to go back
+	# to is a trapdoor: the player who presses it at the wrong moment has silently
+	# spent three lessons and has no way of knowing they are retrievable. Naming
+	# the screen at the moment of the decision is the whole fix.
+	coach.show_panel(
+		TutorialDB.title("walk_play"), TutorialDB.body("walk_play"), "", 1, 3,
+		{"note": "Settings › Coaching turns this off or plays it again."})
+
+
+## The nearest open slot on the front row (falling back to any open slot).
+func _first_battle_gesture_slot(card: Control, slots: Array[Control]) -> Control:
+	var best: Control = slots[0]
+	var best_d := INF
+	var from := TutorialCoach.visual_rect(card).get_center()
+	for slot in slots:
+		if _player_back_slots.has(slot) and best_d < INF:
+			continue        # front row already has a candidate
+		var d := TutorialCoach.visual_rect(slot).get_center().distance_to(from)
+		if d < best_d:
+			best_d = d
+			best = slot
+	return best
+
+
+## Deliberately NOT a snapshot of rects for the panel to dodge. The coach keeps
+## its openings live (they follow a dragged card), so it derives the panel's
+## keep-out from those instead — see TutorialCoach._place_panel.
+##
+## THE SNAPSHOT VERSION WAS A REAL BUG AND WORTH THE NOTE: a body that has just
+## been played is still flying to its slot, so a rect read on the next frame is
+## the rect of the ANIMATION. Step 2 measured its own creature at (208, 5) — the
+## top-left corner, mid-tween — and dutifully placed the panel clear of a
+## position the card was never going to occupy, i.e. straight across the
+## creature it had just lit.
+
+
+func _first_battle_tutorial_after_creature_play(card: Control) -> void:
+	if card != _first_battle_tutorial_card:
+		return
+	_first_battle_tutorial_card = null
+	_first_battle_tutorial_stage = FirstBattleTutorialStage.END_TURN
+	# The step landed — say so. A walkthrough that answers a correct action with
+	# nothing but the next instruction reads as a checklist; one beat of applause
+	# is what makes the player believe they did the right thing.
+	AudioBank.play_sfx("upgrade_confirm", 0.03, -9.0, 1.18)
+	_first_battle_step_end_turn()
+
+
+## Step 2, from either entry (a fresh walkthrough, or one resumed on a turn where
+## the player had already set something down before the coach woke).
+func _first_battle_step_end_turn() -> void:
+	var coach := _ensure_coach()
+	coach.clear_marks()
+	if _end_turn_btn != null and is_instance_valid(_end_turn_btn):
+		# THE COPY NAMES THE CREATURE, SO THE CREATURE STAYS LIT. Spotlighting the
+		# button alone left "your creature is forming up" pointing at a body the
+		# scrim had just dimmed to 58% — the sentence and the screen disagreeing
+		# about what mattered.
+		var lit: Array = [_end_turn_btn]
+		for body in _all_player_creatures():
+			if is_instance_valid(body):
+				lit.append(body)
+		coach.focus(lit, 0.58)
+		coach.mark(_end_turn_btn, {"color": Color(1.0, 0.84, 0.36, 1.0),
+			"pad": 26.0, "corner": 8.0, "spread": 24.0, "rim": 3.0})
+		# From the left: the button sits at the lower right, so an arrow coming in
+		# from the board side travels the way the player's eye already is.
+		coach.point_at(_end_turn_btn, {"from": "left", "length": 104.0})
+	coach.show_panel(
+		TutorialDB.title("walk_commit"), TutorialDB.body("walk_commit"), "", 2, 3)
+
+
+func _first_battle_tutorial_commit() -> void:
+	_first_battle_tutorial_stage = FirstBattleTutorialStage.WAIT_FOR_BOARD
+	var coach := _ensure_coach()
+	coach.clear_marks()
+	coach.clear_focus()
+	coach.show_panel(
+		"THE ENEMY MUSTERS",
+		"Watch their line form up. Your creature is ready to fight when round 2 begins.",
+		"", 2, 3)
+
+
+func _show_first_battle_board_lesson() -> void:
+	if _first_battle_tutorial_stage != FirstBattleTutorialStage.WAIT_FOR_BOARD:
+		return
+	await get_tree().create_timer(0.18).timeout
+	if not is_inside_tree() or phase != Phase.PLAYER_TURN:
+		return
+	_first_battle_tutorial_stage = FirstBattleTutorialStage.READ_BOARD
+	var coach := _ensure_coach()
+	coach.clear_marks()
+	# THE LESSON IS A COLUMN, so the spotlight is a column. Marking every enemy on
+	# the table (what this did before) illustrates "the enemy exists"; opening one
+	# lane top-to-bottom illustrates the thing the copy is actually about — who
+	# stands in front of whom, and who is therefore hit first.
+	var column := _first_battle_lesson_column()
+	if column.is_empty():
+		coach.clear_focus()
+		for enemy in _all_enemy_creatures():
+			if is_instance_valid(enemy):
+				coach.mark(enemy, {"color": Color(1.0, 0.62, 0.34, 0.92),
+					"pad": 22.0, "corner": 9.0})
+	else:
+		coach.focus(column, 0.60)
+		for i in column.size():
+			# Ember for the hold's bodies, gilt for yours — the side colours the
+			# rest of the game already uses, so a mark says WHOSE as well as
+			# WHERE. Read off the board arrays, never off the loop index: the
+			# column's contents depend on which rows are actually occupied.
+			var theirs: bool = _enemy_field.has(column[i]) \
+				or _enemy_back.has(column[i])
+			coach.mark(column[i], {
+				"color": Color(1.0, 0.58, 0.30, 0.95) if theirs
+					else Color(1.0, 0.86, 0.40, 0.95),
+				"pad": 26.0, "corner": 9.0, "spread": 24.0, "rim": 3.0,
+				"delay": 0.10 * float(i)})
+	coach.show_panel(
+		TutorialDB.title("walk_lane"), TutorialDB.body("walk_lane"), "GOT IT", 3, 3)
+
+
+## The lane the lesson is about: the player's own body and whatever the hold put
+## opposite it. Falls back to any occupied enemy lane so the step still has a
+## subject if the player's creature died or was never placed.
+##
+## BOTH ROWS ARE SEARCHED, AND THAT IS NOT DEFENSIVE CODING. Checking only the
+## FRONT arrays looked obviously right and made this return nothing at all on a
+## real opening: `goblin_scouts` musters into the hold's BACK row, so
+## `_enemy_field` was four nulls, the lane lesson silently fell through to its
+## no-column fallback, and the step drew a mark on every enemy on the table
+## instead of the column its own copy is about. A row is not a guarantee.
+func _first_battle_lesson_column() -> Array:
+	var lane := -1
+	for i in range(LANES_PER_ROW):
+		var mine: bool = _player_field[i] != null or _player_back[i] != null
+		var theirs: bool = _enemy_field[i] != null or _enemy_back[i] != null
+		if mine and theirs:
+			lane = i
+			break
+	if lane < 0:
+		for i in range(LANES_PER_ROW):
+			if _enemy_field[i] != null or _enemy_back[i] != null:
+				lane = i
+				break
+	if lane < 0:
+		return []
+	var out: Array = []
+	# TOP OF SCREEN DOWNWARD — the hold's back row is the topmost band and the
+	# player's back row the lowest, so this is also the order the staggered
+	# `delay` lights them in, and the lesson reads front-to-back as it is spoken.
+	for body in [_enemy_back[lane], _enemy_field[lane],
+			_player_field[lane], _player_back[lane]]:
+		if body != null and is_instance_valid(body):
+			out.append(body)
+	return out
+
+
+## A step's refusal, made visible: flare every mark and punch the panel. Combat
+## owns this rather than the coach because only Combat knows a refusal happened.
+func _first_battle_nudge_step() -> void:
+	if _coach == null or not is_instance_valid(_coach):
+		return
+	_coach.nudge()
+
+
+## The walkthrough is over — finished on GOT IT, or abandoned on SKIP.
+##
+## BOTH ENDINGS SPEND THE SAME LESSONS, and that is deliberate: the three rules
+## the walkthrough teaches are the three rules its own steps state, so re-offering
+## them as one-line tips two rounds later would tell a player who just pressed
+## SKIP the exact thing they declined. Everything OUTSIDE the walkthrough's own
+## subject (banking, the piles, the belt, the gold words) is untouched and still
+## arrives when it becomes relevant — skipping the guided fight is not the same
+## request as "never explain anything", which is what the OFF setting is for.
+func _finish_first_battle_tutorial() -> void:
+	if _coach != null and is_instance_valid(_coach):
+		_coach.dismiss()
+		_coach.queue_free()
+	_coach = null
+	_first_battle_tutorial_card = null
+	_first_battle_tutorial_stage = FirstBattleTutorialStage.INACTIVE
+	for id in ["walk_play", "walk_commit", "walk_lane",
+			"muster", "intents", "combat_model"]:
+		UserSettings.mark_lesson_seen(id)
+	UserSettings.mark_first_battle_tutorial_complete()
+
+
+func _show_opening_muster_forecast() -> void:
+	if _is_net() or not _opening_muster_pending:
+		return
+	if not _opening_muster_forecast.is_empty():
+		return
+	await get_tree().process_frame
+	if not is_inside_tree() or not _opening_muster_pending:
+		return
+	for lane in range(LANES_PER_ROW):
+		if _enemy_field[lane] != null:
+			continue
+		var slot := _enemy_slots[lane]
+		if slot == null or not is_instance_valid(slot):
+			continue
+		var rect := slot.get_global_rect()
+		var ghost := PanelContainer.new()
+		ghost.position = rect.position + Vector2(8, 7)
+		ghost.size = Vector2(
+			maxf(70.0, rect.size.x - 16.0), 42.0)
+		ghost.z_index = 468
+		ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ghost.modulate = Color(1.0, 0.90, 0.66, 0.86)
+		ghost.add_theme_stylebox_override("panel", BATCHED_CHART_STYLE.from_chart(
+			GameTheme.make_panel_style(
+				Color(0.20, 0.12, 0.05, 0.52), Color(0.95, 0.72, 0.28, 0.90),
+				2, 5, false)))
+		var label := GameTheme.make_label("MUSTER  ?", 15,
+			Color(1.0, 0.86, 0.52), true)
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		ghost.add_child(label)
+		_hud_layer.add_child(ghost)
+		_opening_muster_forecast.append(ghost)
+
+
+func _clear_opening_muster_forecast() -> void:
+	for ghost in _opening_muster_forecast:
+		if ghost != null and is_instance_valid(ghost):
+			ghost.queue_free()
+	_opening_muster_forecast.clear()
+
+
+## THE ONE TEACHING FUNNEL for every one-line combat lesson.
+##
+## Each `_maybe_show_*` below is now a gate and a call. The six it replaced each
+## carried their own copy of the same three checks, and the one that got left out
+## of all six is the one that did not exist yet: NOTHING asked whether the player
+## wanted coaching at all. Adding that to a funnel is one line; adding it to six
+## hand-written twins is six chances to miss one, and the miss is invisible —
+## a lesson that ignores the OFF setting looks exactly like a lesson.
+##
+## Returns true only when the line actually reached the screen. `_show_tutorial_tip`
+## is first-claim-wins, so a refusal here is "not this round", never "never": the
+## seen flag is stamped only on a real showing, which is what lets the ladder in
+## `_start_round` offer every rung every round and have exactly one land.
+func _teach_tip(id: String, target: Control = null, args: Dictionary = {}) -> bool:
+	if not TutorialCoach.should_teach(id):
+		return false
+	# The guided walkthrough owns the teaching surface while it is running.
+	if _first_battle_tutorial_stage != FirstBattleTutorialStage.INACTIVE \
+			or _first_battle_tutorial_pending():
+		return false
+	if not _show_tutorial_tip(TutorialDB.tip_line(id, args), target):
+		return false
+	UserSettings.mark_lesson_seen(id)
+	return true
+
+
 func _maybe_show_banking_tutorial() -> void:
-	if _banking_tutorial_shown:
-		return
-	_banking_tutorial_shown = true
-	UserSettings.mark_banking_tutorial_seen()
-	_show_tutorial_tip("BANK COMMAND — Carry up to 2 unused Command into the next turn.")
+	_teach_tip("banking", _mana_label)
 
 
+## Taught on round 2 — the first round with an enemy line on the table, and so
+## the first round on which any of the three things this names exists. It fired
+## on round 1 until 2026-08-01, where it described intent badges, forecast chips
+## and a front row that were all still absent (the hold does not muster until the
+## END of round 1). A tip that points at nothing is worse than no tip: it is
+## stamped seen-forever the moment it fires.
 func _maybe_show_intents_tutorial() -> void:
-	if _intents_tutorial_shown:
-		return
-	_intents_tutorial_shown = true
-	UserSettings.mark_intents_tutorial_seen()
-	_show_tutorial_tip("READ THE BOARD — Front-row creatures protect the back row. Forecast chips preview enemy attacks.")
+	var intent_subject: Control = null
+	for foe in _all_enemy_creatures():
+		if is_instance_valid(foe):
+			intent_subject = foe
+			break
+	_teach_tip("intents", intent_subject)
+
+
+## Taught on round 1 — the ONE beat of a Burning Meadow fight that nothing on
+## screen accounts for. The player sets a line, ends the turn, no clash happens,
+## and only then does the enemy appear. Both halves of that have a rule behind
+## them (the muster delay stops a body swinging on the round it arrives; TAKE THE
+## FIELD moves the hold's opening formation to the end of round 1) and neither
+## was stated anywhere. Written as the consequence, not the rule, in the register
+## the initiative modal already uses ("they form up", "take the field").
+func _maybe_show_muster_tutorial() -> void:
+	_teach_tip("muster")
 
 
 func _maybe_show_pile_tutorial() -> void:
-	if _pile_tutorial_shown:
+	_teach_tip("piles", _deck_count_label)
+
+
+# ── The lessons added by the 2026-09-10 coverage pass ──────────────────
+#
+# WHAT WAS MISSING AND WHY IT WAS INVISIBLE. The six lessons above covered the
+# first fight's SHAPE — play, commit, read the lane, bank, dismiss, piles — and
+# nothing else in the game, because there was no list to compare them against.
+# Written out, the hole is obvious: a deckbuilder that never mentions its own
+# spells, its own relics, its own potions, or what the gold words on a card mean.
+# Every one of these is a mechanic the player meets in fight one and has to infer.
+#
+# Each fires the first time it is TRUE rather than on a fixed round — teaching a
+# rule about a thing that is not on screen is the defect the 2026-08-01 pass fixed
+# for the intents tip, and a tip is spent the moment it fires.
+
+
+## The back row, taught the first time it is a DECISION rather than a fact —
+## when the front row fills, or when the player has already put someone back
+## there and needs to know it was not a demotion. Both triggers, because a player
+## who only ever fills lanes 0-3 front would otherwise never be told.
+func _maybe_show_back_row_tutorial() -> void:
+	if UserSettings == null or UserSettings.lesson_seen("back_row"):
 		return
-	_pile_tutorial_shown = true
-	UserSettings.mark_pile_tutorial_seen()
-	_show_tutorial_tip("TIP: Click your deck or discard pile (bottom-left) to see what's in it.")
+	var subject: Control = null
+	var front_full := true
+	for lane in range(LANES_PER_ROW):
+		if _player_field[lane] == null and not _sp_lane_closed(lane):
+			front_full = false
+		var back = _player_back[lane]
+		if back != null and is_instance_valid(back):
+			subject = back
+	if subject == null and not front_full:
+		return
+	_teach_tip("back_row", subject)
+
+
+## The gold words. Offered when a hand card actually carries a keyword, and
+## pointed at that card — "hover a gold word" is unfollowable advice if the hand
+## the player is holding happens to be four vanillas.
+func _maybe_show_keyword_tutorial() -> void:
+	if UserSettings == null or UserSettings.lesson_seen("keywords"):
+		return
+	for card in _hand:
+		if not is_instance_valid(card) or CardDB.is_curse(card.card_id):
+			continue
+		var kws = card.card_data.get("keywords", [])
+		if kws is Array and not kws.is_empty():
+			_teach_tip("keywords", card)
+			return
+
+
+## Casting. The two-beat "play it, then click what it hits" is the one verb in
+## combat that a drag does not finish, so it is the one that reads as a bug when
+## nobody explains it — the card leaves the hand and then the game appears to
+## wait for nothing.
+func _maybe_show_spell_tutorial() -> void:
+	if UserSettings == null or UserSettings.lesson_seen("spells"):
+		return
+	for card in _hand:
+		if is_instance_valid(card) and card.is_spell() \
+				and not CardDB.is_curse(card.card_id):
+			_teach_tip("spells", card)
+			return
+
+
+## The rail. Every hero starts holding a signature relic, so this is true on
+## round 1 of the first fight and points at something already on screen.
+func _maybe_show_relic_tutorial() -> void:
+	if UserSettings == null or UserSettings.lesson_seen("relics"):
+		return
+	var chip: Control = null
+	for rid in _relic_chip_by_id:
+		var c = _relic_chip_by_id[rid]
+		if c is Control and is_instance_valid(c) and c.is_visible_in_tree():
+			chip = c
+			break
+	if chip == null:
+		return
+	_teach_tip("relics", chip)
+
+
+## The belt. Gated on a potion actually being in it: an empty belt is a row of
+## dark sockets, and pointing at those to say "click a potion" is the fake
+## affordance the `structure` countdown pass was written about.
+func _maybe_show_potion_tutorial() -> void:
+	if UserSettings == null or UserSettings.lesson_seen("potions"):
+		return
+	if _potion_bar_root == null or not is_instance_valid(_potion_bar_root) \
+			or not _potion_bar_root.is_visible_in_tree():
+		return
+	if _is_net():
+		if _net_potion_slots <= 0:
+			return
+	elif RunState.potions.is_empty():
+		return
+	_teach_tip("potions", _potion_bar_root)
+
+
+## Overkill and the hero's own life — both latched from inside the clash by
+## `_arm_overkill_lesson` / `_arm_hero_hit_lesson` and cashed in here, on the
+## next player turn, with the board that produced them still standing.
+func _maybe_show_overkill_tutorial() -> void:
+	if not _overkill_lesson_armed:
+		return
+	if _teach_tip("overkill"):
+		_overkill_lesson_armed = false
+
+
+func _maybe_show_hero_hp_tutorial() -> void:
+	if not _hero_hit_lesson_armed:
+		return
+	if _teach_tip("hero_hp", _player_hp_label):
+		_hero_hit_lesson_armed = false
+
+
+## Called from the strike paths. Deliberately cheap and deliberately silent: this
+## runs inside the clash, on every killing blow, and must never do more than set
+## a bool — the teaching happens a phase later.
+func _arm_overkill_lesson() -> void:
+	if UserSettings != null and not UserSettings.lesson_seen("overkill"):
+		_overkill_lesson_armed = true
+
+
+func _arm_hero_hit_lesson() -> void:
+	if UserSettings != null and not UserSettings.lesson_seen("hero_hp"):
+		_hero_hit_lesson_armed = true
 
 
 ## Right-click discard marking (2026-07-07 rework, CAPPED 2026-07-28): toggles a
@@ -13713,19 +14896,36 @@ func _marked_discard_count() -> int:
 	return n
 
 
+## THE SAME RULE MUST SPEAK ON EVERY INPUT THAT MEETS IT. This gate carried the
+## right logic and none of the voice: dragging a card in a sealed match answers
+## "Orders are sealed — waiting for your opponent.", while right-clicking that same
+## card to mark it for discard returned in silence. One rule, two inputs, and only
+## one of them explained itself — so the right-click read as a dead control rather
+## than as a refusal. The wording below is deliberately identical to
+## `_on_card_played`'s, because a player meeting one rule twice should hear one
+## sentence. (The curse and mark-cap branches further down already spoke, which is
+## what makes the silence here an inconsistency rather than a house style.)
 func _on_card_dismiss_requested(card: Control) -> void:
 	if phase != Phase.PLAYER_TURN:
+		# No message: mid-clash the board is busy and this is "not now", not a
+		# rule. But the drag path still sounds and recoils the card, so match it
+		# — an input that produces nothing at all is the thing being fixed here.
+		AudioBank.play_sfx("refused", 0.03, -8.0)
 		return
 	if _is_net():
 		if _net_match_over:
-			return
+			return          # the verdict banner is up; nothing to explain
 		# Sealed orders: both sides act at once — marking is open while our own
 		# orders window is (not yet sealed). Alternating: only during MY window,
 		# same gate as playing a card.
 		if _is_sealed():
 			if _sealed_await_foe:
+				_show_info("Orders are sealed — waiting for your opponent.")
+				AudioBank.play_sfx("refused", 0.03, -8.0)
 				return
 		elif _net_active_index != NetMatch.local_player_index:
+			_show_info("Not your turn.")
+			AudioBank.play_sfx("refused", 0.03, -8.0)
 			return
 	if _targeting_spell != null or _targeting_potion_idx >= 0:
 		return
@@ -13842,34 +15042,103 @@ func _animate_dismiss(card: Control, delay: float = 0.0) -> void:
 
 
 func _maybe_show_dismiss_tutorial() -> void:
-	if _dismiss_tutorial_shown:
-		return
-	_dismiss_tutorial_shown = true
-	UserSettings.mark_dismiss_tutorial_seen()
-	_show_tutorial_tip("RIGHT-CLICK any number of hand cards to discard them when your turn ends.")
+	# The cap, read live — not "any number", which is what this taught until
+	# 2026-08-01. MAX_DISCARD_MARKS became 2 on 2026-07-28, so the first fight's
+	# one-and-only discard tip instructed the player to do something the game
+	# then refused, and the tip is stamped seen the moment it fires — there is no
+	# second chance to teach it correctly. Reading _max_discard_marks() means a
+	# relic that raises the cap cannot break the sentence again.
+	var hand_subject: Control = null
+	for hc in _hand:
+		if is_instance_valid(hc):
+			hand_subject = hc
+			break
+	_teach_tip("dismiss", hand_subject, {"n": _max_discard_marks()})
 
 
 func _maybe_show_combat_model_tutorial() -> void:
+	if _first_battle_tutorial_stage != FirstBattleTutorialStage.INACTIVE \
+			or _first_battle_tutorial_pending():
+		return
 	# Fired on the first End Turn — the simultaneous-combat model is the rule new
 	# players least expect, and it only becomes visible the moment the lines clash.
-	if _combat_model_tutorial_shown:
-		return
-	_combat_model_tutorial_shown = true
-	UserSettings.mark_combat_model_tutorial_seen()
-	_show_tutorial_tip("BOTH SIDES ATTACK EACH ROUND — Swift attacks first, then the front row, then the back row.")
+	_teach_tip("combat_model")
 
 
-func _show_tutorial_tip(msg: String) -> void:
+## Post a tutorial tip. Returns TRUE only if the tip actually took the channel —
+## every caller must stamp its "seen forever" flag on that return and NOT before,
+## or a tip that lost the channel is spent without ever having been on screen.
+##
+## FIRST CLAIM WINS. Three of these can fire inside a single _start_round (round 2
+## reaches the intents tip near the top, then the dismiss tip ~250 lines later,
+## then the banking tip), and the channel is one Label: the last writer used to
+## take it and the earlier tips died having already burnt their flag. First-claim
+## rather than last-claim because the callers are ordered by teaching priority
+## already — the round's own lesson is posted before the incidental ones.
+## `point_at` is optional and costs nothing when omitted (the probe calls this
+## with one argument). When given, the tip stops being a sentence about a thing
+## somewhere on screen and becomes a sentence with an arrow on the thing: "click
+## your deck or discard pile (bottom-left)" is a set of directions the player has
+## to follow, where an arrow on the pile is just the answer.
+func _show_tutorial_tip(msg: String, point_at: Control = null) -> bool:
 	# Longer dwell than _show_info — new players need time to actually read.
 	# Falls back to the standard info channel if _info_label isn't built yet.
 	if _info_label == null:
-		return
+		return false
+	if _tutorial_tip_live != "":
+		return false   # another tip owns the channel this round — try again later
+	_show_tip_pointer(point_at)
+	# Claim the channel. FOUR of the five tips were being erased before they could
+	# be read, and by the same function that set them: every _maybe_show_*
+	# fires from inside _start_round, whose LAST statement is _show_turn_banner(),
+	# which blanked _info_label unconditionally. The intents and pile tips lived
+	# ~600 ms (three _round_beat pauses); the dismiss and banking tips lived one
+	# frame. Each had already stamped its UserSettings "seen" flag, so the rule
+	# was spent — a new player was told once, for a frame, under a 70px ROUND
+	# banner, and never again on that profile.
+	_tutorial_tip_live = msg
 	_info_label.text = msg
 	_info_label.modulate = Color(1, 1, 1, 1)
 	get_tree().create_timer(7.0).timeout.connect(func():
 		# Only clear if the tip is still showing (don't stomp on later messages).
+		# This is also what RELEASES the channel for the next tip, so a tip that
+		# lost the first claim gets its turn on a later round rather than never.
+		if _tutorial_tip_live == msg:
+			_tutorial_tip_live = ""
+			# The arrow leaves with the sentence that explains it. An arrow left
+			# standing over the piles with no text is a mark the player cannot
+			# read and cannot dismiss.
+			if _coach != null and is_instance_valid(_coach) \
+					and _first_battle_tutorial_stage \
+						== FirstBattleTutorialStage.INACTIVE:
+				_coach.clear_marks()
 		if _info_label != null and _info_label.text == msg:
 			_info_label.text = "")
+	return true
+
+
+## Mark the subject of a one-line tip: a soft rim on it and an arrow coming in
+## from whichever side has the room. No scrim and no panel — an incidental tip is
+## not a step, and dimming the fight to mention the discard pile would be a
+## bigger interruption than the rule is worth.
+func _show_tip_pointer(target: Control) -> void:
+	if target == null or not is_instance_valid(target):
+		return
+	# The guided walkthrough owns the coach while it is running; its marks must
+	# not be cleared or joined by an incidental tip's arrow.
+	if _first_battle_tutorial_stage != FirstBattleTutorialStage.INACTIVE \
+			or _first_battle_tutorial_pending():
+		return
+	var coach := _ensure_coach()
+	coach.clear_marks()
+	coach.mark(target, {"color": Color(1.0, 0.82, 0.34, 0.90), "pad": 22.0,
+		"corner": 9.0, "spread": 18.0, "rim": 2.2})
+	var canvas := get_viewport().get_visible_rect()
+	var from_side := "left"
+	if TutorialCoach.visual_rect(target).get_center().x \
+			< canvas.position.x + canvas.size.x * 0.5:
+		from_side = "right"
+	coach.point_at(target, {"from": from_side, "length": 88.0})
 
 
 # =====================================================================
@@ -14294,6 +15563,11 @@ func damage_player_hero(amount: int, from_effect: bool = true) -> void:
 			return
 	player_hp -= amount
 	_face_damage_taken_this_fight += amount
+	# ARMED HERE AND TAUGHT ON THE NEXT PLAYER TURN. Placed after every
+	# prevention and redirection above, so the lesson about your health only
+	# fires on a blow that actually reached you. See `_arm_hero_hit_lesson`.
+	if amount > 0:
+		_arm_hero_hit_lesson()
 	# Clash replay: a face hit is a logged beat (owner 0 = the host's hero).
 	if _net_clash_recording and amount > 0:
 		_net_clash_log.append(_net_enrich_face_hit(
@@ -14350,6 +15624,7 @@ func damage_player_hero(amount: int, from_effect: bool = true) -> void:
 	else:
 		presence_react_player_hit(amount)
 	_update_hud()
+	_check_game_over()
 
 
 func heal_enemy_hero(amount: int) -> void:
@@ -14359,7 +15634,7 @@ func heal_enemy_hero(amount: int) -> void:
 	if amount <= 0:
 		return
 	enemy_hp = mini(enemy_hp + amount, enemy_max_hp)
-	_log_event("The foe's wounds close — it heals %d." % amount)
+	_log_event("The enemy heals %d." % amount)
 	_update_hud()
 
 
@@ -14379,7 +15654,7 @@ func damage_enemy_hero(amount: int, from_effect: bool = true,
 	if not from_effect and amount > 0:
 		var _eip := _find_interposer(true)
 		if _eip != null:
-			_log_event("%s interposes — the blow meant for the foe lands on her." \
+			_log_event("%s interposes — the blow meant for the enemy lands on her." \
 				% _log_card_ref(_eip), _log_data(_eip), _log_side(_eip))
 			_net_fx_text(_eip, "INTERPOSED", Color(0.75, 0.85, 1.0))
 			_eip.take_damage(amount)
@@ -14423,7 +15698,7 @@ func damage_enemy_hero(amount: int, from_effect: bool = true,
 				_vg.current_atk += 3 if bool(_vg.card_data.get("is_upgraded", false)) else 2
 				_vg.update_stat_display()
 	if amount > 0:
-		_log_event("The foe takes [color=#f2e6c8]%d[/color] — [color=#e06a50]%d[/color] left." \
+		_log_event("The enemy takes [color=#f2e6c8]%d[/color] — [color=#e06a50]%d[/color] left." \
 			% [amount, maxi(enemy_hp, 0)])
 	screen_shake(clampf(amount * 2.0, 4.0, 15.0))
 	presence_flinch(amount)   # the antagonist recoils + reddens
@@ -14653,7 +15928,13 @@ func summon_token(atk: int, hp: int, lane_idx: int, is_enemy: bool, row: int = R
 	# opposed (enemy arrivals ARE gated), so it hit face unopposed every clash.
 	# Gating the primitive repairs all of those call sites at once, the same
 	# argument _place_enemy_card already makes for the enemy side.
-	if _sp_lane_closed(lane_idx):
+	# SALTED GROUND rides the same gate, for the enemy side only — salt is a
+	# spell the PLAYER casts to deny the foe a seat, so it must bind every enemy
+	# arrival path. _place_enemy_card already makes that argument, but this
+	# primitive spawns its token directly and never passes through it, so an
+	# enemy on-death `summon` (118 entries carry one) reseeded the very lane the
+	# player had just paid to close.
+	if _sp_lane_closed(lane_idx) or (is_enemy and _lane_is_salted(lane_idx)):
 		var reroute := _pick_empty_for_summon(is_enemy, row)
 		if reroute.is_empty():
 			return
@@ -15619,32 +16900,47 @@ func _show_keyword_choice(target_card: Control) -> void:
 ## 48px (no SIZE_FILL stretch), so it never blows the tile out of shape.
 func _keyword_pick_tile(label: String, accent: Color, desc: String,
 		icon_path: String) -> PanelContainer:
+	# THE CHART-PANEL KIT, not a coloured rectangle (2026-08-28). This was a bare
+	# StyleBoxFlat — 1px accent border, 3px radius, flat fill — i.e. the one
+	# pattern the house style explicitly rejects, and it is what four modals in
+	# the game were built out of (Adaptable, the war school, the tribe doctrine,
+	# the Initiative). Beside a real writ it read as unfinished. Same
+	# ChartPanelStyle every choice banner and roadside tile already uses, so these
+	# now sit in the same world: drawn document furniture, parchment, deep shadow.
 	var root := PanelContainer.new()
 	root.custom_minimum_size = Vector2(250, 150)
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.055, 0.048, 0.040, 0.97)
-	sb.border_color = Color(accent.r, accent.g, accent.b, 0.55)
-	sb.set_border_width_all(1)
-	sb.set_corner_radius_all(3)
-	sb.shadow_color = Color(0, 0, 0, 0.60)
-	sb.shadow_size = 8
-	sb.shadow_offset = Vector2(0, 4)
-	sb.content_margin_left = 14
-	sb.content_margin_right = 14
-	sb.content_margin_top = 12
-	sb.content_margin_bottom = 12
+	var sb := GameTheme.make_panel_style(
+		Color(0.055, 0.048, 0.040, 0.96),
+		Color(0.60, 0.51, 0.34, 0.90), 1, 4, true, true)
+	sb.set("content_margin_left", 14.0)
+	sb.set("content_margin_right", 14.0)
+	sb.set("content_margin_top", 12.0)
+	sb.set("content_margin_bottom", 12.0)
 	root.add_theme_stylebox_override("panel", sb)
 
 	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 7)
+	vb.add_theme_constant_override("separation", 6)
 	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(vb)
 
 	if ResourceLoader.exists(icon_path):
+		# The device is SET IN A MOUNT — an inked medallion with a metal ring —
+		# the way a keyword device is set in a card's bottom margin. A bare tinted
+		# silhouette floating in a box is the single thing that read as placeholder
+		# art here; the mount is what makes it look struck rather than imported.
 		var icon_box := Control.new()
-		icon_box.custom_minimum_size = Vector2(48, 48)
+		icon_box.custom_minimum_size = Vector2(52, 52)
 		icon_box.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		icon_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		icon_box.draw.connect(func() -> void:
+			var c := Vector2(26.0, 26.0)
+			icon_box.draw_circle(c + Vector2(0, 2), 24.0, Color(0, 0, 0, 0.45))
+			icon_box.draw_circle(c, 23.0, Color(0.10, 0.085, 0.068, 0.95))
+			icon_box.draw_arc(c, 23.0, 0.0, TAU, 40,
+				Color(accent.r, accent.g, accent.b, 0.55), 1.6, true)
+			icon_box.draw_arc(c, 19.5, 0.0, TAU, 36,
+				Color(0.60, 0.51, 0.34, 0.30), 1.0, true))
+		vb.add_child(icon_box)
 		var tex: Texture2D = load(icon_path)
 		for layer in range(2):
 			var t := TextureRect.new()
@@ -15652,27 +16948,43 @@ func _keyword_pick_tile(label: String, accent: Color, desc: String,
 			t.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 			t.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 			t.set_anchors_preset(Control.PRESET_FULL_RECT)
+			# Inset so the glyph sits INSIDE the ring instead of touching it.
+			for p in ["offset_left", "offset_top"]:
+				t.set(p, 12.0)
+			for p in ["offset_right", "offset_bottom"]:
+				t.set(p, -12.0)
 			t.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			if layer == 0:
-				for p in ["offset_left", "offset_top", "offset_right", "offset_bottom"]:
-					t.set(p, 2.0)
-				t.modulate = Color(0, 0, 0, 0.55)
+				t.position += Vector2(1.5, 1.5)
+				t.modulate = Color(0, 0, 0, 0.60)
 			else:
-				t.modulate = Color(accent.r, accent.g, accent.b, 0.92)
+				t.modulate = Color(accent.r, accent.g, accent.b, 0.95)
 			icon_box.add_child(t)
-		vb.add_child(icon_box)
 
 	var name_lbl := Label.new()
 	name_lbl.text = label
 	if GameTheme.font_display:
 		name_lbl.add_theme_font_override("font", GameTheme.font_display)
 	name_lbl.add_theme_font_size_override("font_size", 20)
-	name_lbl.add_theme_color_override("font_color", accent)
+	# Gilt title over an ACCENT RULE — the choice-banner convention. The accent
+	# belongs on the rule, not flooded through the words; a fully accent-coloured
+	# headline is what made three of these read as three different UIs.
+	name_lbl.add_theme_color_override("font_color", GameTheme.GILT_BRIGHT)
 	name_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.7))
 	name_lbl.add_theme_constant_override("outline_size", 3)
 	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vb.add_child(name_lbl)
+
+	var rule := Control.new()
+	rule.custom_minimum_size = Vector2(0, 5)
+	rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rule.draw.connect(func() -> void:
+		var w: float = rule.size.x
+		var half: float = minf(w * 0.30, 46.0)
+		rule.draw_line(Vector2(w * 0.5 - half, 2.0), Vector2(w * 0.5 + half, 2.0),
+			Color(accent.r, accent.g, accent.b, 0.85), 2.0, true))
+	vb.add_child(rule)
 
 	var desc_lbl := Label.new()
 	desc_lbl.text = desc
@@ -15831,7 +17143,8 @@ func _offer_war_school() -> void:
 			# would hang the harness. Deterministic first-school pick instead.
 			pick = String(schools[0].kw)
 		else:
-			pick = await _war_school_overlay(String(data.get("name", "The veteran")), schools)
+			pick = await _war_school_overlay(String(data.get("name", "The veteran")),
+				data, schools)
 		if pick == "":
 			continue
 		idx = RunState.deck_uids.find(uid)  # re-resolve: the await is long
@@ -15878,10 +17191,17 @@ const WAR_DOCTRINES := {
 		{"kw": "guardian", "school": "THE SHIELD-BEARER",
 			"chip": Color(0.65, 0.85, 1.0)},
 	],
+	# `overrun` was the second option until 2026-07-30 and made this a FAKE choice:
+	# it is +1 ATK for the round, and only while the opposing FRONT lane of its
+	# column is empty — which for the front-line brawler that banks ten kills is
+	# usually false, and on the rounds it is true the beast is already swinging at
+	# the face where +1 is noise. Against `charge` (unconditional, permanent) it
+	# was never the pick. `rampage` gives the tribe a real fork: take the tempo now,
+	# or snowball off the kills this body is already making.
 	"beast": [
 		{"kw": "charge", "school": "THE FIRST BLOOD",
 			"chip": Color(1.0, 0.72, 0.40)},
-		{"kw": "overrun", "school": "THE TRAMPLE",
+		{"kw": "rampage", "school": "THE RUNNING KILL",
 			"chip": Color(0.95, 0.60, 0.35)},
 	],
 	"dead": [
@@ -15955,6 +17275,19 @@ func _offer_doctrine() -> void:
 		for d in _doctrines_for(data):
 			if not have.has(d.kw):
 				options.append(d)
+		# BACKFILL A COLLAPSED PAIR. Guardian is the most commonly PRINTED keyword
+		# across exactly the two tribes that offer it (Palisade, Warding Stone, Iron
+		# Rampart, and Bramble Stockade's forge all carry it), so those creatures
+		# reached this rung with one option already filtered out — and a screen that
+		# says "choose the Bastion doctrine" over a single tile is a fake choice
+		# wearing a real one's clothes. Top up from the universal three so the rung
+		# always presents an actual decision.
+		if options.size() == 1:
+			for s in WAR_SCHOOLS:
+				if options.size() >= 2:
+					break
+				if not have.has(s.kw) and String(s.kw) != String(options[0].kw):
+					options.append(s)
 		if options.is_empty():
 			# Already carries the whole doctrine — honorary, never re-asked. Same
 			# empty-keyword entry the war school writes for the same situation.
@@ -15983,17 +17316,53 @@ func _offer_doctrine() -> void:
 				c.update_stat_display()
 
 
+## THE VETERAN'S OWN WRIT, standing in its rung modal. Both modals used to name
+## the veteran in a title and then show nothing but two keyword tiles — the card
+## that had earned the rung, the card the lesson is about to be written on, and
+## the card whose art the player would actually recognise, was not on the screen.
+## The stamp at the end of the pick lands here (see _rung_overlay_writ_strike).
+func _rung_overlay_writ(card_data: Dictionary) -> Control:
+	var wrapper := Control.new()
+	wrapper.custom_minimum_size = Vector2(169, 225)  # 225×300 at 0.75
+	wrapper.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var card_node = CARD_SCENE.instantiate()
+	card_node.static_display = true
+	card_node.card_data = card_data.duplicate(true)
+	card_node.card_id = String(card_data.get("id", ""))
+	card_node.live_baked_mode = true
+	CardTextureCache.bake(card_data)
+	card_node.scale = Vector2(0.75, 0.75)
+	wrapper.add_child(card_node)
+	return wrapper
+
+
+## Strike the chosen lesson onto the writ, then let the modal close. Awaited by
+## both rung overlays so the change is SEEN on the card before the screen goes.
+func _rung_overlay_writ_strike(overlay: Control, writ: Control,
+		kw: String, accent: Color) -> void:
+	if overlay == null or not is_instance_valid(overlay):
+		return
+	var disp := String(KeywordEffects.KEYWORDS.get(kw, {}) \
+		.get("display", kw.capitalize()))
+	await GameTheme.writ_amend(overlay, writ, disp.to_upper(), accent)
+
+
 ## The doctrine modal. Same scaffold as the war school's, with the tribe named in
 ## the subtitle — the choice only reads as a specialisation if the screen says
 ## which specialism is on offer.
 func _doctrine_overlay(veteran_name: String, card_data: Dictionary,
 		options: Array) -> String:
+	# Own canvas layer — see the war school's twin for why z_index 200 on the
+	# base canvas was not enough.
+	var modal_layer := CanvasLayer.new()
+	modal_layer.layer = 100
+	add_child(modal_layer)
 	var overlay := ColorRect.new()
 	overlay.color = Color(0.05, 0.03, 0.04, 0.78)
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
-	overlay.z_index = 200
-	add_child(overlay)
+	modal_layer.add_child(overlay)
 
 	var center := CenterContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -16027,12 +17396,19 @@ func _doctrine_overlay(veteran_name: String, card_data: Dictionary,
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(sub)
 
+	var writ := _rung_overlay_writ(card_data)
+	col.add_child(writ)
+
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 18)
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	col.add_child(row)
 
-	var result := {"kw": ""}
+	var result := {"kw": "", "accent": Color(GameTheme.GILT_BRIGHT)}
+	# ONE-SHOT LATCH: the tiles stay live through the awaited stamp below, so a
+	# second click would re-enter the modal's own teardown. Lambdas capture
+	# primitives by value, hence the array.
+	var acted := [false]
 	for o in options:
 		var opt: Dictionary = o
 		var disp := String(KeywordEffects.KEYWORDS.get(opt.kw, {}) \
@@ -16045,13 +17421,23 @@ func _doctrine_overlay(veteran_name: String, card_data: Dictionary,
 		tile.custom_minimum_size = Vector2(262, 170)
 		tile.size_flags_vertical = Control.SIZE_FILL
 		tile.get_node("Click").pressed.connect(func() -> void:
+			if acted[0]:
+				return
+			acted[0] = true
+			result["accent"] = accent
 			result["kw"] = String(opt.kw)
-			overlay.queue_free()
 		)
 		row.add_child(tile)
 
 	while result["kw"] == "" and is_instance_valid(overlay):
 		await get_tree().process_frame
+	# The modal no longer vanishes on the click: the lesson is written onto the
+	# veteran's writ first, and THEN the screen closes.
+	if is_instance_valid(overlay):
+		await _rung_overlay_writ_strike(overlay, writ,
+			String(result["kw"]), result["accent"])
+	if is_instance_valid(modal_layer):
+		modal_layer.queue_free()
 	return String(result["kw"])
 
 
@@ -16063,25 +17449,27 @@ func _doctrine_overlay(veteran_name: String, card_data: Dictionary,
 ## docs/COMBAT_SHAPE_PASS_20260727.md). One, once, in the round it is earned.
 const INITIATIVE_COIN_COMMAND: int = 1
 
-## Extra bodies the hold commits when the player takes the field. They go to
-## RESERVE, never the front line: the front-row ceiling in _deal_opening_muster
-## (LANES_PER_ROW - 1) exists so a hold can bring a wall but not a lid, and a
-## price that seals the last lane would not be a price, it would be a wall.
-const INITIATIVE_FIELD_RESERVES: int = 1
-
-## The two prices. Copy is written as the CONSEQUENCE, not the rule — "they will
-## bring one more" rather than "+1 enemy reserve" — which is the register the
+## The two prices. Copy is written as the CONSEQUENCE, not the rule — "they form
+## up to answer you" rather than "+reactive placement" — which is the register the
 ## surrounding modals (WAR_SCHOOLS, the despatch) already use.
+##
+## WHICH OPTION CARRIES THE COIN WAS WRONG AT FIRST, and the reason is worth
+## keeping. The Coin originally paid for LETTING THEM COME, on the theory that
+## ceding the first move was the sacrifice. It is not: round 1 has no clash (the
+## muster delay), so moving first buys no tempo, and whoever commits SECOND gets
+## the last word. Letting them come was already the stronger line, and it was
+## being paid a bonus on top — a dominated choice wearing a decision's clothes.
+## The Coin now rides TAKE THE FIELD, the option that genuinely gives something up.
 const INITIATIVE_OPTIONS := [
-	{"id": "field", "label": "TAKE THE FIELD",
+	{"id": "field", "label": "GO FIRST",
 		"accent": Color(1.0, 0.85, 0.35),
-		"desc": "You move first, onto open ground. Warned, they will bring one"
-			+ " more body up behind their line.",
+		"desc": "You place onto an empty field and get 1 extra Command this round."
+			+ " They then place in answer to whatever you set down.",
 		"icon": "res://assets/icons/keywords/swift.svg"},
-	{"id": "form_up", "label": "LET THEM COME",
+	{"id": "form_up", "label": "GO SECOND",
 		"accent": Color(0.65, 0.85, 1.0),
-		"desc": "They take the field first, at their own strength. You see the"
-			+ " whole line and its orders, and open on one extra Command.",
+		"desc": "They place first, blind to your line. You see their whole"
+			+ " formation and its orders before you spend anything.",
 		"icon": "res://assets/icons/keywords/guardian.svg"},
 ]
 
@@ -16114,23 +17502,37 @@ func _offer_initiative() -> void:
 	if DisplayServer.get_name() == "headless":
 		_initiative = "field"
 		return
+	# THE MODAL MUST ACTUALLY STOP THE GAME (found by rendering it, 2026-07-30 —
+	# the shot showed END TURN and the whole hand at full brightness, live,
+	# alongside a modal that is supposed to be blocking). The overlay's own
+	# mouse_filter cannot protect them: the HUD is a CanvasLayer and draws ABOVE a
+	# plain child of Combat, so it is neither dimmed nor covered. Freeze the same
+	# pair _run_opening_muster freezes, by hand, around the await.
+	var was_interactive: bool = Card2D.board_interactive
+	Card2D.board_interactive = false
+	if _end_turn_btn != null:
+		_end_turn_btn.disabled = true
 	var pick := await _initiative_overlay()
+	Card2D.board_interactive = was_interactive
+	if _end_turn_btn != null:
+		_end_turn_btn.disabled = false
 	_initiative = pick if pick != "" else "field"
-	if _initiative != "form_up":
+	if _initiative == "form_up":
+		# They form up first, blind. This is the second path _place_starting_board
+		# always banked and TAKE THE FIELD made unreachable — it is not new code,
+		# it is the other branch becoming choosable again. No Coin: the last word
+		# IS the reward for this line.
+		await _run_opening_muster()
 		return
-	# They form up first. This is the second path _place_starting_board always
-	# banked and TAKE THE FIELD made unreachable — it is not new code, it is the
-	# other branch becoming choosable again.
-	await _run_opening_muster()
-	# THE COIN. One extra Command, once, paid the moment initiative is ceded, so
-	# the compensation lands in the round the player gave up. It is scoped to this
-	# round by construction: _start_round recomputes player_mana from
-	# base_max_mana plus banked carryover, so the Coin cannot compound.
+	# THE COIN, paid for taking the field — the option that gives up the last word
+	# and is answered by a reactive muster. It is scoped to this round by
+	# construction: _start_round ASSIGNS player_mana from base_max_mana plus banked
+	# carryover (Combat.gd:3754), so the Coin cannot compound.
 	player_mana += INITIATIVE_COIN_COMMAND
 	_pulse_mana_label(INITIATIVE_COIN_COMMAND, true)
 	_update_hud()
-	_log_event("[color=#e8b547]THE COIN[/color] — one extra Command"
-		+ " for letting them take the field.")
+	_log_event("[color=#e8b547]THE COIN[/color] — 1 extra Command"
+		+ " for going first this round.")
 
 
 ## The two prices, side by side, worded as consequences rather than as rules.
@@ -16140,7 +17542,15 @@ func _initiative_overlay() -> String:
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	overlay.z_index = 200
-	add_child(overlay)
+	# Parented to the HUD CanvasLayer, not to Combat. A plain child of Combat
+	# draws BENEATH the HUD layer, so the scrim dimmed the battlefield and left
+	# the hand, the Command seal and END TURN sitting over it at full brightness —
+	# a blocking modal that visibly did not block. Falls back to `self` headless,
+	# where there is no HUD layer and nothing renders anyway.
+	if _hud_layer != null:
+		_hud_layer.add_child(overlay)
+	else:
+		add_child(overlay)
 
 	var center := CenterContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -16162,7 +17572,7 @@ func _initiative_overlay() -> String:
 	col.add_child(title)
 
 	var sub := Label.new()
-	sub.text = "Neither line has formed. Who moves first?"
+	sub.text = "Neither side has placed. Who goes first?"
 	sub.add_theme_font_size_override("font_size", 19)
 	sub.add_theme_color_override("font_color", GameTheme.IVORY)
 	sub.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
@@ -16197,13 +17607,21 @@ func _initiative_overlay() -> String:
 ## The school-choice modal — same scaffold as the Adaptable overlay, but the
 ## buttons are the Pensioned Master's three schools and there is no dismiss:
 ## ten kills bought this choice, it will not be lost to a stray click.
-func _war_school_overlay(veteran_name: String, schools: Array) -> String:
+func _war_school_overlay(veteran_name: String, card_data: Dictionary,
+		schools: Array) -> String:
+	# ON ITS OWN CANVAS LAYER, like the pile viewer and the glossary (both 100).
+	# Parented to `self` the scrim sits on the base canvas at layer 0, so the HUD
+	# (12) and the hand (20) drew straight OVER a modal that was blocking input —
+	# the muster chips crossed the veteran's writ and the enemy's taunt bubble ran
+	# through the title. z_index cannot reach across a CanvasLayer.
+	var modal_layer := CanvasLayer.new()
+	modal_layer.layer = 100
+	add_child(modal_layer)
 	var overlay := ColorRect.new()
 	overlay.color = Color(0.05, 0.03, 0.04, 0.78)
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
-	overlay.z_index = 200
-	add_child(overlay)
+	modal_layer.add_child(overlay)
 
 	var center := CenterContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -16215,7 +17633,14 @@ func _war_school_overlay(veteran_name: String, schools: Array) -> String:
 	center.add_child(col)
 
 	var title := Label.new()
-	title.text = "%s — 10 KILLS" % veteran_name.to_upper()
+	# READ THE RUNG, NEVER PRINT IT. This said "10 KILLS" as a literal, and the
+	# war-school rung moved to 3 on 2026-07-30 — so the modal that announces the
+	# reward stated a threshold the game had not used for days, while the map's
+	# Company ledger said "3 to a name and a war school" a screen away. Two
+	# numbers for one rule, and the wrong one on the thing being read. The
+	# doctrine twin already derives its number; this is the same call, and the
+	# Drill Book shave rides it for free.
+	title.text = "%s — %d KILLS" % [veteran_name.to_upper(), RunState.veteran_school_kills()]
 	title.add_theme_font_override("font", GameTheme.font_display)
 	title.add_theme_font_size_override("font_size", 34)
 	title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.30))
@@ -16233,12 +17658,17 @@ func _war_school_overlay(veteran_name: String, schools: Array) -> String:
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(sub)
 
+	var writ := _rung_overlay_writ(card_data)
+	col.add_child(writ)
+
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 18)
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	col.add_child(row)
 
-	var result := {"kw": ""}
+	var result := {"kw": "", "accent": Color(GameTheme.GILT_BRIGHT)}
+	# One-shot latch — see the doctrine modal's twin for why.
+	var acted := [false]
 	for s in schools:
 		var school: Dictionary = s
 		var disp := String(KeywordEffects.KEYWORDS.get(school.kw, {}) \
@@ -16251,14 +17681,22 @@ func _war_school_overlay(veteran_name: String, schools: Array) -> String:
 		tile.custom_minimum_size = Vector2(262, 170)
 		tile.size_flags_vertical = Control.SIZE_FILL
 		tile.get_node("Click").pressed.connect(func():
+			if acted[0]:
+				return
+			acted[0] = true
+			result["accent"] = accent
 			result["kw"] = String(school.kw)
-			overlay.queue_free()
 		)
 		row.add_child(tile)
 
 	while result["kw"] == "" and is_instance_valid(overlay):
 		await get_tree().process_frame
-	return result["kw"]
+	if is_instance_valid(overlay):
+		await _rung_overlay_writ_strike(overlay, writ,
+			String(result["kw"]), result["accent"])
+	if is_instance_valid(modal_layer):
+		modal_layer.queue_free()
+	return String(result["kw"])
 
 
 func _build_discover_overlay(card_ids: Array, title_text: String = "Discover",
@@ -16423,7 +17861,7 @@ func _debug_auto_win() -> void:
 	_check_game_over()
 
 
-func _dim_war_furniture() -> void:
+func _dim_war_furniture(won: bool = false) -> void:
 	# ★13 (screenshot-caught 2026-07-17, in _shot_killing_blow's stamp frame):
 	# the verdict used to stamp down over STALE PROMISES — the INCOMING chip
 	# and the NEXT-ROUND wave chip kept forecasting a round that will never
@@ -16434,6 +17872,12 @@ func _dim_war_furniture() -> void:
 	# faded to alpha 0 here would come back invisible in game 2.
 	# The forecast information is dead by definition at GAME_OVER, so Reduce
 	# Motion snapping these hidden (fade_exit's contract) is correct.
+	#
+	# `won` exists for ONE thing and it is not a sweep: the foe's standing rule is
+	# not stale furniture, it is his LAW, and a law is not cleared away — it is
+	# struck out, and only by winning. See _strike_the_edict.
+	if won:
+		_strike_the_edict()
 	for chip in [_incoming_dmg_chip, _wave_chip, _reserves_chip]:
 		if chip != null and is_instance_valid(chip) and chip.visible:
 			Motion.fade_exit(chip)
@@ -16551,7 +17995,7 @@ func _check_game_over() -> void:
 		# Record what killed the player for the GameOver recap. Encounter name
 		# is the most useful unit of "killed by" — players remember "I died
 		# to the Pyre Cult," not "I died to Burning Martyr's on-death."
-		RunState.cause_of_death = _encounter_name if _encounter_name != "" else "an unknown foe"
+		RunState.cause_of_death = _encounter_name if _encounter_name != "" else "an unknown enemy"
 		_presence_say(_pick_bark("slay"), Color(0.95, 0.85, 0.5))   # the foe's parting line
 		_show_battle_verdict(false)
 		if AudioBank != null:
@@ -16573,7 +18017,8 @@ func _check_game_over() -> void:
 			"player_hp": player_hp, "enemy_hp": 0})
 		_stop_low_hp_dread()  # JUICE: clear dread overlay on victory
 		_play_killing_blow_moment(true)  # ★8: the world stops for the blow that ended it
-		_dim_war_furniture()  # ★13: no stale next-round forecasts under the verdict
+		# won = true: this is the ONE path that voids the foe's standing rule.
+		_dim_war_furniture(true)  # ★13: no stale next-round forecasts under the verdict
 		_dbgp("[PACING] FIGHT END | %s | VICTORY | ended R%d | P_HP:%d E_HP:%d | intents_shown:%s" % [_encounter_name, round_number, player_hp, enemy_hp, str(_pacing_any_intent_shown)])
 		# The banner + victory sting are DEFERRED ~0.45s (scheduled below, once
 		# the gold line is known) so the killing blow's death burst and shake get
@@ -16647,6 +18092,7 @@ func _check_game_over() -> void:
 			RunState.gain_gold(gold_won)
 		if gold_won + wagon_payout > 0:
 			victory_banner = "VICTORY!  +%d gold" % (gold_won + wagon_payout)
+		var potion_won_name := ""
 		# Spoils potion — StS-style drop with a pity ladder: 40% base, +10% per
 		# dry fight, reset on a drop. Rolled only when a slot is free (no dead
 		# rewards; can_add_potion also respects the Temperance Vow) and never
@@ -16655,6 +18101,7 @@ func _check_game_over() -> void:
 			if _combat_ops.chance_percent(40 + RunState.potion_drop_misses * 10):
 				var drop_pid: String = PotionDB.roll_random_potion()
 				RunState.add_potion(drop_pid)
+				potion_won_name = String(PotionDB.get_potion(drop_pid).get("name", drop_pid))
 				RunState.potion_drop_misses = 0
 				_show_info("Spoils: %s" % PotionDB.get_potion(drop_pid).get("name", drop_pid))
 			else:
@@ -16669,7 +18116,7 @@ func _check_game_over() -> void:
 			var mut_bonus: int = int(MutatorDB.get_mutator(_mutator_id).get("gold_bonus", 0))
 			if mut_bonus > 0:
 				RunState.gain_gold(mut_bonus)
-				_show_info("★ Mutator bonus: +%d gold" % mut_bonus)
+				_show_info("★ Battle Rule bonus: +%d gold" % mut_bonus)
 			RunState.current_mutator_id = ""
 		# Cursed Key: the curse lands on victory (used to ride the Reward roll).
 		if RunState.has_downside("curse_on_reward"):
@@ -16678,7 +18125,13 @@ func _check_game_over() -> void:
 		# The held beat: banner text + sting land together after the final death
 		# has breathed. Well inside the earliest scene fade (elite, 1.0s).
 		get_tree().create_timer(0.45).timeout.connect(func():
-			_show_battle_verdict(true, gold_won)
+			var settlement_line := conquest_line
+			if potion_won_name != "":
+				if settlement_line != "":
+					settlement_line += "  /  "
+				settlement_line += "Spoils: %s" % potion_won_name
+			_show_battle_verdict(
+				true, gold_won, true, false, settlement_line)
 			if is_instance_valid(_phase_label):
 				_phase_label.text = victory_banner
 				_phase_label.add_theme_color_override("font_color", Color(1.0, 0.82, 0.34))
@@ -16732,6 +18185,23 @@ func _assign_intents() -> void:
 		if _is_fortification(card):
 			card.state.current_intent = ""
 			_update_intent_display(card, "")
+			continue
+		# A CHARGE COUNTDOWN IS NOT AN INTENT TO OVERWRITE. The badge is rendered
+		# THROUGH the intent label (_refresh_structure_charge_label), and this sweep
+		# runs AFTER the start-of-round passive tick that advances it (_start_round:
+		# _dispatch_passive_start_of_round, then _assign_intents) — so stamping a
+		# structure "ATK" hid the counter for the whole player turn. For cauldron_brew
+		# (THE CRONE) and altar_sacrifice, whose feed is start-of-round only, the badge
+		# was NEVER on screen while the player could act, while the passive text told
+		# them to race it. Re-rendering here also writes current_intent, so a winding-up
+		# engine reads as wearing an order (see _wears_an_order, which names CHARGE as
+		# the archetypal counterable wind-up); an orphaned/spent structure posts "" and
+		# correctly wears nothing.
+		if card.has_keyword("structure"):
+			var charge_max: int = int(card.card_data.get("charge_max", 0))
+			card.state.current_intent = "" if charge_max <= 0 else \
+				"CHARGE %d/%d" % [int(card.card_data.get("charge_current", 0)), charge_max]
+			_refresh_structure_charge_label(card)
 			continue
 		if intents.is_empty():
 			card.state.current_intent = "ATK"
@@ -16814,7 +18284,10 @@ func _update_intent_display(card: Control, intent: String) -> void:
 		card.add_child(lbl)
 		card.set_meta("intent_label", lbl)
 	var color := Color(0.95, 0.40, 0.30)  # default ATK red
-	match intent:
+	# Key the colour off the FIRST WORD: the structure countdown arrives as
+	# "CHARGE n/max", so matching the whole string fell through to the default and
+	# painted every wind-up the same red as an ordinary incoming attack.
+	match intent.get_slice(" ", 0):
 		"CHARGE": color = Color(1.0, 0.45, 0.20)
 		"GUARD": color = Color(0.50, 0.78, 1.0)
 		"RALLY": color = Color(1.0, 0.88, 0.30)
@@ -17678,7 +19151,7 @@ func _sp_setup_fight_state() -> void:
 	_encounter_id = ""
 	_encounter_faction = ""
 	_wave_schedule_active = false
-	_encounter_name = String(_sp_data.get("name", "A Named Action"))
+	_encounter_name = String(_sp_data.get("name", "A Special Battle"))
 	_encounter_passive = ""
 	# The GROUND is the fight's standing rule, stated in the despatch the player
 	# must read and dismiss before round 1. It does NOT ride the encounter rule
@@ -17804,9 +19277,9 @@ func _sp_end_of_round_revive() -> void:
 		risen += 1
 	_sp_revive_queue.clear()
 	if risen > 0:
-		_show_combat_banner("THE EAGLE IS STILL UP",
-			"%d of the dead get back in line" % risen, Color(0.72, 0.62, 0.86))
-		_log_event("The standard holds. %d of the fallen stand back up." % risen,
+		_show_combat_banner("THE BEARER STILL STANDS",
+			"%d of the dead get back up" % risen, Color(0.72, 0.62, 0.86))
+		_log_event("The Bearer still stands — %d of the fallen get back up." % risen,
 			{}, 1)
 		if AudioBank != null:
 			AudioBank.play_sfx("creature_death", 0.0, 0.0, 0.7)
@@ -17870,7 +19343,7 @@ func _sp_show_despatch() -> void:
 	pad.add_child(col)
 
 	# ── Eyebrow: what KIND of page this is, before the name of it ──
-	var eyebrow := _make_text_label("A NAMED ACTION", 15, Color(0.78, 0.64, 0.38))
+	var eyebrow := _make_text_label("SPECIAL BATTLE", 15, Color(0.78, 0.64, 0.38))
 	eyebrow.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(eyebrow)
 
@@ -17899,13 +19372,13 @@ func _sp_show_despatch() -> void:
 	var ground: Dictionary = _sp_data.get("ground", {})
 	if String(ground.get("text", "")) != "":
 		col.add_child(_sp_brief_block(
-			"THE GROUND · %s" % String(ground.get("name", "")).to_upper(),
+			"SPECIAL RULE · %s" % String(ground.get("name", "")).to_upper(),
 			String(ground.get("text", "")),
 			Color(0.62, 0.26, 0.17, 0.95), Color(1.0, 0.74, 0.52)))
 
 	# ── THE ORDER — gilt, because it is yours. ──
 	col.add_child(_sp_brief_block(
-		"THE ORDER",
+		"YOUR OBJECTIVE",
 		String(_sp_objective.get("label", "")),
 		GameTheme.GILT_BRIGHT, Color(1.0, 0.93, 0.74)))
 
@@ -17913,14 +19386,14 @@ func _sp_show_despatch() -> void:
 	var trophy_id := String(_sp_data.get("trophy", {}).get("relic", ""))
 	var stake_bits: Array[String] = []
 	if trophy_id != "":
-		stake_bits.append("Carry the field: %s" \
+		stake_bits.append("Win the fight: %s" \
 			% String(RelicDB.get_relic(trophy_id).get("name", trophy_id)))
 	var purse: int = int(_sp_data.get("gold", 0))
 	if purse > 0:
 		stake_bits.append("%d gold" % purse)
 	var toll: int = int(_sp_data.get("toll", 0))
 	if toll > 0:
-		stake_bits.append("Fail the order and the army withdraws — %d HP" % toll)
+		stake_bits.append("Miss the objective and you withdraw — lose %d HP" % toll)
 	if not stake_bits.is_empty():
 		col.add_child(_sp_rule_line(Color(0.55, 0.46, 0.30), 0.55))
 		var stakes := _make_text_label("  ·  ".join(stake_bits), 16,
@@ -17931,6 +19404,10 @@ func _sp_show_despatch() -> void:
 
 	var take := GameTheme.make_themed_button("START THE FIGHT",
 		Color(0.28, 0.17, 0.09), Vector2(260, 50), 22)
+	# Named so tools/_shot_setpiece.gd can find it without matching its LABEL.
+	# It used to hunt for text beginning "TAKE"; the copy moved on and the
+	# harness silently pressed nothing for weeks.
+	take.name = "SetPieceStartBtn"
 	take.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	col.add_child(take)
 	GameTheme.hover_lift(take)
@@ -18038,7 +19515,7 @@ func _sp_build_plaque(stack: Control) -> void:
 	# Gilt-rimmed and gilt-lettered: the order is YOURS. The rule plaque below
 	# is oxblood because it is the foe's law — the two plaques must never be
 	# mistaken for each other at a glance.
-	var head := _make_text_label("STANDING ORDER", 13, GameTheme.GILT_BRIGHT)
+	var head := _make_text_label("OBJECTIVE", 15, GameTheme.GILT_BRIGHT)
 	head.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
 	head.add_theme_constant_override("outline_size", 3)
 	head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -18107,7 +19584,7 @@ func _sp_progress_text() -> String:
 	var clock: String = ""
 	if _sp_deadline > 0:
 		if left <= 0:
-			clock = "THE TIME IS UP"
+			clock = "OUT OF ROUNDS"
 		elif left == 1:
 			clock = "LAST ROUND"
 		else:
@@ -18117,11 +19594,11 @@ func _sp_progress_text() -> String:
 			return clock
 		"slay_marked":
 			if _sp_mark_broken:
-				return "THE ORDER IS KEPT"
-			return "STILL STANDING · %s" % clock
+				return "OBJECTIVE COMPLETE"
+			return "TARGET ALIVE · %s" % clock
 		"protect":
 			if _sp_ward_lost:
-				return "LOST"
+				return "OBJECTIVE FAILED"
 			var ward_hp: String = ""
 			if _sp_ward != null and is_instance_valid(_sp_ward):
 				ward_hp = "%d HP · " % maxi(0, int(_sp_ward.current_hp))
@@ -18133,8 +19610,8 @@ func _sp_progress_text() -> String:
 		"clear_board":
 			var standing: int = _all_enemy_creatures().size()
 			if _sp_deadline <= 0:
-				return "%d STILL STANDING" % standing
-			return "%d STILL STANDING · %s" % [standing, clock]
+				return "%d ENEMIES LEFT" % standing
+			return "%d ENEMIES LEFT · %s" % [standing, clock]
 	return clock
 
 
@@ -18214,10 +19691,10 @@ func _sp_award() -> void:
 	var already: bool = RunState.setpieces_carried.has(_sp_id)
 	if not already:
 		RunState.setpieces_carried.append(_sp_id)
-	_show_combat_banner("THE FIELD IS CARRIED",
-		String(_sp_objective.get("short", "THE ORDER IS KEPT")),
+	_show_combat_banner("BATTLE WON",
+		String(_sp_objective.get("short", "OBJECTIVE COMPLETE")),
 		Color(1.0, 0.82, 0.34))
-	_log_event("The order is kept: %s" % String(_sp_objective.get("label", "")),
+	_log_event("Objective complete: %s" % String(_sp_objective.get("label", "")),
 		{}, 0)
 	# The trophy is granted ON THE FIELD, not on a reward screen — a named
 	# action pays where it was won. Guarded on `already` so a save resumed
@@ -18258,14 +19735,17 @@ func _sp_withdraw() -> void:
 		"result": "withdraw", "round": round_number,
 		"player_hp": player_hp, "enemy_hp": enemy_hp})
 	_stop_low_hp_dread()
+	# NOT a win, deliberately: a withdrawal pays the toll and marches on, so the
+	# ground's rule is still posted when you leave it. Same answer as a defeat —
+	# only breaking the foe strikes his law out. See _strike_the_edict.
 	_dim_war_furniture()
 	if is_instance_valid(_phase_label):
 		_phase_label.text = "WITHDRAWN"
 		_phase_label.add_theme_color_override("font_color", Color(0.82, 0.68, 0.42))
-	_show_combat_banner("THE ARMY WITHDRAWS",
+	_show_combat_banner("YOU WITHDRAW",
 		"%s — the toll is %d HP" % [String(_sp_objective.get("short", "")), toll],
 		Color(0.72, 0.44, 0.24))
-	_log_event("The order fails. The army breaks off and pays %d HP." % toll,
+	_log_event("Objective failed. You withdraw and lose %d HP." % toll,
 		{}, 1)
 	var lost_line := String(_sp_data.get("lost", ""))
 	if lost_line != "":
@@ -18450,7 +19930,7 @@ func _siege_build_plaque(stack: Control) -> void:
 	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	frame.add_child(col)
 
-	var head := _make_text_label("STANDING ORDER", 15, GameTheme.GILT_BRIGHT)
+	var head := _make_text_label("OBJECTIVE", 15, GameTheme.GILT_BRIGHT)
 	head.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
 	head.add_theme_constant_override("outline_size", 3)
 	head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -19301,6 +20781,11 @@ func _pick_empty_for_summon(is_enemy: bool, preferred_row: int) -> Dictionary:
 		var arr = _row_array(is_enemy, row)
 		var empties: Array[int] = []
 		for i in range(LANES_PER_ROW):
+			# Salt binds the enemy only, so it is checked per side here rather
+			# than blanket — a reroute must not land the foe back on salted
+			# ground, but the player's own summons ignore it entirely.
+			if is_enemy and _lane_is_salted(i):
+				continue
 			if arr[i] == null and not _sp_lane_closed(i):
 				empties.append(i)
 		if not empties.is_empty():
@@ -19636,8 +21121,10 @@ func _build_board() -> void:
 	_lane_aftermath_marks.draw_ground = false
 	_lane_aftermath_marks.set_anchors_preset(Control.PRESET_FULL_RECT)
 	board_zone.add_child(_lane_aftermath_marks)
-	# Solo clash focus sits above the field but below the HUD/hand CanvasLayers.
-	# It inks down every column except the one currently resolving.
+	# The clash focus sits above the field but below the HUD/hand CanvasLayers.
+	# It inks down every column except the one currently resolving. Built in every
+	# mode — the host has used it in skirmish since 2026-07-29 and the client drives
+	# it off the clash log since 2026-08-04.
 	_clash_lane_focus = CLASH_LANE_FOCUS.new()
 	_clash_lane_focus.name = "ClashLaneFocus"
 	_clash_lane_focus.z_index = 8
@@ -19986,7 +21473,7 @@ const PRESENCE_BARKS := {
 	"the_devil": {
 		"enter": "I have read your whole little ledger. Shall we settle up?",
 		"hurt": ["A fair price.", "You burn so brightly when you're afraid."],
-		"phase": "DID YOU THINK THIS WAS THE BARGAIN?",
+		"phase": "THIS WAS NEVER THE BARGAIN.",
 		"slay": "Sign here.",
 	},
 	"wolf_pack": {
@@ -20004,7 +21491,7 @@ const PRESENCE_BARKS := {
 	"necromancer_tower": {
 		"enter": "Death is only a door I keep propping back open.",
 		"hurt": ["You free them, nothing more.", "Kill it. Then watch."],
-		"phase": "Rise. RISE.",
+		"phase": "Rise. Rise now.",
 		"slay": "Welcome to the choir.",
 	},
 
@@ -20295,7 +21782,7 @@ func _make_lane_slot(is_enemy: bool, lane_idx: int, row: int = ROW_FRONT) -> Con
 	contact.offset_right = 92
 	contact.offset_top = -34
 	contact.offset_bottom = 14
-	contact.modulate = Color(1, 1, 1, 0.9)
+	contact.modulate = Color(1, 1, 1, CONTACT_SHADOW_A)
 	slot.add_child(contact)
 
 	# Centering wrapper for the played card.
@@ -20368,7 +21855,8 @@ func _restore_slot_label(_slot: Control, _lane_idx: int) -> void:
 
 
 func _place_card_in_slot(card: Control, lane_idx: int, row: int = ROW_FRONT,
-		from_global: Vector2 = Vector2.ZERO, with_arc: bool = false) -> void:
+		from_global: Vector2 = Vector2.ZERO, with_arc: bool = false,
+		land_sfx: String = "") -> void:
 	_row_array(false, row)[lane_idx] = card
 	card.current_row = row
 	card.current_lane = lane_idx
@@ -20403,29 +21891,143 @@ func _place_card_in_slot(card: Control, lane_idx: int, row: int = ROW_FRONT,
 		if not card.damaged.is_connected(_on_friendly_damaged.bind(card)):
 			card.damaged.connect(_on_friendly_damaged.bind(card))
 	card.update_floop_display()
-	_play_landing_pop(card, from_global, with_arc)
-	# A new creature changes adjacency — re-tally so it gets/grants the buff and
-	# the numerals (its own + its neighbours') update with a "+N ATK" pop.
+	# ORDER MATTERS HERE, AND IT USED TO BE BACKWARDS (2026-08-03). The adjacency
+	# re-tally is what makes the neighbours' wax seals float their "+N ATK", and it
+	# ran AFTER the landing coroutine was kicked off — which is a race the arrival
+	# always LOSES, because _play_landing_pop yields a frame before it touches the
+	# card at all (the slot's CenterContainer needs that frame to place it). So the
+	# board reacted to a body that had not landed yet. State first, presentation
+	# last: the refresh is synchronous, so hoisting it costs nothing and guarantees
+	# the arrival is the last word spoken about this placement.
 	_refresh_adjacency_buffs()
+	_play_landing_pop(card, from_global, with_arc, land_sfx)
+
+
+# ── The flight is MEASURED, not fixed (2026-08-03) ─────────────────────
+# A placement used to fly for a flat 0.34 s over a flat 72 px apex no matter how
+# far it actually travelled — a card seated one slot-width from where the player
+# dropped it took exactly as long, and rose exactly as high, as a reinforcement
+# dealt from off the top of the screen. That flatness is also precisely why the
+# arc was switched OFF for the player's own play: over the ~40 px between a drop
+# point and its slot's centre, a 72 px lift is not an arc, it is a loop back over
+# the gesture the player just made. Derived from the real travel it degrades
+# correctly at BOTH ends, which is what lets the player's own play take the same
+# path as everything else.
+const ARC_FULL_TRAVEL := 420.0   # travel at which the arc is at full size
+const ARC_MAX_LIFT := 78.0       # apex above the chord at full reach
+const ARC_MIN_TIME := 0.12       # a seat, not a flight
+const ARC_MAX_TIME := 0.38       # the long deal, from off-screen
+# How long Card2D.play_wax_press squashes before the seal bites. The ground ring
+# belongs on that BITE, not on the frame the press starts — see
+# _play_slot_claim_vfx. The press wraps this in Motion.time(), so every READ of
+# it here must too: unscaled, the ring fired at a fixed 70 ms while the bite it
+# is timed against moved with the animation-speed setting, so at Instant the
+# halo landed after the press had already released. Wrap at the call site — a
+# `const` cannot call Motion.time() at initialisation.
+#
+# ALIASES, not copies (2026-08-03). These used to be a literal 0.07 here and a
+# literal 0.07 in play_wax_press, kept in step by a comment; the turn added a
+# second rung and a second chance to drift, so the numbers now live once, in
+# Card2D beside the tween that spends them. PRESS_CONTACT_TURN is what a card
+# that arrived FORESHORTENED gets — it has to open out of the turn before it can
+# squash, and the ring has to wait for it.
+const PRESS_CONTACT := Card2D.PRESS_BITE
+const PRESS_CONTACT_TURN := Card2D.PRESS_BITE_TURN
+
+# ── The slot's ground shadow, and why the flight has to own it ─────────
+# THE SHADOW USED TO ARRIVE BEFORE THE BODY (fixed 2026-08-03). `_slot_set_card`
+# turns a lane's ContactShadow on the frame the card is COMMITTED to the slot,
+# and `_slot_take_card` is the matching funnel that turns it back off — but
+# `_play_landing_pop` detaches for the flight with a bare `remove_child`, not
+# `_slot_take_card`. So for the whole 0.12–0.38 s flight a 184×48 px ellipse sat
+# in a visibly empty square with nothing above it to cast it. It pre-existed for
+# dealt enemies; switching the player's own play to `with_arc = true` multiplied
+# it across every creature the player fields.
+#
+# The fix pays for a feature on the way past. Every contact shadow in this game
+# is lit from directly overhead, so the pool never has to TRAVEL — it only has
+# to gather under the slot as the body comes down, which is a scale and an alpha
+# on a node that already exists and is already proven to read there. (A shadow
+# sliding under the card across the table was considered and rejected: a dark
+# blot crossing the scorched chart is the ★4 ink-spatter mistake in a new dress —
+# camouflage against a dense warm background.)
+const CONTACT_SHADOW_A := 0.9    # the rest alpha the slot builder paints
+const CONTACT_SHADOW_FAR := 0.55 # the pool's size while the body is still up
+
+
+## The slot's ground shadow, reached from the CELL a card rests in (the cell is
+## the slot's centering child, so the shadow is its sibling). Returns null for a
+## card resting anywhere that isn't a lane slot — mid-flight re-entry parks a
+## card on the HUD layer, and the interrupt case really does come back here with
+## that as its "rest parent".
+func _slot_ground_shadow(cell: Node) -> Control:
+	if cell == null or not is_instance_valid(cell):
+		return null
+	var slot: Node = cell.get_parent()
+	if slot == null or not is_instance_valid(slot):
+		return null
+	return slot.get_node_or_null("ContactShadow") as Control
+
+
+## Fire-and-forget a cue `delay` seconds from now. Exists so the play cue can be
+## OWED by the landing rather than owned by the card: a creature can be eaten by
+## its own on-enter inside its flight, and the sound of it being set down is not
+## something the player should lose because the board answered fast. Captures a
+## String and nothing else — never a node, which is the deferred-lambda trap this
+## file has paid for before.
+func _play_cue_delayed(cue: String, delay: float) -> void:
+	if cue == "" or AudioBank == null:
+		return
+	if delay > 0.0 and is_inside_tree():
+		await get_tree().create_timer(delay).timeout
+	if AudioBank != null:
+		AudioBank.play_sfx(cue)
 
 
 func _play_landing_pop(card: Control, from_global: Vector2 = Vector2.ZERO,
-		with_arc: bool = false) -> void:
+		with_arc: bool = false, land_sfx: String = "") -> void:
 	# Tier 1 card-play motion. When `with_arc` is true, the card flies from
-	# `from_global` (its hand position, captured before remove_child) to its
-	# resting slot via a quadratic Bezier with an upward apex, finishing with a
-	# scale punch. When false, falls back to the squash-only pop used for enemy
-	# placements and repositions where there's no "where it came from" to draw.
-	# Deferred a frame so the slot's CenterContainer has time to lay the card out.
+	# `from_global` (the flight's start CENTRE — the drop point for the player's
+	# own play, a point above the enemy line for a dealt one) to its resting slot
+	# via a quadratic Bezier, finishing with the wax press. When false, falls back
+	# to the squash-only pop used for repositions and effect-spawns where there is
+	# no "where it came from" to draw. Deferred a frame so the slot's
+	# CenterContainer has time to lay the card out.
 	if not is_instance_valid(card):
 		return
+	# The arc is DECORATIVE: the information is the card ending up in the slot, and
+	# it lands either way. The bail lives HERE rather than only at
+	# _place_enemy_card's call site so a new caller cannot reintroduce a third of a
+	# second of await into a headless probe run.
+	if with_arc and (DisplayServer.get_name() == "headless" \
+			or (UserSettings != null and UserSettings.reduce_motion)):
+		with_arc = false
+	# THE ONE-FRAME FLASH AT THE DESTINATION. The flight cannot read where it is
+	# flying TO until the container has placed the card — but that frame RENDERS,
+	# so every arced arrival blinked at its slot and then jumped back to its origin
+	# to fly in. Hide it across the wait. `modulate`, never `visible`: an invisible
+	# Control is skipped by container layout and rest_global would come back wrong.
+	var pre_alpha: float = card.modulate.a
+	if with_arc:
+		card.modulate.a = 0.0
 	await get_tree().process_frame
 	if not is_instance_valid(card):
 		return
+	# THE REST POSE, NOT THE CURRENT POSE (2026-08-03). Everything below is
+	# relative to where this card sits at rest, and reading `card.scale` is only
+	# the same thing while no flight is live. A card CAN be re-landed mid-flight —
+	# an on-enter that redeploys it, a push, a swap all come back through here —
+	# and since the flight now carries the writ's TURN, a mid-flight pose can be a
+	# few percent of the card's width. Settling a body at that "rest" would leave
+	# it permanently invisible on the board. Card2D escrows the truth for the
+	# duration of a flight; ask it first.
 	var rest_scale: Vector2 = card.scale
+	if card is Card2D and card.flight_in_air:
+		rest_scale = card.flight_rest_scale
 	card.pivot_offset = card.size * 0.5
 
 	if with_arc:
+		card.modulate.a = pre_alpha
 		# The card is currently parented inside its slot's CenterContainer, so
 		# tweening local position would fight the container's layout pass. Detach
 		# to the HUD layer for the flight, then re-attach to the cell at landing
@@ -20433,37 +22035,163 @@ func _play_landing_pop(card: Control, from_global: Vector2 = Vector2.ZERO,
 		var rest_global: Vector2 = card.global_position
 		var rest_parent: Node = card.get_parent()
 		var rest_index: int = card.get_index()
+		# The slot lit its ground shadow the moment the card was COMMITTED to the
+		# lane (see CONTACT_SHADOW_A). Nothing is standing there yet, so take it
+		# back down for the flight — this is the half of `_slot_take_card` that the
+		# bare `remove_child` below does not do.
+		var ground: Control = _slot_ground_shadow(rest_parent)
+		if ground != null:
+			ground.visible = false
 		if rest_parent != null:
 			rest_parent.remove_child(card)
 		var flight_parent: Node = _hud_layer if _hud_layer != null else self
 		flight_parent.add_child(card)
-		card.global_position = from_global
-		card.scale = rest_scale * 0.92
-		card.rotation = randf_range(-0.07, 0.07)
+		# `from_global` is a CENTRE; the card's origin sits half a card up-left of
+		# it. The half cannot be folded into the caller: a hand card's position is
+		# captured while it is still hand-sized and it flies compact.
+		var half: Vector2 = card.size * 0.5
+		var start: Vector2 = from_global - half
+		var stop: Vector2 = rest_global
+		card.global_position = start
+		# How much of a flight this actually IS, 0..1. Everything the arc does
+		# scales off this one number, so a short seat can never pick up a long
+		# deal's hang time, apex or spin.
+		var reach: float = clampf(start.distance_to(stop) / ARC_FULL_TRAVEL, 0.0, 1.0)
+		var duration: float = Motion.time(lerpf(ARC_MIN_TIME, ARC_MAX_TIME, reach))
+		var arc_peak_lift: float = ARC_MAX_LIFT * reach
+		card.scale = rest_scale * lerpf(0.985, 0.92, reach)
+		card.rotation = randf_range(-0.07, 0.07) * reach
 		card.z_index = 200
+		var ctrl: Vector2 = start.lerp(stop, 0.5) + Vector2(0, -arc_peak_lift)
 
-		var duration := 0.34
-		var arc_peak_lift := 72.0
-		var control: Vector2 = from_global.lerp(rest_global, 0.5) + Vector2(0, -arc_peak_lift)
-		# Capture by-value so the lambda doesn't see later mutations.
-		var start := from_global
-		var stop := rest_global
-		var ctrl := control
+		# ── THE WRIT TURNS (★5's card half, 2026-08-03) ──────────────────
+		# What the material says an arrival is: a hand card is an illuminated writ
+		# — big, papery, name cartouche, rules text — and a board token is a
+		# compact painting. Playing one is carrying an order to the field and
+		# STAMPING it, and a card being set down on a table foreshortens on its
+		# way: it goes over onto an edge and is pressed flat. So the flight closes
+		# the writ and play_wax_press opens it — ONE gesture across the two beats
+		# that already exist, not a flip animation stacked on top of them.
+		#
+		# THIS IS WHY IT IS SAFE, AND IT IS THE WHOLE REASON THE FEATURE WAS
+		# BLOCKED. `scale` has exactly one writer here, the same single tween
+		# below that was already writing it — the turn is a change of that tween's
+		# END VALUE, not a second tween. The press then owns `scale` outright from
+		# the moment the flight's tween has run its full duration and been
+		# awaited, so the two windows are complementary by construction rather
+		# than by timing. (The other half of the old blocker is gone too: for the
+		# whole flight the card is parented to _hud_layer, so no CenterContainer
+		# is re-fitting it — a container sort resets a child Control's scale and
+		# rotation to identity, which is what made the earlier scale-based
+		# hand→board morph unbuildable.)
+		#
+		# DEPTH RIDES `reach`, exactly like the apex, the hang time and the spin
+		# above it — and it has to, on arithmetic. A drop right on the slot is a
+		# ~0.13 s seat; a 90° turn inside 0.13 s is eight frames and reads as a
+		# glitch. At reach 0 the card only TIPS (cos 45° of its width); full
+		# edge-on is spent on the long deals that have 0.3 s+ to spend it. No
+		# threshold, because a hard gate would make one gesture into two different
+		# animations either side of an invisible line.
+		#
+		# X only: a turning card foreshortens, it doesn't shrink (Motion's flip
+		# verbs already say so). It also keeps the two axes doing separate jobs —
+		# X is the turn, Y is the press's squash — so neither reads as the other.
+		var turn_face: float = Motion.turn_face(reach)
+		var landed_scale := Vector2(rest_scale.x * turn_face, rest_scale.y * 1.05)
+		# The press has to open the card back out of however far it turned, so its
+		# bite is scaled off the same number. One value, used twice below, so the
+		# ground ring cannot come off the bite it is timed against.
+		var press_bite: float = lerpf(PRESS_CONTACT, PRESS_CONTACT_TURN, reach)
+		# The escrow: from here until the landing, `card.scale` is a POSE, not a
+		# rest. A re-entrant landing must not mistake one for the other.
+		if card is Card2D:
+			card.flight_rest_scale = rest_scale
+			card.flight_in_air = true
+
+		# THE SHADOW GATHERS AS THE BODY COMES DOWN. Held off for the first part
+		# of the flight (for a long deal the card is nowhere near this slot yet,
+		# so a pool there would be a shadow cast by nothing), then it spreads and
+		# darkens into the rest pose the slot builder painted. It finishes at 0.90
+		# of the flight rather than exactly at the landing on purpose:
+		# _play_slot_claim_vfx CAPTURES this node's live alpha as the value to
+		# settle back to, so the rise must be provably over before the claim can
+		# read it — one writer at a time, with a frame of daylight between them.
+		# Values are constants, never captured, so a second flight into the same
+		# lane re-poses from a known state instead of compounding a partial one.
+		if ground != null:
+			ground.pivot_offset = ground.size * 0.5
+			ground.scale = Vector2(CONTACT_SHADOW_FAR, CONTACT_SHADOW_FAR)
+			ground.modulate.a = 0.0
+			var gtw := ground.create_tween()
+			gtw.tween_interval(duration * 0.45)
+			gtw.tween_callback(func():
+				if is_instance_valid(ground):
+					ground.visible = true)
+			gtw.tween_property(ground, "modulate:a", CONTACT_SHADOW_A,
+				duration * 0.45).set_ease(Tween.EASE_OUT)
+			gtw.parallel().tween_property(ground, "scale", Vector2.ONE,
+				duration * 0.45).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 		var tw := card.create_tween().set_parallel(true)
+		# EASE_IN_OUT, not the flat EASE_OUT this shipped with: the card gathers
+		# itself out of the hand and DECELERATES into the slot, which is the
+		# anticipation/settle pair a pure ease-out has no room for. It is also the
+		# easing _client_animate_own_play's skirmish ghost already used, so solo and
+		# skirmish finally describe the same gesture.
 		tw.tween_method(func(t: float):
 			if not is_instance_valid(card):
 				return
 			var p1 := start.lerp(ctrl, t)
 			var p2 := ctrl.lerp(stop, t)
 			card.global_position = p1.lerp(p2, t)
-		, 0.0, 1.0, duration).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_QUAD)
+		, 0.0, 1.0, duration).set_ease(Tween.EASE_IN_OUT).set_trans(Tween.TRANS_QUAD)
 		tw.tween_property(card, "rotation", 0.0, duration).set_ease(Tween.EASE_OUT)
-		tw.tween_property(card, "scale", rest_scale * 1.05, duration).set_ease(Tween.EASE_OUT)
+		# SINE-in, not the QUAD-out the pose tween used before the turn. Ease-out
+		# would spend the close in the first few frames and then hold the card
+		# edge-on for the rest of the flight, which is a card that VANISHED and
+		# then landed. Ease-in keeps it readable across the arc and collapses it
+		# at the end, so the thin moment is a moment — and it hands over to the
+		# press's BACK-out release, which is the same in/out pair the arc's own
+		# position tween uses.
+		tw.tween_property(card, "scale", landed_scale, duration) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
 
-		await tw.finished
+		# A REAL TIMER, never `tw.finished` (the same call the net fly-in ghost
+		# makes, for the same reason): the tween is bound to the CARD, and a card
+		# can die inside its own flight — an on-enter that eats it, a Doom that
+		# expires, a sacrifice cost paid on arrival. A killed tween never emits
+		# `finished`, so awaiting the signal parks this coroutine forever holding a
+		# freed node. `duration` is already animation-speed scaled, so this must be
+		# a bare timer and not _short_pause, which would scale it a second time.
+		await get_tree().create_timer(duration).timeout
+		# ── THE CUE DESCRIBES THE STAMP, NOT THE RELEASE (2026-08-03) ────
+		# "card_play" is the sound of a card meeting a table, and it was fired the
+		# frame the card LEFT THE HAND — fine while the play teleported into its
+		# slot (~16 ms), a lie once the arc came back (136–396 ms of a card audibly
+		# landing while it is still in the air, squarely inside the forbidden
+		# 100–500 ms band). It is the same single cue MOVED, never a second one:
+		# the caller that owned it hands it down as `land_sfx` rather than playing
+		# it itself, so exactly the same events make a sound as before — an enemy
+		# deal-in still arrives silent, because it always has. Scheduled here,
+		# ahead of the validity check, so a body eaten by its own arrival still
+		# makes the sound of being set down.
+		_play_cue_delayed(land_sfx, Motion.time(press_bite))
 		if not is_instance_valid(card):
+			# Died in the air. The slot is empty, so its shadow must not be left
+			# standing — that is the same "a pool with nothing above it" defect the
+			# flight was fixed for, just reached by the other door.
+			if ground != null and is_instance_valid(ground):
+				ground.visible = false
 			return
+		# The flight has stopped writing `scale`; hand the property back before
+		# anything else can read the card's pose.
+		if card is Card2D:
+			card.flight_in_air = false
+		# The re-parent happens while the card is at its most FORESHORTENED, and
+		# that is a small free win worth naming: re-adding the card to the cell
+		# makes the CenterContainer re-sort it, and any sub-pixel disagreement
+		# between `rest_global` and where the sort actually puts it is a pop. On a
+		# long deal there is barely a card on screen at this instant to pop.
 		if card.get_parent() != null:
 			card.get_parent().remove_child(card)
 		if is_instance_valid(rest_parent):
@@ -20472,18 +22200,36 @@ func _play_landing_pop(card: Control, from_global: Vector2 = Vector2.ZERO,
 				rest_parent.move_child(card, rest_index)
 		card.z_index = 0
 
-		# Landing = the wax press (squash + impression ring + release). It
-		# re-arms the idle bob itself when the press settles.
+		# Landing = the wax press (squash + impression ring + release), which is
+		# also the TURN'S SECOND HALF — it opens the card out of the pose the
+		# flight left it in on its way to the squash. It re-arms the idle bob
+		# itself when the press settles.
 		if card.has_method("play_wax_press"):
-			card.play_wax_press(rest_scale)
-		_play_slot_claim_vfx(card)
+			card.play_wax_press(rest_scale, press_bite)
+		_play_slot_claim_vfx(card, Motion.time(press_bite))
 	else:
-		# Drop-in entrance (enemy placements / repositions): arrive slightly
-		# large, then the shared wax press stamps it onto the board.
+		# Drop-in entrance (repositions, effect-spawns): arrive slightly large,
+		# then the shared wax press stamps it onto the board.
+		#
+		# DELIBERATELY NO TURN HERE (2026-08-03). The turn says "this order was
+		# carried here from somewhere else and set down"; this branch is every
+		# case where that is not what happened. A reposition is not an arrival —
+		# the body was already face-up on the table and only changed lane, and
+		# turning it over would claim a new card entered play. Summons, tokens and
+		# encounter-effect spawns aren't carried either; they appear. Nothing
+		# needed gating: the two branches are separate code paths, so the turn
+		# rides the ARC and only the arc, which is exactly the set of arrivals
+		# that have a "from" to be carried out of.
 		card.scale = rest_scale * 1.22
 		if card.has_method("play_wax_press"):
 			card.play_wax_press(rest_scale)
-		_play_slot_claim_vfx(card)
+		_play_slot_claim_vfx(card, Motion.time(PRESS_CONTACT))
+		# No flight to wait out, so the cue keeps its historical timing (it used
+		# to fire ~16 ms before this press). This branch is also where Reduce
+		# Motion and headless land, and AUDIO IS NOT DECORATIVE — gating the cue
+		# behind the arc would have silently deleted the play sound for every
+		# Reduce Motion player, which is the trap this arm exists to close.
+		_play_cue_delayed(land_sfx, 0.0)
 
 
 func _landing_color_for(card: Control) -> Color:
@@ -20500,10 +22246,31 @@ func _landing_color_for(card: Control) -> Color:
 	return Color(1.0, 0.82, 0.34)
 
 
-func _play_slot_claim_vfx(card: Control) -> void:
+func _play_slot_claim_vfx(card: Control, delay: float = 0.0) -> void:
+	# The lane wash, the ground ring and the dust streak that say "this square is
+	# taken". `delay` puts them on the wax press's BITE rather than on the frame
+	# the press begins (2026-08-03): at t=0 the card is still a fifth larger than
+	# rest and travelling DOWN, so a ground ring blooming there went off under a
+	# card that had not touched the board yet — press, ring and the neighbours'
+	# stat pops all inside one frame, which reads as one indistinct event instead
+	# of as an arrival.
 	if card == null or not is_instance_valid(card):
 		return
 	if DisplayServer.get_name() == "headless":
+		return
+	if delay > 0.0 and is_inside_tree():
+		# WEAKREF, never the node itself. A body can be killed inside the same beat
+		# it lands (an on-enter that eats it, a summon that trades), and a Callable
+		# still holding a freed Control errors when the engine marshals its
+		# captures — before the body runs, so no is_instance_valid() inside could
+		# suppress it. Same idiom as the spell-travel timer.
+		var ref: WeakRef = weakref(card)
+		get_tree().create_timer(delay).timeout.connect(func():
+			if not is_inside_tree():
+				return
+			var live: Control = ref.get_ref() as Control
+			if live != null and is_instance_valid(live):
+				_play_slot_claim_vfx(live, 0.0))
 		return
 	var lane: int = int(card.current_lane)
 	var row: int = int(card.current_row)
@@ -20607,12 +22374,22 @@ func _on_card_destroyed(card: Control) -> void:
 	# Null arrays BEFORE dispatching so on_death effects that read the field
 	# (e.g. summon-token in the dying card's lane) see the empty slot.
 	for i in range(LANES_PER_ROW):
+		# The two FRONT arms used to index their slot arrays unguarded while both
+		# BACK arms below bounds-check — the guard arrived with the 4x4 back row
+		# and was never backfilled onto the pair that predated it. The row arrays
+		# are fixed at LANES_PER_ROW, but the SLOT arrays are appended by
+		# _build_board, so any moment the two disagree (a death resolving against a
+		# board that is still assembling, or one being torn down) raised "Out of
+		# bounds get index on base Array[Control]" here — inside the death path,
+		# where an error is least welcome.
 		if _player_field[i] == card:
 			_player_field[i] = null
-			_restore_slot_label(_player_slots[i], i)
+			if i < _player_slots.size():
+				_restore_slot_label(_player_slots[i], i)
 		if _enemy_field[i] == card:
 			_enemy_field[i] = null
-			_restore_slot_label(_enemy_slots[i], i)
+			if i < _enemy_slots.size():
+				_restore_slot_label(_enemy_slots[i], i)
 		if _player_back[i] == card:
 			_player_back[i] = null
 			if i < _player_back_slots.size():
@@ -20643,6 +22420,24 @@ func _on_card_destroyed(card: Control) -> void:
 			"data": card.card_data.duplicate(true),
 		}
 		net._net_remote_field_card_left(card, was_enemy, false)
+
+	# THE BODY LEAVES THE REGISTRY WHEN IT LEAVES THE BOARD.
+	#
+	# `Combat.gd` never called `unregister_entity` ANYWHERE — the only three calls
+	# in the codebase are client-side or in two specific spell resolvers — so every
+	# creature that died on the host stayed in `NetMatch.entities` for the rest of
+	# the match, pointing at a node that had been freed. Found by the per-frame
+	# invariant audit (`tools/_probe_invariants.gd`), which measured stale entries
+	# on 26,033 frames of a single driven match; no end-state check could see it,
+	# because the registry is cleared wholesale at `_enter_combat_local` and looks
+	# clean by the time anything settles.
+	#
+	# Mostly benign — `get_entity` callers guard with `is_instance_valid` — but
+	# "mostly" is doing a lot of work in a table that every wire lookup consults,
+	# and the freed nodes were being retained for the whole fight.
+	if _is_net() and int(card.entity_id) >= 0 \
+			and NetMatch.get_entity(int(card.entity_id)) == card:
+		NetMatch.unregister_entity(int(card.entity_id))
 
 	# JUICE — register this death for the coalesced "notable kill" hit-stop so a
 	# multi-creature wipe or a chunky bruiser dying lands with weight.
@@ -20908,6 +22703,22 @@ func _is_free_move_card(card: Control) -> bool:
 	return card != null and is_instance_valid(card) \
 		and String(card.card_data.get("passive", "")) == "free_move"
 
+## The Outrider gets exactly one free reposition each owning turn.
+func _has_free_move_available(card: Control) -> bool:
+	return _is_free_move_card(card) and not card.state.free_move_used
+
+
+func _consume_free_move(card: Control) -> void:
+	if _is_free_move_card(card):
+		card.state.free_move_used = true
+
+
+func _reset_free_moves_for_side(is_enemy_side: bool) -> void:
+	for row in [ROW_FRONT, ROW_BACK]:
+		for card in _row_array(is_enemy_side, row):
+			if card != null and is_instance_valid(card):
+				card.state.free_move_used = false
+
 
 ## The Outrider's on-move reward: +1 ATK this round (+2 forged). Called on every
 ## successful free reposition (solo + net) so the buff rides the board snapshot.
@@ -20970,7 +22781,7 @@ func _on_field_move_dropped(global_pos: Vector2, card: Control) -> void:
 	var moved := false
 	# The Outrider (free_move) repositions for free — it ignores the move cap and
 	# spends none of it (see _is_free_move_card).
-	var free_move: bool = _is_free_move_card(card)
+	var free_move: bool = _has_free_move_available(card)
 	if phase == Phase.PLAYER_TURN and (_moves_used_this_turn < MOVES_PER_TURN or free_move):
 		var drop := _nearest_player_slot(global_pos)
 		var dest_row: int = drop.row
@@ -20987,6 +22798,7 @@ func _on_field_move_dropped(global_pos: Vector2, card: Control) -> void:
 			_slot_set_card(_slot_array(false, dest_row)[dest_lane], card)
 			_row_array(false, dest_row)[dest_lane] = card
 			if free_move:
+				_consume_free_move(card)
 				_apply_free_move_bonus(card)   # Outride +ATK; no move spent
 			else:
 				_moves_used_this_turn += 1
@@ -21007,7 +22819,7 @@ func _on_field_move_dropped(global_pos: Vector2, card: Control) -> void:
 			_refresh_adjacency_buffs()
 			_dispatch_creature_relocated(card, src_row, src_lane)
 		elif not same_slot:
-			_show_info("No footing there - the ground is closed this fight." \
+			_show_info("That lane is closed for this fight." \
 				if _sp_lane_closed(dest_lane) else "That slot is occupied.")
 	elif _moves_used_this_turn >= MOVES_PER_TURN:
 		_show_info("No moves left this turn.")
@@ -21081,8 +22893,9 @@ func _build_hud() -> void:
 
 	_info_label = _make_text_label("", 22, Color(1, 0.78, 0.40))
 	_info_label.set_anchors_preset(Control.PRESET_CENTER)
-	_info_label.position = Vector2(-200, -30)
-	_info_label.size = Vector2(400, 60)
+	_info_label.position = Vector2(-350, -30)
+	_info_label.size = Vector2(700, 60)
+	_info_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_info_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_info_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
@@ -21109,8 +22922,8 @@ func _build_battle_log() -> void:
 	# The drawer — left edge, vertically centred, above the board plates.
 	_battle_log_panel = PanelContainer.new()
 	_battle_log_panel.name = "BattleLogPanel"
-	var pstyle := GameTheme.make_panel_style(
-		Color(0.075, 0.058, 0.045, 0.94), Color(0.60, 0.51, 0.34, 0.90), 1, 4, true)
+	var pstyle := _batched_chart_style(GameTheme.make_panel_style(
+		Color(0.075, 0.058, 0.045, 0.94), Color(0.60, 0.51, 0.34, 0.90), 1, 4, true))
 	pstyle.content_margin_left = 12
 	pstyle.content_margin_right = 8
 	pstyle.content_margin_top = 8
@@ -21123,7 +22936,7 @@ func _build_battle_log() -> void:
 	_battle_log_panel.anchor_top = 0.0
 	_battle_log_panel.anchor_bottom = 0.0
 	_battle_log_panel.offset_left = 10
-	_battle_log_panel.offset_right = 346
+	_battle_log_panel.offset_right = 272
 	_battle_log_panel.offset_top = 124
 	_battle_log_panel.offset_bottom = 574
 	_battle_log_panel.z_index = 80
@@ -21165,14 +22978,14 @@ func _build_battle_log() -> void:
 		fv.base_font = GameTheme.font_title
 		fv.spacing_glyph = 2
 		_battle_log_tab.add_theme_font_override("font", fv)
-	var tstyle := GameTheme.make_panel_style(
-		Color(0.10, 0.062, 0.046, 0.94), Color(0.60, 0.51, 0.34, 0.90), 1, 4, true)
+	var tstyle := _batched_chart_style(GameTheme.make_panel_style(
+		Color(0.10, 0.062, 0.046, 0.94), Color(0.60, 0.51, 0.34, 0.90), 1, 4, true))
 	tstyle.content_margin_left = 12
 	tstyle.content_margin_right = 12
 	tstyle.content_margin_top = 4
 	tstyle.content_margin_bottom = 4
-	var thover := GameTheme.make_panel_style(
-		Color(0.14, 0.095, 0.062, 0.96), Color(0.72, 0.61, 0.40, 1.0), 1, 4, true)
+	var thover := _batched_chart_style(GameTheme.make_panel_style(
+		Color(0.14, 0.095, 0.062, 0.96), Color(0.72, 0.61, 0.40, 1.0), 1, 4, true))
 	thover.content_margin_left = 12
 	thover.content_margin_right = 12
 	thover.content_margin_top = 4
@@ -21205,8 +23018,13 @@ func _toggle_battle_log() -> void:
 		_battle_log_panel.visible = _battle_log_open
 	if _battle_log_open:
 		_scroll_log_to_bottom()
+	# The chronicle drawer is UI furniture, not a combat beat, so it speaks with
+	# the shell's voice — and the direction is audible: paper drawn out to open,
+	# drawn back (pitched down) to close. It was a bare `button_click`, which is
+	# also the stand-in for six unrelated gameplay cues, so the drawer sounded
+	# exactly like a doom tick.
 	if AudioBank != null:
-		AudioBank.play_sfx("button_click")
+		AudioBank.play_ui("select" if _battle_log_open else "back")
 
 
 ## One chronicle line. `bb` is BBCode (names pre-tinted via _log_card_ref).
@@ -21543,7 +23361,7 @@ func _net_log_local_cast(data: Dictionary, target: Control) -> void:
 
 
 func _net_log_foe_cast(data: Dictionary, target: Control) -> void:
-	var line := "The foe casts [color=%s]%s[/color]" \
+	var line := "The enemy casts [color=%s]%s[/color]" \
 		% [_LOG_ENEMY_COL, String(data.get("name", "a spell"))]
 	if target != null and is_instance_valid(target):
 		line += " on %s" % _log_card_ref(target)
@@ -21609,8 +23427,8 @@ func _build_incoming_damage_chip() -> void:
 	# Warm ink-board family (the cards' mat / the map tooltips) on the chart
 	# document kit — a plaque, not an app pill. The border keeps its crimson
 	# threat ramp at hairline weight, matching every other plaque on the rail.
-	var style := GameTheme.make_panel_style(
-		Color(0.10, 0.062, 0.046, 0.94), Color(0.85, 0.27, 0.18, 1.0), 1, 4, true)
+	var style := _batched_chart_style(GameTheme.make_panel_style(
+		Color(0.10, 0.062, 0.046, 0.94), Color(0.85, 0.27, 0.18, 1.0), 1, 4, true))
 	style.content_margin_left = 10
 	style.content_margin_right = 12
 	style.content_margin_top = 5
@@ -21702,6 +23520,13 @@ func _compute_incoming_face_damage() -> int:
 				continue
 			if not attacker.can_attack():
 				continue
+			# THE RUSH RULE (see _can_reach_face): a Swift body in its arrival round
+			# still passes can_attack(), but it may only break BODIES — the face is
+			# closed to it. Without this the chip billed the player for a hit that
+			# _creature_hits_face refuses, and on a wide-open board that is exactly
+			# the sum the "block or die" lethal read is computed from.
+			if not _can_reach_face(attacker):
+				continue
 			# Both rows attack independently every turn (see _resolve_column_attack):
 			# over an open player column, the front AND back enemy each land a
 			# separate face hit, so both are summed here. They're distinct
@@ -21750,7 +23575,7 @@ func _refresh_incoming_damage_chip() -> void:
 		var was := _incoming_dmg_style_key
 		_incoming_dmg_style_key = style_key
 		_incoming_dmg_label.add_theme_color_override("font_color", num_color)
-		var st: GameTheme.ChartPanelStyle = _incoming_dmg_chip.get_theme_stylebox("panel")
+		var st = _incoming_dmg_chip.get_theme_stylebox("panel")
 		if st != null:
 			st.border_color = border
 		# ★11 — the chip REACTS the moment the threat crosses into a death
@@ -21822,7 +23647,11 @@ func _resolve_enemy_portrait() -> Texture2D:
 		if ResourceLoader.exists(bpath):
 			return load(bpath)
 	if _enemy_deck.is_empty() and _encounter_id != "":
-		_enemy_deck = EncounterDB.build_enemy_deck(_encounter_id, RunState.get_act())
+		# Same salt as _setup_fight_state's build: if this presentation-side
+		# fallback ever does fire, it must hand back the SAME lineup the setup
+		# path would have built (it assigns _enemy_deck, so it is not cosmetic).
+		_enemy_deck = EncounterDB.build_enemy_deck(_encounter_id, RunState.get_act(),
+			_encounter_roll_stream(ENC_ROLL_SALT_DECK))
 	if not _enemy_deck.is_empty():
 		var lead: Dictionary = _enemy_deck[0]
 		for cd in _enemy_deck:
@@ -22368,6 +24197,11 @@ func _apply_standing_rule() -> void:
 	_passive_rule_label.custom_minimum_size = Vector2(minf(rule_w + 2.0, 620.0), 0)
 	if _passive_banner == null or not is_instance_valid(_passive_banner):
 		return
+	# A REPOSTED RULE IS NEVER BORN CANCELLED. This is the one writer of what the
+	# plaque says, so it is the one place that can guarantee a strike from an
+	# earlier state does not survive the wording it struck out — a mid-fight phase
+	# turn, and, more to the point, a rematch reusing this scene in place.
+	_clear_edict_strokes()
 	# Nothing to say means no box: an empty oxblood plaque hanging over the enemy
 	# back row is furniture, not information.
 	_passive_banner.visible = rule_text != ""
@@ -22379,6 +24213,174 @@ func _apply_standing_rule() -> void:
 	# `pivot_offset` from it and slide the plaque a full line while it pulses —
 	# the very artifact the pulse is meant to avoid. The pulse is deferred a
 	# frame instead (see `_set_standing_rule`) so it punches a settled box.
+
+
+## How far down RubricStroke is scaled to strike a line of TYPE rather than a
+## battlefield token, and the cap-height fraction used to find the line's optical
+## middle. Both were settled by a photographed sweep, not by arithmetic — see the
+## note inside _strike_the_edict.
+const EDICT_STROKE_SCALE := 0.19
+## Height above the BASELINE, in ems, at which the mark crosses. 0.26 em is the
+## middle of this face's x-height (measured: ~10px of x-height on an 18pt line).
+## The cap middle — the obvious first guess, and the first thing tried — puts the
+## mark ~2px high, where it cuts the tops of the lowercase instead of crossing
+## them, and a photograph is the only thing that shows the difference.
+const EDICT_STRIKE_EM := 0.26
+
+
+## THE EDICT IS STRUCK OUT (2026-08-04).
+##
+## ★13's sweep (_dim_war_furniture) clears the foe's FORECASTS — the incoming
+## chip, the wave chip, the intent chevrons, the lane sigils — and stops there.
+## The one thing it never touched was his LAW. The standing-rule plaque held its
+## ground, dead centre under the word VICTORY, after the army enforcing it was
+## gone. That is not a rare case: 98 of EncounterDB's 105 entries carry a
+## non-empty passive_desc, so it is effectively every fight, and it lands on the
+## single frame a player is most likely to keep.
+##
+## NOT A FADE, and the difference is the whole item. A fade says "this UI is
+## leaving"; a strike says "this law is VOID" — and only the second one is the
+## story of winning a fight. The game has owned the exact painter for months:
+## RubricStroke's first docstring line is "the mark a chronicler makes when a
+## line of the record is struck out". This is that mark used for its own stated
+## meaning, not a new device (R6: adding volume to generic effects makes them
+## more generic).
+##
+## ONLY ON A WIN. Lose, and HIS LAW STOOD; a set-piece WITHDRAWAL is the same
+## answer, because the toll is paid and the ground is left as it was found. The
+## asymmetry is free, and it is the only thing on screen that says so.
+##
+## The size rules both pass, which is why this is built rather than filed. ★3:
+## the plaque is 644 x 33..57 px — 32x the ~20px mush floor and 74x the 8.7px
+## annulus that killed the seal crack. ★4: a flat dark ink board with type on it
+## is the exact opposite of the full-bleed painting that killed the ink spatter.
+##
+## ONE STROKE PER LINE. The measure is tuned so nearly every rule fits one line
+## (see the 18pt/620px note at the plaque's build), but a rule that wraps must
+## not be "voided" by a mark falling in the gutter between its lines. A
+## chronicler strikes each line, working down.
+##
+## INFORMATIONAL: it reports a state change (this rule no longer applies), so
+## Reduce Motion keeps it and skips only the nib's travel — the same contract
+## _play_rubric_stroke already publishes for the same painter.
+func _strike_the_edict() -> void:
+	# SOLO ONLY, honouring _dim_war_furniture's own note: a Bo3 rematch reuses
+	# this scene in place, so nothing may be parked on the plaque here. (No net
+	# path reaches this today — _check_game_over returns to the net resolver
+	# before the verdict branches — but the guard is the contract, not the
+	# reachability.)
+	if _is_net():
+		return
+	if _passive_banner == null or not is_instance_valid(_passive_banner) \
+			or not _passive_banner.visible:
+		return
+	if _passive_rule_label == null or not is_instance_valid(_passive_rule_label):
+		return
+	if String(_passive_rule_label.text).strip_edges() == "":
+		return
+	_clear_edict_strokes()
+	# The plaque may be sitting at the 0.55 watermark — you can break the face
+	# with his back row still standing, and _refresh_passive_plaque yields the
+	# rule's ink to a token that mustered under it. Those tokens are about to
+	# burn, so the law comes back to full ink to be struck at full ink.
+	var old_tw = _passive_banner.get_meta("fade_tw") \
+		if _passive_banner.has_meta("fade_tw") else null
+	if old_tw != null and old_tw is Tween and (old_tw as Tween).is_valid():
+		(old_tw as Tween).kill()
+	_passive_banner.modulate.a = 1.0
+	var lbl: Label = _passive_rule_label
+	var lines: int = maxi(1, lbl.get_line_count())
+	var line_h: float = lbl.size.y / float(lines)
+	# THE MARK GOES THROUGH THE TYPE, NOT THROUGH THE BOX. The first cut centred it
+	# on the line box — which is ascent PLUS descent, so it rode high and cut the
+	# tops of the lowercase instead of crossing them. A line box's middle and a
+	# line of type's optical middle are different heights, and only the second is
+	# where a pen goes. Measured off the font's own ascent so a face or size change
+	# carries the mark with it instead of stranding it at a baked offset.
+	var rule_font: Font = lbl.get_theme_font("font")
+	var rule_size: float = 18.0
+	var strike_y: float = line_h * 0.5
+	if rule_font != null:
+		strike_y = rule_font.get_ascent(int(rule_size)) - rule_size * EDICT_STRIKE_EM
+	var snap: bool = DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	var strokes: Array = []
+	for i in range(lines):
+		var stroke := RubricStroke.new()
+		# Added last, so it draws over the type; the z_index is belt and braces.
+		# A Node2D child of a Control is safe here for the reason Card2D's press
+		# ring is: containers re-fit Control children on every sort, and this is
+		# not one.
+		stroke.z_index = 8
+		# SCALED DOWN HARD, and the number was PHOTOGRAPHED, not derived. The
+		# painter's widths are tuned against a 200x150 battlefield token: BODY_W 19
+		# plus a 2.4 knockout pad each side is a ~26px dark cross-section, laid on
+		# a line of 18pt type whose caps are ~14px. The first cut used 0.40 on the
+		# reasoning that it left ~13px of cap — and the shot came back a REDACTION,
+		# with the whole x-height buried and the rule unreadable. A rule you cannot
+		# read is not a rule you can see was cancelled; that is the difference
+		# between striking a line out and blacking it out.
+		#
+		# Swept on the real plaque at 0.16 / 0.20 / 0.26 / 0.34: legible and clean
+		# through 0.20, half-eaten at 0.26, buried at 0.34. 0.19 sits in the good
+		# band and puts the total dark cross-section at ~4.9px against a ~14.6px
+		# cap height — a strike-through is a FRACTION of the cap, which is the
+		# whole reason the arithmetic could not settle this and the photograph
+		# could.
+		#
+		# BE HONEST ABOUT THE COST: at this scale the ivory core is ~0.8px, under
+		# the CORE_DRY_W floor the painter documents. That floor exists because on
+		# a token the core NARROWING is how the mark tells you the ink is drying —
+		# and this mark never dries in front of anyone, because it never fades and
+		# nothing follows it. What is left doing the work is the two-band read (ink
+		# knockout under vermilion) at 644px long, plus the seeded per-segment
+		# alpha jitter, which is not geometric and survives the scaling intact.
+		stroke.scale = Vector2(EDICT_STROKE_SCALE, EDICT_STROKE_SCALE)
+		stroke.position = Vector2(0.0, lbl.position.y + float(i) * line_h + strike_y)
+		_passive_banner.add_child(stroke)
+		# Laid out in the stroke's own pre-scale space, overshooting the plaque at
+		# both ends: a chronicler's stroke runs PAST the line it voids. One that
+		# stops neatly at the text is an underline, which means the opposite.
+		var over: float = 14.0 / EDICT_STROKE_SCALE
+		stroke.configure(Vector2(-over, 0.0),
+			Vector2(_passive_banner.size.x / EDICT_STROKE_SCALE + over, 0.0),
+			hash("edict_%s_%d" % [_encounter_id, i]))
+		strokes.append(stroke)
+		if snap:
+			stroke.progress = 1.0
+			stroke.dry = 1.0
+			continue
+		var tw := stroke.create_tween()
+		# A 644px run takes longer than the 0.07s the same painter takes across a
+		# 156px token: that one is force leaving a body, this one is a hand drawing
+		# a line. Lines are struck in order, working down, and the stagger is short
+		# enough that a two-line rule never opens a gap in the forbidden band.
+		tw.tween_interval(Motion.time(0.09) * float(i))
+		tw.tween_property(stroke, "progress", 1.0, Motion.time(0.26)) \
+			.set_trans(Tween.TRANS_SINE)
+		tw.tween_property(stroke, "dry", 1.0, Motion.time(0.34))
+	# IT DOES NOT FADE, and that is the difference from _play_rubric_stroke. That
+	# mark is an EVENT and expires with the blow that made it; this one is the new
+	# state of the record, and the whole verdict ceremony plays over it.
+	_passive_banner.set_meta("_edict_strokes", strokes)
+
+
+## Take any strike back off the plaque.
+##
+## Called before a new one is drawn, and from `_apply_standing_rule` — the ONE
+## writer of what this plaque says — so a rule that has just been re-posted can
+## never be born already cancelled. That is also the rematch reset ★13's note
+## demands: a Bo3 game 2 reuses this scene in place, so nothing may be left
+## parked on the plaque between games.
+func _clear_edict_strokes() -> void:
+	if _passive_banner == null or not is_instance_valid(_passive_banner):
+		return
+	if not _passive_banner.has_meta("_edict_strokes"):
+		return
+	for s in _passive_banner.get_meta("_edict_strokes"):
+		if s != null and is_instance_valid(s):
+			(s as Node).queue_free()
+	_passive_banner.remove_meta("_edict_strokes")
 
 
 func _set_standing_rule(passive_id: String, desc: String) -> void:
@@ -22624,6 +24626,28 @@ func _build_command_seal_post(is_opp: bool) -> void:
 	plinth.add_theme_stylebox_override("panel", plinth_st)
 	post.add_child(plinth)
 
+	# THE STRUCK PART OF THE INSTRUMENT (✦1, 2026-08-04). The wax and the numeral
+	# pressed into it go in ONE wrapper so a strike moves them together. This is
+	# not stylistic: they are siblings, and squashing the blob alone would dip the
+	# wax out from under a digit standing perfectly still — the exact tell that
+	# reads as a UI counter rather than an impression. Everything else on the post
+	# (plinth, aura, caption, pips) stays outside, because none of it is what the
+	# signet touches. Anchored to the full post rect so the seal's `position` and
+	# the numeral's offsets below are unchanged by the extra level; pivoted on the
+	# SEAL centre so the squash is about the wax, not the post.
+	# MOUSE_FILTER_IGNORE: `post` keeps MOUSE_FILTER_STOP and owns the tooltip,
+	# and a wrapper that ate the hover would silently retire that lesson.
+	var press := Control.new()
+	press.anchor_right = 1.0
+	press.anchor_bottom = 1.0
+	press.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	press.pivot_offset = Vector2(GEM_W / 2.0, CY)
+	post.add_child(press)
+	if is_opp:
+		_net_opp_seal_press = press
+	else:
+		_mana_seal_press = press
+
 	# The pressed seal itself. Card2D.WaxSeal draws a seeded irregular wax
 	# blob with a stamp-impression ring — the exact painter the cards use for
 	# their cost seals, in the exact cost wax (#264167), scaled up to an
@@ -22637,7 +24661,7 @@ func _build_command_seal_post(is_opp: bool) -> void:
 	seal.seed_text = "command_post_opp" if is_opp else "command_post"
 	seal.position = Vector2(GEM_W / 2.0 - seal_r, CY - seal_r)
 	seal.size = Vector2(seal_r * 2.0, seal_r * 2.0)
-	post.add_child(seal)
+	press.add_child(seal)
 
 	# Big numeric — the SPENDABLE count, dominant readout, pressed INTO the wax
 	# face: cream numeral + deep-navy outline, same ink as card cost seals.
@@ -22659,7 +24683,7 @@ func _build_command_seal_post(is_opp: bool) -> void:
 	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	lbl.add_theme_color_override("font_outline_color", Color(0.04, 0.08, 0.16, 0.95))
 	lbl.add_theme_constant_override("outline_size", 6)
-	post.add_child(lbl)
+	press.add_child(lbl)   # inside the strike wrapper — see the note there
 	if is_opp:
 		_net_opp_mana_label = lbl
 	else:
@@ -22707,6 +24731,93 @@ func _build_command_seal_post(is_opp: bool) -> void:
 		_net_opp_mana_post = post
 
 
+## THE SEAL IS STRUCK (✦1 of docs/CARD_PLAY_COOL_HUNT_20260803.md, 2026-08-04).
+##
+## Paying Command used to punch a NUMERAL 25% bigger and wash it blue while the
+## 96px navy wax disc that numeral is pressed into did not move a pixel. That is
+## a competent HUD-counter beat performed on a physical instrument: everything
+## about this object — a signet in sealing wax on an ink plinth under a lamp —
+## says IMPRESSION, and spending Command is the die coming down again.
+##
+## ★3's SIZE rule (an effect only lands where its material is visible at the size
+## it is drawn) is what killed the battlefield seal crack, and it passes here
+## with room to spare, which is the whole reason this is built and that was
+## reverted. Visible wax = 48px radius − (the 37px numeral's ~13px cap
+## half-height + its 6px outline) ≈ 29px, i.e. 3.3× the ≈8.7px canvas the crack
+## died on — at a FIXED HUD scale that never shrinks with a fan or a zoom. And
+## the loud half of the beat, the impression, radiates OFF the 48px rim into the
+## 168px aura box, so it is not drawn inside the wax at all and the rule does not
+## even apply to it.
+##
+## `shortfall` is the SAME instrument REFUSING (✦7b): the die comes down and
+## nothing takes — it dips, it does not ring, it does not re-stamp, and it
+## settles flat instead of springing back. Deliberately built second and only as
+## the negative of a beat the player has already felt on every play; a failed
+## press with no successful press to contrast against is just a twitch.
+##
+## DECORATIVE. What was paid is stated by the floating number and by the count on
+## the wax, and both of those survive Reduce Motion — this is the impression
+## around them, so Motion.press declines and the impression never fires alone.
+func _strike_command_seal(press: Control, shortfall: bool = false) -> void:
+	if press == null or not is_instance_valid(press) or not press.is_inside_tree():
+		return
+	if DisplayServer.get_name() == "headless":
+		return
+	Motion.press(press, 1.07, 0.88,
+		Callable() if shortfall else _spawn_seal_impression.bind(weakref(press)),
+		shortfall)
+
+
+## The impression the die leaves: a ring off the wax's rim, at the bite.
+##
+## Hosted on the seal's PARENT, never on the struck wrapper — a ring parented
+## inside the dip would be squashed by the very tween that spawned it, and the
+## impression is the one part of this beat that must read as leaving the seal
+## rather than belonging to it.
+##
+## WeakRef because Motion.press's callback is queued on a tween: a scene teardown
+## between the bite and the callback would otherwise marshal a freed Control.
+func _spawn_seal_impression(press_ref: WeakRef) -> void:
+	var press: Control = null
+	if press_ref != null:
+		press = press_ref.get_ref() as Control
+	if press == null or not is_instance_valid(press) or not press.is_inside_tree():
+		return
+	var host: Node = press.get_parent()
+	if host == null:
+		return
+	# The wrapper is anchored to the whole post and pivoted on the wax, so its
+	# pivot IS the seal centre in the host's coordinates. Derived rather than
+	# re-stated, so retuning the instrument's geometry cannot leave the ring
+	# spreading off-centre with nothing to say it has.
+	var centre: Vector2 = press.position + press.pivot_offset
+	var band: Color = Color(0.98, 0.44, 0.30, 0.70) if press == _net_opp_seal_press \
+		else Color(0.55, 0.80, 1.0, 0.70)
+	# THE TRACER-HOT-CORE IDIOM — the rule two shots caught the hard way: a lone
+	# ring in its own colour is camouflage on this warm table. So the impression
+	# is a white-hot core with the side's own band spreading behind it (navy for
+	# your Command, vermilion for the foe's, matching the wax each is struck in).
+	# The band ends at 48 × 1.62 ≈ 78px, clear of the 48px rim and just inside
+	# the 84px aura box, so it never reaches the caption below.
+	# Both are born just OUTSIDE the 48px rim, not on it: the first cut started the
+	# core at 0.98 and the shot came back with a hard white circle sitting exactly
+	# on the wax's edge, which for its first frames read as a SELECTION outline
+	# rather than as something leaving the seal. An impression is what the wax
+	# throws off, so it has to start already clear of it.
+	Motion.ring(host, centre, Color(1.0, 0.97, 0.90, 0.90), {
+		"radius": 48.0, "start_scale": 1.05, "end_scale": 1.28,
+		"duration": 0.20, "scale_time": true,
+		"width": 2.5, "width_end": 0.7, "z_index": 4,
+		"trans": Tween.TRANS_CUBIC,
+	})
+	Motion.ring(host, centre, band, {
+		"radius": 48.0, "start_scale": 1.08, "end_scale": 1.70,
+		"duration": 0.36, "scale_time": true,
+		"width": 4.0, "width_end": 0.9, "z_index": 3,
+		"trans": Tween.TRANS_CUBIC,
+	})
+
+
 ## Hover text for the player's Command seal — teaches the resource from scratch:
 ## what it is, that it refills each turn, and that unspent Command banks. Rebuilt
 ## live (max / cap can grow mid-run) so the lesson never goes stale.
@@ -22743,6 +24854,27 @@ func _set_seal_readout(lbl: Label, text: String) -> void:
 	var slash: int = text.find("/")
 	if slash >= 0:
 		text = text.substr(0, slash).strip_edges()
+	# THE FOE'S SEAL IS STRUCK TOO (✦1's parity gap, 2026-08-04). The opponent's
+	# mirror never routed through _pulse_mana_label at all — CombatNet's
+	# _net_set_opp_mana called straight into here and stopped — so the foe's
+	# Command ticked silently while yours pressed. Two instruments built "the same
+	# way" out of the same wax must describe the same object, or the wax stops
+	# meaning anything.
+	#
+	# Hung off the READOUT rather than off the spend call site on purpose: this is
+	# already documented as the one funnel every seal numeral passes through, so
+	# whatever path moves the foe's count — a play, a potion, a resync — the
+	# strike follows it and cannot be bypassed by an eighth call site. Scoped to
+	# the opponent's label alone: the player's own numeral is set from _update_hud
+	# on the same frame it is spent, and would strike twice.
+	#
+	# A DROP ONLY. The foe's seal refills at the top of their turn, and a refill
+	# is not a stamp.
+	if lbl == _net_opp_mana_label and _net_opp_seal_press != null:
+		var was: int = int(lbl.get_meta("_seal_last_val", text.to_int()))
+		if text.to_int() < was:
+			_strike_command_seal(_net_opp_seal_press)
+	lbl.set_meta("_seal_last_val", text.to_int())
 	lbl.text = text
 	var f: Font = lbl.get_theme_font("font")
 	if f == null:
@@ -23415,8 +25547,15 @@ func _show_pile_viewer(kind: int) -> void:
 	add_child(_pile_viewer_layer)
 
 	# Backdrop — full-screen dim that catches clicks to close.
+	# NOT `flat`. A flat Button does not draw its stylebox at all, so `flat = true`
+	# silently cancelled the dim below: the pile opened over a fully lit fight,
+	# with the board, the HUD and the hand all at full brightness behind the card
+	# grid and this viewer's title printed across the HUD's phase caption.
+	# Measured at 0% darkening by tools/_probe_modal_scrim.tscn — and invisible to
+	# every tree-walking check, because the node is there, is `visible`, and does
+	# carry the 0.7 stylebox. Only the pixels disagreed.
 	var backdrop := Button.new()
-	backdrop.flat = true
+	backdrop.flat = false
 	backdrop.focus_mode = Control.FOCUS_NONE
 	backdrop.anchor_right = 1.0
 	backdrop.anchor_bottom = 1.0
@@ -23542,24 +25681,67 @@ func _make_text_label(text: String, sz: int, color: Color) -> Label:
 
 var _glossary_layer: CanvasLayer = null
 
+# FOUR SURFACES STATE RULES TO THE PLAYER and they drift apart, because they were
+# written by different passes: `GameTheme.HOW_TO_PLAY_PRIMER`,
+# `KeywordEffects.KEYWORDS`, `TutorialDB.LESSONS`, and these two arrays. Audit
+# them as a CORPUS — a fix here that contradicts a lesson there is not a fix.
+#
+# `{n}` in a desc is substituted at render time by `_help_desc`.
 const QUICK_HELP: Array = [
 	{"name": "Lanes", "desc": "Each side has four lanes. Creatures attack directly across their lane."},
-	{"name": "Rows", "desc": "Front guards back. Front attacks first and is hit first."},
-	{"name": "Forecast", "desc": "Lane markers preview enemy attacks before the main clash."},
-	{"name": "Swift", "desc": "Swift creatures strike before the main clash."},
-	{"name": "Hand", "desc": "Unplayed cards stay. Right-click cards to discard them at turn end."},
+	# NOT "front guards back" (pre-2026-09-10). That taught a BENCH: a player who
+	# believes the back row waits its turn treats four of their eight slots as
+	# unusable. Both rows swing every round — see _resolve_column_attack, whose own
+	# comment reads "front and back rows are mechanically identical".
+	{"name": "Rows", "desc": "Both rows strike every round. The front row strikes first and is struck first."},
+	# BOTH LINES, not just theirs: _refresh_lane_forecast has drawn the player's own
+	# attackers since 2026-07-28, and describing it as an enemy-only readout hid
+	# half of what is already on screen.
+	{"name": "Forecast", "desc": "Lane markers preview the coming clash on both lines, yours and the enemy's."},
+	# "not in the clash" is the part that was missing: _resolve_swift_attack spends
+	# has_attacked_this_turn, so a Swift body strikes ONCE, in the pre-phase.
+	# KEPT TO ONE WRAPPED LINE ON PURPOSE — this panel has no scroll and its fixed
+	# 620px rect is already full; a sixth line pushes the "[Tab] / [?]" hint off the
+	# bottom of the canvas. Spend extra words in MECHANICS_HELP, which scrolls.
+	{"name": "Swift", "desc": "Swift creatures strike early, not in the clash."},
+	{"name": "Hand", "desc": "Unplayed cards stay. Right-click up to {n} cards to discard them when your turn ends."},
 ]
 
 const MECHANICS_HELP: Array = [
-	{"name": "Four lanes", "desc": "Each side has four lanes. In each lane, the front creature attacks first, then the back creature. An empty lane attacks enemy face."},
-	{"name": "Forecast chips", "desc": "During your turn, lane markers preview enemy attacks before the main clash."},
+	# NOT "in each lane, front then back" — that describes a per-lane resolution
+	# the engine does not do. `_run_clash` walks ALL FOUR front lanes, then all
+	# four back lanes (see the `_rank_will_strike(ROW_FRONT)` / `ROW_BACK` passes),
+	# which is exactly what the captions on screen say while this panel is open:
+	# "FRONT ROW ATTACKS", then "BACK ROW ATTACKS". The panel was contradicting
+	# the thing the player was watching.
+	{"name": "Four lanes", "desc": "Each side has four lanes. The whole front row strikes, then the whole back row. A creature with nobody opposite it hits the enemy face."},
+	{"name": "Forecast chips", "desc": "During your turn, lane markers preview the coming clash on both lines, yours and the enemy's."},
 	{"name": "Sacrifice", "desc": "Some cards destroy one of your creatures as a cost. Its On-Death effect still triggers."},
 	{"name": "Banking", "desc": "Carry up to 2 unused Command into the next turn."},
 	{"name": "Front / Back row", "desc": "Both rows attack each round. The front row attacks first and takes attacks first."},
-	{"name": "Swift phase", "desc": "Swift creatures attack before the main clash and take damage normally."},
+	# The muster delay had NO glossary entry at all, while "Four lanes" above states
+	# that every creature in a lane attacks — which is exactly the wrong thing to
+	# read about the body you just played. "Forming Up" is the on-screen term
+	# (Card2D's status rail and HOW_TO_PLAY_PRIMER both use it).
+	{"name": "Forming up", "desc": "A creature played this round is Forming Up and does not attack until the next round. Swift and Charge are the exceptions."},
+	{"name": "Swift phase", "desc": "Swift creatures attack before the main clash instead of during it. They are still struck in the clash."},
+	# OVERKILL IS UNIVERSAL and was documented nowhere. The Piercing keyword entry
+	# describes the same spill, so the only rule statement a player could find made
+	# carry-over look like a keyword premium — while _apply_piercing_overflow runs
+	# it on every killing blow and Piercing only adds the leg to the face.
+	{"name": "Overkill", "desc": "A killing blow carries its excess into the body standing behind. Piercing carries it on to the enemy face."},
 	{"name": "Command", "desc": "Spend Command to play creatures and spells. You normally gain 3 each turn."},
-	{"name": "Your hand", "desc": "Unplayed cards stay in hand. Refill to 5 each turn, up to 10. Right-click cards to discard them at turn end."},
+	{"name": "Your hand", "desc": "Unplayed cards stay in hand. Refill to 5 each turn, up to 10. Right-click up to {n} cards to discard them when your turn ends."},
 ]
+
+
+## Fill in the live values a help entry declares. `{n}` is the discard cap, read
+## through `_max_discard_marks()` for the same reason `_maybe_show_dismiss_tutorial`
+## interpolates instead of printing "2": a relic may widen it, and a hardcoded
+## number in a const would then instruct the player to do something the game
+## refuses — the exact bug that pass was fixing.
+func _help_desc(desc: String) -> String:
+	return desc.replace("{n}", str(_max_discard_marks()))
 
 
 func _toggle_glossary() -> void:
@@ -23580,8 +25762,11 @@ func _reset_glossary_layer(dim_alpha: float = 0.56) -> Button:
 	_glossary_layer.layer = 100
 	add_child(_glossary_layer)
 
+	# NOT `flat` — see the pile viewer's backdrop. A flat Button skips its
+	# stylebox, so this dim was never painted and the glossary read over a fully
+	# lit board. Measured at 0% darkening before the fix.
 	var backdrop := Button.new()
-	backdrop.flat = true
+	backdrop.flat = false
 	backdrop.focus_mode = Control.FOCUS_NONE
 	backdrop.anchor_right = 1.0
 	backdrop.anchor_bottom = 1.0
@@ -23631,7 +25816,7 @@ func _show_combat_primer() -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	root.add_child(title)
 
-	var sub := _make_text_label("The five things you need before pressing CLASH.", 15, IVORY)
+	var sub := _make_text_label("The five things you need before you press Clash.", 15, IVORY)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	sub.modulate = Color(1, 1, 1, 0.82)
 	root.add_child(sub)
@@ -23642,7 +25827,8 @@ func _show_combat_primer() -> void:
 	root.add_child(rule)
 
 	for e in QUICK_HELP:
-		root.add_child(_make_glossary_row(String(e.name), String(e.desc), 360))
+		root.add_child(_make_glossary_row(
+			String(e.name), _help_desc(String(e.desc)), 360))
 
 	var spacer := Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -23658,14 +25844,47 @@ func _show_combat_primer() -> void:
 	var full_btn := _make_glossary_action_button("FULL RULES")
 	full_btn.pressed.connect(_show_full_glossary)
 	buttons.add_child(full_btn)
+	# TWO ROWS, NOT FOUR ACROSS. The panel is 450 wide with 18px margins — 414
+	# usable — and these buttons are 124 each, so a fourth would need 520 and
+	# clip. Splitting the row is the honest fix; shrinking all four to fit would
+	# have squeezed "FULL RULES" at 17px into 96px.
+	var buttons2 := HBoxContainer.new()
+	buttons2.add_theme_constant_override("separation", 8)
+	buttons2.alignment = BoxContainer.ALIGNMENT_CENTER
+	root.add_child(buttons2)
+	# THE RETRIEVAL PATH FROM INSIDE A FIGHT. HOW TO PLAY carries the lesson list
+	# and was reachable only from the main menu and the map — i.e. never at the
+	# moment a player is actually confused. This opens it straight to the COACHING
+	# page, where every lesson can be read in full or armed to fire again.
+	var lessons_btn := _make_glossary_action_button("LESSONS")
+	lessons_btn.pressed.connect(_show_coaching_lessons)
+	buttons2.add_child(lessons_btn)
 	var close_btn := _make_glossary_action_button("CLOSE")
 	close_btn.pressed.connect(_close_glossary)
-	buttons.add_child(close_btn)
+	buttons2.add_child(close_btn)
 
-	var hint := _make_text_label("[Tab] / [?] to toggle", 13, IVORY)
+	var hint := _make_text_label("[Tab] / [?] to toggle", 14, IVORY)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.modulate = Color(1, 1, 1, 0.70)
 	root.add_child(hint)
+
+
+## The lesson list, on the glossary's own CanvasLayer (100).
+##
+## IT MUST GO ON THAT LAYER, not on `self`. `make_how_to_play_overlay` sets
+## `z_index = 50`, which is enough on the map and the menu because those screens
+## are one canvas — but Combat draws the HUD on layer 12 and the hand on layer 20,
+## and **z_index cannot cross a CanvasLayer**. Parented to `self` the overlay
+## would sit at layer 0 with the whole fight painted over the top of it.
+func _show_coaching_lessons() -> void:
+	_reset_glossary_layer(0.62)
+	var overlay := GameTheme.make_how_to_play_overlay(1)
+	_glossary_layer.add_child(overlay)
+	# ONE DISMISSAL, NOT TWO. The overlay frees ITSELF on CLOSE or a scrim click,
+	# which would leave the glossary layer and its dim standing behind it — so the
+	# player's first click appears to do nothing but darken the board, and a second
+	# is needed to get back to the fight. Following the overlay out closes both.
+	overlay.tree_exiting.connect(_close_glossary)
 
 
 func _show_full_glossary() -> void:
@@ -23714,7 +25933,8 @@ func _show_full_glossary() -> void:
 	mech_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	mech_col.add_child(mech_header)
 	for m in MECHANICS_HELP:
-		mech_col.add_child(_make_glossary_row(m.name, m.desc))
+		mech_col.add_child(_make_glossary_row(
+			String(m.name), _help_desc(String(m.desc))))
 
 	var hint := _make_text_label("[Tab] / [?] to toggle  ·  [Esc] or click backdrop to close", 14, IVORY)
 	hint.anchor_left = 0.0
@@ -23872,14 +26092,14 @@ func _build_end_turn_button() -> void:
 	btn.add_theme_font_size_override("font_size", 24)  # primary action — loudest control
 	# Raised plate styleboxes — the chart document kit (chamfered plate, gilt
 	# rule, soft drop shadow), warm ink fill so the primary action stays loud.
-	var et_normal := GameTheme.make_panel_style(
-		Color(0.14, 0.085, 0.052, 0.96), GameTheme.GILT_BRIGHT, 2, 4, true)
-	var et_hover := GameTheme.make_panel_style(
-		Color(0.22, 0.13, 0.07, 0.98), Color(1.0, 0.92, 0.62), 2, 4, true)
-	var et_pressed := GameTheme.make_panel_style(
-		Color(0.10, 0.06, 0.04, 0.98), GameTheme.GILT_BRIGHT, 2, 4, true)
-	var et_disabled := GameTheme.make_panel_style(
-		Color(0.10, 0.075, 0.06, 0.80), Color(0.45, 0.36, 0.22, 0.55), 2, 4, true)
+	var et_normal := _batched_chart_style(GameTheme.make_panel_style(
+		Color(0.14, 0.085, 0.052, 0.96), GameTheme.GILT_BRIGHT, 2, 4, true))
+	var et_hover := _batched_chart_style(GameTheme.make_panel_style(
+		Color(0.22, 0.13, 0.07, 0.98), Color(1.0, 0.92, 0.62), 2, 4, true))
+	var et_pressed := _batched_chart_style(GameTheme.make_panel_style(
+		Color(0.10, 0.06, 0.04, 0.98), GameTheme.GILT_BRIGHT, 2, 4, true))
+	var et_disabled := _batched_chart_style(GameTheme.make_panel_style(
+		Color(0.10, 0.075, 0.06, 0.80), Color(0.45, 0.36, 0.22, 0.55), 2, 4, true))
 	btn.add_theme_stylebox_override("normal", et_normal)
 	btn.add_theme_stylebox_override("hover", et_hover)
 	btn.add_theme_stylebox_override("pressed", et_pressed)
@@ -23891,8 +26111,8 @@ func _build_end_turn_button() -> void:
 	# it needs no Reduce Motion gating.
 	# Lit rim in warm gilt — the old pale lemon (1.0, 0.94, 0.66) read as a
 	# hazard-sign yellow, the one pure hue on the board.
-	var et_ready := GameTheme.make_panel_style(
-		Color(0.21, 0.125, 0.066, 0.98), Color(0.97, 0.83, 0.46), 3, 4, true)
+	var et_ready := _batched_chart_style(GameTheme.make_panel_style(
+		Color(0.21, 0.125, 0.066, 0.98), Color(0.97, 0.83, 0.46), 3, 4, true))
 	btn.set_meta("style_normal", et_normal)
 	btn.set_meta("style_ready", et_ready)
 	_end_turn_btn = btn
@@ -24592,12 +26812,12 @@ func _player_turn_caption() -> String:
 	if _is_sealed():
 		if _sorcery_active >= 0:
 			return "YOUR SPELL STEP" if _sorcery_active == _net_my_index() \
-				else "FOE'S SPELL STEP"
+				else "OPPONENT'S SPELL STEP"
 		if _sealed_await_foe:
 			return "ORDERS SEALED"
 		return "YOUR ORDERS"
 	if _net_active_index >= 0 and _net_active_index != _net_my_index():
-		return "FOE'S TURN"
+		return "OPPONENT'S TURN"
 	return "YOUR TURN"
 
 
@@ -24618,8 +26838,8 @@ func _set_primary_action(state: String) -> void:
 			_end_turn_btn.text = "PASS  [E]"
 			_end_turn_btn.tooltip_text = "End your spell step."
 		"waiting":
-			_end_turn_btn.text = "AWAITING FOE"
-			_end_turn_btn.tooltip_text = "Waiting for the foe."
+			_end_turn_btn.text = "WAITING…"
+			_end_turn_btn.tooltip_text = "Waiting for your opponent."
 		_:
 			_end_turn_btn.text = "END TURN  [E]"
 			_end_turn_btn.tooltip_text = "Commit your turn without a clash."
@@ -24653,10 +26873,22 @@ func _update_hud() -> void:
 	_sp_refresh_plaque()
 	_siege_refresh_plaque()
 	# Update HP bar fills (inset by 1px from frame border)
+	#
+	# DIVIDE BY maxi(max, 1), NEVER BY THE RAW MAX. A face whose max HP is still
+	# zero — the legacy fallback below with an unknown node type, a probe that
+	# drove the scene before setup, a skirmish plate before the opening sync —
+	# makes 0/0 = NaN here, and NaN survives clampf (every comparison against it
+	# is false). The NaN then lands in a "size:x" tween that writes it to the
+	# Fill Control for 0.35 s, and Control::set_size rejects a non-finite size
+	# with a C++ ERROR *once per frame* — 21 engine errors with no GDScript
+	# backtrace, because the write comes from the Tween's own step. The bar
+	# itself just froze, so nothing on screen said why. Same idiom as
+	# _refresh_portrait_char and _make_hp_medallion_diegetic already use.
 	var p_fill = _player_hp_label.get_parent().get_node_or_null("Fill")
 	if p_fill:
 		var p_full: float = p_fill.get_meta("full_w", 184.0)
-		var p_target := p_full * clampf(float(player_hp) / float(player_max_hp), 0.0, 1.0)
+		var p_target := p_full * clampf(
+			float(player_hp) / float(maxi(player_max_hp, 1)), 0.0, 1.0)
 		if not is_equal_approx(_player_hp_bar_target, p_target):
 			_player_hp_bar_target = p_target
 			if _player_hp_tween != null and _player_hp_tween.is_valid():
@@ -24667,7 +26899,8 @@ func _update_hud() -> void:
 	var e_fill = _enemy_hp_label.get_parent().get_node_or_null("Fill")
 	if e_fill:
 		var e_full: float = e_fill.get_meta("full_w", 204.0)
-		var e_target := e_full * clampf(float(enemy_hp) / float(enemy_max_hp), 0.0, 1.0)
+		var e_target := e_full * clampf(
+			float(enemy_hp) / float(maxi(enemy_max_hp, 1)), 0.0, 1.0)
 		if not is_equal_approx(_enemy_hp_bar_target, e_target):
 			_enemy_hp_bar_target = e_target
 			if _enemy_hp_tween != null and _enemy_hp_tween.is_valid():
@@ -24699,7 +26932,9 @@ func _update_hud() -> void:
 		_turn_label.text = "Round %d" % shown_round
 	# The primary button names its consequence. Network turn code uses the same
 	# helper because its opener has a different clash condition.
-	if _end_turn_btn != null and not _is_net():
+	if _end_turn_btn != null and not _is_net() and shown_round == 1 and _opening_muster_pending:
+		_set_primary_action("end_turn")
+	elif _end_turn_btn != null and not _is_net():
 		_set_primary_action("clash" if not _all_creatures_both_sides().is_empty() \
 			else "end_turn")
 	# Ready cue: once nothing left in hand is payable (respecting effective
@@ -24744,7 +26979,7 @@ func _update_hud() -> void:
 		Phase.PLAYER_TURN:
 			var turn_caption := _player_turn_caption()
 			_phase_label.text = turn_caption
-			var foe_state := turn_caption.begins_with("FOE") or turn_caption == "ORDERS SEALED"
+			var foe_state := turn_caption.begins_with("OPPONENT") or turn_caption == "ORDERS SEALED"
 			_phase_label.add_theme_color_override("font_color",
 				Color(1.0, 0.68, 0.46) if foe_state else IVORY)
 		Phase.RESOLVING:
@@ -24897,6 +27132,7 @@ func _spawn_vfx_ring(center: Vector2, color: Color, radius: float,
 	# Combat-side face of Motion.ring (the one ring engine since R5): keeps
 	# the historical signature for the ~24 spell/impact call sites and scales
 	# with the animation-speed setting (combat-visible by definition).
+	_visible_beat_seq += 1
 	if _hud_layer == null:
 		return
 	Motion.ring(_hud_layer, center, color, {
@@ -24911,14 +27147,13 @@ func _spawn_vfx_streak(from_pos: Vector2, to_pos: Vector2, color: Color,
 		bow: float = 0.0) -> void:
 	if _hud_layer == null or DisplayServer.get_name() == "headless":
 		return
-	var line := Line2D.new()
-	line.width = width
-	line.antialiased = true
-	line.joint_mode = Line2D.LINE_JOINT_ROUND
-	line.begin_cap_mode = Line2D.LINE_CAP_ROUND
-	line.end_cap_mode = Line2D.LINE_CAP_ROUND
-	line.z_index = z
-	line.default_color = color
+	# A TRACER IS A COMET, NOT A ROD (2026-09-09). This was one flat colour end to
+	# end — the same defect the ring engine had, and the same one three stacked
+	# Line2Ds could not fix for the lightning bolt: a Line2D's opacity is UNIFORM
+	# ACROSS ITS WIDTH, so it reads as a drawn stroke however it is coloured.
+	# Motion.beam_line paints the cross-section (soft edge, bright body, hot
+	# centre) and the "comet" strip ramps alpha along the length, so the tail has
+	# dissipated and the head is white-hot.
 	var pts := PackedVector2Array()
 	var ctrl := (from_pos + to_pos) * 0.5
 	var dir := to_pos - from_pos
@@ -24926,12 +27161,15 @@ func _spawn_vfx_streak(from_pos: Vector2, to_pos: Vector2, color: Color,
 		ctrl += dir.orthogonal().normalized() * bow
 	for i in range(15):
 		pts.append(_bezier_quad(from_pos, ctrl, to_pos, float(i) / 14.0))
-	line.points = pts
+	# Widened deliberately: most of the extra span is the soft halo the hard
+	# stroke was never drawing, so the lit core stays about where it was.
+	var line := Motion.beam_line(pts, color, width * 2.4, "comet", 0.9)
+	line.z_index = z
 	_hud_layer.add_child(line)
-	var tw := line.create_tween().set_parallel(true)
-	tw.tween_property(line, "width", maxf(1.0, width * 0.30),
+	var tw := line.create_tween()
+	tw.tween_property(line, "material:shader_parameter/fade", 0.0,
 		UserSettings.anim_time(duration)).set_ease(Tween.EASE_IN)
-	tw.tween_property(line, "modulate:a", 0.0,
+	tw.parallel().tween_property(line, "width", maxf(1.0, width * 0.9),
 		UserSettings.anim_time(duration)).set_ease(Tween.EASE_IN)
 	tw.chain().tween_callback(line.queue_free)
 
@@ -25070,7 +27308,13 @@ const _CALLOUT_STYLE := {
 	# counter holds on the round it forms up, and a countdown that silently
 	# refuses to move is indistinguishable from a bug — so the round it holds,
 	# it says so. Ember, because it is the fuse's own colour.
-	"fuse_unlit":     {"col": Color(1.00, 0.62, 0.28), "label": "FUSE UNLIT"},
+	"fuse_unlit":     {"col": Color(1.00, 0.62, 0.28), "label": "DOOM HOLDS"},
+	# A blow the wall ate whole. Shield-blue with the rest of the protective
+	# family. Routed through the kw funnel rather than a bare callout so it
+	# crosses to a skirmish client — the beat exists precisely because a fully
+	# blunted hit is otherwise indistinguishable from a dropped attack, and it
+	# was landing on the host's screen only. (See _creature_hits_face.)
+	"wall_holds":     {"col": Color(0.60, 0.78, 0.96), "label": "BLOCKED"},
 	# THE FIGHT'S OWN RULE (2026-07-29). An encounter passive lending its line
 	# Piercing or Thorns is a rider like any other — it just happens to be named
 	# after a printed keyword. Ember, with the rest of the "this body does
@@ -25091,7 +27335,7 @@ const _CALLOUT_ICON_ALIAS := {
 	"challenging": "overrun", "redirecting": "guardian", "warded": "last_stand",
 	"fuse_unlit": "doom",
 	"granted_piercing": "piercing", "granted_thorns": "thorns",
-	"summoned": "summon",
+	"summoned": "summon", "wall_holds": "armored",
 }
 var _active_callouts: Array = []
 
@@ -25107,9 +27351,17 @@ func spawn_keyword_callout_kw(card: Control, kw_id: String, suffix: String = "")
 	# only the HP delta, not WHY). eid<0 (an unsynced fresh token) can't be matched — skip.
 	if _is_host() and int(card.entity_id) >= 0:
 		var col: Color = style["col"]
-		_net_fx_queue.append({
+		# Mid-clash this rides the REEL (so the chip fires beside its blow instead of
+		# arriving in a batch with the trailing snapshot); elsewhere, the fx queue.
+		_net_queue_fx_chip({
 			"eid": int(card.entity_id), "label": String(style["label"]) + suffix,
 			"col": [col.r, col.g, col.b],
+			# The DEVICE, not just the word (2026-08-04). The replay looked the icon up
+			# for exactly one label ("LAST STAND") by string-matching it, so every other
+			# keyword chip came out on the client as bare text while the host's carried
+			# its silhouette. Shipping the alias means the two chips are the same object
+			# and a new rider can never be added to the icon-less half by omission.
+			"icon": String(_CALLOUT_ICON_ALIAS.get(kw_id, kw_id)),
 		})
 	var anchor: Vector2 = card.global_position + Vector2(
 		card.size.x * card.scale.x * 0.5, card.size.y * card.scale.y * 0.06)
@@ -25135,7 +27387,7 @@ func spawn_trigger_callout(global_pos: Vector2, text: String, is_death: bool, ei
 	# creature and replay; on-death labels usually have no anchor left (the creature's
 	# gone from the next snapshot) and are dropped — the death burst already reads it.
 	if _is_host() and eid >= 0:
-		_net_fx_queue.append({"eid": eid, "label": text, "col": [col.r, col.g, col.b]})
+		_net_queue_fx_chip({"eid": eid, "label": text, "col": [col.r, col.g, col.b]})
 	spawn_keyword_callout(global_pos, text, col, null)
 
 
@@ -25145,6 +27397,7 @@ func spawn_trigger_callout(global_pos: Vector2, text: String, is_death: bool, ei
 ## sibling chips already live near the same anchor so they never overlap.
 func spawn_keyword_callout(global_pos: Vector2, text: String, color: Color,
 		icon_tex: Texture2D = null) -> void:
+	_visible_beat_seq += 1
 	var parent: Node = _hud_layer if _hud_layer != null else self
 	_play_keyword_pulse_for(text, global_pos, color)
 	_active_callouts = _active_callouts.filter(func(c): return is_instance_valid(c))
@@ -25233,32 +27486,42 @@ func _play_keyword_pulse_for(text: String, global_pos: Vector2, color: Color) ->
 		or key.begins_with("SACRIFICE") or key.begins_with("EXHAUST")
 	if not strong or _hud_layer == null:
 		return
-	var ring := Line2D.new()
-	ring.width = 3.0
-	ring.antialiased = true
-	ring.z_index = 208
-	ring.default_color = Color(color.r, color.g, color.b, 0.74)
-	var pts := PackedVector2Array()
-	var r := 24.0
-	for i in range(33):
-		var a := TAU * float(i) / 32.0
-		pts.append(Vector2(cos(a), sin(a)) * r)
-	ring.points = pts
-	ring.position = global_pos
-	_hud_layer.add_child(ring)
-	var tw := ring.create_tween().set_parallel(true)
-	var end_scale := Vector2(1.35, 1.35)
+	# THROUGH THE ONE RING ENGINE (2026-09-10). This hand-rolled a 33-point
+	# Line2D circle at a flat 3px — the exact hairline-wireframe defect the ring
+	# rebuild exists to remove, still alive here because a whole-game sweep for
+	# cos/sin point loops had never been run (the FX audit only ever scanned four
+	# files). It fires on BLOCKED / ARMORED / SHIELD / PIERCING / SACRIFICE /
+	# EXHAUST, so it is one of the most-seen circles in a fight.
+	#
+	# Same rule as Card2D._spawn_press_ring: the house has ONE ring engine, and
+	# hand-rolling one also skips the headless gate it does for free.
+	var grow: float = 1.35
 	if UserSettings != null and UserSettings.reduce_motion:
-		end_scale = Vector2(1.05, 1.05)
-	tw.tween_property(ring, "scale", end_scale, 0.28).set_ease(Tween.EASE_OUT)
-	tw.tween_property(ring, "modulate:a", 0.0, 0.30).set_ease(Tween.EASE_IN)
-	tw.chain().tween_callback(ring.queue_free)
+		grow = 1.05
+	Motion.ring(_hud_layer, global_pos, Color(color.r, color.g, color.b, 0.74), {
+		"radius": 24.0, "start_scale": 1.0, "end_scale": grow,
+		"duration": 0.28, "width": 3.0, "z_index": 208,
+		# A keyword pulse is a RULE firing — a legibility mark, not a blast — so
+		# it takes the standing-mark treatment: no erosion, no wobble, and the
+		# core kept off white so the keyword's own colour survives. Same
+		# reasoning as ring_static's defaults and the mind family's rings.
+		# WAKE 1.3, NOT THE 3.2 IMPACT DEFAULT — and this is the whole difference
+		# between a ring and a bubble. `wake` is measured in THICKNESS units, so
+		# at a small radius (24px here) the band is proportionally enormous and
+		# the inner falloff runs almost to the centre: the hole came out at 28%
+		# of the front radius, which photographs as a filled orb. Shot-caught,
+		# and it had made this pulse WORSE than the hairline it replaced.
+		# `ring_static` carries 1.35 for exactly this reason.
+		"wake": 1.3,
+		"grit": 0.0, "wobble": 0.0, "hot": 0.30, "heat_gain": 0.30,
+	})
 
 
 func spawn_floating_number(global_pos: Vector2, text: String, color: Color, big: bool = false) -> void:
 	# Floating combat text (damage / heal / gold). Parented to the HUD layer so
 	# it survives the source node's death and rides the screen-shake offset.
 	# Rises while fading; pops in with a slight back-eased scale.
+	_visible_beat_seq += 1
 	var parent: Node = _hud_layer if _hud_layer != null else self
 	# Colour-blind: remap the float colour centrally so heal greens read distinct
 	# from damage reds under deuteranopia/protanopia (no-op when colorblind is off).
@@ -25329,40 +27592,109 @@ func _play_face_damage_flash(amount: int) -> void:
 	# never mask the number it punctuates. Lower floor, steeper slope so big hits
 	# still read as big, and a decay short enough to fuse with the blow instead
 	# of sitting across the next one.
-	var wash_a: float = clampf(0.07 + float(amount) * 0.038, 0.09, 0.38)
-	# Full-screen red wash.
-	var wash := ColorRect.new()
-	wash.set_anchors_preset(Control.PRESET_FULL_RECT)
-	wash.color = Color(0.72, 0.06, 0.04, wash_a)
-	wash.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	wash.z_index = 232
-	parent.add_child(wash)
-	var tw := wash.create_tween()
-	tw.tween_property(wash, "color:a", 0.0, 0.19).set_ease(Tween.EASE_IN)
-	tw.tween_callback(wash.queue_free)
-	# Hard red edge frame that hits + recedes for the "took a real blow" punch.
-	var frame := Panel.new()
-	frame.set_anchors_preset(Control.PRESET_FULL_RECT)
-	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	frame.z_index = 233
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0, 0, 0, 0)
-	# RESCALED WITH THE WASH (2026-07-29). The wash above was toned down first and
-	# the board STILL measured +129 redness peak with a ~400 ms decay — because this
-	# frame, not the wash, was doing most of it and had been left alone. Its floors
-	# were the problem: 0.45 alpha and 80 px meant a ONE-POINT tickle drew more than
-	# half the maximum frame the game can produce, and the 0.40 s fade sat right in
-	# the 100-500 ms band §1 condemns, so it lay across the NEXT beat and buried it.
-	# Floors down, slope kept so a real haymaker still frames the screen in blood.
-	sb.border_color = Color(0.85, 0.07, 0.05, clampf(0.16 + float(amount) * 0.045, 0.20, 0.72))
-	sb.set_border_width_all(int(clampf(38.0 + float(amount) * 11.0, 46.0, 150.0)))
-	sb.shadow_color = Color(0.9, 0.08, 0.05, 0.34)
-	sb.shadow_size = 30
-	frame.add_theme_stylebox_override("panel", sb)
-	parent.add_child(frame)
-	var ft := frame.create_tween()
-	ft.tween_property(frame, "modulate:a", 0.0, 0.22).set_ease(Tween.EASE_IN)
-	ft.tween_callback(frame.queue_free)
+	# ONE VIGNETTE, NOT A WASH PLUS A FRAME (2026-09-09, the FX technique audit).
+	# The comment above already described the intent exactly — "blood at the
+	# edges of your vision", and a wash that "must never mask the number it
+	# punctuates" — but neither half was built that way:
+	#
+	#   · the wash was a UNIFORM full-screen ColorRect, so it reddened the
+	#     CENTRE hardest of all, which is where the damage numeral it is
+	#     punctuating lives;
+	#   · the frame was a StyleBoxFlat border, i.e. a hard-edged rectangular
+	#     band 46-150px wide with a visible inner edge — the same flat-primitive
+	#     defect class as the old Line2D rings.
+	#
+	# A radial vignette is the technique the intent was always asking for: it is
+	# zero at the centre BY CONSTRUCTION (so it cannot mask the numeral however
+	# loud it gets) and has no edge anywhere. The 2026-07-29 magnitude tuning is
+	# preserved — the curve below lands the same peak ink at the screen edge as
+	# the wash+frame pair did, and the decay stays where that pass put it.
+	var strength: float = clampf(0.18 + float(amount) * 0.050, 0.22, 0.78)
+	var vig := ColorRect.new()
+	vig.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vig.color = Color.WHITE
+	vig.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vig.z_index = 232
+	var vsz: Vector2 = get_viewport_rect().size
+	vig.material = _face_vignette_material(
+		Color(0.80, 0.06, 0.04), strength,
+		vsz.x / maxf(vsz.y, 1.0))
+	parent.add_child(vig)
+	# IT HOLDS, AND IT THROBS (2026-09-10, the audit's last standing `z`).
+	#
+	# The technique was right after the 2026-09-09 rebuild and the ENVELOPE was
+	# still the lightning's original defect, exactly: it began fading on its
+	# spawn frame, so there was no instant at which the thing was ever at full
+	# strength. The bolt gained most of its weight from one 35ms hold — peak ink
+	# 71 -> 479 on that change alone — and the same hole was sitting here behind
+	# a much better shader.
+	#
+	# THE THROB is the matched aliveness. A blood vignette must not flicker (that
+	# is a discharge, and this is a body being hit) but neither should it simply
+	# dim: pain arrives, eases, and comes back once before it goes. So the decay
+	# is broken by a small re-swell, which is internal life without a single
+	# frame of jitter.
+	#
+	# BOTH SCALE WITH THE BLOW. A 1-damage chip gets a short hold and no throb at
+	# all — punctuation on a scratch reads as melodrama — while a big hit holds
+	# longer and comes back harder. `amount` is already the magnitude the
+	# strength curve above is built on.
+	#
+	# SEQUENCED, never `set_parallel(true)` after the interval: that makes every
+	# following tweener parallel to the PREVIOUS one, the interval included,
+	# which is precisely how the bolt's hold got cancelled the first time.
+	var heavy: float = clampf((float(amount) - 1.0) / 6.0, 0.0, 1.0)
+	var tw := vig.create_tween()
+	# The shader writes COLOR outright, so `modulate` never reaches it.
+	tw.tween_interval(0.045 + 0.055 * heavy)
+	if heavy > 0.15:
+		tw.tween_property(vig, "material:shader_parameter/fade",
+			0.42, 0.09).set_ease(Tween.EASE_OUT)
+		tw.tween_property(vig, "material:shader_parameter/fade",
+			0.30 + 0.34 * heavy, 0.07).set_ease(Tween.EASE_IN)
+	tw.tween_property(vig, "material:shader_parameter/fade", 0.0,
+		0.20 + 0.10 * heavy).set_ease(Tween.EASE_IN)
+	tw.tween_callback(vig.queue_free)
+
+
+static var _face_vig_shader: Shader = null
+
+
+## The blood-at-the-edges vignette behind _play_face_damage_flash.
+##
+## ASPECT-CORRECTED on purpose: measuring the falloff in raw UV on a 16:9 screen
+## makes the "circle" an ellipse that reaches the left and right edges long
+## before the top and bottom, so the band is thick on two sides and thin on the
+## other two. Scaling x by the aspect before taking the length keeps the ramp the
+## same distance in from every edge.
+func _face_vignette_material(tint: Color, strength: float,
+		aspect: float) -> ShaderMaterial:
+	if _face_vig_shader == null:
+		_face_vig_shader = Shader.new()
+		_face_vig_shader.code = """shader_type canvas_item;
+
+uniform vec4 tint : source_color = vec4(1.0, 0.0, 0.0, 1.0);
+uniform float strength = 0.4;
+uniform float fade = 1.0;
+uniform float aspect = 1.777;
+
+void fragment() {
+	vec2 p = (UV - vec2(0.5)) * 2.0;
+	p.x *= aspect;
+	// Normalised so 1.0 lands on the SHORT edge: the ramp then starts the same
+	// distance in on all four sides and the corners simply run hotter.
+	float d = length(p) / 1.0;
+	float v = pow(clamp(smoothstep(0.42, 1.35, d), 0.0, 1.0), 1.5);
+	COLOR = vec4(tint.rgb, v * strength * fade);
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = _face_vig_shader
+	mat.set_shader_parameter("tint", tint)
+	mat.set_shader_parameter("strength", strength)
+	mat.set_shader_parameter("fade", 1.0)
+	mat.set_shader_parameter("aspect", aspect)
+	return mat
 
 
 func _punch_label(lbl: Control, amount_scale: float) -> void:
@@ -25634,8 +27966,10 @@ func _enemy_is_threatening(c: Control, lane: int, row: int) -> bool:
 	# Face threat: both player slots in this column are empty, so the blow lands
 	# on the hero. Front and back rows attack independently every turn (see
 	# _resolve_column_attack) — a back-row enemy reaches face on an open column
-	# regardless of its own front partner, so both rows flag here.
-	if _player_field[lane] == null and _player_back[lane] == null:
+	# regardless of its own front partner, so both rows flag here. Gated on the
+	# Rush rule for the same reason _compute_incoming_face_damage is: the two must
+	# agree about who reaches the face, or the flag and the chip contradict.
+	if _can_reach_face(c) and _player_field[lane] == null and _player_back[lane] == null:
 		return true
 	return false
 
@@ -25857,8 +28191,27 @@ func _add_lane_forecast_total(g: Dictionary) -> void:
 func _add_lane_forecast(attacker: Control, read: Dictionary,
 		suppress_label: bool = false) -> void:
 	var dst: Vector2 = read["point"]
-	var danger: Color = Color(1.0, 0.36, 0.20, 0.62) if bool(read.get("face", false)) \
-		else Color(1.0, 0.72, 0.34, 0.48)
+	# LETHALITY DRIVES THE MARK, NOT JUST THE WORDS (2026-09-10). The read has
+	# carried `lethal` all along and the visual layer ignored it: the ring and
+	# the connector were coloured by face-vs-body only, so a KILLING BLOW looked
+	# identical to a scratch unless the player stopped and read the label.
+	#
+	# That is the exact failure the tactics-UI literature warns about. Into the
+	# Breach's stated rule is to "sacrifice cool ideas for the sake of clarity
+	# every time" — they cut whole weapons because playtesters could not read
+	# them at a glance. "This one dies" is the most important thing on this
+	# overlay and it was the quietest thing on it.
+	#
+	# A lethal read now runs hot red; a survivable one stays quiet amber. The
+	# player sorts the board without reading a word, and the text becomes
+	# confirmation rather than the only channel carrying it.
+	var danger: Color
+	if bool(read.get("lethal", false)):
+		danger = Color(1.0, 0.28, 0.18, 0.80)
+	elif bool(read.get("face", false)):
+		danger = Color(1.0, 0.36, 0.20, 0.62)
+	else:
+		danger = Color(1.0, 0.72, 0.34, 0.40)
 	if bool(read.get("face", false)):
 		_add_lane_forecast_face_marker(dst, read, danger)
 		if not suppress_label:
@@ -25867,19 +28220,27 @@ func _add_lane_forecast(attacker: Control, read: Dictionary,
 
 	var src := _card_center(attacker)
 	_add_lane_forecast_target_ring(dst, read, danger)
-	var line := Line2D.new()
-	line.width = 3.0
-	line.antialiased = true
-	line.joint_mode = Line2D.LINE_JOINT_ROUND
-	line.begin_cap_mode = Line2D.LINE_CAP_ROUND
-	line.end_cap_mode = Line2D.LINE_CAP_ROUND
-	line.z_index = 176
-	line.default_color = danger
+	# A TAPERED BEAM, NOT A FLAT WIRE (2026-09-10). This was a constant-width 3px
+	# Line2D with round caps — uniform opacity across its width, hard on both
+	# edges, and giving no clue which END was the target. Together with the
+	# reticle and the crosshair it is what the owner called "a bunch of ugly
+	# lines", and it is the most-looked-at overlay in the game because the lane
+	# forecast is ALWAYS ON.
+	#
+	# The "comet" taper is doing real work here, not decoration: it runs thin at
+	# the attacker and heavy at the victim, so the line states its own DIRECTION.
+	# That is information the flat wire could only convey by adding chevrons on
+	# top of it — fewer elements, and the read is stronger.
+	#
+	# Kept deliberately QUIET: low heat, no erosion, modest width. This is a
+	# standing information overlay, not a blow landing — the same reasoning that
+	# gives ring_static its tight, un-eroded defaults.
 	var mid := (src + dst) * 0.5 + Vector2(0, -22)
 	var pts := PackedVector2Array()
 	for i in range(13):
 		pts.append(_bezier_quad(src, mid, dst, float(i) / 12.0))
-	line.points = pts
+	var line := Motion.beam_line(pts, danger, 15.0, "trail", 0.25, "comet")
+	line.z_index = 176
 	_hud_layer.add_child(line)
 	_lane_forecast_nodes.append(line)
 
@@ -25920,6 +28281,32 @@ func _add_lane_forecast_label(dst: Vector2, read: Dictionary) -> void:
 	_lane_forecast_nodes.append(label)
 	label.reset_size()
 	var s: Vector2 = label.size
+	# A BACKING PLATE (2026-09-10). The forecast is the game's most-read overlay
+	# and it was outlined text laid straight onto CARD ART — a busy, warm,
+	# mid-value painting — which is the worst possible ground for warm text at
+	# any outline weight. Six of these on screen at once was most of why the
+	# whole overlay read as noise.
+	#
+	# A quiet dark plate is the standard fix and it costs no attention of its
+	# own: it stays below the text, hugs it, and gives the numerals a constant
+	# ground so a "TAKES 3" over a fire elemental reads the same as one over a
+	# dark corner. Rounded and low-alpha, because this is a label backing, not a
+	# panel — it must not compete with the reticle it belongs to.
+	var plate := Panel.new()
+	var pst := StyleBoxFlat.new()
+	pst.bg_color = Color(0.06, 0.045, 0.035, 0.72)
+	pst.set_corner_radius_all(5)
+	pst.content_margin_left = 7.0
+	pst.content_margin_right = 7.0
+	pst.content_margin_top = 1.0
+	pst.content_margin_bottom = 1.0
+	plate.add_theme_stylebox_override("panel", pst)
+	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	plate.z_index = 177
+	_hud_layer.add_child(plate)
+	_lane_forecast_nodes.append(plate)
+	# Tracked so the stacking pass below moves the plate with its label.
+	label.set_meta("forecast_plate", plate)
 	# STACK, DON'T BURY (2026-07-29). This loop runs per ATTACKER but anchors per
 	# TARGET, so two bodies striking the same victim produced two labels at
 	# identical positions — and the survivor showed only ITS OWN attacker's damage.
@@ -25936,6 +28323,13 @@ func _add_lane_forecast_label(dst: Vector2, read: Dictionary) -> void:
 	_lane_forecast_anchors[key] = stacked + 1
 	label.position = Vector2(dst.x - s.x * 0.5,
 		dst.y - s.y - 10.0 - float(stacked) * (s.y + 3.0))
+	# The plate follows its label, inset so it hugs the text rather than framing
+	# it. Sized from the label's own measured rect, so a long read ("HELD - NO
+	# FACE THIS ROUND") gets a long plate and a short one does not float in a box.
+	var lp: Panel = label.get_meta("forecast_plate", null)
+	if lp != null and is_instance_valid(lp):
+		lp.position = label.position + Vector2(-7.0, 2.0)
+		lp.size = s + Vector2(14.0, -4.0)
 
 
 func _add_lane_forecast_face_marker(dst: Vector2, read: Dictionary, danger: Color) -> void:
@@ -25969,33 +28363,27 @@ func _add_lane_forecast_target_ring(dst: Vector2, read: Dictionary, danger: Colo
 	if _hud_layer == null:
 		return
 	var radius: float = 34.0 if bool(read.get("face", false)) else 50.0
-	var ring := Line2D.new()
-	ring.width = 2.5
-	ring.antialiased = true
-	ring.z_index = 175
-	ring.default_color = Color(danger.r, danger.g, danger.b, minf(danger.a + 0.12, 0.72))
-	var pts := PackedVector2Array()
-	for i in range(41):
-		var a := TAU * float(i) / 40.0
-		pts.append(Vector2(cos(a), sin(a)) * radius)
-	ring.points = pts
-	ring.position = dst
-	_hud_layer.add_child(ring)
-	_lane_forecast_nodes.append(ring)
+	# THE ONE RING ENGINE, held rather than fired (2026-09-09). This used to
+	# hand-roll a 41-point Line2D at a flat 2.5px — and because the lane forecast
+	# is always-on, that hairline was the most-looked-at circle in the game. It is
+	# the same distance-field band as every other ring now, tuned tight by
+	# ring_static's defaults so a standing mark still reads as information.
+	# WEIGHT AS WELL AS HUE. Colour alone fails a colour-blind player outright,
+	# so a lethal reticle is drawn heavier too — two independent channels
+	# carrying the same "this one dies", which is the accessibility floor this
+	# project already applies to damage numbers via GameTheme.cb_color.
+	var kill: bool = bool(read.get("lethal", false))
+	var ring := Motion.ring_static(_hud_layer, dst,
+		Color(danger.r, danger.g, danger.b, minf(danger.a + 0.12, 0.86)),
+		{"radius": radius, "width": 4.2 if kill else 2.2, "z_index": 175})
+	if ring != null:
+		_lane_forecast_nodes.append(ring)
 
-	var cross := Line2D.new()
-	cross.width = 2.0
-	cross.antialiased = true
-	cross.z_index = 176
-	cross.default_color = Color(danger.r, danger.g, danger.b, 0.42)
-	cross.points = PackedVector2Array([
-		Vector2(-radius * 0.54, 0), Vector2(radius * 0.54, 0),
-		Vector2(0, 0),
-		Vector2(0, -radius * 0.54), Vector2(0, radius * 0.54),
-	])
-	cross.position = dst
-	_hud_layer.add_child(cross)
-	_lane_forecast_nodes.append(cross)
+	# THE CROSSHAIR IS DROPPED (2026-09-10). Between the ring, the crosshair and
+	# the connector arriving at the same point, three separate marks were saying
+	# ONE thing — "here" — and six of those on a board is the clutter the owner
+	# called a bunch of ugly lines. The soft ring says "here" perfectly well; the
+	# beam's taper says which direction it came from.
 
 
 func _forecast_chip_text(read: Dictionary) -> String:
@@ -26214,7 +28602,8 @@ func _play_face_strike_vfx(card: Control, lane_idx: int, is_enemy: bool, power: 
 
 func _play_attack_tracer(from_pos: Vector2, to_pos: Vector2, attacker_is_enemy: bool,
 		power: float = 2.0, heavy: bool = false, ranged: bool = false,
-		col_override: Color = Color(0, 0, 0, 0)) -> void:
+		col_override: Color = Color(0, 0, 0, 0),
+		bow_scale: float = 1.0) -> void:
 	# Gold = player strike, ember-red = enemy. Heavy blows get a white-hot core;
 	# ranged shots draw tighter, colder lines so snipers don't read like melee.
 	# `col_override` (alpha > 0) paints the line in a caller's colour instead of
@@ -26231,11 +28620,20 @@ func _play_attack_tracer(from_pos: Vector2, to_pos: Vector2, attacker_is_enemy: 
 		base_col = Color(1.0, 0.58, 0.34, 0.95) if attacker_is_enemy else Color(0.76, 0.92, 1.0, 0.95)
 	if col_override.a > 0.0:
 		base_col = col_override
+	# `glow_col` retired with the glow LAYER (2026-09-09) — the beam texture
+	# carries the halo now. `hot_col` still dresses the ranged muzzle streaks.
 	var hot_col := Color(1.0, 0.96, 0.76, 0.94)
-	var glow_col := Color(base_col.r, base_col.g, base_col.b, 0.28)
 	var slash_width := clampf(5.0 + (power - 2.0) * 0.48, 4.5, 9.0)
 	var mid := (from_pos + to_pos) * 0.5
-	var bow := clampf(dir.length() * (0.045 if ranged else 0.085), 10.0, 38.0)
+	# MELEE BOWS HARD, RANGED BARELY. The old melee bow was shallow enough that
+	# the arc read as a straight line with a bend in it; a slash has to be a
+	# CRESCENT before the taper can make it a blade. Ranged is left flat because
+	# a shot travels straight.
+	# `bow_scale` lets a SPELL say how heavy the thing it threw is (see
+	# _spell_fx_deliver). Additive: every historical call site omits it and gets
+	# 1.0, i.e. exactly the arc it had before.
+	var bow := clampf(dir.length() * (0.045 if ranged else 0.155), 10.0, 62.0) \
+		* bow_scale
 	if attacker_is_enemy:
 		bow *= -1.0
 	var ctrl := mid + dir.orthogonal().normalized() * bow
@@ -26246,58 +28644,48 @@ func _play_attack_tracer(from_pos: Vector2, to_pos: Vector2, attacker_is_enemy: 
 	if UserSettings.reduce_motion:
 		_spawn_vfx_streak(from_pos, to_pos, base_col, slash_width * 0.75, 230, 0.16)
 		return
-	var glow := Line2D.new()
-	glow.width = slash_width * 2.15
-	glow.antialiased = true
-	glow.joint_mode = Line2D.LINE_JOINT_ROUND
-	glow.begin_cap_mode = Line2D.LINE_CAP_ROUND
-	glow.end_cap_mode = Line2D.LINE_CAP_ROUND
-	glow.z_index = 229
-	glow.default_color = glow_col
-	glow.points = pts
-	_hud_layer.add_child(glow)
-	var glow_tw := glow.create_tween()
-	glow_tw.tween_property(glow, "width", maxf(1.0, slash_width * 0.85),
-		UserSettings.anim_time(0.18)).set_ease(Tween.EASE_IN)
-	glow_tw.parallel().tween_property(glow, "modulate:a", 0.0,
-		UserSettings.anim_time(0.20)).set_ease(Tween.EASE_IN)
-	glow_tw.tween_callback(glow.queue_free)
-	var line := Line2D.new()
-	line.width = slash_width
-	line.antialiased = true
-	line.joint_mode = Line2D.LINE_JOINT_ROUND
-	line.begin_cap_mode = Line2D.LINE_CAP_ROUND
-	line.end_cap_mode = Line2D.LINE_CAP_ROUND
+	# ONE TEXTURED BEAM (2026-09-09). This was a glow band + a body band + a
+	# conditional hot band — three hard-edged Line2Ds approximating a cross
+	# section, on the effect that fires on EVERY attack in the game. A Line2D's
+	# opacity is uniform across its width, so no number of them adds up to a soft
+	# edge; Motion.beam_line paints the profile instead and one draw does it.
+	# `heat` carries what the old `core` layer carried, so a heavy blow still
+	# runs a hotter centre — as a value now, not a fourth node.
+	var hot: float = 0.95 if (heavy or power >= HEAVY_HIT_DAMAGE) else 0.72
+	# A SWING, NOT A ROD. Uniform width plus round caps plus a shallow bow drew a
+	# straight shaft with a blob on the end — a shape nobody wants on screen, and
+	# it read as "a red line" rather than as a blow landing. The slash-VFX
+	# anatomy is a crescent whose trailing end is NARROW and whose leading edge
+	# is WIDE and bright: the taper says which way it went, and the narrow tail
+	# says how fast. A ranged shot keeps the straight, even profile — a bolt in
+	# flight is not a blade.
+	# A TAPERED BEAM NEEDS A FATTER BASE. `width_curve` and the texture's
+	# cross-section profile BOTH multiply down, so feeding the taper the same
+	# width the uniform beam used drew a hairline again — the curve only reaches
+	# 1.0 at one point along the arc and the profile then eats its edges.
+	# 4.2 on the RANGED path, not 3.0 (shot-caught on the spell delivery). The
+	# taper and the strip's cross-section profile both multiply down, so 3.0 left
+	# a thrown spell and a sniper shot as a faint scratch across the board while
+	# the melee arc beside them read fine at 4.8. Third time this trap has been
+	# paid; see Motion.beam_line's header.
+	var line := Motion.beam_line(pts, base_col,
+		slash_width * (4.2 if ranged else 4.8),
+		"comet" if ranged else "streak", hot, "comet" if ranged else "slash")
 	line.z_index = 230
-	line.default_color = base_col
-	var curve := Curve.new()
-	curve.add_point(Vector2(0.0, 0.3))
-	curve.add_point(Vector2(1.0, 1.0))
-	line.width_curve = curve
-	line.points = pts
 	_hud_layer.add_child(line)
 	var tw := line.create_tween()
 	tw.tween_interval(UserSettings.anim_time(0.035))
-	tw.tween_property(line, "modulate:a", 0.0,
+	tw.tween_property(line, "material:shader_parameter/fade", 0.0,
 		UserSettings.anim_time(0.17)).set_ease(Tween.EASE_IN)
-	tw.tween_callback(line.queue_free)
+	tw.parallel().tween_property(line, "width", slash_width * 1.15,
+		UserSettings.anim_time(0.17)).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(line.queue_free)
 	if heavy or power >= HEAVY_HIT_DAMAGE:
-		var core := Line2D.new()
-		core.width = maxf(1.6, slash_width * 0.34)
-		core.antialiased = true
-		core.joint_mode = Line2D.LINE_JOINT_ROUND
-		core.begin_cap_mode = Line2D.LINE_CAP_ROUND
-		core.end_cap_mode = Line2D.LINE_CAP_ROUND
-		core.z_index = 231
-		core.default_color = hot_col
-		core.points = pts
-		_hud_layer.add_child(core)
-		var core_tw := core.create_tween()
-		core_tw.tween_property(core, "modulate:a", 0.0,
-			UserSettings.anim_time(0.12)).set_ease(Tween.EASE_IN)
-		core_tw.tween_callback(core.queue_free)
+		# Widened with the arc: at 2.0 this was a thin ellipse OUTLINE sitting
+		# where the blow landed, which is the wireframe read the ring rebuild
+		# exists to kill.
 		_spawn_vfx_ring(to_pos, Color(base_col.r, base_col.g, base_col.b, 0.50),
-			22.0 + power * 2.0, 1.26, 0.22, 228, 2.0, 0.50, Vector2(1.24, 0.54))
+			22.0 + power * 2.0, 1.26, 0.22, 228, 4.5, 0.50, Vector2(1.24, 0.54))
 	if ranged:
 		var n := dir.normalized()
 		var side := n.orthogonal() * 9.0
@@ -27013,6 +29401,15 @@ func _forecast_sniper_strike(attacker: Control, atk: int, lane: int,
 	if target == null:
 		target = _forecast_sniper_pick_lowest(not is_enemy)
 	if target == null:
+		# The Rush rule, forecast — same refusal the column read prints (see
+		# _predict_lane_strike). Without it the lane read promised face damage the
+		# sniper resolver now declines to deal.
+		if not _can_reach_face(attacker):
+			return {
+				"point": _card_center(attacker), "text": "HELD - NO FACE THIS ROUND",
+				"quiet_text": "HELD", "color": Color(0.72, 0.76, 0.82),
+				"face": false, "damage": 0,
+			}
 		var face_read := _forecast_face_strike(attacker, atk, lane, is_enemy, false)
 		if _doubled_hour[1 if is_enemy else 0]:
 			face_read["text"] += "\nSECOND VOLLEY LATER"
@@ -27181,7 +29578,7 @@ func _forecast_face_strike(attacker: Control, atk: int, lane: int,
 		text = "LETHAL" if target_is_enemy else "DEFEAT"
 		color = Color(1.0, 0.32, 0.22)
 	else:
-		text = "%s -%d - %d LEFT" % ["FOE HP" if target_is_enemy else "YOUR HP", dmg, hp_after]
+		text = "%s -%d - %d LEFT" % ["ENEMY HP" if target_is_enemy else "YOUR HP", dmg, hp_after]
 	return {
 		"point": _face_lane_point(target_is_enemy, lane), "text": text,
 		"quiet_text": "HP -%d" % dmg, "color": color, "face": true,
@@ -27469,12 +29866,14 @@ func _forecast_return_outcome(defender: Control, attacker: Control,
 	if defender.current_hp <= 0:
 		return {"text": "", "survives": true}
 	var defender_is_friendly: bool = attacker_is_enemy
+	# Mirrors _apply_thorns' source list exactly. (bridge_watcher's centre-lane
+	# grant was removed there 2026-07-16 — the id is now Witch-Shot, a spell relic
+	# that grants no Thorns at all — but this read kept it, so holding Witch-Shot
+	# made the counter-forecast promise a sting lanes 1-2 never delivered.)
 	var has_thorns: bool = defender.has_keyword("thorns") \
 		or (not attacker_is_enemy and _has_encounter_passive_keyword(defender, "thorns")) \
 		or bool(defender.state.shield_wall_thorns) \
 		or bool(defender.state.square_thorns) \
-		or (defender_is_friendly and _has_relic("bridge_watcher") \
-			and defender.current_lane in [1, 2]) \
 		or (defender_is_friendly and _has_relic("corner_stone") \
 			and defender.current_lane in [0, LANES_PER_ROW - 1])
 	# Mirror of the live rule at _creature_attacks_creature (see the will_counter
@@ -27500,8 +29899,8 @@ func _forecast_return_outcome(defender: Control, attacker: Control,
 	if has_thorns:
 		var thorns := 1
 		if defender_is_friendly \
-				and ((_has_relic("bridge_watcher") and defender.current_lane in [1, 2]) \
-					or (_has_relic("corner_stone") and defender.current_lane in [0, LANES_PER_ROW - 1])):
+				and _has_relic("corner_stone") \
+				and defender.current_lane in [0, LANES_PER_ROW - 1]:
 			thorns = 2
 		_forecast_apply_damage_state(attacker, source_state, thorns, true)
 		var thorn_lost: int = maxi(0, before - maxi(int(source_state["hp"]), 0))
@@ -27640,10 +30039,24 @@ func _hero_face_point(target_is_enemy: bool) -> Vector2:
 	return Vector2(vp.x * 0.5, 40.0 if target_is_enemy else vp.y - 220.0)
 
 
-func _pulse_mana_label(amount: int, is_gain: bool = false) -> void:
+## How far behind the card the Command spend lands. See _pulse_mana_label.
+const MANA_SPEND_BEAT := 0.09
+
+
+func _pulse_mana_label(amount: int, is_gain: bool = false,
+		delay: float = 0.0) -> void:
 	# Brief flash + scale punch on the Command counter so a change reads as a
 	# deliberate cost paid — or a gift received — not just a number that quietly
 	# ticked.
+	#
+	# THE SPEND IS ITS OWN BEAT (2026-08-03). Playing a card fired the card's exit
+	# from the hand, the play cue, the seal punch and the arrival press in ONE
+	# frame, and four simultaneous events read as one indistinct event. `delay`
+	# lets the play sites push the RESOURCE half a beat behind the CARD, so the eye
+	# separates "that left my hand" from "that cost me one". Deliberately under the
+	# 100 ms floor of the forbidden pacing band: this is an offset between two
+	# animations, never a pause anything waits on. Defaults to 0.0, so gifts,
+	# refunds and the Coin are untouched — a gain already arrives on its own beat.
 	#
 	# GAINS WERE SILENT until 2026-07-28. This funnel was only ever called on a
 	# SPEND, so every source of extra Command (a battlecry, a potion, Raider's Oath,
@@ -27654,9 +30067,27 @@ func _pulse_mana_label(amount: int, is_gain: bool = false) -> void:
 	# call sites untouched.
 	if _mana_label == null or amount <= 0:
 		return
+	if delay > 0.0 and is_inside_tree() and DisplayServer.get_name() != "headless":
+		# Scaled with the rest of combat pacing, so Instant collapses the offset
+		# instead of holding a beat nobody asked for. Binding the method (not a
+		# lambda over a node) is safe here: the only capture is Combat itself, and
+		# a freed Object drops its own signal connections.
+		get_tree().create_timer(Motion.time(delay)).timeout.connect(
+			_pulse_mana_label.bind(amount, is_gain, 0.0))
+		return
 	# The floating number is the INFORMATIONAL half — it states the amount, so it
 	# survives Reduce Motion. The flash and the punch below are decorative.
-	var pos := _mana_label.get_global_rect().get_center() + Vector2(0, -10)
+	#
+	# IT LIFTS OFF THE RIM, NOT OUT OF THE COUNT (2026-08-04, caught by the ✦1
+	# shot and by nothing else). It used to spawn at the numeral's own centre and
+	# rise from there, so for the first ~150 ms the amount sat directly on top of
+	# the count and the two composited into a single unreadable string — a "-2"
+	# over an "18" photographs as "-28 / 18". The old numeral punch hid it by
+	# moving the digit out from under; the strike presses the digit IN, so the
+	# collision is now on the exact frame the beat asks to be looked at. 60px is
+	# the seal's 48px radius plus clearance: the amount leaves the wax on the
+	# frame it is born, which is also what it means — this much has left the seal.
+	var pos := _mana_label.get_global_rect().get_center() + Vector2(0, -60)
 	if is_gain:
 		spawn_floating_number(pos, "+%d" % amount, Color(0.98, 0.84, 0.42), false)
 	else:
@@ -27664,27 +30095,49 @@ func _pulse_mana_label(amount: int, is_gain: bool = false) -> void:
 	if UserSettings != null and UserSettings.reduce_motion:
 		return
 	var rest_color: Color = _mana_label.get_theme_color("font_color")
-	# Remembered on the first punch: reading .scale mid-flight (a two-spell turn
-	# lands two of these inside one beat) would settle to an inflated scale and
-	# the counter would creep. Same reason _punch_label keys its rest.
-	var rest_scale: Vector2 = _mana_label.get_meta(
-		"_pulse_mana_rest", _mana_label.scale)
-	_mana_label.set_meta("_pulse_mana_rest", rest_scale)
-	_mana_label.pivot_offset = _mana_label.size * 0.5
+	# THE INK. Both branches wash the numeral blue and let it dry back to cream —
+	# on a spend that is the fresh count still wet in the wax, on a gain it is the
+	# only mark the change gets. It is a THEME OVERRIDE, not a node property, so
+	# it composes with the strike below rather than competing with it.
 	if _mana_label.has_meta("_pulse_mana_tw"):
 		var old = _mana_label.get_meta("_pulse_mana_tw")
 		if old is Tween and old.is_valid():
 			old.kill()
-	_mana_label.scale = rest_scale
 	var tw := _mana_label.create_tween()
 	_mana_label.set_meta("_pulse_mana_tw", tw)
 	tw.set_parallel(true)
-	# House grammar: QUAD-out out, BACK-out home (this used to be inverted).
-	tw.tween_property(_mana_label, "scale", rest_scale * 1.25, Motion.PUNCH) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	tw.tween_method(func(c: Color):
 			_mana_label.add_theme_color_override("font_color", c),
 		Color(0.55, 0.80, 1.0), rest_color, 0.32)
+	if not is_gain:
+		# THE SPEND IS A STRIKE, NOT A COUNTER TICK (✦1, 2026-08-04). The numeral
+		# no longer scale-punches on this branch, and that is the point rather than
+		# an omission: the digit is pressed INTO the wax, so a digit inflating out
+		# of a seal that is compressing under it is the exact tell that gave the
+		# old beat away as a HUD widget. The wrapper carries both.
+		#
+		# A gain punch interrupted by a spend would otherwise strand the numeral
+		# at whatever scale the kill above caught it at — this branch never
+		# writes .scale again, so the rest pose has to be restored here.
+		if _mana_label.has_meta("_pulse_mana_rest"):
+			_mana_label.scale = _mana_label.get_meta("_pulse_mana_rest")
+		_strike_command_seal(_mana_seal_press)
+		return
+	# A GAIN IS NOT A STRIKE. Nothing came down on the wax — the count simply
+	# rose — so this keeps the counter punch it has had since 2026-07-28, which
+	# also leaves the strike meaning exactly one thing: you paid.
+	#
+	# Rest remembered on the first punch: reading .scale mid-flight (a two-spell
+	# turn lands two of these inside one beat) would settle to an inflated scale
+	# and the counter would creep. Same reason _punch_label keys its rest.
+	var rest_scale: Vector2 = _mana_label.get_meta(
+		"_pulse_mana_rest", _mana_label.scale)
+	_mana_label.set_meta("_pulse_mana_rest", rest_scale)
+	_mana_label.pivot_offset = _mana_label.size * 0.5
+	_mana_label.scale = rest_scale
+	# House grammar: QUAD-out out, BACK-out home (this used to be inverted).
+	tw.tween_property(_mana_label, "scale", rest_scale * 1.25, Motion.PUNCH) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	tw.chain().tween_property(_mana_label, "scale", rest_scale, Motion.SETTLE) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
@@ -27710,6 +30163,12 @@ const SPELL_FAMILIES := {
 	# SHOCK — white-blue bolt + brief flash.
 	"holy_smite": "shock", "time_snare": "shock",
 	"spark": "shock", "strike": "shock", "quick_shot": "shock",
+	# Counterorders was the last untagged spell in the pool (caught by
+	# _probe_spell_fx_audit, 2026-09-10) and had been casting the generic
+	# colour puff. SHOCK rather than mind: mechanically it is direct damage
+	# like `strike` and `spark`, and the mind family is this game's ORDERS
+	# register — the card COUNTERMANDS an order, it does not issue one.
+	"counterorders": "shock",
 	# FROST — the 7th family (2026-07-17; S1 filed cold under shock as a
 	# stand-in, but a LIGHTNING BOLT for a frost spell is a material lie):
 	# crystal shatter + slow-falling flakes + rime ring, no lightning.
@@ -27882,7 +30341,87 @@ func _spell_fx_deliver(to: Vector2, family: String) -> void:
 		return
 	var col: Color = _spell_vfx_color(family, "")
 	col.a = 0.92
-	_play_attack_tracer(_spell_caster_origin(), to, false, 2.0, false, true, col)
+	var from: Vector2 = _spell_caster_origin()
+	# SHOCK DOES NOT THROW ANYTHING — IT ARCS (2026-09-10). Every family used the
+	# same tracer in a different colour, which meant the delivery said nothing
+	# the colour swatch had not already said. A discharge is the one element that
+	# does not travel as an object at all, and the bolt that _vfx_shock lands at
+	# the far end is already the right drawing for it: three strokes, forked, a
+	# fresh path each time. Casting it ACROSS the board makes the delivery and
+	# the impact one continuous event instead of two unrelated beats.
+	if family == "shock":
+		_spawn_lightning_bolt(from, to, Color(col.r, col.g, col.b, 1.0))
+		return
+	# The rest still throw, but they throw things of different WEIGHT, which is
+	# the cheapest honest differentiation available: a mote of light and a lump
+	# of earth do not follow the same arc. Straight-ish for the fast and the
+	# weightless; a real sag for the heavy and the slow.
+	var bow_by_family := {
+		"frost": 0.40,     # a hurled shard: fast, barely curved
+		"mind": 0.25,      # an order does not lob; it goes where it is sent
+		"blessing": 0.65,  # light falls gently rather than being thrown
+		"fire": 1.00,
+		"blight": 1.45,    # slow and sagging — rot has no hurry
+		"earth": 1.70,     # a lump of ground, and it flies like one
+	}
+	# POWER 8, not 2. `power` drives `slash_width` (clamped 4.5-9.0) and 2.0 is
+	# its FLOOR — the weight of a chip hit. A thrown spell crossing the whole
+	# board at that width photographed as a scratch. This is a cast, so it gets
+	# near the top of the band; it changes nothing else, since the tracer's
+	# `heavy` branch is driven by the flag rather than by this number.
+	_play_attack_tracer(from, to, false, 8.0, false, true, col,
+		float(bow_by_family.get(family, 1.0)))
+
+
+## THE IMPACT FRAME — the anime device, and the one beat every family was
+## missing (2026-09-10). Each form simply APPEARED at full strength; nothing in
+## the set marked the instant of highest force.
+##
+## The technique is specific and the timing is not negotiable: a near-white
+## abstract shape inserted AT contact for ONE to THREE FRAMES, to shock the eye
+## before it can resolve detail. Anything longer stops being a punch and becomes
+## a flash the player has to look past — which on a board that resolves four
+## impacts at once would be unreadable. Two frames here (~0.033s at 60Hz).
+##
+## A STARBURST, NOT A DISC. The convention is an abstract shape rather than a
+## plain flash, and a spiky silhouette reads as force where a circle reads as a
+## bubble — which is also the mistake the keyword pulse made. Alternating long
+## and short points, jittered, so two impacts in a row never stamp the same mark.
+##
+## It carries a breath of the family's colour at its rim, so a fire hit and a
+## frost hit still differ on the frame that matters most; the centre stays
+## near-white because that is what does the shocking.
+func _spell_impact_frame(at: Vector2, col: Color, force: float = 1.0) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	var burst := Polygon2D.new()
+	var pts := PackedVector2Array()
+	var cols := PackedColorArray()
+	var spikes := 9
+	var hot := Color(1.0, 0.98, 0.94, 0.30 + 0.65 * force)
+	var rim := Color(col.r, col.g, col.b, 0.85).lerp(hot, 0.45)
+	for i in range(spikes * 2):
+		var a: float = TAU * float(i) / float(spikes * 2) + randf_range(-0.05, 0.05)
+		var r: float = (FX_BODY.x * 0.30 if i % 2 == 0 else FX_BODY.x * 0.11) \
+			* randf_range(0.82, 1.18) * (0.55 + 0.45 * force)
+		pts.append(Vector2(cos(a) * r, sin(a) * r * 0.86))
+		# Long points carry the family's colour, short ones stay hot: the mark
+		# reads white at its heart and tinted at its reach.
+		cols.append(rim if i % 2 == 0 else hot)
+	burst.polygon = pts
+	burst.vertex_colors = cols
+	burst.color = Color.WHITE
+	burst.position = at
+	burst.z_index = 232
+	_hud_layer.add_child(burst)
+	var tw := burst.create_tween()
+	# TWO FRAMES HELD, then gone in one. No fade curve — an impact frame that
+	# eases out is a glow, and a glow is the opposite of a shock.
+	tw.tween_interval(0.033)
+	tw.tween_property(burst, "modulate:a", 0.0, 0.016)
+	tw.chain().tween_callback(burst.queue_free)
 
 
 func _spell_fx_impact(pos: Vector2, family: String, spell_type: String,
@@ -27890,6 +30429,18 @@ func _spell_fx_impact(pos: Vector2, family: String, spell_type: String,
 	# ONE impact beat. This is exactly what the whole spell used to be; it's now
 	# the per-target unit, so nothing looks worse on day one and multi-target
 	# spells simply get N of them.
+	# NOT EVERY SPELL IS A BLOW. An impact frame is a SHOCK — the right beat for
+	# a bolt or a rock landing, and the wrong one for a ward going up or an order
+	# being given. Firing it flat across all seven families made a heal punch as
+	# hard as a fireball, which is not just odd: if everything shouts, nothing
+	# reads as loud. Scaled by how violent the family actually is, and skipped
+	# outright for the two that are not violent at all.
+	var shock: float = {
+		"shock": 1.0, "earth": 1.0, "fire": 0.85, "frost": 0.55,
+		"blight": 0.45, "blessing": 0.0, "mind": 0.0,
+	}.get(family, 0.7)
+	if shock > 0.0:
+		_spell_impact_frame(pos, _spell_vfx_color(family, spell_type), shock)
 	match family:
 		"fire":
 			_vfx_fire(pos)
@@ -28257,25 +30808,47 @@ func _spell_fx_lob(to: Vector2, family: String, spell_type: String,
 	# (_resolve_spell holds resolution the same beat).
 	var from: Vector2 = _spell_caster_origin()
 	var apex := Vector2(lerpf(from.x, to.x, 0.45), minf(from.y, to.y) - 230.0)
-	var shell := Panel.new()
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(1.0, 0.90, 0.66, 0.96)
-	sb.set_corner_radius_all(10)
-	sb.shadow_color = Color(1.0, 0.55, 0.18, 0.60)
-	sb.shadow_size = 13
-	shell.add_theme_stylebox_override("panel", sb)
-	shell.size = Vector2(19, 19)
-	shell.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# THE SHELL IS A COMET, AND IT IS THE FAMILY'S COLOUR (2026-09-10).
+	#
+	# It was a `Panel` wearing a StyleBoxFlat: a rounded rectangle with a drop
+	# shadow — a flat primitive standing in for a projectile, the same defect
+	# class as the old hairline rings and untextured lines. Worse, its colours
+	# were HARDCODED WARM (cream body, orange shadow) while the function already
+	# takes `family` and passes it to the impact. So a FROST spell threw an
+	# orange box and a BLIGHT spell threw an orange box, and then each detonated
+	# into its own correct colour — the identity broke in flight and healed on
+	# landing, which is the worst possible place to break it.
+	#
+	# One `beam_line` on the "comet" strip replaces both the body and the trail:
+	# its alpha ramps tail→head along U, so the HEAD OF THE COMET IS THE SHELL
+	# and there is no separate node to keep in sync. The trail is the last few
+	# positions on the arc, which is why it curves with the throw instead of
+	# trailing straight behind it.
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var lob_col: Color = _spell_vfx_color(family, spell_type)
+	lob_col.a = 0.94
+	var shell := Motion.beam_line(PackedVector2Array([from, from]),
+		lob_col, 30.0, "comet", 0.80, "comet")
 	shell.z_index = 231
-	shell.position = from - shell.size * 0.5
 	_hud_layer.add_child(shell)
 	var dur: float = UserSettings.anim_time(SPELL_LOB_TRAVEL)
+	# The trail is read back off the NODE each frame rather than from a captured
+	# array: GDScript lambdas capture by VALUE, and a PackedVector2Array is a
+	# value type, so a captured buffer would be copied and every append lost.
+	var fly := func(t: float) -> void:
+		if not is_instance_valid(shell):
+			return
+		var pts: PackedVector2Array = shell.points
+		pts.append(_bezier_quad(from, apex, to, t))
+		if pts.size() > 16:
+			pts.remove_at(0)
+		shell.points = pts
 	var tw := shell.create_tween()
-	tw.tween_method(func(t: float):
-		if is_instance_valid(shell):
-			shell.position = _bezier_quad(from, apex, to, t) - shell.size * 0.5,
-		0.0, 1.0, dur)
-	tw.tween_callback(shell.queue_free)
+	tw.tween_method(fly, 0.0, 1.0, dur)
+	tw.tween_property(shell, "material:shader_parameter/fade", 0.0,
+		UserSettings.anim_time(0.10)).set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(shell.queue_free)
 	var lb_to := to
 	# WeakRef, as in the grammar bolt: the shell is in the air for the whole of
 	# SPELL_LOB_TRAVEL, and _resolve_spell lands the damage in that window — so
@@ -28291,8 +30864,13 @@ func _spell_fx_lob(to: Vector2, family: String, spell_type: String,
 		_spell_fx_impact(lb_to, family, spell_type, lb_live)
 		# The blast outranks the family impact alone: a shockwave ring, a real
 		# kick, and a deepened boom (pitch_base < 1 per AudioBank convention).
-		_spawn_vfx_ring(lb_to, Color(1.0, 0.82, 0.50, 0.80), 34.0, 2.4, 0.42,
-			226, 4.0, 0.5, Vector2(1.0, 0.72))
+		# The blast ring takes the FAMILY's colour too — it was hardcoded gold,
+		# so every lob, whatever element, detonated warm. It stays brighter and
+		# wider than the family's own impact ring because a lob IS the loud
+		# delivery; it just no longer lies about which element landed.
+		var blast := _spell_vfx_color(family, spell_type)
+		_spawn_vfx_ring(lb_to, Color(blast.r, blast.g, blast.b, 0.80),
+			34.0, 2.4, 0.42, 226, 4.0, 0.5, Vector2(1.0, 0.72))
 		screen_shake(9.0)
 		if AudioBank != null:
 			AudioBank.play_sfx("spell_cast", 0.03, -4.0, 0.70))
@@ -28384,14 +30962,20 @@ func _spell_fx_double_beat(target: Control, col: Color) -> void:
 	if target == null or not is_instance_valid(target):
 		return
 	var p: Vector2 = target.get_global_rect().get_center()
-	var db_t: Control = target
+	# WEAKREF, never the node itself. This cast fires BEFORE the spell resolves,
+	# and resolution can free the target inside the 0.18 s beat (banish, a
+	# sacrifice, a lethal ping). The engine reports a freed capture while
+	# marshalling, i.e. BEFORE the body runs, so the is_instance_valid() below
+	# cannot suppress it — see _play_slot_claim_vfx for the house idiom.
+	var db_ref: WeakRef = weakref(target)
 	_pulse_target_outline(target, col)
 	_spawn_vfx_ring(p, Color(col.r, col.g, col.b, 0.55), 26.0, 1.5, 0.26,
 		224, 2.5, 0.6, Vector2.ONE)
 	get_tree().create_timer(UserSettings.anim_time(0.18)).timeout.connect(func():
 		if not is_inside_tree():
 			return
-		if is_instance_valid(db_t):
+		var db_t: Control = db_ref.get_ref() as Control
+		if db_t != null and is_instance_valid(db_t):
 			_pulse_target_outline(db_t, col)
 		_spawn_vfx_ring(p, Color(col.r, col.g, col.b, 0.70), 34.0, 1.8, 0.30,
 			224, 3.0, 0.6, Vector2.ONE)
@@ -28954,6 +31538,25 @@ func _trigger_fx_points(spec: Dictionary, effect: Dictionary, card,
 ## never awaited — resolution must not wait on presentation.
 func _play_trigger_fx(effect: Dictionary, card, lane_idx: int, is_enemy: bool,
 		channel: String, anchor: Vector2 = Vector2.ZERO, row: int = -1) -> void:
+	# THE WATCHER GETS THE CAUSE, NOT JUST THE CONSEQUENCE (2026-08-04).
+	#
+	# The client never runs a resolver — it renders the host's snapshots — so
+	# `dispatch_on_enter` / `dispatch_on_death` / `_resolve_on_play_ability` and this
+	# funnel with them fire on the HOST ONLY. That left the skirmish client watching
+	# a battlecry as three HP numbers quietly changing: no ring off the body, no
+	# tracer to the thing it hit, no grace wave over the line it buffed. The whole
+	# claim of this funnel — "tie the visible result back to its cause" — was solo-
+	# only, on a screen with an opponent whose plays are exactly what you need to
+	# read.
+	#
+	# Only the eid and the channel cross the wire. The client re-derives everything
+	# else off its own board (`_trigger_fx_points` reads board arrays and card
+	# centres, both locally correct on a mirrored board), which is also why nothing
+	# here needs to know about mirroring: the effect dict comes back out of the
+	# creature's own card_data on the far side.
+	if _is_host() and card is Control and is_instance_valid(card) \
+			and int(card.entity_id) >= 0 and not effect.is_empty():
+		_net_fx_queue.append({"eid": int(card.entity_id), "trig": channel})
 	if _hud_layer == null or DisplayServer.get_name() == "headless":
 		return
 	var map: Dictionary = TRIGGER_FX_ENTER
@@ -28995,7 +31598,8 @@ func _play_trigger_fx(effect: Dictionary, card, lane_idx: int, is_enemy: bool,
 		return a.distance_to(origin) < b.distance_to(origin))
 	if kind == "mirror":
 		# The reflection flows FROM the copied creature TO the copier.
-		_play_attack_tracer(pts[0], origin, is_enemy, 2.0, false, true,
+		# Cast weight, as in the harm branch above — 2.0 is the chip-hit floor.
+		_play_attack_tracer(pts[0], origin, is_enemy, 7.0, false, true,
 			Color(col.r, col.g, col.b, 0.90))
 		var m_origin := origin
 		get_tree().create_timer(UserSettings.anim_time(SPELL_TRAVEL)) \
@@ -29010,7 +31614,13 @@ func _play_trigger_fx(effect: Dictionary, card, lane_idx: int, is_enemy: bool,
 	# WAVE pouring out of the creature (no bolt spaghetti; the same rule as
 	# spells' board-wides: the wave IS the delivery).
 	if pts.size() == 1:
-		_play_attack_tracer(origin, pts[0], is_enemy, 2.0, false, true,
+		# POWER 7, not 2 — the same floor bug the spell delivery had. `power`
+		# drives `slash_width` (clamped 4.5-9.0) and 2.0 is its BOTTOM, the
+		# weight of a chip hit; a battlecry reaching across the board at that
+		# width is a scratch. This is a creature's whole ability firing, so it
+		# gets cast weight. Slightly under the spell's 8: a trigger is frequent
+		# and must not out-shout the spell that was paid for.
+		_play_attack_tracer(origin, pts[0], is_enemy, 7.0, false, true,
 			Color(col.r, col.g, col.b, 0.92))
 		var hp0: Vector2 = pts[0]
 		get_tree().create_timer(UserSettings.anim_time(SPELL_TRAVEL)) \
@@ -29029,6 +31639,77 @@ func _play_trigger_fx(effect: Dictionary, card, lane_idx: int, is_enemy: bool,
 			get_tree().create_timer(h_at).timeout.connect(func():
 				if is_inside_tree():
 					_trigger_fx_impact(hp, col))
+
+
+## THE REAP'S WISP, MIRRORED (2026-08-04) — the grave-light that leaves a corpse and
+## arrives where the Wight rises (the DEAD tribe's keystone signature).
+##
+## Anchored on SLOTS at both ends rather than on the bodies, and that is the whole
+## reason it can cross: the corpse is swept by the very snapshot that carries the fx, so
+## an entity-anchored origin resolves to null on the watcher at exactly the moment it is
+## wanted. A slot is always there. The side is written from the host's board and flipped
+## on replay, the same single transform `fe` uses.
+func wisp_between_slots(is_enemy: bool, from_row: int, from_lane: int,
+		to_row: int, to_lane: int, col: Color) -> void:
+	_draw_slot_wisp(is_enemy, from_row, from_lane, to_row, to_lane, col)
+	if _is_host():
+		_net_queue_fx_chip({"wisp": [1 if is_enemy else 0, from_row, from_lane,
+			to_row, to_lane], "col": [col.r, col.g, col.b]})
+
+
+## The wisp's local half — shared so the host and the watcher draw one animation.
+func _draw_slot_wisp(is_enemy: bool, from_row: int, from_lane: int,
+		to_row: int, to_lane: int, col: Color) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var from_slot = _slot_array(is_enemy, from_row)[from_lane] if (
+		from_row >= 0 and from_lane >= 0) else null
+	var to_slot = _slot_array(is_enemy, to_row)[to_lane] if (
+		to_row >= 0 and to_lane >= 0) else null
+	if from_slot == null or to_slot == null:
+		return
+	var to_pos: Vector2 = to_slot.get_global_rect().get_center()
+	_spawn_vfx_streak(from_slot.get_global_rect().get_center(), to_pos,
+		Color(col.r, col.g, col.b, 0.85), 4.0, 226, 0.40, 30.0)
+	Motion.ring(_hud_layer, to_pos, Color(col.r, col.g, col.b, 0.65),
+		{"radius": 16.0, "end_scale": 1.6, "duration": 0.30,
+		"z_index": 219, "width": 2.5, "delay": 0.20, "scale_time": true})
+
+
+## THE KEYSTONE RING, MIRRORED (2026-08-04). The sibling of `grace_wave_over`, and it
+## exists for the same reason: `_trigger_fx_ring` takes a POSITION, and positions
+## describe the host's board. So the tribe signature rings — the Alpha's howl, the Dire
+## Alpha's charge, the Coven Mother's pulse — fired on one screen only, in resolvers the
+## client never runs.
+##
+## The CHIP beside each of them already crossed (`spawn_trigger_callout` carries an
+## entity id), so the watcher read STAMPEDE or the encore banner with nothing erupting
+## under it. Take this at any net-reachable site; the direct call stays correct inside
+## `_play_trigger_fx` and the `_trigger_fx_*` family, which cross on their own channel.
+## `plain` keeps a site's ORIGINAL single soft ring instead of promoting it to the
+## doubled white-hot trigger device. It exists because the first cut of this quietly
+## restyled the Coven Mother's pulse while claiming to be a parity fix — the howl and
+## the charge already called `_trigger_fx_ring` and were unchanged, but the Mother's was
+## a lone `_spawn_vfx_ring` at alpha 0.70 and got louder for no reason anyone asked for.
+## A mirroring change must not restyle solo on its way past.
+func ring_over(card: Control, col: Color, radius: float = 30.0, z: int = 218,
+		plain: bool = false) -> void:
+	if card == null or not is_instance_valid(card):
+		return
+	_draw_keystone_ring(_card_center(card), col, radius, z, plain)
+	if _is_host() and int(card.entity_id) >= 0:
+		_net_queue_fx_chip({"ring": int(card.entity_id),
+			"col": [col.r, col.g, col.b], "rad": radius, "z": z, "plain": plain})
+
+
+## The ring's local half — shared so the host and the watcher draw one animation.
+func _draw_keystone_ring(pos: Vector2, col: Color, radius: float, z: int,
+		plain: bool) -> void:
+	if plain:
+		_spawn_vfx_ring(pos, Color(col.r, col.g, col.b, 0.70),
+			radius, 1.55, 0.30, z, 2.5)
+	else:
+		_trigger_fx_ring(pos, col, radius, z)
 
 
 ## Doubled ring: a white-hot inner heart + the tribe-colour outer band. A lone
@@ -29069,6 +31750,40 @@ func _trigger_fx_grace(pos: Vector2, col: Color) -> void:
 	_trigger_fx_ring(pos, col, 26.0, 217)
 
 
+## THE KEYSTONE WAVE, MIRRORED (2026-08-04). Take this in preference to calling
+## `_trigger_fx_grace_wave` directly at any site a skirmish can reach.
+##
+## The wave underneath takes POINTS, and points are meaningless on a mirrored board — so
+## every keystone payoff wave in the game (the warden's HOLD glint, the Pike Captain's
+## VOLLEY, the War Fortress SIEGE ramp, a type_buff aura announcing its beneficiaries,
+## the Coven hop, the Magister's ledger) fired on the HOST'S SCREEN ALONE. The watcher
+## got the resulting ATK numbers in the trailing snapshot with no cause shown for them —
+## and `_apply_start_round_passives` is host-authoritative (`if not _is_client()`), so
+## the client never runs those sites at all and could not have drawn its own.
+##
+## What made this hard to notice: the CHIP beside the wave already crossed
+## (`spawn_trigger_callout` carries an entity id), so the watcher got the WORD — HOLD,
+## VOLLEY — with no wave under it. Half a beat reads as a quieter beat, not a missing one.
+##
+## Takes CARDS, not points: the entity id is the part that survives the wire, and the
+## receiving peer rebuilds the centres off its own board. Sorted left-to-right on BOTH
+## peers — the board mirrors front-to-back, never left-to-right, so the reading
+## direction is the same fact on each screen.
+func grace_wave_over(cards: Array, col: Color) -> void:
+	var points: Array = []
+	var eids: Array = []
+	for c in cards:
+		if c == null or not is_instance_valid(c):
+			continue
+		points.append(_card_center(c))
+		if int(c.entity_id) >= 0:
+			eids.append(int(c.entity_id))
+	points.sort_custom(func(a: Vector2, b: Vector2): return a.x < b.x)
+	_trigger_fx_grace_wave(points, col)
+	if _is_host() and not eids.is_empty():
+		_net_queue_fx_chip({"wave": eids, "col": [col.r, col.g, col.b]})
+
+
 ## Staggered grace over a set of points — also the keystone tribes' payoff
 ## wave (Warden-Sergeant's HOLD, War Fortress's SIEGE, the Coven Mother's
 ## incantation, a fresh type_buff aura announcing its beneficiaries).
@@ -29104,6 +31819,82 @@ func _spawn_family_particles(global_pos: Vector2, params: Dictionary) -> void:
 	Motion.burst(parent, global_pos, "base", params)
 
 
+## THE GROUND OPENS — the drawn form the earth family never had (2026-09-10).
+##
+## Before this, "earth" was two dust emitters and a shake: no SHAPE, so the
+## loudest verb in the family read as a brown puff. The ground-crack recipe in
+## the VFX literature is three coordinated parts — the FRACTURE (a crack decal),
+## RADIAL ENERGY in the fissures, and the dust — and the dust was the only part
+## present.
+##
+## The fracture is drawn with `_lightning_path`, and that reuse is the point: a
+## crack and a lightning channel are the same object mathematically — a jagged
+## self-similar line — so the midpoint-displacement generator already in the file
+## draws both. What differs is the REGISTER, and it differs in every other way:
+##
+##   · cracks RADIATE from a point rather than travelling between two;
+##   · they HOLD and then dim slowly — a fracture is permanent damage, not a
+##     discharge, so flicker and per-frame jitter would both be wrong;
+##   · they are DARK with heat in the fissure, not white-hot: the ink is the
+##     split stone and the glow is what is under it. So each crack is drawn
+##     twice — a hot underlayer, then the dark split over it, slightly thinner.
+##
+## Lengths vary per spoke and taper to a point, because a fracture that radiates
+## evenly reads as a drawn asterisk.
+func _spawn_ground_fracture(at: Vector2) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var spokes := randi_range(5, 7)
+	var base := randf() * TAU
+	for s in range(spokes):
+		# Uneven angular spacing for the same reason the lengths vary.
+		var ang: float = base + TAU * (float(s) + randf_range(-0.28, 0.28)) \
+			/ float(spokes)
+		var run: float = randf_range(52.0, 104.0)
+		# Squashed on Y: the table is a receding plane, so a crack running
+		# "away" covers less screen height than one running across.
+		var tip: Vector2 = at + Vector2(cos(ang) * run, sin(ang) * run * 0.52)
+		var pts := _lightning_path(at, tip, 4, run * 0.20)
+		var glow := Motion.beam_line(pts, Color(1.0, 0.46, 0.14, 0.85),
+			10.0, "streak", 0.55, "comet")
+		glow.z_index = 158
+		_hud_layer.add_child(glow)
+		var split := Motion.beam_line(pts, Color(0.10, 0.06, 0.04, 0.92),
+			5.0, "streak", 0.0, "comet")
+		split.z_index = 159
+		_hud_layer.add_child(split)
+		# IT SPLITS OPEN — the fracture's own kind of aliveness, and the reason
+		# the first cut still lagged the bolt. The bolt is alive because it
+		# re-strikes; a crack must not flicker (it is damage, not a discharge),
+		# but it must not simply APPEAR at full length either. It PROPAGATES:
+		# the split races outward from the impact, fast, and only then dims.
+		var full := pts
+		var run_out := func(u: float) -> void:
+			var cut: int = maxi(2, int(round(u * float(full.size()))))
+			var head: PackedVector2Array = full.slice(0, cut)
+			if is_instance_valid(glow):
+				glow.points = head
+			if is_instance_valid(split):
+				split.points = head
+		# Each spoke starts a beat after the last, so the ground tears in
+		# sequence rather than opening as a finished asterisk.
+		var lead: float = UserSettings.anim_time(float(s) * 0.018)
+		var gt := glow.create_tween()
+		gt.tween_interval(lead)
+		gt.tween_method(run_out, 0.06, 1.0, UserSettings.anim_time(0.11)) \
+			.set_ease(Tween.EASE_OUT)
+		# Typed: iterating an untyped Array literal makes `n` a Variant, so
+		# `var tw := n.create_tween()` has nothing to infer from.
+		for n: Line2D in [glow, split]:
+			n.points = PackedVector2Array([full[0], full[1]])
+			var tw: Tween = n.create_tween()
+			# Opens fast, then lingers: the damage stays a beat after the blow.
+			tw.tween_interval(lead + UserSettings.anim_time(0.11))
+			tw.tween_property(n, "material:shader_parameter/fade", 0.0,
+				UserSettings.anim_time(0.62)).set_ease(Tween.EASE_IN)
+			tw.chain().tween_callback(n.queue_free)
+
+
 func _vfx_fire(target_global: Vector2) -> void:
 	# Rising orange cone + a hotter inner core + warm screen tint.
 	_spawn_family_particles(target_global, {
@@ -29122,6 +31913,7 @@ func _vfx_fire(target_global: Vector2) -> void:
 		"scale_min": 4.0, "scale_max": 7.0,
 		"color": Color(1.0, 0.30, 0.10, 1.0),
 	})
+	_spawn_flame_tongues(target_global)
 	screen_flash(Color(1.0, 0.45, 0.15, 0.18), 0.18)
 
 
@@ -29143,28 +31935,400 @@ func _vfx_shock(target_global: Vector2) -> void:
 func _spawn_lightning_bolt(start_pos: Vector2, end_pos: Vector2, color: Color) -> void:
 	if DisplayServer.get_name() == "headless":
 		return
-	# Line2D with mid-point jitter so each cast reads as a fresh strike rather
-	# than a straight beam. Fades width + alpha over ~0.22s and self-frees.
-	var line := Line2D.new()
-	line.width = 4.0
-	line.default_color = color
-	line.z_index = 160
-	var pts: PackedVector2Array = [start_pos]
-	var segments := 6
-	for i in segments - 1:
-		var t := float(i + 1) / segments
-		var mid := start_pos.lerp(end_pos, t)
-		var jitter := Vector2(randf_range(-28.0, 28.0), randf_range(-10.0, 10.0))
-		pts.append(mid + jitter)
-	pts.append(end_pos)
-	line.points = pts
+	# REBUILT 2026-09-09 (the FX technique audit's second finding; the ring engine
+	# was the first). It was ONE flat 4px Line2D at a uniform colour with five
+	# random mid-point bumps — the flattest energy effect in the game, next door
+	# to a strike arc that has carried glow + core + taper for months.
+	#
+	# Two techniques, both standard for this effect and neither expensive:
+	#
+	#   · MIDPOINT DISPLACEMENT. Five independent bumps read as a wiggly line
+	#     because the crookedness has one scale. Recursive subdivision with the
+	#     offset HALVING each level is self-similar — big deviations carrying
+	#     smaller ones — which is what makes a bolt look like a bolt.
+	#   · THREE LAYERS: a wide soft halo in the cast's colour, the bolt itself,
+	#     and a thin WHITE-HOT centre. The house contrast rule (a lone warm line
+	#     on a warm table is camouflage) and the same glow/core idiom
+	#     _spawn_strike_arc already uses.
+	#
+	# Forks are what separates lightning from a crooked line, so a couple branch
+	# off the trunk, shorter and dimmer, and die a little sooner.
+	# IT IS THREE STROKES, NOT ONE BOLT (2026-09-09, third pass). A single path
+	# that fades is the documented failure mode — a motionless bright object
+	# reads as frozen, however well it is drawn, and that is exactly what the
+	# textured single bolt still was. Real lightning is several DISCHARGES
+	# separated enough in time for the eye to resolve them, which is the whole
+	# reason it flickers; the classic recipe keeps two alive at once on offset
+	# cycles. Each stroke re-rolls its own path, so the bolt appears to writhe
+	# and re-strike rather than sit there dimming.
 	var parent: Node = _hud_layer if _hud_layer != null else self
-	parent.add_child(line)
-	var tw := line.create_tween().set_parallel(true)
-	tw.tween_property(line, "modulate:a", 0.0, 0.22).set_ease(Tween.EASE_IN)
-	tw.tween_property(line, "width", 1.0, 0.22).set_ease(Tween.EASE_IN)
-	get_tree().create_timer(0.30).timeout.connect(line.queue_free)
+	# The middle stroke is the strongest — the return stroke is the bright one.
+	var weights: Array[float] = [0.82, 1.0, 0.66]
+	for s in weights.size():
+		var w: float = weights[s]
+		var delay: float = UserSettings.anim_time(float(s) * 0.048)
+		if delay <= 0.0001:
+			_lightning_stroke(parent, start_pos, end_pos, color, w)
+			continue
+		var fire := func() -> void:
+			if is_inside_tree():
+				_lightning_stroke(parent, start_pos, end_pos, color, w)
+		get_tree().create_timer(delay).timeout.connect(fire)
+	# THE STRIKE POINT. A bolt that arrives with no flash where it LANDS reads as
+	# passing through the board rather than hitting it. Timed with the return
+	# stroke (the bright one) and deliberately tight and fast — this is
+	# punctuation for the discharge, not a second effect competing with it.
+	var bloom := func() -> void:
+		if is_inside_tree():
+			_spawn_vfx_ring(end_pos, Color(0.92, 0.97, 1.0, 0.85),
+				24.0, 2.2, 0.20, 161, 4.5, 0.28)
+	get_tree().create_timer(UserSettings.anim_time(0.048)).timeout.connect(bloom)
 
+
+## One discharge: a freshly rolled trunk plus its forks.
+func _lightning_stroke(parent: Node, start_pos: Vector2, end_pos: Vector2,
+		color: Color, weight: float) -> void:
+	# THE SPREAD IS A FRACTION OF THE RUN, not a constant. A fixed 34px on a
+	# ~700px cast is a 5% deviation, which subdivides into a gently wavy line;
+	# real lightning deviates 10-20% and stays ANGULAR. Depth 5 adds a further
+	# octave of the small crookedness that sells it up close.
+	var run_len: float = maxf(start_pos.distance_to(end_pos), 1.0)
+	var pts := _lightning_path(start_pos, end_pos, 5, run_len * 0.16)
+	_lightning_draw(parent, pts, color, weight)
+	# Forks. Branching is most of what separates lightning from a crooked line,
+	# so this is deliberately not shy.
+	for _f in range(1 if weight < 0.8 else 2):
+		var i := randi_range(int(pts.size() * 0.18), int(pts.size() * 0.78))
+		var from: Vector2 = pts[i]
+		var run: Vector2 = (end_pos - start_pos) * randf_range(0.18, 0.42)
+		var away := run.rotated(randf_range(-1.05, 1.05))
+		_lightning_draw(parent, _lightning_path(from, from + away, 4,
+			run.length() * 0.22), color, weight * 0.5)
+
+
+## Recursive midpoint displacement: subdivide each segment `depth` times, pushing
+## the new point PERPENDICULAR to it by a spread that halves per level.
+func _lightning_path(a: Vector2, b: Vector2, depth: int,
+		spread: float) -> PackedVector2Array:
+	var pts: PackedVector2Array = [a, b]
+	var amp := spread
+	for _lvl in range(depth):
+		var next: PackedVector2Array = [pts[0]]
+		for i in range(pts.size() - 1):
+			var p0: Vector2 = pts[i]
+			var p1: Vector2 = pts[i + 1]
+			var mid: Vector2 = (p0 + p1) * 0.5
+			var n: Vector2 = (p1 - p0).orthogonal().normalized()
+			next.append(mid + n * randf_range(-amp, amp))
+			next.append(p1)
+		pts = next
+		amp *= 0.5
+	return pts
+
+
+## One textured beam for one path. `weight` scales it so a fork is visibly
+## lesser than the trunk it left.
+func _lightning_draw(parent: Node, pts: PackedVector2Array, color: Color,
+		weight: float) -> void:
+	# ONE TEXTURED BEAM, NOT A STACK OF HARD BANDS (2026-09-09, second pass).
+	# The first rebuild layered three flat Line2Ds — halo, bolt, core — and that
+	# is still three hard-edged bands, because a Line2D's opacity is UNIFORM
+	# ACROSS ITS WIDTH however many you pile up. Motion.beam_line paints the
+	# cross-section instead (soft edge, bright body, white-hot centre, lengthwise
+	# flicker), which is what the layers were badly approximating, so one line
+	# now does the whole job in a single draw.
+	var line := Motion.beam_line(pts, color, 26.0 * weight, "bolt", 0.95)
+	line.z_index = 160
+	parent.add_child(line)
+
+	# PER-FRAME JITTER. The other half of why lightning reads as alive: the
+	# channel is never still for even one frame. Endpoints are pinned — the bolt
+	# has to stay anchored to what cast it and what it hit — and only the
+	# interior crawls. Bound to a local first: a multi-line lambda written inline
+	# in an argument list parses unreliably here.
+	var base := pts
+	# SECONDARY MOTION DECAYS — "nothing wiggles forever unless it's jelly;
+	# dampen and cap" is the standing rule in the animation-for-games literature,
+	# and this violated it: the jitter ran at full amplitude until the stroke was
+	# freed, and the tween's own progress argument was named `_t` and IGNORED.
+	# A channel that thrashes just as hard at the instant it dies reads as a
+	# looping texture rather than as something burning out.
+	var jitter := func(t: float) -> void:
+		if not is_instance_valid(line):
+			return
+		var j := PackedVector2Array()
+		for k in base.size():
+			if k == 0 or k == base.size() - 1:
+				j.append(base[k])
+			else:
+				# Damped: full thrash on arrival, settling toward still as the
+				# discharge dies. Squared so most of the life is already calm —
+				# the violence belongs to the strike, not to the fade.
+				var damp: float = pow(1.0 - clampf(t, 0.0, 1.0), 2.0)
+				var sw: float = 2.6 * damp
+				j.append(base[k] + Vector2(randf_range(-sw, sw),
+					randf_range(-sw, sw)))
+		line.points = j
+	var jt := line.create_tween()
+	jt.tween_method(jitter, 0.0, 1.0, UserSettings.anim_time(0.20))
+	# A BOLT SNAPS ON, HOLDS, THEN DIES. An earlier cut began fading on the spawn
+	# frame and photographed as a spider-thread: there was no instant at which
+	# the thing was ever at full strength. The hold IS the effect.
+	#
+	# NOT set_parallel(true) here — that makes every tweener added after it
+	# parallel to the PREVIOUS one, the interval included, which is exactly how
+	# the hold got cancelled the first time. Same family as the bare-set_delay
+	# trap. Sequence the hold, then race the two properties with .parallel().
+	# Short, because three of these overlap: a stroke has to CLEAR for the next
+	# to read as a separate discharge rather than as one thickening bolt.
+	# Typed explicitly, not inferred: `var x := UserSettings.foo()` is the exact
+	# shape that fails to infer whenever the type graph is momentarily torn
+	# (parsecheck's documented flake, and any concurrent break elsewhere in the
+	# file), which makes a clean line look like a defect.
+	var d: float = UserSettings.anim_time(0.13)
+	var tw := line.create_tween()
+	tw.tween_interval(UserSettings.anim_time(0.035))
+	tw.tween_property(line, "material:shader_parameter/fade", 0.0, d) \
+		.set_ease(Tween.EASE_IN)
+	tw.parallel().tween_property(line, "width", line.width * 0.45, d) \
+		.set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(line.queue_free)
+
+
+## FLAME TONGUES — the drawn form the fire family never had (2026-09-10).
+##
+## Fire was two upward particle cones and a warm screen tint: a spray of dots,
+## with no flame SHAPE anywhere in it. The hand-drawn-fire literature is unusually
+## specific about what that shape is, and all three rules are used here:
+##
+##   · A ROUNDED BASE AND A POINTED TOP. Each tongue is a curve that starts wide
+##     at the seat of the fire and tapers to a point — the "slash" taper,
+##     reversed by drawing the tongue from tip DOWN to base so the wide end
+##     lands at the bottom.
+##   · HOOKS AND C-SHAPES. A straight taper is a spike, not a flame; each tongue
+##     curls off its own vertical by a control point pushed sideways, and
+##     alternate tongues hook the OTHER way so the cluster interlocks instead of
+##     leaning as one.
+##   · IT BRIGHTENS INWARD. The tongues run cooler on the outside of the cluster
+##     and white-hot at the middle, which is also the house contrast rule.
+##
+## Staggered by a few ms each and given different heights and lifetimes, because
+## a flame is several tongues at different stages, never one shape pulsing.
+func _spawn_flame_tongues(at: Vector2) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	# TWO WAVES. The bolt is three strokes because one path that fades reads as
+	# frozen; a fire is the same argument with a different clock — it must keep
+	# being REBORN, not burn once and dim. The second wave lands while the first
+	# is still going out, so the cluster never empties.
+	var again := func() -> void:
+		if is_inside_tree():
+			_flame_wave(at, randi_range(3, 4))
+	get_tree().create_timer(UserSettings.anim_time(0.17)).timeout.connect(again)
+	_flame_wave(at, randi_range(4, 6))
+
+
+func _flame_wave(at: Vector2, n: int) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	for i in range(n):
+		# Middle of the cluster is tallest and hottest; edges are shorter and
+		# cooler, so the silhouette peaks instead of forming a hedge.
+		var t: float = (float(i) + 0.5) / float(n)
+		var centre_bias: float = 1.0 - absf(t - 0.5) * 1.55
+		var rise: float = randf_range(FX_BODY.y * 0.46, FX_BODY.y * 0.74) 			* (0.60 + 0.55 * centre_bias)
+		# Tight cluster: tongues have to OVERLAP to read as one fire. Spread them
+		# and they read as separate wisps standing near each other.
+		var spread_x: float = (t - 0.5) 			* randf_range(FX_BODY.x * 0.24, FX_BODY.x * 0.34)
+		var base_pt: Vector2 = at + Vector2(spread_x, randf_range(-2.0, 8.0))
+		var tip: Vector2 = base_pt + Vector2(spread_x * 0.35, -rise)
+		# The hook: alternate tongues curl opposite ways so they interlock.
+		var hook: float = randf_range(11.0, 24.0) * (1.0 if i % 2 == 0 else -1.0)
+		var mid: Vector2 = (base_pt + tip) * 0.5 + Vector2(hook, rise * 0.06)
+		var half_w: float = rise * randf_range(0.20, 0.27)
+
+		# THREE NESTED FILLED SHAPES: body, core, heart.
+		var body := Polygon2D.new()
+		body.color = Color(1, 1, 1, 0.94)   # ramp lives in vertex_colors
+		body.z_index = 217
+		# THE MISSING TWO CHANNELS. A polygon with vertex_colors is a shape MASK
+		# and a GRADIENT — half of the canonical VFX construction. What it cannot
+		# carry is INTERNAL TEXTURE and a RAGGED EDGE, which is why these read as
+		# clean vector flames however carefully the silhouette is drawn.
+		# Motion.vfx_noise_material lays scrolling fbm and a feathered alpha
+		# erosion over the colour the polygon already has.
+		#
+		# Each tone gets its OWN seed and grain: sharing one would make all three
+		# churn in lockstep, which is one flame with stripes rather than a body
+		# with fire inside it. The inner tones run finer and faster, because the
+		# hot core of a flame moves quicker than its envelope.
+		# GRAIN 7, NOT 2.1. `grain` is a FREQUENCY in UV space and this tongue's UV.x
+		# spans only ~0.5, so at 2.1 there was barely ONE noise cell across the
+		# whole form — a near-constant wash that looked exactly like the flat fill
+		# it was meant to replace. Several cells per tongue is what makes it read
+		# as internal structure rather than as a tint.
+		body.material = Motion.vfx_noise_material(randf() * 9.0, 1.35, 7.0, 1.05, 1.30)
+		_hud_layer.add_child(body)
+		var core := Polygon2D.new()
+		core.color = Color(1, 1, 1, 0.96)
+		core.material = Motion.vfx_noise_material(randf() * 9.0, 1.75, 9.5, 0.78, 0.85)
+		body.add_child(core)
+		var heart := Polygon2D.new()
+		heart.color = Color(1, 1, 1, 0.95)
+		heart.material = Motion.vfx_noise_material(randf() * 9.0, 2.15, 12.0, 0.55, 0.45)
+		body.add_child(heart)
+
+		var life: float = UserSettings.anim_time(randf_range(0.26, 0.40))
+		var phase := randf() * TAU
+
+		# THE OUTLINE, rebuilt each frame. `shrink` nests the smaller tones
+		# inside the body, and `climb` lifts them so the hottest part sits low —
+		# a flame is brightest at its seat, not at its tip.
+		var outline := func(u: float, shrink: float, climb: float) 				-> PackedVector2Array:
+			var spine := PackedVector2Array()
+			var steps := 12
+			for k in range(steps + 1):
+				var f: float = float(k) / float(steps)
+				var p: Vector2 = _bezier_quad(base_pt, mid, tip, f * climb)
+				# THE CHURN: a smooth wave travelling seat -> tip, pinned to zero
+				# at the base because that is where the flame is attached to
+				# whatever is burning. Not the bolt's random jitter — random
+				# jitter on a flame reads as buzzing; fire LICKS.
+				# DAMPED, for the same reason the bolt's jitter is: secondary
+				# motion decays, and a tongue thrashing exactly as hard at the
+				# moment it goes out reads as a loop rather than as combustion
+				# running out of fuel. Held near full for the first third (the
+				# flame is fed) and easing off after.
+				var damp: float = 1.0 - 0.72 * pow(clampf((u - 0.30) / 0.70,
+					0.0, 1.0), 1.6)
+				var amp: float = f * f * 7.0 * damp
+				var w: float = sin(u * TAU * 2.4 + f * 4.2 + phase)
+				spine.append(p + Vector2(w * amp, absf(w) * amp * -0.35))
+			var left := PackedVector2Array()
+			var right := PackedVector2Array()
+			for k in range(spine.size()):
+				var f: float = float(k) / float(spine.size() - 1)
+				# THE PROFILE: a ROUNDED BASE and a POINTED TOP, which is the
+				# first rule of drawn fire. The bulge sits low (sin to a power
+				# biased toward the seat) so the widest part is near the ground.
+				var prof: float = pow(sin(PI * clampf(f * 0.86 + 0.07, 0.0, 1.0)),
+					0.62) * (1.0 - f * 0.55)
+				var nrm: Vector2 = Vector2(0, -1)
+				if k < spine.size() - 1:
+					nrm = (spine[k + 1] - spine[k]).orthogonal().normalized()
+				var wdt: float = half_w * shrink * prof
+				# ASYMMETRY: the hook side carries more width, so the tongue
+				# curls instead of standing as a symmetrical leaf.
+				left.append(spine[k] + nrm * wdt * (1.0 + 0.35 * signf(hook)))
+				right.append(spine[k] - nrm * wdt * (1.0 - 0.20 * signf(hook)))
+			var poly := PackedVector2Array()
+			for v in left:
+				poly.append(v)
+			for k in range(right.size() - 1, -1, -1):
+				poly.append(right[k])
+			return poly
+
+		# THE RAMP — what separates drawn fire from flat fire. The stylized
+		# convention is a GRADIENT MAP (black/red/orange/yellow/white) rather
+		# than picked flat tones, because a flame is a continuous temperature
+		# and flat fills read as cut paper. Godot gives this for free on a
+		# Polygon2D via `vertex_colors`, which interpolates across the fill with
+		# NO shader and no screen read.
+		#
+		# THAT LAST PART IS AN ENGINE DECISION, not a convenience. The obvious
+		# richer route is a screen-texture distortion/refraction pass, and it is
+		# the wrong tool HERE: the project runs gl_compatibility, where
+		# BackBufferCopy has documented blend faults, and the automatic screen
+		# copy only happens for the FIRST node that reads it in a frame — so with
+		# four effects resolving at once the rest sample a stale buffer. Vertex
+		# colours cost nothing and cannot fail that way.
+		#
+		# Hot at the SEAT, cooling toward the tip: the direction real flame runs,
+		# and the direction the nested cores already imply.
+		var ramp := func(f: float) -> Color:
+			var stops := [Color(1.0, 0.94, 0.66), Color(1.0, 0.74, 0.20),
+				Color(0.97, 0.40, 0.06), Color(0.68, 0.12, 0.03)]
+			var x: float = clampf(f, 0.0, 1.0) * 3.0
+			var i0: int = mini(int(x), 2)
+			return Color(stops[i0]).lerp(Color(stops[i0 + 1]), x - float(i0))
+		# UV FOR THE SHADER. Without this a Polygon2D hands the fragment stage
+		# nothing usable and both new channels are inert. V is 1 at the SEAT and
+		# 0 at the tip — the mapping vfx_noise_material documents — so the detail
+		# travels UP the tongue and the erosion eats the tip first.
+		var uvs := func(poly: PackedVector2Array) -> PackedVector2Array:
+			var out := PackedVector2Array()
+			for v in poly:
+				var f: float = clampf((base_pt.y - v.y) / maxf(rise, 1.0),
+					0.0, 1.0)
+				var across: float = clampf(
+					0.5 + (v.x - base_pt.x) / maxf(half_w * 4.0, 1.0), 0.0, 1.0)
+				out.append(Vector2(across, 1.0 - f))
+			return out
+		var tint := func(poly: PackedVector2Array, boost: float) -> PackedColorArray:
+			var cols := PackedColorArray()
+			for v in poly:
+				# Height up the tongue, measured off the spine's own run so the
+				# ramp tracks the shape however far the churn has thrown it.
+				var f: float = clampf((base_pt.y - v.y) / maxf(rise, 1.0),
+					0.0, 1.0)
+				var c: Color = ramp.call(maxf(f - boost, 0.0))
+				cols.append(c)
+			return cols
+
+		var shape := func(u: float) -> void:
+			if not is_instance_valid(body):
+				return
+			var pb: PackedVector2Array = outline.call(u, 1.0, 1.0)
+			body.polygon = pb
+			body.vertex_colors = tint.call(pb, 0.0)
+			body.uv = uvs.call(pb)
+			if is_instance_valid(core):
+				var pc: PackedVector2Array = outline.call(u, 0.58, 0.80)
+				core.polygon = pc
+				# The inner tones are pulled DOWN the ramp so they stay hotter
+				# than the body at the same height — that is what makes the
+				# flame brighten inward instead of just being three flames.
+				core.vertex_colors = tint.call(pc, 0.22)
+				core.uv = uvs.call(pc)
+			if is_instance_valid(heart):
+				var ph: PackedVector2Array = outline.call(u, 0.26, 0.55)
+				heart.polygon = ph
+				heart.vertex_colors = tint.call(ph, 0.42)
+				heart.uv = uvs.call(ph)
+		shape.call(0.0)
+		var ct := body.create_tween()
+		ct.tween_method(shape, 0.0, 1.0, life)
+
+		# DRIVE THE TWO NEW CHANNELS. Static values would leave the noise as a
+		# fixed marbling printed on the shape — decoration rather than
+		# combustion. `t` scrolls the detail up through the tongue for its whole
+		# life; `erode` climbs only in the LAST 45%, so the flame burns whole
+		# and then comes apart, instead of dissolving from the moment it lights.
+		var mats: Array[ShaderMaterial] = [body.material, core.material,
+			heart.material]
+		var drive := func(u: float) -> void:
+			for m: ShaderMaterial in mats:
+				m.set_shader_parameter("t", u)
+				m.set_shader_parameter("erode",
+					clampf((u - 0.55) / 0.45, 0.0, 1.0))
+		var dt := body.create_tween()
+		dt.tween_method(drive, 0.0, 1.0, life)
+
+		var tw := body.create_tween()
+		tw.tween_interval(UserSettings.anim_time(float(i) * 0.028))
+		# Licks UP as it burns out — the tongue rises and shrinks rather than
+		# dimming in place, which is what makes it read as combustion.
+		#
+		# NOT set_parallel(true) after the interval: that makes each following
+		# tweener parallel to the PREVIOUS one, the interval included, so the
+		# stagger silently cancels and every tongue leaves together.
+		tw.tween_property(body, "modulate:a", 0.0, life).set_ease(Tween.EASE_IN)
+		tw.parallel().tween_property(body, "position",
+			Vector2(0.0, -rise * 0.30), life).set_ease(Tween.EASE_OUT)
+		tw.parallel().tween_property(body, "scale", Vector2(0.72, 1.05), life) 			.set_ease(Tween.EASE_IN)
+		tw.chain().tween_callback(body.queue_free)
 
 func _vfx_frost(target_global: Vector2) -> void:
 	# The 7th family (2026-07-17). Ice is CRYSTAL, not weather: a hard shatter
@@ -29187,7 +32351,257 @@ func _vfx_frost(target_global: Vector2) -> void:
 		"scale_min": 3.0, "scale_max": 5.5,
 		"color": Color(0.72, 0.92, 0.98, 0.85),
 	})
+	_spawn_frost_crown(target_global)
 	screen_flash(Color(0.70, 0.92, 1.0, 0.10), 0.14)
+
+
+## THE CROWN OF SHARDS — the drawn form the frost family never had (2026-09-10).
+##
+## Frost was two particle emitters and a pale tint: no SHAPE, so the coldest verb
+## in the game read as blue dots. It also carried the most collision risk of any
+## family left, because MIND already owns pale cold blue and mind is the BIGGEST
+## family in the pool (27 spells to frost's 2). Two beats that are both "cold blue
+## particles" are one beat.
+##
+## THE FORM IS A SOLID, and that is the whole argument. Every other form in the
+## set is a STROKE — the bolt, the fracture, the tongues and the order rings are
+## all beam_line cross-sections or ring bands, soft on both edges BY CONSTRUCTION
+## (that softness is the entire reason beam_tex exists). The stylised-VFX practice
+## assigns round, soft contours to the LIQUID register — the water rule is
+## literally "stay away from hard edges, expect round edges only" — while crystal
+## is crisp edges and flat shapes. A soft glowing frost is a MIST effect wearing a
+## blue tint, which is exactly what we had.
+##
+## So: Polygon2D, not beam_line, and the choice is load-bearing.
+##   · A FILLED HARD SILHOUETTE — straight sides, sharp termination, no feather.
+##     Faceting in ice creates order; nothing about a crystal is curved.
+##   · A LIT FACE AND A SHADE FACE. Two flat planes meeting at a spine is the
+##     cheapest cue for SOLID, and a stroke can never have it (a stroke has a
+##     bright middle and dies to nothing at both edges). It also INVERTS mind's
+##     colour logic — mind is a blue band with a white core, frost is a WHITE body
+##     with a BLUE shadow — so the two read as different materials before hue is
+##     even considered.
+##
+## `_lightning_path` is deliberately NOT reused here, unlike the earth fracture:
+## midpoint displacement makes SELF-SIMILAR CROOKEDNESS, which is what a crack and
+## a discharge are. A crystal is the opposite object — straight runs meeting at
+## fixed angles — so drawing frost with it would produce a blue earth fracture.
+##
+## ITS ALIVENESS IS ACCRETION IN STEPS, THEN STILLNESS, the only motion of its
+## kind here. Bolt flickers, flame churns, crack propagates, orders converge — all
+## CONTINUOUS. Freezing is not: a dendrite tip advances and stalls when it meets
+## an obstacle, which is why frost on glass branches at all. So the blades JUMP —
+## quarter, hold, half, hold — and then STOP DEAD for a full beat. The absence of
+## motion IS the effect; it is the only way a 2D form says FROZE rather than
+## APPEARED, and no other family could hold still without reading as broken.
+##
+## The exit is a SNAP, not a fade: one over-step (the crack), then each blade
+## topples about its own root. Soft-fading a hard object reads as a ghost. The
+## existing emitters are left alone — they finally have a shard to be fragments
+## OF, which is the return on giving a family a form.
+func _spawn_frost_crown(at: Vector2) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var reduce: bool = UserSettings != null and UserSettings.reduce_motion
+	# Near-white body, saturated blue shade. NOT two values of one blue: that is
+	# a flat shape with a stripe on it, and mind already owns "pale blue".
+	var col_lit := Color(0.90, 0.965, 1.0, 0.96)
+	var col_shade := Color(0.40, 0.66, 0.92, 0.95)
+	# The cold end of the blade ramp — the root, where the crystal is
+	# thickest and least light passes through.
+	var root_ice := Color(0.52, 0.74, 0.94, 0.96)
+
+	# THE RIME PATCH — the ground the crown stands out of; without it the blades
+	# float and read as an icon rather than as something that HAPPENED. Jagged,
+	# not a ring: a soft circle here would be mind's silhouette in the one place
+	# the two beats could still collide. Squashed on Y like the earth fracture,
+	# because the table is a receding plane.
+	var patch := Polygon2D.new()
+	var rim := PackedVector2Array()
+	var teeth := 11
+	for i in range(teeth):
+		var ra: float = TAU * float(i) / float(teeth) + randf_range(-0.10, 0.10)
+		# SIZED OFF THE BODY, not off a magic number. The patch was 32/17, so the
+		# whole crown spanned ~64px against a 200px token — a third of the thing
+		# it was freezing, which read as a decal ON the art rather than as
+		# something that happened TO the creature. See FX_BODY.
+		var rr: float = (FX_BODY.x * 0.23 if i % 2 == 0 else FX_BODY.x * 0.13) \
+			* randf_range(0.82, 1.18)
+		rim.append(Vector2(cos(ra) * rr, sin(ra) * rr * 0.42))
+	patch.polygon = rim
+	patch.color = Color(0.86, 0.95, 1.0, 0.34)
+	patch.position = at
+	patch.z_index = 216
+	patch.scale = Vector2.ONE * (1.0 if reduce else 0.34)
+	_hud_layer.add_child(patch)
+	var pt := patch.create_tween()
+	if not reduce:
+		var creep := func(u: float) -> void:
+			if is_instance_valid(patch):
+				patch.scale = Vector2.ONE * (0.34 + 0.66 * (ceilf(u * 2.0) / 2.0))
+		pt.tween_method(creep, 0.02, 1.0, UserSettings.anim_time(0.10))
+	pt.tween_interval(UserSettings.anim_time(0.26))
+	pt.tween_property(patch, "modulate:a", 0.0, UserSettings.anim_time(0.22)) \
+		.set_ease(Tween.EASE_IN)
+	pt.chain().tween_callback(patch.queue_free)
+
+	var blades := randi_range(5, 7)
+	var base_a := randf() * TAU
+	for i in range(blades):
+		# Uneven spacing, same reason the fracture's spokes are uneven: regular
+		# spacing reads as a drawn asterisk, not as something that grew.
+		var a: float = base_a + TAU * (float(i) + randf_range(-0.22, 0.22)) \
+			/ float(blades)
+		# Feet stand on the patch's ellipse: 0.19 x the body per side, so the ring
+		# of blades spans ~0.38 and the leaning blades carry it out to ~0.6 — in
+		# the house band without swamping the token it stands on.
+		var foot_r: float = FX_BODY.x * 0.19
+		var foot: Vector2 = at + Vector2(cos(a) * foot_r, sin(a) * foot_r * 0.42)
+		# Blades LEAN AWAY from the impact, and the near side grows taller — the
+		# only depth cue a flat polygon gets.
+		var lean: float = cos(a) * 0.42
+		var up := Vector2(sin(lean), -cos(lean))
+		var side := up.orthogonal()
+		var h: float = randf_range(FX_BODY.y * 0.30, FX_BODY.y * 0.50) \
+			* (0.78 + 0.34 * (0.5 + 0.5 * sin(a)))
+		var w: float = maxf(h * 0.19, 5.5)
+
+		var blade := Polygon2D.new()
+		blade.color = col_lit
+		# INTERNAL STRUCTURE, BUT NOT TURBULENCE. The flame's noise SCROLLS
+		# because combustion flows; ice does not flow, so this is the same
+		# material with `scroll` at zero — a fixed marbling that reads as cloud
+		# and fracture inside the crystal rather than as something moving. Low
+		# `bite` too: the point is to stop the blade being a flat chip of
+		# colour, not to make it busy. This family's note says cold arrives
+		# quietly, and that governs the amount as much as the kind.
+		blade.material = Motion.vfx_noise_material(randf() * 9.0, 0.0, 5.5, 0.34)
+		blade.position = foot   # origin AT THE ROOT, so rotation is a break
+		blade.z_index = 218
+		_hud_layer.add_child(blade)
+		# A DARK RIM, because the crown had no dark in it at all. Measured, its
+		# palette ran 0.62-0.95 luminance — three shades of light — and value
+		# range is the strongest tool there is for pulling the eye. Light-on-a-
+		# dark-board carried it, but the SHAPE had no internal contrast, so the
+		# blades had no edges of their own. Same device as the blessing plates:
+		# a slightly larger copy behind, so the contour is even all the way
+		# round instead of a band whose ends stick out.
+		var edge := Polygon2D.new()
+		# 0.40, not 0.70, and lifted off near-black. The rim is here to give the
+		# blade an EDGE, not to outline it in ink — this family's own note says
+		# cold arrives QUIETLY, and a hard black contour on pale ice is the
+		# loudest thing that could be done to it. Enough separation to read as
+		# a solid, no more.
+		edge.color = Color(0.13, 0.19, 0.30, 0.40)
+		edge.z_index = -1     # behind the blade, inside its own transform
+		blade.add_child(edge)
+		# Polygon2D respects `modulate` — unlike beam_line, whose shader writes
+		# COLOR outright and must be faded through its `fade` uniform.
+		var facet := Polygon2D.new()
+		facet.color = col_shade
+		blade.add_child(facet)
+		# THE SPURS — the hoarfrost half. Rooted on the flanks at ±60° off the
+		# blade axis (the hexagonal branch angle) and revealed on the LAST growth
+		# step only: branching is a late, tip-driven instability, and it gives the
+		# final step something to land instead of merely stopping.
+		var spurs: Array[Polygon2D] = []
+		for s in range(randi_range(1, 2)):
+			var sgn: float = 1.0 if s == 0 else -1.0
+			var root: Vector2 = up * (h * randf_range(0.34, 0.52))
+			var sdir: Vector2 = up.rotated(sgn * PI / 3.0)
+			var sw: Vector2 = sdir.orthogonal() * (h * 0.055)
+			var spur := Polygon2D.new()
+			spur.color = col_lit
+			spur.polygon = PackedVector2Array([
+				root - sw, root + sdir * (h * randf_range(0.20, 0.30)), root + sw])
+			spur.visible = reduce
+			blade.add_child(spur)
+			spurs.append(spur)
+
+		# THE GROWTH, QUANTISED — `u` floored to quarters so the blade jumps and
+		# holds rather than sliding to height. Above 1.0 the quantiser is BYPASSED
+		# or the crack's 1.06 would round to 1.25 and leap before breaking.
+		var grow := func(u: float) -> void:
+			if not is_instance_valid(blade):
+				return
+			var q: float = (ceilf(u * 4.0) / 4.0) if u < 1.0 else u
+			var hh: float = h * q
+			# Width barely moves: a crystal extends from its TIP. Scaling width
+			# with height is a uniform scale — a soft-body verb that would undo
+			# the hard read this form is built on.
+			var ww: float = w * (0.62 + 0.38 * minf(q, 1.0))
+			blade.polygon = PackedVector2Array([
+				-side * ww,
+				-side * ww * 0.60 + up * hh * 0.36,
+				up * hh,
+				side * ww * 0.54 + up * hh * 0.24,
+				side * ww * 0.88,
+			])
+			# THE RAMP, as on the flame: `vertex_colors` interpolates across the
+			# fill for free, no shader. Deeper ice at the root, near-white at the
+			# point — which is where ice is genuinely brightest, because that is
+			# where it is thinnest and the light gets through. A flat blade reads
+			# as cut paper for the same reason a flat flame does.
+			blade.vertex_colors = PackedColorArray([
+				root_ice, root_ice.lerp(col_lit, 0.55), col_lit,
+				root_ice.lerp(col_lit, 0.42), root_ice])
+			# The shade plane, as its own polygon rather than a gradient: a
+			# gradient is a soft transition, and the point is two FLAT planes
+			# meeting at an edge.
+			facet.polygon = PackedVector2Array([
+				side * ww * 0.88,
+				side * ww * 0.54 + up * hh * 0.24,
+				up * hh,
+				up * hh * 0.30,
+			])
+			# The rim tracks the blade, scaled about the root so it stays a
+			# contour rather than drifting off as the blade grows.
+			var rim_pts := PackedVector2Array()
+			for bp in blade.polygon:
+				rim_pts.append(bp * 1.14 + up * 1.5)
+			edge.polygon = rim_pts
+			# UV follows the rebuilt polygon, or the marbling would slide around
+			# inside the blade as it grows instead of being IN the crystal.
+			var bu := PackedVector2Array()
+			for bp in blade.polygon:
+				bu.append(Vector2(
+					clampf(0.5 + bp.dot(side) / maxf(ww * 2.4, 1.0), 0.0, 1.0),
+					clampf(1.0 - bp.dot(up) / maxf(hh, 1.0), 0.0, 1.0)))
+			blade.uv = bu
+			for sp: Polygon2D in spurs:
+				sp.visible = q >= 0.98
+
+		var d_grow: float = UserSettings.anim_time(0.13)
+		var d_hold: float = UserSettings.anim_time(0.13)
+		var d_out: float = UserSettings.anim_time(0.15)
+		var tw := blade.create_tween()
+		if reduce:
+			# Reduce Motion keeps the FORM (it is what says a frost spell
+			# resolved) and drops the motion: struck at full, held, faded.
+			grow.call(1.0)
+			tw.tween_interval(d_hold)
+		else:
+			tw.tween_interval(UserSettings.anim_time(float(i) * 0.016))
+			tw.tween_method(grow, 0.02, 1.0, d_grow)
+			# THE HOLD. Nothing moves for a full beat — the beat this whole form
+			# exists for, and the one every other family would read as broken in.
+			tw.tween_interval(d_hold)
+			# THE CRACK: one over-step. A step, not a tween — an eased
+			# anticipation would be an elastic verb on a rigid object.
+			var crack := func() -> void:
+				grow.call(1.06)
+			tw.tween_callback(crack)
+			tw.tween_interval(UserSettings.anim_time(0.03))
+		# NOT set_parallel(true) after an interval — that makes each following
+		# tweener parallel to the PREVIOUS one, silently cancelling the hold and
+		# the stagger. Sequence, then .parallel() the pair.
+		tw.tween_property(blade, "modulate:a", 0.0, d_out).set_ease(Tween.EASE_IN)
+		if not reduce:
+			# Topple about the root, not a spin about the middle: the origin is
+			# the foot, so this is the blade snapping off where it grew.
+			tw.parallel().tween_property(blade, "rotation",
+				randf_range(-0.30, 0.30), d_out).set_ease(Tween.EASE_IN)
+		tw.chain().tween_callback(blade.queue_free)
 
 
 func _vfx_blight(target_global: Vector2) -> void:
@@ -29208,7 +32622,254 @@ func _vfx_blight(target_global: Vector2) -> void:
 		"scale_min": 3.0, "scale_max": 6.0,
 		"color": Color(0.85, 0.30, 0.95, 1.0),
 	})
+	_spawn_blight_colony(target_global)
 	screen_flash(Color(0.45, 0.10, 0.55, 0.12), 0.18)
+
+
+## THE ROT TAKES HOLD — the drawn form the blight family never had (2026-09-10).
+##
+## Blight is the SECOND-BIGGEST family in the pool (24 of 87 spells) and it was
+## two particle emitters and a tint: no SHAPE anywhere in it, so the whole
+## death/debt/curse register read as purple dots. Particles are TEXTURE; a family
+## with no silhouette has no form.
+##
+## THE FORM IS A COLONY — a lobed, closed, ragged margin that spreads outward —
+## and it is chosen AGAINST the forms already here, on the one axis a player
+## reads before they can name it:
+##
+##   · shock draws an ANGULAR OPEN branching line (midpoint displacement),
+##   · earth draws ANGULAR OPEN spokes on the ground plane (same generator),
+##   · fire draws CURVED OPEN tongues that taper to points and climb,
+##   · mind draws SMOOTH CLOSED circles, thin and cold, that CONVERGE,
+##   · frost draws HARD FILLED wedges that stand up and stop.
+##
+## CLOSED-BUT-NOT-ROUND is the only unclaimed slot and it is the right one:
+## angular forms read as danger/energy, curving irregular contours read as
+## LIVING — precisely the claim blight has to make and the others do not. A lobed
+## blotch is also, literally, what a colony looks like from above.
+##
+## THREE PARTS, each doing a job the others cannot:
+##   THE STAIN   a soft eroded mass — the ring engine with an enormous `wake`,
+##               which runs the inner falloff past the centre and turns a shock
+##               FRONT into a filled BLOT. Its `grit` shreds it into filaments,
+##               which is decay by definition.
+##   THE MARGIN  the drawn form: a fat inked contour, the living edge. The
+##               defined edge is what makes this read as a THING and not a fog.
+##   SATELLITES  two small colonies OUTSIDE the front, arriving late. Rot
+##               reproduces — spores travel and germinate where they land. This
+##               is what makes the beat say CONTAGION rather than SPLASH, and
+##               nothing else in the FX set does anything like it.
+##
+## ITS ALIVENESS IS THE CREEP, deliberately none of the other four. Lightning
+## FLICKERS, fire CHURNS, cracks PROPAGATE, mind CONVERGES. Rot does none of
+## those: THE WHOLE FRONT ADVANCES AT ONCE, AT A DIFFERENT RATE IN EVERY
+## DIRECTION, AND IT NEVER RETREATS — which is what hyphal growth actually does,
+## since advance speed is a function of what lies under each part of the margin.
+## A crack is A LINE GETTING LONGER along a path it already knows; a creep is AN
+## AREA GETTING BIGGER AND LUMPIER, so the silhouette keeps changing as it grows.
+## That is why the growth easing lives PER POINT and not on the tween.
+##
+## The second half of the creep is the EXIT ORDER, inverted against every other
+## beat in this file: the bright living margin dies FIRST and the dark stain
+## outlives it. A stain is the part of rot that is still there tomorrow.
+##
+## REJECTED, and worth naming: HYPHAL RUNNERS — thin threads reaching out ahead
+## of the margin. Biologically the correct lead, but at 40-50px they are short
+## radiating strokes from a point, which is precisely EARTH's crack spokes.
+## Building the form whose whole purpose is legibility out of another form's
+## silhouette is the one mistake not worth making.
+func _spawn_blight_colony(at: Vector2) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	# NOT an early return on Reduce Motion: a family with no form is the bug being
+	# fixed, so the SHAPE still lands and only the GROWTH gates off. The
+	# satellites do go — their entire content is a motion claim ("it is
+	# spreading"), and held still they are only clutter.
+	var calm: bool = UserSettings != null and UserSettings.reduce_motion
+
+	# THE PURPLE IS THE INFORMATION, so the value structure is built INSIDE the
+	# hue — a deep bruise mass under a bright magenta margin — rather than by
+	# whitening. Same trap the danger reticle and the mind rings both fell into:
+	# a white-hot core DELETES a coloured mark's identity. Keep every heat term
+	# low and let the mass/margin split carry the contrast.
+	# PULLED BACK OFF NEON (shot-caught). At (0.88, 0.34, 0.96) the margin
+	# photographed as a glowing magenta outline — a light source, which is the
+	# one thing rot is not. Rot is a BRUISE: still clearly the family's purple,
+	# but with the red pulled down and the value dropped so it reads as stained
+	# matter rather than as something switched on.
+	var margin_col := Color(0.72, 0.26, 0.82, 0.70)
+	# THE STAIN HAD TO GO LIGHTER, NOT DARKER (shot-caught, second pass). It was
+	# a deep bruise at alpha 0.66, and the band's own falloff cuts that to ~0.2
+	# by the centre — a dark purple wash at 0.2 over a DARK BROWN TABLE is
+	# invisible, and the shot showed an empty interior with a glowing rim round
+	# it. Rot on this ground has to read as a pale sickly bloom that the board
+	# shows THROUGH, not as a shadow: the table is already dark, so darkness is
+	# not available as a value.
+	var mass_col := Color(0.62, 0.30, 0.74, 0.95)
+	var r_main: float = randf_range(42.0, 52.0)
+
+	# ── THE STAIN ────────────────────────────────────────────────────────────
+	# One Motion.ring, abused on purpose. The ring is a shock FRONT — tight outer
+	# edge, long inner wake — so pushing `wake` to 9 runs that falloff clean past
+	# the centre and what draws is a FILLED blot brightest at its rim. A
+	# Polygon2D was the obvious alternative and is worse: a polygon fill has
+	# UNIFORM opacity, the exact defect that made every Line2D here read as a
+	# stroke from a drawing tool.
+	Motion.ring(_hud_layer, at, mass_col, {
+		"radius": r_main * 0.86,
+		# Fast to full, then it sits there dying. GROWTH is the margin's job —
+		# two things growing at once reads as a pulse, not a spread.
+		"start_scale": 0.28, "end_scale": 1.0, "trans": Tween.TRANS_EXPO,
+		"duration": 0.55, "scale_time": true,
+		# DELIBERATELY over RING_BAND_MAX: `thickness` is clamped, so this pins
+		# the band at the cap and the FILL comes from `wake`. Raising it does
+		# nothing — don't "fix" it.
+		"width": 9.0, "wake": 9.0,
+		# Erosion into filaments IS decay, so blight sits at the top of the band
+		# the grit sweep vetted (0.35 and 0.55 both read as crafted; 0.75 turns
+		# spiky, i.e. the wrong element).
+		# 0.35, not 0.55: the erosion was shredding an already-faint mass into
+		# nothing. Decay still reads — it just has something left to decay.
+		"grit": 0.35,
+		# Lumpier than the default, and deliberately NOT the margin's lobe
+		# profile: the stain has bled unevenly past and short of the living edge.
+		"wobble": 0.055,
+		"hot": 0.22, "heat_gain": 0.16,
+		"oval": Vector2(1.0, 0.74),
+		"z_index": 216,
+	})
+
+	# ── ONE COLONY ───────────────────────────────────────────────────────────
+	# Bound to a local rather than written inline: a multi-line lambda in an
+	# argument list parses unreliably here.
+	var sow := func(c: Vector2, rr: float, ink: float) -> void:
+		if _hud_layer == null or not is_instance_valid(_hud_layer):
+			return
+		var n := 34
+		var p1 := randf() * TAU
+		var p2 := randf() * TAU
+		var p3 := randf() * TAU
+		var p4 := randf() * TAU
+		var dirs := PackedVector2Array()
+		var rads := PackedFloat32Array()
+		var rate := PackedFloat32Array()
+		for i in range(n):
+			var a: float = TAU * float(i) / float(n)
+			dirs.append(Vector2(cos(a), sin(a) * 0.74))
+			# INTEGER HARMONICS ONLY. A closed contour built on hash noise TEARS
+			# at the atan wrap; integer harmonics are periodic in TAU by
+			# construction — the same argument the ring shader's ang_noise makes.
+			# Three octaves: a big lobe, a lobe on the lobe, and a fine nibble so
+			# the margin reads furry rather than as a smooth amoeba. The 0.22
+			# leading amplitude is load-bearing: below ~0.12 this photographs as
+			# a circle and starts colliding with the mind family.
+			rads.append(rr * (1.0 + 0.22 * sin(a * 3.0 + p1)
+				+ 0.13 * sin(a * 5.0 + p2) + 0.06 * sin(a * 11.0 + p3)))
+			# THE CREEP RATE, per direction — the aliveness, precomputed. Two
+			# octaves so the colony reaches LOPSIDEDLY instead of bulging on one
+			# axis. FLOORED AT 1.0 so every point has arrived by u = 1: the final
+			# silhouette is the full lobe profile, and the unevenness is spent
+			# entirely on the journey.
+			var wv: float = 0.62 * sin(a * 2.0 + p4) \
+				+ 0.38 * sin(a * 3.0 - p4 * 1.7)
+			rate.append(1.0 + 0.78 * (0.5 + 0.5 * wv))
+		# The contour at growth fraction `u`. `k % n` repeats point 0 to CLOSE
+		# the loop — beam_line sets LINE_CAP_NONE, so an open contour shows two
+		# feathered stubs where the margin should be continuous.
+		var shape := func(u: float) -> PackedVector2Array:
+			var out := PackedVector2Array()
+			for k in range(n + 1):
+				var idx: int = k % n
+				# MONOTONIC BY CONSTRUCTION. A colony only ever gets bigger; a
+				# contour that breathes in and out is a jellyfish.
+				var reach: float = clampf(u * rate[idx], 0.0, 1.0)
+				# EASED HERE, PER POINT, NOT ON THE TWEEN. A tween ease moves
+				# every point on the same curve, which is a scaling blob — the
+				# whole read is that different parts of the front are at
+				# different stages at the same instant.
+				var e: float = 1.0 - pow(1.0 - reach, 2.0)
+				out.append(c + dirs[idx] * (rads[idx] * e))
+			return out
+		# "trail" is the fattest, softest, least grainy strip in the kit — a wet
+		# organic margin. "comet" is wrong BY CONSTRUCTION (its alpha ramps along
+		# U, so a CLOSED loop fades to nothing at the seam and reads as broken)
+		# and "bolt" is thin, hot and grainy, i.e. electric. NO TAPER: a taper
+		# shapes the beam along its LENGTH, which on a closed loop only pinches
+		# one arbitrary point of the contour.
+		#
+		# ink = 34 ON THE MAIN COLONY IS NOT A TYPO: the strip's cross-section
+		# profile multiplies the width down — the trap that drew the strike arc
+		# as a hairline and made the flame tongues need 42-60. At 34 the "trail"
+		# profile holds full alpha across ~9px and feathers out; at 8 it
+		# photographs as a pencil circle.
+		var seed_u: float = 1.0 if calm else 0.10
+		var pts: PackedVector2Array = shape.call(seed_u)
+		# AN INK UNDERLAYER, as under the blessing plates. Without it the margin
+		# is a bright magenta contour with nothing behind it and reads as a
+		# NEON WIRE — a light source, which is the one thing rot is not. A
+		# darker, wider band beneath gives the edge body, so what the eye sees
+		# is a stained rim rather than something switched on. Same explosion
+		# recipe: the dark shape is what makes the bright one legible.
+		var under := Motion.beam_line(pts, Color(0.16, 0.04, 0.20, 0.62),
+			ink * 1.5, "trail", 0.0, "")
+		under.z_index = 217
+		_hud_layer.add_child(under)
+		# heat 0.72, not 0.35. Measured, blight's palette ran 0.08-0.40 luminance
+		# — ALL dark, with no bright anchor anywhere — and on a dark board that
+		# is the lowest-contrast form in the set (it is why the stain kept
+		# vanishing). `heat` brightens only the band's CENTRE LINE, so the
+		# margin gains a hot lip while the body stays purple: the range arrives
+		# without the hue being spent, which is the trap the reticle and the
+		# mind rings both fell into.
+		var line := Motion.beam_line(pts, margin_col, ink, "trail", 0.72, "")
+		line.z_index = 218
+		_hud_layer.add_child(line)
+		# A small colony fills faster than a big one: the margin advances at
+		# roughly one speed, so the time is a function of the run.
+		var life: float = UserSettings.anim_time(0.15 + 0.0016 * rr)
+		if not calm:
+			var creep := func(u: float) -> void:
+				var edge: PackedVector2Array = shape.call(u)
+				if is_instance_valid(line):
+					line.points = edge
+				if is_instance_valid(under):
+					under.points = edge
+			var gt: Tween = line.create_tween()
+			# LINEAR: all the shaping lives inside `shape`. An ease here would
+			# compound with the per-point ease and stall the whole margin.
+			gt.tween_method(creep, seed_u, 1.0, life).set_trans(Tween.TRANS_LINEAR)
+		# THE MARGIN DIES FIRST — the inverted exit that is half the creep. Fade
+		# the SHADER UNIFORM, never modulate: beam_material writes COLOR outright
+		# so modulate never reaches it and the line would simply pop out.
+		# The ink goes with the margin it bounds — outlive it and the contour is
+		# a dark smear left on the board with nothing inside it (the same rule
+		# the blessing plates' rim follows).
+		# `ln`, not `n` — `n` is already the contour's point count in this scope.
+		for ln: Line2D in [under, line]:
+			var tw: Tween = ln.create_tween()
+			tw.tween_interval(life + UserSettings.anim_time(0.05))
+			tw.tween_property(ln, "material:shader_parameter/fade", 0.0,
+				UserSettings.anim_time(0.14)).set_ease(Tween.EASE_IN)
+			tw.chain().tween_callback(ln.queue_free)
+
+	sow.call(at, r_main, 34.0)
+	if calm:
+		return
+
+	# ── SATELLITES ───────────────────────────────────────────────────────────
+	# Rot reproduces: spores travel and germinate clear of the parent. Two young
+	# colonies open OUTSIDE the front, late enough that the eye reads them as
+	# consequences of the first rather than as parts of one big shape.
+	for s in range(2):
+		var a2: float = randf() * TAU
+		var sc: Vector2 = at + Vector2(cos(a2), sin(a2) * 0.74) \
+			* (r_main * randf_range(1.15, 1.45))
+		var sr: float = r_main * randf_range(0.20, 0.30)
+		var pop := func() -> void:
+			if is_inside_tree():
+				sow.call(sc, sr, 15.0)
+		get_tree().create_timer(
+			UserSettings.anim_time(0.11 + 0.05 * float(s))).timeout.connect(pop)
 
 
 func _vfx_blessing(target_global: Vector2) -> void:
@@ -29229,7 +32890,265 @@ func _vfx_blessing(target_global: Vector2) -> void:
 		"scale_min": 1.5, "scale_max": 3.5,
 		"color": Color(1.0, 1.0, 0.85, 1.0),
 	})
-	screen_flash(Color(1.0, 0.92, 0.55, 0.14), 0.20)
+	_spawn_blessing_aegis(target_global)
+	# 0.05, NOT 0.14 (2026-09-10). This fires ONCE PER BODY — `shield_wall` and
+	# the Countermarch grant both loop it over every friendly creature — so at
+	# 0.14 a full line stacked toward a 0.6-alpha warm wash over the whole board.
+	# It also worked directly against the aegis: a warm full-screen lift raises
+	# the board toward the effect's own hue and eats the local contrast the ink
+	# contour buys. The form carries the beat now; the flash only seasons it.
+	screen_flash(Color(1.0, 0.92, 0.55, 0.05), 0.20)
+
+
+## THE SHIELD WALL GOES UP — the drawn form the blessing family never had
+## (2026-09-10). Blessing was two emitters and a warm tint: golden motes on a
+## warm lamplit table over warm parchment, i.e. the ONE family most likely to be
+## missed entirely. Seven of 87 spells resolved into coloured dust.
+##
+## THE FORM IS A CANOPY, chosen against the rest of the set. Every other family
+## is a full 360° radiation (earth's asterisk), a vertical cluster (fire's
+## tongues), a concentric set (mind's rings), a travelling line (the bolt), a
+## standing scatter (frost's crown) or a spreading blot (blight). Nothing else is
+## a TOP-ONLY arch springing from two shoulders to a centred apex — half-plane
+## versus full-plane is a silhouette difference the eye resolves before it can
+## name it. It is also the family's own fiction: shield_wall IS Lock Shields.
+##
+## THREE THINGS SOLVE THE CAMOUFLAGE AND NOT ONE IS BRIGHTNESS. Fire and shock
+## already own white-hot; a third white core would erase the family, so the
+## contrast is bought elsewhere:
+##   · THE SEAMS. The plates do NOT touch. The form is read by ALTERNATION —
+##     light, gap, light — and alternation survives a warm ground that a
+##     continuous warm ribbon does not. The gap is LOAD-BEARING: widen the plates
+##     until they overlap and this collapses into one band.
+##   · AN INK CONTOUR UNDER EVERY PLATE. The explosion recipe is a dark plume
+##     BEHIND the bright core — the dark shape is what makes the light legible —
+##     and it is how gold leaf was laid on cream: bounded by ink, because it
+##     could not be read otherwise. `_spawn_ground_fracture` already ships this
+##     two-layer idiom in the other order. It self-targets: over the parchment
+##     card the contour separates the gold, over the dark table it disappears.
+##   · IT STANDS OFF THE PLANE. The table is a receding horizontal — the fracture
+##     squashes on Y, impact rings are ovals. This is drawn UPRIGHT and rises
+##     clear of the landscape token, so most of its span sits in the DARK gap
+##     above the card rather than buried in warm art.
+##
+## ITS ALIVENESS IS ASSEMBLY, THEN A HOLD. Not the bolt's flicker, the flame's
+## churn, the fracture's propagation, mind's convergence or the rot's creep.
+## Plates seat from the two ends INWARD, keystone last — nothing else here
+## assembles, and assembly gives the beat a DESTINATION instead of a decay. Then
+## a genuine dead-still window with NO tween running: a ward that starts
+## dissipating the moment it forms is not protecting anything. Earth holds too,
+## but earth's hold is a slow fade — dying throughout; this one has a flat top.
+##
+## REJECTED: a pulse during the hold (a pulse is a heartbeat — anxious, living;
+## this must read as STANDING); screen shake (protection does not concuss, and
+## this fires once per body); a full mandorla (the token is landscape, so an
+## upright almond degenerates into a wide lens).
+## THE FAMILY-FX SIZE REFERENCE (2026-09-10). Every family's form is drawn ON a
+## battlefield token, so the TOKEN is the unit — not a per-effect magic number.
+## Sized independently they drifted badly: the frost crown spanned ~64px against
+## a 200px body (a third of the thing it was freezing) while the earth fracture
+## spanned 208 (wider than the card), so the same event — "one spell hit this
+## creature" — read at three different scales depending on the element.
+##
+## The house band is 0.5-1.1 x the body's width. Under that an impact reads as a
+## decal ON the art rather than as something that happened TO the creature; over
+## it, the effect spills into the neighbouring lane and stops saying WHICH body
+## was hit, which on a 4-lane board is information, not decoration.
+const FX_BODY := Vector2(200.0, 150.0)   # == Card2D.BATTLEFIELD_SIZE
+
+
+func _spawn_blessing_aegis(at: Vector2) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	# Reduce Motion does NOT drop this: in a multi-body grant the aegis is the
+	# only thing saying WHICH bodies were covered, so it takes the writ_amend
+	# contract instead — dealt whole, held, faded.
+	var moving: bool = UserSettings == null or not UserSettings.reduce_motion
+	var slam: float = UserSettings.anim_time(0.06)
+	var step: float = UserSettings.anim_time(0.030)
+	var hold: float = UserSettings.anim_time(0.08)
+	var out_t: float = UserSettings.anim_time(0.24)
+
+	var hub: Vector2 = at + Vector2(0.0, -14.0)
+	# 0.46 x the body width per side, so the canopy spans ~0.92 of the token —
+	# inside the house band and clear of the neighbouring lane. Was 104 (1.04x),
+	# which put the arch's shoulders over the cards either side.
+	var rx: float = FX_BODY.x * 0.46
+	var ry: float = FX_BODY.y * 0.50
+	var plates := 5
+	var mid_i: int = plates / 2
+	var slice: float = PI / float(plates)
+	# 0.42, NOT 0.66: above ~0.5 the plates overlap and the seams close up.
+	var half_span: float = slice * 0.42
+	# How deep a plate is, as a fraction of the arch radius. A shield has a
+	# THICKNESS; the first cut drew each plate as a stroke along the arc, and a
+	# stroke cannot overlap its neighbour — so the gaps between them read as
+	# black nicks chipped out of one arc rather than as five separate plates.
+	var depth := 0.78
+
+	# Held off maximum saturation on purpose — 100% saturation blends into the
+	# environment, and this environment is warm.
+	var gilt := Color(1.0, 0.91, 0.52, 0.94)
+	# A COOL near-black, not soot brown (soot is fire's register), and not pure
+	# black — pure black on this table reads as a hole punched in the board.
+	# Softened (0.05/0.46 -> 0.16/0.30). The ink exists to separate gold from a
+	# warm ground; at near-black it read as a hard outline drawn round a ward,
+	# which is a violent mark for the gentlest family in the set. A ward should
+	# settle over a body, not be stamped onto it.
+	var ink := Color(0.16, 0.13, 0.18, 0.30)
+
+	# When the keystone lands. Every plate releases at this ONE moment.
+	var sealed_at: float = float(mid_i) * step + slam
+
+	for i in range(plates):
+		# Angles run [-PI, 0]: -PI is the left spring, -PI/2 the apex (screen Y
+		# is down, so sin is negative there), 0 the right spring.
+		var mid_a: float = -PI + slice * (float(i) + 0.5)
+		var seat_out := Vector2(cos(mid_a), sin(mid_a))
+		# A FILLED PLATE, NOT A STROKE ALONG THE ARC (second pass). This is the
+		# lesson the frost crown paid for, and it applies exactly: every
+		# soft-edged beam in the kit is a thing in FLIGHT, and a shield is a
+		# SOLID. Drawn as an arc segment the plates could not overlap, so the
+		# seams read as black nicks chipped out of one arc rather than as five
+		# separate plates. A polygon has a hard silhouette, an interior, and —
+		# the part that matters — a LIT FACE AND A SHADE FACE, which is the
+		# cheapest cue for "object" there is.
+		var poly := PackedVector2Array()
+		var steps := 6
+		for k in range(steps + 1):
+			var a: float = mid_a + lerpf(-half_span, half_span,
+				float(k) / float(steps))
+			poly.append(hub + Vector2(cos(a) * rx, sin(a) * ry))
+		for k in range(steps, -1, -1):
+			var a: float = mid_a + lerpf(-half_span, half_span,
+				float(k) / float(steps))
+			poly.append(hub + Vector2(cos(a) * rx * depth, sin(a) * ry * depth))
+
+		# The ink is a slightly LARGER COPY of the same plate sitting behind it,
+		# so the contour is even the whole way round. The first cut used a wider
+		# BAND, whose square ends stuck out past the gold and drew the nicks.
+		var rim := Polygon2D.new()
+		var rim_poly := PackedVector2Array()
+		for p in poly:
+			rim_poly.append(hub + (p - hub) * 1.035)
+		rim.polygon = rim_poly
+		rim.color = ink
+		rim.z_index = 216
+		_hud_layer.add_child(rim)
+
+		var plate := Polygon2D.new()
+		plate.polygon = poly
+		plate.color = gilt
+		plate.z_index = 217
+		_hud_layer.add_child(plate)
+		# THE SHADE FACE — the inner band of the plate in a deeper gold. Two flat
+		# tones meeting along the arc say "a curved object catching the light"
+		# while spending NO brightness, which is the whole trick on a warm table
+		# where brightness is the one currency already spent. Frost does the same
+		# thing with its blades; this is that idea in gold.
+		var facet := Polygon2D.new()
+		var fac := PackedVector2Array()
+		for k in range(steps + 1):
+			var a: float = mid_a + lerpf(-half_span, half_span,
+				float(k) / float(steps))
+			fac.append(hub + Vector2(cos(a) * rx * (depth + 0.10),
+				sin(a) * ry * (depth + 0.10)))
+		for k in range(steps, -1, -1):
+			var a: float = mid_a + lerpf(-half_span, half_span,
+				float(k) / float(steps))
+			fac.append(hub + Vector2(cos(a) * rx * depth, sin(a) * ry * depth))
+		facet.polygon = fac
+		facet.color = Color(0.70, 0.47, 0.15, 0.94)
+		plate.add_child(facet)
+
+		# Ends first, keystone last: distance from the middle, inverted.
+		var lead: float = float(mid_i - absi(i - mid_i)) * step
+
+		# Polygon2D now, not Line2D — and unlike beam_line (whose shader writes
+		# COLOR outright) a Polygon2D DOES respect `modulate`, so the fade below
+		# goes through modulate:a rather than a shader uniform.
+		for n: Polygon2D in [rim, plate]:
+			var wait: float = hold + UserSettings.anim_time(0.10)
+			if moving:
+				# Parked OUTWARD along its own normal and HIDDEN until its beat,
+				# or all five would stand there offset and then slide in — a
+				# wobble, not an assembly. Hidden rather than faded: a shield
+				# does not dissolve into place, it arrives.
+				n.position = seat_out * 18.0
+				n.visible = lead <= 0.0001
+				# THE RELEASE IS ABSOLUTE, NOT RELATIVE, and the hold depends on
+				# it. Chaining `hold` straight after each plate's own slam makes
+				# the ends start fading BEFORE the keystone seats, so the arch is
+				# never whole and still for a single frame — the entire point of
+				# the beat, silently deleted.
+				wait = maxf(sealed_at + hold - (lead + slam), 0.0)
+			var tw: Tween = n.create_tween()
+			if moving:
+				if lead > 0.0:
+					tw.tween_interval(lead)
+					tw.tween_callback(n.show)
+				# BACK-out so it overshoots its seat a hair and settles: a shield
+				# hitting the line, not a panel easing home.
+				tw.tween_property(n, "position", Vector2.ZERO, slam) \
+					.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
+			# THE HOLD. Nothing is tweening across this interval — the difference
+			# between a ward and a flash.
+			tw.tween_interval(wait)
+			# The ink goes FIRST: outlive the gold and the contour is a smear
+			# left on the board with nothing inside it.
+			var dur: float = out_t if n == plate else out_t * 0.70
+			tw.tween_property(n, "modulate:a", 0.0, dur).set_ease(Tween.EASE_IN)
+			# NOT set_parallel(true) after an interval — that makes every
+			# following tweener parallel to the INTERVAL and cancels the stagger.
+			tw.parallel().tween_property(n, "position", Vector2(0.0, -9.0), dur) \
+				.set_ease(Tween.EASE_OUT)
+			tw.chain().tween_callback(n.queue_free)
+
+	if not moving:
+		return
+
+	# THE KEYSTONE AND THE GLORY — deliberately the LAST thing, so the beat
+	# crowns instead of decaying.
+	var lock := func() -> void:
+		if not is_inside_tree() or _hud_layer == null:
+			return
+		# Duration passed RAW: _spawn_vfx_ring hands Motion.ring "scale_time",
+		# so anim_time here would apply twice.
+		_spawn_vfx_ring(hub + Vector2(0.0, -ry), Color(1.0, 0.95, 0.68, 0.78),
+			16.0, 2.0, 0.22, 218, 2.6, 0.30, Vector2.ONE)
+		# THE RAY NIMBUS: shafts breaking outward over the arch. STRAIGHT
+		# (jagged is the bolt, curved is the tongue) and WIDENING toward the far
+		# end, because a shaft of light spreads with distance from its source
+		# where a flame pinches to a point.
+		for k in range(5):
+			var t: float = (float(k) + 0.5) / 5.0
+			# Confined to the upper arc: a 360° fan of spokes from a point is
+			# the earth fracture's silhouette.
+			var a: float = lerpf(-PI + 0.30, -0.30, t) + randf_range(-0.08, 0.08)
+			var out_dir := Vector2(cos(a), sin(a) * 0.86).normalized()
+			var root: Vector2 = hub + Vector2(cos(a) * rx, sin(a) * ry) \
+				+ out_dir * 10.0
+			var run: float = randf_range(30.0, 54.0)
+			# Points are LOCAL and `position` is the root, so `scale` grows the
+			# shaft OUT OF the arch instead of about the screen origin. Widths
+			# are fat because the taper AND the cross-section both multiply down.
+			var ray := Motion.beam_line(
+				PackedVector2Array([Vector2.ZERO, out_dir * run]),
+				Color(1.0, 0.96, 0.74, 0.82), randf_range(24.0, 32.0),
+				"streak", 0.30, "comet")
+			ray.position = root
+			# Behind both plate layers, so the glory reads as escaping from
+			# behind the wall.
+			ray.z_index = 215
+			ray.scale = Vector2(0.40, 0.40)
+			_hud_layer.add_child(ray)
+			var rt: Tween = ray.create_tween()
+			rt.tween_property(ray, "scale", Vector2.ONE,
+				UserSettings.anim_time(0.11)).set_ease(Tween.EASE_OUT)
+			rt.parallel().tween_property(ray, "material:shader_parameter/fade",
+				0.0, UserSettings.anim_time(0.22)).set_ease(Tween.EASE_IN)
+			rt.chain().tween_callback(ray.queue_free)
+	get_tree().create_timer(maxf(sealed_at, 0.001)).timeout.connect(lock)
 
 
 func _vfx_earth(target_global: Vector2) -> void:
@@ -29250,6 +33169,7 @@ func _vfx_earth(target_global: Vector2) -> void:
 		"scale_min": 4.0, "scale_max": 7.0,
 		"color": Color(0.32, 0.22, 0.15, 0.85),
 	})
+	_spawn_ground_fracture(target_global)
 	screen_shake(6.0)
 
 
@@ -29263,8 +33183,123 @@ func _vfx_mind(target_global: Vector2, target: Control) -> void:
 		"scale_min": 2.0, "scale_max": 4.5,
 		"color": Color(0.85, 0.92, 1.0, 0.85),
 	})
+	_spawn_order_mark(target_global)
 	if target != null and is_instance_valid(target):
 		_pulse_target_outline(target, Color(0.85, 0.92, 1.0))
+
+
+## THE ORDER LANDS — the drawn form for the mind family (2026-09-10).
+##
+## Mind is the BIGGEST family in the pool by a distance — 27 of 87 spells, more
+## than fire, earth and shock combined — and it was the only one with no drawn
+## form AND no screen flash: fourteen pale particles and an outline pulse. The
+## card-count audit is what surfaced that; by eye it looked like a minor family.
+##
+## THE FORM IS CONVERGENCE, and that is chosen against the rest of the set:
+## every other family RADIATES — the bolt travels out, the fracture races out,
+## the tongues climb, the shock ring expands. Rings closing INWARD are therefore
+## legible as "not an impact" before the player can name why, which is exactly
+## right, because this game's mind spells are not attacks. They are ORDERS —
+## War Council, Frenzy, Spur Forward, Fill the Rank — so the beat has to read as
+## a command arriving and taking hold, not as something hitting.
+##
+## Its aliveness is neither the bolt's flicker nor the flame's churn: it is
+## ARRIVAL. Three rings close in sequence and a stamp lands on the last one, so
+## the beat has a destination instead of a decay.
+func _spawn_order_mark(at: Vector2) -> void:
+	if _hud_layer == null or DisplayServer.get_name() == "headless":
+		return
+	var cold := Color(0.82, 0.90, 1.0)
+	# Rings CLOSING: start_scale > end_scale inverts the one ring engine, which
+	# is the whole trick — no new machinery, opposite reading.
+	for i in range(3):
+		Motion.ring(_hud_layer, at, Color(cold.r, cold.g, cold.b, 0.26 + 0.14 * float(i)), {
+			"radius": 30.0, "start_scale": 2.5 - 0.45 * float(i),
+			"end_scale": 0.42, "duration": 0.30, "width": 2.2,
+			"z_index": 219, "delay": float(i) * 0.055, "scale_time": true,
+			"grit": 0.0, "wobble": 0.0,
+			# The COLD is the family's identity — mind is the only cool-blue
+			# beat in a warm set, and it is how a player tells an order from an
+			# impact. At the fired-ring default (0.92) the core whitened out and
+			# the rings photographed as plain white donuts, which is the same
+			# way the danger reticle lost its red.
+			"hot": 0.30, "heat_gain": 0.28,
+		})
+	# THE STAMP — four short ticks snapping in as the last ring lands, the
+	# order-mark struck onto the target. Held, not expanding: a command that
+	# has been given does not dissipate, it is simply over.
+	var stamp := func() -> void:
+		if not is_inside_tree() or _hud_layer == null:
+			return
+		# THE SEAL — the order is not merely aimed, it is ISSUED. Four ticks and
+		# three rings was one idea repeated, which is why this read thinnest of
+		# the seven while covering the MOST cards (27 of 87). What it lacked is
+		# what frost and the aegis both have: something SOLID at the end of the
+		# motion. A stroke can dissipate; an object has to be put down.
+		#
+		# A notched wax disc, because this game's orders arrive on writs and the
+		# card kit already speaks that language (WaxSeal on every stat). It is
+		# drawn cool rather than in the usual gilt so it stays MIND's beat and
+		# not the forge's, and it snaps to size with no ease — a seal is pressed,
+		# not eased into place.
+		var seal := Polygon2D.new()
+		var lip := PackedVector2Array()
+		var teeth := 13
+		for k in range(teeth):
+			var a: float = TAU * float(k) / float(teeth)
+			# Alternating radius gives the pressed-wax notch; the jitter stops
+			# it reading as a cog.
+			var rr: float = (25.0 if k % 2 == 0 else 21.0) \
+				* randf_range(0.93, 1.07)
+			lip.append(Vector2(cos(a) * rr, sin(a) * rr * 0.88))
+		seal.polygon = lip
+		seal.color = Color(0.60, 0.72, 0.92, 0.90)
+		seal.position = at
+		seal.z_index = 220
+		seal.scale = Vector2(0.55, 0.55)
+		_hud_layer.add_child(seal)
+		# THE DEVICE ON THE SEAL. Without it the disc is a pale blob, which is
+		# what a seal WITHOUT a stamp is — the wax pressed and nothing pressed
+		# into it. A wax seal in this game always carries a mark (see WaxSeal on
+		# every card stat), and the mark is what makes the object legible as an
+		# order rather than as a token. Cut DARK into the face rather than drawn
+		# bright on top of it: a device is an impression, so it is where the wax
+		# is deeper, not where more wax was added.
+		var device := Polygon2D.new()
+		var arms := PackedVector2Array()
+		for k in range(4):
+			var a: float = TAU * float(k) / 4.0 + PI * 0.25
+			var d0 := Vector2(cos(a), sin(a) * 0.88)
+			var d1 := Vector2(cos(a + PI * 0.5), sin(a + PI * 0.5) * 0.88)
+			arms.append(d0 * 13.0)
+			arms.append((d0 + d1).normalized() * 4.6)
+		device.polygon = arms
+		device.color = Color(0.22, 0.31, 0.48, 0.85)
+		seal.add_child(device)
+		var st := seal.create_tween()
+		st.tween_property(seal, "scale", Vector2.ONE,
+			UserSettings.anim_time(0.07)).set_trans(Tween.TRANS_BACK) \
+			.set_ease(Tween.EASE_OUT)
+		# HELD. An order that has been given does not dissipate; it is simply
+		# over. Same argument as the aegis's flat top.
+		st.tween_interval(UserSettings.anim_time(0.10))
+		st.tween_property(seal, "modulate:a", 0.0,
+			UserSettings.anim_time(0.22)).set_ease(Tween.EASE_IN)
+		st.chain().tween_callback(seal.queue_free)
+		for k in range(4):
+			var a: float = TAU * float(k) / 4.0 + PI * 0.25
+			var dir := Vector2(cos(a), sin(a) * 0.6)
+			var line := Motion.beam_line(
+				PackedVector2Array([at + dir * 30.0, at + dir * 13.0]),
+				Color(1.0, 0.99, 0.94, 0.95), 9.0, "streak", 0.9, "comet")
+			line.z_index = 220
+			_hud_layer.add_child(line)
+			var tw := line.create_tween()
+			tw.tween_interval(UserSettings.anim_time(0.07))
+			tw.tween_property(line, "material:shader_parameter/fade", 0.0,
+				UserSettings.anim_time(0.20)).set_ease(Tween.EASE_IN)
+			tw.chain().tween_callback(line.queue_free)
+	get_tree().create_timer(UserSettings.anim_time(0.16)).timeout.connect(stamp)
 
 
 func _pulse_target_outline(target: Control, color: Color) -> void:
@@ -29289,18 +33324,52 @@ func _pulse_target_outline(target: Control, color: Color) -> void:
 
 
 # =====================================================================
-#  TIER 1 — Spell-card cast ghost
-#  When a spell is played, the card itself is removed from the hand before
-#  resolution (so the player can't drag a 2nd copy). The ghost is a faded
-#  card-art puff that rises and dissolves at the hand position, so the player
-#  reads "the card flew out" instead of "the card vanished."
+#  TIER 1 — THE WRIT, BETWEEN THE DROP AND THE EFFECT
+#
+#  A creature is SEATED and stays; a spell is SPENT and has to read as such —
+#  and until 2026-08-03 it barely read at all. The physical card left the hand
+#  container on the frame it was played and was never seen again; in its place a
+#  ghost drifted up and dissolved over 0.45 s. Two things were wrong with that:
+#    · it dissolved on the same 0.45 s whether the spell resolved instantly or
+#      the player then spent ten seconds choosing a target, so through the whole
+#      targeting window the card being held DID NOT EXIST — and the comment at
+#      the call site claimed the opposite, which is how it went unnoticed;
+#    · rising-and-fading is the same verb as every other fade in the game, so
+#      nothing about it said SPENT — a cast and a dismissed panel looked alike.
+#
+#  The writ now has three states, and the last one carries the meaning:
+#    RAISED — it lifts clear of the board and HOLDS, small and aloft, for
+#             exactly as long as the cast is unresolved.
+#    BURNT  — an EXHAUST spell catches (Motion.burn_away, ★1's parchment rule).
+#             A card that never comes back does not fly to a pile.
+#    PILED  — anything else dives onto the discard stack in the same cubic-in
+#             language as _animate_dismiss, so a spent spell and a shed hand
+#             card go to the same place by the same road.
+#
+#  DECORATIVE throughout: the EFFECT belongs to _play_spell_cast_vfx and the
+#  pile bookkeeping to _after_spell, so Reduce Motion and headless skip the
+#  whole device and nothing about the cast changes. Solo only — a net cast
+#  returns out of _play_spell long before this.
 # =====================================================================
+
+## The writ currently aloft, if any. WeakRef so a scene teardown or a stray
+## queue_free can never leave a dangling Control here.
+var _spell_ghost_ref: WeakRef = null
+
 
 func _spawn_spell_cast_ghost(card_data: Dictionary, start_global: Vector2,
 		_target: Control) -> void:
-	# Best-effort visual; if the baked texture isn't cached yet (e.g. first time
-	# this card has appeared) we just skip the ghost rather than block on a bake.
-	# The Tier-2 family VFX at the resolution point still fires either way.
+	# Only ONE writ can be aloft: a discover-into-cast chain must not leave the
+	# first one hanging over the board.
+	_dispose_spell_cast_ghost("")
+	if DisplayServer.get_name() == "headless" or _hud_layer == null:
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	# Best-effort visual; if the baked texture isn't cached yet we skip the writ
+	# rather than block the cast on a bake. In practice _prebake_hand_textures has
+	# already baked the whole draw pile, so the miss is limited to cards conjured
+	# mid-fight (Discover finds, Chaos Imp).
 	if CardTextureCache == null:
 		return
 	var tex: Texture2D = CardTextureCache.get_texture(card_data)
@@ -29309,8 +33378,24 @@ func _spawn_spell_cast_ghost(card_data: Dictionary, start_global: Vector2,
 	var ghost := TextureRect.new()
 	ghost.texture = tex
 	ghost.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	# Match the in-hand card footprint roughly so the ghost reads as "the card
-	# you just played" rather than a free-floating portrait.
+	# ── THIS SIZE IS INERT, AND KNOWING THAT MATTERS (measured 2026-08-04) ────
+	# TextureRect's `expand_mode` defaults to EXPAND_KEEP_SIZE, so its minimum
+	# size IS the texture's size and the next layout pass clamps the assignment
+	# straight back up: the live writ is the baked sheet's own 747×972, and the
+	# only number below that actually does anything is the SCALE.
+	#
+	# Left alone deliberately. Honouring the 160×220 would SHRINK the held writ
+	# to a quarter of its area, and the pose it produces today is the good one:
+	# 747 × 972 at the 0.44 raise scale = ~329×428 on the 1600×900 canvas, i.e.
+	# ~2.9× the height of the 200×150 battlefield token that ★1's burn is
+	# calibrated against. What is fixed here is the COMMENT — the old one claimed
+	# a ~160×220 footprint held at "~70×97", and docs/CARD_PLAY_COOL_HUNT_20260803
+	# ✦6 took it at its word and specced a growth for a sheet that was never
+	# small. Photographed before building: the burn's ember frontier and its
+	# finest noise octave (1/41 UV ≈ 8 px at this width, not the feared 1.7 px)
+	# both read plainly, and scaling to 1.0 as specced would put a 747×972 sheet
+	# — 83% of the viewport height — through the screen edges. ✦6 is rejected on
+	# measurement, not on taste. If this rect is ever made real, re-open it.
 	var ghost_size := Vector2(160.0, 220.0)
 	ghost.size = ghost_size
 	ghost.position = start_global - ghost_size * 0.5
@@ -29318,14 +33403,134 @@ func _spawn_spell_cast_ghost(card_data: Dictionary, start_global: Vector2,
 	ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ghost.modulate = Color(1, 1, 1, 0.92)
 	ghost.z_index = 180
-	var parent: Node = _hud_layer if _hud_layer != null else self
-	parent.add_child(ghost)
-	var duration := 0.45
+	_hud_layer.add_child(ghost)
+	_spell_ghost_ref = weakref(ghost)
+	# RAISED. It lifts clear of the fan and shrinks to a HELD pose — deliberately
+	# small (~70x97) and a little translucent, because a TARGETED cast holds it
+	# there for as long as the player takes to choose, and the play gate sits at
+	# 0.82 of the viewport (Card2D.PLAY_THRESHOLD_Y) so a spell is usually released
+	# right under the player's own back row. A held writ must be legible as "the
+	# card, raised" without covering the body being aimed at. It never eats a click
+	# either way — MOUSE_FILTER_IGNORE, and targeting resolves on geometry.
+	var lift := Motion.time(0.20)
 	var tw := ghost.create_tween().set_parallel(true)
-	tw.tween_property(ghost, "position:y", ghost.position.y - 70.0, duration).set_ease(Tween.EASE_OUT)
-	tw.tween_property(ghost, "scale", Vector2(0.72, 0.72), duration).set_ease(Tween.EASE_OUT)
-	tw.tween_property(ghost, "modulate:a", 0.0, duration).set_ease(Tween.EASE_IN)
-	get_tree().create_timer(duration + 0.1).timeout.connect(ghost.queue_free)
+	tw.tween_property(ghost, "position:y", ghost.position.y - 70.0, lift) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.tween_property(ghost, "scale", Vector2(0.44, 0.44), lift) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.tween_property(ghost, "modulate:a", 0.78, lift)
+	# ONE WRITER. An untargeted spell resolves inside this 0.20 s, so the raise can
+	# still be writing `position:y` and `scale` when _dispose_spell_cast_ghost
+	# starts writing them too — the pile arm tweens global_position, scale and
+	# modulate:a, and the return arm tweens position:y, all against a raise that
+	# may not have finished. Keep the handle so the disposal takes ownership
+	# instead of racing it. (Found while photographing ✦6; the race is older than
+	# that item and outlives its rejection.)
+	ghost.set_meta("_raise_tw", tw)
+	# LAST RESORT. Every solo cast path ends at _after_spell or _cancel_targeting
+	# and both spend the writ, but this is a card floating over the live board: if
+	# a future path ever forgets, it must not float there for the rest of the
+	# fight. WeakRef in the capture, never the node — a Callable holding a freed
+	# Control errors when the engine marshals it.
+	var mine: WeakRef = weakref(ghost)
+	get_tree().create_timer(12.0).timeout.connect(func():
+		if not is_inside_tree() or _spell_ghost_ref == null:
+			return
+		var still = mine.get_ref()
+		if still != null and _spell_ghost_ref.get_ref() == still:
+			_dispose_spell_cast_ghost(""))
+
+
+## Spend the writ raised at the cast. `mode`:
+##   "burn"   — the spell exhausts: the sheet catches and is consumed.
+##   "pile"   — the spell goes to the discard: it dives onto the stack.
+##   "return" — the cast was cancelled: it drops back toward the hand.
+##   ""       — no beat at all (teardown, or a cast superseding another).
+## Returns the writ's global centre, or Vector2.ZERO when there was none —
+## _after_spell anchors its EXHAUST callout there so the word lands ON the sheet
+## it describes instead of on the hand slot that card left two beats ago.
+func _dispose_spell_cast_ghost(mode: String = "") -> Vector2:
+	var ghost: Control = null
+	if _spell_ghost_ref != null:
+		ghost = _spell_ghost_ref.get_ref() as Control
+	_spell_ghost_ref = null
+	if ghost == null or not is_instance_valid(ghost):
+		return Vector2.ZERO
+	# Centred pivot, so the visual centre is origin + size/2 whatever the scale is
+	# (a Control scales about its pivot; its `global_position` is the untouched
+	# translation). Reading `size * scale * 0.5` here would drift as it shrank.
+	var here: Vector2 = ghost.global_position + ghost.size * 0.5
+	if mode == "" or DisplayServer.get_name() == "headless" \
+			or (UserSettings != null and UserSettings.reduce_motion):
+		ghost.queue_free()
+		return here
+	# Take ownership of the writ's pose before any arm below writes it — the RAISE
+	# may still be in flight on a spell that resolved inside its own 0.20 s.
+	if ghost.has_meta("_raise_tw"):
+		var raise_tw = ghost.get_meta("_raise_tw")
+		if raise_tw is Tween and raise_tw.is_valid():
+			raise_tw.kill()
+	match mode:
+		"burn":
+			# ★1's rule: a card is PARCHMENT, so it does not fade — it catches.
+			# The writ is a single baked TextureRect, which is exactly the one
+			# CanvasItem burn_away needs (a live Card2D is not).
+			var burn_dur: float = Motion.time(0.40)
+			var burn: Tween = Motion.burn_away(ghost, burn_dur)
+			if burn == null:
+				ghost.queue_free()
+			else:
+				# ✦6 — THE MOST PERMANENT ACT IN THE GAME WAS THE SMALLEST PICTURE
+				# IN IT (2026-08-04). The raise leaves the writ HELD at scale 0.44
+				# of a 160×220 rect, so the burn was drawn on ~70×97 px: 23% of the
+				# 200×150 canvas a ROUTINE creature death gets, for a card that
+				# never comes back. The size argument alone is marginal (a ~7px
+				# ember band is thin, not dead) — what settles it is the fibre. The
+				# shader's finest octave, vnoise(p * 41.0), has a period of 1/41 UV,
+				# which at 70px wide is 1.7px: already under the ~20px mush floor
+				# this project wrote down when it switched the inline keyword stamps
+				# off. That octave is the whole reason the frontier reads as PAPER
+				# CATCHING rather than as a wipe, so at held size the game's title
+				# verb was performing without it. At 1.0 the sheet is 160px wide
+				# (period ~3.9px) and 213px tall, so the char band lands at ~34px
+				# against the reference's ~24px.
+				#
+				# It is a GROWTH, not a pop, because that is what paper does: it
+				# lifts and curls toward the flame. Front-loaded (SINE-out over the
+				# first half of the burn) so the sheet is already at full size while
+				# the frontier crosses it — a sheet still growing when the ember
+				# line reaches the top would be photographing the wrong beat. The
+				# rise is the same heat lift ★1 gives a burning token, scaled to a
+				# bigger sheet.
+				burn.chain().tween_callback(ghost.queue_free)
+		"return":
+			var back := ghost.create_tween().set_parallel(true)
+			back.tween_property(ghost, "position:y",
+				ghost.position.y + 70.0, Motion.time(0.16)).set_ease(Tween.EASE_IN)
+			back.tween_property(ghost, "modulate:a", 0.0,
+				Motion.time(0.16)).set_ease(Tween.EASE_IN)
+			back.chain().tween_callback(ghost.queue_free)
+		_:
+			# PILED. The same cubic-in dive, the same landing ring and the same
+			# counter punch a shed hand card gets (_animate_dismiss). No new audio
+			# here on purpose: the exhaust branch of _after_spell already sounds
+			# "card_discard", and the cast itself already sounded "spell_cast".
+			var target: Vector2 = _pile_anchor(_discard_count_label,
+				Vector2(150.0, 640.0))
+			var fall: float = Motion.time(0.32)
+			var tw := ghost.create_tween().set_parallel(true)
+			tw.tween_property(ghost, "global_position",
+				target - ghost.size * 0.5, fall) \
+				.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+			tw.tween_property(ghost, "scale", Vector2(0.20, 0.20), fall) \
+				.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+			tw.tween_property(ghost, "rotation", -0.30, fall) \
+				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+			tw.tween_property(ghost, "modulate:a", 0.12, fall) \
+				.set_ease(Tween.EASE_IN)
+			_play_discard_landing_vfx(target, fall * 0.90)
+			tw.chain().tween_callback(ghost.queue_free)
+	return here
 
 
 func _encounter_intro_accent(is_boss: bool) -> Color:
@@ -29346,9 +33551,21 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 	# completing — the round banner / actual play follows after. `quick` is
 	# the normal-fight variant: smaller, shorter, no type prefix — just long
 	# enough to read the passive/mutator that makes this fight different.
+	#
+	# THE QUICK VARIANT IS PAID FOR BY EVERY FIGHT, so it is priced by how much
+	# it actually has to say (2026-08-01). It used to hold a flat 0.8 s between
+	# 0.32 s of fade-in and 0.32 s of fade-out — ~1.55 s of a 2.78 s cold
+	# time-to-first-legal-play, i.e. the single largest item in the opening, and
+	# the same 1.55 s whether the banner carried one 18px line or four. Now the
+	# fades are trimmed for `quick` only (the boss/General theatre is untouched)
+	# and the hold scales off `read_lines` — the count of reading-size labels
+	# stacked under the name. A plain hold gets out of the way; a fight that
+	# posts a rule AND a mutator still holds long enough to read both.
 	if _hud_layer == null:
 		return
 	var vp := get_viewport_rect().size
+	# Counted, not guessed: every sub-name reading label below increments this.
+	var read_lines := 0
 
 	# ★9 — the world holds its breath for a General or Boss: saturation drains
 	# partway for the length of the banner (the ★8 grade mechanism pointed at
@@ -29429,7 +33646,7 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 		holder.add_child(prefix_label)
 
 	var name_label := Label.new()
-	name_label.text = _encounter_name if _encounter_name != "" else "UNKNOWN FOE"
+	name_label.text = _encounter_name if _encounter_name != "" else "UNKNOWN ENEMY"
 	name_label.add_theme_font_size_override("font_size",
 		86 if is_boss else (54 if quick else 72))
 	name_label.add_theme_color_override("font_color", IVORY)
@@ -29443,7 +33660,9 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 	if quick and _encounter_passive_desc == "" and not has_mutator() \
 			and not _wave_schedule_active and _pursuit_tier() < 1:
 		var identity_label := Label.new()
-		identity_label.text = "Break the line. Front guards back."
+		# Was "Front guards back." — the same bench model QUICK_HELP's Rows entry
+		# carried, on the one line a quick intro spends teaching the board.
+		identity_label.text = "Break the line. Both rows strike every round."
 		identity_label.add_theme_font_size_override("font_size", 18)
 		identity_label.add_theme_color_override("font_color", Color(0.92, 0.84, 0.62))
 		identity_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.92))
@@ -29453,6 +33672,7 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 		identity_label.custom_minimum_size = Vector2(vp.x * 0.58, 0)
 		identity_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		holder.add_child(identity_label)
+		read_lines += 1
 
 	# Successor Wars: quick intros name the kingdom and its engine (§15.2 —
 	# legibility is half the faction work). Tinted with the faction's banner
@@ -29474,6 +33694,7 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 			eng_label.custom_minimum_size = Vector2(vp.x * 0.6, 0)
 			eng_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			holder.add_child(eng_label)
+			read_lines += 1
 
 	# Boss/elite preamble — one diegetic line of ill omen, above the mechanical
 	# passive. Ambient voice only: never names the unnameable, never references
@@ -29512,6 +33733,7 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 		rule_tag.custom_minimum_size = Vector2(vp.x * 0.6, 0)
 		rule_tag.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		holder.add_child(rule_tag)
+		read_lines += 1
 
 	# Pursuit tag — the road has hardened since the march began. Read before
 	# the fight starts, mirrored by the OUTRIDERS banner when the body lands.
@@ -29528,6 +33750,7 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 		pur_label.custom_minimum_size = Vector2(vp.x * 0.6, 0)
 		pur_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		holder.add_child(pur_label)
+		read_lines += 1
 
 	# Mutator badge: tag below the passive (or below the name when no passive),
 	# with name + description so the player reads what changed this fight.
@@ -29550,6 +33773,7 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 			mut_label.custom_minimum_size = Vector2(vp.x * 0.62, 0)
 			mut_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			holder.add_child(mut_label)
+			read_lines += 2   # name line + desc line — it is the tallest block here
 
 	# ★9 — a General's name STAMPS onto the page: it falls IN oversized with an
 	# accelerating ease and the table takes the hit when it lands. Quick intros
@@ -29573,13 +33797,19 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 			AudioBank.play_sfx("boss_intro", 0.0, 3.0, horn_pitch)
 			AudioBank.duck_music(-6.0, 1.6 if is_boss else 1.0)
 
+	# Fade-in / fade-out are trimmed for the QUICK variant only. The boss and
+	# General entrances keep their theatre — those are once-an-act moments and
+	# the extra tenths are the point. The quick banner is paid seven times an act
+	# and is mostly re-reading a name the player already chose on the map.
+	var fade_in: float = 0.20 if quick else 0.28
+	var fade_out: float = 0.22 if quick else 0.32
 	var tw := create_tween()
 	tw.set_parallel(true)
-	tw.tween_property(dim, "color:a", 0.38 if quick else 0.55, 0.28)
-	tw.tween_property(stage_band, "color:a", 0.16 if quick else 0.22, 0.28)
-	tw.tween_property(top_rule, "color:a", 0.70 if quick else 0.95, 0.28)
-	tw.tween_property(bottom_rule, "color:a", 0.70 if quick else 0.95, 0.28)
-	tw.tween_property(holder, "modulate:a", 1.0, 0.32)
+	tw.tween_property(dim, "color:a", 0.38 if quick else 0.55, fade_in)
+	tw.tween_property(stage_band, "color:a", 0.16 if quick else 0.22, fade_in)
+	tw.tween_property(top_rule, "color:a", 0.70 if quick else 0.95, fade_in)
+	tw.tween_property(bottom_rule, "color:a", 0.70 if quick else 0.95, fade_in)
+	tw.tween_property(holder, "modulate:a", 1.0, fade_in + 0.02)
 	if stamp:
 		tw.tween_property(holder, "scale", Vector2.ONE, 0.30) \
 			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
@@ -29587,12 +33817,24 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 			if is_inside_tree():
 				screen_shake(9.0))
 	else:
-		tw.tween_property(holder, "scale", Vector2.ONE, 0.42) \
+		tw.tween_property(holder, "scale", Vector2.ONE, 0.30 if quick else 0.42) \
 			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	# Hold the intro on screen — bosses get longer for the player to read the
-	# passive description; elites are quicker; the quick variant is just long
-	# enough to register the one line that matters.
-	var hold := 1.5 if is_boss else (0.8 if quick else 1.0)
+	# passive description; Generals are quicker.
+	#
+	# THE QUICK HOLD IS PRICED BY WHAT IT SAYS (2026-08-01). It was a flat 0.8 s
+	# whether the banner carried one 18px line or four, and since EVERY fight
+	# shows this banner (the "untagged fights start instantly" branch turned out
+	# to be dead — see the call site in _ready) that flat number was a per-fight
+	# tax on the opening. `read_lines` is the count of reading-size labels stacked
+	# under the name, incremented at each one above, so the hold cannot drift out
+	# of step with the content the way a hardcoded number did: adding a new label
+	# to this banner also buys its own reading time.
+	var hold: float
+	if quick:
+		hold = clampf(0.34 + 0.24 * float(read_lines), 0.34, 1.15)
+	else:
+		hold = 1.5 if is_boss else 1.0
 	if is_boss and _encounter_preamble != "":
 		# Give the player time to read the ill-omen line, scaled to its length
 		# and capped tight — the heavy passive wall now lives in the standing
@@ -29600,11 +33842,11 @@ func _show_encounter_intro(is_boss: bool, quick: bool = false) -> void:
 		# General intros no longer show the preamble, so they don't hold for it.)
 		hold += clampf(_encounter_preamble.length() * 0.022, 1.0, 2.2)
 	tw.chain().tween_interval(hold)
-	tw.chain().tween_property(dim, "color:a", 0.0, 0.32)
-	tw.parallel().tween_property(stage_band, "color:a", 0.0, 0.32)
-	tw.parallel().tween_property(top_rule, "color:a", 0.0, 0.32)
-	tw.parallel().tween_property(bottom_rule, "color:a", 0.0, 0.32)
-	tw.parallel().tween_property(holder, "modulate:a", 0.0, 0.32)
+	tw.chain().tween_property(dim, "color:a", 0.0, fade_out)
+	tw.parallel().tween_property(stage_band, "color:a", 0.0, fade_out)
+	tw.parallel().tween_property(top_rule, "color:a", 0.0, fade_out)
+	tw.parallel().tween_property(bottom_rule, "color:a", 0.0, fade_out)
+	tw.parallel().tween_property(holder, "modulate:a", 0.0, fade_out)
 	tw.chain().tween_callback(dim.queue_free)
 	tw.parallel().tween_callback(stage_band.queue_free)
 	tw.parallel().tween_callback(top_rule.queue_free)
@@ -29710,8 +33952,13 @@ func _show_turn_banner() -> void:
 	# "ROUND N" pops ~1.5 s later in 70 px type directly over it, so the small gold
 	# summary line lost. A stale line about a finished round is the least useful
 	# thing on screen; drop it rather than let it fight the banner.
+	#
+	# A live tutorial tip is the ONE exception: it is a once-ever message stamped
+	# seen the moment it fires, it is posted from inside _start_round, and this
+	# call is _start_round's last statement — so the unconditional blank below was
+	# erasing four of the five tips before a new player could read them.
 	_clear_info_queue()
-	if _info_label != null:
+	if _info_label != null and _info_label.text != _tutorial_tip_live:
 		_info_label.text = ""
 	var vp := get_viewport_rect().size
 	var banner := Label.new()
@@ -29740,7 +33987,10 @@ func _show_turn_banner() -> void:
 
 
 func _show_battle_verdict(won: bool, gold_won: int = 0, with_scrim: bool = true,
-		auto_fade: bool = false) -> void:
+		auto_fade: bool = false, detail_text: String = "") -> void:
+	if _first_battle_tutorial_stage != FirstBattleTutorialStage.INACTIVE:
+		_finish_first_battle_tutorial()
+	_clear_opening_muster_forecast()
 	# The fight's decisive beat. Every strike in the game got ceremony, but the
 	# moment the whole fight builds to used to be a 24px caption swap in the top
 	# HUD. This is the payoff: a focusing scrim, then VICTORY struck down onto
@@ -29821,7 +34071,7 @@ func _show_battle_verdict(won: bool, gold_won: int = 0, with_scrim: bool = true,
 		gold_lbl.text = "+0 gold"
 		if GameTheme.font_display != null:
 			gold_lbl.add_theme_font_override("font", GameTheme.font_display)
-		gold_lbl.add_theme_font_size_override("font_size", 30)
+		gold_lbl.add_theme_font_size_override("font_size", 32)
 		gold_lbl.add_theme_color_override("font_color", Color(1.0, 0.84, 0.40))
 		gold_lbl.add_theme_color_override("font_outline_color", Color(0.05, 0.02, 0.0, 0.9))
 		gold_lbl.add_theme_constant_override("outline_size", 6)
@@ -29846,6 +34096,59 @@ func _show_battle_verdict(won: bool, gold_won: int = 0, with_scrim: bool = true,
 				if is_instance_valid(gold_lbl):
 					gold_lbl.text = "+%d gold" % int(round(v)),
 				0.0, float(gold_won), 0.5)
+	if won and detail_text != "":
+		var detail_width := minf(vp.x - 260.0, 980.0)
+		var detail_panel := PanelContainer.new()
+		detail_panel.size = Vector2(detail_width, 94.0)
+		detail_panel.position = Vector2(
+			(vp.x - detail_width) * 0.5, center.y + 126.0)
+		detail_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		detail_panel.z_index = 248
+		var detail_style := GameTheme.make_panel_style(
+			Color(0.045, 0.028, 0.024, 0.94),
+			Color(0.78, 0.61, 0.28, 0.82), 1, 5, false)
+		detail_style.content_margin_left = 22
+		detail_style.content_margin_right = 22
+		detail_style.content_margin_top = 11
+		detail_style.content_margin_bottom = 11
+		detail_panel.add_theme_stylebox_override("panel", detail_style)
+		var detail_row := HBoxContainer.new()
+		detail_row.alignment = BoxContainer.ALIGNMENT_CENTER
+		detail_row.add_theme_constant_override("separation", 26)
+		detail_panel.add_child(detail_row)
+		var detail_parts := detail_text.split("  /  ", false)
+		for i in range(detail_parts.size()):
+			if i > 0:
+				var divider := ColorRect.new()
+				divider.color = Color(0.68, 0.53, 0.30, 0.54)
+				divider.custom_minimum_size = Vector2(1, 48)
+				divider.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				detail_row.add_child(divider)
+			var raw := String(detail_parts[i])
+			var is_spoils := raw.begins_with("Spoils: ")
+			var heading_text := "SPOILS SECURED" if is_spoils else "ROAD TO THE KEEP"
+			var value_text := raw.trim_prefix("Spoils: ") if is_spoils else raw
+			var block := VBoxContainer.new()
+			block.add_theme_constant_override("separation", 2)
+			block.custom_minimum_size = Vector2(330, 0)
+			block.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			detail_row.add_child(block)
+			var heading := GameTheme.make_label(
+				heading_text, 14, Color(0.91, 0.72, 0.34), true)
+			heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			block.add_child(heading)
+			var value := GameTheme.make_label(
+				value_text, 19, Color(0.97, 0.92, 0.80), true)
+			value.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			value.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			block.add_child(value)
+		detail_panel.modulate.a = 0.0
+		_hud_layer.add_child(detail_panel)
+		pieces.append(detail_panel)
+		var dt := detail_panel.create_tween()
+		dt.tween_interval(0.32)
+		dt.tween_property(detail_panel, "modulate:a", 1.0, 0.18)
+
 	if auto_fade:
 		# No scene wipe is coming (net rematch flow) — clear the ceremony after
 		# it has been read so the result panel keeps the stage.
@@ -29879,6 +34182,7 @@ func _show_info(msg: String) -> void:
 	# Collapse an exact repeat rather than showing the same sentence twice.
 	if _info_queue.size() > 0 and String(_info_queue[-1]) == msg:
 		return
+	_visible_beat_seq += 1
 	if _passive_speaking:
 		# The rule that just spoke is the one printed on the plaque — light it, so
 		# the sentence has a visible source instead of arriving from nowhere. This
@@ -29939,7 +34243,7 @@ func _victory_conquest_line(gate_was_open: bool) -> String:
 	var broken: int = RunState.holds_broken_in_act
 	var need: int = RunState.HOLDS_TO_OPEN_LORD
 	if not gate_was_open and RunState.is_lord_gate_open():
-		return "Keep road open - march on the lord, or raid harder holds."
+		return "Keep road open - challenge the lord, or raid harder holds."
 	if RunState.is_lord_gate_open():
 		if broken >= need + 1:
 			return "Pursuit rises - remaining holds reinforce on rounds 2 and 4."
@@ -29960,6 +34264,16 @@ func _set_phase_caption(t: String) -> void:
 		_phase_label.add_theme_color_override("font_color", Color(1.00, 0.60, 0.25))
 	if changed:
 		_spawn_phase_pulse(t)
+		# ONE FUNNEL FOR THE WIRE TOO (2026-08-04). The clash captions used to be
+		# mirrored by hand-placed `_net_log_caption` calls beside a few of the
+		# `_set_phase_caption` sites, which is why the client's phase line went blank
+		# through the ranks, the fallen and the Arbalest while the host narrated them:
+		# every caption added since had to remember to add its twin, and none did.
+		# Reporting from here means a caption raised inside a clash reaches the
+		# watcher BY CONSTRUCTION. `_net_clash_recording` is only ever on inside a
+		# clash, so the out-of-clash captions (ENEMY DEPLOYMENT / REINFORCES) still
+		# never touch the log.
+		_net_log_caption(t)
 
 
 func _spawn_phase_pulse(t: String) -> void:
@@ -30036,12 +34350,45 @@ func _play_clash_commit_vfx() -> void:
 		84.0, 1.20, 0.34, 226, 3.5, 0.62, Vector2(1.55, 0.44))
 	if UserSettings != null and UserSettings.reduce_motion:
 		return
+	# A CLASH IS MUTUAL, AND A LINE DOES NOT MOVE ON ONE FRAME (2026-09-09).
+	# This fired ONE streak per lane, mine → theirs, with every lane leaving on
+	# the same frame: a one-directional flash that ANNOUNCED the clash without
+	# depicting it, and announced it as a single event rather than as an order
+	# running down the line.
+	#
+	# The treatment that fits this beat is not the bolt's flicker — nothing here
+	# is discharging — it is SEQUENCE and MUTUALITY. Each side charges its own
+	# half in its own colour (gilt yours, ember theirs), the two meet on the
+	# midline where the fighting will actually happen, and the lanes go off a
+	# beat apart so the commitment sweeps across the board.
+	var live_lanes: Array[int] = []
 	for lane in range(LANES_PER_ROW):
 		if _player_field[lane] != null or _enemy_field[lane] != null \
 				or _player_back[lane] != null or _enemy_back[lane] != null:
-			_spawn_vfx_streak(_slot_global_center(false, ROW_FRONT, lane) + Vector2(0.0, -10.0),
-				_slot_global_center(true, ROW_FRONT, lane) + Vector2(0.0, 10.0),
-				Color(col.r, col.g, col.b, 0.50), 3.0, 223, 0.24, 0.0)
+			live_lanes.append(lane)
+	for i in live_lanes.size():
+		var lane: int = live_lanes[i]
+		var mine: Vector2 = _slot_global_center(false, ROW_FRONT, lane) \
+			+ Vector2(0.0, -10.0)
+		var theirs: Vector2 = _slot_global_center(true, ROW_FRONT, lane) \
+			+ Vector2(0.0, 10.0)
+		var meet: Vector2 = (mine + theirs) * 0.5
+		var charge := func() -> void:
+			if not is_inside_tree():
+				return
+			_spawn_vfx_streak(mine, meet, Color(1.0, 0.82, 0.34, 0.60),
+				3.0, 223, 0.20, 0.0)
+			_spawn_vfx_streak(theirs, meet, Color(1.0, 0.45, 0.30, 0.60),
+				3.0, 223, 0.20, 0.0)
+			# The spark where they meet — small and quick, so four of them
+			# across the line read as one sweep rather than four events.
+			_spawn_vfx_ring(meet, Color(1.0, 0.88, 0.58, 0.50),
+				13.0, 1.9, 0.20, 224, 3.0, 0.35)
+		var at: float = UserSettings.anim_time(float(i) * 0.045)
+		if at <= 0.0001:
+			charge.call()
+		else:
+			get_tree().create_timer(at).timeout.connect(charge)
 	if _end_turn_btn != null and is_instance_valid(_end_turn_btn):
 		_end_turn_btn.pivot_offset = _end_turn_btn.size * 0.5
 		var rest := _end_turn_btn.scale
@@ -30158,6 +34505,16 @@ var _net_peer_lost_handled: bool = false
 var _net_clash_attacking_side: int = -1
 var _net_replay_active: bool = false
 var _net_event_backlog: Array = []
+## ★8 latch for the WATCHER's screen. The host declares the match over inside
+## damage_enemy_hero (_check_game_over → _net_host_check_match_over), so its winning
+## blow freezes the killer at full extension exactly as solo does. The client has no
+## such path: it learns the verdict from EV_MATCH_OVER, which sits in
+## _net_event_backlog until the whole reel has finished playing — so the fight-ending
+## blow, the biggest single moment in a match, went by as an ordinary chip hit and the
+## world-stop arrived seconds later with the banner. _net_replay_face_hit claims this
+## once, at the blow. One game per Combat scene (a Bo3 game reloads it), so the latch
+## needs no reset.
+var _net_killing_blow_held: bool = false
 var _net_intent_busy: bool = false
 var _net_intent_backlog: Array = []
 const _NET_CASTER_LOCAL_SPELLS: Array[String] = [
@@ -30281,12 +34638,33 @@ func _net_enrich_face_hit(entry: Dictionary) -> Dictionary:
 	return net._net_enrich_face_hit(entry)
 
 
-func _net_log_hit(attacker: Control, defender: Control, hp_before: int, is_counter: bool = false) -> void:
-	net._net_log_hit(attacker, defender, hp_before, is_counter)
+func _net_log_hit(attacker: Control, defender: Control, hp_before: int,
+		is_counter: bool = false, power: int = -1, ranged: bool = false) -> void:
+	net._net_log_hit(attacker, defender, hp_before, is_counter, power, ranged)
 
 
 func _net_log_caption(text: String) -> void:
 	net._net_log_caption(text)
+
+
+func _net_log_ledger(ours: int, theirs: int) -> void:
+	net._net_log_ledger(ours, theirs)
+
+
+func _net_queue_fx_chip(entry: Dictionary) -> void:
+	net._net_queue_fx_chip(entry)
+
+
+func _net_log_focus(lane_idx: int, enemy_strike: bool) -> void:
+	net._net_log_focus(lane_idx, enemy_strike)
+
+
+func _net_log_dwell(kind: int) -> void:
+	net._net_log_dwell(kind)
+
+
+func _net_log_fallen() -> void:
+	net._net_log_fallen()
 
 
 func _net_log_pierce(attacker: Control, victim: Control,
@@ -30371,8 +34749,12 @@ func _net_flush_backlog() -> void:
 	net._net_flush_backlog()
 
 
-func _net_replay_creature_hit(s: Dictionary) -> void:
-	await net._net_replay_creature_hit(s)
+func _net_replay_creature_hit(s: Dictionary, punctuate: bool = true) -> void:
+	await net._net_replay_creature_hit(s, punctuate)
+
+
+func _net_strike_punctuation(s: Dictionary) -> void:
+	await net._net_strike_punctuation(s)
 
 
 func _net_replay_pierce(attacker_eid: int, victim_eid: int) -> void:
