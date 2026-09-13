@@ -110,6 +110,13 @@ var state: CreatureInstance = CreatureInstance.new()
 # explicit prevents its cheap gallery snapshot from masquerading as a 3x hand
 # bake while letting the same lightweight overlay layout display either class.
 @export var gallery_baked_mode: bool = false
+# Foreground card slates set this only while Motion.deal_card holds the face at
+# alpha zero. The overlay tree and final pixels stay identical, but the expensive
+# RichTextLabel parse/shape moves to the next frame instead of sharing the card's
+# construction frame. Reduce Motion callers leave it false because their cards
+# are revealed immediately.
+@export var defer_baked_rules_text: bool = false
+var _pending_baked_rules: Array = []
 # When true, a card whose card_data carries no `desc` (enemy-only creatures from
 # EncounterDB are terse — {name,atk,hp,kw}) synthesises its rules text from its
 # triggers + keywords so the face isn't blank. Opt-in: ONLY the battle-log hover
@@ -223,6 +230,10 @@ var _compact_face: TextureRect = null
 var _status_orbs: Array = []          # the roundel Panels currently on the rail
 var _status_rail_sig: String = ""     # last-rendered signature (dirty check)
 var _status_poll_accum: float = 0.0   # throttles the shared-clock rail poll
+# One-node status roundels: the shared shader is immutable, while materials are
+# cached per immutable rim/glyph pair (no Compatibility instance uniforms).
+static var _status_roundel_shader_cache: Shader = null
+static var _status_roundel_material_cache: Dictionary = {}
 # Passive battlefield visuals used to give every seated Card2D its own _process
 # callback. A full 4x4 board therefore ran 16 script callbacks and wrote 16
 # transforms every rendered frame just for the decorative breathe. Compact live
@@ -236,6 +247,27 @@ var _battlefield_visual_timer: Timer = null
 # clipping. Hand cards stay full size for readability. Set before _ready
 # (e.g. on instantiate) or via set_compact_mode() after.
 var compact_mode: bool = false
+# Armed by set_compact_mode(true) on a card that was a HAND card a moment ago,
+# consumed the next time the card enters the tree (see _start_compact_morph).
+var _compact_morph_pending: bool = false
+
+# ── The flight's scale escrow (2026-08-03) ─────────────────────────────
+# `Combat._play_landing_pop` is the ONE writer of this card's `scale` while it is
+# in the air, and it establishes its rest pose by READING `card.scale` a frame
+# after the placement. That read is only honest on a card at rest — and a card
+# can be re-landed while a flight is still live (an on-enter that redeploys it, a
+# push, a swap all call the landing again). Before the flight carried the writ's
+# TURN that misread cost a couple of percent and nobody ever saw it; now the
+# close takes `scale.x` most of the way to zero, so a second landing that
+# mistook a mid-turn pose for "rest" would settle the card at a sliver of its
+# width — a permanently invisible body on the board. The flight parks the truth
+# here for its duration and hands it back on landing; a re-entrant landing reads
+# the escrow instead of the pose. Deliberately NOT a full flight registry: the
+# two-overlapping-flights case has its own (green, timing-dependent) behaviour in
+# _play_landing_pop and this pass does not disturb it — it only guarantees that
+# whatever happens, the pose the card is left in is a rest pose.
+var flight_in_air: bool = false
+var flight_rest_scale: Vector2 = Vector2.ONE
 
 var _name_label: Label
 var _atk_label: Label
@@ -271,16 +303,32 @@ var _is_being_dragged := false
 # child's inset offsets on every layout pass.
 var _hover_tween: Tween = null
 var _lift_shadow: Control = null
-# Desaturating grey wash shown over a hand card the current Command pool can't
+# The pick-up settle (see _start_drag). Its own slot rather than a reuse of
+# _hover_tween: the hover tween is killed AT the grab, and this one has to
+# outlive that kill by ~90 ms while the card firms up under the cursor.
+var _grab_tween: Tween = null
+# Desaturating wash shown over a hand card the current Command pool can't
 # afford. Lazily built (see _ensure_unplayable_veil); toggled by set_affordable.
 # A full-rect direct child so container layout fits it to the card automatically.
 var _unplayable_veil: ColorRect = null
+# The last thing set_affordable was told. Kept because the resting tint is now
+# folded from TWO states (see _apply_hand_tint) and the discard mark can be
+# toggled between two affordability refreshes.
+var _affordable: bool = true
 # Static flag: true while ANY Card2D is being dragged anywhere. Hand siblings
 # read this in _on_mouse_entered to suppress their hover-pop animation —
 # without it, dragging a card over the rest of the hand made each neighbour
 # leap up in turn, which is visually noisy and obscures the drop target.
 static var _any_card_dragging: bool = false
-var _is_playing := false
+# NOTE (2026-08-25): a `_is_playing` latch used to be declared here and tested in
+# four guards (the hover lift, the hover enter/exit pair and _start_drag) — but it
+# was NEVER ASSIGNED anywhere in the file, so every one of those tests was a
+# constant false and the protection they advertised did not exist. The reads are
+# gone rather than left lying: what actually stops a card being re-grabbed in
+# flight is `is_on_battlefield`, which Combat stamps at placement and which
+# _start_drag already tests beside it. If a real "in flight, hands off" latch is
+# ever wanted, it needs SETTING at played.emit() and CLEARING when the flight
+# resolves — reinstating the variable alone would restore the same lie.
 var _drag_offset := Vector2.ZERO
 
 # ── Card lean (C1 of docs/ANIMATION_AUDIT_20260716.md §6) ─────────────
@@ -365,8 +413,52 @@ var _hand_target_scale := Vector2.ONE
 # Tween that slides the card to its hand slot (draw / reflow). Killed when the
 # card is hovered, dragged, or re-targeted so those snappy interactions win.
 var _hand_tween: Tween = null
+
+# ▲3 — the hand's reflow runs on a SPRING, position channel only.
+#
+# Rotation and scale stay on `_hand_tween`, deliberately. `_process` is the LEAN
+# driver and `rotation` has exactly one writer at a time by construction (C1); a
+# spring on the same channel would be a second writer during hover and drag, which
+# is the one thing that contract forbids. Position has no such owner in the hand.
+var _hand_spring: Motion.Spring = null
+var _hand_spring_active := false
+var _hand_spring_delay := 0.0
+# The last value the spring itself wrote. If `position` no longer matches it,
+# SOMETHING ELSE has taken the channel and the spring yields — see
+# `_tick_hand_spring`. The spring is the least authoritative writer of the three
+# and must always be the one that gives way.
+var _hand_spring_wrote := Vector2.INF
 var _lunge_tween: Tween = null
 var _lunge_scale_tween: Tween = null
+
+# ▲2 THE SMEAR — see _play_strike_smear.
+#
+# THE STRETCH IS DERIVED, NOT CHOSEN, and the first build got this wrong in the
+# way ★3 exists to prevent: do the arithmetic before the painter.
+#
+# A smear covers the ground the body crossed, so its length is BODY + TRAVEL. The
+# drive is 7 px of pull-back plus 26·strength forward — 33 px against a 150 px
+# token, so the honest figure is 1 + 33/150 = **1.22**, not the 1.55 the pitch
+# guessed. Over-stretching is what made the first version read as a doubled card
+# rather than a streak: a ghost longer than the distance travelled has no motion
+# to explain it, so the eye files it as a second object.
+#
+# It is computed per blow from the real travel (`_smear_stretch`) so a heavy
+# strike, which genuinely covers more ground, genuinely smears longer.
+#
+# ALPHA 0.16, not 0.30. At 0.30 a full-art copy is legible AS A CARD; the whole
+# technique depends on the ghost being read as motion and never resolved as an
+# object. Halving it is what turns the double-exposure into weight.
+const SMEAR_ALPHA: float = 0.16
+const SMEAR_PINCH: float = 0.96   # a token barely narrows over 33 px of travel
+
+
+## Body + travel, over body. Clamped so a glancing tap still reads and a heavy
+## blow never turns the token into a ribbon.
+static func _smear_stretch(travel_px: float, body_px: float) -> float:
+	if body_px <= 1.0:
+		return 1.0
+	return clampf(1.0 + absf(travel_px) / body_px, 1.10, 1.45)
 var _recoil_tween: Tween = null
 # True while hold_lunge_apex has the lunge tweens PAUSED (★8 killing blow).
 # _combat_tween_active must treat the held lunge as live — a paused tween
@@ -411,6 +503,49 @@ const COMPACT_SCALE := 0.50
 # 1.0 to shrink the cancel band; lower to force a longer drag before a drop
 # counts.
 const PLAY_THRESHOLD_Y := 0.82
+
+# ── The play gesture's beat clock (2026-08-03) ─────────────────────────
+# GRAB → HOLD → RELEASE, and the release has THREE distinct endings the player
+# must be able to tell apart at a glance: the card is played (Combat's flight +
+# play_wax_press take over), the player changed their mind and set it back down
+# (_end_drag's put-down), or Combat REFUSED it (play_return_to_hand). The first
+# two used to be indistinguishable snaps and the third was indistinguishable
+# from a routine reflow — so the whole gesture ended in three ways that all
+# looked like the same shrug.
+#
+# These stay OFF Motion.time() on purpose. The scaling policy is "combat FLOW"
+# (Motion.gd's own words) — the clash, the pacing Combat awaits on. This is the
+# player's own hand moving, in the same family as the hover lift and the fan
+# reflow, neither of which is scaled either; speeding it up with the combat
+# setting would make the game harder to hold, not faster to watch. The BOARD
+# half of the gesture (play_wax_press) is combat flow and IS scaled.
+const DRAG_SCALE := Vector2(0.85, 0.85)
+# Shorter than Motion.SETTLE (0.18) by design: a grab is a snatch, a put-down
+# is a placement. Both use the house BACK-out so the card overshoots and firms.
+const GRAB_SETTLE := 0.09
+const PUTDOWN_BEAT := 0.16
+const REFUSAL_BEAT := 0.28
+# A dragged card is held ABOVE the board, so it keeps the hover's elevation
+# shadow — a little under full, since it rides lower and smaller than a hovered
+# card. Before this the grab ZEROED the shadow and a picked-up card stopped
+# being an object and became a decal stuck to the pointer.
+const DRAG_SHADOW_A := 0.72
+
+# ── The board's half of the gesture: the wax press's bite ──────────────
+# How long play_wax_press squashes before the seal makes contact. Two rungs
+# because the press has two jobs depending on how the card arrived: a plain
+# drop-in only has a 12% squash to travel (PRESS_BITE), while a card that flew
+# in TURNED has to open out of its foreshortening first (PRESS_BITE_TURN) — and
+# 70 ms from edge-on to flat is a pop-in, not a turn. 0.13 is deliberately the
+# same figure Motion.flip_out spends on a half turn: the house already priced
+# this beat once and the press should not be cheaper than the reveal.
+#
+# Combat is the caller and owns which rung a given landing gets (it is the only
+# code that knows the flight's reach), and it reads these names rather than
+# keeping its own copies — the ground ring has to fire on the BITE, and a second
+# copy of the number kept in step by comment is how that drifts.
+const PRESS_BITE := 0.07
+const PRESS_BITE_TURN := 0.13
 
 # Painted-frame zone rects, in pixel coords of the 300x400 source frame
 # (assets/frames/frame_creature_*.png). Each rect is the readable interior of a
@@ -536,6 +671,17 @@ func set_compact_mode(enabled: bool) -> void:
 	if not enabled:
 		_idle_bob_enabled = false
 		_unregister_battlefield_visuals()
+	# HAND → BOARD IS A HARD CUT (2026-08-03). This tears down the 225×300 writ
+	# and rebuilds a 200×150 landscape token in a single frame, OFF-TREE, in the
+	# middle of the play gesture — the player watches the sheet they were holding
+	# get swapped for a different object before the flight has even started. It
+	# cannot be tweened from here (create_tween needs the node in the tree, and
+	# Combat calls this between remove_child and add_child), so arm it and let the
+	# card stamp its new face in when it is seated. Scoped to the hand→board
+	# transition on purpose: enemy placements, summons, bakes and previews are all
+	# built compact from the start (`compact_mode = true` before _ready) and never
+	# had a face to lose.
+	var morphing: bool = enabled and not compact_mode and not static_display
 	compact_mode = enabled
 	_apply_compact_layout()
 	# Null cached widget references first, then free children. Otherwise any
@@ -561,9 +707,70 @@ func set_compact_mode(enabled: bool) -> void:
 	_compact_face = null
 	_baked_face = null
 	_gilt_mat = null
+	# The hand-only furniture is a child too, so the free() loop below takes it —
+	# and these three were left holding freed references (rebuild_face already
+	# nulls them; this path never did). Every consumer happens to guard with
+	# is_instance_valid, but the drag now LIGHTS the lift shadow on its way to the
+	# board, so a played card reaches here with a live one every single time.
+	_lift_shadow = null
+	_unplayable_veil = null
+	_discard_mark = null
 	for child in get_children():
 		child.free()
 	_build_layout()
+	if morphing:
+		_compact_morph_pending = true
+		# Normally the card is out of tree here (Combat calls this between
+		# remove_child and add_child) and NOTIFICATION_ENTER_TREE arms the beat.
+		# A caller that switches an already-seated card gets it immediately —
+		# without this the flag would sit armed and fire on some unrelated later
+		# re-parent.
+		if is_inside_tree():
+			_start_compact_morph.call_deferred()
+
+
+## The new face is STRUCK IN rather than cut in, so hand → board reads as the
+## writ being sealed onto the board instead of swapped for a different object
+## (see set_compact_mode).
+##
+## Two constraints decide the whole shape of this. (1) It animates _compact_root
+## — Card2D's OWN child — and never the card: Combat owns `scale` / `position` /
+## `rotation` on a card in flight (_play_landing_pop's arc, then play_wax_press),
+## and a second writer there is exactly the class of bug this file keeps warning
+## about. (2) It rides `modulate` and NOTHING else, because Card2D is a
+## PanelContainer and Container.fit_child_in_rect RESETS a child Control's
+## `scale` and `rotation` to identity on every sort — measured, not assumed. A
+## scale swell here would be silently zeroed by whichever layout pass happened to
+## land inside the beat. `modulate` survives a sort, so the morph is a hot flash
+## fading to true colour: the forge/seal language Motion.forge_strike already
+## speaks, and the one channel that cannot be stomped.
+func _start_compact_morph() -> void:
+	if not _compact_morph_pending:
+		return
+	_compact_morph_pending = false
+	if not compact_mode or not is_inside_tree() or static_display:
+		return
+	if _compact_root == null or not is_instance_valid(_compact_root):
+		return
+	# Decorative — the token arriving is the information, and it arrives either
+	# way. Headless probes skip it for the same reason Motion's FX primitives do.
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	if DisplayServer.get_name() == "headless":
+		return
+	var root: Control = _compact_root
+	# Starts hot and PARTLY transparent, not at zero alpha: the writ vanishes out
+	# of the hand in the same frame, so fading up from nothing reads as a blink in
+	# the middle of the gesture rather than one object becoming another.
+	root.modulate = Color(1.75, 1.55, 1.20, 0.40)
+	# Tween owned by root, so the cached-bake swap (_on_battlefield_texture_ready
+	# frees and rebuilds _compact_root) takes it with it instead of leaving a
+	# tween writing at a dead object.
+	var tw := root.create_tween()
+	tw.tween_property(root, "modulate", Color(1.28, 1.18, 1.04, 1.0),
+		Motion.time(0.09)).set_ease(Tween.EASE_OUT)
+	tw.tween_property(root, "modulate", Color.WHITE, Motion.time(0.22)) \
+		.set_ease(Tween.EASE_OUT)
 
 
 func rebuild_face() -> void:
@@ -928,9 +1135,9 @@ func _build_compact_layout() -> void:
 		c_atk.offset_top = -41;  c_atk.offset_bottom = -3
 		root.add_child(c_atk)
 		_atk_base_color = Color(1, 0.98, 0.90)
-		_atk_label = _build_orb_number_label(
-			"" if bake_strip_stats else str(current_atk), 18, true)
-		c_atk.add_child(_atk_label)
+		if not bake_strip_stats:
+			_atk_label = _build_orb_number_label(str(current_atk), 18, true)
+			c_atk.add_child(_atk_label)
 		_atk_badge = null
 
 		var c_hp := _chart_seal(GameTheme.HEALTH_RED_DROP, token_metal, true)
@@ -940,9 +1147,9 @@ func _build_compact_layout() -> void:
 		c_hp.offset_top = -41;  c_hp.offset_bottom = -3
 		root.add_child(c_hp)
 		_hp_base_color = Color(1, 0.97, 0.92)
-		_hp_label = _build_orb_number_label(
-			"" if bake_strip_stats else str(current_hp), 18, true)
-		c_hp.add_child(_hp_label)
+		if not bake_strip_stats:
+			_hp_label = _build_orb_number_label(str(current_hp), 18, true)
+			c_hp.add_child(_hp_label)
 		_hp_badge = null
 	if compact_static_bake:
 		return
@@ -1760,18 +1967,39 @@ func _break_shield_seal() -> void:
 		return
 	var host: Node = _compact_root if _compact_root != null else self
 	var centre: Vector2 = old.global_position + old.size * 0.5 * old.scale
-	# The fracture: a hard pale line splitting the blob, drawn for one beat.
-	var crack := Line2D.new()
-	crack.width = 3.0
-	crack.default_color = Color(0.86, 0.94, 1.0, 0.95)
-	crack.z_index = 7
-	crack.points = PackedVector2Array([
-		old.position + Vector2(6, 30), old.position + Vector2(42, 16)])
-	host.add_child(crack)
-	var ctw := crack.create_tween()
-	ctw.tween_property(crack, "width", 0.5, Motion.time(0.16))
-	ctw.parallel().tween_property(crack, "modulate:a", 0.0, Motion.time(0.20))
-	ctw.tween_callback(crack.queue_free)
+	# THE FRACTURE, and it was wrong twice over. A Line2D has uniform opacity
+	# across its width, so a 3px stroke reads as a wire rather than as light
+	# catching a broken lip — and a crack is not STRAIGHT. Wax splits along a
+	# jagged path, and the midpoint displacement that draws the lightning
+	# channel draws this too: they are the same fractal at two scales.
+	#
+	# Built as a SPLIT rather than a line — a dark gap with a bright lip over
+	# it, the same idiom the ground fracture uses, because that is what a break
+	# actually looks like: the hole is dark and only its edges catch light.
+	var a0: Vector2 = old.position + Vector2(6, 30)
+	var a1: Vector2 = old.position + Vector2(42, 16)
+	var pts := _jagged_span(a0, a1, 3, 0.13)
+	var gap := Motion.beam_line(pts, Color(0.04, 0.06, 0.11, 0.88), 7.0,
+		"streak", 0.0, "", Color(0.04, 0.06, 0.11))
+	gap.z_index = 6
+	host.add_child(gap)
+	var lip := Motion.beam_line(pts, Color(0.86, 0.94, 1.0, 0.95), 4.0, "bolt")
+	lip.z_index = 7
+	host.add_child(lip)
+	# `modulate` CANNOT fade these. beam_material writes COLOR outright, so the
+	# node's modulate never reaches the fragment — the old `modulate:a` tween
+	# would have left both strokes standing at full alpha until queue_free cut
+	# them dead. The shader's own `fade` uniform is the handle.
+	for seg: Line2D in [gap, lip]:
+		var m: ShaderMaterial = seg.material as ShaderMaterial
+		var stw: Tween = seg.create_tween()
+		stw.tween_method(func(f: float):
+			if m != null:
+				m.set_shader_parameter("fade", f),
+			1.0, 0.0, Motion.time(0.20))
+		stw.parallel().tween_property(seg, "width", seg.width * 0.35,
+			Motion.time(0.16))
+		stw.tween_callback(seg.queue_free)
 	# The wax gives: a brief bulge, then the blob drops away broken.
 	var tw := old.create_tween()
 	tw.tween_property(old, "scale", Vector2(1.18, 0.86), Motion.time(0.07)) 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
@@ -1787,6 +2015,89 @@ func _break_shield_seal() -> void:
 	})
 
 
+## Midpoint displacement between two points — the same construction as Combat's
+## `_lightning_path`, and deliberately so: a crack and a bolt are the SAME
+## fractal, which is why a fracture drawn as a straight segment reads as a
+## scratch on the lens rather than as something breaking.
+##
+## `spread` is a FRACTION OF THE RUN, not a pixel count, so the jag stays in
+## proportion at any seal size; the amplitude halves each pass, which is what
+## keeps the later subdivisions reading as detail instead of as noise.
+func _jagged_span(a: Vector2, b: Vector2, depth: int,
+		spread: float) -> PackedVector2Array:
+	var pts := PackedVector2Array([a, b])
+	var amp: float = a.distance_to(b) * spread
+	for _d in depth:
+		var next := PackedVector2Array()
+		for i in range(pts.size() - 1):
+			var p0: Vector2 = pts[i]
+			var p1: Vector2 = pts[i + 1]
+			var mid: Vector2 = (p0 + p1) * 0.5
+			var n: Vector2 = (p1 - p0).normalized().orthogonal()
+			next.append(p0)
+			next.append(mid + n * randf_range(-amp, amp))
+		next.append(pts[pts.size() - 1])
+		pts = next
+		amp *= 0.5
+	return pts
+
+
+## The old battlefield status roundel was a circular StyleBoxFlat Panel plus a
+## child TextureRect. On the deterministic full board that meant 36 draws and
+## 36 Canvas objects for 18 small icons. This shader composites shadow, rim,
+## field, and the existing white icon texture into one quad without changing
+## tooltip ownership or the mid-fight pop tween.
+static func _status_roundel_shader() -> Shader:
+	if _status_roundel_shader_cache != null:
+		return _status_roundel_shader_cache
+	var shader := Shader.new()
+	shader.code = """
+shader_type canvas_item;
+render_mode unshaded;
+uniform vec4 rim_color : source_color = vec4(0.65, 0.53, 0.30, 1.0);
+uniform vec4 glyph_color : source_color = vec4(0.95, 0.90, 0.76, 1.0);
+
+void fragment() {
+	vec4 inherited = COLOR;
+	vec2 center = vec2(0.5);
+	float d = length(UV - center);
+	float aa = max(fwidth(d) * 1.35, 0.0015);
+	float shadow_d = length(UV - (center + vec2(0.0, 0.030)));
+	float shadow = (1.0 - smoothstep(0.455, 0.505, shadow_d)) * 0.45;
+	float disc = 1.0 - smoothstep(0.438, 0.438 + aa, d);
+	float field = 1.0 - smoothstep(0.405, 0.405 + aa, d);
+	vec4 body = vec4(0.105, 0.088, 0.066, 0.97);
+	vec4 disc_color = mix(rim_color, body, field);
+	vec4 out_color = vec4(0.0, 0.0, 0.0, shadow);
+	out_color.rgb = mix(out_color.rgb, disc_color.rgb, disc * disc_color.a);
+	out_color.a = max(out_color.a, disc * disc_color.a);
+
+	// The source icon used to occupy an 18x18 child inside the 30px seat.
+	// The render quad includes a 2px shadow pad, so the same icon is 18/34.
+	vec2 glyph_uv = (UV - vec2(0.235)) / 0.53;
+	float inside = step(0.0, glyph_uv.x) * step(glyph_uv.x, 1.0)
+		* step(0.0, glyph_uv.y) * step(glyph_uv.y, 1.0);
+	float glyph_alpha = texture(TEXTURE, clamp(glyph_uv, vec2(0.0), vec2(1.0))).a
+		* inside * glyph_color.a;
+	out_color.rgb = mix(out_color.rgb, glyph_color.rgb, glyph_alpha);
+	out_color.a = max(out_color.a, glyph_alpha);
+	COLOR = out_color * inherited;
+}
+"""
+	_status_roundel_shader_cache = shader
+	return _status_roundel_shader_cache
+
+
+static func _status_roundel_material(rim: Color, glyph: Color) -> ShaderMaterial:
+	var key := "%s|%s" % [rim.to_html(true), glyph.to_html(true)]
+	if _status_roundel_material_cache.has(key):
+		return _status_roundel_material_cache[key]
+	var material := ShaderMaterial.new()
+	material.shader = _status_roundel_shader()
+	material.set_shader_parameter("rim_color", rim)
+	material.set_shader_parameter("glyph_color", glyph)
+	_status_roundel_material_cache[key] = material
+	return material
 func _refresh_status_rail(initial_build: bool = false) -> void:
 	if _compact_root == null or not is_instance_valid(_compact_root):
 		return
@@ -1822,40 +2133,27 @@ func _refresh_status_rail(initial_build: bool = false) -> void:
 	var kw_total := float(entries.size()) * kw_orb + float(entries.size() - 1) * kw_gap
 	for i in range(entries.size()):
 		var e: Dictionary = entries[i]
-		var korb := Panel.new()
-		var kost := StyleBoxFlat.new()
-		kost.bg_color = Color(0.105, 0.088, 0.066, 0.97)
-		kost.border_color = e["rim"]
-		kost.set_border_width_all(1)
-		kost.set_corner_radius_all(999)
-		kost.shadow_color = Color(0, 0, 0, 0.45)
-		kost.shadow_size = 3
-		kost.shadow_offset = Vector2(0, 1)
-		korb.add_theme_stylebox_override("panel", kost)
+		var korb := TextureRect.new()
+		korb.texture = e["tex"]
+		korb.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		korb.stretch_mode = TextureRect.STRETCH_SCALE
+		korb.material = _status_roundel_material(e["rim"], e["glyph"])
 		korb.anchor_left = 1.0; korb.anchor_right = 1.0
 		korb.anchor_top = 0.0; korb.anchor_bottom = 0.0
-		korb.offset_left = -4.0 - kw_total + float(i) * (kw_orb + kw_gap)
-		korb.offset_right = korb.offset_left + kw_orb
-		korb.offset_top = 4.0
-		korb.offset_bottom = 4.0 + kw_orb
+		# Two pixels around the 30px seat retain the old StyleBox shadow without
+		# changing rail pitch; neighbouring padded quads meet inside the 4px gap.
+		korb.offset_left = -6.0 - kw_total + float(i) * (kw_orb + kw_gap)
+		korb.offset_right = korb.offset_left + kw_orb + 4.0
+		korb.offset_top = 2.0
+		korb.offset_bottom = 6.0 + kw_orb
 		korb.mouse_filter = Control.MOUSE_FILTER_PASS
 		korb.tooltip_text = _active_effect_tooltip(e)
 		_compact_root.add_child(korb)
-		var kglyph := TextureRect.new()
-		kglyph.texture = e["tex"]
-		kglyph.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		kglyph.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		kglyph.set_anchors_preset(Control.PRESET_FULL_RECT)
-		kglyph.offset_left = 6; kglyph.offset_right = -6
-		kglyph.offset_top = 6; kglyph.offset_bottom = -6
-		kglyph.modulate = e["glyph"]
-		kglyph.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		korb.add_child(kglyph)
 		_status_orbs.append(korb)
 		# A mid-fight change pops the rail in so the new effect draws the eye;
 		# the initial build renders quietly with the token.
 		if not initial_build and not static_display:
-			korb.pivot_offset = Vector2(kw_orb * 0.5, kw_orb * 0.5)
+			korb.pivot_offset = Vector2(17.0, 17.0)
 			korb.scale = Vector2(0.4, 0.4)
 			var tw := korb.create_tween()
 			tw.tween_property(korb, "scale", Vector2.ONE, 0.22) \
@@ -2025,11 +2323,17 @@ func _build_baked_overlay_layout() -> void:
 	# size keys to the ramp, mirroring the chart_proto desc block. Drawn at every
 	# thumbnail scale (down to the 0.36 deck strip): the vector text stays crisp
 	# and legible where a re-cropped copy of the art only read as a duplication.
-	var od_bb := KeywordEffects.decorate_keywords(od_raw, od_sz - 3).replace(
-		KeywordEffects.KEYWORD_GOLD, "#7a4f10")
-	od_rt.text = "[center]%s[/center]" % od_bb
-	od_center.add_child(od_rt)
-	_fit_desc_to_box.call_deferred(od_rt, 87.0 if not is_creature() else 80.0)
+	var od_max_h := 87.0 if not is_creature() else 80.0
+	if defer_baked_rules_text:
+		od_center.add_child(od_rt)
+		_pending_baked_rules = [od_rt, od_raw, od_sz, od_max_h]
+	else:
+		var od_bb := KeywordEffects.decorate_keywords(od_raw, od_sz - 3).replace(
+			KeywordEffects.KEYWORD_GOLD, "#7a4f10")
+		var od_text := "[center]%s[/center]" % od_bb
+		od_rt.text = od_text
+		od_center.add_child(od_rt)
+		_fit_desc_to_box.call_deferred(od_rt, od_max_h)
 
 	# ── Live overlay: NAME (StS model — drawn live over the baked cartouche) ──
 	# The bake paints the swallowtail banner but blanks the name (bake_strip_name);
@@ -2063,54 +2367,46 @@ func _build_baked_overlay_layout() -> void:
 	_center_at_point(_name_label, Vector2(150, 209.33), SIZE_NAME)
 	root.add_child(_name_label)
 
-	# ── Live overlay: floop indicator ──
-	# Same anchors as the v4 layout's floop label so it lands in the same
-	# bottom strip. Toggled via update_floop_display().
-	_floop_indicator = Label.new()
-	_floop_indicator.text = "FLOOP"
-	if GameTheme.font_display:
-		_floop_indicator.add_theme_font_override("font", GameTheme.font_display)
-	_floop_indicator.add_theme_font_size_override("font_size", 10)
-	_floop_indicator.add_theme_color_override("font_color", GameTheme.FLOOP_BLUE)
-	_floop_indicator.add_theme_color_override("font_outline_color",
-		Color(0, 0, 0, 0.95))
-	_floop_indicator.add_theme_constant_override("outline_size", 3)
-	_floop_indicator.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_floop_indicator.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_floop_indicator.anchor_left = 0.24; _floop_indicator.anchor_right = 0.76
-	_floop_indicator.anchor_top = 0.925; _floop_indicator.anchor_bottom = 1.0
-	_floop_indicator.visible = false
-	_floop_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_floop_indicator)
+	# ── Live overlay: TRIBE FOOTER (stripped by the same bake_strip_name) ──
+	# The name's sibling: bake_strip_name blanks BOTH letterpress bands, so both
+	# must be redrawn here. Only the name half was ever written — see
+	# _make_ctype_footer_label for what that cost.
+	var ct_lbl := _make_ctype_footer_label()
+	if ct_lbl != null:
+		root.add_child(ct_lbl)
 
-	# ── Stub refs ────────────────────────────────────────────────────────
-	# External callers (update_floop_display, _on_mouse_entered) read
-	# _name_label / _desc_label / _type_label / _rarity_strip / _art_rect.
-	# In baked mode the art is part of the texture and can't be tinted
-	# individually — set _art_rect = null so update_floop_display's
-	# `if _art_rect:` guard skips the art modulate. The other refs get
-	# invisible Labels so null-deref paths don't crash.
-	_name_label = Label.new()
-	_name_label.visible = false
-	_name_label.text = card_data.get("name", "")
-	_name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_name_label)
-	_desc_label = Label.new()
-	_desc_label.visible = false
-	_desc_label.text = card_data.get("desc", "")
-	_desc_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_desc_label)
-	_type_label = Label.new()
-	_type_label.visible = false
-	_type_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_type_label)
-	_rarity_strip = ColorRect.new()
-	_rarity_strip.visible = false
-	_rarity_strip.color = GameTheme.rarity_color(card_data.get("rarity", "common"))
-	_rarity_strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(_rarity_strip)
+	# Floop display is a no-op, and the old invisible compatibility Labels had
+	# no readers. Keep only the real visible name/rules/stat nodes above; this
+	# removes five Controls from every cached card without changing its pixels.
 	_art_rect = null
 
+
+func complete_deferred_baked_rules() -> void:
+	if _pending_baked_rules.is_empty():
+		return
+	var rt_obj: Variant = _pending_baked_rules[0]
+	var raw_text: String = String(_pending_baked_rules[1])
+	var font_size: int = int(_pending_baked_rules[2])
+	var max_h: float = float(_pending_baked_rules[3])
+	_pending_baked_rules.clear()
+	_set_deferred_baked_rules(rt_obj, raw_text, font_size, max_h)
+
+
+func _set_deferred_baked_rules(rt_obj: Variant, raw_text: String,
+		font_size: int,
+		max_h: float) -> void:
+	# A dealt card can be rebuilt/freed before its delayed text turn (reroll,
+	# purchase, scene exit). Untyped for the same freed-object reason as the fitter.
+	if not is_instance_valid(rt_obj):
+		return
+	var rt := rt_obj as RichTextLabel
+	if rt == null:
+		return
+	var bb := KeywordEffects.decorate_keywords(raw_text, font_size - 3).replace(
+		KeywordEffects.KEYWORD_GOLD, "#7a4f10")
+	var text := "[center]%s[/center]" % bb
+	rt.text = text
+	_fit_desc_to_box.call_deferred(rt, max_h)
 
 # ═══════════════════════════════════════════
 #  FULL (HAND) LAYOUT — name banner, art, description, footer stats
@@ -2259,6 +2555,12 @@ func _kw_stamp_row(root: Control, meds: Array, metal: Color,
 		more.add_child(more_lbl)
 
 
+# The final fit is deterministic for a given rendered string, geometry and font.
+# Card faces repeat across hand, reward, shop, collection and Game Over screens;
+# retain the exact winning leading/size pair instead of reflowing identical text.
+static var _desc_fit_cache: Dictionary = {}
+
+
 func _fit_desc_to_box(rt_obj: Variant, max_h: float) -> void:
 	# Rules text is fixed at the 18px reading floor. The deferred check reports
 	# clip box. RichTextLabel.get_content_height() validates the line cache, so
@@ -2314,20 +2616,42 @@ func _fit_desc_to_box(rt_obj: Variant, max_h: float) -> void:
 	#
 	# Anything still overflowing after both is genuinely over-written and wants
 	# a copy editor, not a smaller font — so we stop and let it clip loudly.
+	var initial_size := int(rt.get_theme_font_size("normal_font_size"))
+	var initial_bold_size := int(rt.get_theme_font_size("bold_font_size"))
+	var initial_lead := int(rt.get_theme_constant("line_separation"))
+	var normal_font: Font = rt.get_theme_font("normal_font")
+	var bold_font: Font = rt.get_theme_font("bold_font")
+	var fit_key := "%s\u001f%.3f|%.3f|%d|%d|%d|%d|%d" % [
+		rt.text, max_h, rt.custom_minimum_size.x,
+		initial_size, initial_bold_size, initial_lead,
+		normal_font.get_instance_id() if normal_font != null else 0,
+		bold_font.get_instance_id() if bold_font != null else 0,
+	]
+	var cached: Variant = _desc_fit_cache.get(fit_key, null)
+	if cached is Vector2i:
+		var cached_fit := cached as Vector2i
+		rt.add_theme_constant_override("line_separation", cached_fit.y)
+		rt.add_theme_font_size_override("normal_font_size", cached_fit.x)
+		rt.add_theme_font_size_override("bold_font_size", cached_fit.x)
+		return
+
 	var guard := 0
 	while guard < 6:
 		if rt.get_content_height() <= max_h:
-			return
+			break
 		var lead := int(rt.get_theme_constant("line_separation"))
 		if lead > -5:
 			rt.add_theme_constant_override("line_separation", lead - 1)
 		else:
 			var cur := int(rt.get_theme_font_size("normal_font_size"))
 			if cur <= 17:
-				return
+				break
 			rt.add_theme_font_size_override("normal_font_size", cur - 1)
 			rt.add_theme_font_size_override("bold_font_size", cur - 1)
 		guard += 1
+	_desc_fit_cache[fit_key] = Vector2i(
+		int(rt.get_theme_font_size("normal_font_size")),
+		int(rt.get_theme_constant("line_separation")))
 
 
 func _build_chart_proto() -> void:
@@ -2608,35 +2932,37 @@ func _build_chart_proto() -> void:
 	plate.offset_bottom = 171
 	plate.metal = metal
 	root.add_child(plate)
-	var name_font: Font = GameTheme.font_title_black \
-		if GameTheme.font_title_black != null else GameTheme.font_display
-	var name_col := Color(0.93, 0.82, 0.55)
-	if is_curse_card:
-		name_col = Color(0.74, 0.72, 0.66)
-	elif is_upg:
-		# Forged: lift the name to a brighter struck-gilt so an upgraded card
-		# reads as upgraded at a glance, independent of the " +" suffix.
-		name_col = Color(1.0, 0.886, 0.541)
-	# Cinzel caps run wide — long names step down instead of ellipsizing.
-	# bake_strip_name: leave the cartouche text BLANK in the bake — the live
-	# overlay draws the name with the font renderer so it stays crisp at any zoom.
-	var nm := "" if bake_strip_name else String(card_data.get("name", ""))
-	var nm_size := 16
-	if nm.length() > 17:
-		nm_size = 14
-	elif nm.length() > 13:
-		nm_size = 15
-	_name_label = _make_styled_label(nm, name_font, nm_size, name_col)
-	_name_label.add_theme_constant_override("outline_size", 0)
-	_name_label.add_theme_color_override("font_shadow_color",
-		Color(0, 0, 0, 0.55))
-	_name_label.add_theme_constant_override("shadow_offset_x", 0)
-	_name_label.add_theme_constant_override("shadow_offset_y", 1)
-	_name_label.clip_text = true
-	_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	# Cartouche center y=157 real → 209.33 in _center_at_point's 300x400 space.
-	_center_at_point(_name_label, Vector2(150, 209.33), SIZE_NAME)
-	root.add_child(_name_label)
+	# A stripped bake needs the painted cartouche above, but its deliberately blank
+	# Label contributes no pixels. Do not build that dead text node; the visible
+	# baked-overlay card recreates the live name after the snapshot lands.
+	if not bake_strip_name:
+		var name_font: Font = GameTheme.font_title_black \
+			if GameTheme.font_title_black != null else GameTheme.font_display
+		var name_col := Color(0.93, 0.82, 0.55)
+		if is_curse_card:
+			name_col = Color(0.74, 0.72, 0.66)
+		elif is_upg:
+			# Forged: lift the name to a brighter struck-gilt so an upgraded card
+			# reads as upgraded at a glance, independent of the " +" suffix.
+			name_col = Color(1.0, 0.886, 0.541)
+		# Cinzel caps run wide — long names step down instead of ellipsizing.
+		var nm := String(card_data.get("name", ""))
+		var nm_size := 16
+		if nm.length() > 17:
+			nm_size = 14
+		elif nm.length() > 13:
+			nm_size = 15
+		_name_label = _make_styled_label(nm, name_font, nm_size, name_col)
+		_name_label.add_theme_constant_override("outline_size", 0)
+		_name_label.add_theme_color_override("font_shadow_color",
+			Color(0, 0, 0, 0.55))
+		_name_label.add_theme_constant_override("shadow_offset_x", 0)
+		_name_label.add_theme_constant_override("shadow_offset_y", 1)
+		_name_label.clip_text = true
+		_name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		# Cartouche center y=157 real → 209.33 in _center_at_point's 300x400 space.
+		_center_at_point(_name_label, Vector2(150, 209.33), SIZE_NAME)
+		root.add_child(_name_label)
 	if is_upg:
 		# Gilt forge finials flank the name cartouche (real-px coords, like the
 		# rulebox ticks). Always visible regardless of rarity or name length —
@@ -2727,33 +3053,44 @@ func _build_chart_proto() -> void:
 		rulebox.queue_free()
 
 	# ── description (dark ink written on the page) ───────────────────────
-	var desc_clip := Control.new()
-	desc_clip.clip_contents = true
-	desc_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	desc_clip.anchor_left = 0.0
-	desc_clip.anchor_right = 1.0
-	desc_clip.anchor_top = 0.0
-	desc_clip.anchor_bottom = 0.0
-	desc_clip.offset_left = 17
-	desc_clip.offset_right = -17
+	if not bake_strip_desc:
+		var desc_clip := Control.new()
+		desc_clip.clip_contents = true
+		desc_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		desc_clip.anchor_left = 0.0
+		desc_clip.anchor_right = 1.0
+		desc_clip.anchor_top = 0.0
+		desc_clip.anchor_bottom = 0.0
+		desc_clip.offset_left = 17
+		desc_clip.offset_right = -17
 	# Text region grows with the band (was 184→255 = 71px → 176→258 = 82px;
 	# spells run to the taller rule_bot band since the one-line footer).
-	desc_clip.offset_top = 176
-	desc_clip.offset_bottom = rule_bot - 2
-	root.add_child(desc_clip)
-	var center_box := CenterContainer.new()
-	center_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	center_box.set_anchors_preset(Control.PRESET_FULL_RECT)
-	desc_clip.add_child(center_box)
-	var desc_rt := RichTextLabel.new()
-	desc_rt.bbcode_enabled = true
+		desc_clip.offset_top = 176
+		desc_clip.offset_bottom = rule_bot - 2
+		root.add_child(desc_clip)
+		var center_box := CenterContainer.new()
+		center_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		center_box.set_anchors_preset(Control.PRESET_FULL_RECT)
+		desc_clip.add_child(center_box)
+		var desc_rt := RichTextLabel.new()
+		desc_rt.bbcode_enabled = true
 	# The [hint] glossary must not underline every keyword — that's reading
-	# noise on the parchment; hover still works.
-	desc_rt.hint_underlined = false
-	desc_rt.fit_content = true
-	desc_rt.scroll_active = false
-	desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# noise on the parchment. Hover DOES still work, but only because of the
+	# filter below; it did not before 2026-08-01.
+		desc_rt.hint_underlined = false
+		desc_rt.fit_content = true
+		desc_rt.scroll_active = false
+		desc_rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	# PASS, not IGNORE — matching _build_baked_overlay_layout's `od_rt`, whose
+	# comment already states the reason. IGNORE means the label never receives
+	# mouse events at all, so `meta_hover_started` cannot fire and every [hint]
+	# in the rules text is DEAD. Card2D has two render paths — this live one and
+	# the baked-overlay one, chosen by whether CardTextureCache is warm — and
+	# they disagreed, so the same card silently stopped explaining its own
+	# keywords on a cold cache. The comment two lines up asserted "hover still
+	# works" while this line prevented it. PASS lets hover reach the hints and
+	# still drops clicks and drags through to the card panel underneath.
+		desc_rt.mouse_filter = Control.MOUSE_FILTER_PASS
 	# 182, not 170 (2026-07-30). desc_clip spans offset 17 → -17 on a natively
 	# 225px card, i.e. 191px of usable line — the label was pinned 21px narrower
 	# than its own container and had been for the life of the layout. That
@@ -2763,28 +3100,28 @@ func _build_chart_proto() -> void:
 	# throwing the width away. Leaves ~4.5px inside the clip and ~6.5px inside
 	# the ruled border, so the text still never touches the rule.
 	# MUST stay in lockstep with the baked-overlay path (od_rt, ~line 2005).
-	desc_rt.custom_minimum_size = Vector2(182, 0)
+		desc_rt.custom_minimum_size = Vector2(182, 0)
 	# Tighten Alegreya's generous default leading so the larger ramp still fits
 	# the band. -2px/line claws back ~6px on a 4-line card without touching
 	# legibility. Keep identical in the baked-overlay path below.
-	desc_rt.add_theme_constant_override("line_separation", -2)
+		desc_rt.add_theme_constant_override("line_separation", -2)
 	# The writ writes its rules in a book hand (Alegreya) — a modern rounded
 	# sans on period paper breaks the document fiction. Serif sizes run +1
 	# on the sans scale: hairline serifs need it at these px sizes.
-	var desc_font: Font = GameTheme.font_card_body \
-		if GameTheme.font_card_body != null else GameTheme.font_body
-	var desc_bold_font: Font = GameTheme.font_card_body_bold \
-		if GameTheme.font_card_body_bold != null else GameTheme.font_body_bold
-	if desc_font:
-		desc_rt.add_theme_font_override("normal_font", desc_font)
-		desc_rt.add_theme_font_override("bold_font",
-			desc_bold_font if desc_bold_font else desc_font)
+		var desc_font: Font = GameTheme.font_card_body \
+			if GameTheme.font_card_body != null else GameTheme.font_body
+		var desc_bold_font: Font = GameTheme.font_card_body_bold \
+			if GameTheme.font_card_body_bold != null else GameTheme.font_body_bold
+		if desc_font:
+			desc_rt.add_theme_font_override("normal_font", desc_font)
+			desc_rt.add_theme_font_override("bold_font",
+				desc_bold_font if desc_bold_font else desc_font)
 	# bake_strip_desc: leave the rules region BLANK in the bake — the live overlay
 	# (_build_baked_overlay_layout) draws the text with the font renderer so it stays
 	# crisp at any zoom (the StS model). The vellum panel above is still baked.
-	var raw_desc: String = "" if bake_strip_desc else card_data.get("desc", "")
-	if raw_desc == "" and not bake_strip_desc and synth_desc_if_empty:
-		raw_desc = _synthesized_rules_text()
+		var raw_desc: String = card_data.get("desc", "")
+		if raw_desc == "" and synth_desc_if_empty:
+			raw_desc = _synthesized_rules_text()
 	# Bigger, more readable body text. The 15/14/13 ramp was still the #1
 	# "too small to read" complaint at the real windowed (1600×900, no global
 	# scaling) card size. Rewritten descriptions now use a fixed 18px size;
@@ -2792,10 +3129,10 @@ func _build_chart_proto() -> void:
 	# The taller band + tightened leading above absorb the
 	# growth. Keep this ramp IDENTICAL to the baked-overlay path below — they
 	# draw the same live text and must not diverge.
-	var dsz := 18
-	desc_rt.add_theme_font_size_override("normal_font_size", dsz)
-	desc_rt.add_theme_font_size_override("bold_font_size", dsz)
-	desc_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
+		var dsz := 18
+		desc_rt.add_theme_font_size_override("normal_font_size", dsz)
+		desc_rt.add_theme_font_size_override("bold_font_size", dsz)
+		desc_rt.add_theme_color_override("default_color", GameTheme.PARCHMENT_TEXT)
 	# The keyword gold (#e8b547) is tuned for dark wells and disappears on
 	# paper. Re-ink the same markup in dark bronze — keyword identity kept,
 	# document contrast won (~5.5:1 on the leaf). decorate_keywords also
@@ -2804,14 +3141,14 @@ func _build_chart_proto() -> void:
 	# scale, including the 0.36 deck strip: a deck strip hits this live path
 	# whenever CardTextureCache is still cold (a freshly opened run-setup screen),
 	# and small crisp text reads better than the duplicated art it used to show.
-	var desc_bbcode := KeywordEffects.decorate_keywords(
-		raw_desc, dsz - 3).replace(KeywordEffects.KEYWORD_GOLD, "#7a4f10")
-	desc_rt.text = "[center]%s[/center]" % desc_bbcode
-	center_box.add_child(desc_rt)
+		var desc_bbcode := KeywordEffects.decorate_keywords(
+			raw_desc, dsz - 3).replace(KeywordEffects.KEYWORD_GOLD, "#7a4f10")
+		desc_rt.text = "[center]%s[/center]" % desc_bbcode
+		center_box.add_child(desc_rt)
 	# Shrink-to-fit safety net: once laid out, if the written text overflows the
 	# clip box, report it while preserving the 18px reading floor.
 	# so a line is never cut top or bottom by the CenterContainer clip.
-	_fit_desc_to_box.call_deferred(desc_rt, 87.0 if is_sp else 80.0)
+		_fit_desc_to_box.call_deferred(desc_rt, 87.0 if is_sp else 80.0)
 
 	# ── stats as wax seals OR the spell footer line ──────────────────────
 	var stat_font: Font = GameTheme.font_stat
@@ -2831,20 +3168,20 @@ func _build_chart_proto() -> void:
 		# 5px dark outline so they read crisply against the textured pressed-wax
 		# face. The 56px seal box offsets are untouched — they are the
 		# bake-overlay contract (see CLAUDE.md).
-		_cost_label = _make_styled_label(
-			"" if bake_strip_stats else str(card_data.get("cost", 0)),
-			stat_font, 19, Color(1, 1, 1))
-		_cost_label.add_theme_color_override("font_outline_color",
-			Color(0, 0, 0, 1.0))
-		_cost_label.add_theme_constant_override("outline_size", 6)
-		_cost_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
-		_cost_label.add_theme_constant_override("shadow_offset_x", 1)
-		_cost_label.add_theme_constant_override("shadow_offset_y", 1)
-		_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
-		_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
-		_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		cost_seal.add_child(_cost_label)
+		if not bake_strip_stats:
+			_cost_label = _make_styled_label(
+				str(card_data.get("cost", 0)), stat_font, 19, Color(1, 1, 1))
+			_cost_label.add_theme_color_override("font_outline_color",
+				Color(0, 0, 0, 1.0))
+			_cost_label.add_theme_constant_override("outline_size", 6)
+			_cost_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+			_cost_label.add_theme_constant_override("shadow_offset_x", 1)
+			_cost_label.add_theme_constant_override("shadow_offset_y", 1)
+			_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+			_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
+			_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
+			_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			cost_seal.add_child(_cost_label)
 
 		var atk_seal := _chart_seal(GameTheme.ATK_GOLD_SHIELD, seal_metal)
 		atk_seal.anchor_left = 0.0
@@ -2856,20 +3193,20 @@ func _build_chart_proto() -> void:
 		atk_seal.offset_top = -47
 		atk_seal.offset_bottom = 9
 		root.add_child(atk_seal)
-		_atk_label = _make_styled_label(
-			"" if bake_strip_stats else str(current_atk), stat_font, 19,
-			Color(1, 1, 1))
-		_atk_label.add_theme_color_override("font_outline_color",
-			Color(0, 0, 0, 1.0))
-		_atk_label.add_theme_constant_override("outline_size", 6)
-		_atk_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
-		_atk_label.add_theme_constant_override("shadow_offset_x", 1)
-		_atk_label.add_theme_constant_override("shadow_offset_y", 1)
-		_atk_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_atk_label.offset_top = ORB_NUMERAL_Y_OFFSET
-		_atk_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
-		_atk_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		atk_seal.add_child(_atk_label)
+		if not bake_strip_stats:
+			_atk_label = _make_styled_label(
+				str(current_atk), stat_font, 19, Color(1, 1, 1))
+			_atk_label.add_theme_color_override("font_outline_color",
+				Color(0, 0, 0, 1.0))
+			_atk_label.add_theme_constant_override("outline_size", 6)
+			_atk_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+			_atk_label.add_theme_constant_override("shadow_offset_x", 1)
+			_atk_label.add_theme_constant_override("shadow_offset_y", 1)
+			_atk_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+			_atk_label.offset_top = ORB_NUMERAL_Y_OFFSET
+			_atk_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
+			_atk_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			atk_seal.add_child(_atk_label)
 
 		var hp_seal := _chart_seal(GameTheme.HEALTH_RED_DROP, seal_metal)
 		hp_seal.anchor_left = 1.0
@@ -2881,20 +3218,20 @@ func _build_chart_proto() -> void:
 		hp_seal.offset_top = -47
 		hp_seal.offset_bottom = 9
 		root.add_child(hp_seal)
-		_hp_label = _make_styled_label(
-			"" if bake_strip_stats else str(current_hp), stat_font, 19,
-			Color(1, 1, 1))
-		_hp_label.add_theme_color_override("font_outline_color",
-			Color(0, 0, 0, 1.0))
-		_hp_label.add_theme_constant_override("outline_size", 6)
-		_hp_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
-		_hp_label.add_theme_constant_override("shadow_offset_x", 1)
-		_hp_label.add_theme_constant_override("shadow_offset_y", 1)
-		_hp_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_hp_label.offset_top = ORB_NUMERAL_Y_OFFSET
-		_hp_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
-		_hp_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		hp_seal.add_child(_hp_label)
+		if not bake_strip_stats:
+			_hp_label = _make_styled_label(
+				str(current_hp), stat_font, 19, Color(1, 1, 1))
+			_hp_label.add_theme_color_override("font_outline_color",
+				Color(0, 0, 0, 1.0))
+			_hp_label.add_theme_constant_override("outline_size", 6)
+			_hp_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+			_hp_label.add_theme_constant_override("shadow_offset_x", 1)
+			_hp_label.add_theme_constant_override("shadow_offset_y", 1)
+			_hp_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+			_hp_label.offset_top = ORB_NUMERAL_Y_OFFSET
+			_hp_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
+			_hp_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			hp_seal.add_child(_hp_label)
 
 		# Campaign memory: kill tallies scratched down the left page margin
 		# (the strip between the art plate's foot and the ATK seal — marginalia
@@ -2913,19 +3250,9 @@ func _build_chart_proto() -> void:
 		# Creature type tag (2026-07-10): the letterpress footer slot carries
 		# the creature's type — the tag ctype effects read (Warchief's
 		# Soldiers, Siege Golem's Engines). No type, no filler.
-		var ct_id := String(card_data.get("ctype", ""))
-		if ct_id != "" and not bake_strip_name:
-			var ct_text := ct_id.to_upper()
-			var ct_spaced := ""
-			for ci in range(ct_text.length()):
-				ct_spaced += ct_text[ci]
-				if ci < ct_text.length() - 1:
-					ct_spaced += " "
-			var ct_lbl := _make_styled_label(ct_spaced, GameTheme.font_title if GameTheme.font_title != null else GameTheme.font_display, 12, Color(0.302, 0.224, 0.133, 0.85))
-			ct_lbl.add_theme_constant_override("outline_size", 0)
-			ct_lbl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.4))
-			ct_lbl.add_theme_constant_override("shadow_offset_y", 1)
-			_center_at_point(ct_lbl, Vector2(150, 374), Vector2(230, 24))
+		# Built through the shared funnel — see _make_ctype_footer_label.
+		var ct_lbl := _make_ctype_footer_label()
+		if ct_lbl != null:
 			root.add_child(ct_lbl)
 	else:
 		# Spells still pay a cost — the seal stays; the bottom carries the
@@ -2940,20 +3267,20 @@ func _build_chart_proto() -> void:
 		sp_cost.offset_top = -9
 		sp_cost.offset_bottom = 47
 		root.add_child(sp_cost)
-		_cost_label = _make_styled_label(
-			"" if bake_strip_stats else str(card_data.get("cost", 0)),
-			stat_font, 19, Color(1, 1, 1))
-		_cost_label.add_theme_color_override("font_outline_color",
-			Color(0, 0, 0, 1.0))
-		_cost_label.add_theme_constant_override("outline_size", 6)
-		_cost_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
-		_cost_label.add_theme_constant_override("shadow_offset_x", 1)
-		_cost_label.add_theme_constant_override("shadow_offset_y", 1)
-		_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
-		_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
-		_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
-		_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		sp_cost.add_child(_cost_label)
+		if not bake_strip_stats:
+			_cost_label = _make_styled_label(
+				str(card_data.get("cost", 0)), stat_font, 19, Color(1, 1, 1))
+			_cost_label.add_theme_color_override("font_outline_color",
+				Color(0, 0, 0, 1.0))
+			_cost_label.add_theme_constant_override("outline_size", 6)
+			_cost_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+			_cost_label.add_theme_constant_override("shadow_offset_x", 1)
+			_cost_label.add_theme_constant_override("shadow_offset_y", 1)
+			_cost_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+			_cost_label.offset_top = ORB_NUMERAL_Y_OFFSET
+			_cost_label.offset_bottom = ORB_NUMERAL_Y_OFFSET
+			_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			sp_cost.add_child(_cost_label)
 
 		# One honest line (2026-07-10): "SPELL — TARGET ENEMY · EXHAUST". The old
 		# two-line block (a spaced-out SPELL over the contract) hid Exhaust and
@@ -3199,6 +3526,46 @@ func _creature_type_text() -> String:
 		if needle in search:
 			return entry[1]
 	return "CREATURE"
+
+
+## The letterpress tribe footer ("B E A S T") — the ONE writer of that band's
+## text, metrics and placement. Returns null when there is nothing to print.
+##
+## It has to be built from TWO layouts, and that is the whole point of the
+## funnel. The bake STRIPS this band along with the name (bake_strip_name) so the
+## font renderer can draw it live and stay razor-sharp down at the 0.36–0.72 deck
+## strip, exactly like the name and the rules text (the StS model). But from
+## 2026-07-10 until 2026-08-04 only the STRIP half existed — nothing ever redrew
+## it — so `_build_baked_overlay_layout` printed an empty band. That is every
+## card face in real play: hand cards, Reward, Shop, Recruit, Rest, Event, the
+## deck viewer, THE COLUMN. The tag was visible only in the frame or two before
+## the bake landed, which is why it survived in screenshots and nowhere else.
+##
+## Keep both layouts on this funnel so the halves cannot drift apart again.
+func _make_ctype_footer_label() -> Label:
+	# `bake_strip_name` means THIS instance is the bake — leave the band bare and
+	# let the display card's overlay draw it.
+	if bake_strip_name or not is_creature():
+		return null
+	var ct_id := String(card_data.get("ctype", ""))
+	if ct_id == "":
+		return null
+	var ct_text := ct_id.to_upper()
+	var ct_spaced := ""
+	for ci in range(ct_text.length()):
+		ct_spaced += ct_text[ci]
+		if ci < ct_text.length() - 1:
+			ct_spaced += " "
+	var ct_lbl := _make_styled_label(ct_spaced,
+		GameTheme.font_title if GameTheme.font_title != null else GameTheme.font_display,
+		12, Color(0.302, 0.224, 0.133, 0.85))
+	ct_lbl.add_theme_constant_override("outline_size", 0)
+	ct_lbl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.4))
+	ct_lbl.add_theme_constant_override("shadow_offset_y", 1)
+	# Same ref-space point in both layouts: 374/400 of the card height = the
+	# real y=280.5 band the flanking chart diamonds sit on.
+	_center_at_point(ct_lbl, Vector2(150, 374), Vector2(230, 24))
+	return ct_lbl
 
 
 func _make_styled_label(text: String, font: Font, font_size: int,
@@ -3546,13 +3913,17 @@ func _draw_fuse_cord() -> void:
 		var kx: float = lerpf(x_start, lit_x, (float(i) + 1.0) / float(n))
 		var head: bool = i == n - 1
 		var kp := Vector2(kx, y)
+		# SMOOTH, NOT STEPPED. These were three concentric filled discs at
+		# r13/r7.5/r4 and alpha 0.26/0.65/1.00 — a hand-rolled falloff in three
+		# jumps, which reads as two visible RINGS on the one thing in the frame
+		# that is meant to be a burning coal. `draw_glow` is the same intent with
+		# a real radial falloff, so the ember has no edge at any radius.
 		if head:
-			_fuse_cord.draw_circle(kp, 13.0, Color(1.0, 0.45, 0.10, 0.26), true, -1.0, true)
-			_fuse_cord.draw_circle(kp, 7.5, Color(1.0, 0.62, 0.16, 0.65), true, -1.0, true)
-			_fuse_cord.draw_circle(kp, 4.0, Color(1.0, 0.93, 0.58, 1.0), true, -1.0, true)
+			Motion.draw_glow(_fuse_cord, kp, 15.0,
+				Color(1.0, 0.52, 0.16, 0.97), 0.34, 1.15)
 		else:
-			_fuse_cord.draw_circle(kp, 5.0, Color(0.9, 0.38, 0.10, 0.35), true, -1.0, true)
-			_fuse_cord.draw_circle(kp, 2.6, Color(1.0, 0.58, 0.18, 0.9), true, -1.0, true)
+			Motion.draw_glow(_fuse_cord, kp, 7.0,
+				Color(0.94, 0.44, 0.13, 0.88), 0.40, 1.25)
 	# Ash flecks between knots — the cord has visibly BURNED, not just lit.
 	var ash := Color(0.38, 0.33, 0.28, 0.55)
 	for i in range(3):
@@ -4081,6 +4452,10 @@ func _flash_hit() -> void:
 
 var _baked_face: TextureRect = null
 var _gilt_mat: ShaderMaterial = null
+var _gilt_tween: Tween = null
+# Matched to the hover-exit / put-down settle (0.14 / PUTDOWN_BEAT) so the leaf's
+# highlight and the sheet's angle come home together.
+const GILT_SETTLE := 0.15
 
 func _apply_gilt_foil() -> void:
 	# ★2 — only rares and uncommons carry leaf, and only in the hand. The shine
@@ -4111,6 +4486,52 @@ func _sweep_gilt(tilt: float) -> void:
 	# (gold leaf doesn't shimmer on its own; it catches light when you move it).
 	if _gilt_mat != null:
 		_gilt_mat.set_shader_parameter("tilt", tilt)
+
+
+## THE LIGHT HAS TO COME BACK DOWN TOO (2026-08-03).
+## `_sweep_gilt` was driven from `_process` and nowhere else, and `_disarm_lean`
+## just stopped the process — so the foil froze at whatever angle the cursor left
+## it. A rare you hovered and released sat lit from the side, permanently, until
+## the next hover; the leaf's whole claim is that it answers the card's ANGLE,
+## and a card at rest is not tilted. The card's own rotation is already easing
+## home over the settle beat, so the light rides the same beat rather than
+## snapping — otherwise the sheet straightens while its highlight teleports.
+##
+## Not a second writer: `_process` owns the tilt only while `_lean_active`, and
+## this tween is created the instant that flag drops and killed the instant it
+## comes back up (`_arm_lean`). The windows cannot overlap.
+##
+## AND THE REST ITSELF MOVES (2026-08-04). Returning the foil at `_disarm_lean`
+## covers only the half of the bug that the hand is holding. The foil's rest is
+## `_hand_target_rotation`, and `set_hand_target` is that value's ONE writer —
+## Combat re-fans on every draw, play, refusal and discard mark, so the angle
+## slides out from under a card that is sitting perfectly still. Measured on a
+## card that had never been hovered at all: sheet at −0.104 rad, foil at 0.000,
+## i.e. `pos` 0.500 against the 0.323 the sheet's angle asks for — 13% of the
+## `band`'s 1.35 range, on the outermost cards of every fan in the game. So
+## `set_hand_target` re-rests the light over the SAME duration it moves the
+## sheet, which is this function's existing argument applied to the other half.
+## Not new gilt behaviour (that is R5's territory) — the same rest, arriving.
+func _settle_gilt_home(dur: float = GILT_SETTLE) -> void:
+	if _gilt_mat == null:
+		return
+	if _gilt_tween != null and _gilt_tween.is_valid():
+		_gilt_tween.kill()
+	var rest_tilt: float = _hand_target_rotation
+	if UserSettings != null and UserSettings.reduce_motion:
+		# Decorative, but the END STATE is not optional — a card left mis-lit is
+		# wrong however the player has their settings.
+		_sweep_gilt(rest_tilt)
+		return
+	if not is_inside_tree():
+		_sweep_gilt(rest_tilt)
+		return
+	if dur <= 0.0:
+		_sweep_gilt(rest_tilt)
+		return
+	_gilt_tween = create_tween()
+	_gilt_tween.tween_method(_sweep_gilt, float(_gilt_mat.get_shader_parameter("tilt")),
+		rest_tilt, dur).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 
 
 var _flash_mat: ShaderMaterial = null
@@ -4219,40 +4640,56 @@ func _die() -> void:
 		return
 	_dead = true
 	destroyed.emit()
-	# Stop idle bob from writing position.y each frame — it would fight the death
-	# tween (and the sacrifice rise in particular).
+	# Skipped when the clash path already sounded "creature_death" at the impact
+	# beat (death_cue_played) — the flush is the visual flourish, not a second hit.
+	if AudioBank != null and not death_cue_played:
+		AudioBank.play_sfx("death")
+	# The field arrays are already nulled by the destroyed signal / _cleanup_dead,
+	# so the lingering node the flourish animates is invisible to combat logic.
+	play_death_flourish()
+
+
+## THE BODY GOING, WITHOUT THE DEATH (extracted 2026-08-04).
+##
+## `_die()` is death: it emits `destroyed`, which is what runs on-death dispatch,
+## encounter hooks and ally-death passives. A SKIRMISH CLIENT must never do any of
+## that — the host resolved it and the client only renders the outcome — so the
+## client's despawn path deliberately frees its nodes without emitting.
+##
+## The consequence was that `_net_despawn_creature` hand-rolled a death animation,
+## and the one it hand-rolled was a verbatim copy of the FALLBACK below: the
+## shrink-spin-fade that `_play_burn_death` was written to replace, described in its
+## own header as "the most generic beat in a game whose whole identity is paper and
+## ink". So the writ burned on the host's screen and shrank on the client's — two
+## players in one match watching different deaths — and the client also missed the
+## death burst and never stopped the clash tweens still writing `position`.
+##
+## So the FLOURISH is now its own funnel and the two callers share it. Adding a beat
+## to a creature's exit belongs here; anything that must only happen on a real death
+## stays in `_die`.
+func play_death_flourish() -> void:
+	if static_display or not is_inside_tree():
+		queue_free()
+		return
+	# Idle bob and the clash choreography both write `position`/`scale`; a body dies
+	# mid-lunge on every mutual trade and mid-recoil on nearly every kill, so both
+	# have to stop before the exit takes those properties over.
 	_idle_bob_enabled = false
-	# ...and stop the CLASH tweens for the same reason, which the bob guard above
-	# has always implied but never covered (2026-07-30). A body dies mid-lunge on
-	# every mutual trade and mid-recoil on nearly every kill — the blow that killed
-	# it is what started the recoil — so `position` and `scale` were being written
-	# by the strike choreography and the death flourish at the same time for the
-	# remainder of the settle. Today the shrink happens to win; it is a real
-	# two-writer bug the moment anything else joins (the strike roll in
-	# docs/STRIKE_DESIGN_20260730.md would put `rotation` in the same state).
-	# _lunge_hold_active must clear too, or _combat_tween_active() keeps reporting
-	# true against a corpse — hold_lunge_apex only lowers it from a timer callback
-	# that a freed node will never see.
 	for tw in [_lunge_tween, _lunge_scale_tween, _recoil_tween, _brace_tween,
 			_lunge_arc_tween]:
 		if tw != null and tw.is_valid():
 			tw.kill()
 	_lunge_hold_active = false
-	if static_display or not is_inside_tree():
-		if AudioBank != null and not death_cue_played:
-			AudioBank.play_sfx("death")
-		queue_free()
-		return
-	# The field arrays are already nulled by the destroyed signal / _cleanup_dead,
-	# so this lingering node is invisible to combat logic.
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	pivot_offset = size * 0.5
-	z_index = 40
+	z_index = maxi(z_index, 40)
 	_spawn_death_burst()
 	if _sacrifice_death:
 		# Sacrifice ritual: the body ashes away UPWARD — rises, stretches thin, and
 		# burns out to amber. Combat._sacrifice_creature plays the crimson veil,
 		# ember burst, and altar shake around it; this is the body dissolving.
+		# (Never reached on a skirmish client: sacrifice is host-resolved, so the
+		# flag is only ever set on the machine that ran the ritual.)
 		var rise := Motion.time(0.6)
 		var stw := create_tween()
 		stw.set_parallel(true)
@@ -4262,21 +4699,17 @@ func _die() -> void:
 		stw.tween_property(self, "rotation", rotation + randf_range(-0.12, 0.12), rise)
 		stw.chain().tween_callback(queue_free)
 		return
-	# Skipped when the clash path already sounded "creature_death" at the impact
-	# beat (death_cue_played) — the flush is the visual flourish, not a second hit.
-	if AudioBank != null and not death_cue_played:
-		AudioBank.play_sfx("death")
 	if _play_burn_death():
 		return
 	# Fallback flourish — hand cards, uncached compact tokens, headless: fade to
 	# a dark red while shrinking + spinning slightly, then free.
 	var flourish := Motion.time(0.34)
-	var tw := create_tween()
-	tw.set_parallel(true)
-	tw.tween_property(self, "modulate", Color(0.35, 0.08, 0.08, 0.0), flourish).set_ease(Tween.EASE_IN)
-	tw.tween_property(self, "scale", scale * 0.45, flourish).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_BACK)
-	tw.tween_property(self, "rotation", rotation + randf_range(-0.5, 0.5), flourish)
-	tw.chain().tween_callback(queue_free)
+	var tw2 := create_tween()
+	tw2.set_parallel(true)
+	tw2.tween_property(self, "modulate", Color(0.35, 0.08, 0.08, 0.0), flourish).set_ease(Tween.EASE_IN)
+	tw2.tween_property(self, "scale", scale * 0.45, flourish).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_BACK)
+	tw2.tween_property(self, "rotation", rotation + randf_range(-0.5, 0.5), flourish)
+	tw2.chain().tween_callback(queue_free)
 
 
 func _play_burn_death() -> bool:
@@ -4357,7 +4790,16 @@ func set_hand_target(pos: Vector2, rot: float, scl: Vector2 = Vector2.ONE) -> vo
 	# while the top swings outward — pivot bottom-centre IS that behaviour.
 	# (2) hover scale uses the same pivot so the card grows UPWARD from the
 	# hand baseline, never sinking below where the bottom orbs sit.
-	pivot_offset = Vector2(size.x * 0.5, size.y)
+	#
+	# Through _repivot_preserving_pose, not a raw write: this line is the first
+	# thing a REJECTED card meets (Combat refuses the drop → _layout_hand), and
+	# the card is still wearing the drag's centre pivot at scale 0.85. A bare
+	# swap teleports the sheet ~22 px up in one frame before the return even
+	# starts. The DRAG keeps its own pivot — a reflow that fires mid-drag must
+	# not steal it, or the cursor stops tracking the card's middle and the drop
+	# point Combat computes drifts off the card. _end_drag hands it back.
+	if not _is_being_dragged:
+		_repivot_preserving_pose(Vector2(size.x * 0.5, size.y))
 	if not _is_hovered and not _is_being_dragged:
 		# Smoothly slide to the new slot instead of snapping. This is what makes
 		# draws "deal in", plays make the hand close the gap, and discards reflow
@@ -4379,8 +4821,11 @@ func set_hand_target(pos: Vector2, rot: float, scl: Vector2 = Vector2.ONE) -> vo
 		_hand_tween.set_parallel(true)
 		_hand_tween.set_trans(Tween.TRANS_CUBIC if deal_pop else Tween.TRANS_QUAD) \
 			.set_ease(Tween.EASE_OUT)
-		_hand_tween.tween_property(self, "position", _hand_target_position, dur) \
-			.set_delay(deal_delay)
+		# POSITION is the spring's (▲3); the tween keeps rotation, scale and alpha.
+		# A reflow that interrupts another reflow now carries its velocity through
+		# instead of restarting from a standstill — which is the case this hand
+		# meets constantly (hover, drag, draw, play, discard all relayout it).
+		_arm_hand_spring(deal_delay, deal_pop)
 		_hand_tween.tween_property(self, "rotation", _hand_target_rotation, dur) \
 			.set_delay(deal_delay)
 		_hand_tween.tween_property(self, "scale", _hand_target_scale, dur) \
@@ -4397,6 +4842,111 @@ func set_hand_target(pos: Vector2, rot: float, scl: Vector2 = Vector2.ONE) -> vo
 			# reading as permanently "dimmed". Whenever we own the reflow tween and
 			# the card isn't fully opaque, finish the fade.
 			_hand_tween.tween_property(self, "modulate:a", 1.0, 0.16)
+		# The fan angle just moved, so the leaf's rest moved with it. Guarded on
+		# `_lean_active` rather than on the hover/drag flags this branch already
+		# tested, because `_lean_active` is the actual authority on who owns the
+		# tilt — and it rides `dur` so the light and the sheet arrive together
+		# (the same reason _settle_gilt_home tweens instead of snapping). No-ops
+		# on commons: _gilt_mat is null unless _apply_gilt_foil built one.
+		if not _lean_active:
+			_settle_gilt_home(dur)
+
+
+## Move `pivot_offset` without moving the card on screen.
+##
+## A Control renders as T(pivot)·R·S·T(-pivot) with `position` added on, so its
+## world top-left is `position + pivot - R·S·pivot` — which means changing the
+## pivot MOVES the sheet unless the scale is exactly 1 and the rotation exactly
+## 0. Neither holds during the play gesture: the drag runs at 0.85 with a live
+## lean, and both the hand fan and the return want the bottom-centre pivot back.
+## Compensating `position` by the exact delta makes the swap invisible, so the
+## only thing the player sees move is the tween that follows.
+func _repivot_preserving_pose(new_pivot: Vector2) -> void:
+	var d: Vector2 = pivot_offset - new_pivot
+	if not d.is_zero_approx():
+		# R·S·d — scale then rotate, matching Transform2D.set_rotation_and_scale,
+		# which is how Control builds its internal transform.
+		position += d - Vector2(d.x * scale.x, d.y * scale.y).rotated(rotation)
+	pivot_offset = new_pivot
+
+
+## THE REFUSAL (2026-08-03). Combat turns a drop down — wrong phase, not enough
+## Command, an occupied slot, a Curse, closed ground — and the card has to come
+## home. Until now it came home on the PLAIN reflow tween (the refusal paths just
+## call `_layout_hand()`), which is the exact motion a card makes when a NEIGHBOUR
+## is drawn: a rejection was indistinguishable from a shuffle. That is an
+## INFORMATIONAL failure, not a decorative one, so this beat always plays —
+## Reduce Motion drops only the head-shake, which is the part a motion-sensitive
+## player would actually object to, and keeps the recoil that carries the meaning.
+##
+## The shape is the house SETTLE (BACK-out) pushed hard against the reflow's flat
+## QUAD-out: the sheet is thrown back at the fan, slams past its slot and springs
+## up into it. The put-down in `_end_drag` is deliberately the OTHER curve — a
+## cancel is the player's decision and must not look like the game saying no.
+##
+## CONTRACT FOR COMBAT: call `_layout_hand()` FIRST (it computes this card's slot
+## into `_hand_target_*`), then `card.play_return_to_hand()`. The beat IS
+## `_hand_tween`, so a hover, a fresh grab, or the next reflow all cancel it
+## through the paths that already own that tween — no new ownership rules.
+##
+## DECLARED ROTATION WRITER. This is one of the few functions in the file allowed
+## to tween `rotation`, and it is safe for the same reason `_on_mouse_exited` is:
+## a refusal can only reach a card whose drag has already ENDED (`_end_drag`
+## disarms the lean before `played` is even emitted), so the driver has let go of
+## the baton before the tween picks it up. It has to be named in
+## tools/_probe_card_play.gd's ROTATION_TWEEN_OWNERS list.
+func play_return_to_hand() -> void:
+	if static_display or is_on_battlefield or not is_inside_tree():
+		return
+	if _hand_tween != null and _hand_tween.is_valid():
+		_hand_tween.kill()
+	if _hover_tween != null and _hover_tween.is_valid():
+		_hover_tween.kill()
+	if _grab_tween != null and _grab_tween.is_valid():
+		_grab_tween.kill()
+	# The card may still be wearing the drag's centre pivot if Combat refused
+	# without a reflow in between; either way this lands on the fan's pivot
+	# without a jump, and is a no-op once _layout_hand has already done it.
+	if not _is_being_dragged:
+		_repivot_preserving_pose(Vector2(size.x * 0.5, size.y))
+	if _lift_shadow != null and is_instance_valid(_lift_shadow):
+		_lift_shadow.modulate.a = 0.0
+	_hand_tween = create_tween()
+	_hand_tween.set_parallel(true)
+	_hand_tween.tween_property(self, "position", _hand_target_position, REFUSAL_BEAT) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_hand_tween.tween_property(self, "scale", _hand_target_scale, REFUSAL_BEAT) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	if modulate.a < 0.999:
+		# Same guard as the reflow above: never strand a card translucent because
+		# a refusal killed the tween that owed it the tail of its deal-in fade.
+		_hand_tween.tween_property(self, "modulate:a", 1.0, 0.16)
+	if UserSettings != null and UserSettings.reduce_motion:
+		_hand_tween.tween_property(self, "rotation", _hand_target_rotation,
+			REFUSAL_BEAT).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		return
+	# The head-shake, as a damped swing written by ONE owner. `rotation` has a
+	# single writer at a time and the lean is already disarmed here (_end_drag
+	# calls _disarm_lean before Combat can refuse anything), so the tween owns it.
+	# A tween_method rather than three chained tween_propertys because the swing
+	# has to land EXACTLY on _hand_target_rotation: sin(TAU · 1.5) is 0 and the
+	# (1 - t) damp is 0 at t = 1, so the card cannot end up parked off-angle.
+	# Peak deflection is kick · max|sin(t·TAU·1.5)·(1 - t)| = kick · 0.833, so
+	# 0.12 rad of kick swings ~5.7° at the top of the shake. Sized against the
+	# things it must not be confused with: the whole hand FAN spans 12°, and the
+	# drag lean clamps at 20°. It also leads AWAY from the slot the card is
+	# heading for, so the shake and the travel read as one movement.
+	var kick: float = 0.12
+	if position.x > _hand_target_position.x:
+		kick = -kick
+	var rest_rot: float = _hand_target_rotation
+	var swing := func(t: float):
+		rotation = rest_rot + sin(t * TAU * 1.5) * kick * (1.0 - t)
+	# Bound to a name so the tween call is one plain line — the rotation-owner
+	# scan in tools/_probe_card_play.gd matches a tween call and the literal
+	# "rotation" on the SAME line, and a lambda that assigns it further down would
+	# slip that guard silently, which is worse than tripping it.
+	_hand_tween.tween_method(swing, 0.0, 1.0, REFUSAL_BEAT)  # writes "rotation"
 
 
 ## Lazily builds the elevation shadow used by the hand hover-lift: a soft
@@ -4434,18 +4984,56 @@ func _ensure_lift_shadow() -> void:
 ## Replaces a plain outward scale pop: in the writ fiction, playing a card
 ## is pressing a seal, not inflating a balloon. Combat calls this at the end
 ## of _play_landing_pop for both player flights and enemy drop-ins.
-func play_wax_press(rest_scale: Vector2 = Vector2.ONE) -> void:
+##
+## ── IT IS ALSO THE SECOND HALF OF THE WRIT'S TURN (2026-08-03) ────────────
+## An arced arrival now lands FORESHORTENED — the flight closes the writ toward
+## edge-on (Motion.turn_face), deeply for a long deal, barely for a near-slot
+## seat. Nothing here had to change to open it out again: this tween interpolates
+## from whatever pose the card is in, so a card that lands turned is carried from
+## edge-on to the squash and then to rest, which is precisely the second half of
+## the turn. That is the whole reason the turn was hung on the flight rather than
+## added as its own animation — a flip tween here would be a SECOND writer of
+## `scale` in a window this function already owns outright, which is the bug the
+## feature was blocked on for a year.
+##
+## `bite` is how long the squash takes before the seal makes contact. It is a
+## parameter rather than a constant because the turn's second half has further to
+## travel than a bare 12% squash does: opening from edge-on in 70 ms is a pop-in,
+## not a turn. Combat scales it with the same `reach` the close was scaled by and
+## passes the SAME number to _play_slot_claim_vfx, so the ground ring stays
+## welded to the bite instead of being a second copy of the number that has to be
+## kept in step by comment.
+func play_wax_press(rest_scale: Vector2 = Vector2.ONE,
+		bite: float = PRESS_BITE) -> void:
 	if static_display or not is_inside_tree():
 		return
 	pivot_offset = size * 0.5
+	# Reduce Motion: the press is DECORATIVE — the card has already arrived, and
+	# THAT is the information — so snap to the resting pose. `enable_idle_bob`
+	# must still be called on this path: its first act is
+	# _register_battlefield_visuals, and for a player-side card this landing
+	# callback is the only in-tree opportunity to join the shared status clock
+	# (it was compacted while detached from the hand). Registration is not
+	# decorative; the bob itself declines on its own under Reduce Motion.
+	if UserSettings != null and UserSettings.reduce_motion:
+		scale = rest_scale
+		enable_idle_bob()
+		return
 	var tw := create_tween()
-	# Press: wider + shorter, from whatever entrance scale the landing left.
+	# THE ARRIVAL IS THE LOUDEST BEAT OF THE GESTURE (2026-08-03). Everything
+	# before it is the player's own hand moving; this is the BOARD answering, and
+	# it was the quietest thing in the sequence — a 6%/10% squash over 0.07 s, a
+	# smaller deflection than the recoil a creature makes when it takes 1 damage.
+	# Deepened to a real stamp. It also now rides Motion.time() like every other
+	# combat-visible tween in this file: the landing was the one beat that ignored
+	# the animation-speed setting, so at Instant the whole clash collapsed around
+	# a press still running at full length.
 	tw.tween_property(self, "scale",
-		Vector2(rest_scale.x * 1.06, rest_scale.y * 0.90), 0.07) \
+		Vector2(rest_scale.x * 1.12, rest_scale.y * 0.86), Motion.time(bite)) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	tw.tween_callback(_spawn_press_ring)
-	# Release with a small overshoot, then hand off to the idle bob.
-	tw.tween_property(self, "scale", rest_scale, 0.17) \
+	# Release with the house overshoot, then hand off to the idle bob.
+	tw.tween_property(self, "scale", rest_scale, Motion.time(Motion.SETTLE)) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	tw.tween_callback(func():
 		if has_method("enable_idle_bob"):
@@ -4453,30 +5041,27 @@ func play_wax_press(rest_scale: Vector2 = Vector2.ONE) -> void:
 	)
 
 
-## One-shot impression ring for the wax press: a warm gilt outline that
-## radiates out from the card edge and fades, like the halo a seal leaves
-## in soft wax. Self-freeing.
+## One-shot impression halo for the wax press: a warm gilt outline radiating off
+## the card's edge and fading, like the ring a seal leaves in soft wax.
+##
+## 2026-08-03: this was a hand-rolled ring Panel, which was wrong twice over.
+## The house has ONE ring engine (Motion.ring) and hand-rolling one skips the
+## headless gate it does for free; worse, a Panel is a CONTROL, and Card2D is a
+## PanelContainer — container layout re-fits every Control child on any layout
+## pass, so a halo mid-flight could be snapped back to the card rect underneath
+## it. Motion.ring draws a Line2D (a Node2D, which containers do not sort), and
+## the `oval` key squashes it to this card's aspect so the halo still reads as
+## THIS sheet's edge spreading rather than a generic pulse.
 func _spawn_press_ring() -> void:
 	if not is_inside_tree():
 		return
-	var ring := Panel.new()
-	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var st := StyleBoxFlat.new()
-	st.draw_center = false
-	st.border_color = Color(0.95, 0.84, 0.58, 0.85)
-	st.set_border_width_all(2)
-	st.set_corner_radius_all(10)
-	ring.add_theme_stylebox_override("panel", st)
-	ring.position = Vector2.ZERO
-	ring.size = size
-	ring.pivot_offset = size * 0.5
-	ring.z_index = 30
-	add_child(ring)
-	var tw := ring.create_tween().set_parallel(true)
-	tw.tween_property(ring, "scale", Vector2(1.22, 1.30), 0.30) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tw.tween_property(ring, "modulate:a", 0.0, 0.30).set_ease(Tween.EASE_OUT)
-	tw.chain().tween_callback(ring.queue_free)
+	Motion.ring(self, size * 0.5, Color(0.95, 0.84, 0.58, 0.85), {
+		"radius": size.x * 0.5, "start_scale": 1.0, "end_scale": 1.26,
+		"duration": 0.30, "scale_time": true,
+		"width": 2.0, "width_end": 0.7,
+		"oval": Vector2(1.0, size.y / maxf(size.x, 1.0)),
+		"z_index": 30,
+	})
 
 
 ## True while this card's lunge or hit-recoil tween is mid-flight. The idle bob
@@ -4614,6 +5199,123 @@ func play_attack_lunge(strength: float = 1.0) -> void:
 	_lunge_arc_tween.parallel().tween_property(self, "rotation", rest_rot,
 			Motion.time(Motion.LUNGE_SETTLE + 0.04)) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+	_play_strike_smear(rest, dir, strength)
+
+
+## ▲2 — THE SMEAR (docs/TECHNIQUE_HUNT_20260902.md).
+##
+## In hand-drawn animation a fast move is not drawn sharp on every frame: at peak
+## velocity the artist draws ONE elongated, low-contrast frame occupying the whole
+## path. The eye reads it as speed. Without it a fast move reads as TELEPORTING —
+## which is what a 26 px drive crossed in two frames does.
+##
+## WHEN, and the doc's own number was wrong. The pitch said t −55 → −22 before
+## contact, copied from STRIKE_DESIGN's generic exposure sheet. But the drive is
+## **EXPO-out over 90 ms**, which front-loads the distance deliberately (§2.2: the
+## card is effectively stopped at the contact frame). Solving it: by t −55 the body
+## has already travelled 1 − 2^(−10·0.39) ≈ **93 %** of the way and is in the slow
+## tail — smearing there would draw a speed line on a body that has stopped. Peak
+## velocity is the FIRST two frames of the drive, so that is where this fires.
+## **Read the easing before choosing the frame.**
+##
+## WHAT, and why it survives §4's arbitration. The smear is the attacker's own
+## already-baked face, so it adds **no new actor and no new propositional
+## content** — it is the same body rendered with its velocity, the identical
+## distinction that lets the buckle survive as "a *transform*, not a drawn line".
+## It is also gone before t=0, so it never enters the fused CONTACT window, and
+## Slot 1's single travelling mark remains the RubricStroke. It is NOT the
+## rejected blade arc: an arc invents a weapon, a smear only draws the body that
+## is already moving.
+##
+## `top_level` is what makes this safe. The ghost is a CHILD of the card — so it
+## cannot perturb the slot's CenterContainer layout the way a sibling would, and
+## it is freed with the card — while `top_level = true` detaches it from the
+## card's transform so it stays put in the world instead of riding along, which
+## is the whole difference between a smear and a second card.
+##
+## Decorative: the lunge itself carries "who swung, how hard" (Tier A), so Reduce
+## Motion drops this exactly as it drops the arc and roll above.
+func _play_strike_smear(rest: Vector2, dir: float, strength: float) -> void:
+	if static_display or not is_inside_tree():
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	if DisplayServer.get_name() == "headless":
+		return
+	var src: TextureRect = _compact_face
+	if src == null or not is_instance_valid(src) or src.texture == null:
+		src = _baked_face
+	if src == null or not is_instance_valid(src) or src.texture == null:
+		return
+	var tex: Texture2D = src.texture
+	var parent := get_parent()
+	if parent == null or not (parent is Control):
+		return
+
+	await get_tree().create_timer(Motion.time(Motion.LUNGE_ANTICIPATION)).timeout
+	# Suspended across a real timer, so everything below may be gone (C19).
+	if not is_instance_valid(self) or not is_inside_tree() or _dead:
+		return
+	# AND `parent` MUST BE RE-VALIDATED, not just `self`. It was captured before
+	# the wind-up, and a body can be reparented or freed inside 90 ms — a
+	# relocate, a summon reflow, a death sweep. Reading `global_position` off a
+	# freed node is a hard error, and it would only ever fire in a WINDOWED
+	# session: the smear is disabled headless, so the campaign soak can never
+	# see it. Re-read the parent instead of trusting the captured one.
+	var host := get_parent()
+	if host == null or not is_instance_valid(host) or not (host is Control):
+		return
+	if host != parent:
+		return          # reparented mid-wind-up; `rest` describes the old slot
+
+	# The span the body crosses in those two frames: from the pull-back pose to
+	# ~92 % of full extension. Centre the ghost on it.
+	var back: float = -dir * 7.0
+	var reach: float = dir * 26.0 * strength * 0.92
+	var mid_local: Vector2 = rest + Vector2(0, (back + reach) * 0.5)
+	# A Sprite2D, NOT a TextureRect, and this is the load-bearing choice.
+	#
+	# `top_level` does not save a CONTROL child here. It detaches the canvas
+	# transform, but a Control is still LAID OUT by its parent: when the card's
+	# rect moves, the child re-anchors and the ghost drifts along behind it. It
+	# was verified placing correctly at spawn (380, 311.54) and being dragged to
+	# (392, 270.29) twelve milliseconds later — riding the card for the rest of
+	# the drive, which is the exact second-card look this technique avoids.
+	# A Node2D is not laid out by anything, so `top_level` on it means what it says.
+	var ghost := Sprite2D.new()
+	ghost.texture = tex
+	ghost.centered = true
+	# NOT a negative z. "Behind the body" and "behind the board" are the same
+	# place in a flat z=0 canvas: at -1 the ghost sank under the table plate and
+	# rendered nowhere at all. It rides at the body's own z and draws just after
+	# it by tree order — which is what every 2D smear does anyway, since at alpha
+	# 0.30 a speed line reads as motion whether it is over or under the object.
+	ghost.z_index = 0
+	ghost.modulate = Color(1.0, 1.0, 1.0, SMEAR_ALPHA)
+	add_child(ghost)
+	ghost.top_level = true
+	# `rest` is a Control `position`, i.e. a TOP-LEFT, and a centred Sprite2D is
+	# placed by its MIDDLE — so the half-size that was wrong to subtract earlier is
+	# exactly right to add here.
+	ghost.global_position = (parent as Control).global_position + mid_local + size * 0.5
+	# The face is baked at supersampled resolution (432x332 behind a 200x150
+	# token), so bring it back to the body's footprint first, THEN elongate along
+	# the line of travel and pinch across it. Volume is roughly preserved, which is
+	# what keeps a smear reading as the same object rather than a bigger one.
+	var tex_size: Vector2 = tex.get_size()
+	var fit := Vector2.ONE
+	if tex_size.x > 0.0 and tex_size.y > 0.0:
+		fit = size / tex_size
+	var stretch := _smear_stretch(reach - back, size.y)
+	ghost.scale = Vector2(fit.x * SMEAR_PINCH, fit.y * stretch)
+
+	# Two frames. A smear you can watch is a ghost; the whole technique is that it
+	# is gone before the eye resolves it.
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if is_instance_valid(ghost):
+		ghost.queue_free()
 
 
 ## THE STRIKE STOP (STRIKE_DESIGN §2.4) — a REAL freeze, not a scheduler wait.
@@ -5166,7 +5868,7 @@ func _battlefield_visual_tick(delta: float) -> void:
 	# Field repositioning owns position.y while a board creature is lifted — the bob
 	# must NOT write it then or it pins the card to its anchor Y while only X tracks
 	# the cursor (that was the "moves jump to a random place" multiplayer bug).
-	if _is_being_dragged or _is_playing or _field_grabbing:
+	if _is_being_dragged or _field_grabbing:
 		return
 	# A lunge or hit-recoil tween owns position.y for its whole duration. If the
 	# idle bob also writes position.y every frame the two fight, superimposing a
@@ -5199,38 +5901,101 @@ func rearm_idle_bob_next_frame() -> void:
 	enable_idle_bob()
 
 
+## PARCHMENT OUT OF THE LAMPLIGHT GOES BROWNER, NEVER BLUER (2026-08-04, ✦4).
+##
+## Measured on the worst-case art the old header names — Inferno, at the fan's
+## rest scale, mean over the mounted art plate:
+##
+##   affordable            r−b +0.307   HSV S 0.634   luma 0.306
+##   the old blue-grey     r−b +0.052   HSV S 0.345   luma 0.219
+##   this wash             r−b +0.131   HSV S 0.405   luma 0.236
+##
+## The old pair was the ONE surface in the card's whole material kit with
+## INVERTED hue order (modulate r−b −0.10, veil −0.09) against `WritLeaf.paper`
+## at +0.18 and the gilt shader's measured parchment at +0.21 — and on cooler
+## art it dragged the entire sheet across zero: Hexwright measured −0.053 and
+## Frost Bolt −0.029, which is a document turning into a greyed-out UI control.
+## Both constants are warm-ordered now (+0.04 and +0.09) and no card in the study
+## composites below +0.05.
+##
+## THE VEIL IS LIGHTER THAN THE FACE IT DARKENS, AND THAT IS THE POINT. Darkening
+## is the MODULATE's job. The veil's job is to collapse varied art toward one
+## flat tone, and the only way it can do that is by lifting the shadows — and
+## because `modulate` is hierarchical it multiplies the veil too, so this tan
+## renders at roughly (0.35, 0.32, 0.28) on screen. Do NOT "fix" the constant by
+## darkening it to match what you see: a dark warm veil preserves the art's own
+## channel ratios and stops desaturating altogether (one measured in the study
+## left Inferno at S 0.616 against the affordable card's 0.634 — no flattening
+## at all, which is exactly the failure the veil was added to prevent).
+##
+## THE HONEST COST, since the header was right to demand a photograph. A warm
+## wash cannot flatten warm art as hard as a blue-grey one, because blue-grey
+## works by fighting the flames' own hue; Inferno keeps S 0.405 here against
+## 0.345 before. What pays for it is that nothing else moved: the darkening is
+## unchanged (whole-card luma 0.474 affordable → 0.280 before → 0.287 now) and
+## the rules well keeps 84% of the old ink/paper separation. Flatter candidates
+## were built and rejected on that last number — they bought 0.03 more
+## desaturation with a third of the card's readable text, and an unplayable card
+## is still a card the player has to read. The state is carried by luma and
+## flatness, never by hue, which is what keeps it honest under `colorblind_mode`.
+const UNPLAYABLE_DIM := Color(0.56, 0.545, 0.52, 1.0)
+const UNPLAYABLE_VEIL := Color(0.62, 0.58, 0.53, 0.45)
+
+
 func set_affordable(can_afford: bool) -> void:
 	# Slay-the-Spire / Hearthstone readability: a card the current Command pool
-	# can't pay for reads as clearly DISABLED — a cool darken PLUS a desaturating
-	# grey veil that drains the art's colour. Darkening alone left vivid art (e.g.
-	# Inferno's flames) looking merely "a bit dark" next to its neighbours; the
-	# veil flattens the colour so unplayable cards are unmistakable at a glance.
+	# can't pay for reads as clearly DISABLED — a darken PLUS a desaturating veil
+	# that drains the art's colour. Darkening alone left vivid art (e.g. Inferno's
+	# flames) looking merely "a bit dark" next to its neighbours; the veil flattens
+	# the colour so unplayable cards are unmistakable at a glance.
 	# Skip battlefield/static cards (no cost concept) and mid-drag (the drag owns
 	# modulate during the drag → release flow).
 	if is_on_battlefield or static_display:
 		return
 	if _is_being_dragged:
 		return
-	if can_afford:
-		modulate = Color(1.0, 1.0, 1.0, 1.0)
-		if _unplayable_veil != null and is_instance_valid(_unplayable_veil):
-			_unplayable_veil.visible = false
-	else:
-		modulate = Color(0.60, 0.62, 0.70, 1.0)
+	_affordable = can_afford
+	if not can_afford:
 		_ensure_unplayable_veil()
-		_unplayable_veil.visible = true
+	if _unplayable_veil != null and is_instance_valid(_unplayable_veil):
+		_unplayable_veil.visible = not can_afford
+	_apply_hand_tint()
+
+
+## THE RESTING TINT OF A HAND CARD HAS EXACTLY ONE WRITER (2026-08-04).
+## `modulate` was claimed independently by affordability and by the discard mark,
+## and neither read the other, so whichever wrote last won. Both directions were
+## live and both were caught by driving the real methods:
+##   · mark a card, then let ANY `_update_hud` fire — `_refresh_hand_affordability`
+##     wrote `Color.WHITE` over the mark's dim (0.80 → 1.00) and the sunk card
+##     came back to full brightness wearing only its band;
+##   · un-mark an unaffordable card — `set_discard_marked(false)` wrote
+##     `Color.WHITE` while the veil stayed visible (0.60 → 1.00, veil on), which
+##     is the worse of the two now that the veil's own job is flattening rather
+##     than darkening: without its modulate the wash nearly disappears and an
+##     unplayable card reads as playable. `_on_card_dismiss_requested` calls
+##     `_layout_hand` and not `_refresh_hand_affordability`, so nothing repaired
+##     it until the next HUD refresh.
+## Unaffordable outranks marked because it is the INFORMATIONAL half — the mark
+## already prints its own band across the sheet, and it is the player's own
+## decision, while "you cannot pay for this" is the game refusing.
+func _apply_hand_tint() -> void:
+	if not _affordable:
+		modulate = UNPLAYABLE_DIM
+	elif marked_for_discard:
+		modulate = DISCARD_DIM
+	else:
+		modulate = Color(1.0, 1.0, 1.0, 1.0)
 
 
 func _ensure_unplayable_veil() -> void:
-	# Cool grey wash over the whole card face. Blended over the (varied) art it
-	# pulls every colour toward flat grey — the canonical "can't play this" read
-	# that pure modulate-darkening can't achieve (multiply darkens but never
-	# desaturates). Full-rect + mouse-ignore so it never eats input; z_index 5
-	# sits above the card face but below the battlefield threat flag (6).
+	# Full-rect + mouse-ignore so it never eats input; z_index 5 sits above the
+	# card face but below the battlefield threat flag (6). See UNPLAYABLE_VEIL
+	# for why the constant is lighter than the result it produces.
 	if _unplayable_veil != null and is_instance_valid(_unplayable_veil):
 		return
 	var veil := ColorRect.new()
-	veil.color = Color(0.40, 0.42, 0.49, 0.42)
+	veil.color = UNPLAYABLE_VEIL
 	veil.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	veil.set_anchors_preset(Control.PRESET_FULL_RECT)
 	veil.z_index = 5
@@ -5284,7 +6049,7 @@ func play_floop_pulse() -> void:
 
 
 func _on_mouse_entered() -> void:
-	if _is_playing or _is_being_dragged or _any_card_dragging:
+	if _is_being_dragged or _any_card_dragging:
 		return
 	_is_hovered = true
 	if _hand_tween != null and _hand_tween.is_valid():
@@ -5339,7 +6104,7 @@ func _on_mouse_entered() -> void:
 
 
 func _on_mouse_exited() -> void:
-	if _is_being_dragged or _is_playing:
+	if _is_being_dragged:
 		return
 	_is_hovered = false
 	# Hand `rotation` back to the settle tween below, which carries it from
@@ -5429,8 +6194,16 @@ func begin_flight() -> void:
 		_hand_tween.kill()
 	if _hover_tween != null and _hover_tween.is_valid():
 		_hover_tween.kill()
+	# The pick-up settle writes `scale` too — same reason as the other two.
+	if _grab_tween != null and _grab_tween.is_valid():
+		_grab_tween.kill()
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
-	pivot_offset = size * 0.5
+	# Centre pivot so the flight's shrink happens about the card's middle — but
+	# through the compensating swap. A resting hand card wears the fan's
+	# bottom-centre pivot at scale 0.72, so the bare assignment this replaced
+	# teleported the sheet 42 px DOWN in the frame before the discard arc even
+	# started, which is why a dismissal looked like it lurched before it flew.
+	_repivot_preserving_pose(size * 0.5)
 
 
 ## ── Marked-for-discard (2026-07-07 discard rework) ─────────────────────────
@@ -5439,6 +6212,10 @@ func begin_flight() -> void:
 ## playable while marked — grabbing it to play rescinds the mark (_start_drag).
 var marked_for_discard: bool = false
 var _discard_mark: Control = null
+# The mark's own dim. Warm, like every other de-emphasis on this sheet — it is
+# the same "the lamp is off this one" statement UNPLAYABLE_DIM makes, one stop
+# shallower because a marked card is still playable.
+const DISCARD_DIM := Color(0.80, 0.75, 0.68, 1.0)
 
 
 func set_discard_marked(on: bool) -> void:
@@ -5449,7 +6226,10 @@ func set_discard_marked(on: bool) -> void:
 		if _discard_mark != null and is_instance_valid(_discard_mark):
 			_discard_mark.queue_free()
 		_discard_mark = null
-		modulate = Color.WHITE
+		# Through the funnel, never a bare `modulate = WHITE`: this card may be
+		# unaffordable, and whitening it there hands a "you can play this" read to
+		# a card the player cannot pay for. See _apply_hand_tint.
+		_apply_hand_tint()
 		return
 	# The writ's ink drains (dim) and a discard band is laid across it. The band
 	# stamps DOWN into place (scale 1.35 → 1) so marking reads as an act, not a
@@ -5458,7 +6238,7 @@ func set_discard_marked(on: bool) -> void:
 	# resting hand hangs most of each card below the screen fold (cards lift on
 	# hover), and a sunk marked card shows only its top — a centre band would be
 	# off-screen, hiding the very label that says the card is marked.
-	modulate = Color(0.80, 0.75, 0.68)
+	_apply_hand_tint()
 	_discard_mark = Control.new()
 	_discard_mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_discard_mark.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -5507,7 +6287,7 @@ func set_discard_marked(on: bool) -> void:
 
 
 func _start_drag(mouse_pos: Vector2) -> void:
-	if _is_playing or is_on_battlefield or is_opponent:
+	if is_on_battlefield or is_opponent:
 		return
 	# Not your turn (skirmish): the hand is locked — don't even lift the card.
 	# The grey unplayable veil is already showing; this makes it truly inert.
@@ -5522,26 +6302,31 @@ func _start_drag(mouse_pos: Vector2) -> void:
 	_is_hovered = false
 	if _hand_tween != null and _hand_tween.is_valid():
 		_hand_tween.kill()
-	# The grab sets scale/rotation directly below — a live hover-lift tween
-	# would keep writing them every frame and fight the drag.
+	# The grab takes over scale/rotation below — a live hover-lift tween would
+	# keep writing them every frame and fight the drag (and it also owns the
+	# lift shadow's alpha, which the grab re-lights immediately after).
 	if _hover_tween != null and _hover_tween.is_valid():
 		_hover_tween.kill()
-	if _lift_shadow != null and is_instance_valid(_lift_shadow):
-		_lift_shadow.modulate.a = 0.0
-	# Scale the card DOWN to ~0.85 while dragging so it doesn't obscure the
-	# board the player is trying to drop it on. Hover scale is 1.15 (a "pop"
-	# while the card sits in hand) — keeping that during drag made the card
-	# fill most of the field. 0.85 matches Hearthstone/Cross Blitz drag size
-	# where the picked card is a touch smaller than its hover preview.
-	scale = Vector2(0.85, 0.85)
+	# A HELD CARD STILL CASTS A SHADOW. The grab used to ZERO the elevation
+	# shadow, so the instant you picked a card up it stopped being an object
+	# above the table and became a decal stuck to the pointer — and then the
+	# release had nothing to collapse, which is half of why a drop had no
+	# landing. Keep it lit at DRAG_SHADOW_A; _end_drag decides how it goes out,
+	# hard on a play and soft on a cancel.
+	_ensure_lift_shadow()
+	_lift_shadow.modulate.a = DRAG_SHADOW_A
 	# Straighten the card on grab. Hand cards carry a fan rotation; a tilted
-	# card stuck under the cursor reads as a glitch. (Hover already zeroes this,
-	# but a fast grab or touch press can skip the hover step.)
-	# From here rotation is the LEAN's (C1) — it damps away from this 0 into
-	# cursor velocity and back. Under Reduce Motion the lean never arms and the
-	# card stays straight, as it did before.
-	rotation = 0.0
-	_arm_lean()
+	# card stuck under the cursor reads as a glitch. This used to be a bare
+	# `rotation = 0.0` on every path — but when the LEAN arms it is already the
+	# owner of `rotation` and damps out of the fan angle on its own over ~150 ms,
+	# which is the card righting itself in your hand rather than blinking
+	# straight. Under Reduce Motion the lean never arms, so the snap stays: the
+	# rule that `rotation` always has exactly one owner is what is being held
+	# here, not the snap.
+	if _lean_can_arm():
+		_arm_lean()
+	else:
+		rotation = 0.0
 	# Pivot to centre so the dragged card scales around its middle, then place
 	# that middle under the cursor. With a CENTRED pivot the card's on-screen
 	# centre is global_position + size*0.5 INDEPENDENT of scale — so the offset
@@ -5554,6 +6339,25 @@ func _start_drag(mouse_pos: Vector2) -> void:
 	_drag_offset = -size * 0.5
 	global_position = mouse_pos + _drag_offset
 	z_index = 20
+	# THE GRAB. Scale DOWN to 0.85 while dragging so the card doesn't obscure the
+	# board it's being dropped on (hover is 1.15, a pop while it sits in hand;
+	# 0.85 matches Hearthstone/Cross Blitz, where the picked card is a touch
+	# smaller than its hover preview). This was a one-frame SNAP — the
+	# cheapest-feeling beat in the whole play gesture: the card didn't get picked
+	# up, it teleported into a different size. One BACK-out settle fixes it, and
+	# the house overshoot does the work in BOTH directions by construction:
+	# coming down off a hover it dips under 0.85 and springs back (a snatch),
+	# coming up off the resting fan it swells past and settles (a lift). The
+	# centred pivot means the card's middle stays welded to the cursor
+	# throughout, so the drop-point maths never sees the settle at all.
+	if UserSettings != null and UserSettings.reduce_motion:
+		scale = DRAG_SCALE
+	else:
+		if _grab_tween != null and _grab_tween.is_valid():
+			_grab_tween.kill()
+		_grab_tween = create_tween()
+		_grab_tween.tween_property(self, "scale", DRAG_SCALE, GRAB_SETTLE) \
+			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
 
 func _update_drag(mouse_pos: Vector2) -> void:
@@ -5579,10 +6383,88 @@ func _lean_can_arm() -> bool:
 func _arm_lean() -> void:
 	if not _lean_can_arm():
 		return
+	# The driver is about to own the foil's tilt again; a settle tween still
+	# easing it home would be a second writer for its remaining life.
+	if _gilt_tween != null and _gilt_tween.is_valid():
+		_gilt_tween.kill()
 	_lean_active = true
 	_lean_target = 0.0
 	_lean_last_mouse_x = get_global_mouse_position().x
 	set_process(true)
+
+
+## ▲3 — arm the reflow spring toward `_hand_target_position`.
+##
+## TUNED FROM MEASUREMENT, not from taste — the numbers are the ones that land in
+## the same time the tween took, because a hand that became continuous but SLOWER
+## would be a downgrade dressed as a feature.
+##
+##   reflow  f 5.4 / zeta 0.68 -> settles 0.167 s (tween: 0.17)  overshoot 0.2 px
+##   deal    f 4.6 / zeta 0.70 -> settles 0.250 s (tween: 0.24)  overshoot 0.6 px
+##
+## The first guess (f 3.6 / zeta 0.78) measured 0.30 s — nearly twice the tween.
+## Note that raising `f` alone barely helps: the settle is governed by the
+## exponential tail, so it is the DAMPING that had to come down. The residual
+## sub-pixel overshoot is deliberate on both, and is the thing a tween cannot do.
+func _arm_hand_spring(delay: float, deal_pop: bool) -> void:
+	if _hand_spring == null:
+		_hand_spring = Motion.Spring.new()
+	if deal_pop:
+		_hand_spring.configure(4.6, 0.70, 0.0)
+	else:
+		_hand_spring.configure(5.4, 0.68, 0.0)
+	# Seed from where the card ACTUALLY is, and keep whatever velocity it already
+	# had — inheriting that is the entire point. Re-seeding `vel` to zero here
+	# would reproduce the tween's restart-from-a-standstill and buy nothing.
+	_hand_spring.value = position
+	_hand_spring_delay = maxf(delay, 0.0)
+	if not _hand_spring_active:
+		_hand_spring.vel = Vector2.ZERO
+	_hand_spring_active = true
+	_hand_spring_wrote = position   # re-baseline, or the yield guard trips at once
+	set_process(true)
+
+
+## Returns true while it still owns `position`.
+func _tick_hand_spring(delta: float) -> bool:
+	if not _hand_spring_active or _hand_spring == null:
+		return false
+	# Hover and drag are instant by contract — they killed the tween before, and
+	# they stand the spring down now for the same reason.
+	if _is_hovered or _is_being_dragged:
+		_hand_spring_active = false
+		return false
+	# A card that has left the hand is not the spring's business any more.
+	if compact_mode or is_on_battlefield or static_display:
+		_hand_spring_active = false
+		return false
+	# SOMEBODY ELSE IS WRITING `position` — yield the channel.
+	#
+	# This is a general guard rather than a list of call sites, because the list
+	# is long and open-ended: the refusal beat and the put-down beat both tween
+	# position on `_hand_tween`, and Combat's DISCARD FLY-AWAY tweens a still-
+	# uncompacted hand card all the way to the pile. That last one is the case
+	# that matters — an armed spring would have hauled a discarded card back to
+	# its hand slot mid-flight, and no existing gate covers it. Comparing against
+	# our own last write catches every such writer, including ones added later.
+	if _hand_spring_wrote.is_finite() \
+			and position.distance_squared_to(_hand_spring_wrote) > 0.25:
+		_hand_spring_active = false
+		return false
+	if _hand_spring_delay > 0.0:
+		# A staggered deal must actually stagger: hold the card where it is until
+		# its turn. The tween expressed this with set_delay; the spring waits.
+		_hand_spring_delay -= delta
+		_hand_spring_wrote = position
+		return true
+	position = _hand_spring.update(delta, _hand_target_position)
+	_hand_spring_wrote = position
+	if _hand_spring.is_settled(_hand_target_position):
+		position = _hand_target_position     # land exactly on the slot
+		_hand_spring.vel = Vector2.ZERO
+		_hand_spring_active = false
+		return false
+	return true
 
 
 func _disarm_lean() -> void:
@@ -5590,12 +6472,24 @@ func _disarm_lean() -> void:
 	# from wherever the lean left it — no snap, and no second writer).
 	_lean_active = false
 	_lean_target = 0.0
-	set_process(false)
+	# NOT an unconditional stop any more: the reflow spring may still own
+	# `position`, and killing `_process` here would strand a card mid-flight
+	# between two slots. The driver stops when BOTH are idle.
+	set_process(_hand_spring_active)
+	# ...and hands the GILT back the same way. The driver is the foil's only
+	# writer while it runs, so this is the one moment the light can be returned
+	# to rest without fighting it. See _settle_gilt_home.
+	_settle_gilt_home()
 
 
+## TWO drivers now share this callback, on DIFFERENT channels: the lean owns
+## `rotation`, the reflow spring owns `position`. They are still one-writer-each
+## by construction — and the spring stands itself down the moment a hover or drag
+## begins, which is exactly when the lean takes over.
 func _process(delta: float) -> void:
+	var spring_busy := _tick_hand_spring(delta)
 	if not _lean_active:
-		set_process(false)
+		set_process(spring_busy)
 		return
 	if _is_being_dragged:
 		# Lean into cursor VELOCITY: the card trails the hand that swings it.
@@ -5632,6 +6526,13 @@ func _end_drag() -> void:
 	_disarm_lean()
 	z_index = 0
 	drag_ended.emit()
+	# The pick-up settle must not outlive the pick-up. On the play branch this
+	# matters most: Combat calls set_compact_mode() in the SAME frame as
+	# played.emit(), and _apply_compact_layout writes `scale = ONE` — a grab
+	# tween still running would keep writing scale afterwards and fight the
+	# landing arc for the rest of the flight.
+	if _grab_tween != null and _grab_tween.is_valid():
+		_grab_tween.kill()
 	var viewport_h = get_viewport_rect().size.y
 	# Wildfrost-style drop: the whole board above the resting hand is a live
 	# drop zone. Release with the card's CENTRE on the board → play (Combat
@@ -5640,14 +6541,48 @@ func _end_drag() -> void:
 	# size*0.5 (scale-independent — the drag pivot is centred, see _start_drag).
 	var card_center_y: float = global_position.y + size.y * 0.5
 	if card_center_y < viewport_h * PLAY_THRESHOLD_Y:
+		# COMMITTED. The card is handed off untouched — Combat reads its live
+		# global_position as the flight's origin and owns every transform from
+		# here (arc → set_compact_mode → play_wax_press), so anything started
+		# now would be a second writer on a card in flight. The one beat that IS
+		# ours is the shadow: it snaps shut, because the sheet has left the hand.
+		# (set_compact_mode frees it a frame later either way — cutting it here
+		# means the last thing the player sees of the held card is it letting go,
+		# not the shadow vanishing with the rest of the layout.)
+		if _lift_shadow != null and is_instance_valid(_lift_shadow):
+			_lift_shadow.modulate.a = 0.0
 		played.emit()
 	else:
-		# Released over the hand — cancel. Restore the resting hand pose
-		# (set_hand_target values) and the bottom-centre pivot hand fans use.
-		scale = _hand_target_scale
+		# RELEASED OVER NOTHING — the player changed their mind. This used to
+		# snap all four transforms home in a single frame, which reads as the
+		# card being deleted and redrawn rather than set back down. A short
+		# QUAD-out put-down instead: gentler than the grab (you pick a card up
+		# eagerly and put it down carefully), and DELIBERATELY not the refusal's
+		# BACK-out overshoot — a cancel is the player's own decision and must
+		# never look like the game saying no (see play_return_to_hand).
+		_repivot_preserving_pose(Vector2(size.x * 0.5, size.y))
+		# Rotation is the one property that still SNAPS here, deliberately: the
+		# drag straightened the card and the lean was disarmed two lines ago, so
+		# the whole delta is the ≤6° fan angle Combat._layout_hand assigns — worth
+		# nothing as motion, and worth a lot as an invariant. Every function in
+		# this file that tweens `rotation` is one more place a second writer could
+		# appear during a drag; the cancel keeps itself out of that set entirely.
 		rotation = _hand_target_rotation
-		position = _hand_target_position
-		pivot_offset = Vector2(size.x * 0.5, size.y)
+		if UserSettings != null and UserSettings.reduce_motion:
+			scale = _hand_target_scale
+			position = _hand_target_position
+			if _lift_shadow != null and is_instance_valid(_lift_shadow):
+				_lift_shadow.modulate.a = 0.0
+			return
+		if _hand_tween != null and _hand_tween.is_valid():
+			_hand_tween.kill()
+		_hand_tween = create_tween()
+		_hand_tween.set_parallel(true)
+		_hand_tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		_hand_tween.tween_property(self, "scale", _hand_target_scale, PUTDOWN_BEAT)
+		_hand_tween.tween_property(self, "position", _hand_target_position, PUTDOWN_BEAT)
+		if _lift_shadow != null and is_instance_valid(_lift_shadow):
+			_hand_tween.tween_property(_lift_shadow, "modulate:a", 0.0, PUTDOWN_BEAT)
 
 
 # ═══════════════════════════════════════════
@@ -5794,6 +6729,12 @@ func _hide_detail_panel() -> void:
 
 
 func _notification(what: int) -> void:
+	# A card compacted for the board was rebuilt while detached (Combat does it
+	# between remove_child and add_child), so being seated is the first moment its
+	# new face can animate. Deferred: children get ENTER_TREE after their parent,
+	# so _compact_root is not yet a legal tween host at this instant.
+	if what == NOTIFICATION_ENTER_TREE and _compact_morph_pending:
+		_start_compact_morph.call_deferred()
 	# The cached inspector lives on the shared popup layer, not under this card, so
 	# free it explicitly when the card is deleted — otherwise every drawn-then-
 	# discarded card would orphan a hidden panel on that layer.
@@ -5821,7 +6762,22 @@ func _detail_host_layer(vp: Viewport) -> CanvasLayer:
 		return existing
 	var layer := CanvasLayer.new()
 	layer.name = LAYER_NAME
-	layer.layer = 90
+	# 110, ABOVE the modal pile / glossary viewers (100), not below them.
+	#
+	# This used to be 90, chosen so the inspector could not cover those viewers.
+	# That reasoning only holds while the modals contain no cards — and the pile
+	# viewer is a six-column grid of real Card2D instances. `_on_mouse_entered`
+	# has no `static_display` guard, so those cards hover, lift, gild, and raise
+	# an inspector ten layers BENEATH the viewer that owns the card being pointed
+	# at: the player asks what a card in their discard pile does and gets a lift
+	# with no rules text. z_index cannot reach across a CanvasLayer.
+	#
+	# Above 100 is the correct side, because a modal's full-screen backdrop eats
+	# the mouse: while one is open, the only card that CAN be hovered is a card
+	# inside it, so a popup that exists at all belongs on top. (Before the
+	# backdrop scrims were repaired this hid itself — the "dim" never painted, so
+	# the buried popup was still legible wherever it missed a card.)
+	layer.layer = 110
 	root.add_child(layer)
 	return layer
 

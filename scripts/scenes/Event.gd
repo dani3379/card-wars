@@ -48,19 +48,12 @@ const PaySack = preload("res://scripts/ui/painters/PaySack.gd")
 const TallySlate = preload("res://scripts/ui/painters/TallySlate.gd")
 const DerbyBeetle = preload("res://scripts/ui/painters/DerbyBeetle.gd")
 const CoinProp = preload("res://scripts/ui/painters/CoinProp.gd")
-const GauntletHand = preload("res://scripts/ui/painters/GauntletHand.gd")
 const ChalkSlate = preload("res://scripts/ui/painters/ChalkSlate.gd")
 const FieldCell = preload("res://scripts/ui/painters/FieldCell.gd")
-const GibbetPost = preload("res://scripts/ui/painters/GibbetPost.gd")
-const RingProp = preload("res://scripts/ui/painters/RingProp.gd")
-const QuoitsPeg = preload("res://scripts/ui/painters/QuoitsPeg.gd")
 const DrumHead = preload("res://scripts/ui/painters/DrumHead.gd")
 const BalanceScale = preload("res://scripts/ui/painters/BalanceScale.gd")
 const StrongboxDial = preload("res://scripts/ui/painters/StrongboxDial.gd")
 const PowderKeg = preload("res://scripts/ui/painters/PowderKeg.gd")
-const SignalBeacon = preload("res://scripts/ui/painters/SignalBeacon.gd")
-const MerelsBoard = preload("res://scripts/ui/painters/MerelsBoard.gd")
-const BoneTessera = preload("res://scripts/ui/painters/BoneTessera.gd")
 const WarPip = preload("res://scripts/ui/painters/WarPip.gd")
 const PipDie = preload("res://scripts/ui/painters/PipDie.gd")
 const FortuneWheel = preload("res://scripts/ui/painters/FortuneWheel.gd")
@@ -124,6 +117,10 @@ const ART_SCRIM_DARKNESS := {
 # sub-dict when the player picks a branching choice. Multi-stage events read
 # desc + choices from this; the top-level event title stays on _event_data.
 var _current_node: Dictionary = {}
+# The folio wash has immutable shader code. Materials remain per Event so mood
+# uniforms stay independent, while the compiled program is shared across visits.
+static var _horizontal_gradient_shader_cache: Shader = null
+
 var _selected_choice_for_result: Dictionary = {}
 var _art_reaction_tween: Tween = null
 
@@ -167,6 +164,46 @@ func _ready() -> void:
 	var supersample := get_node_or_null("/root/Supersample")
 	if supersample != null:
 		supersample.begin_adaptive_scope(self)
+	_maybe_coach_the_page()
+
+
+## FIVE LAYOUTS, ONE LESSON. The choice controls live under a different parent
+## per presentation (`_event_presentation_layout` picks between the folio and four
+## presented dresses), and each builder names its own container — so the lesson
+## asks for all five names and takes whichever one this page built. An
+## `auto_effect` node builds no choices at all and is skipped: there is nothing to
+## decide, and a panel saying "pick a line" over a page with no lines is worse
+## than silence.
+const COACH_CHOICE_HOSTS: Array[String] = [
+	"ChoicesBox", "ChoiceDevices", "ChoiceContracts", "ChoiceSeals"]
+
+
+func _maybe_coach_the_page() -> void:
+	if not TutorialCoach.should_teach("event_choice"):
+		return
+	# The choice column content-fits a frame after ready and `_align_margin_line`
+	# repositions on the second — measure after both.
+	for _i in 3:
+		await get_tree().process_frame
+		if not is_inside_tree():
+			return
+	var targets: Array = []
+	for host_name in COACH_CHOICE_HOSTS:
+		# RECURSIVE, and `owned = false`: these containers are built in code and
+		# parented several levels down inside the page's column, so they are
+		# neither direct children nor owned by the scene — `get_node` would miss
+		# every one of them and the lesson would silently never fire.
+		var host := find_child(host_name, true, false)
+		if host == null:
+			continue
+		for child in host.get_children():
+			if child is Button or child is PanelContainer:
+				targets.append(child)
+		if not targets.is_empty():
+			break
+	if targets.is_empty():
+		return
+	TutorialCoach.teach(self, "event_choice", targets)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -487,9 +524,22 @@ func _refresh_ledger(animate: bool = true) -> void:
 
 
 func _clear_ui() -> void:
+	_ui_build_gen += 1
 	for child in get_children():
 		if not (child.name in PRESERVE_NODES):
+			# queue_free() retires at frame end. Hide and disarm the outgoing tree
+			# now so a modal/result rebuild never presents both screens together.
+			if child is CanvasItem:
+				child.visible = false
+			if child is Control:
+				child.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			child.queue_free()
+
+
+func _event_ui_build_is_current(gen: int, owner: Node) -> bool:
+	return _ui_build_gen == gen and is_inside_tree() and owner != null \
+		and is_instance_valid(owner) and owner.is_inside_tree()
+
 
 
 func _build_ui() -> void:
@@ -694,8 +744,19 @@ func _build_presented_event(layout: String) -> void:
 	var centered := false
 	match layout:
 		"character":
-			title_rect = Rect2(1000, 58, 520, 72)
-			desc_rect = Rect2(1000, 146, 520, 190)
+			# WIDTH 450, NOT 520, AND THE 70px IS THE STAKES LEDGER.
+			# The ledger is anchored TOP_RIGHT at x 1370..1560 and is four rows
+			# deep (y 40..176) — its last row, the deck count, hangs level with
+			# this column's FIRST LINE OF PROSE. At 520 the copy ran to x≈1493 and
+			# the deck numeral sits at 1489, so the description read
+			# "...abandoned a field kitchen, but 11 [deck]" — the HUD spliced into
+			# the middle of the sentence. Verified by shot, 2026-09-02.
+			# The arithmetic is not a coincidence: 40 + 3 rows x 34 = 142, and this
+			# desc used to start at 146. The column was authored against a
+			# THREE-row ledger and the fourth row was added later, in another file,
+			# with nothing comparing the two.
+			title_rect = Rect2(1000, 58, 450, 72)
+			desc_rect = Rect2(1000, 146, 450, 190)
 		"location":
 			title_rect = Rect2(300, 42, 1000, 76)
 			desc_rect = Rect2(350, 116, 900, 116)
@@ -1092,6 +1153,12 @@ func _apply_event_art_focus(art: TextureRect) -> void:
 
 func _ensure_event_overlay(darkness_left: float) -> void:
 	var scrim := get_node_or_null("EventOverlayLeft") as ColorRect
+	# Presented layouts paint their own local ink pools. Avoid allocating and
+	# compiling a full-screen folio wash merely to keep it hidden on those pages.
+	if not _wants_left_scrim():
+		if scrim != null:
+			scrim.visible = false
+		return
 	if scrim == null:
 		scrim = _make_horizontal_gradient_overlay(darkness_left, 0.0)
 		scrim.name = "EventOverlayLeft"
@@ -1102,7 +1169,7 @@ func _ensure_event_overlay(darkness_left: float) -> void:
 		var mat := scrim.material as ShaderMaterial
 		if mat:
 			mat.set_shader_parameter("darkness_left", darkness_left)
-	scrim.visible = _event_art_visible and _wants_left_scrim()
+	scrim.visible = _event_art_visible
 
 
 ## This wash pools ink down the LEFT and pools it deeper at the bottom-left and
@@ -1156,8 +1223,9 @@ func _make_horizontal_gradient_overlay(darkness_left: float,
 	var rect := ColorRect.new()
 	rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var mat := ShaderMaterial.new()
-	var shader := Shader.new()
-	shader.code = """
+	if _horizontal_gradient_shader_cache == null:
+		_horizontal_gradient_shader_cache = Shader.new()
+		_horizontal_gradient_shader_cache.code = """
 shader_type canvas_item;
 uniform float darkness_left : hint_range(0.0, 1.0) = 0.0;
 uniform float darkness_right : hint_range(0.0, 1.0) = 0.0;
@@ -1175,7 +1243,7 @@ void fragment() {
 	COLOR = vec4(shadow_ink, a);
 }
 """
-	mat.shader = shader
+	mat.shader = _horizontal_gradient_shader_cache
 	mat.set_shader_parameter("darkness_left", darkness_left)
 	mat.set_shader_parameter("darkness_right", darkness_right)
 	var ink := _mood_shadow_ink()
@@ -1390,7 +1458,10 @@ const COST_INK := "#e06550"
 # outcome text these open.
 const GLYPH_GOLD := "[img=20]res://assets/icons/map/hud_gold_coin.png[/img] "
 const GLYPH_HP := "[img=20]res://assets/icons/map/hud_heart_painted.png[/img] "
-const GLYPH_CURSE := "[img=19]res://assets/icons/skull.png[/img] "
+# The engraved skull, not the flat one from the pre-art icon set — this glyph
+# sits inline in result prose beside gilt text, where a solid primitive reads
+# as a missing sprite at 19px.
+const GLYPH_CURSE := "[img=19]res://assets/icons/game-icons/horned-skull.svg[/img] "
 const GLYPH_POTION := "[img=20]res://assets/icons/map/hud_potion_painted.png[/img] "
 const GLYPH_RELIC := "[img=20]res://assets/icons/map/hud_relic.png[/img] "
 const GLYPH_CARD := "[img=20]res://assets/icons/map/hud_deck.png[/img] "
@@ -1401,7 +1472,7 @@ const GLYPH_COMMAND := "[img=20]res://assets/icons/stats/cost_runestone.png[/img
 ## No "sharpen" here: it never OPENS a stake in the pool, it only ever trails as
 ## prose ("returns to your deck, sharpened"), where a middot reads wrong.
 const TERM_VERBS := ["heal", "gain", "remove", "transform", "eat", "give", "add",
-	"free", "upgrade", "lose", "pay", "bury", "purge"]
+	"free", "upgrade", "forge", "lose", "pay", "bury", "purge"]
 ## The house separator for discrete contract terms — the same middot the card
 ## faces use for "{contract} · {EXHAUST}".
 const OUTCOME_SEP := "[color=#7c6a49]  ·  [/color]"
@@ -1929,9 +2000,9 @@ const MODAL_EFFECTS := [
 	"stranger_hand_pick", "relic_sacrifice_pick", "sacrifice_pick",
 	"transform_choice", "dice_run", "risk_loop", "pawn_appraisal",
 	"grant_keyword_pick", "veteran_swap", "shell_game", "straw_game",
-	"cut_game", "sack_game", "wheel_game", "liar_game", "morra_game",
-	"tali_game", "field_game", "quoits_game", "crown_game", "scale_game",
-	"box_game", "deal_game", "signal_game", "morris_game",
+	"sack_game", "wheel_game",
+	"tali_game", "field_game", "crown_game", "scale_game",
+	"box_game", "deal_game",
 ]
 
 func _choice_unavailable_reason(choice: Dictionary) -> String:
@@ -2014,7 +2085,7 @@ func _effect_target_unavailable_reason(effect: Dictionary) -> String:
 					can_upgrade = true
 					break
 			if not can_upgrade:
-				return "No eligible card to upgrade."
+				return "No eligible card to forge."
 		"transform_choice":
 			var can_transform := false
 			for card_id in RunState.deck:
@@ -2269,8 +2340,8 @@ func _apply_effect(effect: Dictionary) -> String:
 				RunState.upgrade_card(idx, "plus")
 				_seal_card_change(before_rand, idx)
 				_sting("card_play")
-				return "Upgraded a card!"
-			return "No cards to upgrade."
+				return "Forged a card!"
+			return "No cards to forge."
 		"copy_card":
 			# Interactive picker — handled by _resolve_choice → _start_copy_mode.
 			# Fallback if reached directly (shouldn't happen).
@@ -2388,7 +2459,7 @@ func _apply_effect(effect: Dictionary) -> String:
 				RunState.upgrade_card(back_idx, "plus")
 			_seal_card_change(before_pawn, back_idx)
 			_sting("coin")
-			return "%s was returned and upgraded." \
+			return "%s was returned and forged." \
 				% CardDB.get_card_data(back_id).name
 		"gain_potion_random":
 			# Any potion from the live PotionDB pool (gain_potion is always the
@@ -2565,29 +2636,17 @@ func _apply_effect(effect: Dictionary) -> String:
 		"straw_game":
 			_start_straw_game(effect)
 			return ""
-		"cut_game":
-			_start_cut_game(effect)
-			return ""
 		"sack_game":
 			_start_sack_game(effect)
 			return ""
 		"wheel_game":
 			_start_wheel_game(effect)
 			return ""
-		"liar_game":
-			_start_liar_game(effect)
-			return ""
-		"morra_game":
-			_start_morra_game(effect)
-			return ""
 		"tali_game":
 			_start_tali_game(effect)
 			return ""
 		"field_game":
 			_start_field_game(effect)
-			return ""
-		"quoits_game":
-			_start_quoits_game(effect)
 			return ""
 		"crown_game":
 			_start_crown_game(effect)
@@ -2600,12 +2659,6 @@ func _apply_effect(effect: Dictionary) -> String:
 			return ""
 		"deal_game":
 			_start_deal_game(effect)
-			return ""
-		"signal_game":
-			_start_signal_game(effect)
-			return ""
-		"morris_game":
-			_start_morris_game(effect)
 			return ""
 		"risk_loop":
 			_start_risk_loop(effect)
@@ -2715,6 +2768,17 @@ func _gamble_pay(cfg: Dictionary, win: bool, gold: int,
 	return _apply_effect_list(plain)
 
 
+## Would a win of this size still pay in COIN? `win_effects` REPLACES the coin
+## payout (see _gamble_pay), so a game whose config carries one must not print
+## a gold figure on its own action rows — the Strongbox advertised "Current
+## reward: 138 gold" while paying a forge and no coin at all, and the Scale
+## advertised a pay it never made. Mirrors _gamble_pay's own gate exactly.
+func _gamble_pays_coin(cfg: Dictionary, gold: int) -> bool:
+	if not cfg.has("win_effects"):
+		return true
+	return gold < int(cfg.get("win_effects_at", 0))
+
+
 # The terminal prize on a push-your-luck pot: stop holding at least N and the
 # table's own relic leaves with the gold. The dice-run arm, generalised to the
 # four pot games that escalated toward nothing (crown / deal / field / sack).
@@ -2790,6 +2854,19 @@ var _result_pairs: Array = []
 # the one payoff class that showed nothing at all: "Removed one card." and no
 # indication of which, even when the game had chosen at random.
 var _result_lost: Array = []
+# The picker tile the player last clicked, and a latch for the handlers that
+# AWAIT a beat before moving on. The before→after pair above is the RESULT
+# page's account of a change; these let the change also land on the card the
+# player actually clicked, at the moment they click it.
+var _last_pick_tile: Control = null
+var _picker_busy: bool = false
+# Picker grids populate across rendered frames. A rebuild advances this token so
+# an old cache coroutine cannot append cards to a page the player already left.
+var _ui_build_gen: int = 0
+const PICKER_JOBS_META := &"_event_picker_jobs"
+const PICKER_DRAIN_META := &"_event_picker_drain_busy"
+
+
 # Set by gamble effects (roll_table, coin calls): the result page holds blank
 # for a breath before the ink lands — the pause IS the dice rolling.
 var _result_suspense: bool = false
@@ -2906,8 +2983,11 @@ func _build_presented_result(full: String, layout: String, delay: float,
 	var receipt_floor := -1.0
 	match layout:
 		"character":
-			title_rect = Rect2(1000, 58, 520, 72)
-			desc_rect = Rect2(1000, 146, 520, 250)
+			# Same 450 as the choice page, same reason — see the note there. The
+			# result page restates every one of these rects rather than sharing
+			# them, so a fix applied to one half leaves the other half broken.
+			title_rect = Rect2(1000, 58, 450, 72)
+			desc_rect = Rect2(1000, 146, 450, 250)
 			selected_rect = Rect2(1000, 444, 520, 126)
 			continue_rect = Rect2(1160, 628, 360, 104)
 			# The conversation column is empty between the prose and the reply —
@@ -3034,7 +3114,8 @@ func _result_accent(text: String, had_payoffs: bool) -> Color:
 	if had_payoffs or lower.find("gained") >= 0 or lower.find("gold") >= 0 \
 			or lower.find("healed") >= 0:
 		return GameTheme.KEYWORD_GOLD
-	if lower.find("max command") >= 0 or lower.find("upgraded") >= 0:
+	if lower.find("max command") >= 0 or lower.find("upgraded") >= 0 \
+			or lower.find("forged") >= 0:
 		return Color(0.70, 0.86, 1.0)
 	return GameTheme.GILT_BRIGHT
 
@@ -3103,18 +3184,8 @@ func _show_result_objects(delay: float = 0.0) -> void:
 		var total_w: int = n * card_w + (n - 1) * sep
 		var start_x: float = art_center_x - total_w / 2.0
 		for i in range(n):
-			var wrapper := Control.new()
-			wrapper.custom_minimum_size = Vector2(225, 300)
-			wrapper.position = Vector2(start_x + i * (card_w + sep), 170)
-			wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			var card_node = CARD_SCENE.instantiate()
-			card_node.static_display = true
-			card_node.card_data = shown[i]
-			card_node.live_baked_mode = true
-			CardTextureCache.bake(shown[i])
-			wrapper.add_child(card_node)
-			add_child(wrapper)
-			GameTheme.deal_in(wrapper, delay + 0.16 + i * 0.10)
+			_stage_card(shown[i], Vector2(start_x + i * (card_w + sep), 170),
+				delay + 0.16 + i * 0.10, 1.0)
 		if extra > 0:
 			var more := Label.new()
 			more.text = "…and %d more march behind." % extra
@@ -3214,7 +3285,7 @@ func _show_result_change_pairs(delay: float) -> void:
 		var node := _stage_card(lost, Vector2(center_x - 112.0, y), delay + 0.16, 0.82)
 		if node != null:
 			node.modulate = Color(0.62, 0.58, 0.54, 0.92)
-		_stage_caption("STRUCK FROM THE ROLL",
+		_stage_caption("REMOVED FROM YOUR DECK",
 			Vector2(center_x - 210.0, y + 258.0), 420.0, GameTheme.DESC_DIM, delay + 0.30)
 		y += 330.0
 
@@ -3226,15 +3297,46 @@ func _stage_card(data: Dictionary, pos: Vector2, delay: float,
 	wrapper.position = pos
 	wrapper.scale = Vector2(card_scale, card_scale)
 	wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(wrapper)
+	GameTheme.deal_in(wrapper, delay)
+	_hydrate_staged_card(wrapper, data, delay, _ui_build_gen)
+	return wrapper
+
+
+## Result cards are already authored to deal in at staggered times. Use that
+## hidden interval to bake and assemble each complete face, so the result text
+## appears immediately and no click pays for two or three ornate trees at once.
+func _hydrate_staged_card(wrapper: Control, data: Dictionary,
+		deal_delay: float, build_gen: int) -> void:
+	var started_usec := Time.get_ticks_usec()
+	var windowed := DisplayServer.get_name() != "headless"
+	if windowed and not CardTextureCache.has(data):
+		await CardTextureCache.bake(data)
+		if not _event_ui_build_is_current(build_gen, wrapper):
+			return
+	if windowed and not UserSettings.reduce_motion:
+		# Finish the face just before its existing deal-in wakes. Distinct authored
+		# delays naturally keep warm-cache overlays on separate frames as well.
+		var target_usec := int(maxf(0.0, deal_delay - 0.08) * 1000000.0)
+		var remaining_usec := target_usec - (Time.get_ticks_usec() - started_usec)
+		if remaining_usec > 0:
+			await get_tree().create_timer(float(remaining_usec) / 1000000.0).timeout
+			if not _event_ui_build_is_current(build_gen, wrapper):
+				return
+	if not _event_ui_build_is_current(build_gen, wrapper):
+		return
 	var card_node = CARD_SCENE.instantiate()
 	card_node.static_display = true
 	card_node.card_data = data
 	card_node.live_baked_mode = true
-	CardTextureCache.bake(data)
+	card_node.defer_baked_rules_text = windowed
 	wrapper.add_child(card_node)
-	add_child(wrapper)
-	GameTheme.deal_in(wrapper, delay)
-	return wrapper
+	if windowed:
+		await RenderingServer.frame_post_draw
+		if not _event_ui_build_is_current(build_gen, wrapper):
+			return
+		card_node.complete_deferred_baked_rules()
+		await RenderingServer.frame_post_draw
 
 
 func _stage_arrow(pos: Vector2, delay: float) -> void:
@@ -3295,6 +3397,8 @@ func _make_card_picker_grid(title_text: String, title_color: Color) -> GridConta
 	# keeps the cards readable, but the Sin-Eater's table and the Remount Fair
 	# no longer collapse into the same black room the moment a picker opens.
 	_clear_ui()
+	_picker_busy = false  # a fresh picker re-arms the awaited-handler latch
+	_last_pick_tile = null
 	_set_event_art_visible(true)
 	add_child(_make_picker_scrim())
 
@@ -3335,32 +3439,121 @@ func _make_picker_scrim() -> ColorRect:
 
 
 func _add_card_to_grid(grid: GridContainer, data: Dictionary, callback: Callable) -> void:
-	# Add a Card2D wrapper with click overlay to a picker grid. The hovered
-	# tile lifts slightly toward the cursor — the same "this one answers"
-	# physicality the choice ladder's slide gives.
-	var wrapper := Control.new()
-	wrapper.custom_minimum_size = Vector2(210, 280)
-	wrapper.pivot_offset = Vector2(105, 140)
+	# Callers stay synchronous and simply enqueue their slate. One coroutine per
+	# grid drains it in order, so cold texture work and ornate live overlays never
+	# collapse the whole deck into one input-blocking frame.
+	if grid == null or not is_instance_valid(grid):
+		return
+	var jobs: Array = grid.get_meta(PICKER_JOBS_META, [])
+	jobs.append({"data": data, "callback": callback})
+	grid.set_meta(PICKER_JOBS_META, jobs)
+	if bool(grid.get_meta(PICKER_DRAIN_META, false)):
+		return
+	grid.set_meta(PICKER_DRAIN_META, true)
+	_drain_card_grid(grid, _ui_build_gen)
+
+
+func _drain_card_grid(grid: GridContainer, build_gen: int) -> void:
+	while _event_ui_build_is_current(build_gen, grid):
+		var jobs: Array = grid.get_meta(PICKER_JOBS_META, [])
+		if jobs.is_empty():
+			break
+		var job: Dictionary = jobs.pop_front()
+		grid.set_meta(PICKER_JOBS_META, jobs)
+		var data: Dictionary = job.data
+		if DisplayServer.get_name() != "headless" and not CardTextureCache.has(data):
+			await CardTextureCache.bake(data)
+			if not _event_ui_build_is_current(build_gen, grid):
+				return
+
+		var wrapper := Control.new()
+		wrapper.custom_minimum_size = Vector2(210, 280)
+		wrapper.pivot_offset = Vector2(105, 140)
+		var card_node = CARD_SCENE.instantiate()
+		card_node.static_display = true
+		card_node.card_data = data
+		card_node.live_baked_mode = true
+		card_node.defer_baked_rules_text = DisplayServer.get_name() != "headless"
+		wrapper.add_child(card_node)
+		var click_btn := Button.new()
+		click_btn.flat = true
+		click_btn.focus_mode = Control.FOCUS_NONE
+		click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
+		click_btn.disabled = DisplayServer.get_name() != "headless"
+		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
+		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
+		click_btn.pressed.connect(_on_picker_tile_pressed.bind(
+			wrapper, job.callback as Callable))
+		# The kit's hover lift: the invisible catcher hovers, the card wrapper
+		# lifts and pops above its overlapping grid neighbors.
+		GameTheme.hover_lift(click_btn, 1.05, wrapper, true)
+		wrapper.add_child(click_btn)
+		grid.add_child(wrapper)
+
+		if DisplayServer.get_name() != "headless":
+			await RenderingServer.frame_post_draw
+			if not _event_ui_build_is_current(build_gen, grid):
+				return
+			card_node.complete_deferred_baked_rules()
+			click_btn.disabled = false
+			await RenderingServer.frame_post_draw
+	if is_instance_valid(grid):
+		grid.set_meta(PICKER_DRAIN_META, false)
+
+
+## Every picker tile goes through here so a handler can play a beat ON the card
+## that was chosen — the callbacks are bound to a deck index, not to the tile.
+## `_picker_busy` is claimed only by the handlers that await something; it is
+## cleared whenever a fresh picker is built, so the multi-pick pickers (which
+## rebuild their grid per pick) are untouched.
+func _on_picker_tile_pressed(tile: Control, callback: Callable) -> void:
+	if _picker_busy:
+		return
+	_last_pick_tile = tile
+	callback.call()
+
+
+## Re-bake the clicked tile from POST-mutation data. The picker grid is built
+## before the change, so without this the stamp reads "+2 HP" across a card still
+## printing its old numbers — the beat would be announcing something the card it
+## lands on flatly contradicts. The click catcher is kept (it carries the tile's
+## hover lift); only the writ underneath is swapped.
+func _refresh_pick_tile(deck_index: int) -> void:
+	if _last_pick_tile == null or not is_instance_valid(_last_pick_tile):
+		return
+	if deck_index < 0 or deck_index >= RunState.deck.size():
+		return
+	var tile := _last_pick_tile
+	var build_gen := _ui_build_gen
+	var data: Dictionary = RunState.get_upgraded_card_data(deck_index)
+	# Keep the old face in place while the new cache key bakes; the mutation's
+	# stamp only starts after the complete replacement has landed.
+	if DisplayServer.get_name() != "headless" and not CardTextureCache.has(data):
+		await CardTextureCache.bake(data)
+		if not _event_ui_build_is_current(build_gen, tile) or _last_pick_tile != tile:
+			return
+	for child in tile.get_children():
+		if child is Button:
+			continue
+		# remove THEN free — queue_free is deferred, so a plain queue_free would
+		# leave the stale writ drawn under the new one for a frame.
+		tile.remove_child(child)
+		child.queue_free()
 	var card_node = CARD_SCENE.instantiate()
 	card_node.static_display = true
 	card_node.card_data = data
 	card_node.live_baked_mode = true
-	CardTextureCache.bake(data)
-	wrapper.add_child(card_node)
-	var click_btn := Button.new()
-	click_btn.flat = true
-	click_btn.focus_mode = Control.FOCUS_NONE
-	click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
-	click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
-	click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
-	click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
-	click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-	click_btn.pressed.connect(callback)
-	# The kit's hover lift: the invisible catcher hovers, the card wrapper
-	# lifts and pops above its overlapping grid neighbors.
-	GameTheme.hover_lift(click_btn, 1.05, wrapper, true)
-	wrapper.add_child(click_btn)
-	grid.add_child(wrapper)
+	card_node.defer_baked_rules_text = DisplayServer.get_name() != "headless"
+	tile.add_child(card_node)
+	tile.move_child(card_node, 0)
+	if DisplayServer.get_name() != "headless":
+		await RenderingServer.frame_post_draw
+		if not _event_ui_build_is_current(build_gen, tile) or _last_pick_tile != tile:
+			return
+		card_node.complete_deferred_baked_rules()
+		await RenderingServer.frame_post_draw
 
 
 func _start_remove_mode() -> void:
@@ -3586,7 +3779,7 @@ func _start_grant_keyword_mode(effect: Dictionary) -> void:
 		return
 	var disp := String(KeywordEffects.KEYWORDS.get(kw, {}).get("display", kw.capitalize()))
 	var grid = _make_card_picker_grid(
-		String(effect.get("prompt", "Who takes the lesson? (gains %s)" % disp)),
+		String(effect.get("prompt", "Choose a creature to teach %s" % disp)),
 		GameTheme.KEYWORD_GOLD)
 	for i in eligible:
 		_add_card_to_grid(grid, RunState.get_upgraded_card_data(i),
@@ -3594,6 +3787,9 @@ func _start_grant_keyword_mode(effect: Dictionary) -> void:
 
 
 func _on_grant_keyword_pick(deck_index: int) -> void:
+	if _picker_busy:
+		return
+	_picker_busy = true
 	var kw := String(_grant_kw_effect.get("keyword", ""))
 	var data: Dictionary = RunState.get_upgraded_card_data(deck_index)
 	var before := _note_card_change(deck_index)
@@ -3602,7 +3798,15 @@ func _on_grant_keyword_pick(deck_index: int) -> void:
 	# Show the soldier either side of the lesson, so the new keyword chip is
 	# something the player SEES arrive rather than a sentence they're told.
 	_seal_card_change(before, deck_index)
-	_sting("card_play")
+	_sting("upgrade_confirm")
+	# The pair above is the RESULT page's account of the change. Strike it on the
+	# card that was actually clicked, first, while the slate is still on screen —
+	# otherwise the lesson only ever happens on the next screen.
+	await _refresh_pick_tile(deck_index)
+	await GameTheme.writ_amend(self, _last_pick_tile, disp.to_upper(),
+		GameTheme.KEYWORD_GOLD)
+	if not is_inside_tree():
+		return
 	_show_result("%s permanently gained %s." \
 		% [data.get("name", "The soldier"), disp])
 
@@ -3672,15 +3876,16 @@ func _start_upgrade_mode(count: int) -> void:
 
 	var any_upgradeable := false
 	for i in range(RunState.deck.size()):
-		if not RunState.has_upgrade_path(i, "plus"):
+		if not RunState.has_upgrade_path(i, "plus") \
+				and CardDB.is_upgradeable(RunState.deck[i]):
 			any_upgradeable = true
 			break
 	if not any_upgradeable:
 		var msg := ""
 		if _upgrade_choice_names.size() > 0:
-			msg = "Upgraded: %s." % ", ".join(_upgrade_choice_names)
+			msg = "Forged: %s." % ", ".join(_upgrade_choice_names)
 		else:
-			msg = "Nothing left to upgrade."
+			msg = "Nothing left to forge."
 		_upgrade_choice_remaining = 0
 		_show_result(msg)
 		return
@@ -3688,27 +3893,71 @@ func _start_upgrade_mode(count: int) -> void:
 	var suffix := ""
 	if _upgrade_choice_remaining > 1:
 		suffix = " (%d remaining)" % _upgrade_choice_remaining
-	var grid = _make_card_picker_grid("Choose a card to upgrade" + suffix, GameTheme.KEYWORD_GOLD)
+	var grid = _make_card_picker_grid("Choose a card to forge" + suffix, GameTheme.KEYWORD_GOLD)
 	for i in range(RunState.deck.size()):
-		if RunState.has_upgrade_path(i, "plus"):
+		if RunState.has_upgrade_path(i, "plus") or not CardDB.is_upgradeable(RunState.deck[i]):
 			continue
 		var data = RunState.get_upgraded_card_data(i)
 		_add_card_to_grid(grid, data, _on_upgrade_choice_pick.bind(i))
 
-
 func _on_upgrade_choice_pick(deck_index: int) -> void:
+	if _picker_busy:
+		return
+	if deck_index < 0 or deck_index >= RunState.deck.size():
+		return
+	if RunState.has_upgrade_path(deck_index, "plus") \
+		or not CardDB.is_upgradeable(RunState.deck[deck_index]):
+		return
+	_picker_busy = true
 	var data = CardDB.get_card_data(RunState.deck[deck_index])
 	var before := _note_card_change(deck_index)
 	RunState.upgrade_card(deck_index, "plus")
 	_seal_card_change(before, deck_index)
-	_sting("card_play")
+	_sting("upgrade_confirm")
+	# The forge lands on the card the player picked, not just in the sentence
+	# afterwards. The stamp names the loudest single change — the full diff is
+	# the result page's before→after pair.
+	await _refresh_pick_tile(deck_index)
+	await GameTheme.writ_amend(self, _last_pick_tile,
+		_forge_stamp_text(before, RunState.get_upgraded_card_data(deck_index)),
+		GameTheme.KEYWORD_GOLD)
+	if not is_inside_tree():
+		return
 	_upgrade_choice_names.append(data.name)
 	_upgrade_choice_remaining -= 1
 	if _upgrade_choice_remaining <= 0:
 		_show_result("Upgraded: %s." % ", ".join(_upgrade_choice_names))
 	else:
+		# Rebuilding the picker clears _picker_busy for the next pick.
 		_start_upgrade_mode(_upgrade_choice_remaining)
 
+
+## A SHORT delta for the forge stamp. It has to fit across a 210px card, so it
+## names the loudest single change rather than the whole diff (which the result
+## page's before→after pair already carries in full).
+func _forge_stamp_text(before: Dictionary, after: Dictionary) -> String:
+	if before.is_empty() or after.is_empty():
+		return "FORGED"
+	var da: int = int(after.get("atk", 0)) - int(before.get("atk", 0))
+	var dh: int = int(after.get("hp", 0)) - int(before.get("hp", 0))
+	if da > 0 and dh > 0:
+		return "+%d/+%d" % [da, dh]
+	if da > 0:
+		return "+%d ATK" % da
+	if dh > 0:
+		return "+%d HP" % dh
+	var had: Array = before.get("keywords", [])
+	for kw in after.get("keywords", []):
+		if not had.has(kw):
+			return String(KeywordEffects.KEYWORDS.get(kw, {}) \
+				.get("display", String(kw).capitalize())).to_upper()
+	if before.has("spell") and after.has("spell"):
+		var dv: int = int(after.spell.get("value", 0)) - int(before.spell.get("value", 0))
+		if dv > 0:
+			return "+%d POWER" % dv
+	if int(after.get("cost", 0)) < int(before.get("cost", 0)):
+		return "COSTS %d" % int(after.get("cost", 0))
+	return "FORGED"
 
 # Designer-style choose-from-pool picker. Rolls 3 random rare cards
 # (preferring ones not already in the deck so the offering feels new) and
@@ -3734,6 +3983,7 @@ func _start_stranger_hand_mode() -> void:
 	var offered: Array = pool.slice(0, mini(3, pool.size()))
 
 	_clear_ui()
+	var build_gen := _ui_build_gen
 	_set_event_art_visible(true)
 	add_child(_make_picker_scrim())
 
@@ -3764,7 +4014,7 @@ func _start_stranger_hand_mode() -> void:
 	var card_w: int = 220
 	var sep: int = 40
 	var total_w: int = n * card_w + (n - 1) * sep
-	var flip_rows: Array = []
+	var card_rows: Array = []
 	var hbox := HBoxContainer.new()
 	hbox.set_anchors_preset(Control.PRESET_CENTER)
 	hbox.offset_left = -total_w / 2
@@ -3788,12 +4038,6 @@ func _start_stranger_hand_mode() -> void:
 		# _add_card_to_grid so click semantics match the other pickers.
 		var wrapper := Control.new()
 		wrapper.custom_minimum_size = Vector2(card_w, 290)
-		var card_node = CARD_SCENE.instantiate()
-		card_node.static_display = true
-		card_node.card_data = data
-		card_node.live_baked_mode = true
-		CardTextureCache.bake(data)
-		wrapper.add_child(card_node)
 		var click_btn := Button.new()
 		click_btn.flat = true
 		click_btn.focus_mode = Control.FOCUS_NONE
@@ -3805,11 +4049,12 @@ func _start_stranger_hand_mode() -> void:
 		click_btn.pressed.connect(_on_stranger_hand_pick.bind(card_id, cost))
 		wrapper.add_child(click_btn)
 		v.add_child(wrapper)
+		var back: TextureRect = null
 		# L4 (docs/EVENT_PLAY_PITCH_20260718.md): the wet cards land
 		# face-DOWN and flip up one at a time — a dealing beat, not a
 		# different offer. Reduce Motion deals them face-up as before.
 		if not UserSettings.reduce_motion:
-			var back := TextureRect.new()
+			back = TextureRect.new()
 			back.name = "WetBack"
 			back.texture = load("res://assets/ui/card_back.png")
 			back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
@@ -3817,8 +4062,6 @@ func _start_stranger_hand_mode() -> void:
 			back.set_anchors_preset(Control.PRESET_FULL_RECT)
 			back.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			wrapper.add_child(back)
-			card_node.visible = false
-			flip_rows.append([wrapper, card_node, back])
 
 		var cost_label := Label.new()
 		cost_label.text = cost.label
@@ -3830,6 +4073,7 @@ func _start_stranger_hand_mode() -> void:
 		if GameTheme.font_display:
 			cost_label.add_theme_font_override("font", GameTheme.font_display)
 		v.add_child(cost_label)
+		card_rows.append({"wrapper": wrapper, "data": data, "back": back})
 
 	# Leave button below the row — the player can step into the picker,
 	# inspect the cards, and back out without paying. Cleaner than forcing
@@ -3846,9 +4090,45 @@ func _start_stranger_hand_mode() -> void:
 	leave_btn.offset_top = -160
 	leave_btn.offset_bottom = -72
 	add_child(leave_btn)
-	if flip_rows.size() > 0:
-		_play_wet_deal(flip_rows)
+	_hydrate_stranger_hand_cards(card_rows, build_gen)
 	_refresh_ledger()
+
+
+## Build every shell/card-back immediately, then hydrate the expensive faces in
+## order behind them. The authored flip waits until all three complete, so the
+## player never sees a partial face and the settled offer is pixel-identical.
+func _hydrate_stranger_hand_cards(rows: Array, build_gen: int) -> void:
+	var flip_rows: Array = []
+	for row in rows:
+		var wrapper: Control = row.wrapper
+		var data: Dictionary = row.data
+		var back = row.back
+		if not _event_ui_build_is_current(build_gen, wrapper):
+			return
+		if DisplayServer.get_name() != "headless" and not CardTextureCache.has(data):
+			await CardTextureCache.bake(data)
+			if not _event_ui_build_is_current(build_gen, wrapper):
+				return
+		var card_node = CARD_SCENE.instantiate()
+		card_node.static_display = true
+		card_node.card_data = data
+		card_node.live_baked_mode = true
+		card_node.defer_baked_rules_text = DisplayServer.get_name() != "headless"
+		card_node.visible = back == null
+		wrapper.add_child(card_node)
+		wrapper.move_child(card_node, 0)
+		if back != null:
+			flip_rows.append([wrapper, card_node, back])
+		if DisplayServer.get_name() != "headless":
+			await RenderingServer.frame_post_draw
+			if not _event_ui_build_is_current(build_gen, wrapper):
+				return
+			card_node.complete_deferred_baked_rules()
+			await RenderingServer.frame_post_draw
+	if not _event_ui_build_is_current(build_gen, self):
+		return
+	if not flip_rows.is_empty():
+		_play_wet_deal(flip_rows)
 
 
 ## L4's dealing beat: each wet card flips up off the stone in turn — the
@@ -3940,11 +4220,36 @@ func _start_relic_sacrifice_mode() -> void:
 		"Choose one of the smith's relics to trade. The trade is permanent.",
 		mini(non_starting.size(), 5) + 1)
 
-	# 96px per entry — the content-fit pass grows a name+rules entry to ~85px,
-	# so a tighter estimate leaves the viewport a few pixels short: the last
-	# line's descenders clip and a 1-entry-tall scrollbar appears mid-art.
+	# 128px per entry. This was 96, calibrated when the note below was written on
+	# a name plus a TWO-line rules block (~85px). Plenty of relics wrap to three:
+	# Thief's Gloves ("After a fight: if you took 1-5 face damage, gain 15 gold.
+	# If you took 0, start the next fight with +1 Command.") is ~120px on its own,
+	# so with two such relics the viewport was shorter than its content and the
+	# SECOND entry's rules text was scrolled out of sight — it read as a relic
+	# with no description at all, beside one that had it. First seen the day this
+	# screen was first rendered: the whole feature had been unreachable, so no
+	# screenshot of it had ever existed.
+	#
+	# THE CAP IS A WHOLE NUMBER OF ENTRIES, and that is the point of rounding it.
+	# A flat 440 is 3.4 entries, so a heavy relic bag cut the fourth one straight
+	# through the middle: its NAME sat at the bottom of the viewport with its rules
+	# text below the fold, which reads as a relic that has no description — the
+	# very defect the 128 above was raised to fix, returning at a different count.
+	# Rounding down to a whole entry means the list can only ever cut BETWEEN
+	# entries, at any bag size, and it follows ENTRY_H automatically if that moves.
+	# THE CAP IS MEASURED, NOT ESTIMATED. Two estimates have now been wrong here —
+	# 96px (calibrated on a two-line rules block) and 128px (calibrated on typical
+	# relics) — and each was found by a different bug report, because an estimate is
+	# only ever right for the content it was measured against. The relics with the
+	# LONGEST text in the database build ~145px rows, so 3 x 128 sliced the third
+	# one's last line off.
+	# So the viewport is sized from the entries THEMSELVES once they have laid out
+	# (see the deferred pass below): the sum of the first MAX_VISIBLE real heights.
+	# That cannot drift with the content, and it keeps the one invariant that
+	# matters — a list may cut BETWEEN entries, never through one.
+	const MAX_VISIBLE := 3
 	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(0, mini(non_starting.size() * 96, 440))
+	scroll.custom_minimum_size = Vector2(0, 384)   # provisional; re-measured below
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	choices_vbox.add_child(scroll)
@@ -3968,6 +4273,43 @@ func _start_relic_sacrifice_mode() -> void:
 		"Keep them all", "",
 		"Keep all relics and leave.",
 		72, _on_stranger_hand_leave))
+
+	_fit_relic_scroll.call_deferred(scroll, lst, MAX_VISIBLE)
+
+
+## Size the relic picker's viewport to a WHOLE number of real entries, once they
+## have actually laid out. Deferred because entry heights are not known until the
+## container has run: a rules block wraps to two lines or three depending on the
+## relic, so no constant can be right for every bag. Summing the real heights is
+## the only version of this that cannot drift with the content — and the invariant
+## it protects is that the list cuts BETWEEN entries and never through one, which
+## is what makes a half-shown relic look like a relic with no rules text.
+func _fit_relic_scroll(scroll: ScrollContainer, lst: VBoxContainer,
+		max_visible: int) -> void:
+	# TWO FRAMES, NOT call_deferred's ONE. A deferred call lands at the end of the
+	# same frame, BEFORE the container has laid its children out, so every height
+	# reads as zero and the fit silently does nothing — which is exactly what
+	# happened: the viewport stayed at its provisional 384 and the wordiest relic
+	# in the game still had its last line sliced off. Wait for layout to settle,
+	# then measure.
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if scroll == null or not is_instance_valid(scroll) \
+			or lst == null or not is_instance_valid(lst):
+		return
+	var sep: int = lst.get_theme_constant("separation")
+	var total := 0.0
+	var counted := 0
+	for child in lst.get_children():
+		if counted >= max_visible or not (child is Control):
+			break
+		var h: float = (child as Control).size.y
+		if h <= 1.0:
+			continue
+		total += h + (sep if counted > 0 else 0)
+		counted += 1
+	if counted > 0:
+		scroll.custom_minimum_size = Vector2(0, ceilf(total))
 
 
 func _on_relic_sacrifice_pick(relic_id: String) -> void:
@@ -4335,6 +4677,10 @@ func _build_bone_stage(root: Control) -> void:
 			heap.add_child(c)
 			placed += 1
 	var bank_btn := Button.new()
+	# Named so headless harnesses can find the bank action. The heap IS the
+	# button, so it carries NO text — tools/_probe_stuck2.gd matches end-of-
+	# screen controls by label, and a textless one is invisible to that walk.
+	bank_btn.name = "DiceBankBtn"
 	bank_btn.flat = true
 	bank_btn.focus_mode = Control.FOCUS_NONE
 	bank_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -4610,12 +4956,24 @@ func _play_coin_call(bust: bool) -> void:
 	fast.tween_property(coin, "face_t", 1.0, 0.10) \
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 	await get_tree().create_timer(0.82).timeout
+	# The spin is nearly a second long and `_clear_ui()` frees the props, so the
+	# coin can be gone by the time this resumes — and a call on a freed object
+	# aborts the rest of this function silently, leaving the spinner mid-beat with
+	# no error. Its sibling `_run_shell_shuffle` already guards this way (on the
+	# root); this one did not.
+	if not is_instance_valid(coin):
+		return
 	# …then it leans, each lean deeper than the last.
 	var lean := coin.create_tween()
 	for a in [0.16, -0.22, 0.30]:
 		lean.tween_property(coin, "rotation", a, 0.16) \
 			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	await lean.finished
+	# Second suspension, same hazard as the first. The `tween_callback` further
+	# down already tests `is_instance_valid(coin)`, so the risk was understood —
+	# it just was not covered at the point the tween is created.
+	if not is_instance_valid(coin):
+		return
 	if bust:
 		# Past the point of no return: it topples through one last half-turn
 		# and lands flat — TAILS up (flipped while edge-on, so the swap is
@@ -4640,6 +4998,8 @@ func _play_coin_call(bust: bool) -> void:
 			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 		right.parallel().tween_property(coin, "face_t", 1.0, 0.20)
 		await right.finished
+		if not is_instance_valid(coin):
+			return
 		Motion.burst(self, coin.get_global_position() + coin.size * 0.5, "coin_spark")
 		await get_tree().create_timer(0.30).timeout
 
@@ -4955,7 +5315,13 @@ func _run_shell_shuffle() -> void:
 		drop.tween_property(pw, "scale", Vector2.ONE, 0.10)
 		await drop.finished
 	else:
+		# Reduce Motion still has to SHOW the coin — it is the one honest look
+		# the whole game rests on. Snap the helm up, hold it, snap it back.
+		pw.position = _shell_slots[1] + Vector2(0, -56)
 		await get_tree().create_timer(0.8).timeout
+		if _shell_root == null or not is_instance_valid(_shell_root):
+			return
+		pw.position = _shell_slots[1]
 	if _shell_root == null or not is_instance_valid(_shell_root):
 		return
 	if _shell_coin != null and is_instance_valid(_shell_coin):
@@ -5002,8 +5368,15 @@ func _shell_swap(slot_a: int, slot_b: int, dur: float) -> void:
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	tb.tween_property(hb, "position", pa, dur * 0.5) \
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	await ta.finished
-	await get_tree().create_timer(0.05).timeout
+	# Waited out on the TREE, not on `ta.finished`. A tween made by
+	# `ha.create_tween()` is bound to `ha`, and a bound tween that dies with its
+	# node is KILLED, not finished — `finished` never emits. So leaving the shell
+	# game mid-shuffle (the player answers, backs out, or the scene is torn down)
+	# parked this coroutine and its caller forever, holding the helm Controls
+	# alive; two of the leaked function states behind the 2026-09-03 UI-gate exit
+	# crash were exactly this. The tween runs dur*0.5 twice, so the tree timer
+	# expires on the same beat, and it fires whether or not `ha` outlives it.
+	await get_tree().create_timer(dur + 0.05).timeout
 
 
 ## After the shuffle the ladder gets its accessible duplicates — one row
@@ -5038,14 +5411,21 @@ func _on_shell_pick(helm_idx: int) -> void:
 	var slot: int = _shell_order.find(helm_idx)
 	var rm := UserSettings.reduce_motion
 	AudioBank.play_sfx("card_play", 0.05, -4.0)
-	if not rm and is_instance_valid(wrap):
-		var up := wrap.create_tween()
-		up.tween_property(wrap, "position",
-			_shell_slots[slot] + Vector2(0, -52), 0.22) \
-			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-		up.parallel().tween_property(wrap, "rotation",
-			0.10 if slot < 2 else -0.10, 0.22)
-		await up.finished
+	# The lift is INFORMATIONAL — the coin sits UNDER the helms in the draw
+	# order, so a helm that never rises hides the verdict entirely. Reduce
+	# Motion snaps to the lifted end state instead of skipping it.
+	if is_instance_valid(wrap):
+		if rm:
+			wrap.position = _shell_slots[slot] + Vector2(0, -52)
+			wrap.rotation = 0.10 if slot < 2 else -0.10
+		else:
+			var up := wrap.create_tween()
+			up.tween_property(wrap, "position",
+				_shell_slots[slot] + Vector2(0, -52), 0.22) \
+				.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			up.parallel().tween_property(wrap, "rotation",
+				0.10 if slot < 2 else -0.10, 0.22)
+			await up.finished
 	if win:
 		_show_shell_coin(slot)
 		_sting("coin")
@@ -5054,15 +5434,18 @@ func _on_shell_pick(helm_idx: int) -> void:
 				+ _shell_slots[slot] + Vector2(77, 86), "coin_spark")
 		await get_tree().create_timer(0.55).timeout
 		# Honesty on the house: the other two lift empty before he pays.
-		if not rm:
-			for h in range(3):
-				if h != helm_idx and is_instance_valid(_shell_helms[h]):
-					var os: int = _shell_order.find(h)
-					var ot: Tween = (_shell_helms[h] as Control).create_tween()
-					ot.tween_property(_shell_helms[h], "position",
-						_shell_slots[os] + Vector2(0, -40), 0.20) \
-						.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-			await get_tree().create_timer(0.60).timeout
+		for h in range(3):
+			if h != helm_idx and is_instance_valid(_shell_helms[h]):
+				var os: int = _shell_order.find(h)
+				if rm:
+					(_shell_helms[h] as Control).position = \
+						_shell_slots[os] + Vector2(0, -40)
+					continue
+				var ot: Tween = (_shell_helms[h] as Control).create_tween()
+				ot.tween_property(_shell_helms[h], "position",
+					_shell_slots[os] + Vector2(0, -40), 0.20) \
+					.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		await get_tree().create_timer(0.60).timeout
 		var receipt := _gamble_pay(_shell_cfg, true,
 			int(_shell_cfg.get("payout", 0)), "coin_pour")
 		_win_flourish()
@@ -5073,11 +5456,14 @@ func _on_shell_pick(helm_idx: int) -> void:
 		# The honest reveal: he lifts the right one himself.
 		var pslot: int = _shell_order.find(_shell_prize_helm)
 		var pw: Control = _shell_helms[_shell_prize_helm]
-		if not rm and is_instance_valid(pw):
-			var pu := pw.create_tween()
-			pu.tween_property(pw, "position",
-				_shell_slots[pslot] + Vector2(0, -44), 0.20) \
-				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		if is_instance_valid(pw):
+			if rm:
+				pw.position = _shell_slots[pslot] + Vector2(0, -44)
+			else:
+				var pu := pw.create_tween()
+				pu.tween_property(pw, "position",
+					_shell_slots[pslot] + Vector2(0, -44), 0.20) \
+					.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 		_show_shell_coin(pslot)
 		_sting("hit_hero", -4.0)
 		await get_tree().create_timer(0.75).timeout
@@ -5328,365 +5714,6 @@ func _finish_straw_game(win: bool) -> void:
 		else _straw_text("lose_text",
 			"You take the last straw. You lose."),
 		receipt]))
-
-
-# ── The Widow's Cut (cut_game) — cut high cards with the dead, best of three ─
-# The high-card duel, played across a mourning-woman's black cloth: she deals
-# her dead soldier's own paybook, and you cut against him, best of three. The
-# only skill is the ONE swap you hold for the match — trade a low chit for the
-# next off the deck. HONEST BY CONSTRUCTION: one real deck of distinct chits
-# (1..13), shuffled once and drawn WITHOUT replacement; the dead's chit is
-# drawn from the SAME remaining deck only at the reveal, so the odds shown for
-# your chit ("beats M of the N left") are exactly the chance the dead cuts
-# lower. Win two cuts to take the pot; a clean 2-0 pays a bonus.
-#   Config: {stake, pay, sweep, open_text, win_text, sweep_text, lose_text,
-#            broke_text, seen_texts} — texts take {stake}/{pay}.
-
-var _cut_cfg: Dictionary = {}
-var _cut_deck: Array = []
-var _cut_pos := 0                   # next undrawn card
-var _cut_round := 0                 # 0-based round index
-var _cut_you := 0                   # rounds you have won
-var _cut_dead := 0                  # rounds the dead has won
-var _cut_swaps := 1                 # swaps left this match
-var _cut_your_rank := 0
-var _cut_pay := 0
-var _cut_root: Control = null
-var _cut_rows: VBoxContainer = null
-var _cut_caption: Label = null
-var _cut_tally: Label = null
-var _cut_odds: Label = null
-var _cut_swap_lbl: Label = null
-var _cut_your_chit: CoinProp = null
-var _cut_your_num: Label = null
-var _cut_dead_chit: CoinProp = null
-var _cut_dead_num: Label = null
-var _cut_busy := true
-
-const CUT_ROUNDS := 3
-const CUT_WIN := 2
-const CUT_COOL := Color(0.80, 0.85, 0.95)   # the dead's chit tint (cold coin)
-
-
-func _cut_text(key: String, fallback: String) -> String:
-	var raw := _seen_text_override(_cut_cfg, key,
-		String(_cut_cfg.get(key, fallback)))
-	return raw.replace("{stake}", str(int(_cut_cfg.get("stake", 0)))) \
-		.replace("{pay}", str(_cut_pay))
-
-
-func _start_cut_game(effect: Dictionary) -> void:
-	_cut_cfg = effect
-	var stake: int = int(effect.get("stake", 0))
-	if stake > 0 and RunState.gold < stake:
-		_show_result(_cut_text("broke_text",
-			"You need {stake} gold to play."))
-		return
-	if stake > 0:
-		RunState.gold -= stake
-	_cut_deck = []
-	for r in range(1, 14):
-		_cut_deck.append(r)
-	_cut_deck.shuffle()
-	_cut_pos = 0
-	_cut_round = 0
-	_cut_you = 0
-	_cut_dead = 0
-	_cut_swaps = 1
-	_cut_pay = 0
-	_cut_busy = true
-	var vbox := _build_event_screen(_event_data.name,
-		_cut_text("open_text",
-			"Play best of three. Higher card wins each round. You may replace one card during the match."), 4)
-	_cut_rows = VBoxContainer.new()
-	_cut_rows.add_theme_constant_override("separation", 12)
-	vbox.add_child(_cut_rows)
-	_build_cut_stage()
-	_cut_deal_round()
-
-
-func _build_cut_stage() -> void:
-	var root := Control.new()
-	root.name = "CutStage"
-	root.position = Vector2(860, 200)
-	root.size = Vector2(560, 450)
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(root)
-	_cut_root = root
-	var patch := CastPatch.new()
-	patch.seed_text = "cut_" + _event_id
-	patch.chalk = "line"
-	patch.position = Vector2(10, 56)
-	patch.size = Vector2(540, 356)
-	root.add_child(patch)
-	var caption := Label.new()
-	caption.text = "ROUND 1 OF 3"
-	caption.add_theme_font_size_override("font_size", 18)
-	caption.add_theme_color_override("font_color", Color(0.92, 0.86, 0.70))
-	caption.position = Vector2(30, 74)
-	caption.size = Vector2(500, 24)
-	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(caption)
-	_cut_caption = caption
-	var tally := Label.new()
-	tally.text = "YOU  0      —      0  THE DEAD"
-	tally.add_theme_font_size_override("font_size", 19)
-	tally.add_theme_color_override("font_color", Color(0.86, 0.80, 0.66))
-	tally.position = Vector2(30, 102)
-	tally.size = Vector2(500, 26)
-	tally.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	tally.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(tally)
-	_cut_tally = tally
-	# The two facing chits: yours (warm gold, left) and the dead's (cold, right).
-	_cut_your_chit = _cut_make_chit(root, Vector2(118, 178), false)
-	_cut_your_num = _cut_your_chit.get_node("Num")
-	_cut_dead_chit = _cut_make_chit(root, Vector2(322, 178), true)
-	_cut_dead_num = _cut_dead_chit.get_node("Num")
-	var you_lbl := _cut_side_label(root, "YOU", Vector2(118, 152))
-	you_lbl.add_theme_color_override("font_color", Color(0.90, 0.80, 0.46))
-	var dead_lbl := _cut_side_label(root, "THE DEAD", Vector2(322, 152))
-	dead_lbl.add_theme_color_override("font_color", Color(0.72, 0.78, 0.88))
-	# The "cut against" mark between the two hands.
-	var vs := Label.new()
-	vs.text = "cut"
-	vs.add_theme_font_size_override("font_size", 16)
-	vs.add_theme_color_override("font_color", Color(0.66, 0.60, 0.50))
-	vs.position = Vector2(238, 228)
-	vs.size = Vector2(64, 22)
-	vs.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vs.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(vs)
-	var odds := Label.new()
-	odds.add_theme_font_size_override("font_size", 18)
-	odds.add_theme_color_override("font_color", Color(0.84, 0.78, 0.64))
-	odds.position = Vector2(30, 312)
-	odds.size = Vector2(500, 24)
-	odds.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	odds.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(odds)
-	_cut_odds = odds
-	var swap_lbl := Label.new()
-	swap_lbl.add_theme_font_size_override("font_size", 15)
-	swap_lbl.add_theme_color_override("font_color", Color(0.70, 0.64, 0.52))
-	swap_lbl.position = Vector2(30, 340)
-	swap_lbl.size = Vector2(500, 20)
-	swap_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	swap_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(swap_lbl)
-	_cut_swap_lbl = swap_lbl
-	_stage_entrance(root)
-	GameTheme.attach_rich_hover(patch, "The widow's cloth",
-		"Higher card wins each round. Win two rounds to win. You may replace one card during the match.",
-		"Play your card or use your one replacement.", Color(0.86, 0.82, 0.72), 1.0)
-
-
-func _cut_make_chit(root: Control, pos: Vector2, cold: bool) -> CoinProp:
-	var wrap := Control.new()
-	wrap.position = pos
-	wrap.size = Vector2(124, 124)
-	wrap.pivot_offset = Vector2(62, 62)
-	wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	if cold:
-		wrap.modulate = CUT_COOL
-	root.add_child(wrap)
-	var coin := CoinProp.new()
-	coin.seed_text = ("cutdead_" if cold else "cutyou_") + _event_id
-	coin.worn = true
-	coin.set_anchors_preset(Control.PRESET_FULL_RECT)
-	wrap.add_child(coin)
-	var num := Label.new()
-	num.name = "Num"
-	num.add_theme_font_size_override("font_size", 64)
-	num.add_theme_color_override("font_color", Color(0.20, 0.13, 0.05))
-	if GameTheme.font_display:
-		num.add_theme_font_override("font", GameTheme.font_display)
-	num.set_anchors_preset(Control.PRESET_FULL_RECT)
-	num.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	num.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	num.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	# Num rides ON the coin (so get_node("Num") resolves and the cool modulate
-	# on the wrap tints both together); the coin keeps a back-ref to its wrap
-	# for the swap pop tween.
-	coin.add_child(num)
-	coin.set_meta("wrap", wrap)
-	return coin
-
-
-func _cut_side_label(root: Control, text: String, pos: Vector2) -> Label:
-	var l := Label.new()
-	l.text = text
-	l.add_theme_font_size_override("font_size", 16)
-	l.position = pos
-	l.size = Vector2(124, 22)
-	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(l)
-	return l
-
-
-## Deal your chit for the round face-up; the dead's stays hidden until reveal.
-func _cut_deal_round() -> void:
-	_cut_busy = true
-	if _cut_pos >= _cut_deck.size():
-		# Safety: reshuffle a fresh deck if the paybook runs thin (rare).
-		_cut_deck.shuffle()
-		_cut_pos = 0
-	_cut_your_rank = int(_cut_deck[_cut_pos])
-	_cut_pos += 1
-	if _cut_your_num != null and is_instance_valid(_cut_your_num):
-		_cut_your_num.text = str(_cut_your_rank)
-	if _cut_dead_num != null and is_instance_valid(_cut_dead_num):
-		_cut_dead_num.text = "?"
-	if _cut_caption != null and is_instance_valid(_cut_caption):
-		_cut_caption.text = "ROUND %d OF %d · YOUR CUT" % [_cut_round + 1, CUT_ROUNDS]
-	_cut_refresh_odds()
-	_cut_arm_rows()
-
-
-func _cut_beats_left() -> Vector2i:
-	var lower := 0
-	var total := 0
-	for i in range(_cut_pos, _cut_deck.size()):
-		total += 1
-		if int(_cut_deck[i]) < _cut_your_rank:
-			lower += 1
-	return Vector2i(lower, total)
-
-
-func _cut_refresh_odds() -> void:
-	if _cut_tally != null and is_instance_valid(_cut_tally):
-		_cut_tally.text = "YOU  %d      —      %d  THE DEAD" % [_cut_you, _cut_dead]
-	var b := _cut_beats_left()
-	if _cut_odds != null and is_instance_valid(_cut_odds):
-		if b.y <= 0:
-			_cut_odds.text = "your %d — the deck is spent" % _cut_your_rank
-		else:
-			_cut_odds.text = "your %d beats %d of the %d left in the deck" % [
-				_cut_your_rank, b.x, b.y]
-	if _cut_swap_lbl != null and is_instance_valid(_cut_swap_lbl):
-		_cut_swap_lbl.text = ("1 swap in hand" if _cut_swaps > 0
-			else "no swaps left")
-
-
-func _cut_arm_rows() -> void:
-	if _cut_rows == null or not is_instance_valid(_cut_rows):
-		return
-	_cut_busy = false
-	for ch in _cut_rows.get_children():
-		ch.queue_free()
-	_cut_rows.add_child(_make_frameless_choice("Play the cut",
-		"Reveal the opponent's card against your %d. Higher card wins." % _cut_your_rank,
-		"", 52, _on_cut_play))
-	if _cut_swaps > 0:
-		_cut_rows.add_child(_make_frameless_choice("Swap your card  (1 left)",
-			"Replace your %d with the next card in the deck." % _cut_your_rank,
-			"", 52, _on_cut_swap))
-
-
-func _on_cut_swap() -> void:
-	if _cut_busy or _cut_swaps <= 0:
-		return
-	if _cut_pos >= _cut_deck.size():
-		return
-	_cut_busy = true
-	_cut_swaps -= 1
-	AudioBank.play_sfx("coin", 0.05, -8.0)
-	_cut_your_rank = int(_cut_deck[_cut_pos])
-	_cut_pos += 1
-	if _cut_your_num != null and is_instance_valid(_cut_your_num):
-		_cut_your_num.text = str(_cut_your_rank)
-	if not UserSettings.reduce_motion and _cut_your_chit != null \
-			and is_instance_valid(_cut_your_chit):
-		var yw = _cut_your_chit.get_meta("wrap")
-		if is_instance_valid(yw):
-			var tw: Tween = yw.create_tween()
-			tw.tween_property(yw, "scale", Vector2(1.10, 1.10), 0.08)
-			tw.tween_property(yw, "scale", Vector2.ONE, 0.16) \
-				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	_cut_refresh_odds()
-	_cut_arm_rows()
-
-
-func _on_cut_play() -> void:
-	if _cut_busy:
-		return
-	_cut_busy = true
-	for ch in _cut_rows.get_children():
-		ch.queue_free()
-	if _cut_pos >= _cut_deck.size():
-		_cut_deck.shuffle()
-		_cut_pos = 0
-	var dead_rank := int(_cut_deck[_cut_pos])
-	_cut_pos += 1
-	await _cut_reveal(dead_rank)
-	var you_win := _cut_your_rank > dead_rank
-	if you_win:
-		_cut_you += 1
-	else:
-		_cut_dead += 1
-	if _cut_caption != null and is_instance_valid(_cut_caption):
-		_cut_caption.text = ("YOU WIN THE ROUND WITH %d" % _cut_your_rank) if you_win \
-			else ("THE OPPONENT WINS WITH %d" % dead_rank)
-	_cut_refresh_odds()
-	if you_win:
-		_sting("coin", -4.0)
-	else:
-		_sting("hit_hero", -10.0)
-	await get_tree().create_timer(0.9).timeout
-	if _cut_you >= CUT_WIN or _cut_dead >= CUT_WIN or _cut_round + 1 >= CUT_ROUNDS:
-		_cut_end_match()
-		return
-	_cut_round += 1
-	_cut_deal_round()
-
-
-func _cut_reveal(dead_rank: int) -> void:
-	if _cut_dead_chit == null or not is_instance_valid(_cut_dead_chit):
-		return
-	if UserSettings.reduce_motion:
-		if _cut_dead_num != null and is_instance_valid(_cut_dead_num):
-			_cut_dead_num.text = str(dead_rank)
-		await get_tree().create_timer(0.5).timeout
-		return
-	AudioBank.play_sfx("coin", 0.05, -6.0)
-	var t := _cut_dead_chit.create_tween()
-	t.tween_property(_cut_dead_chit, "face_t", 0.05, 0.14) \
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
-	t.parallel().tween_property(_cut_dead_num, "modulate:a", 0.0, 0.11)
-	t.tween_callback(func():
-		if _cut_dead_num != null and is_instance_valid(_cut_dead_num):
-			_cut_dead_num.text = str(dead_rank))
-	t.tween_property(_cut_dead_chit, "face_t", 1.0, 0.17) \
-		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	t.parallel().tween_property(_cut_dead_num, "modulate:a", 1.0, 0.15)
-	await t.finished
-	await get_tree().create_timer(0.2).timeout
-
-
-func _cut_end_match() -> void:
-	var won := _cut_you > _cut_dead
-	if won:
-		var sweep := _cut_dead == 0
-		_cut_pay = int(_cut_cfg.get("sweep", 85)) if sweep \
-			else int(_cut_cfg.get("pay", 55))
-		RunState.gain_gold(_cut_pay)
-		_sting("coin_pour")
-		if _cut_your_chit != null and is_instance_valid(_cut_your_chit):
-			_win_flourish(_cut_your_chit.get_global_position() + _cut_your_chit.size * 0.5)
-		else:
-			_win_flourish()
-		if sweep:
-			_show_result(_cut_text("sweep_text",
-				"You won the first two rounds. Gained {pay} gold."))
-		else:
-			_show_result(_cut_text("win_text",
-				"You won the match. Gained {pay} gold."))
-	else:
-		_bust_feedback()
-		_show_result(_cut_text("lose_text",
-			"You lost the match and the stake."))
 
 
 # ── The Courier's Satchel (sack_game) — the counting game ────────────────
@@ -6105,754 +6132,6 @@ func _wheel_spin_to(winner_slice: int) -> void:
 	AudioBank.play_sfx("coin", 0.05, -8.0)
 
 
-# ── The Provost Marshal (liar_game) — liars' dice against a man who can't ─
-# The bluffing game, honest by construction: four knucklebones each; yours
-# lie OPEN at your edge, his rattle under his helm. Bids name "at least Q
-# of face F" across all eight; raise or call. The provost NEVER bluffs —
-# his policy is a posted drill (he bids only what his own bones support,
-# crediting you exactly one of every face) — so his raises are TRUE
-# information about his helm, and his bids can still be WRONG about you:
-# the mistake window is the whole game. You may lie freely; he calls any
-# bid that needs three or more of one face from your hand. Every row does
-# the player's arithmetic in the open (your holding, what his helm must
-# carry). Showdown lifts the helm, tumbles his bones out, and counts the
-# bid face bone by bone before the verdict — bake-then-shade: the bones
-# were baked at the deal; the count only performs them. Config:
-#   {stake, payout, open_text, win_stood_text, win_called_text,
-#    lose_caught_text, lose_wrong_text, broke_text, seen_texts}
-#   — texts take {stake} / {payout} / {bid} / {qty} / {count}.
-
-const LIAR_FACES := ["dog", "pike", "wheel", "crown"]
-const LIAR_QTY := ["one", "two", "three", "four", "five", "six", "seven", "eight"]
-
-var _liar_cfg: Dictionary = {}
-var _liar_mine: Array = []        # your four faces, public
-var _liar_his: Array = []         # his four faces, under the helm
-var _liar_q := 0                  # standing bid quantity
-var _liar_f := 0                  # standing bid face
-var _liar_bid_mine := false       # whose bid stands
-var _liar_root: Control = null
-var _liar_rows: VBoxContainer = null
-var _liar_chalk: Label = null
-var _liar_caption: Label = null
-var _liar_helm: Control = null
-var _liar_my_dice: Array = []
-var _liar_his_dice: Array = []
-var _liar_busy := true
-
-
-func _liar_text(key: String, fallback: String, count: int = 0) -> String:
-	var raw := _seen_text_override(_liar_cfg, key,
-		String(_liar_cfg.get(key, fallback)))
-	return raw.replace("{stake}", str(int(_liar_cfg.get("stake", 0)))) \
-		.replace("{payout}", str(int(_liar_cfg.get("payout", 0)))) \
-		.replace("{bid}", _liar_phrase(_liar_q, _liar_f)) \
-		.replace("{qty}", LIAR_QTY[clampi(_liar_q, 1, 8) - 1]) \
-		.replace("{count}", str(count))
-
-
-func _liar_face_word(f: int, n: int) -> String:
-	var w: String = LIAR_FACES[clampi(f, 1, 4) - 1]
-	return w if n == 1 else w + "s"
-
-
-func _liar_phrase(q: int, f: int) -> String:
-	return "%s %s" % [LIAR_QTY[clampi(q, 1, 8) - 1], _liar_face_word(f, q)]
-
-
-func _liar_count(arr: Array, f: int) -> int:
-	var n := 0
-	for v in arr:
-		if int(v) == f:
-			n += 1
-	return n
-
-
-func _start_liar_game(effect: Dictionary) -> void:
-	_liar_cfg = effect
-	var stake: int = int(effect.get("stake", 0))
-	if stake > 0 and RunState.gold < stake:
-		_show_result(_liar_text("broke_text",
-			"You need {stake} gold to play."))
-		return
-	if stake > 0:
-		RunState.gold -= stake
-	# Bake the whole deal: eight bones, before anything moves.
-	_liar_mine = []
-	_liar_his = []
-	for _i in range(4):
-		_liar_mine.append(randi_range(1, 4))
-		_liar_his.append(randi_range(1, 4))
-	_liar_q = 0
-	_liar_f = 0
-	_liar_busy = true
-	var vbox := _build_event_screen(_event_data.name,
-		_liar_text("open_text",
-			"You see four bones; four are hidden. Raise the bid or call a lie. The opponent never bluffs."), 3)
-	_liar_rows = VBoxContainer.new()
-	_liar_rows.add_theme_constant_override("separation", 12)
-	vbox.add_child(_liar_rows)
-	_build_liar_stage()
-	_liar_run_intro()
-
-
-func _build_liar_stage() -> void:
-	_liar_my_dice = []
-	_liar_his_dice = []
-	var root := Control.new()
-	root.name = "LiarStage"
-	root.position = Vector2(860, 210)
-	root.size = Vector2(560, 430)
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(root)
-	_liar_root = root
-	var patch := CastPatch.new()
-	patch.seed_text = "provost_" + _event_id
-	patch.chalk = "ring"
-	patch.position = Vector2(10, 60)
-	patch.size = Vector2(540, 340)
-	root.add_child(patch)
-	# His bones wait under the helm, already true — hidden, not undecided.
-	for i in range(4):
-		var d := KnuckleboneDie.new()
-		d.seed_text = "his_%d_%s" % [i, _event_id]
-		d.face = int(_liar_his[i])
-		d.size = Vector2(30, 30)
-		d.pivot_offset = Vector2(15, 15)
-		d.position = Vector2(96.0 + float(i) * 24.0, 176.0)
-		d.visible = false
-		root.add_child(d)
-		_liar_his_dice.append(d)
-	var helm := Control.new()
-	helm.position = Vector2(56, 100)
-	helm.size = Vector2(150, 118)
-	helm.pivot_offset = Vector2(75, 96)
-	helm.mouse_filter = Control.MOUSE_FILTER_PASS
-	root.add_child(helm)
-	_liar_helm = helm
-	var steel := EventHelm.new()
-	steel.seed_text = "provost_helm_" + _event_id
-	steel.dome_up = true
-	steel.set_anchors_preset(Control.PRESET_FULL_RECT)
-	helm.add_child(steel)
-	GameTheme.attach_rich_hover(helm, "His helm",
-		"Four bones are hidden here. The opponent only makes bids his bones can support.",
-		"", Color(0.72, 0.74, 0.78), 1.0)
-	# Your bones tumble in openly at your edge of the plate. The tumble's
-	# final hops all drift +18 x (spin_dir 1), so the rests stay spread.
-	var dests := [Vector2(300, 300), Vector2(356, 314), Vector2(412, 298),
-		Vector2(468, 316)]
-	for i in range(4):
-		var d := KnuckleboneDie.new()
-		d.seed_text = "mine_%d_%s" % [i, _event_id]
-		d.face = int(_liar_mine[i])
-		d.size = Vector2(34, 34)
-		d.pivot_offset = Vector2(17, 17)
-		d.position = Vector2(420.0 + float(i) * 18.0, 428.0)
-		root.add_child(d)
-		_liar_my_dice.append(d)
-		d.set_meta("dest", dests[i])
-	var chalk := Label.new()
-	chalk.text = ""
-	chalk.add_theme_font_size_override("font_size", 30)
-	chalk.add_theme_color_override("font_color", Color(0.92, 0.88, 0.80))
-	chalk.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
-	chalk.add_theme_constant_override("outline_size", 5)
-	if GameTheme.font_display:
-		chalk.add_theme_font_override("font", GameTheme.font_display)
-	chalk.position = Vector2(230, 74)
-	chalk.size = Vector2(310, 40)
-	chalk.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	chalk.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(chalk)
-	_liar_chalk = chalk
-	var caption := Label.new()
-	caption.text = "HE RATTLES HIS UNDER THE STEEL"
-	caption.add_theme_font_size_override("font_size", 18)
-	caption.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
-	caption.position = Vector2(230, 118)
-	caption.size = Vector2(310, 24)
-	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(caption)
-	_liar_caption = caption
-	GameTheme.attach_rich_hover(patch, "The count",
-		"A bid states how many matching faces are present across all eight bones.",
-		"His raises are honest; yours needn't be", Color(0.92, 0.88, 0.80), 1.0)
-
-
-func _liar_run_intro() -> void:
-	var rm := UserSettings.reduce_motion
-	AudioBank.play_sfx("bone_cast", 0.06, -4.0)
-	if rm:
-		for d in _liar_my_dice:
-			if is_instance_valid(d):
-				d.position = d.get_meta("dest")
-		await get_tree().create_timer(0.6).timeout
-	else:
-		for i in range(_liar_my_dice.size()):
-			var d = _liar_my_dice[i]
-			if is_instance_valid(d):
-				_tumble_die(d, {"face": int(_liar_mine[i]), "skull": false},
-					d.get_meta("dest"), 0.10 * i, 1.0)
-		await get_tree().create_timer(1.15).timeout
-		# The rattle: his helm shivers once — the bones are in, and hidden.
-		if _liar_helm != null and is_instance_valid(_liar_helm):
-			var tw: Tween = _liar_helm.create_tween()
-			tw.tween_property(_liar_helm, "rotation", 0.03, 0.07)
-			tw.tween_property(_liar_helm, "rotation", -0.03, 0.07)
-			tw.tween_property(_liar_helm, "rotation", 0.0, 0.07)
-		AudioBank.play_sfx("bone_settle", 0.08, -6.0)
-		await get_tree().create_timer(0.5).timeout
-	if _liar_root == null or not is_instance_valid(_liar_root):
-		return
-	# He opens — the dead speak first, and truthfully.
-	var open := _liar_his_open()
-	_liar_set_bid(int(open["q"]), int(open["f"]), false)
-	_liar_busy = false
-	_liar_arm_rows()
-
-
-## His opening drill: his most common face, one more than he holds — he
-## credits the living exactly one of everything. He has met a lot of soldiers.
-func _liar_his_open() -> Dictionary:
-	var best_f := 1
-	for f in range(2, 5):
-		if _liar_count(_liar_his, f) >= _liar_count(_liar_his, best_f):
-			best_f = f
-	return {"q": _liar_count(_liar_his, best_f) + 1, "f": best_f}
-
-
-## His response drill, posted in the fiction: he calls any bid that needs
-## three or more of one face from your hand; otherwise he makes the honest
-## raise his own bones best support. No roll anywhere — his replies are
-## a readable function of his helm.
-func _liar_his_reply(q: int, f: int) -> Dictionary:
-	if q - _liar_count(_liar_his, f) > 2:
-		return {"call": true}
-	var best_q := -1
-	var best_f := -1
-	var best_slack := -99
-	for f2 in range(1, 5):
-		var q2 := q + 1 if f2 <= f else q
-		if q2 > 8:
-			continue
-		var slack := _liar_count(_liar_his, f2) + 1 - q2
-		if slack < 0:
-			continue
-		if slack > best_slack or (slack == best_slack and q2 < best_q):
-			best_slack = slack
-			best_q = q2
-			best_f = f2
-	if best_q < 0:
-		return {"call": true}
-	return {"call": false, "q": best_q, "f": best_f}
-
-
-func _liar_set_bid(q: int, f: int, mine: bool) -> void:
-	_liar_q = q
-	_liar_f = f
-	_liar_bid_mine = mine
-	if _liar_chalk != null and is_instance_valid(_liar_chalk):
-		_liar_chalk.text = _liar_phrase(q, f).to_upper()
-	if _liar_caption != null and is_instance_valid(_liar_caption):
-		_liar_caption.text = "YOUR BID STANDS" if mine \
-			else "HIS BID — RAISE OR CALL"
-
-
-## The player's turn: two curated raises (your strongest ground first) plus
-## the call. Every row does the arithmetic in the open — your holding, and
-## what his helm would have to carry.
-func _liar_arm_rows() -> void:
-	if _liar_rows == null or not is_instance_valid(_liar_rows):
-		return
-	for c in _liar_rows.get_children():
-		c.queue_free()
-	var faces := [1, 2, 3, 4]
-	faces.sort_custom(func(a, b) -> bool:
-		var ca := _liar_count(_liar_mine, a)
-		var cb := _liar_count(_liar_mine, b)
-		return ca > cb if ca != cb else a > b)
-	var offered := 0
-	for f2 in faces:
-		if offered >= 2:
-			break
-		var q2 := _liar_q + 1 if f2 <= _liar_f else _liar_q
-		if q2 > 8:
-			continue
-		var k := _liar_count(_liar_mine, f2)
-		var sub := "Your visible bones already support this bid." if k >= q2 \
-			else "You show %d. The hidden bones must contain %d more." % [k, q2 - k]
-		_liar_rows.add_child(_make_frameless_choice(
-			"Bid %s" % _liar_phrase(q2, f2), sub, "", 56,
-			_on_liar_raise.bind(q2, f2)))
-		offered += 1
-	var kc := _liar_count(_liar_mine, _liar_f)
-	_liar_rows.add_child(_make_frameless_choice("Call the lie",
-		"The bid claims %d. You show %d." % [_liar_q, kc],
-		"", 56, _on_liar_call))
-
-
-func _on_liar_raise(q: int, f: int) -> void:
-	if _liar_busy:
-		return
-	_liar_busy = true
-	_liar_set_bid(q, f, true)
-	if _liar_rows != null and is_instance_valid(_liar_rows):
-		for c in _liar_rows.get_children():
-			c.queue_free()
-	if _liar_caption != null and is_instance_valid(_liar_caption):
-		_liar_caption.text = "HE COUNTS UNDER THE STEEL"
-	AudioBank.play_sfx("button_click")
-	await get_tree().create_timer(0.6 if UserSettings.reduce_motion else 1.0).timeout
-	if _liar_root == null or not is_instance_valid(_liar_root):
-		return
-	var rep := _liar_his_reply(q, f)
-	if bool(rep.get("call", false)):
-		if _liar_caption != null and is_instance_valid(_liar_caption):
-			_liar_caption.text = "\"LIAR,\" HE SAYS."
-		AudioBank.play_sfx("card_play", 0.05, -6.0)
-		await get_tree().create_timer(0.8).timeout
-		await _liar_showdown(false)
-		return
-	_liar_set_bid(int(rep["q"]), int(rep["f"]), false)
-	AudioBank.play_sfx("bone_settle", 0.08, -8.0)
-	_liar_busy = false
-	_liar_arm_rows()
-
-
-func _on_liar_call() -> void:
-	if _liar_busy:
-		return
-	_liar_busy = true
-	if _liar_rows != null and is_instance_valid(_liar_rows):
-		for c in _liar_rows.get_children():
-			c.queue_free()
-	if _liar_caption != null and is_instance_valid(_liar_caption):
-		_liar_caption.text = "YOU CALL THE LIE."
-	AudioBank.play_sfx("card_play", 0.05, -6.0)
-	await get_tree().create_timer(0.7).timeout
-	if _liar_root == null or not is_instance_valid(_liar_root):
-		return
-	await _liar_showdown(true)
-
-
-## The helm comes up, his bones tumble out, and the bid face is counted
-## bone by bone across both hands before the verdict lands.
-func _liar_showdown(player_called: bool) -> void:
-	var rm := UserSettings.reduce_motion
-	AudioBank.play_sfx("helm_slide", 0.08, -6.0)
-	var spreads := [Vector2(230, 168), Vector2(286, 180), Vector2(342, 166),
-		Vector2(398, 182)]
-	if _liar_helm != null and is_instance_valid(_liar_helm):
-		if rm:
-			_liar_helm.position += Vector2(0, -56)
-		else:
-			var tw: Tween = _liar_helm.create_tween()
-			tw.tween_property(_liar_helm, "position",
-				_liar_helm.position + Vector2(0, -56), 0.28) \
-				.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-			tw.parallel().tween_property(_liar_helm, "rotation", -0.12, 0.28)
-	for i in range(_liar_his_dice.size()):
-		var d = _liar_his_dice[i]
-		if not is_instance_valid(d):
-			continue
-		d.visible = true
-		if rm:
-			d.position = spreads[i]
-		else:
-			_tumble_die(d, {"face": int(_liar_his[i]), "skull": false},
-				spreads[i], 0.06 * i, 1.0)
-	await get_tree().create_timer(0.7 if rm else 1.25).timeout
-	if _liar_root == null or not is_instance_valid(_liar_root):
-		return
-	# The count beat: every bone of the bid face answers, both hands.
-	var total: int = _liar_count(_liar_his, _liar_f) + _liar_count(_liar_mine, _liar_f)
-	if not rm:
-		var n := 0
-		for d in _liar_his_dice + _liar_my_dice:
-			if not is_instance_valid(d) or int(d.face) != _liar_f:
-				continue
-			n += 1
-			var pu: Tween = d.create_tween()
-			pu.tween_property(d, "scale", Vector2(1.34, 1.34), 0.09) \
-				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-			pu.tween_property(d, "scale", Vector2.ONE, 0.14)
-			AudioBank.play_sfx("bone_settle", 0.08, -10.0)
-			if _liar_chalk != null and is_instance_valid(_liar_chalk):
-				_liar_chalk.text = "%d ON THE TABLE" % n
-			await get_tree().create_timer(0.26).timeout
-			if _liar_root == null or not is_instance_valid(_liar_root):
-				return
-	if _liar_chalk != null and is_instance_valid(_liar_chalk):
-		_liar_chalk.text = "%s ON THE TABLE" % str(total)
-	if _liar_caption != null and is_instance_valid(_liar_caption):
-		_liar_caption.text = "THE BID NEEDED %d" % _liar_q
-	await get_tree().create_timer(0.9).timeout
-	var bid_true: bool = total >= _liar_q
-	var player_wins: bool = (not bid_true) if player_called else bid_true
-	if player_wins:
-		RunState.gain_gold(int(_liar_cfg.get("payout", 0)))
-		_sting("coin_pour")
-		_win_flourish()
-		_show_result(_liar_text(
-			"win_called_text" if player_called else "win_stood_text",
-			"Correct call: only {count} matched a bid of {qty}. Gained {payout} gold." if player_called
-			else "The opponent called incorrectly. There are {count} matches. Gained {payout} gold.",
-			total))
-	else:
-		_sting("hit_hero", -4.0)
-		_bust_feedback()
-		_show_result(_liar_text(
-			"lose_wrong_text" if player_called else "lose_caught_text",
-			"Wrong call: {count} matches support the bid. You lost the stake." if player_called
-			else "The opponent called correctly. There are {count} matches; your bid needed {qty}. You lost the stake.",
-			total))
-
-
-# ── The Old Game (morra_game) — the flash of fingers, older than the war ──
-# Morra against a dead pikeman: each throw, both hands flash at once. You
-# pick your fingers (one to five) and name what HIS hand will show; he has
-# three fingers left, so his throw is one, two, or three — and he throws
-# them to a DRILL, a repeating figure whose phase is baked fresh each
-# sitting. His call never changes: six, the pikeman's number — he scores
-# any throw where the two hands total six. You score by naming his hand.
-# No roll decides a round: his sequence is fixed at the deal, his spent
-# throws pile at his table edge in ORDER, and reading the drill is the
-# whole game (the straw game's covenant: learnable, and the dead never
-# blunder). First to three points; the throws run out at seven. Config:
-#   {stake, payout, drill: [3,1,2], target: 3, rounds: 7, open_text,
-#    win_text, lose_text, wash_text, broke_text, seen_texts}
-#   — texts take {stake} / {payout} / {you} / {him}.
-
-var _morra_cfg: Dictionary = {}
-var _morra_drill: Array = []
-var _morra_phase := 0
-var _morra_round := 0
-var _morra_you := 0
-var _morra_him := 0
-var _morra_throw := 2             # your selected fingers for the next flash
-var _morra_root: Control = null
-var _morra_rows: VBoxContainer = null
-var _morra_your_hand: Control = null
-var _morra_his_hand: Control = null
-var _morra_score: Label = null
-var _morra_caption: Label = null
-var _morra_your_num: Label = null
-var _morra_his_num: Label = null
-var _morra_studs: Array = []
-var _morra_busy := true
-
-
-func _morra_text(key: String, fallback: String) -> String:
-	var raw := _seen_text_override(_morra_cfg, key,
-		String(_morra_cfg.get(key, fallback)))
-	return raw.replace("{stake}", str(int(_morra_cfg.get("stake", 0)))) \
-		.replace("{payout}", str(int(_morra_cfg.get("payout", 0)))) \
-		.replace("{you}", str(_morra_you)).replace("{him}", str(_morra_him))
-
-
-func _start_morra_game(effect: Dictionary) -> void:
-	_morra_cfg = effect
-	var stake: int = int(effect.get("stake", 0))
-	if stake > 0 and RunState.gold < stake:
-		_show_result(_morra_text("broke_text",
-			"You need {stake} gold to play."))
-		return
-	if stake > 0:
-		RunState.gold -= stake
-	_morra_drill = effect.get("drill", [3, 1, 2])
-	_morra_phase = randi() % maxi(1, _morra_drill.size())
-	_morra_round = 0
-	_morra_you = 0
-	_morra_him = 0
-	_morra_throw = 2
-	_morra_busy = true
-	var vbox := _build_event_screen(_event_data.name,
-		_morra_text("open_text",
-			"Both players reveal 1 to 3 fingers. Guess his hand to score. If the total is 6, he scores. First to 3 points wins."), 3)
-	_morra_rows = VBoxContainer.new()
-	_morra_rows.add_theme_constant_override("separation", 12)
-	vbox.add_child(_morra_rows)
-	_build_morra_stage()
-	_morra_busy = false
-	_morra_arm_rows()
-
-
-func _build_morra_stage() -> void:
-	_morra_studs = []
-	var root := Control.new()
-	root.name = "MorraStage"
-	root.position = Vector2(860, 210)
-	root.size = Vector2(560, 430)
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(root)
-	_morra_root = root
-	var patch := CastPatch.new()
-	patch.seed_text = "morra_" + _event_id
-	patch.chalk = "ring"
-	patch.position = Vector2(10, 60)
-	patch.size = Vector2(540, 340)
-	root.add_child(patch)
-	# His hand, far side — the maimed throwing hand IS the posted rule.
-	var his := GauntletHand.new()
-	his.seed_text = "pikeman_" + _event_id
-	his.bony = true
-	his.maimed = true
-	his.fingers = 0
-	his.position = Vector2(64, 78)
-	his.size = Vector2(130, 165)
-	his.pivot_offset = Vector2(65, 145)
-	root.add_child(his)
-	_morra_his_hand = his
-	var his_wrap := Control.new()
-	his_wrap.position = his.position
-	his_wrap.size = his.size
-	his_wrap.mouse_filter = Control.MOUSE_FILTER_PASS
-	root.add_child(his_wrap)
-	GameTheme.attach_rich_hover(his_wrap, "His hand",
-		"He shows 1, 2, or 3 fingers in a repeating pattern. His previous throws remain visible.",
-		"", Color(0.72, 0.74, 0.78), 1.0)
-	# Your hand, near side.
-	var yours := GauntletHand.new()
-	yours.seed_text = "your_hand_" + _event_id
-	yours.fingers = 0
-	yours.position = Vector2(344, 208)
-	yours.size = Vector2(140, 175)
-	yours.pivot_offset = Vector2(70, 152)
-	root.add_child(yours)
-	_morra_your_hand = yours
-	# The flash numerals: each hand's thrown count chalks beside it while
-	# the hands stand open — the arithmetic in the open, always (they carry
-	# game state, so they play under Reduce Motion too).
-	for side in ["his", "yours"]:
-		var num := Label.new()
-		num.text = ""
-		num.add_theme_font_size_override("font_size", 34)
-		num.add_theme_color_override("font_color", Color(0.92, 0.88, 0.80))
-		num.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
-		num.add_theme_constant_override("outline_size", 5)
-		if GameTheme.font_display:
-			num.add_theme_font_override("font", GameTheme.font_display)
-		num.position = Vector2(24, 122) if side == "his" else Vector2(296, 258)
-		num.size = Vector2(44, 44)
-		num.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		num.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		root.add_child(num)
-		if side == "his":
-			_morra_his_num = num
-		else:
-			_morra_your_num = num
-	# The five studs: pick your fingers for the flash. The hand stays a
-	# fist until the throw — morra is simultaneous or it is nothing.
-	for i in range(5):
-		var wrap := Control.new()
-		wrap.position = Vector2(44.0 + float(i) * 46.0, 326.0)
-		wrap.size = Vector2(40, 40)
-		wrap.pivot_offset = Vector2(20, 20)
-		wrap.mouse_filter = Control.MOUSE_FILTER_PASS
-		root.add_child(wrap)
-		_morra_studs.append(wrap)
-		var tok := PayToken.new()
-		tok.seed_text = "stud_%d_%s" % [i, _event_id]
-		tok.value = i + 1
-		tok.set_anchors_preset(Control.PRESET_FULL_RECT)
-		wrap.add_child(tok)
-		var btn := Button.new()
-		btn.flat = true
-		btn.focus_mode = Control.FOCUS_NONE
-		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
-		btn.mouse_filter = Control.MOUSE_FILTER_PASS
-		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-		for st in ["normal", "hover", "pressed", "focus"]:
-			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
-		btn.pressed.connect(_on_morra_stud.bind(i + 1))
-		wrap.add_child(btn)
-		GameTheme.attach_rich_hover(wrap, "Throw %s" % LIAR_QTY[i],
-			"Choose how many fingers to show. The total is your hand plus his.",
-			"Click to set your throw", Color(0.92, 0.88, 0.80), 1.04)
-	_morra_mark_studs()
-	var score := Label.new()
-	score.text = "0 — 0"
-	score.add_theme_font_size_override("font_size", 38)
-	score.add_theme_color_override("font_color", Color(0.92, 0.88, 0.80))
-	score.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
-	score.add_theme_constant_override("outline_size", 5)
-	if GameTheme.font_display:
-		score.add_theme_font_override("font", GameTheme.font_display)
-	score.position = Vector2(250, 72)
-	score.size = Vector2(240, 48)
-	score.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	score.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(score)
-	_morra_score = score
-	var caption := Label.new()
-	caption.text = "THROW 1 OF %d · HE CALLS SIX" % int(_morra_cfg.get("rounds", 7))
-	caption.add_theme_font_size_override("font_size", 18)
-	caption.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
-	caption.position = Vector2(230, 124)
-	caption.size = Vector2(280, 24)
-	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(caption)
-	_morra_caption = caption
-	GameTheme.attach_rich_hover(patch, "The old game",
-		"Guess his hand to score. If both hands total 6, he scores. First to 3 points; the game lasts 7 throws.",
-		"Pick your fingers below, then call his hand", Color(0.92, 0.88, 0.80), 1.0)
-
-
-func _morra_mark_studs() -> void:
-	for i in range(_morra_studs.size()):
-		var wrap = _morra_studs[i]
-		if not is_instance_valid(wrap):
-			continue
-		var picked: bool = i + 1 == _morra_throw
-		wrap.modulate = Color(1.22, 1.18, 1.05) if picked else Color(0.82, 0.80, 0.76)
-		wrap.position.y = 318.0 if picked else 326.0
-
-
-func _on_morra_stud(n: int) -> void:
-	if _morra_busy:
-		return
-	_morra_throw = n
-	AudioBank.play_sfx("button_click")
-	_morra_mark_studs()
-	_morra_arm_rows()
-
-
-## Three calls — one per finger he has left. The sub-line does the count's
-## arithmetic for the flash you have set, and names the six out loud.
-func _morra_arm_rows() -> void:
-	if _morra_rows == null or not is_instance_valid(_morra_rows):
-		return
-	for c in _morra_rows.get_children():
-		c.queue_free()
-	for h in range(1, 4):
-		var total := _morra_throw + h
-		var sub := "You show %s; the combined total would be %d." % [
-			LIAR_QTY[_morra_throw - 1], total]
-		if total == 6:
-			sub += " That would total 6."
-		_morra_rows.add_child(_make_frameless_choice(
-			"Guess he shows %s" % LIAR_QTY[h - 1], sub, "", 56,
-			_on_morra_call.bind(h)))
-
-
-func _on_morra_call(h: int) -> void:
-	if _morra_busy:
-		return
-	_morra_busy = true
-	var rm := UserSettings.reduce_motion
-	# Bake: his throw was always going to be this one — the drill decides.
-	var his: int = int(_morra_drill[(_morra_phase + _morra_round) % _morra_drill.size()])
-	var total: int = _morra_throw + his
-	var you_hit: bool = h == his
-	var him_hit: bool = total == 6
-	# The flash: both hands at once — the pop IS the reveal.
-	AudioBank.play_sfx("bone_settle", 0.08, -5.0)
-	if _morra_your_hand != null and is_instance_valid(_morra_your_hand):
-		_morra_your_hand.fingers = _morra_throw
-		_morra_your_hand.queue_redraw()
-	if _morra_his_hand != null and is_instance_valid(_morra_his_hand):
-		_morra_his_hand.fingers = his
-		_morra_his_hand.queue_redraw()
-	if _morra_your_num != null and is_instance_valid(_morra_your_num):
-		_morra_your_num.text = str(_morra_throw)
-	if _morra_his_num != null and is_instance_valid(_morra_his_num):
-		_morra_his_num.text = str(his)
-	if not rm:
-		for hand in [_morra_your_hand, _morra_his_hand]:
-			if hand == null or not is_instance_valid(hand):
-				continue
-			var tw: Tween = hand.create_tween()
-			tw.tween_property(hand, "scale", Vector2(1.16, 1.16), 0.09) \
-				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-			tw.tween_property(hand, "scale", Vector2.ONE, 0.16) \
-				.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	if _morra_caption != null and is_instance_valid(_morra_caption):
-		_morra_caption.text = "THE COUNT: %d" % total
-	await get_tree().create_timer(0.55 if rm else 0.75).timeout
-	if _morra_root == null or not is_instance_valid(_morra_root):
-		return
-	# His spent throw joins the pile — in ORDER, at his table edge. The
-	# drill sits there in plain view for whoever thinks to read it.
-	var tok := PayToken.new()
-	tok.seed_text = "drill_%d_%s" % [_morra_round, _event_id]
-	tok.value = his
-	tok.size = Vector2(30, 30)
-	tok.pivot_offset = Vector2(15, 15)
-	tok.position = Vector2(212.0 + float(_morra_round) * 40.0, 168.0)
-	tok.scale = Vector2(0.4, 0.4)
-	_morra_root.add_child(tok)
-	if rm:
-		tok.scale = Vector2.ONE
-	else:
-		var tt: Tween = tok.create_tween()
-		tt.tween_property(tok, "scale", Vector2.ONE, 0.18) \
-			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	# Score beats — both can land on one flash.
-	if you_hit:
-		_morra_you += 1
-		_sting("coin")
-		if not rm and _morra_his_hand != null and is_instance_valid(_morra_his_hand):
-			Motion.burst(self, _morra_root.get_global_position()
-				+ _morra_his_hand.position + Vector2(55, 60), "coin_spark")
-	if him_hit:
-		_morra_him += 1
-		_sting("hit_hero", -8.0)
-	if _morra_score != null and is_instance_valid(_morra_score):
-		_morra_score.text = "%d — %d" % [_morra_you, _morra_him]
-	if _morra_caption != null and is_instance_valid(_morra_caption):
-		if you_hit and him_hit:
-			_morra_caption.text = "THE COUNT: %d — BOTH CALLS STAND" % total
-		elif you_hit:
-			_morra_caption.text = "THE COUNT: %d — YOU NAMED HIS HAND" % total
-		elif him_hit:
-			_morra_caption.text = "THE COUNT: %d — SIX. HIS CALL." % total
-		else:
-			_morra_caption.text = "THE COUNT: %d — NO CALL STANDS" % total
-	_morra_round += 1
-	await get_tree().create_timer(0.9 if rm else 1.1).timeout
-	if _morra_root == null or not is_instance_valid(_morra_root):
-		return
-	var target: int = int(_morra_cfg.get("target", 3))
-	var rounds: int = int(_morra_cfg.get("rounds", 7))
-	if _morra_you >= target or _morra_him >= target or _morra_round >= rounds:
-		_finish_morra_game()
-		return
-	# Fists again for the next flash.
-	for hand in [_morra_your_hand, _morra_his_hand]:
-		if hand != null and is_instance_valid(hand):
-			hand.fingers = 0
-			hand.queue_redraw()
-	for num in [_morra_your_num, _morra_his_num]:
-		if num != null and is_instance_valid(num):
-			num.text = ""
-	if _morra_caption != null and is_instance_valid(_morra_caption):
-		_morra_caption.text = "THROW %d OF %d · HE CALLS SIX" % [
-			_morra_round + 1, rounds]
-	_morra_busy = false
-	_morra_arm_rows()
-
-
-func _finish_morra_game() -> void:
-	var target: int = int(_morra_cfg.get("target", 3))
-	if _morra_you >= target or _morra_you > _morra_him:
-		RunState.gain_gold(int(_morra_cfg.get("payout", 0)))
-		_sting("coin_pour")
-		_win_flourish()
-		_show_result(_morra_text("win_text",
-			"You reached {you} points first. Gained {payout} gold."))
-	elif _morra_him > _morra_you:
-		_sting("hit_hero", -4.0)
-		_bust_feedback()
-		_show_result(_morra_text("lose_text",
-			"He won {him} to {you}. You lost the stake."))
-	else:
-		_show_result(_morra_text("wash_text",
-			"The game ended {you} to {him}. Your stake was returned."))
-
-
 # ── The Burial Fund (tali_game) — the Venus throw, one recast each ───────
 # The keep-and-recast game (dice poker's ancestor, played with the real
 # Roman tali): both throws land OPEN, the rank table is chalked on a
@@ -7102,8 +6381,11 @@ func _build_tali_stage() -> void:
 	slate_hover.size = slate.size
 	slate_hover.mouse_filter = Control.MOUSE_FILTER_PASS
 	root.add_child(slate_hover)
+	# The five ranks are TALI_RANKS, and the slate beside this hover prints them
+	# by those names — the old line invented a sixth ("High", impossible on four
+	# tali: every throw is at least a pair) and renamed two others.
 	GameTheme.attach_rich_hover(slate_hover, "The table's law",
-		"Hands rank from rarest to commonest: Wall, Venus, Crossed Pikes, Column, Pair, High.",
+		"Hands rank from rarest to commonest: The Wall, Venus, Crossed Pikes, The Column, The File.",
 		"Ties use total pips. Exact ties return the stake.",
 		Color(0.85, 0.86, 0.82), 1.0)
 
@@ -7357,6 +6639,9 @@ func _tali_verdict() -> void:
 			"{his} beats {yours}. You lost the stake.",
 			0, yours, his), lose_receipt]))
 	else:
+		var stake_refund := int(_tali_cfg.get("stake", 0))
+		if stake_refund > 0:
+			RunState.gain_gold(stake_refund)
 		_show_result(_tali_text("wash_text",
 			"{yours} ties {his}. Your stake was returned.",
 			0, yours, his))
@@ -7668,309 +6953,6 @@ func _on_field_bank() -> void:
 		receipt]))
 
 
-# ── The Gibbet Green (quoits_game) — read the chain, loose at the peg ────
-# The environmental-reading game: rope quoits pitched at the gallows
-# stake, where the WIND is the house — and the field posts it honestly
-# twice over: the hanged man's empty chain swings downwind (one notch of
-# lean per notch of wind), and the crow sits the gibbet arm only in a
-# dead calm. Wind runs -2..2; you can only aim one mark either side of
-# the peg, so a hard two-notch gust is unwinnable beyond a leaner — the
-# real decision is "Wait out the wind" (limited holds per sitting) versus
-# taking the eight. Bake-then-shade: each throw's wind is baked before
-# the chain shows it, and the landing is aim + wind, arithmetic a player
-# can check against the resting rings. Config:
-#   {stake, ringer: 20, leaner: 8, waits: 2, throws: 3, open_text,
-#    perfect_text, win_text, poor_text, broke_text, seen_texts}
-#   — texts take {stake} / {pay} / {hits}.
-
-var _quoits_cfg: Dictionary = {}
-var _quoits_wind := 0
-var _quoits_throw := 0
-var _quoits_hits := 0
-var _quoits_pay := 0
-var _quoits_waits := 0
-var _quoits_root: Control = null
-var _quoits_rows: VBoxContainer = null
-var _quoits_gibbet: Control = null
-var _quoits_caption: Label = null
-var _quoits_busy := true
-
-
-func _quoits_text(key: String, fallback: String) -> String:
-	var raw := _seen_text_override(_quoits_cfg, key,
-		String(_quoits_cfg.get(key, fallback)))
-	return raw.replace("{stake}", str(int(_quoits_cfg.get("stake", 0)))) \
-		.replace("{pay}", str(_quoits_pay)).replace("{hits}", str(_quoits_hits))
-
-
-func _start_quoits_game(effect: Dictionary) -> void:
-	_quoits_cfg = effect
-	var stake: int = int(effect.get("stake", 0))
-	if stake > 0 and RunState.gold < stake:
-		_show_result(_quoits_text("broke_text",
-			"You need {stake} gold to play."))
-		return
-	if stake > 0:
-		RunState.gold -= stake
-	_quoits_wind = randi_range(-2, 2)
-	_quoits_throw = 0
-	_quoits_hits = 0
-	_quoits_pay = 0
-	_quoits_waits = int(effect.get("waits", 2))
-	_quoits_busy = true
-	var vbox := _build_event_screen(_event_data.name,
-		_quoits_text("open_text",
-			"You have three throws and two waits. The chain points downwind, so aim the opposite way."), 4)
-	_quoits_rows = VBoxContainer.new()
-	_quoits_rows.add_theme_constant_override("separation", 12)
-	vbox.add_child(_quoits_rows)
-	_build_quoits_stage()
-	_quoits_busy = false
-	_quoits_arm_rows()
-
-
-func _build_quoits_stage() -> void:
-	var root := Control.new()
-	root.name = "QuoitsStage"
-	root.position = Vector2(860, 210)
-	root.size = Vector2(560, 430)
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(root)
-	_quoits_root = root
-	var patch := CastPatch.new()
-	patch.seed_text = "green_" + _event_id
-	patch.chalk = "court"
-	patch.position = Vector2(10, 60)
-	patch.size = Vector2(540, 340)
-	root.add_child(patch)
-	var gibbet := GibbetPost.new()
-	gibbet.seed_text = "gallows_" + _event_id
-	gibbet.lean = float(_quoits_wind) * 0.5
-	gibbet.crow = _quoits_wind == 0
-	gibbet.position = Vector2(28, 66)
-	gibbet.size = Vector2(150, 250)
-	root.add_child(gibbet)
-	_quoits_gibbet = gibbet
-	# The live flutter — decorative; the LEAN is the information.
-	if not UserSettings.reduce_motion:
-		var sw: Tween = gibbet.create_tween().set_loops()
-		sw.tween_method(_quoits_sway_tick, -1.0, 1.0, 1.3) \
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-		sw.tween_method(_quoits_sway_tick, 1.0, -1.0, 1.3) \
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	var gib_hover := Control.new()
-	gib_hover.position = gibbet.position
-	gib_hover.size = gibbet.size
-	gib_hover.mouse_filter = Control.MOUSE_FILTER_PASS
-	root.add_child(gib_hover)
-	GameTheme.attach_rich_hover(gib_hover, "The gauge",
-		"The chain points downwind. Each notch shows one level of wind. No lean means calm.",
-		"Aim opposite the chain.", Color(0.72, 0.74, 0.78), 1.0)
-	var peg := QuoitsPeg.new()
-	peg.seed_text = "peg_" + _event_id
-	peg.position = Vector2(300, 168)
-	peg.size = Vector2(30, 78)
-	root.add_child(peg)
-	var caption := Label.new()
-	caption.text = "THROW 1 OF %d · READ THE CHAIN" % int(_quoits_cfg.get("throws", 3))
-	caption.add_theme_font_size_override("font_size", 18)
-	caption.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
-	caption.position = Vector2(200, 84)
-	caption.size = Vector2(340, 24)
-	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(caption)
-	_quoits_caption = caption
-	# The three chalked aiming marks, and the pay chalked at the near edge.
-	for k in range(-1, 2):
-		var tick := ColorRect.new()
-		tick.color = Color(0.90, 0.90, 0.86, 0.55)
-		tick.position = Vector2(313.0 + float(k) * 40.0, 250.0)
-		tick.size = Vector2(4, 14)
-		tick.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		root.add_child(tick)
-	var ledger := Label.new()
-	ledger.text = "AROUND THE PEG: %d · TOUCHING: %d" % [
-		int(_quoits_cfg.get("ringer", 20)), int(_quoits_cfg.get("leaner", 8))]
-	ledger.add_theme_font_size_override("font_size", 15)
-	ledger.add_theme_color_override("font_color", Color(0.72, 0.66, 0.55))
-	ledger.position = Vector2(30, 366)
-	ledger.size = Vector2(500, 20)
-	ledger.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	ledger.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(ledger)
-	_stage_entrance(root)
-
-
-func _quoits_sway_tick(v: float) -> void:
-	if _quoits_gibbet == null or not is_instance_valid(_quoits_gibbet):
-		return
-	_quoits_gibbet.sway = v * 0.07
-	_quoits_gibbet.queue_redraw()
-
-
-func _quoits_lean_to(v: float) -> void:
-	if _quoits_gibbet == null or not is_instance_valid(_quoits_gibbet):
-		return
-	_quoits_gibbet.lean = v
-	_quoits_gibbet.queue_redraw()
-
-
-func _quoits_arm_rows() -> void:
-	if _quoits_rows == null or not is_instance_valid(_quoits_rows):
-		return
-	for c in _quoits_rows.get_children():
-		c.queue_free()
-	_quoits_rows.add_child(_make_frameless_choice("Aim left of the peg",
-		"Throw one step left.", "", 52,
-		_on_quoits_loose.bind(-1)))
-	_quoits_rows.add_child(_make_frameless_choice("Aim at the peg",
-		"Throw at the center.", "", 52,
-		_on_quoits_loose.bind(0)))
-	_quoits_rows.add_child(_make_frameless_choice("Aim right of the peg",
-		"Throw one step right.", "", 52,
-		_on_quoits_loose.bind(1)))
-	if _quoits_waits > 0:
-		_quoits_rows.add_child(_make_frameless_choice("Wait out the wind",
-			"Skip this wind. %s remain." % (
-				"Two holds" if _quoits_waits == 2 else "One hold"), "", 52,
-			_on_quoits_wait))
-
-
-func _on_quoits_wait() -> void:
-	if _quoits_busy or _quoits_waits <= 0:
-		return
-	_quoits_busy = true
-	_quoits_waits -= 1
-	await _quoits_shift_wind("THE WIND CHANGES - CHECK THE CHAIN")
-	if _quoits_root == null or not is_instance_valid(_quoits_root):
-		return
-	_quoits_busy = false
-	_quoits_arm_rows()
-
-
-## Rebake the wind and swing the gauge to it; the crow answers last.
-func _quoits_shift_wind(caption: String) -> void:
-	_quoits_wind = randi_range(-2, 2)
-	if _quoits_caption != null and is_instance_valid(_quoits_caption):
-		_quoits_caption.text = caption
-	var gib = _quoits_gibbet
-	if gib == null or not is_instance_valid(gib):
-		return
-	var had_crow: bool = bool(gib.crow)
-	if UserSettings.reduce_motion:
-		gib.lean = float(_quoits_wind) * 0.5
-		gib.crow = _quoits_wind == 0
-		gib.queue_redraw()
-		await get_tree().create_timer(0.7).timeout
-		return
-	var tw: Tween = gib.create_tween()
-	tw.tween_method(_quoits_lean_to, float(gib.lean),
-		float(_quoits_wind) * 0.5, 0.8) \
-		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	await tw.finished
-	if gib == null or not is_instance_valid(gib):
-		return
-	gib.crow = _quoits_wind == 0
-	gib.queue_redraw()
-	if had_crow and not bool(gib.crow) and _quoits_root != null \
-			and is_instance_valid(_quoits_root):
-		Motion.burst(self, _quoits_root.get_global_position()
-			+ gib.position + Vector2(96, 18), "ash")
-	await get_tree().create_timer(0.4).timeout
-
-
-func _on_quoits_loose(aim: int) -> void:
-	if _quoits_busy:
-		return
-	_quoits_busy = true
-	var landing: int = clampi(aim + _quoits_wind, -3, 3)
-	var rm := UserSettings.reduce_motion
-	var rest := Vector2(315.0 + float(landing) * 40.0 - 24.0, 212.0)
-	AudioBank.play_sfx("card_play", 0.06, -8.0)
-	var ring := RingProp.new()
-	ring.seed_text = "quoit_%d_%s" % [_quoits_throw, _event_id]
-	ring.size = Vector2(48, 48)
-	ring.pivot_offset = Vector2(24, 24)
-	if _quoits_root != null and is_instance_valid(_quoits_root):
-		_quoits_root.add_child(ring)
-		if rm:
-			ring.position = rest
-			await get_tree().create_timer(0.55).timeout
-		else:
-			ring.airborne = true
-			ring.position = Vector2(452, 386)
-			ring.scale = Vector2(1.2, 1.2)
-			var mid := ring.position.lerp(rest, 0.55) + Vector2(0, -90)
-			var tw: Tween = ring.create_tween()
-			tw.tween_property(ring, "position", mid, 0.26) \
-				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-			tw.parallel().tween_property(ring, "rotation", -0.5, 0.26)
-			tw.tween_property(ring, "position", rest, 0.24) \
-				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-			tw.parallel().tween_property(ring, "scale", Vector2.ONE, 0.24)
-			tw.parallel().tween_property(ring, "rotation", 0.0, 0.24)
-			await tw.finished
-			if not is_instance_valid(ring):
-				return
-			ring.airborne = false
-			ring.queue_redraw()
-			AudioBank.play_sfx("bone_settle", 0.08, -8.0)
-			var sq: Tween = ring.create_tween()
-			sq.tween_property(ring, "scale", Vector2(1.14, 0.86), 0.06)
-			sq.tween_property(ring, "scale", Vector2.ONE, 0.10) \
-				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-			await get_tree().create_timer(0.2).timeout
-	if _quoits_root == null or not is_instance_valid(_quoits_root):
-		return
-	# The board settles: arithmetic anyone can check against the rings.
-	if landing == 0:
-		_quoits_hits += 1
-		_quoits_pay += int(_quoits_cfg.get("ringer", 20))
-		_sting("coin")
-		if not rm:
-			Motion.burst(self, _quoits_root.get_global_position()
-				+ Vector2(315, 220), "coin_spark")
-		if _quoits_caption != null and is_instance_valid(_quoits_caption):
-			_quoits_caption.text = "AROUND THE PEG · %d WON" % _quoits_pay
-	elif absi(landing) == 1:
-		_quoits_pay += int(_quoits_cfg.get("leaner", 8))
-		if _quoits_caption != null and is_instance_valid(_quoits_caption):
-			_quoits_caption.text = "TOUCHING THE PEG · %d WON" % _quoits_pay
-	else:
-		if _quoits_caption != null and is_instance_valid(_quoits_caption):
-			_quoits_caption.text = "WIDE — THE WIND KEEPS IT"
-	_quoits_throw += 1
-	await get_tree().create_timer(0.9).timeout
-	if _quoits_root == null or not is_instance_valid(_quoits_root):
-		return
-	if _quoits_throw >= int(_quoits_cfg.get("throws", 3)):
-		if _quoits_pay > 0:
-			RunState.gain_gold(_quoits_pay)
-		if _quoits_hits >= int(_quoits_cfg.get("throws", 3)):
-			_sting("coin_pour")
-			_win_flourish()
-			_show_result(_quoits_text("perfect_text",
-				"Three ringers. Gained {pay} gold."))
-		elif _quoits_pay > 0:
-			_sting("coin")
-			_win_flourish()
-			_show_result(_quoits_text("win_text",
-				"The round ended with {pay} gold. You collect it."))
-		else:
-			_sting("hit_hero", -6.0)
-			_bust_feedback()
-			_show_result(_quoits_text("poor_text",
-				"All three throws missed. You lost the stake."))
-		return
-	await _quoits_shift_wind("THROW %d OF %d · READ THE CHAIN" % [
-		_quoits_throw + 1, int(_quoits_cfg.get("throws", 3))])
-	if _quoits_root == null or not is_instance_valid(_quoits_root):
-		return
-	_quoits_busy = false
-	_quoits_arm_rows()
-
-
 # ── Crown & Pike (crown_game) — back a mark, cast the three dice ─────────
 # Crown-and-Anchor, retold on the Old King's gaming board: six bold marks
 # (Crown · Pike · Skull · Banner · Coin · Wheel), each a distinct SILHOUETTE
@@ -8180,7 +7162,11 @@ func _on_crown_mark(i: int) -> void:
 	if _cap_caption != null and is_instance_valid(_cap_caption):
 		_cap_caption.text = "BACKED THE %s — CAST WHEN READY" % CAP_NAMES[i].to_upper()
 	_cap_refresh_pot()
-	_cap_arm_rows()
+	# The marks stay live after a winning cast, so re-backing here must NOT drop
+	# back to the pre-cast row set — that took "Bank the pot" off the board and
+	# left a won pot with no exit but another cast. A cast has happened iff we
+	# are in the after-win state: a bust ends the game on _show_result.
+	_cap_arm_rows(_cap_casts > 0)
 
 
 func _cap_arm_rows(after_win: bool = false) -> void:
@@ -8307,7 +7293,11 @@ func _pulse_crown_mark() -> void:
 	var wrap = _cap_pads[_cap_mark]["wrap"]
 	if is_instance_valid(wrap):
 		var tw: Tween = wrap.create_tween()
-		tw.tween_property(wrap, "scale", Vector2(1.18, 1.18), 0.09)
+		# The house PUNCH: QUAD-out on the way up, BACK-out home. Only the
+		# return carried its easing, so the pop itself grew at constant rate —
+		# a punch with no impact in it, which is the half a player feels.
+		tw.tween_property(wrap, "scale", Vector2(1.18, 1.18), 0.09) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 		tw.tween_property(wrap, "scale", Vector2.ONE, 0.18) \
 			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 
@@ -8543,10 +7533,13 @@ func _scale_arm_rows() -> void:
 			"Weigh %d against %d. Weighing %d of %d." % [
 				counts.x, counts.y, _scale_used + 1, _scale_max], "", 52,
 			_on_scale_drop))
-	_scale_rows.add_child(_make_frameless_choice("Name the false coin",
-		"Choose the light coin. Correct pays %d after %d weighing%s." % [
+	var name_sub := "Choose the light coin."
+	if _gamble_pays_coin(_scale_cfg, _scale_base_plus_saved()):
+		name_sub += " Correct pays %d after %d weighing%s." % [
 			_scale_base_plus_saved(), _scale_used,
-			"" if _scale_used == 1 else "s"], "", 52, _on_scale_begin_accuse))
+			"" if _scale_used == 1 else "s"]
+	_scale_rows.add_child(_make_frameless_choice("Name the false coin",
+		name_sub, "", 52, _on_scale_begin_accuse))
 
 
 func _scale_base_plus_saved() -> int:
@@ -8728,10 +7721,14 @@ func _box_text(key: String, fallback: String) -> String:
 		.replace("{code}", code_str)
 
 
-func _box_tier() -> int:
+## The pay for cracking it having spent `tries` attempts. Defaults to the tries
+## ALREADY spent — the live row must pass `_box_tries + 1`, because the attempt
+## it is offering is itself counted before _box_crack reads this.
+func _box_tier(tries: int = -1) -> int:
+	var spent: int = _box_tries if tries < 0 else tries
 	var base: int = int(_box_cfg.get("base", 40))
 	var per: int = int(_box_cfg.get("per_saved", 14))
-	return base + (_box_max - _box_tries) * per
+	return base + (_box_max - spent) * per
 
 
 func _start_box_game(effect: Dictionary) -> void:
@@ -8755,7 +7752,7 @@ func _start_box_game(effect: Dictionary) -> void:
 	_box_busy = true
 	var vbox := _build_event_screen(_event_data.name,
 		_box_text("open_text",
-			"Set four dials from 1 to 6. EXACT means correct number and position. MISPLACED means correct number in the wrong position."), 4)
+			"Set four dials from 1 to 6. Exact means correct number and position. Misplaced means correct number in the wrong position."), 4)
 	_box_rows = VBoxContainer.new()
 	_box_rows.add_theme_constant_override("separation", 12)
 	vbox.add_child(_box_rows)
@@ -8869,7 +7866,7 @@ func _build_box_stage() -> void:
 	_box_hist_label = hist
 	_stage_entrance(root)
 	GameTheme.attach_rich_hover(patch, "The paychest, marked IV",
-		"Turn each dial, then try the code. Use the EXACT and MISPLACED counts to solve it.",
+		"Turn each dial, then try the code. Use the Exact and Misplaced counts to solve it.",
 		"Turn the wards, then try the combination", Color(0.90, 0.84, 0.68), 1.0)
 
 
@@ -8879,9 +7876,13 @@ func _box_arm_rows() -> void:
 	for c in _box_rows.get_children():
 		c.queue_free()
 	var guess_str := " · ".join(_box_guess.map(func(v): return str(v)))
+	var try_sub := "Code: %s. Attempt %d of %d." % [guess_str,
+		_box_tries + 1, _box_max]
+	var crack_pay := _box_tier(_box_tries + 1)
+	if _gamble_pays_coin(_box_cfg, crack_pay):
+		try_sub += " Current reward: %d gold." % crack_pay
 	_box_rows.add_child(_make_frameless_choice("Try the combination",
-		"Code: %s. Attempt %d of %d. Current reward: %d gold." % [guess_str,
-			_box_tries + 1, _box_max, _box_tier()], "", 52, _on_box_try))
+		try_sub, "", 52, _on_box_try))
 
 
 func _on_box_dial(i: int) -> void:
@@ -9188,7 +8189,7 @@ func _deal_refresh() -> void:
 		if _deal_streak <= 0:
 			_deal_streak_lbl.text = "Make one correct call to earn a reward."
 		else:
-			_deal_streak_lbl.text = "%d correct in a row - %d gold available." % [
+			_deal_streak_lbl.text = "%d correct %s in a row - %d gold available." % [
 				_deal_streak, "call" if _deal_streak == 1 else "calls", _deal_pay]
 
 
@@ -9343,853 +8344,6 @@ func _on_deal_bank() -> void:
 			"Gained relic: %s." % RelicDB.get_relic(rid).name)])
 	_show_result(_combine_lines([_deal_text("bank_text",
 		"Collected {pay} gold."), receipt]))
-
-
-# ── The Signal Line (signal_game) — light the whole beacon-chain ──────────
-# The parity puzzle (1-D Lights Out), retold as the fire-watch's beacon
-# line: each cresset's draught catches the two beside it, so lighting one
-# flips its neighbours too. Get the whole line burning. HONEST BY
-# CONSTRUCTION and always solvable: the board is generated FROM the
-# all-lit state by a known scramble, so a solution provably exists (re-press
-# the scramble), and nothing is hidden — every beacon's state is on the
-# wall. Solve inside the press budget for pay that climbs toward the clean
-# line.
-#   Config: {stake, beacons: 7, scramble: 5, budget, base, per_under,
-#            open_text, win_text, poor_text, broke_text, seen_texts}
-#            — texts take {stake}/{pay}/{presses}/{par}.
-
-var _signal_cfg: Dictionary = {}
-var _signal_lit: Array = []
-var _signal_n := 7
-var _signal_presses := 0
-var _signal_par := 5
-var _signal_budget := 9
-var _signal_pay := 0
-var _signal_beacons: Array = []
-var _signal_root: Control = null
-var _signal_rows: VBoxContainer = null
-var _signal_caption: Label = null
-var _signal_busy := true
-
-
-func _signal_text(key: String, fallback: String) -> String:
-	var raw := _seen_text_override(_signal_cfg, key,
-		String(_signal_cfg.get(key, fallback)))
-	return raw.replace("{stake}", str(int(_signal_cfg.get("stake", 0)))) \
-		.replace("{pay}", str(_signal_pay)).replace("{presses}", str(_signal_presses)) \
-		.replace("{par}", str(_signal_par))
-
-
-func _signal_flip(i: int) -> void:
-	for j in [i - 1, i, i + 1]:
-		if j >= 0 and j < _signal_n:
-			_signal_lit[j] = not bool(_signal_lit[j])
-
-
-func _signal_all_lit() -> bool:
-	for v in _signal_lit:
-		if not bool(v):
-			return false
-	return true
-
-
-func _start_signal_game(effect: Dictionary) -> void:
-	_signal_cfg = effect
-	var stake: int = int(effect.get("stake", 0))
-	if stake > 0 and RunState.gold < stake:
-		_show_result(_signal_text("broke_text",
-			"You need {stake} gold to play."))
-		return
-	if stake > 0:
-		RunState.gold -= stake
-	_signal_n = clampi(int(effect.get("beacons", 7)), 3, 9)
-	_signal_par = clampi(int(effect.get("scramble", 5)), 1, _signal_n)
-	_signal_budget = int(effect.get("budget", _signal_par + 4))
-	_signal_presses = 0
-	_signal_pay = 0
-	# Generate FROM the solved (all-lit) state so a solution always exists.
-	var attempts := 0
-	while attempts < 20:
-		attempts += 1
-		_signal_lit = []
-		for _i in range(_signal_n):
-			_signal_lit.append(true)
-		var idx := range(_signal_n)
-		idx.shuffle()
-		for k in range(_signal_par):
-			_signal_flip(int(idx[k]))
-		if not _signal_all_lit():
-			break
-	_signal_busy = true
-	var vbox := _build_event_screen(_event_data.name,
-		_signal_text("open_text",
-			"Each beacon flips itself and its two neighbors. Turn every beacon on before you run out of moves."), 4)
-	_signal_rows = VBoxContainer.new()
-	_signal_rows.add_theme_constant_override("separation", 12)
-	vbox.add_child(_signal_rows)
-	_build_signal_stage()
-	_signal_busy = false
-	_signal_arm_rows()
-
-
-func _build_signal_stage() -> void:
-	_signal_beacons = []
-	var root := Control.new()
-	root.name = "SignalStage"
-	root.position = Vector2(860, 210)
-	root.size = Vector2(560, 430)
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(root)
-	_signal_root = root
-	var patch := CastPatch.new()
-	patch.seed_text = "signal_" + _event_id
-	patch.chalk = "line"
-	patch.light_center_frac = Vector2(0.0, -0.02)
-	patch.position = Vector2(10, 60)
-	patch.size = Vector2(540, 340)
-	root.add_child(patch)
-	var caption := Label.new()
-	caption.text = "LIGHT THE LINE · PAR %d · BUDGET %d" % [_signal_par, _signal_budget]
-	caption.add_theme_font_size_override("font_size", 18)
-	caption.add_theme_color_override("font_color", Color(0.82, 0.72, 0.52))
-	caption.position = Vector2(30, 84)
-	caption.size = Vector2(500, 24)
-	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	caption.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(caption)
-	_signal_caption = caption
-	# The wall the cressets are bracketed to.
-	var wall := ColorRect.new()
-	wall.color = Color(0.14, 0.12, 0.10, 0.55)
-	wall.position = Vector2(30, 250)
-	wall.size = Vector2(480, 8)
-	wall.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(wall)
-	var step := 480.0 / float(_signal_n)
-	for i in range(_signal_n):
-		var wrap := Control.new()
-		wrap.position = Vector2(30.0 + float(i) * step + (step - 64.0) * 0.5, 130.0)
-		wrap.size = Vector2(64, 120)
-		wrap.pivot_offset = Vector2(32, 70)
-		wrap.mouse_filter = Control.MOUSE_FILTER_PASS
-		root.add_child(wrap)
-		var bc := SignalBeacon.new()
-		bc.seed_text = "cresset_%d_%s" % [i, _event_id]
-		bc.lit = bool(_signal_lit[i])
-		bc.set_anchors_preset(Control.PRESET_FULL_RECT)
-		wrap.add_child(bc)
-		_signal_beacons.append(bc)
-		var btn := Button.new()
-		btn.flat = true
-		btn.focus_mode = Control.FOCUS_NONE
-		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
-		btn.mouse_filter = Control.MOUSE_FILTER_PASS
-		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-		for st in ["normal", "hover", "pressed", "focus"]:
-			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
-		btn.pressed.connect(_on_signal_press.bind(i))
-		btn.mouse_entered.connect(_on_signal_hover.bind(i, true))
-		btn.mouse_exited.connect(_on_signal_hover.bind(i, false))
-		_stage_touchable(wrap, btn)
-		wrap.add_child(btn)
-	_stage_entrance(root)
-	GameTheme.attach_rich_hover(patch, "The beacon-line",
-		"Click a beacon to flip it and its two neighbors. Light the full line. Fewer moves pay more.",
-		"Strike a beacon (it flips its neighbours too)", Color(0.94, 0.72, 0.40), 1.0)
-
-
-func _signal_refresh(changed: Array = []) -> void:
-	for i in range(_signal_beacons.size()):
-		var bc = _signal_beacons[i]
-		if not is_instance_valid(bc):
-			continue
-		bc.lit = bool(_signal_lit[i])
-		if i in changed and not UserSettings.reduce_motion:
-			bc.flare = 1.0
-			var tw: Tween = bc.create_tween()
-			tw.tween_method(func(v): bc.flare = v; bc.queue_redraw(),
-				1.0, 0.0, 0.4).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		bc.queue_redraw()
-
-
-## Hover-telegraph: light a dashed ring on the cresset under the cursor and
-## its two neighbours — the exact three a strike here would flip. Purely
-## informational, so it holds under Reduce Motion too.
-func _on_signal_hover(i: int, entering: bool) -> void:
-	if _signal_busy:
-		return
-	for j in [i - 1, i, i + 1]:
-		if j >= 0 and j < _signal_n and j < _signal_beacons.size():
-			var bc = _signal_beacons[j]
-			if is_instance_valid(bc):
-				bc.preview = entering
-				bc.queue_redraw()
-
-
-func _on_signal_press(i: int) -> void:
-	if _signal_busy:
-		return
-	# Clear any hover-preview rings before the strike resolves.
-	for bc in _signal_beacons:
-		if is_instance_valid(bc):
-			bc.preview = false
-	_signal_flip(i)
-	_signal_presses += 1
-	AudioBank.play_sfx("card_play", 0.06, -9.0, 1.05)
-	var changed := []
-	for j in [i - 1, i, i + 1]:
-		if j >= 0 and j < _signal_n:
-			changed.append(j)
-	_signal_refresh(changed)
-	if not UserSettings.reduce_motion and _signal_root != null \
-			and is_instance_valid(_signal_root):
-		var wrap = _signal_beacons[i].get_parent()
-		Motion.ring(self, _signal_root.get_global_position()
-			+ wrap.position + Vector2(32, 88), Color(0.92, 0.52, 0.20),
-			{"radius": 30.0, "duration": 0.35})
-	if _signal_all_lit():
-		await _signal_win()
-		return
-	if _signal_presses >= _signal_budget:
-		await _signal_fail()
-		return
-	if _signal_caption != null and is_instance_valid(_signal_caption):
-		var lit := 0
-		for v in _signal_lit:
-			if bool(v):
-				lit += 1
-		_signal_caption.text = "%d OF %d LIT · %d PRESSES · BUDGET %d" % [
-			lit, _signal_n, _signal_presses, _signal_budget]
-	_signal_arm_rows()
-
-
-func _signal_arm_rows() -> void:
-	if _signal_rows == null or not is_instance_valid(_signal_rows):
-		return
-	for c in _signal_rows.get_children():
-		c.queue_free()
-	var base: int = int(_signal_cfg.get("base", 22))
-	var per: int = int(_signal_cfg.get("per_under", 7))
-	var best := base + maxi(0, _signal_budget - _signal_par) * per
-	_signal_rows.add_child(_make_frameless_choice("Strike the beacons",
-		"Light every beacon. Solving it in %d moves pays up to %d gold." % [
-			_signal_par, best], "", 52, func(): pass))
-	_signal_rows.add_child(_make_frameless_choice("Leave the line dark",
-		"Leave and lose the %d gold stake." % int(_signal_cfg.get("stake", 0)),
-		"", 52, _on_signal_giveup))
-
-
-func _on_signal_giveup() -> void:
-	if _signal_busy:
-		return
-	_signal_busy = true
-	_show_result(_signal_text("giveup_text",
-		"You left before solving the line. You lost the stake."))
-
-
-func _signal_win() -> void:
-	_signal_busy = true
-	var base: int = int(_signal_cfg.get("base", 22))
-	var per: int = int(_signal_cfg.get("per_under", 7))
-	_signal_pay = base + maxi(0, _signal_budget - _signal_presses) * per
-	if _signal_caption != null and is_instance_valid(_signal_caption):
-		_signal_caption.text = "THE WHOLE LINE BURNS · %d PRESSES" % _signal_presses
-	if not UserSettings.reduce_motion and _signal_root != null \
-			and is_instance_valid(_signal_root):
-		for i in range(_signal_beacons.size()):
-			var wrap = _signal_beacons[i].get_parent()
-			Motion.ring(self, _signal_root.get_global_position()
-				+ wrap.position + Vector2(32, 88), Color(0.96, 0.66, 0.28),
-				{"radius": 26.0, "duration": 0.5, "delay": float(i) * 0.05})
-	RunState.gain_gold(_signal_pay)
-	_sting("coin_pour" if _signal_presses <= _signal_par else "coin")
-	_win_flourish()
-	await get_tree().create_timer(0.9).timeout
-	_show_result(_signal_text("win_text",
-		"All beacons are lit. Gained {pay} gold."))
-
-
-func _signal_fail() -> void:
-	_signal_busy = true
-	_sting("hit_hero", -6.0)
-	_bust_feedback()
-	if _signal_caption != null and is_instance_valid(_signal_caption):
-		_signal_caption.text = "OUT OF STRIKES · THE LINE STAYS BROKEN"
-	await get_tree().create_timer(0.8).timeout
-	_show_result(_signal_text("poor_text",
-		"You ran out of moves. You lost the stake."))
-
-
-# ── The Sentry's Board (morris_game) — three men's morris vs the drill ───
-# The pool's first true board game: three stones each on a merels grid
-# scratched into a guard-post flagstone, against a sentry of the Fourth
-# who was never relieved. Rules posted plain: place your three (the
-# garrison rule — not the middle post to open), then stones SLIDE along
-# the scratched lines (Tapatan movement); three in a row wins. The sentry
-# cannot improvise — he plays the standing drill, fully posted and
-# DETERMINISTIC: complete his mill, else block yours, else the middle
-# post, else the roll (first free post, far rank first, left to right);
-# on the march he also refuses any move that hands you a mill next turn
-# ("he never opens a door") — unless every move does. The drill being
-# learnable IS the game: forks beat him, and tools/_probe_morris_solve.gd
-# proves a forced player win exists against the exact shipped drill.
-# If neither side mills inside the move budget the watch calls the game
-# and the stake comes back. Telegraphs: threat tints ride the grooves
-# (gilt = yours, ember = his), a lifted stone halos with its legal posts
-# ringed green, and every drill choice is captioned in the open.
-# Config: {stake, payout, calls, open_text, win_text, lose_text,
-#          call_text, concede_text, broke_text, seen_texts} — texts take
-#          {stake} / {payout}.
-
-## Post adjacency along the scratched lines (Tapatan movement): consecutive
-## points of each mill only. The middle post touches all eight.
-const MOR_ADJ := [
-	[1, 3, 4], [0, 2, 4], [1, 4, 5],
-	[0, 4, 6], [0, 1, 2, 3, 5, 6, 7, 8], [2, 4, 8],
-	[3, 4, 7], [4, 6, 8], [4, 5, 7]]
-
-## In-world names for the nine posts — captions speak these, never numbers.
-const MOR_POST := [
-	"the far-left corner", "the far post", "the far-right corner",
-	"the left post", "the middle post", "the right post",
-	"the near-left corner", "the near post", "the near-right corner"]
-
-const MOR_STONE_SIZE := [30.0, 34.0, 38.0]  # by rank — nearer is bigger
-
-var _mor_cfg: Dictionary = {}
-var _mor_board: Array = []       # 9 posts: 0 empty / 1 you / 2 the sentry
-var _mor_stones: Array = []      # 9 posts → the seated prop Control (null = empty)
-var _mor_phase := "place"        # "place" → "move"
-var _mor_placed := [0, 0]        # stones placed: [you, him]
-var _mor_sel := -1               # your lifted stone's post
-var _mor_moves_left := 18        # march plies before the watch calls the game
-var _mor_root: Control = null
-var _mor_board_item: Control = null
-var _mor_status: Label = null
-var _mor_clock: Label = null
-var _mor_busy := true
-var _mor_over := false
-
-
-# ── The drill, as pure board functions (probed headless) ──
-# A board is a 9-int Array (0 empty / 1 player / 2 sentry). These are
-# STATIC so tools/_probe_morris_solve.gd can drive the exact shipped drill
-# and prove the player's forced win exists — change the drill, rerun it.
-
-static func mor_mill(board: Array, side: int) -> Array:
-	# The milled line's posts, or [] when side holds no mill.
-	for ln in MerelsBoard.LINES:
-		if int(board[ln[0]]) == side and int(board[ln[1]]) == side \
-				and int(board[ln[2]]) == side:
-			return ln
-	return []
-
-
-static func mor_completions(board: Array, side: int) -> Array:
-	# Empty posts that would complete a mill for side, muster order.
-	var out: Array = []
-	for p in range(9):
-		if int(board[p]) != 0:
-			continue
-		for ln in MerelsBoard.LINES:
-			if not p in ln:
-				continue
-			var n := 0
-			for q in ln:
-				if int(board[q]) == side:
-					n += 1
-			if n == 2 and not p in out:
-				out.append(p)
-	return out
-
-
-static func mor_moves(board: Array, side: int) -> Array:
-	# Legal marches for side: [from, to] pairs, muster order.
-	var out: Array = []
-	for s in range(9):
-		if int(board[s]) != side:
-			continue
-		for d in MOR_ADJ[s]:
-			if int(board[d]) == 0:
-				out.append([s, int(d)])
-	return out
-
-
-static func mor_can_mill_by_move(board: Array, side: int) -> bool:
-	for mv in mor_moves(board, side):
-		var b := board.duplicate()
-		b[mv[0]] = 0
-		b[mv[1]] = side
-		if not mor_mill(b, side).is_empty():
-			return true
-	return false
-
-
-static func mor_place_ai(board: Array) -> int:
-	# The posted placement drill: mill, block, the middle post, the roll.
-	var own := mor_completions(board, 2)
-	if not own.is_empty():
-		return int(own[0])
-	# He blocks the SHAPE of your threat, reachable or not — a hundred
-	# years of drill does not ask whether the threat is real.
-	var yours := mor_completions(board, 1)
-	if not yours.is_empty():
-		return int(yours[0])
-	if int(board[4]) == 0:
-		return 4
-	for p in range(9):
-		if int(board[p]) == 0:
-			return p
-	return -1
-
-
-static func mor_move_ai(board: Array) -> Array:
-	# The posted march drill: mill, block, never opens a door, the roll.
-	var moves := mor_moves(board, 2)
-	if moves.is_empty():
-		return []
-	for mv in moves:
-		var b := board.duplicate()
-		b[mv[0]] = 0
-		b[mv[1]] = 2
-		if not mor_mill(b, 2).is_empty():
-			return mv
-	# Block: the landing posts of your actual milling marches, first
-	# reachable one in muster order.
-	var doors: Array = []
-	for mv2 in mor_moves(board, 1):
-		var b2 := board.duplicate()
-		b2[mv2[0]] = 0
-		b2[mv2[1]] = 1
-		if not mor_mill(b2, 1).is_empty() and not int(mv2[1]) in doors:
-			doors.append(int(mv2[1]))
-	for t in doors:
-		for mv in moves:
-			if int(mv[1]) == int(t):
-				return mv
-	# "He never opens a door": refuse any march that leaves you a mill
-	# next turn — unless every march does.
-	for mv in moves:
-		var b3 := board.duplicate()
-		b3[mv[0]] = 0
-		b3[mv[1]] = 2
-		if not mor_can_mill_by_move(b3, 1):
-			return mv
-	return moves[0]
-
-
-func _mor_text(key: String, fallback: String) -> String:
-	var raw := _seen_text_override(_mor_cfg, key,
-		String(_mor_cfg.get(key, fallback)))
-	return raw.replace("{stake}", str(int(_mor_cfg.get("stake", 0)))) \
-		.replace("{payout}", str(int(_mor_cfg.get("payout", 0))))
-
-
-func _start_morris_game(effect: Dictionary) -> void:
-	_mor_cfg = effect
-	var stake: int = int(effect.get("stake", 0))
-	if stake > 0 and RunState.gold < stake:
-		_show_result(_mor_text("broke_text",
-			"You need {stake} gold to play."))
-		return
-	if stake > 0:
-		RunState.gold -= stake
-	_mor_board = []
-	_mor_stones = []
-	for _i in range(9):
-		_mor_board.append(0)
-		_mor_stones.append(null)
-	_mor_phase = "place"
-	_mor_placed = [0, 0]
-	_mor_sel = -1
-	_mor_moves_left = int(effect.get("calls", 18))
-	_mor_over = false
-	_mor_busy = true
-	var vbox := _build_event_screen(_event_data.name,
-		_mor_text("open_text",
-			"Place three stones, but not in the center first. Then slide along the lines. Make a row of three to win. The opponent's next move is shown."), 1)
-	vbox.add_child(_make_frameless_choice(
-		"Concede and lose the stake", "End the game and lose your stake.", "", 52,
-		_on_mor_concede))
-	_build_mor_stage()
-	_mor_busy = false
-
-
-func _build_mor_stage() -> void:
-	var root := Control.new()
-	root.name = "MorrisStage"
-	root.position = Vector2(860, 200)
-	root.size = Vector2(560, 440)
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(root)
-	_mor_root = root
-	var board := MerelsBoard.new()
-	board.seed_text = "merels_" + _event_id
-	board.position = Vector2(56, 70)
-	board.size = Vector2(448, 300)
-	root.add_child(board)
-	_mor_board_item = board
-	# One invisible button over each post.
-	for i in range(9):
-		var btn := Button.new()
-		btn.flat = true
-		btn.focus_mode = Control.FOCUS_NONE
-		for st in ["normal", "hover", "pressed", "focus"]:
-			btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
-		btn.mouse_filter = Control.MOUSE_FILTER_PASS
-		btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-		btn.size = Vector2(46, 46)
-		btn.position = board.position + board.point_pos(i) - Vector2(23, 23)
-		btn.pressed.connect(_on_mor_post.bind(i))
-		btn.mouse_entered.connect(_on_mor_hover.bind(i))
-		btn.mouse_exited.connect(_on_mor_unhover)
-		root.add_child(btn)
-	var status := Label.new()
-	status.text = "YOUR STONE FIRST — NOT THE MIDDLE POST"
-	status.add_theme_font_size_override("font_size", 18)
-	status.add_theme_color_override("font_color", Color(0.92, 0.88, 0.80))
-	status.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
-	status.add_theme_constant_override("outline_size", 4)
-	status.position = Vector2(30, 26)
-	status.size = Vector2(500, 24)
-	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	status.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(status)
-	_mor_status = status
-	var clock := Label.new()
-	clock.text = ""
-	clock.add_theme_font_size_override("font_size", 16)
-	clock.add_theme_color_override("font_color", Color(0.80, 0.74, 0.62))
-	clock.position = Vector2(30, 372)
-	clock.size = Vector2(500, 18)
-	clock.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	clock.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(clock)
-	_mor_clock = clock
-	var drill := Label.new()
-	drill.text = "OPPONENT PRIORITY: WIN - BLOCK - CENTER - RANDOM\nNO DIAGONAL MOVES"
-	drill.add_theme_font_size_override("font_size", 16)
-	drill.add_theme_color_override("font_color", Color(0.66, 0.60, 0.50))
-	drill.position = Vector2(30, 394)
-	drill.size = Vector2(500, 42)
-	drill.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	drill.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(drill)
-	GameTheme.attach_rich_hover(board, "The sentry's board",
-		"Place three stones. Then select one of your stones and an adjacent open point. Make a row of three to win.",
-		"His whole drill is posted — beat it", Color(0.92, 0.88, 0.80), 1.0)
-	_stage_entrance(root)
-
-
-func _mor_caption(text: String) -> void:
-	if _mor_status != null and is_instance_valid(_mor_status):
-		_mor_status.text = text
-
-
-func _mor_update_clock() -> void:
-	if _mor_clock == null or not is_instance_valid(_mor_clock):
-		return
-	if _mor_phase != "move" or _mor_over:
-		_mor_clock.text = ""
-		return
-	_mor_clock.text = "THE WATCH CALLS THE GAME IN %d MOVES" % _mor_moves_left
-
-
-func _mor_refresh_rings() -> void:
-	if _mor_board_item == null or not is_instance_valid(_mor_board_item):
-		return
-	_mor_board_item.select_point = _mor_sel
-	var dests: Array = []
-	if _mor_sel >= 0:
-		for d in MOR_ADJ[_mor_sel]:
-			if int(_mor_board[d]) == 0:
-				dests.append(int(d))
-	_mor_board_item.dest_points = dests
-	_mor_board_item.queue_redraw()
-	# The lifted stone also brightens — the halo alone can hide under the
-	# stone's own footprint (informational, holds steady).
-	for p in range(9):
-		var st = _mor_stones[p]
-		if st != null and is_instance_valid(st) and int(_mor_board[p]) == 1:
-			st.modulate = Color(1.18, 1.12, 0.94) if p == _mor_sel else Color.WHITE
-
-
-func _mor_refresh_threats() -> void:
-	if _mor_board_item == null or not is_instance_valid(_mor_board_item):
-		return
-	var out: Array = []
-	for ln in MerelsBoard.LINES:
-		var you := 0
-		var him := 0
-		var open := 0
-		for q in ln:
-			match int(_mor_board[q]):
-				1: you += 1
-				2: him += 1
-				0: open += 1
-		if open == 1 and you == 2:
-			out.append({"pts": ln, "col": Color(0.85, 0.72, 0.38, 0.30)})
-		elif open == 1 and him == 2:
-			out.append({"pts": ln, "col": Color(0.80, 0.36, 0.20, 0.32)})
-	_mor_board_item.threats = out
-	_mor_board_item.queue_redraw()
-
-
-func _mor_seat_pos(i: int, sz: float) -> Vector2:
-	# Stones sit a touch above the pit so their ground pool reads under them.
-	return _mor_board_item.position + _mor_board_item.point_pos(i) \
-		- Vector2(sz * 0.5, sz * 0.62)
-
-
-func _mor_make_stone(side: int, i: int) -> Control:
-	var sz: float = MOR_STONE_SIZE[int(i / 3.0)] * (1.0 if side == 1 else 0.92)
-	var s: Control
-	if side == 1:
-		var coin := CoinProp.new()
-		coin.lying = true
-		coin.worn = true
-		coin.seed_text = "mor_coin_%d_%s" % [i, _event_id]
-		s = coin
-	else:
-		var bone := BoneTessera.new()
-		bone.seed_text = "mor_bone_%d_%s" % [i, _event_id]
-		s = bone
-	s.size = Vector2(sz, sz)
-	s.position = _mor_seat_pos(i, sz)
-	_mor_root.add_child(s)
-	return s
-
-
-func _mor_place_stone(side: int, i: int) -> void:
-	_mor_board[i] = side
-	var s := _mor_make_stone(side, i)
-	_mor_stones[i] = s
-	AudioBank.play_sfx("bone_settle", 0.06, -8.0, 1.15 if side == 1 else 0.85)
-	if not UserSettings.reduce_motion:
-		var dest := s.position
-		s.position = dest + (Vector2(0, 70) if side == 1 else Vector2(0, -60))
-		s.modulate.a = 0.0
-		var tw := s.create_tween()
-		tw.tween_property(s, "position", dest, 0.24) \
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		tw.parallel().tween_property(s, "modulate:a", 1.0, 0.16)
-	_mor_refresh_threats()
-
-
-func _mor_slide_stone(from: int, to: int, side: int) -> void:
-	var s = _mor_stones[from]
-	_mor_board[from] = 0
-	_mor_board[to] = side
-	_mor_stones[from] = null
-	_mor_stones[to] = s
-	AudioBank.play_sfx("bone_settle", 0.06, -10.0, 0.7)
-	if s != null and is_instance_valid(s):
-		var sz: float = MOR_STONE_SIZE[int(to / 3.0)] * (1.0 if side == 1 else 0.92)
-		var dest := _mor_seat_pos(to, sz)
-		if UserSettings.reduce_motion:
-			s.size = Vector2(sz, sz)
-			s.position = dest
-		else:
-			var tw: Tween = s.create_tween()
-			tw.tween_property(s, "position", dest, 0.30) \
-				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN_OUT)
-			tw.parallel().tween_property(s, "size", Vector2(sz, sz), 0.30)
-	_mor_refresh_threats()
-
-
-func _on_mor_hover(i: int) -> void:
-	if _mor_busy or _mor_over or _mor_board_item == null \
-			or not is_instance_valid(_mor_board_item):
-		return
-	var b = _mor_board_item
-	if _mor_phase == "place":
-		if int(_mor_board[i]) == 0 and not (_mor_placed[0] == 0 and i == 4):
-			b.hover_point = i
-	else:
-		if _mor_sel < 0 and int(_mor_board[i]) == 1:
-			# Preview a stone's legal posts before you even lift it.
-			var dests: Array = []
-			for d in MOR_ADJ[i]:
-				if int(_mor_board[d]) == 0:
-					dests.append(int(d))
-			b.dest_points = dests
-			b.hover_point = i
-		elif _mor_sel >= 0 and int(_mor_board[i]) == 0 and i in MOR_ADJ[_mor_sel]:
-			b.hover_point = i
-	b.queue_redraw()
-
-
-func _on_mor_unhover() -> void:
-	if _mor_board_item == null or not is_instance_valid(_mor_board_item):
-		return
-	_mor_board_item.hover_point = -1
-	_mor_refresh_rings()
-
-
-func _on_mor_post(i: int) -> void:
-	if _mor_busy or _mor_over:
-		return
-	if _mor_phase == "place":
-		if int(_mor_board[i]) != 0:
-			return
-		if _mor_placed[0] == 0 and i == 4:
-			_mor_caption("THE GARRISON RULE: NOT THE MIDDLE POST TO OPEN")
-			return
-		_mor_busy = true
-		_mor_place_stone(1, i)
-		_mor_placed[0] += 1
-		if not mor_mill(_mor_board, 1).is_empty():
-			await _finish_mor(true)
-			return
-		await _mor_ai_turn()
-	else:
-		if int(_mor_board[i]) == 1:
-			_mor_sel = -1 if _mor_sel == i else i
-			_mor_refresh_rings()
-			return
-		if _mor_sel < 0 or int(_mor_board[i]) != 0 or not i in MOR_ADJ[_mor_sel]:
-			return
-		_mor_busy = true
-		var moved_from := _mor_sel
-		_mor_sel = -1
-		_mor_refresh_rings()
-		_mor_slide_stone(moved_from, i, 1)
-		await get_tree().create_timer(0.32).timeout
-		if _mor_over or _mor_root == null or not is_instance_valid(_mor_root):
-			return
-		if not mor_mill(_mor_board, 1).is_empty():
-			await _finish_mor(true)
-			return
-		_mor_moves_left -= 1
-		_mor_update_clock()
-		if _mor_moves_left <= 0:
-			await _mor_watch_calls()
-			return
-		await _mor_ai_turn()
-
-
-func _mor_drill_why_place(p: int) -> String:
-	if p in mor_completions(_mor_board, 2):
-		return "HIS DRILL: THE MILL, AT " + MOR_POST[p].to_upper()
-	if p in mor_completions(_mor_board, 1):
-		return "HIS DRILL: HE BLOCKS " + MOR_POST[p].to_upper()
-	if p == 4:
-		return "HIS DRILL: HE TAKES THE MIDDLE POST"
-	return "HIS DRILL: THE ROLL SAYS " + MOR_POST[p].to_upper()
-
-
-func _mor_drill_why_move(mv: Array) -> String:
-	var b := _mor_board.duplicate()
-	b[mv[0]] = 0
-	b[mv[1]] = 2
-	if not mor_mill(b, 2).is_empty():
-		return "HIS DRILL: THE MILL, AT " + MOR_POST[int(mv[1])].to_upper()
-	var doors: Array = []
-	for mv2 in mor_moves(_mor_board, 1):
-		var b2 := _mor_board.duplicate()
-		b2[mv2[0]] = 0
-		b2[mv2[1]] = 1
-		if not mor_mill(b2, 1).is_empty() and not int(mv2[1]) in doors:
-			doors.append(int(mv2[1]))
-	if int(mv[1]) in doors:
-		return "HIS DRILL: HE BLOCKS " + MOR_POST[int(mv[1])].to_upper()
-	return "HIS DRILL: THE ROLL — " + MOR_POST[int(mv[0])].to_upper() \
-		+ " TO " + MOR_POST[int(mv[1])].to_upper()
-
-
-func _mor_ai_turn() -> void:
-	_mor_busy = true
-	_mor_caption("HE READS THE ROLL…")
-	await get_tree().create_timer(0.60).timeout
-	if _mor_over or _mor_root == null or not is_instance_valid(_mor_root):
-		return
-	if _mor_phase == "place":
-		var p := mor_place_ai(_mor_board)
-		if p < 0:
-			await _mor_watch_calls()
-			return
-		var why := _mor_drill_why_place(p)
-		_mor_place_stone(2, p)
-		_mor_placed[1] += 1
-		_mor_caption(why)
-		if not mor_mill(_mor_board, 2).is_empty():
-			await _finish_mor(false)
-			return
-		if _mor_placed[0] >= 3 and _mor_placed[1] >= 3:
-			_mor_phase = "move"
-			_mor_update_clock()
-			_mor_caption("ALL SIX DOWN — STONES SLIDE ALONG THE LINES NOW")
-	else:
-		var mv := mor_move_ai(_mor_board)
-		if mv.is_empty():
-			await _mor_watch_calls()
-			return
-		var why2 := _mor_drill_why_move(mv)
-		_mor_slide_stone(int(mv[0]), int(mv[1]), 2)
-		await get_tree().create_timer(0.32).timeout
-		if _mor_over or _mor_root == null or not is_instance_valid(_mor_root):
-			return
-		_mor_caption(why2)
-		if not mor_mill(_mor_board, 2).is_empty():
-			await _finish_mor(false)
-			return
-		_mor_moves_left -= 1
-		_mor_update_clock()
-		if _mor_moves_left <= 0:
-			await _mor_watch_calls()
-			return
-	# Zugzwang guard: if you cannot march, the watch calls the game.
-	if _mor_phase == "move" and mor_moves(_mor_board, 1).is_empty():
-		await _mor_watch_calls()
-		return
-	_mor_busy = false
-
-
-func _finish_mor(win: bool) -> void:
-	_mor_over = true
-	var line := mor_mill(_mor_board, 1 if win else 2)
-	if _mor_board_item != null and is_instance_valid(_mor_board_item):
-		_mor_board_item.win_pts = line
-		_mor_board_item.select_point = -1
-		_mor_board_item.dest_points = []
-		_mor_board_item.hover_point = -1
-		_mor_board_item.queue_redraw()
-	_mor_update_clock()
-	_mor_caption("THREE IN A ROW — THE MILL" if win else "HIS MILL — THE DRILL HOLDS")
-	AudioBank.play_sfx("bone_settle", 0.05, -6.0, 1.2 if win else 0.6)
-	await get_tree().create_timer(0.9).timeout
-	if win:
-		RunState.gain_gold(int(_mor_cfg.get("payout", 0)))
-		_sting("coin")
-		_win_flourish()
-		_show_result(_mor_text("win_text",
-			"You made a row of three. Gained {payout} gold."))
-	else:
-		_sting("hit_hero", -4.0)
-		_bust_feedback()
-		_show_result(_mor_text("lose_text",
-			"The opponent made a row of three. You lost the stake."))
-
-
-func _mor_watch_calls() -> void:
-	_mor_over = true
-	var stake: int = int(_mor_cfg.get("stake", 0))
-	if stake > 0:
-		RunState.gain_gold(stake)
-	_mor_caption("THE WATCH CALLS THE GAME")
-	_mor_update_clock()
-	await get_tree().create_timer(0.7).timeout
-	_show_result(_mor_text("call_text",
-		"The game ended in a draw. Your stake was returned."))
-
-
-func _on_mor_concede() -> void:
-	if _mor_busy or _mor_over:
-		return
-	_mor_over = true
-	_sting("hit_hero", -6.0)
-	_show_result(_mor_text("concede_text",
-		"You conceded. You lost the stake."))
 
 
 # ── Risk loop (risk_loop) — the generic "do it again?" engine ────────────
@@ -10423,6 +8577,11 @@ func _appraisal_roll(exclude: int) -> int:
 		return exclude
 	return pool[randi() % pool.size()]
 
+func _appraisal_has_alternate(exclude: int) -> bool:
+	for i in range(RunState.deck.size()):
+		if i != exclude and not CardDB.is_curse(RunState.deck[i]):
+			return true
+	return false
 
 func _appraisal_price(deck_index: int) -> int:
 	var data = RunState.get_upgraded_card_data(deck_index)
@@ -10439,13 +8598,14 @@ func _build_appraisal_screen() -> void:
 	var data = RunState.get_upgraded_card_data(_appr_index)
 	var price := _appraisal_price(_appr_index)
 
-	var can_another: bool = _appr_shown < 3 and RunState.deck.size() > 1
+	var can_another: bool = _appr_shown < 3 and _appraisal_has_alternate(_appr_index)
 	var n_choices: int = 3 if can_another else 2
 	# Choices sit right of the appraised card (96–321), so widen the left inset.
 	var choices_vbox := _build_event_screen(
 		"She holds up [color=#e8b547]%s[/color]" % String(data.get("name", "a card")),
 		"She offers a price for this card.",
 		n_choices, 360, 980)
+	var build_gen := _ui_build_gen
 
 	# The card itself, stood on the scrim left of the choices.
 	var wrapper := Control.new()
@@ -10455,13 +8615,8 @@ func _build_appraisal_screen() -> void:
 	wrapper.offset_right = 321
 	wrapper.offset_top = -40
 	wrapper.offset_bottom = 260
-	var card_node = CARD_SCENE.instantiate()
-	card_node.static_display = true
-	card_node.card_data = data
-	card_node.live_baked_mode = true
-	CardTextureCache.bake(data)
-	wrapper.add_child(card_node)
 	add_child(wrapper)
+	_hydrate_staged_card(wrapper, data, 0.0, build_gen)
 
 	choices_vbox.add_child(_make_frameless_choice("Sell it",
 		"Trade %s for %d gold." % [String(data.get("name", "the card")), price],
@@ -10469,7 +8624,7 @@ func _build_appraisal_screen() -> void:
 	if can_another:
 		choices_vbox.add_child(_make_frameless_choice("Show her another",
 			"Look at a different card.",
-			"\"As you like. The figure was for THAT one.\"", 84,
+			"\"As you like. The figure was for the other one.\"", 84,
 			_on_appraisal_another))
 	choices_vbox.add_child(_make_frameless_choice("Keep your things", "",
 		"She slides the card back without a word.", 84,
@@ -10494,12 +8649,14 @@ func _on_appraisal_sell() -> void:
 
 
 func _on_appraisal_another() -> void:
+	var next_index := _appraisal_roll(_appr_index)
+	if next_index < 0 or next_index == _appr_index:
+		return
 	_appr_shown += 1
 	_appr_mult *= 0.85
-	_appr_index = _appraisal_roll(_appr_index)
+	_appr_index = next_index
 	AudioBank.play_sfx("button_click")
 	_build_appraisal_screen()
-
 
 # ── Event definitions ──
 #

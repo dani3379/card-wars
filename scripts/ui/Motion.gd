@@ -206,6 +206,7 @@ static func particle_tex(kind: String) -> Texture2D:
 
 
 static var _beam_cache: Dictionary = {}
+static var _soft_rect_shader: Shader = null
 static var _beam_shader_cache: Shader = null
 
 ## ── The beam kit (2026-09-09) ─────────────────────────────────────────
@@ -248,6 +249,12 @@ static func beam_tex(kind: String) -> Texture2D:
 	var edge := 1.9
 	var halo := 0.85
 	var grain := 0.18
+	# How much the EDGE HARDNESS wanders along the run (lost-and-found). It is
+	# per-kind and deliberately smallest on the INFORMATIONAL kinds: a chevron
+	# or an aim thread is a read-aid, and Into the Breach's rule applies —
+	# clarity before spectacle. A stroke that melts where the player is trying
+	# to measure something is a worse stroke, however well drawn.
+	var lost_e := 0.30
 	# "comet" ramps alpha ALONG the line (0 at the tail, 1 at the head). It lives
 	# in the texture rather than in a Line2D `gradient` because the beam shader
 	# writes COLOR outright and never reads the vertex colour a gradient sets.
@@ -255,12 +262,16 @@ static func beam_tex(kind: String) -> Texture2D:
 	match kind:
 		"bolt":
 			core = 0.11; edge = 1.8; halo = 0.90; grain = 0.22
+			lost_e = 0.42   # lightning is the least machined thing here
 		"streak":
 			core = 0.18; edge = 2.1; halo = 0.80; grain = 0.10
+			lost_e = 0.20   # read-aid kind (chevrons): keep it measurable
 		"comet":
 			core = 0.16; edge = 2.0; halo = 0.82; grain = 0.08; comet = true
+			lost_e = 0.22   # the targeting arrow and aim thread ride this
 		"trail":
 			core = 0.26; edge = 1.5; halo = 0.70; grain = 0.06
+			lost_e = 0.38   # a drag ribbon is pure atmosphere; let it breathe
 		"ink":
 			# INK IS NOT ENERGY, and the profile is where that gets decided.
 			# Every other kind here is a GLOW — a thin hot spine with a wide soft
@@ -278,12 +289,17 @@ static func beam_tex(kind: String) -> Texture2D:
 			#     breathes in weight along its length; a line that does not is
 			#     the tell that a machine drew it.
 			core = 0.34; edge = 1.05; halo = 0.62; grain = 0.34
+			# The HIGHEST here: a nib bleeds into paper unevenly, so a pen stroke
+			# has the most wandering edge of anything in the kit.
+			lost_e = 0.52
 		_:
 			pass
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash(kind)
 	var h1 := rng.randf_range(0.0, TAU)
 	var h2 := rng.randf_range(0.0, TAU)
+	var h3 := rng.randf_range(0.0, TAU)
+	var h4 := rng.randf_range(0.0, TAU)
 	var img := Image.create(lu, lv, false, Image.FORMAT_RGBA8)
 	for u in lu:
 		var fu := float(u) / float(lu - 1)
@@ -292,15 +308,151 @@ static func beam_tex(kind: String) -> Texture2D:
 			* (0.5 + 0.5 * sin(fu * TAU * 7.0 + h2))
 		if comet:
 			g *= pow(fu, 1.6)
+		# LOST AND FOUND EDGES, ALONG THE RUN — the ring's angular version of
+		# this, applied to the other half of the kit. `grain` already varies a
+		# beam's ALPHA down its length, but its EDGE HARDNESS was constant for
+		# the whole stroke: the same falloff at the tail as at the head, which
+		# is the thing a drawn line never does. Varying the falloff POWER gives
+		# passages where the stroke is crisp and passages where it melts into
+		# the ground, which is what stops a correct beam still reading as
+		# extruded.
+		#
+		# Harmonics 2 and 3, as on the ring and for the same reason: this works
+		# in LONG passages. At `grain`'s 3-and-7 it would read as a dirty edge
+		# rather than a lost one. A LOWER power is a SLOWER falloff, i.e. softer.
+		var e_u: float = edge * (1.0 + lost_e * (0.62 * sin(fu * TAU * 2.0 + h3)
+			+ 0.38 * sin(fu * TAU * 3.0 - h4)))
 		for v in lv:
 			var t: float = absf(2.0 * float(v) / float(lv - 1) - 1.0)
 			var hot: float = pow(clampf(1.0 - t / core, 0.0, 1.0), 0.55)
-			var body: float = pow(clampf(1.0 - t, 0.0, 1.0), edge)
+			var body: float = pow(clampf(1.0 - t, 0.0, 1.0), maxf(e_u, 0.20))
 			var a: float = clampf(hot + body * halo, 0.0, 1.0) * g
 			img.set_pixel(u, v, Color(hot, hot, hot, a))
 	var tex := ImageTexture.create_from_image(img)
 	_beam_cache[kind] = tex
 	return tex
+
+
+## Feather a ColorRect's edges — THE CORRECT FORM FOR A SLAB USED AS LIGHT.
+##
+## A ColorRect is a rectangle of uniform colour with four hard edges, which is
+## exactly right for a SCRIM (a dim layer is meant to be even, and a full-rect
+## one has no visible edge at all) and exactly wrong for a wash, a sweep or a
+## touch: light has no straight sides. `_spell_fx_banner_sweep` documented the
+## symptom without naming the cause — "a lone thin bar reads as a UI artifact" —
+## and worked around it by adding a SECOND bar.
+##
+## IT MULTIPLIES `COLOR.a` RATHER THAN WRITING COLOR OUTRIGHT, and that is the
+## whole design. `beam_material` assigns COLOR, which is why every caller of it
+## has to fade through a `fade` uniform and why three `modulate`/`color:a` tweens
+## in this codebase were silently dead. Reading and modifying instead leaves the
+## node's own `color` — and therefore every existing `color:a` tween — working
+## untouched. A primitive that quietly breaks the callers it is meant to fix is
+## not an improvement.
+##
+## `feather` is in UV, so it scales with the rect: 0.5 on an axis means the
+## fade reaches the middle (a blade with no flat centre at all).
+static func soft_rect_material(feather: Vector2 = Vector2(0.25, 0.12),
+		power: float = 1.35) -> ShaderMaterial:
+	if _soft_rect_shader == null:
+		_soft_rect_shader = Shader.new()
+		_soft_rect_shader.code = """shader_type canvas_item;
+
+uniform vec2 feather = vec2(0.25, 0.12);
+uniform float power = 1.35;
+
+void fragment() {
+	// Distance to the NEAREST edge on each axis, in UV.
+	vec2 d = min(UV, vec2(1.0) - UV);
+	float ax = clamp(d.x / max(feather.x, 0.0001), 0.0, 1.0);
+	float ay = clamp(d.y / max(feather.y, 0.0001), 0.0, 1.0);
+	COLOR.a *= pow(ax, power) * pow(ay, power);
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = _soft_rect_shader
+	mat.set_shader_parameter("feather", feather)
+	mat.set_shader_parameter("power", power)
+	return mat
+
+
+## Recolour a beam built by `beam_line`. THE OBVIOUS WAY DOES NOT WORK: setting
+## `default_color` or `modulate` on the node changes nothing, because
+## `beam_material` writes COLOR outright and reads neither. A caller that
+## retints a beam at runtime — the drag ribbon changes colour for a creature
+## versus a spell — must go through the shader's `tint` uniform, and the failure
+## mode if it does not is SILENT: the old colour simply stays.
+static func beam_tint(line: Line2D, tint: Color) -> void:
+	if line == null or not is_instance_valid(line):
+		return
+	var m := line.material as ShaderMaterial
+	if m == null:
+		return
+	m.set_shader_parameter("tint", tint)
+
+
+## A smooth radial falloff, cached — THE REPLACEMENT FOR `draw_circle` USED AS
+## LIGHT, and the reason that defect kept getting rebuilt by hand.
+##
+## A filled circle has a HARD EDGE, so a call site that needs a glow inside a
+## `_draw` callback has nowhere to go: `Motion.burst` is particles and
+## `Motion.ring` is a band, and neither can be called from a draw. What people
+## reach for instead is three concentric discs at descending alpha, which is a
+## STEPPED approximation — and steps BAND. Card2D's fuse ember is exactly that,
+## r13/r7.5/r4 at alpha 0.26/0.65/1.00, so its two brightest rings are visible
+## as rings on the one thing in the frame that is supposed to be a coal.
+##
+## `power` is the falloff exponent: higher is a tighter, hotter point; ~2.2 is a
+## naked flame and ~1.4 is a diffuse haze.
+static func glow_tex(power: float = 2.2) -> Texture2D:
+	var key := "glow_%.2f" % power
+	if _beam_cache.has(key):
+		return _beam_cache[key]
+	var n := 64
+	var img := Image.create(n, n, false, Image.FORMAT_RGBA8)
+	var c := float(n - 1) * 0.5
+	for y in n:
+		for x in n:
+			var d: float = Vector2(float(x) - c, float(y) - c).length() / c
+			var a: float = pow(clampf(1.0 - d, 0.0, 1.0), power)
+			# White RGB so a draw-time modulate carries the colour intact; the
+			# falloff lives entirely in alpha. Baking the tint here instead would
+			# make the texture single-use and force a cache entry per colour.
+			img.set_pixel(x, y, Color(1.0, 1.0, 1.0, a))
+	var tex := ImageTexture.create_from_image(img)
+	_beam_cache[key] = tex
+	return tex
+
+
+## Draw a soft point of light inside a `_draw` callback. Two passes, both smooth:
+## a wide body in `tint` and a tight core lifted toward white.
+##
+## THE CORE IS A SECOND PASS RATHER THAN PART OF THE TEXTURE because the tint is
+## applied by `draw_texture_rect`'s modulate, which MULTIPLIES — a white-hot
+## centre baked into the image would be multiplied straight back down to the
+## tint and vanish. Two passes is also what keeps the house contrast rule
+## reachable here: a lone warm glow on the warm table is camouflage, and the
+## hot middle is what separates an ember from an orange smudge.
+## `power` IS EXPOSED BECAUSE THE DEFAULT LOSES AN EMBER. At 2.2 the falloff is
+## so peaked that a 13px coal is bright for ~4px and faint everywhere else: the
+## smoothness test passed (6x fewer kinks than the disc stack it replaced) while
+## the thing itself had all but vanished from the frame. A metric satisfied by
+## deleting the subject is the oldest failure in this file's history — LOOK at
+## the shot as well as reading the number. ~1.5 is a coal, 2.2+ is a spark.
+static func draw_glow(ci: CanvasItem, centre: Vector2, radius: float,
+		tint: Color, core: float = 0.45, power: float = 2.2) -> void:
+	if ci == null or not is_instance_valid(ci) or radius <= 0.0:
+		return
+	var tex := glow_tex(power)
+	ci.draw_texture_rect(tex,
+		Rect2(centre - Vector2(radius, radius), Vector2(radius, radius) * 2.0),
+		false, tint)
+	if core <= 0.0:
+		return
+	var cr: float = radius * core
+	ci.draw_texture_rect(tex,
+		Rect2(centre - Vector2(cr, cr), Vector2(cr, cr) * 2.0),
+		false, Color(tint.lightened(0.72), minf(tint.a * 1.35, 1.0)))
 
 
 ## The material that reads `beam_tex`: body in the caller's colour, core ramped
@@ -668,6 +820,7 @@ uniform float seed = 0.0;
 uniform float fade = 1.0;
 // 0 = the smooth analytic band; 1 = fully filamented. See `fil` below.
 uniform float grit = 0.0;
+uniform float lost = 0.0;   // lost-and-found edge variation (0 = uniform)
 
 // SEAMLESS ANGULAR NOISE, and the seam is the whole reason it is built this way.
 // The stylized-shockwave recipe is noise sampled in POLAR space (so it stretches
@@ -696,11 +849,26 @@ void fragment() {
 	float w = wobble * (sin(ang * 3.0 + seed) * 0.62
 		+ sin(ang * 5.0 - seed * 1.7) * 0.38);
 	float off = d - (front_r + w);
+	// LOST AND FOUND EDGES — a DRAWING technique, not a shader one, and the one
+	// that most separates a drawing from a diagram. A painter does not give a
+	// form the same edge the whole way round: some of it is crisp where it wants
+	// the eye, and some dissolves into the ground so the shape breathes. Every
+	// procedural ring here had ONE feather for its entire circumference, which
+	// is why a technically-correct shock front could still read as machined.
+	//
+	// The harmonics are 2 and 3, NOT `ang_noise`'s 11..53. Lost-and-found works
+	// in LARGE passages — two or three arcs of hard edge and soft edge around
+	// the ring. Running it at filament frequency would just be fuzz, which is a
+	// different thing entirely and reads as a dirty edge rather than a lost one.
+	// Integer harmonics keep it seamless across the atan wrap, same as above.
+	float lo = sin(ang * 2.0 + seed * 1.3) * 0.62
+		+ sin(ang * 3.0 - seed * 0.7) * 0.38;
+	float soft = thickness * 0.55 * (1.0 + lost * lo);
 	// THE SHOCK FRONT: a TIGHT outer edge, a LONG inner wake. The asymmetry is
 	// the whole read. Feathering the outside by the full band (the first cut of
 	// this) turns the ring into a fuzzy ball — the front has to stay a front.
 	float a = off > 0.0
-		? 1.0 - smoothstep(0.0, thickness * 0.55, off)
+		? 1.0 - smoothstep(0.0, max(soft, 0.0001), off)
 		: 1.0 - smoothstep(0.0, thickness * wake, -off);
 	a = pow(clamp(a, 0.0, 1.0), 1.5);
 	// RADIAL FILAMENTS BY ALPHA EROSION. A purely analytic band is clean, and
@@ -722,16 +890,43 @@ void fragment() {
 	// and a front with holes in it is a dashed circle — a different ugly, and
 	// the exact failure the grit sweep showed at 0.75 and above.
 	float thr = grit * (0.10 + wk * (0.72 + 0.50 * (1.0 - fade)));
-	a *= mix(1.0, smoothstep(thr - 0.30, thr + 0.30, fil), grit);
+	float ero = smoothstep(thr - 0.30, thr + 0.30, fil);
+	a *= mix(1.0, ero, grit);
+	// THE BURN EDGE. An erosion with no rim reads as FADING, not as being
+	// consumed — the standard dissolve-shader fix is to brighten the narrow
+	// band of pixels sitting AT the threshold, which is exactly where material
+	// is being eaten this frame. The parabola peaks at ero == 0.5 (half gone)
+	// and is zero at both settled ends, so only the live front lights up.
+	//
+	// EVERY TUTORIAL SPENDS THAT BRIGHTNESS AS AN HDR EMISSIVE AND LETS BLOOM
+	// CARRY IT, AND THAT DOES NOT TRANSLATE HERE. Godot's Compatibility
+	// renderer is SDR-only in 2D and its 2D glow is explicitly not planned, so
+	// there is no post-process to pick up a value above 1.0 — an "emissive"
+	// rim would simply clamp and look like flat white. The brightness has to be
+	// baked into the colour and paid for in VALUE CONTRAST against the ground,
+	// which is the same constraint that decided the white-hot core.
+	//
+	// It rides `grit`, so a ring with no erosion (the held marks, ring_static)
+	// is byte-identical to before.
+	// CUBED, because the plain parabola is not a BAND. `ero`'s own smoothstep is
+	// a wide +/-0.30 window, so ero sits mid-range over a large part of the ring
+	// and 4*ero*(1-ero) lit most of it — a milky halo, which is the opposite of
+	// the read: a burn edge says "material is being consumed HERE", and a wide
+	// one says nothing at all. The cube pulls it into a front.
+	float burn = pow(4.0 * ero * (1.0 - ero), 3.0) * grit;
 	// The hot core sits JUST INSIDE the front, where alpha is still high. Put
 	// it ON the leading edge and the falloff multiplies it away — which is how
 	// the first cut silently dropped the house contrast rule it exists to keep.
 	float hb = (off + thickness * 0.30) / max(thickness * hot, 0.0001);
 	float heat = clamp(exp(-hb * hb), 0.0, 1.0);
-	vec3 col = mix(tint.rgb, vec3(1.0), heat * heat_gain);
+	vec3 col = mix(tint.rgb, vec3(1.0),
+		clamp(heat * heat_gain + burn * 0.62, 0.0, 1.0));
 	// The core carries a little extra opacity too, so the rim is the BRIGHTEST
-	// part of the beat and not merely the whitest.
-	float al = clamp(a * (1.0 + heat * 0.30), 0.0, 1.0) * tint.a * fade;
+	// part of the beat and not merely the whitest. The burn front does the same
+	// — a consuming edge is DENSER than what it leaves behind, and without this
+	// the erosion multiply above would dim the very pixels it just lit.
+	float al = clamp(a * (1.0 + heat * 0.30 + burn * 0.45), 0.0, 1.0)
+		* tint.a * fade;
 	COLOR = vec4(col, al);
 }
 """
@@ -782,6 +977,10 @@ static func _ring_node(center: Vector2, color: Color,
 	# moving it. Bear in mind these rings are only 30-50px, which is why the
 	# harmonics are as coarse as they are — finer reads as dirt at this size.
 	mat.set_shader_parameter("grit", float(opts.get("grit", 0.50)))
+	# LOST-AND-FOUND defaults ON for moving beats and is left OFF by
+	# `ring_static`, whose whole job is to be a STEADY held mark — a
+	# standing telegraph that breathes at its edges reads as unstable.
+	mat.set_shader_parameter("lost", float(opts.get("lost", 0.38)))
 	mat.set_shader_parameter("seed", randf() * TAU)
 	mat.set_shader_parameter("fade", 0.0 if fade_in > 0.0 else 1.0)
 
@@ -879,6 +1078,11 @@ static func ring_static(host: Node, center: Vector2, color: Color,
 	# clean CG, but a reticle is INFORMATION: a shredding target mark reads as a
 	# rendering fault, and its edge is the thing the player measures against.
 	o["grit"] = float(o.get("grit", 0.0))
+	# AND NO LOST EDGES, for the same reason one step further. Lost-and-found is
+	# a drawing technique for making a form breathe, and a held reticle is the
+	# one thing here that must NOT: its edge is what the player measures a
+	# target against, so it stays uniform all the way round.
+	o["lost"] = float(o.get("lost", 0.0))
 	o["fade_in"] = 0.0
 	var rg := _ring_node(center, color, o)
 	if rg == null:
@@ -1829,7 +2033,9 @@ static var _vfx_noise_shader_cache: Shader = null
 ## effects that fire on the same frame.
 static func vfx_noise_material(seed: float = 0.0, scroll: float = 1.4,
 		grain: float = 2.2, bite: float = 0.55,
-		warp: float = 0.0) -> ShaderMaterial:
+		warp: float = 0.0, ramp: float = 0.0,
+		ramp_hot: Color = Color(1.0, 0.93, 0.62),
+		rim: float = 0.0) -> ShaderMaterial:
 	if _vfx_noise_shader_cache == null:
 		_vfx_noise_shader_cache = Shader.new()
 		_vfx_noise_shader_cache.code = """shader_type canvas_item;
@@ -1841,6 +2047,9 @@ uniform float scroll = 1.4;   // how fast the detail travels
 uniform float grain = 2.2;    // noise frequency: low = billowy, high = fibrous
 uniform float bite = 0.55;    // how hard the noise cuts the value
 uniform float warp = 0.0;     // domain warping — see the note in fragment()
+uniform float ramp = 0.0;     // gradient-map strength (0 = plain brightness)
+uniform vec4 ramp_hot : source_color = vec4(1.0, 0.93, 0.62, 1.0);
+uniform float rim = 0.0;      // how hard the erosion frays the SILHOUETTE
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
@@ -1877,6 +2086,21 @@ void fragment() {
 	// The internal value. Centred on 1.0 so the form keeps its overall
 	// brightness and the noise only redistributes it.
 	vec3 col = COLOR.rgb * ((1.0 - bite * 0.5) + bite * n);
+	// GRADIENT MAPPING. The line above MULTIPLIES the tint by the noise, so a
+	// hot filament comes out as a LIGHTER VERSION OF THE SAME HUE — and that is
+	// not what combustion does. Temperature moves fire along a ramp, deep red to
+	// orange to yellow to white, so the hot parts are a different COLOUR and not
+	// merely a brighter one. Multiplying an orange by 1.3 gives a pale orange,
+	// which is exactly the "looks like tinted smoke" read.
+	//
+	// The standard fix is to use the noise as a LOOKUP into a palette rather
+	// than as a brightness multiplier. Two stops is enough here: the polygons
+	// that carry this already have macro ramps in `vertex_colors`, so this only
+	// has to supply the MICRO shift inside one form.
+	//
+	// `ramp` defaults to 0, so every existing call site is byte-identical.
+	float heat = clamp((n - 0.42) * 2.4, 0.0, 1.0);
+	col = mix(col, ramp_hot.rgb, heat * heat * ramp);
 	// EROSION, biased by UV.y so the FAR end goes first — tips break up, the
 	// seat holds. Feathered, never `step`: a hard cut aliases on these sizes.
 	//
@@ -1888,7 +2112,50 @@ void fragment() {
 	// gets eaten, not whether the edge is clean to begin with.
 	float far = 1.0 - UV.y;
 	float thr = (0.14 + erode) * (0.35 + 0.85 * far);
-	float a = COLOR.a * smoothstep(thr - 0.22, thr + 0.22, n + 0.30);
+	// AND IT HAS TO BITE AT THE SILHOUETTE, which is the part the eye actually
+	// calls "cut out". Noise keyed to UV alone eats the form EVENLY: the
+	// interior gets lovely internal structure and the OUTLINE stays exactly
+	// where the polygon put it, facets and all. Fixing the threshold, the
+	// offset and the grain all improved the inside of a shape whose edge never
+	// moved — three passes at the wrong half of the problem.
+	//
+	// UV.x runs ACROSS the form, so this is 0 on the spine and 1 at either
+	// margin. Squared, so the bite is concentrated in the last stretch rather
+	// than thinning the whole body. `rim` defaults to 0: a crystalline form
+	// wants its facets, and only callers that should fray opt in.
+	// THE EXPONENT MATTERS MORE THAN THE COEFFICIENT, and getting that backwards
+	// cost two passes. Squared is not edge-localised: `marg` is 0 only on the
+	// spine and 1 at either margin, so at UV.x 0.25 it is still 0.25 and HALF
+	// THE FORM was being eroded. Raising the coefficient to compensate just
+	// washed the whole tongue out — pale, thin and ghostly, with the body colour
+	// gone. The shape was losing its mass to buy a ragged edge.
+	//
+	// The sixth power confines it to roughly the outer fifth: 0.5 -> 0.016
+	// (nothing), 0.8 -> 0.26, 0.96 -> 0.78. That allows a STRONG coefficient,
+	// so the margin genuinely breaks up while the body keeps its density.
+	float marg = 1.0 - min(UV.x, 1.0 - UV.x) * 2.0;
+	float m3 = marg * marg * marg;
+	thr += m3 * m3 * 0.95 * rim;
+	// THE +0.30 OFFSET MADE THE EROSION INERT, and the comment above described
+	// an intent the arithmetic never delivered. `n` is fbm in 0..1; adding 0.30
+	// put it above the tip threshold (0.168) almost everywhere, so the minimum
+	// alpha multiplier at the NOISE FLOOR was 0.896 — the form stayed opaque and
+	// wore its raw polygon silhouette, which is exactly the faceted cut-out read
+	// the noise was added to destroy. Measured, not guessed: at 0.30 the whole
+	// range 0.25..1.0 mapped to 1.000.
+	//
+	// 0.12 keeps the seat solid (a flame's base is dense) while letting the tips
+	// break up from the first frame, which is what the note above promises.
+	float ero = smoothstep(thr - 0.22, thr + 0.22, n + 0.12);
+	// THE BURN EDGE, as on the ring: the band being eaten RIGHT NOW is the
+	// hottest part of a burning thing, and without it an erosion reads as the
+	// form fading rather than being consumed. Cubed for the same reason it is
+	// cubed there — the erosion's own smoothstep is wide, so the plain parabola
+	// lights most of the form instead of its front. It rides `ramp`, so a call
+	// site that has not opted into the palette is unaffected.
+	float burn = pow(4.0 * ero * (1.0 - ero), 3.0) * ramp;
+	col = mix(col, ramp_hot.rgb, burn * 0.85);
+	float a = COLOR.a * clamp(ero + burn * 0.30, 0.0, 1.0);
 	COLOR = vec4(col, a);
 }
 """
@@ -1899,9 +2166,41 @@ void fragment() {
 	mat.set_shader_parameter("grain", grain)
 	mat.set_shader_parameter("bite", bite)
 	mat.set_shader_parameter("warp", warp)
+	mat.set_shader_parameter("ramp", ramp)
+	mat.set_shader_parameter("ramp_hot", ramp_hot)
+	mat.set_shader_parameter("rim", rim)
 	mat.set_shader_parameter("t", 0.0)
 	mat.set_shader_parameter("erode", 0.0)
 	return mat
+
+
+static var _white_tex_cache: ImageTexture = null
+
+
+## A 1x1 opaque white texture, cached.
+##
+## THE REASON IT EXISTS IS A GODOT TRAP THAT MADE `vfx_noise_material` INERT.
+## A `Polygon2D` does not hand usable UVs to its shader unless it has a
+## `texture` assigned — with none, every vertex reads (0,0), so a UV-driven
+## lookup is CONSTANT across the whole form. Measured, not inferred: the same
+## polygon under the same noise material scored a pixel standard deviation of
+## 0.0000 without a texture and 0.1931 with one.
+##
+## Nothing errors. The shader compiles, the material binds, the uniforms are
+## set, and the form renders as a clean vertex-colour gradient — which reads
+## exactly like a deliberately flat art style, so it survived a full rebuild of
+## the flame plus three further passes at the threshold, the offset and the
+## grain. Every one of those was tuning the inside of a shape whose shader was
+## sampling a single point.
+##
+## Assigning white changes no colour (it multiplies through) and costs one
+## 1x1 texture for the whole game.
+static func white_tex() -> Texture2D:
+	if _white_tex_cache == null:
+		var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+		img.set_pixel(0, 0, Color.WHITE)
+		_white_tex_cache = ImageTexture.create_from_image(img)
+	return _white_tex_cache
 
 
 static var _bloom_shader_cache: Shader = null

@@ -60,8 +60,83 @@ EXEMPT = {
     "EventLayoutStage.gd",
 }
 
+# LINE-LEVEL WAIVERS, for the two files that cannot be exempted wholesale
+# because they hold real effects as well as furniture. An entry here is VISIBLE
+# DEBT, not absolution: it names the line and says why, so a reader can check
+# the claim and a future change that invalidates it is a diff, not a silence.
+WAIVERS = {
+    ("Combat.gd", "icon_box"):
+        "the keyword device's MOUNT — a drop shadow and two metal bezel rings "
+        "on an inked medallion. An object with an edge, not light.",
+    ("MapView.gd", "sp + Vector2(1, 3)"):
+        "contact shadow under the army standard's base.",
+    ("MapView.gd", "19.0 + 1.5 * sway"):
+        "the standard's ring. DELIBERATE: its own note says a standing mark "
+        "wants a hard edge, and the lamp texture beside it does the glow.",
+    ("MapView.gd", "seal_p"):
+        "a wax seal on the chart — shadow disc plus a 2.8px bezel. Furniture.",
+    ("MapView.gd", "rr, 0, TAU"):
+        "the breathing AVAILABILITY rings. DELIBERATE per the FX transfer "
+        "pass: telegraphs, not beats.",
+    ("MapView.gd", "_hover_dest"):
+        "the hover destination ring — same telegraph class as availability.",
+}
+
+
+def _waiver_for(fname, snippet):
+    for (f, needle), why in WAIVERS.items():
+        if f == fname and needle in snippet:
+            return why
+    return None
+
+
 FULL_ARC = re.compile(r"draw_arc\(([^;]*?)\)", re.S)
 DRAW_CIRCLE = re.compile(r"draw_circle\(([^;]*?)\)", re.S)
+
+
+def _reassemble(lines, i):
+    """Return the full text of the call starting on line i, across its parens."""
+    buf = lines[i]
+    depth = buf.count("(") - buf.count(")")
+    j = i
+    while depth > 0 and j + 1 < len(lines) and j - i < 5:
+        j += 1
+        buf += " " + lines[j].strip()
+        depth += lines[j].count("(") - lines[j].count(")")
+    return buf
+
+
+def _color_alpha(text):
+    """Alpha of the first `Color(...)` in `text`, or None when it is opaque.
+
+    A THREE-argument Color has no alpha and is fully opaque. Reading the last
+    number in the call instead makes the blue channel masquerade as alpha,
+    which is how seven solid pips got reported as glows.
+    """
+    ci = text.find("Color(")
+    if ci < 0:
+        return None
+    depth, buf, args = 0, "", []
+    for ch in text[ci + 6:]:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        if ch == "," and depth == 0:
+            args.append(buf.strip())
+            buf = ""
+            continue
+        buf += ch
+    if buf.strip():
+        args.append(buf.strip())
+    if len(args) < 4:
+        return None            # opaque: Color(r, g, b)
+    try:
+        return float(args[3])
+    except ValueError:
+        return None            # a named/derived alpha — do not guess
 
 
 def scan(path: Path):
@@ -97,9 +172,16 @@ def scan(path: Path):
                 yield (i, "WIREFRAME ARC", s[:96])
 
         # A flat disc used as a GLOW rather than as an object: low alpha.
+        #
+        # READ THE ALPHA BY POSITION. The first cut matched the last `0.xx)` on
+        # the line, which on a THREE-argument `Color(r, g, b)` is the BLUE
+        # CHANNEL — and a 3-arg Color is fully opaque. That convicted seven
+        # solid colour pips across Collection, NetConstructed and the map's
+        # flagpole finial, all of them plain drawn objects. Alpha is argument 4
+        # or it does not exist.
         if "draw_circle(" in ln:
-            m = re.search(r"0\.(\d+)\s*\)", ln)
-            if m and float("0." + m.group(1)) < 0.5:
+            a = _color_alpha(_reassemble(lines, i - 1))
+            if a is not None and a < 0.5:
                 yield (i, "FLAT GLOW DISC", s[:96])
 
     # A THIRD SPELLING, found the hard way (2026-09-10): `draw_polyline` fed
@@ -141,6 +223,7 @@ def main() -> int:
     roots = [ROOT / "scripts"]
     suspects: list[tuple[str, int, str, str]] = []
     exempted = 0
+    waived = 0
     for r in roots:
         for p in sorted(r.rglob("*.gd")):
             hits = list(scan(p))
@@ -150,6 +233,14 @@ def main() -> int:
                 exempted += len(hits)
                 continue
             for (n, kind, snip) in hits:
+                # A waiver needs the FULL call, not the truncated snippet — the
+                # needle can sit past the 96-char cut on a long draw.
+                full = _reassemble(p.read_text(encoding="utf-8",
+                                               errors="replace").splitlines(),
+                                   n - 1)
+                if not show_all and _waiver_for(p.name, full) is not None:
+                    waived += 1
+                    continue
                 suspects.append((str(p.relative_to(ROOT)), n, kind, snip))
 
     print("=" * 78)
@@ -165,7 +256,8 @@ def main() -> int:
     print()
     print("-" * 78)
     print(f"{len(suspects)} suspect(s) in {len(by_file)} file(s); "
-          f"{exempted} hit(s) exempted as drawn OBJECTS (see EXEMPT)")
+          f"{exempted} exempted as drawn OBJECTS (see EXEMPT); "
+          f"{waived} waived by line (see WAIVERS)")
     print("-" * 78)
     return 0
 

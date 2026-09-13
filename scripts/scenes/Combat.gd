@@ -7150,17 +7150,25 @@ func _update_aim_threads() -> void:
 		if quarry == null:
 			continue
 		if not _aim_thread_nodes.has(sniper):
-			var line := Line2D.new()
-			line.width = 2.5
-			line.antialiased = true
+			# A SNIPER'S STANDING ORDER IS A SIGHT-LINE, so of everything here
+			# it had the worst business being a flat 2.5px wire: the one thing
+			# it has to look like is a taut thread of light running to a mark.
+			# Textured now — hot spine, soft shoulders — with "comet" carrying
+			# the faint-at-the-sniper / bright-at-the-quarry ramp that the old
+			# Gradient was written for and that `beam_material` cannot read
+			# (it writes COLOR outright, so a Line2D gradient never reaches it).
+			#
+			# Heat 0.50 and an aim-coloured core, both deliberately low: the
+			# z-order note below is a rule about loudness, and a white-hot
+			# filament would break it from a different direction.
+			var line := Motion.beam_line(
+				PackedVector2Array(),
+				Color(AIM_COLOR.r, AIM_COLOR.g, AIM_COLOR.b, 0.72), 8.0,
+				"comet", 0.50, "", AIM_COLOR.lightened(0.60))
 			line.begin_cap_mode = Line2D.LINE_CAP_ROUND
 			line.end_cap_mode = Line2D.LINE_CAP_ROUND
 			line.z_index = 230   # under the telegraph arrow (235) — a standing
-			var grad := Gradient.new()   # order must never shout over a forecast
-			grad.set_color(0, Color(AIM_COLOR.r, AIM_COLOR.g, AIM_COLOR.b, 0.16))
-			grad.set_color(1, Color(AIM_COLOR.r, AIM_COLOR.g, AIM_COLOR.b, 0.70))
-			line.gradient = grad
-			_hud_layer.add_child(line)
+			_hud_layer.add_child(line)   # order must never shout over a forecast
 			var head := Polygon2D.new()
 			head.polygon = PackedVector2Array([
 				Vector2(0, -7), Vector2(7, 0), Vector2(0, 7), Vector2(-7, 0)])
@@ -14044,8 +14052,14 @@ func _play_potion_drink_fx(pid: String, target: Control) -> void:
 			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 		tw.parallel().tween_property(b, "rotation_degrees", -38.0,
 			UserSettings.anim_time(0.26)).set_ease(Tween.EASE_OUT)
+		# EASED TO MATCH ITS SIBLINGS. The position and rotation above both
+		# decelerate; this rode the same 0.26s at CONSTANT velocity, so the
+		# bottle arrived while still growing at full rate — the three channels
+		# of one movement disagreeing about when the movement ends is what reads
+		# as "animated by a computer" even when nothing is visibly wrong.
 		tw.parallel().tween_property(b, "scale", Vector2(1.18, 1.18),
-			UserSettings.anim_time(0.26))
+			UserSettings.anim_time(0.26)) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 		tw.tween_property(b, "modulate:a", 0.0,
 			UserSettings.anim_time(0.18)).set_ease(Tween.EASE_IN)
 		tw.tween_callback(b.queue_free)
@@ -15239,7 +15253,10 @@ func _play_deck_peel_vfx() -> void:
 	tw.tween_property(leaf, "position",
 		r.position + Vector2(52.0, -34.0), UserSettings.anim_time(0.20)) \
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tw.tween_property(leaf, "rotation", 0.16, UserSettings.anim_time(0.20))
+	# Same deceleration as the position above — a leaf whose travel eases out
+	# while its spin stays constant is two motions, not one peel.
+	tw.tween_property(leaf, "rotation", 0.16, UserSettings.anim_time(0.20)) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	tw.tween_property(leaf, "modulate:a", 0.0, UserSettings.anim_time(0.22)) \
 		.set_ease(Tween.EASE_IN)
 	tw.chain().tween_callback(leaf.queue_free)
@@ -18001,6 +18018,11 @@ func _check_game_over() -> void:
 		if AudioBank != null:
 			AudioBank.duck_music(-8.0, 1.3)
 			AudioBank.play_sfx("defeat")
+		# Kills earned in this fight can change the deck's veteran cache keys after
+		# Combat's opening warm. Re-bake only those misses behind the 1.5 s verdict
+		# hold so Game Over normally builds its full detail strip from cache.
+		# warm_run_deck is deduplicated and returns immediately if one is still active.
+		ScenePreload.warm_run_deck()
 		get_tree().create_timer(1.5).timeout.connect(func():
 			RunState.end_run(false)
 			GameTheme.fade_out_then_change_scene(self, GAMEOVER_SCENE, 0.5)
@@ -18121,6 +18143,13 @@ func _check_game_over() -> void:
 		# Cursed Key: the curse lands on victory (used to ride the Reward roll).
 		if RunState.has_downside("curse_on_reward"):
 			RunState.add_card(CardDB.random_curse_id())
+		# Settlement above is the last point that can alter the deck (veterancy and
+		# Cursed Key included). Warm only those new cache keys behind the held verdict:
+		# Generals feed a full-card forge slate next, while the final lord feeds Game
+		# Over. Ordinary holds and non-final bosses do not open a card-heavy screen.
+		if node_type == "elite" \
+				or (node_type == "boss" and RunState.is_final_boss()):
+			ScenePreload.warm_run_deck()
 
 		# The held beat: banner text + sting land together after the final death
 		# has breathed. Well inside the earliest scene fade (elite, 1.0s).
@@ -27077,26 +27106,27 @@ func _on_card_drag_trail(global_pos: Vector2, card: Control) -> void:
 	if UserSettings != null and UserSettings.reduce_motion:
 		return
 	if _drag_trail == null or not is_instance_valid(_drag_trail):
-		_drag_trail = Line2D.new()
-		_drag_trail.width = 13.0
-		_drag_trail.antialiased = true
+		# A RIBBON OFF A CARD IN MOTION IS A TRAIL, so it gets the "trail" beam
+		# profile — the softest of the kit, a broad core with a gentle falloff,
+		# because this follows the cursor continuously and a hard filament
+		# scribbling across the board is the opposite of what it is for.
+		# Previously a flat 13px Line2D: uniform opacity across the width, so the
+		# ribbon had two hard edges the whole way and read as a drawn stroke
+		# rather than as motion.
+		_drag_trail = Motion.beam_line(
+			PackedVector2Array(), Color(1.0, 0.74, 0.30, 0.50), 30.0,
+			"trail", 0.45, "comet")
 		_drag_trail.joint_mode = Line2D.LINE_JOINT_ROUND
 		_drag_trail.begin_cap_mode = Line2D.LINE_CAP_ROUND
 		_drag_trail.end_cap_mode = Line2D.LINE_CAP_ROUND
 		_drag_trail.z_index = 210
-		var wc := Curve.new()
-		wc.add_point(Vector2(0.0, 0.08))   # tail thins to a spark
-		wc.add_point(Vector2(1.0, 1.0))
-		_drag_trail.width_curve = wc
-		var grad := Gradient.new()
-		grad.set_color(0, Color(1, 1, 1, 0.0))
-		grad.set_color(1, Color(1, 1, 1, 0.50))
-		_drag_trail.gradient = grad
 		_hud_layer.add_child(_drag_trail)
 	if _drag_trail_pts.is_empty():
-		# Fresh grab — tint the ribbon to what's being carried.
-		_drag_trail.default_color = Color(1.0, 0.74, 0.30) \
-			if card.is_creature() else Color(0.62, 0.82, 1.0)
+		# Fresh grab — tint the ribbon to what's being carried. THROUGH THE
+		# SHADER: `default_color` is not read by beam_material, so writing it
+		# here would fail silently and every spell would trail creature-gold.
+		Motion.beam_tint(_drag_trail, Color(1.0, 0.74, 0.30, 0.50) \
+			if card.is_creature() else Color(0.62, 0.82, 1.0, 0.50))
 	# Anchor at the card's lower third, not the cursor: the ribbon reads as
 	# coming off the card's body, and mostly clears the face on the way up.
 	var anchor := global_pos + Vector2(0.0, card.size.y * card.scale.y * 0.30)
@@ -28338,14 +28368,32 @@ func _add_lane_forecast_face_marker(dst: Vector2, read: Dictionary, danger: Colo
 	_add_lane_forecast_target_ring(dst, read, danger)
 	var dir := -1.0 if bool(read.get("target_is_enemy", false)) else 1.0
 	for i in range(2):
-		var chevron := Line2D.new()
-		chevron.width = 3.6 - float(i) * 0.8
-		chevron.antialiased = true
+		# STACKED HAIRLINES WERE THE DEFECT. Two flat 3px strokes one behind the
+		# other is the same construction that made the map's committed march
+		# read as four ribbons: a stroke has UNIFORM OPACITY across its width,
+		# so stacking them stacks hard edges instead of accumulating a falloff.
+		# Each chevron is a textured beam now, and the pair reads as one mark
+		# with an echo behind it rather than as two wires.
+		#
+		# THE CORE KEEPS THE HUE BUT NOT THE VALUE, and getting that balance
+		# wrong is visible in the A/B. Everywhere else in combat the hot core is
+		# white, because the war table is dark and a warm stroke on warm wood is
+		# camouflage — but this mark's whole job is that LETHAL reads RED, and a
+		# white spine washes out the one channel carrying the meaning.
+		#
+		# The first cut over-corrected: core `lightened(0.55)` at heat 0.45 left
+		# the stroke at a SINGLE VALUE, so it photographed as flat as the plain
+		# Line2D it replaced even while measuring a clean alpha falloff. Value
+		# is what the eye reads as light. `lightened(0.82)` is a pale warm red —
+		# still unmistakably the danger hue, but bright enough to be a core.
+		var chevron := Motion.beam_line(
+			PackedVector2Array(),
+			Color(danger.r, danger.g, danger.b, 0.74 - float(i) * 0.26),
+			13.5 - float(i) * 3.5, "streak", 0.78, "", danger.lightened(0.82))
 		chevron.joint_mode = Line2D.LINE_JOINT_ROUND
 		chevron.begin_cap_mode = Line2D.LINE_CAP_ROUND
 		chevron.end_cap_mode = Line2D.LINE_CAP_ROUND
 		chevron.z_index = 177
-		chevron.default_color = Color(danger.r, danger.g, danger.b, 0.64 - float(i) * 0.20)
 		var step := float(i) * 17.0 * -dir
 		chevron.points = PackedVector2Array([
 			Vector2(-26, -dir * 12 + step),
@@ -28427,26 +28475,26 @@ func _refresh_hand_affordability() -> void:
 func _build_targeting_arrow() -> void:
 	# Hearthstone-style glowing curve from the cast source to the cursor. Lives
 	# on the HUD layer so it draws above everything; hidden until targeting begins.
-	_targeting_arrow = Line2D.new()
-	_targeting_arrow.width = 7.0
-	_targeting_arrow.default_color = Color(1.0, 0.78, 0.30, 0.95)
-	_targeting_arrow.antialiased = true
+	# ITS OWN COMMENT SAID "glowing", AND IT WAS A FLAT WIRE. This is the most
+	# looked-at stroke in the game — it is on screen for as long as the player is
+	# choosing a target — and it was a 7px Line2D, i.e. uniform opacity across
+	# its width with two hard edges. The `width_curve` taper and the lengthwise
+	# `gradient` were both trying to buy a beam's read without a beam's profile;
+	# neither does anything ACROSS the width, which is where a glow lives.
+	#
+	# It escaped the line sweep because of its width, on the wrong theory that a
+	# fat stroke reads as a shape. Seven pixels of flat colour is not a shape.
+	#
+	# "comet" carries the warm-body → hot-tip ramp the old Gradient was written
+	# for, inside the texture, where the beam material can actually see it.
+	_targeting_arrow = Motion.beam_line(
+		PackedVector2Array(), Color(1.0, 0.62, 0.22, 0.98), 22.0,
+		"comet", 0.90, "comet")
 	_targeting_arrow.joint_mode = Line2D.LINE_JOINT_ROUND
 	_targeting_arrow.begin_cap_mode = Line2D.LINE_CAP_ROUND
 	_targeting_arrow.end_cap_mode = Line2D.LINE_CAP_ROUND
 	_targeting_arrow.z_index = 240
 	_targeting_arrow.visible = false
-	# Width taper: thick at the cursor, slim at the source, like a chargeable beam.
-	var curve := Curve.new()
-	curve.add_point(Vector2(0.0, 0.4))
-	curve.add_point(Vector2(1.0, 1.0))
-	_targeting_arrow.width_curve = curve
-	# Soft gradient: warm gold body fading to orange tip for the "spell about to
-	# strike" read.
-	var grad := Gradient.new()
-	grad.set_color(0, Color(1.0, 0.85, 0.35, 0.55))
-	grad.set_color(1, Color(1.0, 0.45, 0.15, 1.0))
-	_targeting_arrow.gradient = grad
 	_hud_layer.add_child(_targeting_arrow)
 	# Arrowhead — triangular Polygon2D rotated to face the cursor.
 	_targeting_arrow_head = Polygon2D.new()
@@ -28977,18 +29025,29 @@ func _build_combat_telegraph() -> void:
 	# A slimmer cousin of the spell targeting arrow — quieter ink so it reads as
 	# a "preview" rather than an active cast. Parented to the HUD layer; cards
 	# live in the board layer but map 1:1 onto it (see _card_center).
-	_telegraph_arrow = Line2D.new()
-	_telegraph_arrow.width = 4.0
-	_telegraph_arrow.antialiased = true
+	# A TEXTURED BEAM, NOT A HAIRLINE. A Line2D paints every pixel across its
+	# width at the same alpha, so a 4px stroke is two hard edges with a flat
+	# interior — which is why this read as a wire laid over the board rather
+	# than as a sight-line. `beam_tex` carries heat in R and opacity in A, so
+	# the arrow gets a bright spine that falls off into the table.
+	#
+	# THE LENGTHWISE Gradient IS GONE, and it could never have worked here:
+	# `beam_material` writes COLOR outright and never reads the vertex colour a
+	# Line2D gradient sets. "comet" ramps alpha along the run INSIDE the texture
+	# instead — faint at the creature, bright at what it is about to hit, which
+	# is the direction the old gradient was reaching for.
+	#
+	# Heat is held at 0.62 rather than the combat default: this is a PREVIEW, and
+	# its own note below puts it under the spell arrow deliberately. A full-heat
+	# white core would make a forecast shout louder than a live cast.
+	_telegraph_arrow = Motion.beam_line(
+		PackedVector2Array(), Color(0.96, 0.50, 0.22, 0.92), 13.0,
+		"comet", 0.62)
 	_telegraph_arrow.joint_mode = Line2D.LINE_JOINT_ROUND
 	_telegraph_arrow.begin_cap_mode = Line2D.LINE_CAP_ROUND
 	_telegraph_arrow.end_cap_mode = Line2D.LINE_CAP_ROUND
 	_telegraph_arrow.z_index = 235
 	_telegraph_arrow.visible = false
-	var grad := Gradient.new()
-	grad.set_color(0, Color(0.95, 0.80, 0.42, 0.30))
-	grad.set_color(1, Color(0.96, 0.50, 0.22, 0.92))
-	_telegraph_arrow.gradient = grad
 	_hud_layer.add_child(_telegraph_arrow)
 	_telegraph_head = Polygon2D.new()
 	_telegraph_head.polygon = PackedVector2Array([
@@ -30899,6 +30958,12 @@ func _spell_fx_lane_bar(enemy_side: bool, lane: int, tint: Color,
 	wash.size = Vector2(w, bot_y - top_y)
 	wash.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	wash.z_index = 218
+	# A COLUMN OF LIGHT HAS NO STRAIGHT SIDES. This was a bare ColorRect, so the
+	# lane wash had four hard edges and read as a UI panel dropped over the lane
+	# rather than as the lane being lit. Feathered hard across X (the column's
+	# sides are the giveaway) and softly on Y so it bleeds off the board ends.
+	# The material MULTIPLIES alpha, so the `color:a` tweens below still drive it.
+	wash.material = Motion.soft_rect_material(Vector2(0.46, 0.14))
 	_hud_layer.add_child(wash)
 	var tw := wash.create_tween()
 	tw.tween_property(wash, "color:a", 0.26, UserSettings.anim_time(0.12)) \
@@ -31091,25 +31156,38 @@ func _spell_fx_fissure() -> void:
 	while fx < fx1:
 		pts.append(Vector2(fx, fy + randf_range(-16.0, 16.0)))
 		fx += randf_range(38.0, 64.0)
-	var glow := Line2D.new()
-	glow.points = pts
-	glow.width = 16.0
-	glow.default_color = Color(0.62, 0.48, 0.30, 0.30)
+	# THE FISSURE WAS TWO STACKED FLAT RIBBONS — a 16px pale Line2D under a 6px
+	# dark one, both with uniform opacity across their width, so the ground
+	# opening read as two bands lying ON the table rather than a split in it.
+	# It survived the line sweep for a while because of its own WIDTH, on the
+	# wrong assumption that a fat stroke reads as a shape; a wide untextured
+	# stroke is not a shape, it is a wider wire with two hard edges.
+	#
+	# Built as a real split now — a broad warm BLEED under a narrow dark GAP,
+	# the same idiom as the shield-seal crack, so the light reads as coming OUT
+	# of the ground instead of being painted over it.
+	var glow := Motion.beam_line(pts, Color(0.66, 0.50, 0.31, 0.44), 26.0,
+		"streak", 0.55)
 	glow.z_index = 220
 	glow.joint_mode = Line2D.LINE_JOINT_ROUND
-	var core := Line2D.new()
-	core.points = pts
-	core.width = 6.0
-	core.default_color = Color(0.10, 0.07, 0.05, 0.92)
+	var core := Motion.beam_line(pts, Color(0.09, 0.06, 0.04, 0.95), 9.0,
+		"streak", 0.0, "", Color(0.09, 0.06, 0.04))
 	core.z_index = 221
 	core.joint_mode = Line2D.LINE_JOINT_ROUND
 	_hud_layer.add_child(glow)
 	_hud_layer.add_child(core)
+	# `modulate` CANNOT fade a beam. `beam_material` writes COLOR outright, so
+	# the node's modulate never reaches the fragment — the old tween would now
+	# hold the fissure at full strength until queue_free cut it dead. The
+	# shader's own `fade` uniform is the handle.
 	for ln: Line2D in [glow, core]:
+		var lm: ShaderMaterial = ln.material as ShaderMaterial
 		var fw: Tween = ln.create_tween()
 		fw.tween_interval(UserSettings.anim_time(0.30))
-		fw.tween_property(ln, "modulate:a", 0.0, UserSettings.anim_time(0.75)) \
-			.set_ease(Tween.EASE_IN)
+		fw.tween_method(func(f: float):
+			if lm != null:
+				lm.set_shader_parameter("fade", f),
+			1.0, 0.0, UserSettings.anim_time(0.75)).set_ease(Tween.EASE_IN)
 		fw.tween_callback(ln.queue_free)
 	for i in 4:
 		var dp: Vector2 = pts[mini(pts.size() - 1, i * maxi(1, pts.size() / 4))]
@@ -31141,6 +31219,12 @@ func _spell_fx_banner_sweep() -> void:
 	var x1: float = _slot_global_center(false, ROW_FRONT, LANES_PER_ROW - 1).x + 110.0
 	# Two bars — the standard and its trailing echo — so the sweep reads as
 	# MOTION even in a single frame (a lone thin bar reads as a UI artifact).
+	#
+	# THAT NOTE HAD THE SYMPTOM AND NOT THE CAUSE. A bar reads as a UI artifact
+	# because a bare ColorRect has four hard edges, and adding a second one gave
+	# the sweep two artifacts instead of one. Feathering is the actual fix: 0.5
+	# on X means the fade reaches the middle, so each bar is a blade of light
+	# with no flat centre, and the pair now reads as one bright edge with a wake.
 	for e in 2:
 		var bar := ColorRect.new()
 		bar.color = Color(1.0, 0.88, 0.45, 0.0)
@@ -31148,6 +31232,7 @@ func _spell_fx_banner_sweep() -> void:
 		bar.size = Vector2(44.0 if e == 0 else 26.0, h)
 		bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		bar.z_index = 222
+		bar.material = Motion.soft_rect_material(Vector2(0.5, 0.10))
 		_hud_layer.add_child(bar)
 		var peak: float = 0.30 if e == 0 else 0.14
 		var mv := bar.create_tween()
@@ -32169,15 +32254,38 @@ func _flame_wave(at: Vector2, n: int) -> void:
 		# whole form — a near-constant wash that looked exactly like the flat fill
 		# it was meant to replace. Several cells per tongue is what makes it read
 		# as internal structure rather than as a tint.
-		body.material = Motion.vfx_noise_material(randf() * 9.0, 1.35, 7.0, 1.05, 1.30)
+		# THE RAMP IS WHAT MAKES IT FIRE AND NOT TINTED SMOKE. `vertex_colors`
+		# gives each layer its macro gradient root-to-tip, but INSIDE a layer the
+		# noise was only ever a brightness multiply — so a hot filament came out
+		# as a paler version of the same orange. Combustion does not work that
+		# way: temperature moves the colour ALONG a ramp, and the hue shift is
+		# most of what the eye reads as heat.
+		#
+		# Each layer's ramp top is hotter than the one outside it, so the shift
+		# compounds inward exactly as the macro ramps already do: the envelope
+		# reaches a deep orange, the core a yellow, the heart very nearly white.
+		# Strength falls off outward — the envelope is the coolest, sootiest part
+		# of a flame and should stay closest to its own colour.
+		# THE WHITE TEXTURE IS LOAD-BEARING, not decoration. A Polygon2D with no
+		# texture hands its shader UV (0,0) at every vertex, so the noise below
+		# samples ONE POINT and the whole material renders as a flat tint —
+		# measured at pixel stddev 0.0000 without it, 0.1931 with. That is why
+		# these tongues read as cut-out paper no matter how the noise was tuned.
+		body.texture = Motion.white_tex()
+		body.material = Motion.vfx_noise_material(randf() * 9.0, 1.35, 7.0, 1.05,
+			1.30, 0.55, Color(1.0, 0.62, 0.22), 1.00)
 		_hud_layer.add_child(body)
 		var core := Polygon2D.new()
 		core.color = Color(1, 1, 1, 0.96)
-		core.material = Motion.vfx_noise_material(randf() * 9.0, 1.75, 9.5, 0.78, 0.85)
+		core.texture = Motion.white_tex()
+		core.material = Motion.vfx_noise_material(randf() * 9.0, 1.75, 9.5, 0.78,
+			0.85, 0.70, Color(1.0, 0.85, 0.42), 0.62)
 		body.add_child(core)
 		var heart := Polygon2D.new()
 		heart.color = Color(1, 1, 1, 0.95)
-		heart.material = Motion.vfx_noise_material(randf() * 9.0, 2.15, 12.0, 0.55, 0.45)
+		heart.texture = Motion.white_tex()
+		heart.material = Motion.vfx_noise_material(randf() * 9.0, 2.15, 12.0, 0.55,
+			0.45, 0.85, Color(1.0, 0.97, 0.86), 0.30)
 		body.add_child(heart)
 
 		var life: float = UserSettings.anim_time(randf_range(0.26, 0.40))
@@ -32475,7 +32583,25 @@ func _spawn_frost_crown(at: Vector2) -> void:
 		# `bite` too: the point is to stop the blade being a flat chip of
 		# colour, not to make it busy. This family's note says cold arrives
 		# quietly, and that governs the amount as much as the kind.
-		blade.material = Motion.vfx_noise_material(randf() * 9.0, 0.0, 5.5, 0.34)
+		# Same trap as the flame: no texture, no UVs, no marbling. The blade keeps
+		# `rim` at 0 — ice is FACETED and its silhouette should stay crisp; what
+		# it was missing is the internal veining, not a frayed edge.
+		blade.texture = Motion.white_tex()
+		# BITE 0.85, NOT 0.34. Every number on this line was chosen against a
+		# shader that was rendering nothing (no texture, so UV was (0,0) and the
+		# noise sampled one point), which means 0.34 was never SEEN — it was a
+		# guess at "subtle". With the material actually running, a +/-17% value
+		# swing on a 30px blade is invisible, and ice is not subtle inside: it is
+		# cloudy and clear in patches, with veins.
+		#
+		# The ramp carries the same reading as a hue shift rather than a
+		# brightness one — clear ice catching light goes toward a cold white,
+		# not toward a paler blue. `scroll` stays 0 and `warp` stays absent:
+		# a crystal does not flow, and this is the one form in the kit that
+		# must NOT churn. `rim` stays 0 for the same reason — ice is faceted,
+		# and fraying its silhouette would make a solid look like smoke.
+		blade.material = Motion.vfx_noise_material(randf() * 9.0, 0.0, 5.5, 0.85,
+			0.0, 0.50, Color(0.93, 0.98, 1.0))
 		blade.position = foot   # origin AT THE ROOT, so rotation is a break
 		blade.z_index = 218
 		_hud_layer.add_child(blade)
@@ -33304,7 +33430,14 @@ func _spawn_order_mark(at: Vector2) -> void:
 
 func _pulse_target_outline(target: Control, color: Color) -> void:
 	# Brief translucent fill that expands slightly while fading — reads as the
-	# target being "touched" by the cast without requiring an outline shader.
+	# target being "touched" by the cast.
+	#
+	# IT USED TO SAY "without requiring an outline shader", which was the tell:
+	# a bare ColorRect is a hard-edged box, so a cast landing on a creature drew
+	# a rectangle around it — UI furniture, not contact. The shader it was
+	# avoiding is four lines. Feathered on both axes and still rect-shaped, so
+	# it keeps hugging the card (a ring would not, on a 225x300 target) while
+	# losing the straight sides that made it read as a selection box.
 	if DisplayServer.get_name() == "headless" or not is_instance_valid(target):
 		return
 	var rect := ColorRect.new()
@@ -33314,12 +33447,19 @@ func _pulse_target_outline(target: Control, color: Color) -> void:
 	rect.color = Color(color.r, color.g, color.b, 0.40)
 	rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	rect.z_index = 175
+	rect.material = Motion.soft_rect_material(Vector2(0.30, 0.24), 1.15)
 	var parent: Node = _hud_layer if _hud_layer != null else self
 	parent.add_child(rect)
 	var tw := rect.create_tween().set_parallel(true)
 	tw.tween_property(rect, "color:a", 0.0, 0.42).set_ease(Tween.EASE_IN)
-	tw.tween_property(rect, "position", rect.position - Vector2(4, 4), 0.42)
-	tw.tween_property(rect, "size", rect.size + Vector2(8, 8), 0.42)
+	# A SPREAD DECELERATES. Both of these expanded at constant velocity, which
+	# is the temporal twin of the hard edge fixed above: nothing in the physical
+	# world spreads at a fixed rate, and a shockwave least of all. QUAD-out puts
+	# the movement in the first third, where the eye actually reads it.
+	tw.tween_property(rect, "position", rect.position - Vector2(4, 4), 0.42) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(rect, "size", rect.size + Vector2(8, 8), 0.42) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	get_tree().create_timer(0.50).timeout.connect(rect.queue_free)
 
 

@@ -44,6 +44,44 @@ func _net_init_remote_authority() -> bool:
 	return true
 
 
+## COERCE A PEER-SUPPLIED FIELD WITHOUT TRUSTING ITS TYPE.
+##
+## `int(x)` THROWS on a Dictionary, an Array or an Object — "Invalid call.
+## Nonexistent 'int' constructor" — and a thrown call ABORTS the function where it
+## stands. Every intent handler read its peer's fields with a bare `int(...)`, so a
+## modified or simply buggy client could stop a host-side handler half-finished by
+## sending `{"t": "play_creature", "lane": {}}`: found by fuzzing the wire
+## (tools/_probe_fuzz_wire.gd), which is the only pass that ever fed this game input
+## it did not write itself. `NetProtocol` cannot prevent it — the envelope contract
+## is about SHAPE, and `{"lane": {}}` is a perfectly well-shaped payload — so the
+## coercion itself has to be total.
+##
+## Returns `fallback` for anything that is not sensibly a number, which puts the
+## value straight into the range checks the handlers already perform.
+static func _wire_int(v, fallback: int) -> int:
+	match typeof(v):
+		TYPE_INT:
+			return int(v)
+		TYPE_FLOAT:
+			var f := float(v)
+			return int(f) if is_finite(f) else fallback
+		TYPE_BOOL:
+			return 1 if bool(v) else 0
+		TYPE_STRING, TYPE_STRING_NAME:
+			return int(String(v)) if String(v).is_valid_int() else fallback
+	return fallback
+
+
+## The same guarantee for text. `String(x)` does not throw, but it happily renders a
+## whole nested Dictionary into an id field, which then travels into lookups and log
+## lines. Anything that is not already text is refused.
+static func _wire_str(v, fallback: String = "") -> String:
+	match typeof(v):
+		TYPE_STRING, TYPE_STRING_NAME:
+			return String(v)
+	return fallback
+
+
 func _net_remote_empty_edge_columns() -> int:
 	var count := 0
 	for lane in [0, combat.LANES_PER_ROW - 1]:
@@ -105,7 +143,7 @@ func _net_payload_entries(entries: Array) -> Array[String]:
 func _net_apply_private_state(event: Dictionary) -> void:
 	if not combat._is_client():
 		return
-	var rejection_reason := String(event.get("reason", ""))
+	var rejection_reason := _wire_str(event.get("reason", ""))
 	if rejection_reason != "" and _is_sealed() and combat._sorcery_active < 0:
 		_sealed_clear_pending_local()
 	for key in ["hand", "draw", "discard", "exhaust", "potions"]:
@@ -158,8 +196,8 @@ func _net_apply_private_state(event: Dictionary) -> void:
 	combat._player_draw_pile = _net_payload_entries(event.get("draw", []))
 	combat._player_discard_pile = _net_payload_entries(event.get("discard", []))
 	combat._exhaust_pile = _net_payload_entries(event.get("exhaust", []))
-	combat.player_mana = maxi(0, int(event.get("mana", 0)))
-	combat.player_max_mana = maxi(0, int(event.get("max_mana", 0)))
+	combat.player_mana = maxi(0, _wire_int(event.get("mana", 0), 0))
+	combat.player_max_mana = maxi(0, _wire_int(event.get("max_mana", 0), 0))
 	var slot := SkirmishState.local_slot()
 	if slot != null:
 		slot.potions = event.get("potions", []).duplicate()
@@ -279,16 +317,7 @@ func _net_begin_combat() -> void:
 					NetMatch.send_intent({"t": NetMatch.IN_ORDER_PICK,
 						"first": combat._net_first_player_override})
 		else:
-			combat._show_info("The foe won the toss — they are choosing…")
-			# Wait for the pick to cross the wire; a generous timeout falls back
-			# to the raw flip so a dropped message can never soft-lock the match.
-			var toss_waited := 0.0
-			while combat._net_first_player_override < 0 and toss_waited < 90.0 \
-					and not combat._net_match_over:
-				await combat.get_tree().create_timer(0.2).timeout
-				toss_waited += 0.2
-			if combat._net_first_player_override < 0:
-				combat._net_first_player_override = combat._net_first_player()
+			await _net_show_order_wait()
 	# ── SEALED ORDERS style: no opener, no Coin — both sides give orders blind,
 	# so there is nothing to COMPENSATE. There is still something to DECIDE:
 	# initiative (reveal order + the sorcery opener), which alternates per round
@@ -312,8 +341,13 @@ func _net_begin_combat() -> void:
 		# Slot 1's private opening hand comes from the host authority.
 		if first_index == 0:
 			var remote_predeal: int = combat.HAND_REFILL_TARGET
+			# Read the relic's own value, exactly as the local pre-deal below does
+			# (line ~329). This was a hardcoded +1: identical today, but the two
+			# paths would diverge silently the moment Deep Satchel is retuned, and
+			# the divergence would land on the CLIENT's opening hand only — the
+			# hardest place to notice it.
 			if _remote_state.relics.has("deep_satchel"):
-				remote_predeal += 1
+				remote_predeal += int(RelicDB.get_relic("deep_satchel").get("value", 1))
 			_remote_state.predeal(remote_predeal, true)
 		_net_send_private_state()
 	var i_go_first: bool = first_index == NetMatch.local_player_index
@@ -345,7 +379,7 @@ func _net_begin_combat() -> void:
 			combat._layout_hand()
 		# Share the pre-dealt opening hand so the opponent's foe-readout is correct.
 			_net_broadcast_hand_count()
-		combat._show_info("The foe goes first. You go second — you keep The Coin, and your first turn attacks.")
+		combat._show_info("Your opponent goes first. You go second — you keep The Coin, and your first turn attacks.")
 	# (attach_combat already ran ahead of the toss above — the buffered-message
 	# replay that used to live here rides that earlier call; see NetMatch.attach_combat.)
 	# Only the HOST drives the authoritative turn machine — but it opens the match for
@@ -399,6 +433,21 @@ func _net_show_order_choice() -> bool:
 	coin.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(coin)
 	await _net_play_coin_toss(coin)
+	# THE TOSS IS A MULTI-SECOND SUSPENSION AND `layer` IS A CHILD OF THE COMBAT
+	# SCENE. If the peer drops while the coin is in the air, `_net_on_peer_lost`
+	# arms a scene change two seconds out, the scene and this layer are freed, and
+	# every line below is operating on a freed object — which in GDScript aborts
+	# the function silently rather than raising. Nothing after this point would
+	# run, so the toss winner would be left staring at a coin with no choice
+	# buttons under it and no error anywhere.
+	#
+	# The abort ANSWER follows the convention already established for the wait loop
+	# below: the caller only feeds it to `_net_first_player_override` for a match
+	# that is ending, so hand back whatever makes that override a no-op.
+	if not is_instance_valid(layer) or not is_instance_valid(combat):
+		if not is_instance_valid(combat):
+			return true
+		return combat._net_first_player() == combat._net_my_index()
 
 	var col := VBoxContainer.new()
 	col.set_anchors_preset(Control.PRESET_CENTER)
@@ -419,15 +468,15 @@ func _net_show_order_choice() -> bool:
 	# also commit your spell first.
 	var sealed_toss: bool = _is_sealed()
 	var sub = GameTheme.make_label(
-		"Do you want the initiative?" if sealed_toss
+		"Do you want to resolve first or second?" if sealed_toss
 			else "Do you want to go first or second?",
 		18, GameTheme.DESC_DIM)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(sub)
 	var picked: Array = [-1]
 	var choices: Array = [
-		["TAKE INITIATIVE", "Your creatures arrive first. Your spells also resolve first, before you see the opponent's spells.", 1],
-		["LET THEM LEAD", "They reveal and cast first. You answer the spell step already knowing what they played.", 0],
+		["RESOLVE FIRST", "Your creatures arrive first. Your spells also resolve first, before you see the opponent's spells.", 1],
+		["RESOLVE SECOND", "They reveal and cast first. You answer the spell step already knowing what they played.", 0],
 	] if sealed_toss else [
 		["GO FIRST", "You take the first turn, and every turn after it.", 1],
 		["GO SECOND", "You see their line before you commit yours, and you start with The Coin (+1 Command, once).", 0],
@@ -448,9 +497,126 @@ func _net_show_order_choice() -> bool:
 		GameTheme.hover_lift(btn)
 	GameTheme.deal_in(col, 0.05)
 	GameTheme.stamp_in(title, 0.10)
+	# THE TWIN'S GUARD, WHICH THIS LOOP NEVER HAD. `_net_show_order_wait` — the
+	# other half of the same toss — waits with BOTH a timeout and a
+	# `not combat._net_match_over` term. This one waited on nothing but the click.
+	#
+	# So if the opponent quit while you were choosing (people close the game at
+	# match start more than anywhere else), `_net_on_peer_lost` set `_net_match_over`
+	# and armed a 2.5s fade to the menu; the scene changed, `combat` was freed, and
+	# this coroutine went on dereferencing it once a frame — `combat.get_tree()` on
+	# a previously-freed instance — with no exit, because the modal it was waiting
+	# for a click on had been freed too.
+	#
+	# On an abort the return value is moot (the caller only feeds it to
+	# `_net_first_player_override` for a match that is ending), so hand back the
+	# answer that makes the override a NO-OP: whatever the raw flip already said.
 	while picked[0] < 0:
+		if not is_instance_valid(combat) or combat._net_match_over:
+			if is_instance_valid(layer):
+				layer.queue_free()
+			if not is_instance_valid(combat):
+				return true
+			return combat._net_first_player() == combat._net_my_index()
 		await combat.get_tree().process_frame
 	return picked[0] == 1
+
+
+## THE LOSER OF THE TOSS WATCHES THE SAME TOSS (2026-08-04).
+##
+## The opening ceremony used to be one-sided: the winner got the Old King's coin spun
+## on its edge over a dimmed board, and the other player got a single info line and up
+## to ninety seconds of a static board while somebody else decided how the match opens.
+## The very first thing a skirmish does was the least mutual thing in it.
+##
+## So the watcher now sees the same coin — and it is genuinely THE SAME COIN, not a
+## lookalike: CoinProp is seeded off `SkirmishState.rng_seed`, which both peers already
+## share, so the two machines draw identical wear and the same faces come up. Then the
+## verdict lands as a BEAT ("They go first." / "They go second — you hold The Coin.")
+## rather than as a silent state change, which is how the player learns what the other
+## chose at all.
+##
+## Keeps the old wait loop verbatim, timeout and all: a dropped EV_ORDER_PICK still
+## falls back to the raw flip, and a match that ends under us still bails.
+func _net_show_order_wait() -> void:
+	var headless: bool = DisplayServer.get_name() == "headless"
+	var layer: CanvasLayer = null
+	var status: Label = null
+	if not headless:
+		layer = CanvasLayer.new()
+		layer.layer = 30
+		combat.add_child(layer)
+		var dim := ColorRect.new()
+		dim.color = Color(0, 0, 0, 0.0)
+		dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+		dim.mouse_filter = Control.MOUSE_FILTER_STOP
+		layer.add_child(dim)
+		if UserSettings != null and UserSettings.reduce_motion:
+			dim.color = Color(0, 0, 0, 0.80)
+		else:
+			var dim_tw := dim.create_tween()
+			dim_tw.tween_property(dim, "color", Color(0, 0, 0, 0.80), 0.35)
+		var coin = COIN_PROP.new()
+		coin.seed_text = "toss_%d" % SkirmishState.rng_seed   # the same coin, both peers
+		coin.custom_minimum_size = Vector2(150, 150)
+		coin.size = Vector2(150, 150)
+		coin.set_anchors_preset(Control.PRESET_CENTER)
+		coin.position = Vector2(-75, -280)
+		coin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		layer.add_child(coin)
+		await _net_play_coin_toss(coin)
+		# Same suspension hazard as the winner's screen above: a drop during the
+		# toss frees this layer with the rest of the combat scene.
+		if not is_instance_valid(layer) or not is_instance_valid(combat):
+			return
+		var col := VBoxContainer.new()
+		col.set_anchors_preset(Control.PRESET_CENTER)
+		col.offset_left = -330
+		col.offset_right = 330
+		col.offset_top = -150
+		col.offset_bottom = 300
+		col.alignment = BoxContainer.ALIGNMENT_BEGIN
+		col.add_theme_constant_override("separation", 12)
+		layer.add_child(col)
+		# Ember, not gilt: the winner's title is gilt, and the two screens should not
+		# claim the same colour for opposite outcomes.
+		var title = GameTheme.make_label("OPPONENT WON THE TOSS", 34, GameTheme.ATK_RED, true)
+		title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		col.add_child(title)
+		status = GameTheme.make_label("They are choosing the order…", 18, GameTheme.DESC_DIM)
+		status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		col.add_child(status)
+		GameTheme.deal_in(col, 0.05)
+		GameTheme.stamp_in(title, 0.10)
+	else:
+		combat._show_info("Your opponent won the toss — they are choosing…")
+
+	# Wait for the pick to cross the wire; a generous timeout falls back to the raw
+	# flip so a dropped message can never soft-lock the match.
+	var toss_waited := 0.0
+	while combat._net_first_player_override < 0 and toss_waited < 90.0 \
+			and not combat._net_match_over:
+		await combat.get_tree().create_timer(0.2).timeout
+		toss_waited += 0.2
+	if combat._net_first_player_override < 0:
+		combat._net_first_player_override = combat._net_first_player()
+
+	# The verdict as a BEAT. Said from OUR side of the table — what matters to this
+	# player is whether they move first and whether they hold the Coin, not which
+	# global index won.
+	if status != null and is_instance_valid(status):
+		var they_lead: bool = combat._net_first_player() != combat._net_my_index()
+		if _is_sealed():
+			status.text = "They resolve first." if they_lead \
+				else "They resolve second — you reveal and cast first."
+		else:
+			status.text = "They go first." if they_lead \
+				else "They go second — you hold The Coin."
+		status.add_theme_color_override("font_color", GameTheme.GILT_BRIGHT)
+		GameTheme.stamp_in(status, 0.0)
+		await combat.get_tree().create_timer(1.15).timeout
+	if layer != null and is_instance_valid(layer):
+		layer.queue_free()
 
 
 ## The coin goes up, turns on its edge, and comes down. `face_t` is the honest
@@ -644,7 +810,7 @@ func _sealed_open_orders_local() -> void:
 		combat._set_primary_action("seal")
 	combat._update_hud()
 	var init_line: String = "You hold the initiative." \
-		if combat._net_initiative == NetMatch.local_player_index else "The foe holds the initiative."
+		if combat._net_initiative == NetMatch.local_player_index else "Your opponent holds the initiative."
 	combat._show_combat_banner("SEALED ORDERS", "Set your line in secret — " + init_line,
 		Color(0.98, 0.86, 0.55))
 	if AudioBank != null:
@@ -662,7 +828,13 @@ func _sealed_commit_creature(card: Control, cost: int, lane_idx: int, row: int) 
 	var cid: String = card.card_id
 	var data: Dictionary = card.card_data.duplicate(true)
 	combat.player_mana -= cost
-	combat._pulse_mana_label(cost)
+	# THE SPEND IS ITS OWN BEAT (parity, 2026-08-04). Every solo play site passes
+	# MANA_SPEND_BEAT so the RESOURCE lands half a beat behind the CARD — otherwise the
+	# card's exit, the play cue, the seal punch and the arrival press all share one
+	# frame and four simultaneous events read as one indistinct event. All three
+	# skirmish play sites were passing the 0.0 default, so a skirmish play was exactly
+	# the mush that offset was introduced to fix.
+	combat._pulse_mana_label(cost, false, combat.MANA_SPEND_BEAT)
 	combat._hand.erase(card)
 	combat._hand_container.remove_child(card)
 	card.queue_free()
@@ -773,7 +945,9 @@ func _sealed_on_button() -> void:
 			order_discards.append(int(card.deck_uid))
 	combat._flush_marked_discards()
 	combat._sealed_await_foe = true
-	# Orders committed — lock the hand until the reveal / your spell step.
+	# Orders committed — drop the planning overlay (same beat solo drops it, see
+	# _net_on_done_placing) and lock the hand until the reveal / your spell step.
+	combat._clear_threat_flags()
 	Card2D.hand_interactive = false
 	combat._refresh_hand_affordability()
 	if combat._end_turn_btn != null:
@@ -783,7 +957,7 @@ func _sealed_on_button() -> void:
 	var list: Array = []
 	for p in combat._sealed_pending:
 		list.append({"id": p.id, "uid": p.uid, "lane": p.lane, "row": p.row})
-	combat._show_info("Orders sealed. Awaiting the foe…")
+	combat._show_info("Orders sealed. Waiting for your opponent…")
 	if combat._is_host():
 		_sealed_store_bundle(0, list, combat.player_mana)
 	else:
@@ -881,17 +1055,27 @@ func _sealed_reveal() -> void:
 	# is the one moment in the game that has earned a flip, and it used to be a
 	# texture swap: the ghosts vanished and the cards popped in.
 	_sealed_clear_pending_local(true)
-	combat._show_combat_banner("THE ORDERS BREAK OPEN", "", Color(1.0, 0.78, 0.35))
+	combat._show_combat_banner("ORDERS REVEALED", "", Color(1.0, 0.78, 0.35))
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play", 0.04, 2.0, 0.62)
 	combat._net_cards_played[0] = 0
 	combat._net_cards_played[1] = 0
 	for side in [combat._net_initiative, 1 - combat._net_initiative]:
+		# STOP STAMPING A FIGHT THAT IS OVER. `run_on_enter` is true for these spawns,
+		# so a battlecry chain can end the match part-way through the reveal — the
+		# function's own tail acknowledges that ("an on-enter chain ended it") but only
+		# AFTER the loop had seated every remaining order. The watcher then read the
+		# verdict and went on receiving fresh bodies behind it. Latent before the
+		# per-order sync above (one trailing snapshot hid it); plainly visible now.
+		if combat._net_match_over:
+			break
 		var b: Dictionary = combat._sealed_bundles.get(side, {})
 		# Condottiere reads the caster's unspent pool: the client's rides its
 		# bundle; the host's own pool is live in player_mana.
 		combat._net_client_unspent_mana = int(b.get("mana", 0)) if side == 1 else 0
 		for o_raw in b.get("list", []):
+			if combat._net_match_over:
+				break   # same reason as the outer break — see above
 			var o: Dictionary = o_raw
 			var data := SkirmishState.skirmish_card_data(String(o.get("id", "")))
 			if data.is_empty():
@@ -915,6 +1099,17 @@ func _sealed_reveal() -> void:
 			# needs the landing-pop-vs-flip ownership settled first.
 			_net_spawn_creature(data, int(o.get("uid", _net_issue_token_id())),
 				lane, row, side == 1, true)
+			# SHIP EACH ORDER AS IT LANDS (2026-08-04). The sync used to sit after the
+			# loop, so the host watched the orders STAMP DOWN one at a time in
+			# initiative order — the mode's signature moment — while the watcher got a
+			# single snapshot and every card appeared on one frame. Syncing per order
+			# gives the client the same paced arrival through the path it already has
+			# (`_net_apply_board_sync` → `_net_spawn_creature` → `_play_landing_pop` →
+			# the wax press), with no new message kind and no second authoritative
+			# spawn path: the snapshot stays the client's single source of truth, which
+			# is what keeps this cheap in risk. A sealed round commits at most eight
+			# orders, so it is at most eight small snapshots.
+			_net_sync_board()
 			await combat._short_pause(0.12)
 	_net_sync_board()
 	await combat._short_pause(combat.COMBAT_PAUSE_SHORT)
@@ -987,8 +1182,8 @@ func _sealed_set_sorcery(who: int) -> void:
 		combat._set_phase_caption("YOUR SPELL STEP")
 		combat._show_info("Your spell step — cast freely over the revealed lines, then pass.")
 	else:
-		combat._set_phase_caption("FOE'S SPELL STEP")
-		combat._show_info("The foe weighs its spells…")
+		combat._set_phase_caption("OPPONENT'S SPELL STEP")
+		combat._show_info("Your opponent is casting spells…")
 
 
 
@@ -1027,14 +1222,14 @@ func _bot_sealed_orders() -> void:
 	var list: Array = []
 	var spent := 0
 	for intent in plays:
-		if String(intent.get("t", "")) != NetMatch.IN_PLAY_CREATURE:
+		if _wire_str(intent.get("t", "")) != NetMatch.IN_PLAY_CREATURE:
 			continue   # v1: the sealed bot fields creatures only
-		var lane := int(intent.get("lane", -1))
-		var row = int(intent.get("row", combat.ROW_FRONT))
-		spent += _bot_consume_card(int(intent.get("uid", -1)))
+		var lane := _wire_int(intent.get("lane", -1), -1)
+		var row = _wire_int(intent.get("row", combat.ROW_FRONT), combat.ROW_FRONT)
+		spent += _bot_consume_card(_wire_int(intent.get("uid", -1), -1))
 		_bot_sync_hand_display(mana - spent)
-		list.append({"id": String(intent.get("id", "")),
-			"uid": int(intent.get("uid", -1)), "lane": lane, "row": row})
+		list.append({"id": _wire_str(intent.get("id", "")),
+			"uid": _wire_int(intent.get("uid", -1), -1), "lane": lane, "row": row})
 		_sealed_show_ghost(lane, row)
 		await combat._short_pause(0.25)
 	combat._bot_banked_mana = clampi(mana - spent, 0, combat.MAX_BANKED_MANA)
@@ -1064,6 +1259,7 @@ func _net_open_placement(active_index: int) -> void:
 	# turn (the host's own turns also reset it via _start_round; this covers the
 	# client's turns, where the host validates the client's reposition intents).
 	combat._moves_used_this_turn = 0
+	combat._reset_free_moves_for_side(active_index == 1)
 	combat._net_spells_this_turn = 0   # per-turn spell tally (flame_bolt combo)
 	combat._net_last_spell_data = {}   # Echo only reaches back within the current turn
 	combat._net_last_spell_target_eid = -1
@@ -1156,6 +1352,9 @@ func _net_client_turn_begin(active: int, rnd: int) -> void:
 	combat._net_active_index = active
 	combat._net_turn_round = rnd
 	if active == NetMatch.local_player_index:
+		combat._moves_used_this_turn = 0
+		combat._reset_free_moves_for_side(false)
+	if active == NetMatch.local_player_index:
 		# Slot 1's draw, piles and Command were already applied from EV_HAND_SET.
 		# Only the host-side local player still runs Combat._start_round directly.
 		if combat._is_client():
@@ -1217,6 +1416,14 @@ func _net_on_done_placing() -> void:
 		if card != null and is_instance_valid(card) and card.marked_for_discard:
 			discard_uids.append(int(card.deck_uid))
 	combat._flush_marked_discards()
+	# Drop the planning overlay before the lines meet (2026-08-04). Solo does this
+	# at the same beat — `_on_end_turn` calls `_clear_threat_flags()` the instant it
+	# flips to RESOLVING, because the clash itself is now the read and the forecast
+	# was only ever an aid for the decision you have just made. The skirmish commit
+	# never did, so a shot of a net clash had DIES / TAKES 1 - 8 HP chips floating
+	# over the bodies actually dying, which is the forecast contradicting the board.
+	# `_refresh_lane_forecast` bails outside PLAYER_TURN, so nothing re-adds them.
+	combat._clear_threat_flags()
 	if combat._net_turn_round > 1 or combat._net_goes_second(NetMatch.local_player_index):
 		combat._play_clash_commit_vfx()
 	if combat._is_host():
@@ -1224,8 +1431,8 @@ func _net_on_done_placing() -> void:
 	else:
 		_net_set_local_active(false)
 		combat._set_primary_action("waiting")
-		combat._set_phase_caption("AWAITING FOE")
-		combat._show_info("Ready — waiting for the clash…")
+		combat._set_phase_caption("WAITING FOR OPPONENT")
+		combat._show_info("Turn committed — waiting for the clash…")
 		NetMatch.send_intent({"t": NetMatch.IN_END_ACTIONS, "discards": discard_uids})
 
 
@@ -1299,7 +1506,21 @@ func _net_enrich_face_hit(entry: Dictionary) -> Dictionary:
 
 
 
-func _net_log_hit(attacker: Control, defender: Control, hp_before: int, is_counter: bool = false) -> void:
+## `power` = the blow's PRE-mitigation size, and it is the reason this entry exists
+## in its current shape. The host weighs a strike's punctuation off that number
+## (`_strike_stop` / `_strike_read` / the tracer's width / the burst's spray), while
+## `n` is only what survived Armored, a Shield or an HP floor. A client working from
+## `n` alone therefore ran a DIFFERENT weight class for the same blow — an 8-ATK
+## swing fully eaten by a Shield is a heavy strike that removed nothing, and the two
+## peers disagreed about it. Optional so the ten incidental sites (cleave splash,
+## overflow spill, hydra, stampede, the ledger) can keep passing nothing and fall
+## back to `n`, which is the right answer for a rider that has no separate weight.
+##
+## `ranged` marks a shot rather than a swing. The tracer draws tighter and colder
+## for one so a marksman does not read like a melee attacker — the client had no way
+## to know, so every sniper shot in skirmish came out as a warm melee slash.
+func _net_log_hit(attacker: Control, defender: Control, hp_before: int,
+		is_counter: bool = false, power: int = -1, ranged: bool = false) -> void:
 	if not combat._net_clash_recording:
 		return
 	if defender == null or not is_instance_valid(defender) or int(defender.entity_id) < 0:
@@ -1309,6 +1530,10 @@ func _net_log_hit(attacker: Control, defender: Control, hp_before: int, is_count
 		"hp": int(defender.current_hp),
 		"n": maxi(0, hp_before - int(defender.current_hp)),
 	}
+	if power > 0:
+		entry["p"] = power
+	if ranged:
+		entry["rng"] = true
 	if attacker != null and is_instance_valid(attacker) and int(attacker.entity_id) >= 0:
 		entry["a"] = int(attacker.entity_id)
 		entry["o"] = 1 if attacker.is_opponent else 0
@@ -1323,11 +1548,62 @@ func _net_log_hit(attacker: Control, defender: Control, hp_before: int, is_count
 
 
 
-## Log the sub-phase caption the host flips mid-clash (only THE DOUBLED HOUR reaches
-## the net clash) so the client's phase line matches instead of going blank.
+## Log the sub-phase caption the host flips mid-clash so the client's phase line
+## matches instead of going blank. Since 2026-08-04 that is the same set of captions
+## solo raises — SWIFT STRIKES, FRONT ROW ATTACKS, BACK ROW ATTACKS, CLASH, THE FALLEN,
+## THE DOUBLED HOUR, RAIN OF BLOWS — because the clash the client watches is now the
+## same paced, named sequence the campaign runs.
 func _net_log_caption(text: String) -> void:
 	if combat._net_clash_recording:
 		combat._net_clash_log.append({"cap": text})
+
+
+
+
+## THE PACING CROSSES THE WIRE AS DECISIONS, NOT AS SECONDS (2026-08-04).
+##
+## The skirmish clash used to be a burst on BOTH machines: the host resolved every
+## column on adjacent frames, and the client replayed a flat strike list with no
+## sense of which column was being decided. Solo, meanwhile, has spent two passes
+## learning to spotlight one column at a time and to spend its dwell where the
+## information is. These two entries carry that structure across:
+##
+##   {fo: lane, fe: enemy_strike}  — put the spotlight on this column
+##   {dw: kind}                    — this column earned a MINOR / NORMAL / KILL slot
+##
+## Both are *choices*, not durations. The watching peer runs its own
+## `_focus_combat_lane` and `_run_lane_dwell`, so the Clash Pause dial and Animation
+## Speed that pace the host's clash are the CLIENT's own settings on the client's
+## screen. Shipping a float would have quietly handed one player's reading speed to
+## the other, which is exactly what that dial exists to prevent.
+##
+## `fe` is written from the HOST's point of view ("the striker is on the enemy half
+## of my board") and the client INVERTS it on replay — the clash log only ever flows
+## host → client, so the two boards are exact mirrors of each other and one flip is
+## the whole transform. Lane index needs no transform: the board mirrors front-to-
+## back, not left-to-right, so column 2 is column 2 on both screens.
+func _net_log_focus(lane_idx: int, enemy_strike: bool) -> void:
+	if combat._net_clash_recording:
+		combat._net_clash_log.append({"fo": lane_idx, "fe": enemy_strike})
+
+
+func _net_log_dwell(kind: int) -> void:
+	if combat._net_clash_recording:
+		combat._net_clash_log.append({"dw": kind})
+
+
+## Mark the point in the reel where the host's paced corpse flush runs. The client's
+## corpses are swept by the TRAILING SNAPSHOT, not by this log, so it cannot simply
+## replay a death list — instead it names its own mortally-struck bodies on the same
+## budget (see _net_replay_fallen), and the beats it spends doing so are what hold
+## the snapshot back until the names have been read.
+func _net_log_fallen() -> void:
+	# Only when there is actually a flush to pace. A marker over an empty sweep would
+	# make the client run a naming pass with nothing to name — harmless, but it is
+	# the same rule the captions follow (never announce an empty beat) and it keeps
+	# the reel honest for anyone reading one.
+	if combat._net_clash_recording and combat._downed_count() > 0:
+		combat._net_clash_log.append({"fal": true})
 
 
 
@@ -1378,14 +1654,20 @@ func _net_log_pierce(attacker: Control, victim: Control,
 
 
 ## Buffer a floating text callout (e.g. a warden's "+N ATK" pump) onto a creature by
-## eid so it replays on the client via the fx channel — the host spawns these at world
-## positions the client can't reuse. Rides the next board sync like every other fx.
+## eid so it replays on the client — the host spawns these at world positions the client
+## cannot reuse.
+##
+## Routed through `_net_queue_fx_chip` since 2026-08-04 rather than straight onto the fx
+## queue: several of its callers (`_apply_ally_death_passives` above all, which fires
+## during the recorded corpse flush) run MID-CLASH, and the queue does not ship until the
+## trailing snapshot. So those floats arrived in a batch after the fight instead of on
+## the body they described, while every other chip had already been moved into the reel.
 func _net_fx_text(creature: Control, label: String, color: Color) -> void:
 	if not combat._is_host() or creature == null or not is_instance_valid(creature):
 		return
 	if int(creature.entity_id) < 0:
 		return
-	combat._net_fx_queue.append({
+	_net_queue_fx_chip({
 		"eid": int(creature.entity_id), "label": label,
 		"col": [color.r, color.g, color.b],
 	})
@@ -1422,6 +1704,60 @@ func _net_send_clash_log() -> void:
 
 
 
+## Take the spotlight off the board on the watcher's screen too. Purely local on the
+## host (it just calls clear_focus), so this only has to exist for the replay.
+func _net_log_focus_clear() -> void:
+	if combat._net_clash_recording:
+		combat._net_clash_log.append({"fo": -1})
+
+
+## The clash's closing ledger, shipped as COUNTS and never as the finished sentence.
+## The host writes "ours" from its own board; the client's board is the mirror, so the
+## pair is swapped on replay and each player reads "ours" as their OWN line. Sending
+## the string would have told the player who just lost four bodies that their line
+## held — the same class of mistake `fe` avoids by inverting rather than re-deriving.
+func _net_log_ledger(ours: int, theirs: int) -> void:
+	if combat._net_clash_recording:
+		combat._net_clash_log.append({"led": [ours, theirs]})
+
+
+
+
+## A KEYWORD CHIP FIRES WHERE IT HAPPENED (2026-08-04, second pass).
+##
+## Every callout the host raises — POISON, THORNS, REFLECT, THE WORKS, SPLINTER,
+## LAST STAND, a deathrattle's label — used to go on the fx QUEUE, which ships with
+## the trailing board snapshot. The clash log is deliberately sent AHEAD of that
+## snapshot, so on the client the entire clash played through with no chips at all
+## and then every chip in it arrived at once, in a batch, over a settled board. The
+## host saw a reason beside each blow; the watcher saw a pile of words afterwards.
+##
+## Mid-clash the chip therefore rides the REEL instead, at the position it fired, and
+## falls back to the queue everywhere else (a battlecry during the play phase has no
+## reel to ride). The two channels are exclusive by construction — one `if` — so a
+## chip can never be drawn twice.
+##
+## Anchors are safe here: during a clash every callout is raised on a body that was
+## already on the board when the reel was sent. A chip on a token summoned mid-clash
+## would find no entity and be skipped, which is exactly what the {d} entries already
+## do with the same bodies.
+func _net_queue_fx_chip(entry: Dictionary) -> void:
+	if not combat._is_host():
+		return
+	if combat._net_clash_recording:
+		combat._net_clash_log.append({"kw": entry})
+	else:
+		combat._net_fx_queue.append(entry)
+
+
+# Per-CLASH baselines for the closing beats. Private to CombatNet: solo reads the
+# same facts off its own locals inside _do_combat, and nothing outside the clash
+# has any use for them.
+var _alive_before_clash: int = 0
+var _ledger_ours_before: int = 0
+var _ledger_theirs_before: int = 0
+
+
 ## HOST: the attack pass. In the both-sides form (-1) every attacker lands its
 ## blow and a creature slain by the first striker still retaliates (Card2D.defer_deaths
 ## holds deaths until the phase flushes), so nobody gets a de-facto Swift. This is the
@@ -1444,7 +1780,7 @@ func _net_run_clash(attacking_side: int = -1) -> void:
 	elif attacking_side == 0:
 		combat._show_info("Your line strikes!")
 	else:
-		combat._show_info("The foe's line strikes!")
+		combat._show_info("Their line strikes!")
 	# Clash replay: from here every strike beat is logged for the client's paced
 	# replay (see the EV_CLASH block above). Recording stays on through each
 	# segment's death flush so on-death face chips keep their place in the reel.
@@ -1452,6 +1788,12 @@ func _net_run_clash(attacking_side: int = -1) -> void:
 	combat._net_clash_banner_sent = false
 	combat._net_clash_attacking_side = attacking_side
 	combat._net_clash_recording = true
+	# Baselines for the closing beats (2026-08-04): the headcount funds the mass-grave
+	# punctuation, the two tallies fund the post-clash ledger. Both are per-CLASH here
+	# rather than per-round — the alternating style runs this twice a round.
+	_alive_before_clash = combat._all_creatures_both_sides().size()
+	_ledger_ours_before = combat._friendly_deaths_this_round
+	_ledger_theirs_before = combat._enemy_deaths_this_round
 	# Adjacency current before the strike math reads effective_atk for both warbands.
 	combat._refresh_adjacency_buffs()
 	# Stunned/frozen creatures forfeit their swing (can_attack honours is_frozen
@@ -1492,7 +1834,6 @@ func _net_run_clash(attacking_side: int = -1) -> void:
 			break
 	if net_swift_queued:
 		combat._set_phase_caption("SWIFT STRIKES")
-		_net_log_caption("SWIFT STRIKES")
 	# SWIFT PHASE — striking sides only, deaths HELD so Swift-vs-Swift trades
 	# (see _do_combat).
 	Card2D.defer_deaths = true
@@ -1507,31 +1848,58 @@ func _net_run_clash(attacking_side: int = -1) -> void:
 		if client_strikes:
 			await combat._resolve_swift_attack(lane_idx, combat.ROW_BACK, true)
 	Card2D.defer_deaths = false
-	combat._cleanup_dead()
+	_net_log_fallen()
+	await combat._cleanup_dead_paced()
 	_net_send_clash_log()   # ship the Swift beats AHEAD of their outcome snapshot
 	_net_sync_board()   # let the client see the Swift results before the main clash
-	combat._net_clash_recording = true
-	combat._set_phase_caption("CLASH")
-	_net_log_caption("CLASH")
+	# NOT re-armed once the fight is decided. A Swift striker can reach the face, and
+	# `damage_enemy_hero` declares the match over SYNCHRONOUSLY from inside that pass —
+	# which flushes the reel and sends the verdict (see _net_host_check_match_over).
+	# Re-arming unconditionally here would record the now-moot main pass and ship it
+	# AFTER that verdict, putting the watcher back in front of the very inversion the
+	# flush exists to prevent, just one phase later.
+	if not combat._net_match_over:
+		combat._net_clash_recording = true
 	# MAIN PASS — striking sides per lane, deaths HELD so mutual kills drop both.
 	# In a one-directional pass this is where the Cross-Blitz counterstrike lives:
 	# the struck defender hits back inside _creature_attacks_creature (gated below).
 	# A both-sides pass (sealed) is already simultaneous, so it stays off there.
+	#
+	# SERIALIZED THROUGH THE SAME UNIT AS SOLO (2026-08-04). This used to call
+	# `_resolve_column_attack` twice per column inline, which resolved the whole line
+	# on adjacent frames — the exact undifferentiated burst the campaign clash was
+	# rebuilt to stop being. `_clash_lane_pass` is that rebuild, and it takes a
+	# `side_filter` now precisely so the one-directional net pass can be the same
+	# code: spotlight the column, swing, weigh what happened, hold long enough to
+	# read it. The two ranks are named for the same reason they are in solo — a
+	# clash with phase boundaries beats one eight-beat "CLASH".
 	combat._net_mutual_retaliation = attacking_side >= 0
 	Card2D.defer_deaths = true
+	var front_strikes: bool = combat._rank_will_strike(combat.ROW_FRONT, attacking_side)
+	var back_strikes: bool = combat._rank_will_strike(combat.ROW_BACK, attacking_side)
+	if front_strikes or back_strikes:
+		combat._set_phase_caption("CLASH")
+	if front_strikes:
+		combat._set_phase_caption("FRONT ROW ATTACKS")
 	for lane_idx in range(combat.LANES_PER_ROW):
-		if host_strikes:
-			await combat._resolve_column_attack(lane_idx, combat.ROW_FRONT, false, enemy_front_empty)
-		if client_strikes:
-			await combat._resolve_column_attack(lane_idx, combat.ROW_FRONT, true, player_front_empty)
+		await combat._clash_lane_pass(lane_idx, combat.ROW_FRONT,
+			enemy_front_empty, player_front_empty, attacking_side)
+	# Re-asked after the front rank resolved, exactly as solo asks it — the answer
+	# can move (a back-row body spent by an interpose, a Twinblade already swung).
+	if combat._rank_will_strike(combat.ROW_BACK, attacking_side):
+		combat._set_phase_caption("BACK ROW ATTACKS")
 	for lane_idx in range(combat.LANES_PER_ROW):
-		if host_strikes:
-			await combat._resolve_column_attack(lane_idx, combat.ROW_BACK, false, enemy_front_empty)
-		if client_strikes:
-			await combat._resolve_column_attack(lane_idx, combat.ROW_BACK, true, player_front_empty)
+		await combat._clash_lane_pass(lane_idx, combat.ROW_BACK,
+			enemy_front_empty, player_front_empty, attacking_side)
 	combat._net_mutual_retaliation = false
 	Card2D.defer_deaths = false
-	combat._cleanup_dead()
+	# Name the beat BEFORE the bodies go (the 2026-07-28 lesson): `_downed_count`
+	# reads the dead-but-still-standing that defer_deaths has been holding, which is
+	# the same information one beat sooner than a headcount diff could give it.
+	if combat._downed_count() > 0:
+		combat._set_phase_caption("THE FALLEN")
+	_net_log_fallen()
+	await combat._cleanup_dead_paced()
 	# THE DOUBLED HOUR / Ranged: in a one-directional pass the DEFENDER's armed
 	# Doubled Hour must not fire (it swings on its own turn) — stash its flag
 	# around the shared helpers. Twinblade + Berserker self-filter (they key on
@@ -1557,7 +1925,24 @@ func _net_run_clash(attacking_side: int = -1) -> void:
 		if is_instance_valid(c) and c.card_data.get("passive", "") == "grow_on_attack" and c.has_attacked_this_turn:
 			c.current_atk += int(c.card_data.get("grow", 1))
 			c.update_stat_display()
-	combat._cleanup_dead()
+	# The late sweep — whatever the ranged / second-swing phases killed after the main
+	# flush. Paced like solo's, and the spotlight comes off the board here so the
+	# settled result is read without one column still lit.
+	if combat._downed_count() > 0 and combat._phase_caption != "THE FALLEN":
+		combat._set_phase_caption("THE FALLEN")
+	_net_log_fallen()
+	await combat._cleanup_dead_paced()
+	if combat._clash_lane_focus != null and is_instance_valid(combat._clash_lane_focus):
+		combat._clash_lane_focus.clear_focus()
+	_net_log_focus_clear()
+	# A mass grave is a beat, not a blink — the same 3+-fallen punctuation solo gets.
+	# (The client's copy of this already fires in _net_apply_board_sync, where its
+	# deaths flush; this is the host's half.)
+	var fallen_n: int = _alive_before_clash - combat._all_creatures_both_sides().size()
+	if fallen_n >= 3:
+		combat.screen_shake(11.0)
+		await combat._short_pause(combat.HITSTOP_BEAT * 2.0)
+	combat._post_clash_ledger(_ledger_ours_before, _ledger_theirs_before)
 	# Clear per-turn attack flags so both sides can swing again next round.
 	for c in combat._all_creatures_both_sides():
 		if is_instance_valid(c):
@@ -1653,6 +2038,21 @@ func _net_host_check_match_over() -> void:
 		winner = 0
 	else:
 		winner = 1
+	# SHIP THE FIGHT BEFORE THE VERDICT (2026-08-04). This is reached SYNCHRONOUSLY from
+	# `damage_enemy_hero` -> `_check_game_over`, i.e. from inside the clash, while the
+	# reel that contains the killing blow is still sitting unsent in `_net_clash_log`
+	# (it does not ship until the clash ends). So the watcher used to receive
+	# EV_MATCH_OVER first, show the verdict banner over a settled board, and only THEN
+	# get the reel and replay the fight that produced it — the result before its cause.
+	#
+	# Flushing here puts the reel on the wire first, and the client's existing backlog
+	# does the rest: `_net_replay_active` goes true for the replay and EV_MATCH_OVER
+	# queues behind it, so the killing blow lands, claims its ★8 hold, and the ceremony
+	# follows it. Recording is deliberately left OFF afterwards — the remainder of the
+	# host's clash is post-lethal and moot, the trailing sync still reconciles the
+	# board, and the watcher is in the verdict ceremony by then.
+	if combat._net_clash_recording:
+		_net_send_clash_log()
 	NetMatch.send_to_client({"t": NetMatch.EV_MATCH_OVER, "winner": winner})
 	_net_sync_board()
 	_net_show_result(winner)
@@ -1743,9 +2143,33 @@ func _net_show_series_interstitial(winner_index: int) -> void:
 		game_verdict, _net_series_score_str(), SkirmishState.games_to_win()])
 	if AudioBank != null:
 		AudioBank.play_sfx("victory" if winner_index == me else "defeat")
+	# A GAME INSIDE A SERIES IS STILL A FIGHT THAT ENDED (2026-08-04). This used to be
+	# the one fight-ending in the game with no ceremony at all — a 24px caption swap and
+	# a sting, which is precisely the "decisive beat presented as a label" that
+	# _show_battle_verdict was built to replace. Every solo fight gets the banner and so
+	# does the series' last game; games 1 and 2 of a Bo3 got nothing. Both peers run this
+	# path symmetrically, so adding it keeps the two screens identical.
+	#
+	# Guarded on a real winner for the same reason the Bo1 path is: a DRAW is neither
+	# VICTORY nor DEFEAT, and the banner can only say one of those two words.
+	if winner_index >= 0:
+		combat._play_killing_blow_moment(winner_index == me)
+		combat._show_battle_verdict(winner_index == me, 0, false, true,
+			_net_series_score_str())
 	# Hold the standing on screen, then advance. The host only relaunches once BOTH
 	# sides have signalled, so a small clock skew between the two timers is harmless.
-	await combat.get_tree().create_timer(2.2).timeout
+	# 2.8s, not the old 2.2: the banner alone holds 1.7 and fades over 0.4, so the
+	# shorter wait would have advanced the scene into its own fade.
+	await combat.get_tree().create_timer(2.8).timeout
+	# THE SCENE CAN BE GONE BEFORE THIS RESUMES. _net_on_peer_lost runs a 2.0s
+	# timer then a 0.5s fade into the menu, so a peer dropping during this
+	# interstitial frees Combat (and this node with it) at ~2.5s — a full 0.3s
+	# before the 2.8s wait is up. A SceneTreeTimer survives the scene change, so
+	# the latch test below was reading a member off a freed instance: the guard
+	# that exists specifically for this case was itself past the point of no
+	# return. Check the instance FIRST, then the latch.
+	if not is_instance_valid(combat):
+		return   # the scene left while we waited; nothing here has an owner
 	# Was a dead guard: _net_match_over is set TRUE by _net_show_result before we
 	# run, and _net_on_peer_lost never clears it, so this could never be true and
 	# the stated protection never once fired. Test the peer-lost latch instead.
@@ -1829,7 +2253,7 @@ func _net_request_rematch() -> void:
 func _net_on_remote_rematch() -> void:
 	combat._net_rematch_remote = true
 	if not combat._net_rematch_local:
-		combat._show_info("Opponent wants a rematch — press REMATCH to play again.")
+		combat._show_info("Opponent wants a rematch — press Rematch to play again.")
 	_net_try_start_rematch()
 
 
@@ -1838,7 +2262,19 @@ func _net_on_remote_rematch() -> void:
 ## When BOTH sides want a rematch, the HOST relaunches combat (host-authoritative,
 ## both peers transition together; _enter_combat_local resets HP + the board).
 func _net_try_start_rematch() -> void:
-	if not (combat._net_rematch_local and combat._net_rematch_remote):
+	# THE PRACTICE BOT ALWAYS SAYS YES, because there is nobody to ask. A drill has
+	# no peer, so `EV_REMATCH` goes into `send_to_client`'s `not remote_present`
+	# early return and `_net_rematch_remote` can never turn true — the handshake
+	# was waiting on an answer that could not arrive. Two live consequences, both
+	# reachable straight from the lobby's PRACTICE VS BOT panel:
+	#   * Bo1 — REMATCH relabels itself "WAITING FOR OPPONENT…" and stays there
+	#     forever. LEAVE TO MENU was the only working button on the panel.
+	#   * Bo3 — worse, and silent: the lobby offers BEST OF 3 against the bot, and
+	#     `_net_show_series_interstitial` drives this same handshake with no button
+	#     involved. Game 1 ended, the standing was shown, and game 2 never started.
+	#     The player was left on a settled board with no panel and no way forward.
+	var remote_agrees: bool = combat._net_rematch_remote or SkirmishState.vs_bot
+	if not (combat._net_rematch_local and remote_agrees):
 		return
 	if combat._is_host():
 		combat._show_info("Rematch — redrawing the line…")
@@ -1910,6 +2346,7 @@ func _net_sync_board() -> void:
 		"host_hp": combat.player_hp,
 		"client_hp": combat.enemy_hp,
 		"active": combat._net_active_index,
+		"moves": combat._moves_used_this_turn,
 		# Entities removed by exile (Banish) this sync — the client drops them WITHOUT
 		# recycling to discard, since an exiled creature is gone, not dead.
 		"exiled": combat._net_exiled_eids.duplicate(),
@@ -1939,6 +2376,9 @@ func _net_apply_board_sync(ev: Dictionary) -> void:
 		else:
 			var data := _net_display_data_from_sync(cd)
 			_net_spawn_creature(data, eid, int(cd.get("lane", 0)), int(cd.get("row", 0)), is_enemy_local, false)
+	# Deathrattle beats FIRST, while the bodies that fired them are still standing —
+	# they radiate out of a seat the loop below is about to empty.
+	_net_replay_trigger_fx(ev, "death")
 	# Entities the host exiled (Banish) this sync — drop these without recycling.
 	var exiled: Dictionary = {}
 	for e in ev.get("exiled", []):
@@ -1972,6 +2412,7 @@ func _net_apply_board_sync(ev: Dictionary) -> void:
 		combat.player_hp = int(ev.get("client_hp", combat.player_hp))
 		combat.enemy_hp = int(ev.get("host_hp", combat.enemy_hp))
 	combat._net_active_index = int(ev.get("active", combat._net_active_index))
+	combat._moves_used_this_turn = int(ev.get("moves", combat._moves_used_this_turn))
 	combat._update_hud()
 	# Face-damage feedback (the client only learns hero HP from the snapshot).
 	# NOTE: a clash's face blows are already applied+logged in _net_replay_face_hit
@@ -1981,7 +2422,7 @@ func _net_apply_board_sync(ev: Dictionary) -> void:
 	if combat.enemy_hp < prev_enemy_hp and combat._enemy_hp_label != null:
 		combat.spawn_floating_number(combat._enemy_hp_label.get_global_rect().get_center(),
 			"-%d" % (prev_enemy_hp - combat.enemy_hp), Color(0.95, 0.5, 0.3), true)
-		combat._log_event("The foe takes [color=#f2e6c8]%d[/color] — [color=#e06a50]%d[/color] left." \
+		combat._log_event("The enemy takes [color=#f2e6c8]%d[/color] — [color=#e06a50]%d[/color] left." \
 			% [prev_enemy_hp - combat.enemy_hp, maxi(combat.enemy_hp, 0)])
 	if combat.player_hp < prev_player_hp:
 		combat.screen_shake(7.0)
@@ -1993,6 +2434,10 @@ func _net_apply_board_sync(ev: Dictionary) -> void:
 	# VFX parity: replay the host's keyword combat callouts on the matching local
 	# entities now that the board is reconciled (survivors are at their final slots).
 	_net_replay_fx(ev)
+	# Battlecries / on-play abilities: after the reconcile, so a creature that arrived
+	# in THIS snapshot exists to announce from.
+	_net_replay_trigger_fx(ev, "enter")
+	_net_replay_trigger_fx(ev, "play")
 
 
 
@@ -2016,10 +2461,27 @@ func _net_replay_clash(ev: Dictionary) -> void:
 		elif atk_side == NetMatch.local_player_index:
 			combat._show_info("Your line strikes!")
 		else:
-			combat._show_info("The foe's line strikes!")
-	for s_raw in ev.get("strikes", []):
-		var s: Dictionary = s_raw
-		if s.has("l"):        # attacker wind-up
+			combat._show_info("Their line strikes!")
+	var strikes: Array = ev.get("strikes", [])
+	var i: int = -1
+	while i + 1 < strikes.size():
+		i += 1
+		var s: Dictionary = strikes[i]
+		if s.has("fo"):       # the spotlight moves to a column (-1 = take it off)
+			var fo_lane: int = int(s.get("fo", -1))
+			if fo_lane < 0:
+				if combat._clash_lane_focus != null \
+						and is_instance_valid(combat._clash_lane_focus):
+					combat._clash_lane_focus.clear_focus()
+			else:
+				# The host wrote `fe` from ITS board; ours is the mirror, so a striker
+				# the host called friendly is our foe and the mark leans the other way.
+				combat._focus_combat_lane(fo_lane, not bool(s.get("fe", false)))
+		elif s.has("dw"):     # this column earned a registration slot — hold on it
+			await combat._run_lane_dwell(int(s.get("dw", 0)))
+		elif s.has("fal"):    # the host's corpse flush — name ours on the same budget
+			await _net_replay_fallen()
+		elif s.has("l"):      # attacker wind-up
 			var lunger = NetMatch.get_entity(int(s.get("l", -1)))
 			if lunger != null and is_instance_valid(lunger) and lunger.has_method("play_attack_lunge"):
 				lunger.play_attack_lunge(combat._lunge_strength(int(s.get("latk", 2))))
@@ -2027,18 +2489,45 @@ func _net_replay_clash(ev: Dictionary) -> void:
 			# one-sided swing. Host-named target; the client never guesses it.
 			if int(s.get("dt", -1)) >= 0:
 				var braced = NetMatch.get_entity(int(s.get("dt", -1)))
-				if braced != null and is_instance_valid(braced) 						and braced.has_method("play_defend_brace"):
-					braced.play_defend_brace(not bool(braced.is_opponent))
+				if braced != null and is_instance_valid(braced) \
+						and braced.has_method("play_defend_brace"):
+					# `from_below` names where the ATTACKER is, so it is the braced
+					# body's own side: a body drawn at the top of the board is struck
+					# from below. Host-side that reads `not attacker_is_enemy`, which
+					# IS the defender's side — inverted here, the watcher's defender
+					# leaned away from the blow instead of into it.
+					braced.play_defend_brace(bool(braced.is_opponent))
 			await combat._short_pause(combat.LUNGE_APEX)
 		elif s.has("cap"):    # a mid-clash phase caption (THE DOUBLED HOUR)
 			combat._set_phase_caption(String(s.get("cap", "")))
+		elif s.has("kw"):     # a keyword chip, fired where it happened
+			_net_render_fx_chip(s.get("kw", {}))
+		elif s.has("led"):    # the clash's closing ledger — counts, read from OUR side
+			var led: Array = s.get("led", [])
+			if led.size() >= 2:
+				combat._show_info(combat._clash_ledger_line(int(led[1]), int(led[0])))
 		elif s.has("pl"):     # a piercing kill's skewer
 			_net_replay_pierce(int(s.get("pl", -1)), int(s.get("pv", -1)),
 				int(s.get("pr", -1)), int(s.get("pf", -1)), bool(s.get("pp", true)))
 		elif s.has("f"):      # a hero took the blow
 			await _net_replay_face_hit(s)
 		elif s.has("d"):      # a creature took the blow
-			await _net_replay_creature_hit(s)
+			# A CROSS-BLITZ TRADE IS ONE BEAT, NOT TWO. Host-side the forward blow and
+			# the defender's counter both resolve inside _creature_attacks_creature and
+			# a SINGLE weighted hold punctuates the exchange at its tail. Replaying the
+			# two logged halves as independently-punctuated strikes paid that hold
+			# twice and pushed the counter's tracer a whole beat behind the blow that
+			# provoked it — and the mutual trade is the DEFAULT in the alternating
+			# style, not an edge case. So a blow followed by its counter is replayed
+			# dry, and the forward blow's weight buys the one hold, as host-side.
+			var nxt: Dictionary = strikes[i + 1] if i + 1 < strikes.size() else {}
+			var paired: bool = not bool(s.get("ctr", false)) \
+				and nxt.has("d") and bool(nxt.get("ctr", false))
+			await _net_replay_creature_hit(s, not paired)
+			if paired:
+				i += 1
+				await _net_replay_creature_hit(nxt, false)
+				await _net_strike_punctuation(s)
 	combat._net_replay_active = false
 	_net_flush_backlog()
 
@@ -2054,14 +2543,73 @@ func _net_flush_backlog() -> void:
 
 
 
-func _net_replay_creature_hit(s: Dictionary) -> void:
+## CLIENT: the naming half of the host's corpse flush, run on our own clock.
+##
+## We cannot replay a death list: the client's corpses belong to the trailing board
+## snapshot, which despawns them with the ash burst and the slump. What we CAN do —
+## and what the host does in `_cleanup_dead_paced` — is name each body over the slot
+## it fell in, one beat at a time, under the shared budget. The beats spent here are
+## load-bearing twice over: they are what makes the names readable one at a time, AND
+## they are what holds the snapshot back (it is queued in `_net_event_backlog` while
+## `_net_replay_active` is on), so the corpses sweep AFTER their names have been read
+## instead of vanishing under them.
+##
+## The bodies are already `_mark_mortally_struck` from the strike replay, so a
+## `current_hp <= 0` scan finds exactly the set the host is flushing — the same
+## predicate `_downed_count` uses, which is what keeps the two budgets identical.
+func _net_replay_fallen() -> void:
+	var corpse_n: int = combat._downed_count()
+	if corpse_n <= 0:
+		return
+	var beat: float = combat._death_flush_beat(corpse_n)
+	await combat._short_pause(beat)
+	if not combat._death_beat_names(beat):
+		return   # a wipe: past the subitizing limit the names stop being casualties
+	var seen_one := false
+	for row in [combat.ROW_FRONT, combat.ROW_BACK]:
+		for is_enemy in [false, true]:
+			var arr = combat._row_array(is_enemy, row)
+			for lane_idx in range(combat.LANES_PER_ROW):
+				var c = arr[lane_idx]
+				if c == null or not is_instance_valid(c) or c.current_hp > 0:
+					continue
+				if seen_one:
+					await combat._short_pause(beat)
+				seen_one = true
+				combat._name_the_fallen(c, is_enemy)
+
+
+
+
+## CLIENT: replay one logged blow. `punctuate` is false for the two halves of a
+## Cross-Blitz trade, which the caller punctuates ONCE for the pair — see
+## _net_replay_clash.
+func _net_replay_creature_hit(s: Dictionary, punctuate: bool = true) -> void:
 	var victim = NetMatch.get_entity(int(s.get("d", -1)))
 	if victim == null or not is_instance_valid(victim):
 		return   # a mid-clash token we never saw — the snapshot reconciles it
 	var striker = NetMatch.get_entity(int(s.get("a", -1)))
-	var attacker_is_foe: bool = int(s.get("o", 0)) != NetMatch.local_player_index
+	# `o` is the striker's OWNER INDEX, and it only rides the entry when the host had
+	# a registered attacker to name (see _net_log_hit). The incidental sites that pass
+	# no attacker — or one whose token has no eid yet — left this falling back to the
+	# literal 0, which on the CLIENT (index 1) reads as "the foe struck" for EVERY such
+	# blow, including the ones landing on the foe's own line. The recoil below and the
+	# tracer both take their direction from it, so a friendly-fire chip kicked the
+	# wrong way. Absent an owner, read it off the VICTIM: a blow on my body came from
+	# the foe, a blow on theirs came from me.
+	var attacker_is_foe: bool = (int(s["o"]) != NetMatch.local_player_index) \
+		if s.has("o") else (not bool(victim.is_opponent))
 	var dmg: int = int(s.get("n", 0))
 	var hp_after: int = int(s.get("hp", victim.current_hp))
+	# THE BLOW'S WEIGHT CLASS, as the host measured it (see _net_log_hit). Every
+	# decision below that used to read `dmg` reads this instead, because `dmg` is
+	# post-mitigation: a heavy swing a Shield swallowed whole is still a heavy swing,
+	# and weighing it at 0 made the two peers punctuate the same strike differently.
+	# Absent (a rider with no weight of its own, or an older peer) → fall back to the
+	# damage, which is exactly what this path did for everything before 2026-08-04.
+	var power: int = int(s.get("p", maxi(dmg, 1)))
+	var ranged: bool = bool(s.get("rng", false))
+	var lethal: bool = hp_after <= 0
 	# Battle log — the client learns each blow only from this replay stream; mirror
 	# the host's strike line (counters read "strikes back at", matching
 	# _apply_mutual_retaliation). The trailing snapshot logs the resulting deaths.
@@ -2076,9 +2624,9 @@ func _net_replay_creature_hit(s: Dictionary) -> void:
 		# will_counter lunge). Forward strikes keep their existing lunge (logged as a
 		# separate {l} entry), so only the counter needs one synthesized here.
 		if bool(s.get("ctr", false)) and striker.has_method("play_attack_lunge"):
-			striker.play_attack_lunge(combat._lunge_strength(maxi(dmg, 1)))
+			striker.play_attack_lunge(combat._lunge_strength(power))
 		combat._play_attack_tracer(combat._card_center(striker), combat._card_center(victim),
-			attacker_is_foe, float(maxi(dmg, 1)), dmg >= combat.HEAVY_HIT_DAMAGE)
+			attacker_is_foe, float(power), power >= combat.HEAVY_HIT_DAMAGE, ranged)
 		# Thorns / Hydra self-bite: the attacker's own chip rides the same entry.
 		if s.has("ahp") and int(s.get("ahp", 0)) < int(striker.current_hp):
 			var sting: int = int(striker.current_hp) - int(s.get("ahp", 0))
@@ -2095,19 +2643,19 @@ func _net_replay_creature_hit(s: Dictionary) -> void:
 	# strikes recoil normally (the victim is a static defender).
 	if not bool(s.get("ctr", false)) and victim.has_method("play_hit_recoil"):
 		victim.play_hit_recoil(attacker_is_foe)
-	# Contact-point spark parity with the host's strike path. Power uses the
-	# post-mitigation damage (all the log carries) — cosmetic-only divergence
-	# from the host's pre-mitigation atk on Armored/Shield hits.
+	# THE BLOW LANDS SOMEWHERE. The host crosses the attacker->defender segment with
+	# the defender's rect so the spark erupts at the struck EDGE rather than out of
+	# the middle of the painting; the client drew from the centre, which is the one
+	# surface ★4's spatter was reverted for touching.
 	if striker != null and is_instance_valid(striker):
-		combat._spawn_impact_burst(combat._card_center(victim),
-			combat._card_center(victim) - combat._card_center(striker), float(maxi(dmg, 1)), hp_after <= 0)
+		combat._spawn_impact_burst(combat._strike_contact_point(striker, victim),
+			combat._card_center(victim) - combat._card_center(striker), float(power), lethal)
 	if dmg > 0:
 		combat.spawn_floating_number(combat._card_center(victim), "-%d" % dmg, Color(0.95, 0.38, 0.38), false)
-	if hp_after > 0:
+	if not lethal:
 		# Survivor contract: _flash_hit owns the red punch AND the "hit_creature" cue.
 		if dmg > 0 and victim.has_method("_flash_hit"):
 			victim._flash_hit()
-		await combat._short_pause(combat.HITSTOP_BEAT if dmg >= combat.HEAVY_HIT_DAMAGE else combat.POST_HIT_BEAT)
 	else:
 		# Kill contract: the cue sounds at the impact beat; the corpse slumps and
 		# stands until the trailing snapshot flushes it — the deferred-deaths feel.
@@ -2116,7 +2664,40 @@ func _net_replay_creature_hit(s: Dictionary) -> void:
 		if victim.has_method("_mark_mortally_struck"):
 			victim._mark_mortally_struck()
 		combat.screen_shake(6.0)
-		await combat._short_pause(combat.HITSTOP_BEAT)
+	if punctuate:
+		await _net_strike_punctuation(s)
+
+
+
+
+## THE WORLD STOPS, then breathes — the strike punctuation, run on the watcher's own
+## clock from the host's logged blow.
+##
+## This path was still on the flat HITSTOP_BEAT / POST_HIT_BEAT pair that predates the
+## 2026-07-31 rework, so a skirmish client got no freeze at all AND a differently
+## weighted clash than the host watching the same strike: a chip blow held 130 ms
+## against the host's 70, a heavy one 260 against 200, a kill 260 against 280.
+##
+## The freeze goes on BOTH bodies for the reason it does host-side: on the attacker
+## alone it reads as a stutter, on the defender alone as a hitch — the WORLD stopping
+## is what reads as impact. It PAUSES the running tweens rather than adding a second
+## writer on `position`, which is what lets a body that died mid-lunge hold its pose
+## instead of snapping home. `_strike_stop` / `_strike_read` are the host's own
+## helpers, run here against the local Motion.time and anim_speed: the same "the
+## decision crosses the wire, the clock belongs to whoever is reading the screen"
+## rule the lane dwell follows.
+func _net_strike_punctuation(s: Dictionary) -> void:
+	var victim = NetMatch.get_entity(int(s.get("d", -1)))
+	var striker = NetMatch.get_entity(int(s.get("a", -1)))
+	var power: int = int(s.get("p", maxi(int(s.get("n", 0)), 1)))
+	var lethal: bool = int(s.get("hp", 1)) <= 0
+	var stop: float = combat._strike_stop(power, lethal)
+	if stop > 0.0:
+		for body in [striker, victim]:
+			if body != null and is_instance_valid(body) and body.has_method("hold_strike_frame"):
+				body.hold_strike_frame(stop)
+		await combat._short_pause(stop)
+	await combat._short_pause(combat._strike_read(power, lethal))
 
 
 
@@ -2187,9 +2768,11 @@ func _net_replay_face_hit(entry, hp_after_legacy: int = -1, dmg_legacy: int = -1
 	var hp_after: int = int(s.get("fhp", 0))
 	var dmg: int = int(s.get("n", 0))
 	var mine: bool = owner_idx == NetMatch.local_player_index
+	var killer: Control = null
 	if dmg > 0 and s.has("a"):
 		var striker = NetMatch.get_entity(int(s.get("a", -1)))
 		if striker != null and is_instance_valid(striker):
+			killer = striker
 			var vfx_power: int = int(s.get("p", dmg))
 			combat._play_face_strike_vfx(striker, int(s.get("lane", striker.current_lane)),
 				striker.is_opponent, vfx_power)
@@ -2215,10 +2798,32 @@ func _net_replay_face_hit(entry, hp_after_legacy: int = -1, dmg_legacy: int = -1
 					"-%d" % dmg, Color(1.0, 0.45, 0.2), true)
 			if AudioBank != null:
 				AudioBank.play_sfx("hit_hero")
-			combat._log_event("The foe takes [color=#f2e6c8]%d[/color] — [color=#e06a50]%d[/color] left." \
+			combat._log_event("The enemy takes [color=#f2e6c8]%d[/color] — [color=#e06a50]%d[/color] left." \
 				% [dmg, maxi(hp_after, 0)])
 	combat._update_hud()
-	await combat._short_pause(combat.HITSTOP_BEAT if dmg > 0 else combat.POST_HIT_BEAT)
+	# ★8 — THE BLOW THAT ENDED IT. The host freezes its killer at full extension the
+	# instant the damage lands (see _net_killing_blow_held); the watcher, replaying
+	# that same blow, takes the same hold here rather than reading it as one more chip
+	# hit and meeting the verdict a whole reel later.
+	#
+	# Deliberately the HOLD only — the ceremony (_play_killing_blow_moment: the music
+	# duck, the colour drain, the heavy shake) still rides the backlogged EV_MATCH_OVER
+	# through _net_show_result, which is the one place that knows a DRAW from a win and
+	# owns the Bo3 tally. Firing it here too would double it.
+	if hp_after <= 0 and not combat._net_killing_blow_held:
+		combat._net_killing_blow_held = true
+		if killer != null and is_instance_valid(killer) and killer.has_method("hold_lunge_apex"):
+			killer.hold_lunge_apex(combat.KILLING_BLOW_HOLD)
+		await combat._short_pause(combat.KILLING_BLOW_HOLD)
+		return
+	# Paced like the host's face cascade (_creature_hits_face's tail), which weighs the
+	# beat by the blow: _impact_hold ramps 150 -> 230 ms with the swing's size. The flat
+	# HITSTOP_BEAT here was 260 ms for every hit, so a skirmish client watched an
+	# unblocked line batter a hero on a metronome while the host watched it escalate.
+	# The power the host measured already rides this entry as "p" (see
+	# _net_arm_face_hit_source); "n" is only what the gate/boss actually lost.
+	await combat._short_pause(combat._impact_hold(int(s.get("p", dmg)), false) \
+		if dmg > 0 else combat.POST_HIT_BEAT)
 
 
 
@@ -2228,28 +2833,120 @@ func _net_replay_face_hit(entry, hp_after_legacy: int = -1, dmg_legacy: int = -1
 ## died this sync has no anchor left — skipped; the death burst already shows the kill.
 func _net_replay_fx(ev: Dictionary) -> void:
 	for fx in ev.get("fx", []):
+		if fx.has("trig"):
+			continue   # trigger beats have their own pass — see _net_replay_trigger_fx
+		_net_render_fx_chip(fx)
+
+
+
+
+## Draw ONE mirrored callout. Shared by the snapshot's fx pass and the clash reel's
+## `{kw}` entries (see _net_queue_fx_chip) so a chip looks the same whichever channel
+## carried it — the mid-clash and post-clash paths cannot drift into two chips.
+func _net_render_fx_chip(fx: Dictionary) -> void:
+	var c: Array = fx.get("col", [1, 1, 1])
+	var col := Color(float(c[0]), float(c[1]), float(c[2])) if c.size() >= 3 else Color(1, 1, 1)
+	# A KEYSTONE RING off one body — the Alpha's howl, the Stampede's charge, the
+	# Coven Mother's pulse. Position-anchored host-side, so only the eid can cross.
+	if fx.has("ring"):
+		var ring_body = NetMatch.get_entity(int(fx.get("ring", -1)))
+		if ring_body != null and is_instance_valid(ring_body):
+			combat._draw_keystone_ring(combat._card_center(ring_body), col,
+				float(fx.get("rad", 30.0)), int(fx.get("z", 218)),
+				bool(fx.get("plain", false)))
+		return
+	# THE REAP'S WISP — slot-anchored at both ends (the corpse is swept by this very
+	# snapshot, so an eid origin would be gone). Side inverts: the host wrote it from
+	# its board, ours is the mirror.
+	if fx.has("wisp"):
+		var w: Array = fx.get("wisp", [])
+		if w.size() >= 5:
+			combat._draw_slot_wisp(int(w[0]) == 0, int(w[1]), int(w[2]),
+				int(w[3]), int(w[4]), col)
+		return
+	# A KEYSTONE WAVE — see Combat.grace_wave_over. The host names the bodies it swept;
+	# we rebuild the points off OUR board, because the host's screen coordinates
+	# describe a board that is our mirror. Sorted here too, so the glint runs
+	# left-to-right for both readers (the board mirrors front-to-back, never sideways).
+	if fx.has("wave"):
+		var pts: Array = []
+		for raw_eid in fx.get("wave", []):
+			var body = NetMatch.get_entity(int(raw_eid))
+			if body != null and is_instance_valid(body):
+				pts.append(combat._card_center(body))
+		if pts.is_empty():
+			return
+		pts.sort_custom(func(a: Vector2, b: Vector2): return a.x < b.x)
+		combat._trigger_fx_grace_wave(pts, col)
+		return
+	var node = NetMatch.get_entity(int(fx.get("eid", -1)))
+	if node == null or not is_instance_valid(node):
+		return
+	var anchor: Vector2 = node.global_position + Vector2(
+		node.size.x * node.scale.x * 0.5, node.size.y * node.scale.y * 0.06)
+	# Battle log — mirror the host's status line (the host logs these via
+	# spawn_keyword_callout_kw → log_status; the client re-plays them here).
+	combat.log_status(node, String(fx.get("label", "")))
+	# The device rides the entry now (`icon` = the keyword-icon alias the host
+	# looked up), so every mirrored chip carries the same silhouette its twin does.
+	# Older peers send no alias; a null texture just yields the bare word, which is
+	# what this path did for everything but Last Stand before 2026-08-04.
+	var icon_tex: Texture2D = null
+	var icon_id := String(fx.get("icon", ""))
+	if icon_id != "":
+		icon_tex = GameTheme.get_keyword_icon(icon_id)
+	# Last Stand also flares the surviving card itself — the chip alone reads as a
+	# label on a body that visibly should have died.
+	if String(fx.get("label", "")) == "LAST STAND":
+		if icon_tex == null:
+			icon_tex = GameTheme.get_keyword_icon("last_stand")
+		combat.spawn_keyword_callout(anchor, "LAST STAND", col, icon_tex)
+		if node.has_method("_play_last_stand_flare"):
+			node._play_last_stand_flare()
+		return
+	combat.spawn_keyword_callout(anchor, String(fx.get("label", "")), col, icon_tex)
+
+
+
+
+## CLIENT: play the creature-trigger beats (battlecry / deathrattle / on-play) the
+## host fired while resolving this snapshot — the ring off the body, the tracer to
+## what it struck, the grace wave over what it helped.
+##
+## Split into two passes around the reconcile because the two channels have opposite
+## anchoring needs, and getting this wrong is how the beat would silently vanish:
+##
+##   • "death" runs BEFORE the despawn loop, while the dying body is still standing.
+##     Its FX radiate out of a seat that is about to be empty; after the loop there
+##     is no node to read a position from.
+##   • "enter" / "play" run AFTER the reconcile, so a creature that ARRIVED in this
+##     very snapshot already exists to announce from.
+##
+## The effect dict comes back out of the local node's own card_data — the wire
+## carries the eid and the channel and nothing else, so a battlecry cannot describe
+## itself differently on the two machines.
+func _net_replay_trigger_fx(ev: Dictionary, only_channel: String) -> void:
+	for fx in ev.get("fx", []):
+		if String(fx.get("trig", "")) != only_channel:
+			continue
 		var node = NetMatch.get_entity(int(fx.get("eid", -1)))
 		if node == null or not is_instance_valid(node):
 			continue
-		var c: Array = fx.get("col", [1, 1, 1])
-		var col := Color(float(c[0]), float(c[1]), float(c[2])) if c.size() >= 3 else Color(1, 1, 1)
-		var anchor: Vector2 = node.global_position + Vector2(
-			node.size.x * node.scale.x * 0.5, node.size.y * node.scale.y * 0.06)
-		# Battle log — mirror the host's status line (the host logs these via
-		# spawn_keyword_callout_kw → log_status; the client re-plays them here).
-		combat.log_status(node, String(fx.get("label", "")))
-		# Last Stand: reproduce the host's exact presentation — the keyword-icon
-		# pill (what _spawn_keyword_chip shows there) plus the overbright flare on
-		# the surviving card itself, not just a bare text callout.
-		if String(fx.get("label", "")) == "LAST STAND":
-			combat.spawn_keyword_callout(anchor, "LAST STAND", col,
-				GameTheme.get_keyword_icon("last_stand"))
-			if node.has_method("_play_last_stand_flare"):
-				node._play_last_stand_flare()
+		var key := "on_enter"
+		if only_channel == "death":
+			key = "on_death"
+		elif only_channel == "play":
+			key = "on_play"
+		var effect: Dictionary = node.card_data.get(key, {})
+		if effect.is_empty():
 			continue
-		combat.spawn_keyword_callout(anchor, String(fx.get("label", "")), col)
-
-
+		# The on-play channel's announce is the card's own floop pulse (the funnel
+		# deliberately skips its ring there) — without it the client would get the
+		# delivery with nothing to say which body sent it.
+		if only_channel == "play" and node.has_method("play_floop_pulse"):
+			node.play_floop_pulse()
+		combat._play_trigger_fx(effect, node, int(node.current_lane),
+			bool(node.is_opponent), only_channel, Vector2.ZERO, int(node.current_row))
 
 
 func _net_display_data_from_sync(cd: Dictionary) -> Dictionary:
@@ -2395,12 +3092,16 @@ func _net_despawn_creature(node: Control, exiled: bool = false) -> void:
 				if arr[lane] == node:
 					arr[lane] = null
 	if is_instance_valid(node):
-		var pos = combat._card_center(node)
 		if exiled:
-			combat.spawn_ash_burst(pos, Color(0.62, 0.60, 0.66), 18)
-			var xtw := node.create_tween()
-			xtw.tween_property(node, "modulate:a", 0.0, UserSettings.anim_time(0.18))
-			xtw.tween_callback(node.queue_free)
+			# Banish reads as BANISH on both screens (2026-08-04). This used to play
+			# an ash burst and an 0.18 s fade — and ash is this game's word for DEATH,
+			# which is precisely what `_play_banish_exit`'s own header says a banish is
+			# not ("not a death (no ash, no On-Death)"). So the client was told the
+			# wrong thing about the removal it was watching. The authored exit — the
+			# token spiralling small into a contracting pale ring — is safe to call
+			# here because the row arrays are already cleared above, which is the
+			# precondition it states.
+			combat._play_banish_exit(node)
 			return
 		var cue_already_played: bool = bool(node.death_cue_played)
 		node.death_cue_played = true
@@ -2410,18 +3111,20 @@ func _net_despawn_creature(node: Control, exiled: bool = false) -> void:
 		if node.has_method("_mark_mortally_struck"):
 			node._mark_mortally_struck()
 		combat._play_creature_death_vfx(node, bool(node.is_opponent))
-		node.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		node.pivot_offset = node.size * 0.5
-		node.z_index = maxi(int(node.z_index), 40)
-		var tw := node.create_tween()
-		tw.set_parallel(true)
-		tw.tween_property(node, "modulate", Color(0.35, 0.08, 0.08, 0.0),
-			UserSettings.anim_time(0.34)).set_ease(Tween.EASE_IN)
-		tw.tween_property(node, "scale", node.scale * 0.45,
-			UserSettings.anim_time(0.34)).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_BACK)
-		tw.tween_property(node, "rotation", node.rotation + randf_range(-0.5, 0.5),
-			UserSettings.anim_time(0.34))
-		tw.chain().tween_callback(node.queue_free)
+		# THE WRIT BURNS HERE TOO (2026-08-04). This used to hand-roll a
+		# shrink-spin-fade — which was a verbatim copy of `_die`'s FALLBACK, i.e. the
+		# exact animation `_play_burn_death` was written to replace. So on a skirmish
+		# CLIENT every death played the retired generic beat while the host's screen
+		# burned the parchment: two players in one match watching different deaths, in
+		# the game whose whole identity is paper and ink. It also skipped the death
+		# burst and never stopped the clash tweens, which are still writing `position`
+		# on a body that died mid-lunge (most of them do).
+		#
+		# `play_death_flourish` is the visual half of `_die`, split out for exactly
+		# this call site. NOT `try_die`/`_die`: those emit `destroyed`, which runs
+		# on-death dispatch and the encounter / ally-death hooks — and a client must
+		# never resolve any of that. The host already did; we render its outcome.
+		node.play_death_flourish()
 
 
 
@@ -2429,8 +3132,22 @@ func _net_despawn_creature(node: Control, exiled: bool = false) -> void:
 ## Materialize a board creature from card data on a given side. On the host
 ## (run_on_enter=true) the on-enter fires authoritatively; on the client it never
 ## does (the client only renders the snapshot the host already resolved).
+## BOUNDS AT THE CHOKEPOINT (2026-08-04). Two of the three production callers already
+## validate lane/row before arriving here (`_sealed_reveal`, `_net_apply_remote_creature`,
+## which additionally `_net_reject_remote`s a bad one) — but `_net_apply_board_sync` reads
+## them straight out of the snapshot and does not, so a host that shipped an out-of-range
+## seat took the CLIENT down on `_row_array(...)[lane]` instead of dropping one body.
+##
+## The host is authoritative and therefore trusted, so this is not a security control;
+## it is the difference between a peer's bug degrading and a peer's bug crashing you.
+## Guarding here rather than at the third call site covers every future caller too.
+## Returning null is safe: no production caller reads the result.
 func _net_spawn_creature(data: Dictionary, entity_id: int, lane: int, row: int,
 		is_enemy_side: bool, run_on_enter: bool) -> Control:
+	if lane < 0 or lane >= combat.LANES_PER_ROW \
+			or row < combat.ROW_FRONT or row > combat.ROW_BACK:
+		push_warning("[net] spawn dropped — seat out of range (lane %d, row %d)" % [lane, row])
+		return null
 	var card = combat.CARD_SCENE.instantiate()
 	card.card_id = String(data.get("id", ""))
 	card.is_opponent = is_enemy_side
@@ -2468,7 +3185,7 @@ func _net_spawn_creature(data: Dictionary, entity_id: int, lane: int, row: int,
 	# via _net_apply_remote_creature). The host's OWN play logs in _play_creature.
 	if entity_id < _net_token_id_base():
 		if is_enemy_side:
-			combat._log_event("The foe fields %s." % combat._log_card_ref(card),
+			combat._log_event("The enemy fields %s." % combat._log_card_ref(card),
 				combat._log_data(card), combat._log_side(card))
 		else:
 			combat._log_event("You field %s." % combat._log_card_ref(card),
@@ -2508,7 +3225,7 @@ func _on_net_intent(sender_id: int, intent: Dictionary) -> void:
 		return
 	# Rematch requests arrive AFTER the match is over — handle them before the
 	# match-over gate below (which would otherwise swallow them).
-	if String(intent.get("t", "")) == NetMatch.IN_REMATCH:
+	if _wire_str(intent.get("t", "")) == NetMatch.IN_REMATCH:
 		_net_on_remote_rematch()
 		return
 	if combat._net_match_over:
@@ -2529,7 +3246,7 @@ func _on_net_intent(sender_id: int, intent: Dictionary) -> void:
 
 
 func _net_process_intent(intent: Dictionary) -> void:
-	match String(intent.get("t", "")):
+	match _wire_str(intent.get("t", "")):
 		NetMatch.IN_PLAY_CREATURE:
 			if _is_sealed() and not SkirmishState.vs_bot:
 				_net_reject_remote("creature_outside_orders")
@@ -2554,14 +3271,14 @@ func _net_process_intent(intent: Dictionary) -> void:
 			if _is_sealed() and combat._sorcery_active != 1:
 				_net_reject_remote("potion_outside_sorcery")
 				return
-			var pid := String(intent.get("pid", ""))
+			var pid := _wire_str(intent.get("pid", ""))
 			var potion_data := PotionDB.get_potion(pid)
 			if combat._net_active_index != 1 or _remote_state == null \
 					or potion_data.is_empty() or not _remote_state.potions.has(pid):
 				_net_reject_remote("illegal_potion")
 				return
 			var pot_target: Control = null
-			var pot_eid: int = int(intent.get("target", -1))
+			var pot_eid: int = _wire_int(intent.get("target", -1), -1)
 			if pot_eid >= 0:
 				var pn = NetMatch.get_entity(pot_eid)
 				if pn != null and is_instance_valid(pn) and pn is Control:
@@ -2597,7 +3314,7 @@ func _net_process_intent(intent: Dictionary) -> void:
 			_net_sync_board()
 		NetMatch.IN_ORDER_PICK:
 			# The client won the toss — its settled order binds the host too.
-			var settled := int(intent.get("first", -1))
+			var settled := _wire_int(intent.get("first", -1), -1)
 			if combat._net_first_player_override < 0 and combat._net_first_player() == 1 \
 					and settled in [0, 1]:
 				combat._net_first_player_override = settled
@@ -2626,8 +3343,8 @@ func _net_process_intent(intent: Dictionary) -> void:
 			await _sealed_store_bundle(1, intent.get("list", []), 0,
 				intent.get("discards", []))
 		NetMatch.IN_ORDER_GHOST:
-			_sealed_accept_remote_ghost(int(intent.get("lane", -1)),
-				int(intent.get("row", 0)))
+			_sealed_accept_remote_ghost(_wire_int(intent.get("lane", -1), -1),
+				_wire_int(intent.get("row", 0), 0))
 		NetMatch.IN_SORCERY_PASS:
 			if not _is_sealed() or combat._sorcery_active != 1:
 				_net_reject_remote("sorcery_phase_closed")
@@ -2657,7 +3374,7 @@ func _net_process_intent(intent: Dictionary) -> void:
 			_net_on_relic_fx(intent)
 		NetMatch.EV_EMOTE:
 			# The client sent an emote — float their line over the enemy plate.
-			combat._net_show_foe_emote(int(intent.get("idx", -1)))
+			combat._net_show_foe_emote(_wire_int(intent.get("idx", -1), -1))
 		_:
 			_net_reject_remote("unknown_intent")
 
@@ -2674,26 +3391,26 @@ func _net_apply_remote_creature(intent: Dictionary, animate: bool = false) -> vo
 		if not SkirmishState.vs_bot:
 			_net_reject_remote("not_your_turn")
 		return   # not the client's turn
-	var lane: int = int(intent.get("lane", -1))
-	var row: int = int(intent.get("row", combat.ROW_FRONT))
+	var lane: int = _wire_int(intent.get("lane", -1), -1)
+	var row: int = _wire_int(intent.get("row", combat.ROW_FRONT), combat.ROW_FRONT)
 	if lane < 0 or lane >= combat.LANES_PER_ROW or row < combat.ROW_FRONT or row > combat.ROW_BACK:
 		return
 	if combat._row_array(true, row)[lane] != null:
 		if not SkirmishState.vs_bot:
 			_net_reject_remote("slot_occupied")
 		return   # slot occupied — drop the play (client mis-synced)
-	var data := SkirmishState.skirmish_card_data(String(intent.get("id", "")))
+	var data := SkirmishState.skirmish_card_data(_wire_str(intent.get("id", "")))
 	if data.is_empty() or String(data.get("type", "")) != "creature":
 		if not SkirmishState.vs_bot:
 			_net_reject_remote("card_not_creature")
 		return
-	var uid: int = int(intent.get("uid", _net_issue_token_id()))
+	var uid: int = _wire_int(intent.get("uid", -1), -1)
 	var authority_check: Dictionary = {}
 	if not SkirmishState.vs_bot:
 		if _remote_state == null:
 			_net_reject_remote("authority_unavailable")
 			return
-		authority_check = _remote_state.validate_play(uid, String(intent.get("id", "")),
+		authority_check = _remote_state.validate_play(uid, _wire_str(intent.get("id", "")),
 			_net_remote_has_first_spell_discount())
 		if not bool(authority_check.get("ok", false)):
 			_net_reject_remote(String(authority_check.get("reason", "illegal_play")))
@@ -2715,7 +3432,7 @@ func _net_apply_remote_creature(intent: Dictionary, animate: bool = false) -> vo
 	# The client stamps its unspent Command (post-payment) on the intent so
 	# play-time passives that scale off the caster's pool (Condottiere) read the
 	# CLIENT's pool, not the host's. Bot intents omit it → 0 (vanilla body).
-	combat._net_client_unspent_mana = int(intent.get("mana", 0)) if SkirmishState.vs_bot \
+	combat._net_client_unspent_mana = _wire_int(intent.get("mana", 0), 0) if SkirmishState.vs_bot \
 		else _remote_state.mana
 	_net_spawn_creature(data, uid, lane, row, true, true)
 	if not SkirmishState.vs_bot:
@@ -2739,7 +3456,8 @@ func _net_field_move_dropped(global_pos: Vector2, card: Control) -> void:
 	if not active_local or combat.phase != combat.Phase.PLAYER_TURN or combat._net_match_over:
 		combat._return_card_to_slot(card)
 		return
-	if combat._moves_used_this_turn >= combat.MOVES_PER_TURN:
+	var free_move: bool = combat._has_free_move_available(card)
+	if combat._moves_used_this_turn >= combat.MOVES_PER_TURN and not free_move:
 		combat._show_info("No moves left this turn.")
 		combat._return_card_to_slot(card)
 		return
@@ -2763,15 +3481,21 @@ func _net_field_move_dropped(global_pos: Vector2, card: Control) -> void:
 		combat._reset_card_after_drag(card)
 		combat._slot_set_card(combat._slot_array(false, dest_row)[dest_lane], card)
 		combat._row_array(false, dest_row)[dest_lane] = card
-		combat._moves_used_this_turn += 1
+		if free_move:
+			combat._consume_free_move(card)
+			combat._apply_free_move_bonus(card)
+		else:
+			combat._moves_used_this_turn += 1
 		combat._play_landing_pop(card)
 		if AudioBank != null:
 			AudioBank.play_sfx("card_play")
 		_net_sync_board()
 	else:
-		# Client: predict the approved local move immediately for feel, then let the
-		# card home — the host's snapshot will perform the actual move.
-		combat._moves_used_this_turn += 1
+		# Client predicts position and free-use state; the host snapshot confirms or rolls both back.
+		if free_move:
+			combat._consume_free_move(card)
+		else:
+			combat._moves_used_this_turn += 1
 		combat._row_array(false, src_row)[src_lane] = null
 		card.current_row = dest_row
 		card.current_lane = dest_lane
@@ -2787,27 +3511,32 @@ func _net_field_move_dropped(global_pos: Vector2, card: Control) -> void:
 		})
 
 
-
-
 ## HOST: validate + apply the client's reposition (its creatures sit on the host's
 ## ENEMY side), then snapshot so both sides see the move.
 func _net_apply_remote_reposition(intent: Dictionary) -> void:
 	if combat._net_active_index != 1:
-		return   # not the client's turn
-	if combat._moves_used_this_turn >= combat.MOVES_PER_TURN:
+		_net_sync_board()
 		return
-	var dest_lane: int = int(intent.get("lane", -1))
-	var dest_row: int = int(intent.get("row", combat.ROW_FRONT))
+	var dest_lane: int = _wire_int(intent.get("lane", -1), -1)
+	var dest_row: int = _wire_int(intent.get("row", combat.ROW_FRONT), combat.ROW_FRONT)
 	if dest_lane < 0 or dest_lane >= combat.LANES_PER_ROW or dest_row < combat.ROW_FRONT or dest_row > combat.ROW_BACK:
+		_net_sync_board()
 		return
-	var node = NetMatch.get_entity(int(intent.get("eid", -1)))
+	var node = NetMatch.get_entity(_wire_int(intent.get("eid", -1), -1))
 	if node == null or not is_instance_valid(node) or not node.is_opponent:
-		return   # unknown entity or not the client's own creature
+		_net_sync_board()
+		return
+	var free_move: bool = combat._has_free_move_available(node)
+	if combat._moves_used_this_turn >= combat.MOVES_PER_TURN and not free_move:
+		_net_sync_board()
+		return
 	if combat._row_array(true, dest_row)[dest_lane] != null:
-		return   # destination occupied — drop the move (client mis-synced)
+		_net_sync_board()
+		return
 	var src_row: int = node.current_row
 	var src_lane: int = node.current_lane
 	if dest_row == src_row and dest_lane == src_lane:
+		_net_sync_board()
 		return
 	combat._row_array(true, src_row)[src_lane] = null
 	node.current_row = dest_row
@@ -2815,7 +3544,11 @@ func _net_apply_remote_reposition(intent: Dictionary) -> void:
 	combat._reset_card_after_drag(node)
 	combat._slot_set_card(combat._slot_array(true, dest_row)[dest_lane], node)
 	combat._row_array(true, dest_row)[dest_lane] = node
-	combat._moves_used_this_turn += 1
+	if free_move:
+		combat._consume_free_move(node)
+		combat._apply_free_move_bonus(node)
+	else:
+		combat._moves_used_this_turn += 1
 	combat._play_landing_pop(node)
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play")
@@ -2833,6 +3566,12 @@ func _net_apply_remote_reposition(intent: Dictionary) -> void:
 func _net_sniper_aim_dropped(card: Control, quarry: Control) -> void:
 	var active_local: bool = combat._net_active_index == NetMatch.local_player_index
 	if not active_local or combat.phase != combat.Phase.PLAYER_TURN or combat._net_match_over:
+		# The sealed branch below explains itself and this one did not, so the same
+		# gesture was answered with a sentence in one style and a silent snap-back
+		# in the other. The caller restores the card either way, so this was never
+		# a stranded marksman — just an unexplained one.
+		if not combat._net_match_over and combat.phase == combat.Phase.PLAYER_TURN:
+			combat._show_info("Not your turn.")
 		return
 	if _is_sealed():
 		combat._show_info("Sealed orders — no aiming.")
@@ -2861,12 +3600,12 @@ func _net_sniper_aim_clear(card: Control) -> void:
 func _net_apply_remote_sniper_aim(intent: Dictionary) -> void:
 	if combat._net_active_index != 1:
 		return   # not the client's turn
-	var node = NetMatch.get_entity(int(intent.get("eid", -1)))
+	var node = NetMatch.get_entity(_wire_int(intent.get("eid", -1), -1))
 	if node == null or not is_instance_valid(node) or not node.is_opponent:
 		return   # unknown entity or not the client's own creature
 	if not combat._is_sniper(node, true, int(node.current_row)):
 		return
-	var tgt_id: int = int(intent.get("tgt", -1))
+	var tgt_id: int = _wire_int(intent.get("tgt", -1), -1)
 	if tgt_id < 0:
 		combat._clear_sniper_mark(node, false)
 		return
@@ -2889,16 +3628,35 @@ func _net_apply_remote_sniper_aim(intent: Dictionary) -> void:
 
 func _bot_refill_hand() -> void:
 	var slot: SkirmishState.PlayerSlot = SkirmishState.get_slot(1)
-	if slot == null:
-		return
+	if slot == null or slot.deck.is_empty():
+		return   # no deck to draw from — and the loop below must never spin on one
 	# The bot refills to the standard target. Its going-second compensation is the
 	# Coin — a one-time +1 Command on its opening turn (granted in _bot_take_turn),
 	# mirroring the human's Coin card rather than the old raw extra card.
 	var target: int = combat.HAND_REFILL_TARGET
-	while combat._bot_hand.size() < target and combat._bot_deck_cursor < slot.deck.size():
+	while combat._bot_hand.size() < target:
+		# THE BOT USED TO DECK OUT AND NEVER COME BACK. This cursor only ever walked
+		# forward through 20 cards, with no wrap and no reshuffle — while BOTH of the
+		# other draw paths recycle their discard when the pile runs dry
+		# (`Combat.draw_one` reshuffles and plays the pile VFX; `NetPlayerState.draw_one`
+		# does the same for a real client). So a drill that ran past roughly turn eight
+		# hit the end of the list, the hand drained, and the bot stopped fielding
+		# anything at all for the rest of the match. It reads exactly like the AI giving
+		# up, and the longer the game the more certain it was.
+		if combat._bot_deck_cursor >= slot.deck.size():
+			combat._bot_deck_cursor = 0
+			combat._bot_deck_recycled = true
 		var id = String(slot.deck[combat._bot_deck_cursor])
-		var uid: int = int(slot.deck_uids[combat._bot_deck_cursor]) \
-			if combat._bot_deck_cursor < slot.deck_uids.size() else _net_issue_token_id()
+		# FRESH IDS ON EVERY LAP AFTER THE FIRST. `entity_id == deck uid` for drafted
+		# creatures, so handing out a second-lap card under its original uid would
+		# collide in `NetMatch.register_entity` with the first copy if that one is still
+		# standing. `_net_issue_token_id` is the existing "above any uid" allocator the
+		# summon path already uses for exactly this reason.
+		var uid: int
+		if combat._bot_deck_recycled or combat._bot_deck_cursor >= slot.deck_uids.size():
+			uid = _net_issue_token_id()
+		else:
+			uid = int(slot.deck_uids[combat._bot_deck_cursor])
 		combat._bot_hand.append({"uid": uid, "id": id, "data": SkirmishState.skirmish_card_data(id)})
 		combat._bot_deck_cursor += 1
 
@@ -2923,7 +3681,7 @@ func _bot_take_turn() -> void:
 		if combat._net_match_over or combat._net_active_index != 1:
 			break
 		await combat._short_pause(combat.COMBAT_PAUSE_SHORT)
-		spent += _bot_consume_card(int(intent.get("uid", -1)))
+		spent += _bot_consume_card(_wire_int(intent.get("uid", -1), -1))
 		# Drop the card from the visible fan BEFORE the play animates, so the throw
 		# reads as that card leaving the hand (not a phantom extra).
 		_bot_sync_hand_display(mana - spent)
@@ -2950,7 +3708,7 @@ func _bot_consume_card(uid: int) -> int:
 
 
 func _bot_apply_intent(intent: Dictionary) -> void:
-	match String(intent.get("t", "")):
+	match _wire_str(intent.get("t", "")):
 		NetMatch.IN_PLAY_CREATURE:
 			# animate=true → the card arcs from the foe's hand into its slot first.
 			await _net_apply_remote_creature(intent, true)
@@ -3047,8 +3805,17 @@ func _bot_animate_creature_play(data: Dictionary, lane: int, row: int) -> void:
 	ghost.modulate.a = 0.0
 	combat._hud_layer.add_child(ghost)
 
-	var duration := 0.42
+	# Motion.time() so the tween and the wait below scale TOGETHER (2026-08-03).
+	# This was a bare 0.42 while the wait was `_short_pause(0.42)`, which applies
+	# the anim-speed scale itself — so at any speed above 1x the ghost was freed
+	# partway through its own flight and the foe's card vanished in mid-air.
+	# The wait stays `_short_pause` rather than a bare timer on purpose: it also
+	# carries the hold-to-rush divisor, and a player holding ui_accept IS asking
+	# to cut this short, so an early free is correct on that path only.
+	var duration := Motion.time(0.42)
 	# Bow the path downward — the foe reaches up out of its hand and sets the card down.
+	# Left un-derived: unlike the player's own play, this origin is genuinely the
+	# far corner of the screen, so `reach` would pin near 1.0 and the bow is honest.
 	var ctrl = origin.lerp(dest, 0.5) + Vector2(0, -86.0)
 	var tw := ghost.create_tween().set_parallel(true)
 	tw.tween_method(func(t: float):
@@ -3060,7 +3827,9 @@ func _bot_animate_creature_play(data: Dictionary, lane: int, row: int) -> void:
 		ghost.size = sz
 		ghost.position = p1.lerp(p2, t) - sz * 0.5
 	, 0.0, 1.0, duration).set_ease(Tween.EASE_IN_OUT).set_trans(Tween.TRANS_QUAD)
-	tw.tween_property(ghost, "modulate:a", 1.0, 0.12)
+	# Capped against the flight itself: at Instant the whole trip is shorter than a
+	# fixed 0.12 fade, which left the ghost freed while still half transparent.
+	tw.tween_property(ghost, "modulate:a", 1.0, minf(Motion.time(0.12), duration * 0.45))
 	tw.tween_property(ghost, "rotation", 0.0, duration).from(randf_range(-0.12, 0.12)) \
 		.set_ease(Tween.EASE_OUT)
 	# Gate on a real timer (NOT tw.finished) so the bot's turn can never stall on a
@@ -3070,16 +3839,54 @@ func _bot_animate_creature_play(data: Dictionary, lane: int, row: int) -> void:
 		ghost.queue_free()
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play")
+	# A RULES-BEARING BODY GETS READ, NOT GLIMPSED (2026-08-04).
+	#
+	# Skirmish already reveals the foe's SPELLS readably — `_net_spell_telegraph`
+	# holds the real face center-screen under "OPPONENT CASTS", because "what did
+	# they just play?" is the question. Their CREATURES got only this 420 ms fly-by
+	# at 132px, which is not long enough or large enough to read a battlecry off,
+	# so the foe's whole kit arrived as anonymous stat blocks and then did things
+	# nothing on screen had accounted for.
+	#
+	# Solo hit the identical problem from the other side and answered it with
+	# `_announce_enemy_muster`; this reuses its two decisions rather than inventing
+	# new ones — the SAME `_card_has_hidden_rules` filter (a plain 3/2 says nothing,
+	# so it buys no reveal) and the same `_reveal_cast_card` overlay, which is
+	# click-through and never gates the turn. Not awaited: the seat must not wait on
+	# presentation, and the host has already validated the play by this point.
+	if combat._card_has_hidden_rules(data):
+		combat._reveal_cast_card(data, "OPPONENT PLAYS", Color(0.96, 0.56, 0.34))
 
 
 
 
-## CLIENT: a cosmetic ghost of the client's OWN creature play, arcing from the hand
-## up to the destination slot. The real creature still arrives via the host snapshot
+## CLIENT: a cosmetic ghost of the client's OWN creature play, arcing from the drop
+## point to the destination slot. The real creature still arrives via the host snapshot
 ## (the client never seats locally), so this only bridges the visual gap the HOST gets
 ## for free from its local seat — without it, a Player-2 creature just pops into the
 ## slot. Fire-and-forget: it never gates the intent (sent before this is called).
+##
+## THE FLIGHT IS MEASURED, NOT FIXED (2026-08-03). This shipped at a flat 0.34 s over a
+## flat 64 px bow, neither of them through Motion.time() — the same flatness the solo
+## path was just cured of, and worse here: `origin` is the DROP POINT (the client branch
+## of _on_card_played captures it off the dragged hand card, exactly as the solo branch
+## captures play_start_global), so the usual travel is about a slot-width, and a 64 px
+## lift over ~40 px of ground is not an arc, it is a loop back over the gesture the
+## player just made. It now reads Combat's ONE set of arc constants (ARC_FULL_TRAVEL /
+## ARC_MAX_LIFT / ARC_MIN_TIME / ARC_MAX_TIME) off the ctx rather than keeping copies —
+## a duplicated 78.0 is precisely how these two paths drifted apart in the first place —
+## so retuning the campaign's card-play arc retunes the skirmish's with it, and a player
+## crossing between the two cannot tell the flights apart.
 func _client_animate_own_play(data: Dictionary, lane: int, row: int, origin: Vector2) -> void:
+	# Bail BEFORE any allocation or await. Headless: probe-driven plays must not build a
+	# TextureRect or suspend (the rule _bot_animate_creature_play already follows).
+	# Reduce Motion: this ghost is DECORATIVE by definition — the information is the
+	# creature reaching the slot, and the host's snapshot delivers that either way — so
+	# it gates off at the same beat _play_landing_pop drops its arc, and a Reduce Motion
+	# player is shown the same flightless play in skirmish as in the campaign.
+	if DisplayServer.get_name() == "headless" \
+			or (UserSettings != null and UserSettings.reduce_motion):
+		return
 	if combat._hud_layer == null or not is_instance_valid(combat._hud_layer):
 		return
 	var slots: Array = combat._slot_array(false, row)
@@ -3091,6 +3898,10 @@ func _client_animate_own_play(data: Dictionary, lane: int, row: int, origin: Vec
 		tex = CardTextureCache.get_texture(data)   # sync read; null if not yet baked
 	if tex == null:
 		tex = combat._net_card_back_tex
+	# Hand size → board-token footprint. This pair is deliberately NOT reach-derived:
+	# the card the player was dragging one frame ago really was hand-sized and the slot
+	# really is smaller, and that is equally true of a seat and of a long deal. Only the
+	# things that describe the FLIGHT — hang time, apex, spin — scale with travel.
 	var travel := Vector2(132, 172)
 	var land := Vector2(104, 136)
 	var ghost := TextureRect.new()
@@ -3105,23 +3916,60 @@ func _client_animate_own_play(data: Dictionary, lane: int, row: int, origin: Vec
 	ghost.position = origin - travel * 0.5
 	ghost.modulate.a = 0.0
 	combat._hud_layer.add_child(ghost)
-	var duration := 0.34
+	# How much of a flight this actually IS, 0..1 — Combat's reach model, read through
+	# the ctx the same way this file already reads combat.LANES_PER_ROW. Everything the
+	# arc does scales off this one number, so a short seat can never pick up a long
+	# deal's hang time, apex or spin.
+	var reach: float = clampf(origin.distance_to(dest) / float(combat.ARC_FULL_TRAVEL),
+		0.0, 1.0)
+	var duration: float = Motion.time(lerpf(float(combat.ARC_MIN_TIME),
+		float(combat.ARC_MAX_TIME), reach))
 	# Bow the path UP toward the board — the player lifts the card from hand onto the line.
-	var ctrl := origin.lerp(dest, 0.5) + Vector2(0, -64.0)
+	var ctrl := origin.lerp(dest, 0.5) + Vector2(0, -float(combat.ARC_MAX_LIFT) * reach)
 	var tw := ghost.create_tween().set_parallel(true)
 	tw.tween_method(func(t: float):
 		if not is_instance_valid(ghost):
+			return
+		# THE HANDOFF (2026-08-03). Nothing synchronises this flight with the host and the
+		# host does not wait for it: over a LAN the EV_BOARD_SYNC that seats the REAL card
+		# lands well inside the ghost's own travel, and the ghost rides _hud_layer at
+		# z 220, ABOVE the board. The player therefore watched the creature stamp into its
+		# slot and then watched a second copy of it glide down on top of itself. The
+		# instant the real body occupies the destination there is no gap left to bridge,
+		# so the ghost hands off and goes. CUT, not faded: any fade is more duplicate
+		# frames, and the real card's wax press is a loud enough beat to carry the eye by
+		# itself. The lane is empty at t=0 by construction (Combat validated the drop and
+		# nothing awaits between the intent send and this call), so a body here is always
+		# the arrival this ghost was standing in for. queue_free() is deferred, so freeing
+		# from inside the tween's own callback is safe — and the tween dies with its node,
+		# which is exactly why the wait below must be a timer.
+		var seated = combat._row_array(false, row)[lane]
+		if seated != null and is_instance_valid(seated):
+			if not ghost.is_queued_for_deletion():
+				ghost.queue_free()
 			return
 		var p1 := origin.lerp(ctrl, t)
 		var p2 := ctrl.lerp(dest, t)
 		var sz: Vector2 = travel.lerp(land, t)
 		ghost.size = sz
+		ghost.pivot_offset = sz * 0.5   # keep the spin about the card's centre as it shrinks
 		ghost.position = p1.lerp(p2, t) - sz * 0.5
 	, 0.0, 1.0, duration).set_ease(Tween.EASE_IN_OUT).set_trans(Tween.TRANS_QUAD)
-	tw.tween_property(ghost, "modulate:a", 1.0, 0.10)
-	# Real timer, never tw.finished (unreliable headless), mirroring the bot ghost.
-	await combat._short_pause(duration)
-	if is_instance_valid(ghost):
+	# The fade-in is capped against the flight for the same reason the flight is derived:
+	# a fixed 0.10 s over a 0.04 s Instant-speed flight left the ghost freed while still
+	# half transparent — a flicker where a card-play should be.
+	tw.tween_property(ghost, "modulate:a", 1.0, minf(Motion.time(0.10), duration * 0.45))
+	# The same reach-scaled spin the solo arc takes, settling square as it lands.
+	tw.tween_property(ghost, "rotation", 0.0, duration) \
+		.from(randf_range(-0.07, 0.07) * reach).set_ease(Tween.EASE_OUT)
+	# A REAL TIMER on a BARE duration. NOT combat._short_pause: `duration` is already
+	# Motion.time()-scaled, and _short_pause scales it AGAIN and applies the hold-to-rush
+	# divisor on top — which is the standing bug, the ghost being freed a third of the way
+	# through its own flight at any speed above 1.0. NOT tw.finished either: a killed tween
+	# never emits it, and the handoff above kills this one on purpose, so awaiting the
+	# signal would park this coroutine forever holding a freed node.
+	await combat.get_tree().create_timer(duration).timeout
+	if is_instance_valid(ghost) and not ghost.is_queued_for_deletion():
 		ghost.queue_free()
 
 
@@ -3146,28 +3994,46 @@ func _on_net_event(event: Dictionary) -> void:
 ## The event dispatch body — reached live via _on_net_event or deferred via
 ## _net_flush_backlog once a clash replay finishes.
 func _net_process_event(event: Dictionary) -> void:
-	match String(event.get("t", "")):
+	match _wire_str(event.get("t", "")):
 		NetMatch.EV_ORDER_PICK:
 			# The host settled the toss (its own pick, applied host-side already).
-			combat._net_first_player_override = int(event.get("first", 0))
+			# CLAMPED, to match its host-side twin (IN_ORDER_PICK, which checks
+			# `settled in [0, 1]`). This side took the value raw, and it is not an
+			# opaque flag: it becomes `_net_first_player()`, which feeds
+			# `1 - attacking_side` into `_doubled_hour[...]` and `1 - initiative` into
+			# the sealed reveal order. An out-of-range value is therefore a negative
+			# array index on the WATCHER — a crash, not a wrong turn order.
+			combat._net_first_player_override = clampi(_wire_int(event.get("first", 0), 0), 0, 1)
 		NetMatch.EV_TURN_BEGIN:
-			_net_client_turn_begin(int(event.get("active", 0)), int(event.get("round", 0)))
+			_net_client_turn_begin(_wire_int(event.get("active", 0), 0), _wire_int(event.get("round", 0), 0))
 		NetMatch.EV_HAND_SET:
 			_net_apply_private_state(event)
 		NetMatch.EV_ORDERS_PHASE:
-			combat._net_turn_round = int(event.get("round", 1))
-			combat._net_initiative = int(event.get("init", 0))
+			combat._net_turn_round = _wire_int(event.get("round", 1), 1)
+			# Clamped for the same reason EV_ORDER_PICK is: `_net_initiative` is not an
+			# opaque flag. `_sealed_reveal` iterates `[initiative, 1 - initiative]` and
+			# subscripts `_net_cards_played[side]`, which is size 2 — so an out-of-range
+			# initiative is an array index error on the watcher mid-reveal.
+			combat._net_initiative = clampi(_wire_int(event.get("init", 0), 0), 0, 1)
 			_sealed_open_orders_local()
 		NetMatch.EV_ORDER_GHOST:
-			_sealed_show_ghost(int(event.get("lane", -1)), int(event.get("row", 0)))
+			_sealed_show_ghost(_wire_int(event.get("lane", -1), -1), _wire_int(event.get("row", 0), 0))
 		NetMatch.EV_REVEAL:
 			combat.phase = combat.Phase.RESOLVING
-			_sealed_clear_pending_local()
-			combat._show_combat_banner("THE ORDERS BREAK OPEN", "", Color(1.0, 0.78, 0.35))
+			# WITH THE FLIP (2026-08-04). This passed no argument, so the watcher took
+			# `_sealed_clear_pending_local`'s BOOKKEEPING path — the ghosts simply
+			# blinked out — while the host played ★5's authored turn-over, the backs
+			# going edge-on so the real cards open out of them. That function's own
+			# header says the flip "belongs to the REVEAL only"; this IS the reveal, and
+			# it was the one caller that had to pass it and didn't. Same shape as the
+			# client death that hand-rolled `_die`'s fallback: the watcher got the error
+			# path where the host got the ceremony.
+			_sealed_clear_pending_local(true)
+			combat._show_combat_banner("ORDERS REVEALED", "", Color(1.0, 0.78, 0.35))
 			if AudioBank != null:
 				AudioBank.play_sfx("card_play", 0.04, 2.0, 0.62)
 		NetMatch.EV_SORCERY:
-			_sealed_set_sorcery(int(event.get("who", 0)))
+			_sealed_set_sorcery(_wire_int(event.get("who", 0), 0))
 		NetMatch.EV_CLASH:
 			# The host's per-strike clash log — replay it paced (lunges, blows,
 			# numbers, kill cues). Fire-and-forget coroutine: everything that
@@ -3176,55 +4042,59 @@ func _net_process_event(event: Dictionary) -> void:
 		NetMatch.EV_BOARD_SYNC:
 			_net_apply_board_sync(event)
 		NetMatch.EV_HAND_COUNT:
-			combat._net_opp_hand_count = int(event.get("n", 0))
+			combat._net_opp_hand_count = _wire_int(event.get("n", 0), 0)
 			_net_refresh_opp_hand()
-			_net_set_opp_mana(int(event.get("mana", combat._net_opp_mana)),
-				int(event.get("maxmana", combat._net_opp_max_mana)))
+			_net_set_opp_mana(_wire_int(event.get("mana", combat._net_opp_mana), combat._net_opp_mana),
+				_wire_int(event.get("maxmana", combat._net_opp_max_mana), combat._net_opp_max_mana))
 		NetMatch.EV_DISCARD_FX:
 			# The host threw cards away at its turn commit — show the beat.
-			_net_show_foe_discard_fx(int(event.get("n", 0)))
+			_net_show_foe_discard_fx(_wire_int(event.get("n", 0), 0))
 		NetMatch.EV_POTION_FX:
 			# The host drank a potion — show the drink beat over its portrait.
-			_net_show_foe_potion_fx(String(event.get("pid", "")))
+			_net_show_foe_potion_fx(_wire_str(event.get("pid", "")))
 		NetMatch.EV_RELIC_FX:
 			# A relic beat: theirs (mine=true → our foe rail) or OURS resolved
 			# host-side (mine=false → our own grid pulses).
 			_net_on_relic_fx(event)
 		NetMatch.EV_EMOTE:
 			# The host sent an emote — float their line over the enemy plate.
-			combat._net_show_foe_emote(int(event.get("idx", -1)))
+			combat._net_show_foe_emote(_wire_int(event.get("idx", -1), -1))
 		NetMatch.EV_SPELL:
 			# The host cast a spell — show its arrow + thrown card + target burst so we
 			# see exactly what they pointed at (client casts are shown host-side).
 			_net_on_opp_spell_event(event)
 		NetMatch.EV_DRAW:
 			# A spell we cast told us to draw from our own pile (host resolved it).
-			for _i in int(event.get("n", 0)):
+			# Bounded by the hand cap: this is a raw loop count off the wire, and
+			# `draw_one` reshuffles the discard when the deck runs dry, so a bad `n`
+			# does not terminate early — it spins. MAX_HAND_SIZE is the most any real
+			# draw effect can profitably ask for (the rest would burn anyway).
+			for _i in clampi(_wire_int(event.get("n", 0), 0), 0, combat.MAX_HAND_SIZE):
 				combat.draw_one()
 			combat._layout_hand()
 			_net_broadcast_hand_count()
 			combat._update_hud()
 		NetMatch.EV_GIVE_CARD:
 			# The host returned a specific card to our hand (Grave Robbery / Grave Pact).
-			_net_give_card_local(String(event.get("id", "")), int(event.get("uid", -1)))
+			_net_give_card_local(_wire_str(event.get("id", "")), _wire_int(event.get("uid", -1), -1))
 		NetMatch.EV_MANA:
 			if bool(event.get("next", false)):
 				# Compatibility path for a next-turn max-Command grant. Our own
 				# _start_round folds it in at turn-begin, above the banking cap.
-				combat._bonus_mana_next_turn += int(event.get("n", 0))
+				combat._bonus_mana_next_turn += _wire_int(event.get("n", 0), 0)
 			else:
 				# A spell we cast granted us Command on our own side.
-				combat.player_mana += int(event.get("n", 0))
+				combat.player_mana += _wire_int(event.get("n", 0), 0)
 				combat._update_hud()
 				_net_broadcast_hand_count()   # push the bumped Command to the foe's seal
 		NetMatch.EV_MATCH_OVER:
-			_net_show_result(int(event.get("winner", -1)))
+			_net_show_result(_wire_int(event.get("winner", -1), -1))
 		NetMatch.EV_REMATCH:
 			_net_on_remote_rematch()
 		NetMatch.EV_CHOICE:
 			# Host asked us to pick an option for one of our own creatures (Copycat /
 			# Adaptable). Show the picker; the answer goes back as an IN_CHOICE intent.
-			_net_client_show_choice(int(event.get("eid", -1)), String(event.get("kind", "")))
+			_net_client_show_choice(_wire_int(event.get("eid", -1), -1), _wire_str(event.get("kind", "")))
 		_:
 			pass
 
@@ -3291,9 +4161,32 @@ func _net_show_foe_discard_fx(n: int) -> void:
 			if AudioBank != null:
 				AudioBank.play_sfx("card_discard", 0.08, -6.0))
 	combat.spawn_floating_number(origin + Vector2(0.0, -18.0),
-		"FOE DISCARDS %d" % n, Color(0.78, 0.72, 0.62), false)
+		"OPPONENT DISCARDS %d" % n, Color(0.78, 0.72, 0.62), false)
 
 
+
+
+## The local drinker's beat + chronicle line for a skirmish quaff — the presentation
+## half of `_resolve_combat_potion`, which skirmish never reaches (it has its own
+## host-authoritative resolver). Kept in ONE place so the two entry branches of
+## `_net_use_potion` cannot come to disagree about whether a drink is visible.
+func _net_drink_beat(pid: String, target: Control) -> void:
+	var data: Dictionary = PotionDB.get_potion(pid)
+	var quaff_line := "You quaff the [color=%s]%s[/color]" \
+		% [combat._LOG_PLAYER_COL, String(data.get("name", pid))]
+	if target != null and is_instance_valid(target):
+		quaff_line += " on %s" % combat._log_card_ref(target)
+	# Potion glyph in the margin: painted PNG shows untinted, the white silhouette
+	# kit renders tinted by the potion's colour (same rule as Shop / solo).
+	var pot_icon: Texture2D = PotionDB.icon_for(pid)
+	var pot_tint: Color = Color.WHITE if PotionDB.is_painted_icon(pid) \
+		else data.get("color", Color(0.7, 0.7, 0.7))
+	combat._log_event(quaff_line + ".", {}, 0, pot_icon, pot_tint)
+	combat._play_potion_drink_fx(pid, target)
+	# NOT the Apothecary: `tonic_vigor` is a board mutation and the host already fires
+	# it for the drinker's side inside `_net_apply_host_potion`. Firing it here too
+	# would double it on the host and desync it on the client. This function is
+	# presentation only, which is why it is safe to call from both branches.
 
 
 ## Skirmish potion resolution. Host drinks resolve locally. A client sends only
@@ -3302,11 +4195,44 @@ func _net_show_foe_discard_fx(n: int) -> void:
 func _net_use_potion(pid: String, index: int, target: Control = null) -> void:
 	var data: Dictionary = PotionDB.get_potion(pid)
 	var effect := String(data.get("effect", ""))
+	# YOUR OWN QUAFF IS AN ACT (2026-08-04). Both branches below used to hand the
+	# drink straight to the resolver, so a skirmish player watched the FOE's potion
+	# bloom center-screen with its name on a plate and got, for their own, an empty
+	# belt slot and a number that moved. Solo has always played the drink; run it here
+	# so it lands on both peers for their own bottle, on the caster's clock, before
+	# any of the resolution below.
+	_net_drink_beat(pid, target)
 	if combat._is_client():
 		var request := {"t": NetMatch.IN_USE_POTION, "pid": pid}
 		if target != null and is_instance_valid(target):
 			request["target"] = int(target.entity_id)
 		NetMatch.send_intent(request)
+		# EMPTY THE SLOT NOW, not when the round trip lands. The belt is
+		# host-authoritative and the next EV_HAND_SET overwrites it wholesale
+		# (`slot.potions = event.potions` in _net_apply_private_state), so this is
+		# purely optimistic — the same optimism `_net_play_spell` already applies
+		# to Command. Without it the bottle stayed lit for a full round trip and a
+		# second click sent a second intent for a potion the host had already
+		# spent, which came back to the player as the raw rejection string
+		# "Action rejected: illegal potion target" for an entirely legal drink.
+		combat._ctx_consume_potion(index)
+		combat._rebuild_potion_bar()
+		combat._update_hud()
+		# THE HEAL HAS TO SHOW ON THE DRINKER'S SCREEN TOO. The optimistic green wash
+		# lived in the `else` arm further down, which this early return makes
+		# unreachable — the only non-host net role IS the client, so that branch has
+		# never once executed. A client's own Healing Draught therefore emptied a belt
+		# slot and moved a number: `_net_apply_board_sync` floats a figure on HP LOSS
+		# only, so a gain arrived silently. Host-side the same bottle plays the wash.
+		# Optimistic by design (the host's snapshot sets the true HP a beat later),
+		# exactly as the dead branch intended.
+		if effect == "heal_hp":
+			# Clamped against our own known ceiling, the way solo's arm reports the
+			# REAL delta (`player_hp - pot_before`) rather than the bottle's face
+			# value — a "+8" beside a hero two off full is a number the following
+			# snapshot immediately contradicts.
+			combat._show_lifelink_heal(mini(int(data.get("value", 8)),
+				maxi(0, combat._ctx_hero_max_hp() - combat.player_hp)))
 		return
 	# Caster-local resource rider: Butcher's Dram's +3 Command lands on the
 	# drinker's OWN machine (each peer owns its Command); its accompanying
@@ -3321,19 +4247,17 @@ func _net_use_potion(pid: String, index: int, target: Control = null) -> void:
 				combat.draw_one()
 		_:
 			if _net_potion_needs_host(effect):
-				if combat._is_host():
-					_net_apply_host_potion(pid, false, target)
-					_net_sync_board()
-				else:
-					# The target rides as an entity_id — the cross-wire handle
-					# targeted spells use (host resolves via NetMatch.get_entity).
-					var msg := {"t": NetMatch.IN_USE_POTION, "pid": pid}
-					if target != null and is_instance_valid(target):
-						msg["target"] = int(target.entity_id)
-					NetMatch.send_intent(msg)
-					if effect == "heal_hp":
-						var heal: int = int(data.get("value", 8)) if data.has("value") else 8
-						combat._show_lifelink_heal(heal) # optimistic; the sync sets true HP
+				# HOST-ONLY BY CONSTRUCTION. The client sent its intent and RETURNED
+				# at the top of this function, and CombatMode has exactly three
+				# values (SOLO / NET_HOST / NET_CLIENT), so the host is the only
+				# role that can reach here. This used to carry an `else` arm that
+				# sent a SECOND IN_USE_POTION and replayed the heal wash. It was
+				# dead — but a live trap for the next reader, because it made
+				# _net_use_potion look like it had two send sites and two heal
+				# sites, one of each being a lie. The real client-side heal now
+				# lives in the live client branch above.
+				_net_apply_host_potion(pid, false, target)
+				_net_sync_board()
 			else:
 				push_warning("Combat: net potion effect '%s' is not supported" % effect)
 	_net_send_potion_fx(pid)
@@ -3525,7 +4449,7 @@ func _net_show_foe_potion_fx(pid: String) -> void:
 		var anchor = Vector2(combat.get_viewport_rect().size.x * 0.5, 120.0)
 		if combat._enemy_hp_label != null and is_instance_valid(combat._enemy_hp_label):
 			anchor = combat._enemy_hp_label.get_global_rect().get_center() + Vector2(0.0, 34.0)
-		combat.spawn_floating_number(anchor, "FOE DRINKS: %s" % nm.to_upper(), col, false)
+		combat.spawn_floating_number(anchor, "OPPONENT DRINKS: %s" % nm.to_upper(), col, false)
 		return
 	_net_show_potion_reveal(pid, nm, col, rail_chip)
 
@@ -3551,7 +4475,7 @@ func _net_show_potion_reveal(pid: String, nm: String, col: Color, from_chip: Con
 	chip.size = Vector2(CHIP, CHIP)
 	chip.position = Vector2(-CHIP * 0.5, -CHIP * 0.5)
 	holder.add_child(chip)
-	var caption = combat._make_rail_caption("THE FOE DRINKS")
+	var caption = combat._make_rail_caption("OPPONENT DRINKS")
 	caption.position = Vector2(-160.0, -CHIP * 0.5 - 34.0)
 	caption.size = Vector2(320.0, 24.0)
 	holder.add_child(caption)
@@ -3671,7 +4595,7 @@ func _net_build_foe_arsenal() -> void:
 	root.z_index = 5
 	combat._hud_layer.add_child(root)
 	combat._net_foe_rail_root = root
-	var caption = combat._make_rail_caption("FOE'S LOADOUT")
+	var caption = combat._make_rail_caption("OPPONENT'S ITEMS")
 	caption.anchor_left = 0.0
 	caption.anchor_right = 1.0
 	caption.offset_top = 0
@@ -3987,10 +4911,10 @@ func _net_make_card_back(sz: Vector2) -> Control:
 ## entity registry is shared by eid) and play the telegraph. Fires before the board
 ## snapshot, so the target node is still alive even for a lethal spell.
 func _net_on_opp_spell_event(event: Dictionary) -> void:
-	var data := SkirmishState.skirmish_card_data(String(event.get("id", "")))
+	var data := SkirmishState.skirmish_card_data(_wire_str(event.get("id", "")))
 	if data.is_empty():
 		return
-	var teid: int = int(event.get("target", -1))
+	var teid: int = _wire_int(event.get("target", -1), -1)
 	var tnode: Control = null
 	var tcenter := Vector2.ZERO
 	var has_t := false
@@ -4045,21 +4969,18 @@ func _net_spell_telegraph(card_data: Dictionary, target_center: Vector2,
 func _net_flash_arrow(from: Vector2, to: Vector2) -> void:
 	if combat._hud_layer == null:
 		return
-	var line := Line2D.new()
-	line.width = 7.0
-	line.antialiased = true
+	# THE WATCHER MUST SEE WHAT THE CASTER SEES. This is the mirror of the solo
+	# targeting arrow, and it was built the same flat way — a 7px untextured
+	# Line2D whose `width_curve` and lengthwise `gradient` both worked along the
+	# run and neither across the width, which is where a glow lives. Same
+	# construction as its twin, so the two screens stay honest with each other.
+	var line := Motion.beam_line(
+		PackedVector2Array(), Color(1.0, 0.62, 0.22, 0.98), 22.0,
+		"comet", 0.90, "comet")
 	line.joint_mode = Line2D.LINE_JOINT_ROUND
 	line.begin_cap_mode = Line2D.LINE_CAP_ROUND
 	line.end_cap_mode = Line2D.LINE_CAP_ROUND
 	line.z_index = 239
-	var curve := Curve.new()
-	curve.add_point(Vector2(0.0, 0.4))
-	curve.add_point(Vector2(1.0, 1.0))
-	line.width_curve = curve
-	var grad := Gradient.new()
-	grad.set_color(0, Color(1.0, 0.85, 0.35, 0.55))
-	grad.set_color(1, Color(1.0, 0.45, 0.15, 1.0))
-	line.gradient = grad
 	# Bow the curve downward — the opponent throws the spell down at our board.
 	var dir := to - from
 	var ctrl1 := from + Vector2(dir.x * 0.15, 150.0)
@@ -4069,7 +4990,12 @@ func _net_flash_arrow(from: Vector2, to: Vector2) -> void:
 	for i in range(steps + 1):
 		points.append(combat._bezier_cubic(from, ctrl1, ctrl2, to, float(i) / float(steps)))
 	line.points = points
-	line.modulate.a = 0.0
+	# The BEAM fades through its shader, not through modulate — see the tween
+	# below. Starting hidden has to go through the same channel or the arrow
+	# would snap to full on its first frame.
+	var line_mat: ShaderMaterial = line.material as ShaderMaterial
+	if line_mat != null:
+		line_mat.set_shader_parameter("fade", 0.0)
 	combat._hud_layer.add_child(line)
 
 	var head := Polygon2D.new()
@@ -4086,10 +5012,20 @@ func _net_flash_arrow(from: Vector2, to: Vector2) -> void:
 
 	var tw = combat.create_tween()
 	# Fade in (line + head together), hold, fade out (together), then free.
-	tw.tween_property(line, "modulate:a", 1.0, 0.12)
+	#
+	# THE LINE AND THE HEAD FADE THROUGH DIFFERENT CHANNELS, which looks like an
+	# inconsistency and is not: the head is a plain Polygon2D and answers
+	# `modulate`, while the beam's material writes COLOR outright and never
+	# reads it. Left as a `modulate:a` tween the arrow would have hung at full
+	# strength for the whole beat and then vanished on the free — a silent
+	# failure, since nothing errors and the tween reports success.
+	var fade_line := func(v: float) -> void:
+		if line_mat != null:
+			line_mat.set_shader_parameter("fade", v)
+	tw.tween_method(fade_line, 0.0, 1.0, 0.12)
 	tw.parallel().tween_property(head, "modulate:a", 1.0, 0.12)
 	tw.tween_interval(0.45)
-	tw.tween_property(line, "modulate:a", 0.0, 0.30)
+	tw.tween_method(fade_line, 1.0, 0.0, 0.30)
 	tw.parallel().tween_property(head, "modulate:a", 0.0, 0.30)
 	tw.tween_callback(func():
 		if is_instance_valid(line): line.queue_free()
@@ -4123,6 +5059,16 @@ func _net_on_peer_lost() -> void:
 			NetMatch.leave()
 			GameTheme.fade_out_then_change_scene(combat, "res://scenes/main_menu.tscn", 0.5))
 		return
+	# ONE TEARDOWN PER DROP. This branch handled a lost peer without ever claiming
+	# the latch that says so, so a second delivery — both `peer_left` and
+	# `host_closed` are wired to this function — fell through to the post-match
+	# branch above and armed a SECOND leave-and-fade over the one already counting
+	# down. Two `fade_out_then_change_scene` calls race each other on a scene that
+	# is already tearing down. The latch is what the post-match branch has always
+	# used; the mid-match branch simply never set it.
+	if combat._net_peer_lost_handled:
+		return
+	combat._net_peer_lost_handled = true
 	combat._net_match_over = true
 	combat.phase = combat.Phase.GAME_OVER
 	Card2D.board_interactive = false
@@ -4208,11 +5154,21 @@ func _net_play_caster_local_spell(card: Control, cost: int) -> void:
 	var id: String = card.card_id
 	var sid: String = String(card.card_data.get("spell", {}).get("id", ""))
 	var plus_draw: int = int(card.card_data.get("extra_draw", 0))
-	var spell_start_global: Vector2 = card.global_position
+	# CENTRE, not top-left (2026-08-04). `_spawn_spell_cast_ghost` positions the raised
+	# writ around this point and both solo call sites pass `global_position + size * 0.5`;
+	# skirmish passed the raw origin, so the writ rose from half a card up-and-left of the
+	# sheet the player had just let go of.
+	var spell_start_global: Vector2 = card.global_position + card.size * 0.5
 	combat._net_log_local_cast(card.card_data, null)   # "You cast X." (hand/pile spell)
 	# Spend Command + pull the card from hand up front (matches the generic path).
 	combat.player_mana -= cost
-	combat._pulse_mana_label(cost)
+	# THE SPEND IS ITS OWN BEAT (parity, 2026-08-04). Every solo play site passes
+	# MANA_SPEND_BEAT so the RESOURCE lands half a beat behind the CARD — otherwise the
+	# card's exit, the play cue, the seal punch and the arrival press all share one
+	# frame and four simultaneous events read as one indistinct event. All three
+	# skirmish play sites were passing the 0.0 default, so a skirmish play was exactly
+	# the mush that offset was introduced to fix.
+	combat._pulse_mana_label(cost, false, combat.MANA_SPEND_BEAT)
 	combat._first_spell_this_turn = true   # Witch's first-spell discount rests (parity w/ solo)
 	combat._hand.erase(card)
 	if card.get_parent() != null:
@@ -4251,7 +5207,7 @@ func _net_play_caster_local_spell(card: Control, cost: int) -> void:
 			var wmax: int = mini(3, combat._hand.size())
 			if wmax > 0:
 				var wp: Array = await combat._show_discard_picker(wmax,
-					"War Chant — discard up to %d to summon that many Soldiers" % wmax, true)
+					"Call the Militia — discard up to %d to summon that many Soldiers" % wmax, true)
 				for c in wp:
 					picked_uids.append(int(c.deck_uid))
 					_net_pitch_card(c)
@@ -4301,7 +5257,7 @@ func _net_play_spell(card: Control, cost: int) -> void:
 			combat._layout_hand()
 			return
 		if combat._sorcery_active != NetMatch.local_player_index:
-			combat._show_info("The foe's spell step — yours comes next.")
+			combat._show_info("Your opponent's spell step — yours comes next.")
 			combat._layout_hand()
 			return
 	var data: Dictionary = card.card_data
@@ -4317,9 +5273,19 @@ func _net_play_spell(card: Control, cost: int) -> void:
 	var targeting: String = String(data.get("targeting", "none"))
 	var uid: int = card.deck_uid
 	var id: String = card.card_id
-	var spell_start_global: Vector2 = card.global_position
+	# CENTRE, not top-left (2026-08-04). `_spawn_spell_cast_ghost` positions the raised
+	# writ around this point and both solo call sites pass `global_position + size * 0.5`;
+	# skirmish passed the raw origin, so the writ rose from half a card up-and-left of the
+	# sheet the player had just let go of.
+	var spell_start_global: Vector2 = card.global_position + card.size * 0.5
 	combat.player_mana -= cost
-	combat._pulse_mana_label(cost)
+	# THE SPEND IS ITS OWN BEAT (parity, 2026-08-04). Every solo play site passes
+	# MANA_SPEND_BEAT so the RESOURCE lands half a beat behind the CARD — otherwise the
+	# card's exit, the play cue, the seal punch and the arrival press all share one
+	# frame and four simultaneous events read as one indistinct event. All three
+	# skirmish play sites were passing the 0.0 default, so a skirmish play was exactly
+	# the mush that offset was introduced to fix.
+	combat._pulse_mana_label(cost, false, combat.MANA_SPEND_BEAT)
 	combat._first_spell_this_turn = true   # Witch's first-spell discount rests (parity w/ solo)
 	combat._hand.erase(card)
 	combat._hand_container.remove_child(card)
@@ -4344,7 +5310,7 @@ func _net_play_spell(card: Control, cost: int) -> void:
 		combat._targeting_paid_cost = cost
 		combat._targeting_spell = card
 		combat._targeting_data = data
-		combat._show_info("Click a target...")
+		combat._show_info("Click a target.")
 		combat._show_targeting_arrow()
 		combat._update_hud()
 
@@ -4422,26 +5388,46 @@ func _net_remote_spell_target_valid(data: Dictionary, target_eid: int,
 ## HOST: apply the client's spell intent (caster perspective = index 1).
 func _net_apply_remote_spell(intent: Dictionary) -> void:
 	if combat._net_active_index != 1:
-		_net_reject_remote("not_your_turn")
+		if not SkirmishState.vs_bot:
+			_net_reject_remote("not_your_turn")
 		return
-	if _remote_state == null:
+	# THE PRACTICE BOT HAS NO AUTHORITY OBJECT, AND THAT IS BY DESIGN.
+	# `_net_init_remote_authority` returns false the moment `vs_bot` is set — there
+	# is no remote hand to own — so `_remote_state` is null in every practice match.
+	# This arm dereferenced it unguarded and bailed here, which meant the bot could
+	# never cast a spell AT ALL: `SkirmishBot.build_deck` puts up to five in its
+	# twenty, `decide_turn` scores and returns IN_PLAY_SPELL intents for them, and
+	# `_bot_take_turn` charges the bot for the card (`_bot_consume_card` pulls it
+	# from hand and adds its cost to `spent`) BEFORE handing it here — so a quarter
+	# of the bot's deck was dead weight that it also PAID Command for. Silently:
+	# `_net_reject_remote` is itself a no-op in a practice match.
+	# The creature arm beside this one has always guarded every authority call with
+	# `if not SkirmishState.vs_bot:`; the spell arm simply never got the same
+	# treatment. The bot's hand/Command live in `_bot_hand` / `_bot_banked_mana` and
+	# are already spent by its caller, so skipping the private-state ledger is
+	# exactly right — there is no second ledger to keep.
+	if _remote_state == null and not SkirmishState.vs_bot:
 		_net_reject_remote("authority_unavailable")
 		return
-	var id := String(intent.get("id", ""))
-	var uid := int(intent.get("uid", -2))
+	var id := _wire_str(intent.get("id", ""))
+	var uid := _wire_int(intent.get("uid", -2), -2)
 	var data := SkirmishState.skirmish_card_data(id)
 	if data.is_empty() or String(data.get("type", "")) != "spell" \
 			or not _net_spell_supported(data):
-		_net_reject_remote("card_not_spell")
+		if not SkirmishState.vs_bot:
+			_net_reject_remote("card_not_spell")
 		return
-	var authority_check: Dictionary = _remote_state.validate_play(uid, id,
-		_net_remote_has_first_spell_discount())
-	if not bool(authority_check.get("ok", false)):
-		_net_reject_remote(String(authority_check.get("reason", "illegal_play")))
-		return
-	var target_eid: int = int(intent.get("target", -1))
+	var authority_check: Dictionary = {}
+	if not SkirmishState.vs_bot:
+		authority_check = _remote_state.validate_play(uid, id,
+			_net_remote_has_first_spell_discount())
+		if not bool(authority_check.get("ok", false)):
+			_net_reject_remote(String(authority_check.get("reason", "illegal_play")))
+			return
+	var target_eid: int = _wire_int(intent.get("target", -1), -1)
 	if not _net_remote_spell_target_valid(data, target_eid, true):
-		_net_reject_remote("illegal_target")
+		if not SkirmishState.vs_bot:
+			_net_reject_remote("illegal_target")
 		return
 	# Caster-local pile spells (War Chant / Mass Grave) resolve their hand part on the
 	# client and forward only the board consequence as a pick/size count.
@@ -4453,32 +5439,41 @@ func _net_apply_remote_spell(intent: Dictionary) -> void:
 	elif sid in ["gambit", "war_chant"]:
 		max_picks = 3
 	if picks.size() > max_picks or (max_picks == 0 and not picks.is_empty()):
-		_net_reject_remote("illegal_private_choice")
+		if not SkirmishState.vs_bot:
+			_net_reject_remote("illegal_private_choice")
 		return
-	var seen_picks: Dictionary = {}
-	for raw_pick in picks:
-		var pick_uid := int(raw_pick)
-		if pick_uid == uid or seen_picks.has(pick_uid) \
-				or _remote_state.hand_entry(pick_uid).is_empty():
-			_net_reject_remote("private_choice_not_in_hand")
+	# Everything from here to the resolve is the CLIENT'S PRIVATE LEDGER — the hand
+	# entry checks, the commit, and the pile consequences of the four caster-local
+	# pile spells. The bot has no such ledger (its hand is `_bot_hand`, already
+	# debited by `_bot_take_turn`), so the whole block is skipped for it and the
+	# board resolution below runs on its own. SkirmishBot never emits a pick-bearing
+	# spell in the first place — `_best_spell` only scores damage / AoE / buff /
+	# heal — so no bot cast reaches these arms with picks to spend.
+	if not SkirmishState.vs_bot:
+		var seen_picks: Dictionary = {}
+		for raw_pick in picks:
+			var pick_uid := int(raw_pick)
+			if pick_uid == uid or seen_picks.has(pick_uid) \
+					or _remote_state.hand_entry(pick_uid).is_empty():
+				_net_reject_remote("private_choice_not_in_hand")
+				return
+			seen_picks[pick_uid] = true
+		if _remote_state.commit_play(authority_check, false).is_empty():
+			_net_reject_remote("play_commit_failed")
 			return
-		seen_picks[pick_uid] = true
-	if _remote_state.commit_play(authority_check, false).is_empty():
-		_net_reject_remote("play_commit_failed")
-		return
-	if sid == "recycle" and not picks.is_empty():
-		var recycled: Dictionary = _remote_state.hand_entry(int(picks[0]))
-		var recycle_draw := int(recycled.get("cost", 0)) + int(data.get("extra_draw", 0))
-		_remote_state.move_hand_cards(picks, true)
-		_remote_state.draw_cards(recycle_draw)
-	elif sid == "gambit":
-		_remote_state.discard_cards(picks)
-		_remote_state.draw_cards(picks.size())
-	elif sid == "war_chant":
-		_remote_state.discard_cards(picks)
-		data = data.duplicate(true)
-		data["_net_picks"] = picks.size()
-	elif sid == "mass_grave":
+		if sid == "recycle" and not picks.is_empty():
+			var recycled: Dictionary = _remote_state.hand_entry(int(picks[0]))
+			var recycle_draw := int(recycled.get("cost", 0)) + int(data.get("extra_draw", 0))
+			_remote_state.move_hand_cards(picks, true)
+			_remote_state.draw_cards(recycle_draw)
+		elif sid == "gambit":
+			_remote_state.discard_cards(picks)
+			_remote_state.draw_cards(picks.size())
+		elif sid == "war_chant":
+			_remote_state.discard_cards(picks)
+			data = data.duplicate(true)
+			data["_net_picks"] = picks.size()
+	if sid == "mass_grave":
 		data = data.duplicate(true)
 		data["_net_picks"] = combat._enemy_deaths_this_fight
 	# Capture the target's screen position BEFORE resolving — _net_resolve_spell
@@ -5585,8 +6580,8 @@ func _net_request_client_choice(card, kind: String) -> void:
 func _net_apply_client_choice(intent: Dictionary) -> void:
 	if not combat._is_host() or combat._net_active_index != 1:
 		return
-	var eid: int = int(intent.get("eid", -1))
-	var kind := String(intent.get("kind", ""))
+	var eid: int = _wire_int(intent.get("eid", -1), -1)
+	var kind := _wire_str(intent.get("kind", ""))
 	if String(_pending_remote_choices.get(eid, "")) != kind:
 		_net_reject_remote("choice_not_pending")
 		return
@@ -5597,14 +6592,14 @@ func _net_apply_client_choice(intent: Dictionary) -> void:
 		return
 	match kind:
 		"keyword":
-			var kw: String = String(intent.get("pick", ""))
+			var kw: String = _wire_str(intent.get("pick", ""))
 			if kw in ["swift", "piercing", "armored", "thorns"]:
 				if kw not in node.card_data.keywords:
 					node.card_data.keywords.append(kw)
 				node.update_stat_display()
 				_net_sync_board()
 		"copy_friendly":
-			var src_eid: int = int(intent.get("pick", -1))
+			var src_eid: int = _wire_int(intent.get("pick", -1), -1)
 			if src_eid == eid:
 				return   # can't copy itself
 			var src = NetMatch.get_entity(src_eid)
