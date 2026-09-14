@@ -123,17 +123,87 @@ func _process(_delta: float) -> bool:
 		if String(wdb.WRITS[id].get("slot", "")) in ["roll", "purse"]:
 			_check(wdb.PACTS.has(id), "writ '%s' has a pact twin" % id)
 
+	print("— the pact is dealt into the slot BESIDE the term it escalates")
+	# The pact's whole legibility claim is that its price reads as an exchange
+	# rate against the quiet version of itself. That only works if the two are
+	# adjacent: appended, roughly half of all deals put the pair at index 0 and
+	# index 3, opposite ends of the row with two unrelated terms between them.
+	# The screen has no legend explaining the relationship any more, so adjacency
+	# is now the only thing that states it.
+	for s in range(1, 60):
+		var prng := RandomNumberGenerator.new()
+		prng.seed = s ^ 0x57524954
+		var pslate: Array = wdb.roll_slate(prng)
+		var pact_at := -1
+		var twin_at := -1
+		var twin_id := ""
+		for i in pslate.size():
+			if bool((pslate[i] as Dictionary).get("is_pact", false)):
+				pact_at = i
+				twin_id = String((pslate[i] as Dictionary).get("twin", ""))
+		for i in pslate.size():
+			if String((pslate[i] as Dictionary).get("id", "")) == twin_id:
+				twin_at = i
+		_check(pact_at >= 0 and twin_at >= 0 and pact_at == twin_at + 1,
+			"seed %d: the pact sits directly after its twin (pact %d, twin %d)"
+				% [s, pact_at, twin_at])
+	# Slot I must stay the first tile whatever the pact does to the order, because
+	# _refresh_muster_deals auto-selects slate[0] as the standing choice.
+	for s in range(1, 40):
+		var orng := RandomNumberGenerator.new()
+		orng.seed = s ^ 0x57524954
+		var oslate: Array = wdb.roll_slate(orng)
+		_check(String((oslate[0] as Dictionary).get("slot", "")) == "roll",
+			"seed %d: the auto-selected default tile is still THE ROLL" % s)
+
 	print("— slot furniture exists for all four slots")
 	for slot in ["roll", "arsenal", "purse", "pact"]:
 		_check(wdb.SLOT_LABELS.has(slot), "slot '%s' has a label" % slot)
 		_check(wdb.SLOT_HINTS.has(slot), "slot '%s' has a hint" % slot)
 
 	print("— screen chrome is DB copy the wording lint can see")
+	# `terms_rule_text` was retired 2026-07-31 with the three-step split: it was
+	# a legend teaching the player to read four tiles that each already print
+	# their own slot rule, and the terms step has the width to let them.
+	# `host_step_desc_text` / `banner_step_desc_text` went the same way 2026-08-01
+	# — each restated something already printed on its own step (the panel
+	# headings; banner_rule_text). Only the terms step still heads a desc line,
+	# because "Accept one term" is the pick-ONE rule and no tile states it.
 	for key in ["title", "subtitle", "host_head_text", "column_head_text",
-			"banner_head_text", "terms_head_text", "terms_rule_text",
-			"seed_tooltip_text", "banner_card_fallback_text"]:
+			"banner_head_text", "terms_head_text",
+			"step_host_text", "step_banner_text", "step_terms_text",
+			"terms_step_desc_text",
+			"next_banner_text", "next_terms_text",
+			"seed_tooltip_text", "banner_card_fallback_text",
+			"banner_rule_text"]:
 		_check(String(wdb.MUSTER_COPY.get(key, "")) != "",
 			"opening copy key '%s' is authored" % key)
+	print("— every house word on a dealt slate is defined on the screen")
+	# The gloss is screen-scoped, so the contract is: if any dealt term uses a
+	# glossed word, the screen prints exactly one definition; if none does, it
+	# prints nothing rather than an empty line's worth of gap.
+	for key in wdb.GLOSSARY_ORDER:
+		_check(String(wdb.GLOSSARY.get("%s_text" % key, "")) != "",
+			"house word '%s' has a definition" % key)
+	var glossed_seeds := 0
+	for s in range(1, 60):
+		var grng := RandomNumberGenerator.new()
+		grng.seed = s ^ 0x57524954
+		var gslate: Array = wdb.roll_slate(grng)
+		var joined := ""
+		for e in gslate:
+			joined += String((e as Dictionary).get("desc", "")).to_lower() + " "
+		var wants := false
+		for key in wdb.GLOSSARY_ORDER:
+			if joined.contains(String(key)):
+				wants = true
+		var got: String = wdb.gloss_for_slate(gslate)
+		_check(wants == (got != ""),
+			"seed %d: a slate using a house word gets exactly one gloss" % s)
+		if got != "":
+			glossed_seeds += 1
+	_check(glossed_seeds > 0, "the gloss is reachable at all on ordinary seeds")
+
 	# One screen, one name. The centre band and slot I were both "THE ROLL".
 	_check(String(wdb.MUSTER_COPY.get("column_head_text", "")) \
 		!= String(wdb.SLOT_LABELS.get("roll", "")).split("·")[-1].strip_edges(),
@@ -144,6 +214,7 @@ func _process(_delta: float) -> bool:
 	_check_preview_matches_commit(root)
 	_check_determinism()
 	_check_rematch_carries_banner()
+	_check_arsenal_preview(root)
 
 	if _fails.is_empty():
 		print("[muster-probe] ALL PASS")
@@ -176,11 +247,19 @@ func _check_banners(tree_root: Node) -> void:
 		return
 	_check(bdb.BANNER_ORDER.size() == 6, "six banners are offered")
 	var seen_cards: Array[String] = []
+	# The six chips are the whole of step II. Their lines used to be one shared
+	# sentence with the tribe's name swapped in, which made the list a Mad Lib:
+	# the only differing word was the noun already printed in the title above it.
+	# The shared half belongs in MUSTER_COPY.banner_rule_text, printed once.
+	var seen_lines: Array[String] = []
 	for bid in bdb.BANNER_ORDER:
 		var b: Dictionary = bdb.BANNERS.get(bid, {})
 		var tag := "banner '%s'" % bid
 		_check(String(b.get("name", "")) != "", tag + " is named")
 		_check(String(b.get("line_text", "")) != "", tag + " states its direction")
+		var line := String(b.get("line_text", ""))
+		_check(not (line in seen_lines), tag + " does not repeat another's line")
+		seen_lines.append(line)
 		var cid := String(b.get("card_id", ""))
 		_check(cid != "", tag + " names a card")
 		if cid == "":
@@ -235,6 +314,28 @@ func _check_openers(tree_root: Node) -> void:
 				_check(reach >= 2, tag + ": at least 2 sources of face reach (%d)" % reach)
 				_check(banner_copies == 1,
 					tag + ": exactly one copy of the banner card (%d)" % banner_copies)
+	# THE COLUMN strip is the first card art a player ever sees in a run, and a
+	# card with no painting renders the empty-plate sigil. All six banner cards
+	# shipped blank, which put the miss on the one screen whose entire claim is
+	# "your colours add THIS card" — the card step II exists to show was the only
+	# one on the strip that could not be seen. Checked over every opener, not just
+	# the six, because a new hero retinue card lands on the same strip.
+	print("— every card that can appear in an opener resolves a painting")
+	var art_seen: Dictionary = {}
+	for hid in hdb.HERO_ORDER:
+		for bid in bdb.BANNER_ORDER:
+			for alt in [false, true]:
+				for cid in rs.opening_deck_for(String(hid), alt, String(bid)):
+					if art_seen.has(cid):
+						continue
+					art_seen[cid] = true
+					var cd: Dictionary = cdb.get_card_data(String(cid))
+					_check(not cd.is_empty(), "opener card '%s' exists" % cid)
+					if cd.is_empty():
+						continue
+					_check(CardArtAliases.card_art_path(cd) != "",
+						"opener card '%s' (%s) has art, not the empty sigil"
+							% [cid, cd.get("name", "?")])
 
 
 ## "Face reach" = this card can put damage on the enemy hero without needing a
@@ -317,3 +418,55 @@ func _check_rematch_carries_banner() -> void:
 		"GameOver stashes the banner in rematch_request")
 	_check('req.get("banner_tribe"' in mm,
 		"MainMenu._start_rematch restores the banner")
+	# It is not enough to restore the picks: the rematch must enter THE MUSTER,
+	# because _show_hero_select is the ONLY place that rolls _muster_random_seed
+	# and the only place that deals _muster_writ_slate. Committing straight from
+	# _start_rematch left both at their defaults — every rematch ran seed 1 (the
+	# declaration default, randomised nowhere else) and dealt no opening term at
+	# all, because `chosen` came back empty and the code faded to the map.
+	_check("_show_hero_select(3)" in mm,
+		"a rematch enters THE MUSTER (fresh seed + a dealt slate), not the commit")
+	# _begin_run_with must have exactly ONE call site — TAKE THE FIELD. A second
+	# one is how the rematch came to commit with no seed and no dealt slate.
+	_check(mm.count("\t_begin_run_with(") == 1,
+		"_begin_run_with is reached only from TAKE THE FIELD")
+
+
+## THE ARSENAL prints the three relics it will offer BEFORE the run exists, so
+## the tile stops being a blind pick beside three transparent ones. It has to
+## reproduce _pick_blessing's roll exactly — same stream seed, same hero, same
+## relics-already-held — or the screen names three relics the picker then does
+## not deal, which is worse than printing nothing.
+func _check_arsenal_preview(tree_root: Node) -> void:
+	print("— THE ARSENAL's previewed relics are the ones it will actually offer")
+	var rs: Node = tree_root.get_node_or_null("RunState")
+	var hdb: Node = tree_root.get_node_or_null("HeroDB")
+	var rdb: Node = tree_root.get_node_or_null("RelicDB")
+	if rs == null or hdb == null or rdb == null:
+		_fails.append("RunState/HeroDB/RelicDB autoload missing")
+		return
+	for hid in hdb.HERO_ORDER:
+		for run_seed in [11, 20260731, 777]:
+			var tag := "%s / seed %d" % [hid, run_seed]
+			# The screen's side: pure inputs, no run in existence.
+			var prng := RandomNumberGenerator.new()
+			prng.seed = run_seed ^ 0x57524954 ^ 0x5245534F
+			var signature := String(hdb.get_hero(String(hid)).get("relic", ""))
+			var held: Array[String] = []
+			if signature != "":
+				held.append(signature)
+			var previewed: Array = rdb.roll_foundation_relics(3, held, String(hid), prng)
+			# The resolver's side: a real committed run.
+			rs.pending_banner_tribe = "soldier"
+			rs.start_new_run(String(hid), 0, run_seed)
+			_check(Array(rs.relics) == held,
+				tag + ": a fresh run holds exactly the signature relic")
+			# The same expression _writ_rng() builds, off the COMMITTED seed.
+			var rrng := RandomNumberGenerator.new()
+			rrng.seed = int(rs.run_seed) ^ 0x57524954 ^ 0x5245534F
+			var dealt: Array = rdb.roll_foundation_relics(
+				3, Array(rs.relics), String(hid), rrng)
+			_check(previewed.size() == 3, tag + ": three relics are offered")
+			_check(previewed == dealt,
+				tag + ": the previewed relics equal the dealt ones (%s vs %s)"
+					% [previewed, dealt])

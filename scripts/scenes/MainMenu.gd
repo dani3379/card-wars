@@ -1,4 +1,4 @@
-extends Control
+﻿extends Control
 ## MainMenu.gd — title screen. Start a new run, see stats, quit.
 ##
 ## Visual goals: every label uses GameTheme's display font (Cinzel-style serif),
@@ -56,20 +56,27 @@ var _menu_motion_suspended := false
 var _subscreen_obscures_motion := false
 var _how_to_play_overlay: Control = null
 
-# Hero-select (cast lineup + shared detail pane). The row brightens the focused
-# hero; the pane below shows only that hero's loadout — so each card stays down
-# to portrait + name + tagline instead of six stacked text blocks.
+# THE MUSTER's shared panes. `_hero_detail` is THE COLUMN — rebuilt per focused
+# lord by _build_muster_roll on every step that draws it. The roster row itself
+# stays down to portrait + name + tagline; THE COLUMN carries the loadout.
 var _hero_detail: VBoxContainer = null
 var _hero_cards: Dictionary = {}       # hid -> Button (for selected-state styling)
 var _hero_portraits: Dictionary = {}   # hid -> Control (for focus brighten/dim)
 var _selected_hero: String = ""
-var _hero_detail_reveal_seq := 0
 var _run_commit_locked := false
-var _blessing_commit_locked := false
 var _picker_commit_locked := false
+var _picker_build_generation := 0
+## One-way latch on every path that LEAVES the menu scene — see _leave_for.
+var _scene_exit_locked := false
+# One snapshot per menu rebuild. The title page used to parse the same save JSON
+# up to five times to find the recent slot, print its preview, and fill its
+# dossier. Every consumer below is read-only; save mutations rebuild the page.
+var _slot_summary_cache: Array[Dictionary] = []
 # Full-size readable copy of a hovered deck mini (the NetDraft ledger-preview
 # behaviour). Child of the menu root; freed on unhover / pane rebuild.
 var _deck_preview: Control = null
+var _deck_inspect_overlay: Control = null
+var _deck_inspect_return_focus: Control = null
 
 
 # One-screen Muster state. Every choice stays local and reversible until TAKE
@@ -77,13 +84,25 @@ var _deck_preview: Control = null
 var _selected_banner_tribe: String = BannerDB.DEFAULT_BANNER
 var _selected_writ_id: String = ""
 var _muster_random_seed: int = 1
+# The typed seed lives on the OBJECT, not in the LineEdit. The seed field is
+# built on the terms step only, but _pending_run_seed() is read by every step
+# (the terms deal off it, the campaign preview reads it, and _begin_run_with
+# commits it) — parked in the node it would silently revert to the random seed
+# the moment the player stepped away from the field that set it.
+var _muster_seed_text: String = ""
+var _muster_step: int = 1
 var _muster_writ_slate: Array = []
 var _muster_banner_buttons: Dictionary = {}
 var _muster_writ_buttons: Dictionary = {}
 var _muster_writ_row: HBoxContainer = null
 var _muster_campaign_label: Label = null
+var _muster_gloss_label: Label = null
+var _muster_order_term_detail: VBoxContainer = null
 var _muster_setup_preset: Dictionary = {}
 var _writ_resolution_rng: RandomNumberGenerator = null
+var _quick_march_active: bool = false
+var _quick_march_stage: int = 1
+var _muster_advanced_open: bool = false
 
 
 ## The dotted run between a dossier caption and its figure — the leader a
@@ -103,26 +122,41 @@ class DotLeader extends Control:
 	func _draw() -> void:
 		var y := size.y * 0.5 + 3.0
 		var x := 3.0
+		var strokes := PackedVector2Array()
 		while x < size.x - 3.0:
-			draw_circle(Vector2(x, y), 0.9, Color(0.72, 0.62, 0.42, 0.40),
-				true, -1.0, true)
+			# Batch the tiny ledger dots instead of submitting one circle per mark.
+			strokes.append(Vector2(x - 0.55, y))
+			strokes.append(Vector2(x + 0.55, y))
 			x += 6.0
+		if not strokes.is_empty():
+			draw_multiline(strokes, Color(0.72, 0.62, 0.42, 0.40), 1.8, true)
 
 
 func _ready() -> void:
 	GameTheme.add_atmosphere(self, "main_menu")
-	AudioBank.play_music_random(["main_menu", "main_menu_b", "main_menu_c"])
+	# Session-stable, not run-stable: the key carries no "run:" prefix, so
+	# clear_music_themes leaves it alone and the shell keeps ONE voice from boot
+	# to quit — the menu is the game's face and it was rotating three ways every
+	# time you backed out of a run. A fresh launch draws again.
+	AudioBank.play_music_theme("menu", ["main_menu", "main_menu_b", "main_menu_c"])
 	_rebuild_menu()
 	_setup_bg_parallax()
 	_add_menu_embers()
-	# MARCH AGAIN from the game-over screen: skip the menu beat entirely and
-	# restart with the same hero + ascension (fresh seed), straight into the
-	# war chest. The menu column was built above so the blessing sub-screen
-	# has its usual scaffolding to hide.
+	# MARCH AGAIN from the game-over screen: skip the menu beat entirely and open
+	# THE MUSTER on its last step with the ended run's lord, colours and doctrine
+	# already restored — one click from the field. The menu column was built above
+	# because _show_hero_select builds into it and bails if it is missing.
 	if not RunState.rematch_request.is_empty():
 		_start_rematch()
 		return
 	_animate_intro()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if _deck_inspect_overlay != null and is_instance_valid(_deck_inspect_overlay) \
+			and event.is_action_pressed("ui_cancel"):
+		get_viewport().set_input_as_handled()
+		_hide_deck_inspector()
 
 
 func _start_rematch() -> void:
@@ -166,18 +200,58 @@ func _start_rematch() -> void:
 		elif wants_alt_relic and wants_alt_deck:
 			_muster_alt_relic = true
 			_muster_alt_deck = true
-	_begin_run_with(hero_id)
+	# Hand the restored picks to THE MUSTER and open on the last step, rather than
+	# committing here. Calling _begin_run_with directly skipped the only two things
+	# _show_hero_select does that a run cannot start without:
+	#
+	#   * the SEED. _pending_run_seed falls through to _muster_random_seed, whose
+	#     declaration default is 1 and which is randomised nowhere else — so every
+	#     MARCH AGAIN on every profile ran seed 1: the same act 1 map, the same
+	#     rival deal, the same season, forever.
+	#   * the TERMS. _muster_writ_slate is only filled by _refresh_muster_deals, so
+	#     `chosen` came back empty and _begin_run_with faded straight to the map. A
+	#     rematch silently forfeited the whole of step III.
+	#
+	# Landing on step III rather than committing blind is also the honest shape:
+	# the terms are dealt off a NEW seed, so they are not the ones the player just
+	# marched under and cannot be carried over. One click, and the rail is live if
+	# they want to change lord or colours too.
+	_muster_setup_preset = {
+		"hero": hero_id,
+		"banner_tribe": _selected_banner_tribe,
+		"alt_relic": _muster_alt_relic,
+		"alt_deck": _muster_alt_deck,
+	}
+	_show_hero_select(3)
 
 
 func _rebuild_menu() -> void:
 	_set_subscreen_motion_obscured(false)
+	_refresh_slot_summary_cache()
 	# Wipe the placeholder children from the .tscn so we can build the menu
 	# entirely from code with consistent fonts/styles. The Background atmosphere
 	# is preserved (it was added by add_atmosphere()).
+	#
+	# DETACH BEFORE THE DEFERRED FREE, OR THE REBUILT COLUMN LOSES ITS NAME.
+	# queue_free() does not remove the node — it schedules a free at the end of
+	# the frame — so the outgoing column was still a child named "Menu" when the
+	# new one was added below, and add_child resolves that collision by renaming
+	# the INCOMING node (to @VBoxContainer@N). Godot never renames it back once
+	# the old one is finally freed, so from the first return to this screen
+	# onward every `get_node_or_null("Menu")` found nothing.
+	#
+	# That is nine call sites, and all of them open with `if menu == null: return`
+	# — so NEW RUN, LOAD GAME, the muster and the settings return silently did
+	# NOTHING on the second press, with no error anywhere. `MenuScrim` and
+	# `TitleLabel` are rebuilt here under fixed names too and were lost the same
+	# way. remove_child is safe inside the button callback that gets us here (it
+	# detaches, it does not free), and it also stops the two columns being drawn
+	# on top of each other for the frame between the rebuild and the free.
 	for child in get_children():
 		var n: String = child.name
 		if n == "Background" or n == "Atmosphere":
 			continue
+		remove_child(child)
 		child.queue_free()
 
 	var vp := get_viewport_rect().size
@@ -278,16 +352,27 @@ func _rebuild_menu() -> void:
 
 	# ── Primary actions ──
 	# 2026-07-02 consolidation: the column carries at most 8 items (was 11+).
-	# CONTINUE jumps into the most recent save; NEW MARCH opens the run-setup
+	# CONTINUE jumps into the most recent save; NEW RUN opens the run-setup
 	# screen (hero pick, which now also owns ascension / daily / seed — those
 	# used to be three separate top-level menu entries); LOAD GAME appears
 	# only when a SECOND slot is filled (with one save, CONTINUE covers it).
 	var has_any_save := _any_save_exists()
 
-	# All main-menu buttons share font_size=22 and height=50 — visual
-	# hierarchy comes from per-button COLOR, not size. The previous mix of
-	# 17/19/20/22/24 sizes felt random; uniform sizing reads like a single
-	# menu group (matches Ratropolis / Slay the Spire conventions).
+	# All main-menu buttons share one font size and height. The previous mix of
+	# 17/19/20/22/24 sizes felt random; uniform sizing reads like a single menu
+	# group (matches Ratropolis / Slay the Spire conventions).
+	#
+	# THIS COMMENT USED TO CLAIM "visual hierarchy comes from per-button COLOR,
+	# not size" and each call below still passes a distinct Color. It was not
+	# true and had not been for some time: `_make_menu_button`'s second parameter
+	# is named `_bg` precisely because it drives nothing — every item rendered as
+	# identical ivory, so CONTINUE and QUIT carried exactly the same weight on
+	# the first screen of the game. Hierarchy on this column now comes from the
+	# three channels that actually reach the render: the CONTINUE preview line
+	# beneath its own button, the press CUE (commit vs select — see
+	# `_arm_shell_button`), and order. The colours are left in place only as
+	# call-site documentation of intent; do not add a fourth item believing the
+	# colour will distinguish it.
 	const MENU_FONT := 22
 	const MENU_H := 40
 	if has_any_save:
@@ -296,21 +381,54 @@ func _rebuild_menu() -> void:
 			Color(0.32, 0.26, 0.14), MENU_FONT, MENU_H)
 		btn_continue.tooltip_text = _continue_preview_line(recent_slot, true)
 		btn_continue.pressed.connect(_on_continue_recent)
+		# Taking a march back up is a commit, not a browse.
+		_set_shell_cue(btn_continue, "commit")
 		col.add_child(btn_continue)
-		var preview := _make_display_label(_continue_preview_line(recent_slot), 14,
+		# ONE LINE, INDENTED ONTO THE BUTTON IT DESCRIBES (2026-08-04). Two faults,
+		# both measured on the render:
+		#   * It printed "Act 1, Province 1 - HP 30/30 - 175g" — the same four facts
+		#     the CURRENT RUN dossier prints as ruled figures 1200px to the right.
+		#     The dossier is the better telling (captions, leaders, its own accent
+		#     per figure), so this one collapses to what the dossier cannot say:
+		#     which run Continue would actually resume.
+		#   * Its ink began at canvas x 131 while the button labels beside it begin
+		#     at 178, so the line describing CONTINUE aligned with the page title
+		#     instead of with CONTINUE. The offset is exactly the flame slot; the
+		#     lead spacer below is that slot.
+		var preview_row := HBoxContainer.new()
+		preview_row.add_theme_constant_override("separation", 0)
+		var preview_lead := Control.new()
+		preview_lead.custom_minimum_size = Vector2(
+			MENU_FLAME_SLOT + MENU_FLAME_GAP, 0)
+		preview_lead.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		preview_row.add_child(preview_lead)
+		var preview := _make_caption_label(_continue_preview_line(recent_slot), 15,
 			Color(0.91, 0.76, 0.48))
 		preview.name = "ContinuePreview"
 		preview.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		preview.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		preview.custom_minimum_size = Vector2(600, 0)
-		col.add_child(preview)
+		preview.custom_minimum_size = Vector2(560, 0)
+		preview_row.add_child(preview)
+		col.add_child(preview_row)
 
+	# NEW RUN, and it stays NEW RUN (COPY_STYLE §12, the 2026-08-06 plain-language
+	# pass). An earlier note here argued for NEW MARCH on the grounds that "the
+	# whole opening speaks march"; §12 retired that register from UI chrome and
+	# settled the noun — the thing you start is a RUN, on every screen. Do not
+	# re-split it.
+	#
+	# "ASCENSION %d", not "ASC %d" (2026-09-10): the stepper on the run-setup
+	# screen, the save-slot lines and the ascension rules readout all spell the
+	# word out, so the one place that abbreviated it was the odd one out — and an
+	# abbreviation on the FIRST screen of the game is a word a new player has not
+	# met yet.
 	var begin_label: String = "NEW RUN"
 	if MetaState.unlocked_ascension > 0:
-		begin_label = "NEW RUN — ASC %d" % _selected_ascension
+		begin_label = "NEW RUN — ASCENSION %d" % _selected_ascension
 	var btn_start := _make_menu_button(begin_label,
 		Color(0.18, 0.36, 0.18), MENU_FONT, MENU_H)
 	btn_start.pressed.connect(_on_new_run)
+	_set_shell_cue(btn_start, "commit")
 	col.add_child(btn_start)
 
 	if _filled_slot_count() >= 2:
@@ -325,13 +443,13 @@ func _rebuild_menu() -> void:
 	var btn_skirmish := _make_menu_button("SKIRMISH",
 		Color(0.20, 0.28, 0.42), MENU_FONT, MENU_H)
 	btn_skirmish.pressed.connect(func():
-		GameTheme.fade_out_then_change_scene(self, SKIRMISH_SCENE))
+		_leave_for(SKIRMISH_SCENE))
 	col.add_child(btn_skirmish)
 
 	var btn_gallery := _make_menu_button("COLLECTION",
 		Color(0.16, 0.20, 0.32), MENU_FONT, MENU_H)
 	btn_gallery.pressed.connect(func():
-		GameTheme.fade_out_then_change_scene(self, COLLECTION_SCENE))
+		_leave_for(COLLECTION_SCENE))
 	col.add_child(btn_gallery)
 
 	# How to play — the campaign primer + full keyword glossary, reachable
@@ -352,28 +470,44 @@ func _rebuild_menu() -> void:
 	btn_quit.pressed.connect(_on_quit)
 	col.add_child(btn_quit)
 
-	# Bottom decorative line + run stats.
+	# ── The campaign record ──
+	# Bottom ornament, then the player's history — as MATERIAL, not only as a
+	# sentence. See _build_campaign_record.
 	col.add_child(_make_ornament_row(200.0, true))
-	var stats := _make_display_label(_stats_text(), 17, Color(0.80, 0.75, 0.64))
-	stats.name = "StatsLabel"
-	stats.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	col.add_child(stats)
+	col.add_child(_build_campaign_record())
 
 	# Small "Credits" text link below the stats — kept low-key so it doesn't
-	# compete with the primary action buttons, but always accessible.
+	# compete with the primary action buttons, but always accessible. Title Case,
+	# not lowercase: the quiet comes from the size and the colour, and a control
+	# name in the shell is Title Case everywhere else.
 	var credits_btn := Button.new()
-	credits_btn.text = "credits"
+	credits_btn.text = "Credits"
 	credits_btn.flat = true
 	credits_btn.focus_mode = Control.FOCUS_ALL
 	credits_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	credits_btn.custom_minimum_size = Vector2(0, 26)
+	# `flat` STOPS THE BOX BEING DRAWN, NOT ITS MARGINS BEING SPENT. The default
+	# theme's button stylebox still placed this label, so the word sat 4px right
+	# of the rail the title, the tagline, the epigraph, both rules and the record
+	# line all share — measured off the render at x=115 against their 111. An
+	# explicit empty box is the house pairing for `flat` (and the one the
+	# flat/stylebox contradiction scan in `_probe_input_reach` expects).
+	var credits_empty := StyleBoxEmpty.new()
+	for st in ["normal", "hover", "pressed", "focus", "disabled"]:
+		credits_btn.add_theme_stylebox_override(st, credits_empty)
+	# `flat` STOPS THE BOX BEING DRAWN, NOT ITS MARGINS BEING SPENT. The default
+	# theme's button stylebox still placed this label, so the word sat 4px right
+	# of the rail the title, the tagline, the epigraph, both rules and the record
+	# line all share — measured off the render at x=115 against their 111. An
+	# explicit empty box is the house pairing for `flat` (and the one the
+	# flat/stylebox contradiction scan in `_probe_input_reach` expects).
 	credits_btn.add_theme_font_size_override("font_size", GameTheme.MIN_LABEL_SIZE)
 	credits_btn.add_theme_color_override("font_color", Color(0.74, 0.70, 0.62))
 	credits_btn.add_theme_color_override("font_hover_color", GILT_BRIGHT)
 	if GameTheme.font_body:
 		credits_btn.add_theme_font_override("font", GameTheme.font_body)
 	credits_btn.pressed.connect(func():
-		GameTheme.fade_out_then_change_scene(self, CREDITS_SCENE, 0.30))
+		_leave_for(CREDITS_SCENE, 0.30))
 	col.add_child(credits_btn)
 
 	# Build stamp — a dev-only confirmation that the running code is the latest
@@ -458,7 +592,69 @@ func _make_display_label(text: String, size: int, color: Color) -> Label:
 	return lbl
 
 
-func _make_menu_button(text: String, _bg: Color, font_size: int, height: int) -> Button:
+## THE CAPTION FLOOR IS 15, AND IT IS NOT THE READING FLOOR (2026-08-04).
+##
+## Measured symptom: fifteen call sites hand _make_display_label a 13-16, and
+## every one of them renders at 18, because that helper clamps to
+## GameTheme.MIN_LABEL_SIZE. Worked example, THE COLUMN's detail pane on step II
+## — "OPENER CHANGE" (written 14), "+ Line Marker" (22), "RECRUITMENT BIAS" (14)
+## and the bias line (16): four levels of intended hierarchy, three of them
+## printed at the identical size, separated only by a 0.617-vs-0.733 luminance
+## step. A small-caps eyebrow as large as the body it captions is not an eyebrow,
+## it is a second heading.
+##
+## The clamp itself is right and stays: 18 is the floor for text the player
+## READS. But COPY_STYLE §11 licenses 15-17 for captions, and nothing in this
+## file could reach that band. This helper is that band, and it is deliberately
+## a SEPARATE function rather than a flag on the other one, so the choice of
+## register is made at the call site and is greppable.
+##
+## font_body (not the display Cinzel): the in-tree precedent is the step rail's
+## own subtitle, a raw Label at 15 in font_body, and it is the one place in the
+## flow where caption-versus-title already reads correctly. Caps-only Cinzel at
+## 15 sets very wide and very light — it goes grey before it goes small.
+##
+## USE FOR: small-caps eyebrows, the CHOSEN marker, fact/metadata lines that
+## qualify something larger next to them. NOT for sentences — a sentence is
+## reading text and belongs at 18 through _make_display_label.
+const CAPTION_MIN_SIZE := 15
+const CAPTION_MAX_SIZE := 17
+
+func _make_caption_label(text: String, size: int, color: Color) -> Label:
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.add_theme_font_size_override("font_size",
+		clampi(size, CAPTION_MIN_SIZE, CAPTION_MAX_SIZE))
+	lbl.add_theme_color_override("font_color", color)
+	if GameTheme.font_body:
+		lbl.add_theme_font_override("font", GameTheme.font_body)
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return lbl
+
+
+## The flame cursor's reserved slot, and the gap after it. Anything that has to
+## line up with a menu button's LABEL (rather than with its hit box) must be
+## indented by their sum — the flame is packed ahead of the label and holds its
+## footprint even while invisible, so the ink starts 40px in.
+const MENU_FLAME_SLOT := 28
+const MENU_FLAME_GAP := 12
+## Resting alpha of a flame on a button that is ALREADY the forward move (the
+## primary action tab, TAKE THE FIELD). Every other item ignites from 0 on hover;
+## these burn before you reach them, which is the whole hierarchy device. Not
+## 1.0 — hover has to have somewhere left to go.
+const TAKE_FIELD_FLAME_REST := 0.82
+## Diameter of the wax seal pressed into an accepted term. Square by necessity —
+## WaxSeal works off `min(size.x, size.y)`, so a 34×26 host draws a 26px seal
+## floating in a 34px box. 30 clears the 14px Roman device inside its impression.
+const TERM_SEAL := 30
+## Width of a plated forward action in a nav row. Before the primary treatment
+## these were frameless words carrying EXPAND_FILL, so "wide" only meant a wide
+## invisible click cell; now the plate is visible and EXPAND_FILL rendered ORDERS
+## as a 900px bar. The button measures to this and the row centres it.
+const NAV_PRIMARY_W := 340.0
+
+func _make_menu_button(text: String, _bg: Color, font_size: int, height: int,
+		with_flame: bool = true) -> Button:
 	# Frameless text button (Slay the Spire / Hades style): no box at all — the
 	# text *is* the button. On hover the label brightens to gilt, a flame ignites
 	# on each side, and the whole label nudges right. The `_bg` param is retained
@@ -481,17 +677,28 @@ func _make_menu_button(text: String, _bg: Color, font_size: int, height: int) ->
 	var inner := HBoxContainer.new()
 	inner.set_anchors_preset(Control.PRESET_FULL_RECT)
 	inner.alignment = BoxContainer.ALIGNMENT_BEGIN
-	inner.add_theme_constant_override("separation", 12)
+	inner.add_theme_constant_override("separation", MENU_FLAME_GAP)
 	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	btn.add_child(inner)
 
 	# Flame cursor only on the full-size action buttons — the small steppers
 	# (−/+) and BACK links read better as plain text.
+	#
+	# `with_flame = false` keeps the button's other hover tells (the label comes up
+	# to gilt, the rule fades in, the row slides right) but swaps the 28px flame
+	# for a 12px lead, so the LABEL can be lined up with a panel's content column
+	# instead of standing 28px out-dented from it. See _build_muster_nav.
 	var flames: Array[TextureRect] = []
 	if height >= 40:
-		var flame_l := _make_flame_accent()
-		inner.add_child(flame_l)
-		flames.append(flame_l)
+		if with_flame:
+			var flame_l := _make_flame_accent()
+			inner.add_child(flame_l)
+			flames.append(flame_l)
+		else:
+			var lead := Control.new()
+			lead.custom_minimum_size = Vector2(0, 0)
+			lead.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			inner.add_child(lead)
 
 	var text_stack := VBoxContainer.new()
 	text_stack.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -524,7 +731,245 @@ func _make_menu_button(text: String, _bg: Color, font_size: int, height: int) ->
 	btn.mouse_exited.connect(_on_menu_btn_hover.bind(inner, lbl, flames, rule, false))
 	btn.focus_entered.connect(_on_menu_btn_hover.bind(inner, lbl, flames, rule, true))
 	btn.focus_exited.connect(_on_menu_btn_hover.bind(inner, lbl, flames, rule, false))
+	# The full-size action buttons get the press/hover scale; the small steppers
+	# and BACK links (< 40px) do not — a 1.04 lift on a 17px word reads as a
+	# wobble rather than as a lift.
+	_arm_shell_button(btn, "select", 1.035 if height >= 40 else 1.0)
 	return btn
+
+
+## THE SHELL'S INTERACTION CONTRACT (2026-08-05) — one funnel, every button.
+##
+## Before this pass a shell button did three things on hover (label → gilt, flame
+## fade, +12px slide) and *nothing whatsoever* on press: `_make_menu_button`
+## assigns StyleBoxEmpty to all five states including `pressed`, so the click
+## that started your run was visually and audibly identical to not clicking. The
+## genre-standard shape is hover 1.05 → press 0.95 → release 1.0 inside the
+## 100–300ms band; 0.18s was already in band, only the scale and the press were
+## missing.
+##
+## `cue` is the sound the PRESS makes — "select" for an ordinary pick, "commit"
+## for the two buttons that spend the next 40 minutes, "back" for retreat. Hover
+## always ticks. Both halves are DECORATIVE by the Motion contract (they carry no
+## game state), so the scale gates on Reduce Motion; the AUDIO does not, because
+## a player who turns motion off has not asked for silence.
+## The cue is read from meta at PRESS time, not captured at build time, so a
+## caller can promote a button after the fact — `_set_shell_cue(btn, "commit")`
+## — without the helper needing a parameter on every one of its call sites.
+func _arm_shell_button(btn: Button, cue: String = "select",
+		hover_scale: float = 1.0) -> void:
+	btn.set_meta("shell_cue", cue)
+	# One tick per arrival, whichever way the cursor or the keyboard got here.
+	# TAKE THE FIELD mirrors focus into `mouse_entered` so keyboard nav inherits
+	# the flame and the grow, which meant BOTH arms below fired for one focus and
+	# the paper ticked twice — the stutter UI_CUE_MIX's hover level exists to
+	# avoid. Debounce on the frame rather than dropping either arm: the mirror is
+	# what gives the keyboard its body language, and every other shell button
+	# needs the focus arm as its only tick.
+	var hover_tick := func() -> void:
+		if btn.disabled:
+			return
+		var frame := Engine.get_process_frames()
+		if int(btn.get_meta("shell_hover_frame", -1)) == frame:
+			return
+		btn.set_meta("shell_hover_frame", frame)
+		AudioBank.play_ui("hover")
+	btn.mouse_entered.connect(hover_tick)
+	btn.focus_entered.connect(hover_tick)
+	btn.pressed.connect(func() -> void:
+		if is_instance_valid(btn):
+			AudioBank.play_ui(String(btn.get_meta("shell_cue", "select"))))
+	if hover_scale <= 1.0:
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	# Scale from the control's own centre. `pivot_offset` has to be re-read at
+	# press time, not at build time: these buttons are laid out by a VBox that
+	# has not run yet when the helper is called, so a pivot captured here is
+	# always Vector2.ZERO and the "grow" reads as a lurch to the right.
+	var scale_to := func(target: float, dur: float) -> void:
+		if not is_instance_valid(btn):
+			return
+		btn.pivot_offset = btn.size * 0.5
+		var tw := btn.create_tween()
+		tw.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		tw.tween_property(btn, "scale", Vector2(target, target), dur)
+	btn.mouse_entered.connect(func() -> void:
+		if not btn.disabled:
+			scale_to.call(hover_scale, 0.14))
+	btn.mouse_exited.connect(func() -> void: scale_to.call(1.0, 0.14))
+	btn.button_down.connect(func() -> void: scale_to.call(hover_scale * 0.955, 0.06))
+	btn.button_up.connect(func() -> void: scale_to.call(hover_scale, 0.10))
+
+
+func _set_shell_cue(btn: Button, cue: String) -> void:
+	## Promote (or demote) an already-armed button's press cue. "commit" is
+	## reserved for the two buttons that spend the next 40 minutes — NEW RUN and
+	## START RUN — and "back" for every retreat, so advance and retreat are
+	## distinguishable with the screen unread.
+	if btn != null and is_instance_valid(btn):
+		btn.set_meta("shell_cue", cue)
+
+
+func _make_secondary_action(text: String, width: float = 220.0,
+		height: int = 36) -> Button:
+	# Small actions used to borrow the frameless menu treatment. Below 40px that
+	# treatment has no flame and no rule, so VIEW DECK and OPTIONAL RULES looked
+	# exactly like passive captions at rest. Give secondary actions one quiet,
+	# persistent document-tab frame: subordinate to TAKE THE FIELD, but plainly
+	# operable before hover.
+	var btn := Button.new()
+	btn.text = text
+	btn.custom_minimum_size = Vector2(width, height)
+	btn.focus_mode = Control.FOCUS_ALL
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	btn.add_theme_font_size_override("font_size", 14)
+	if GameTheme.font_display:
+		btn.add_theme_font_override("font", GameTheme.font_display)
+	btn.add_theme_color_override("font_color", Color(0.84, 0.78, 0.66))
+	btn.add_theme_color_override("font_hover_color", GILT_BRIGHT)
+	btn.add_theme_color_override("font_focus_color", GILT_BRIGHT)
+	btn.add_theme_color_override("font_pressed_color", Color(0.94, 0.84, 0.60))
+	btn.add_theme_color_override("font_outline_color", Color(0.04, 0.02, 0.01, 0.80))
+	btn.add_theme_constant_override("outline_size", 3)
+
+	var normal := GameTheme.make_panel_style(
+		Color(0.035, 0.025, 0.028, 0.78), Color(0.53, 0.45, 0.32, 0.52),
+		1, 4, false)
+	var hover := GameTheme.make_panel_style(
+		Color(0.11, 0.070, 0.040, 0.94), GILT_BRIGHT, 2, 4, true)
+	var pressed := GameTheme.make_panel_style(
+		Color(0.055, 0.035, 0.028, 0.96), Color(0.76, 0.59, 0.30),
+		1, 4, false)
+	for style in [normal, hover, pressed]:
+		style.content_margin_left = 12
+		style.content_margin_right = 12
+		style.content_margin_top = 5
+		style.content_margin_bottom = 5
+	btn.add_theme_stylebox_override("normal", normal)
+	btn.add_theme_stylebox_override("hover", hover)
+	btn.add_theme_stylebox_override("focus", hover)
+	btn.add_theme_stylebox_override("pressed", pressed)
+	_arm_shell_button(btn, "select", 1.03)
+	return btn
+
+
+func _make_primary_action(text: String, height: int = 46) -> Button:
+	## THE FORWARD MOVE (2026-08-05). `_make_secondary_action` shipped as "one
+	## quiet, persistent document-tab frame: subordinate to TAKE THE FIELD" — but
+	## there was no primary for it to be subordinate TO. Every forward action in
+	## the shell (THE BANNER · THE TERMS · ORDERS · SEE YOUR COMPANY · TAKE THE
+	## FIELD) was `_make_menu_button`, i.e. the exact frameless ivory text at the
+	## exact size as the BACK sitting next to it. Nothing on any of those screens
+	## said which way was on.
+	##
+	## The house answer is not a brighter rectangle — it is the flame. Every menu
+	## item in this game ignites a flame on hover; the forward move is the one
+	## that is ALREADY BURNING before you reach it. Warm parchment plate, gilt
+	## rule, lit flame at rest, and it brightens rather than ignites under the
+	## cursor.
+	var btn := Button.new()
+	btn.custom_minimum_size = Vector2(0, height)
+	btn.focus_mode = Control.FOCUS_ALL
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	btn.clip_contents = false
+
+	var normal := GameTheme.make_panel_style(
+		Color(0.115, 0.062, 0.030, 0.92), Color(0.78, 0.60, 0.30, 0.78),
+		2, 5, false)
+	var hover := GameTheme.make_panel_style(
+		Color(0.20, 0.105, 0.042, 0.97), GILT_BRIGHT, 2, 5, true)
+	var pressed := GameTheme.make_panel_style(
+		Color(0.085, 0.048, 0.026, 0.98), Color(0.86, 0.68, 0.34),
+		2, 5, false)
+	for style in [normal, hover, pressed]:
+		style.content_margin_left = 16
+		style.content_margin_right = 16
+		style.content_margin_top = 6
+		style.content_margin_bottom = 6
+	btn.add_theme_stylebox_override("normal", normal)
+	btn.add_theme_stylebox_override("hover", hover)
+	btn.add_theme_stylebox_override("focus", hover)
+	btn.add_theme_stylebox_override("pressed", pressed)
+
+	# Content mirrors _make_menu_button's row so the primary sits on the same
+	# baseline grammar as the column it leads: flame slot, then the word.
+	var inner := HBoxContainer.new()
+	inner.set_anchors_preset(Control.PRESET_FULL_RECT)
+	inner.alignment = BoxContainer.ALIGNMENT_CENTER
+	inner.add_theme_constant_override("separation", MENU_FLAME_GAP)
+	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(inner)
+
+	var flame := _make_flame_accent()
+	flame.modulate = Color(1, 1, 1, 0.82)   # LIT AT REST — this is the whole idea
+	inner.add_child(flame)
+
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if GameTheme.font_display:
+		lbl.add_theme_font_override("font", GameTheme.font_display)
+	lbl.add_theme_font_size_override("font_size", 19)
+	lbl.add_theme_color_override("font_color", Color(0.98, 0.90, 0.70))
+	lbl.add_theme_color_override("font_outline_color", Color(0.05, 0.02, 0.0, 0.85))
+	lbl.add_theme_constant_override("outline_size", 4)
+	inner.add_child(lbl)
+
+	btn.mouse_entered.connect(_on_primary_hover.bind(flame, lbl, true))
+	btn.mouse_exited.connect(_on_primary_hover.bind(flame, lbl, false))
+	btn.focus_entered.connect(_on_primary_hover.bind(flame, lbl, true))
+	btn.focus_exited.connect(_on_primary_hover.bind(flame, lbl, false))
+	_arm_shell_button(btn, "select", 1.03)
+	return btn
+
+
+func _on_primary_hover(flame: TextureRect, lbl: Label, hovering: bool) -> void:
+	lbl.add_theme_color_override("font_color",
+		GILT_BRIGHT if hovering else Color(0.98, 0.90, 0.70))
+	if not is_instance_valid(flame):
+		return
+	var tw := create_tween()
+	tw.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	# Already lit: hover BRIGHTENS rather than igniting. Never reaches 0 —
+	# a primary that goes dark on mouse-out has stopped being a primary.
+	tw.tween_property(flame, "modulate:a", 1.0 if hovering else 0.82, 0.16)
+
+
+func _reduce_motion() -> bool:
+	return UserSettings != null and UserSettings.reduce_motion
+
+
+## Used by the save-slot marker further down this file — NOT by the campaign
+## record, which carries no ornament any more (see below).
+const WaxSeal := preload("res://scripts/ui/painters/WaxSeal.gd")
+
+## THE CAMPAIGN RECORD — ONE SENTENCE, NO ORNAMENT (2026-09-14).
+##
+## The player's lifetime history, under the bottom ornament rule: "Runs N ·
+## Wins N · Losses N", plus the best win when there is one.
+##
+## THIS ROW USED TO CARRY ITS OWN ORNAMENT AND THE ORNAMENT IS GONE ON THE
+## OWNER'S CALL — DO NOT PUT IT BACK. The 2026-08-05 pass rendered the record
+## TWICE: a rotated `TallyMarks` run scratching one stroke per march, and a row
+## of 18px `WaxSeal` impressions, one per victory, above this sentence. The
+## reasoning was sound on paper (the game's whole material language is an
+## accumulating record, and the player's own record was the one thing rendered
+## as plain text) and it did not survive contact with the screen. A card's left
+## margin is not a menu footer: turned on its side under the column the tally
+## run read as a smear of gold hyphens, and at 18px the seals are three flat
+## dark-red dots indistinguishable from a bullet row. An ornament that has to be
+## explained is decoration, and decoration under a menu column is clutter.
+##
+## The sentence was always the part that actually answered the question — and it
+## is also the honest path for screen readers and for colourblind players, which
+## the marks never were. It is the whole feature now.
+func _build_campaign_record() -> Control:
+	var stats := _make_display_label(_stats_text(), 17, Color(0.80, 0.75, 0.64))
+	stats.name = "CampaignRecord"
+	stats.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	return stats
 
 
 func _make_flame_accent() -> TextureRect:
@@ -580,17 +1025,38 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 	var has_save: bool = summary.get("has_save", false)
 	var unreadable: bool = summary.get("unreadable", false)
 	var occupied := has_save or unreadable
-	# Overwrite mode tints filled slots red-ish to telegraph the destructive
-	# action; normal mode uses the warm gold "continue" treatment.
-	var bg: Color
+	# ── STATE RIDES THE KEYLINE, NOT THE FILL (2026-08-05) ──
+	# The three slots used to carry three different saturated FILLS — an olive
+	# (0.32,0.26,0.14) for a waiting run, a dull red for a damaged one, a warm
+	# charcoal for empty. Rendered, that is three unrelated flat rectangles
+	# stacked in a list, and the olive one was the single brightest object on the
+	# screen: a *list row* out-shouting the title above it. Flat colour fills are
+	# also the one thing the house style rules out outright.
+	#
+	# The kit already solved this and said so in as many words —
+	# `GameTheme.make_themed_button`: "Inked-parchment plaque, NOT a flat colour
+	# fill — the caller's `bg` becomes the accent keyline, so a button that MEANS
+	# something survives as ink while the button stops reading as a generic UI
+	# rectangle." Same call here, and the same fix as the 2026-07-19 Shop shelf
+	# pass: ONE tile, state in the accent.
+	#
+	# So every slot is the house dark doc-tile, and the ACCENT says what it is:
+	#   gold   — a run waiting for you
+	#   ember  — a run this build cannot read
+	#   red    — this run is about to be replaced (overwrite mode)
+	#   bronze — empty; the quietest row, because it is the least eventful
+	# (The 2026-08-03 note about the empty slot's cold green is preserved by
+	# construction: no slot carries a hue that isn't on the ember palette.)
+	var bg := GameTheme.PARCHMENT
+	var accent: Color
 	if overwrite_mode and occupied:
-		bg = Color(0.36, 0.18, 0.14)
+		accent = Color(0.82, 0.32, 0.24)
 	elif unreadable:
-		bg = Color(0.30, 0.16, 0.14)
+		accent = Color(0.78, 0.40, 0.28)
 	elif has_save:
-		bg = Color(0.32, 0.26, 0.14)
+		accent = GILT_BRIGHT
 	else:
-		bg = Color(0.16, 0.22, 0.16)
+		accent = Color(0.56, 0.46, 0.30)
 
 	var btn := Button.new()
 	btn.custom_minimum_size = Vector2(0, 58)
@@ -601,20 +1067,31 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 	btn.add_theme_color_override("font_pressed_color", Color(0.92, 0.85, 0.65))
 	# Reuse the same stylebox treatment as the main menu buttons so the slot
 	# rows feel like part of the same family.
-	var normal := _make_button_stylebox(bg, GILT, 8)
+	# Ask the kit for each state rather than duplicating — `duplicate() as
+	# StyleBoxFlat` on a ChartPanelStyle silently yields null (the documented
+	# panel-kit trap), and even the correct `as ChartPanelStyle` cast shares the
+	# seed, so all four states would keep one silhouette. Asking again is both
+	# safe and per-state.
+	var normal := GameTheme.make_panel_style(bg, accent, 2, 5, false)
 	btn.add_theme_stylebox_override("normal", normal)
-	var hover := normal.duplicate() as GameTheme.ChartPanelStyle
-	hover.bg_color = bg.lightened(0.18)
-	hover.border_color = GILT_BRIGHT
-	hover.shadow = true
-	hover.shadow_size = 10
-	hover.shadow_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.35)
+	var hover := GameTheme.make_panel_style(
+		Color(0.19, 0.115, 0.058, 0.96), GILT_BRIGHT, 2, 5, true)
 	btn.add_theme_stylebox_override("hover", hover)
 	btn.add_theme_stylebox_override("focus", hover)
-	var pressed := normal.duplicate() as GameTheme.ChartPanelStyle
-	pressed.bg_color = bg.darkened(0.18)
-	pressed.border_color = bg.lightened(0.25)
+	var pressed := GameTheme.make_panel_style(
+		Color(0.085, 0.060, 0.042, 0.98), accent, 2, 5, false)
 	btn.add_theme_stylebox_override("pressed", pressed)
+	# THE UNREADABLE SLOT HAD NO PLATE AT ALL (2026-08-03). An unreadable save
+	# disables this button, and `disabled` was the one state with no override —
+	# so Godot fell back to the project theme's disabled box, which draws nothing.
+	# The audit shot shows the result: SLOT 3's two lines, one of them a full
+	# sentence in ember-pink, printed directly onto the painted fire while the
+	# two slots above it sat on solid plates. The row the player is least able to
+	# act on was the row hardest to read. Same plate, drained of its light.
+	var disabled := GameTheme.make_panel_style(
+		Color(bg.r * 0.7, bg.g * 0.7, bg.b * 0.7, bg.a),
+		Color(accent.r, accent.g, accent.b, 0.42), 2, 5, false)
+	btn.add_theme_stylebox_override("disabled", disabled)
 	# The button's own text stays empty — labels are stacked inside a child
 	# VBox so we get a two-line "title / subtitle" treatment without fighting
 	# Godot's single-line Button text rendering.
@@ -628,7 +1105,7 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 	var sub_text: String
 	if unreadable:
 		title_text = "SLOT %d  ·  Run Unavailable" % (slot + 1)
-		sub_text = "Incompatible or damaged — files kept; delete explicitly."
+		sub_text = "This save can't be read. Delete it to reuse the slot."
 	elif has_save:
 		if overwrite_mode:
 			title_text = "SLOT %d  ·  Overwrite This Run" % (slot + 1)
@@ -637,21 +1114,38 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 		var act_floor := "Act %d · Province %d" % [int(summary.act), int(summary.floor)]
 		var hp_gold := "HP %d/%d · %dg" % [int(summary.hp), int(summary.max_hp), int(summary.gold)]
 		if int(summary.ascension) > 0:
-			hp_gold += " · Asc %d" % int(summary.ascension)
+			hp_gold += " · Ascension %d" % int(summary.ascension)
 		sub_text = "%s   ·   %s" % [act_floor, hp_gold]
 	else:
-		title_text = "SLOT %d  ·  Begin New Run" % (slot + 1)
+		title_text = "SLOT %d  ·  Start a New Run" % (slot + 1)
+		# "No saved run", not the bare adjective "Empty": an empty state names the
+		# thing that is missing, and this line is read directly under a title that
+		# says how to fill it (COPY_STYLE §12).
 		if MetaState.unlocked_ascension > 0:
-			sub_text = "Empty   ·   Ascension %d" % _selected_ascension
+			sub_text = "No saved run   ·   Ascension %d" % _selected_ascension
 		else:
-			sub_text = "Empty"
-	var title_lbl := _make_display_label(title_text, 20, IVORY)
+			sub_text = "No saved run"
+	# 22, not 20. The sub-line's call below asks for 14 and RENDERS AT 18 —
+	# _make_display_label floors every size at GameTheme.MIN_LABEL_SIZE — so the
+	# two lines were 20 over 18 and the slot read as one undifferentiated block
+	# of type. The caption cannot be made smaller (18 is the readability floor),
+	# so the rank has to come from the title going up.
+	# With every plate now the same dark parchment, the state has to reach the
+	# INK as well as the keyline or the three rows read as identical. Gold titles
+	# a run that is waiting; ember titles one this build cannot read; the empty
+	# slot's warm ivory is the quietest of the three, which is correct — it is
+	# the row with the least to say.
+	var title_ink: Color = accent if (has_save or unreadable) else Color(0.93, 0.88, 0.78)
+	var title_lbl := _make_display_label(title_text, 22, title_ink)
 	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	inner.add_child(title_lbl)
 	var sub_color := Color(0.90, 0.58, 0.48) if unreadable else (
 		Color(0.74, 0.70, 0.62) if not has_save else Color(0.90, 0.83, 0.62))
-	var sub_lbl := _make_display_label(sub_text, 14, sub_color)
+	# Renders at 18 (MIN_LABEL_SIZE), not 14 — see the title note above.
+	# The slot's state line is a caption of the slot's own title directly above it,
+	# and at the floored 18 the pair read as two titles.
+	var sub_lbl := _make_caption_label(sub_text, 15, sub_color)
 	sub_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	sub_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	inner.add_child(sub_lbl)
@@ -662,6 +1156,24 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 		btn.pressed.connect(_begin_new_in_slot.bind(slot))
 	else:
 		btn.pressed.connect(_load_slot_into_game.bind(slot))
+	# Every path out of this row starts (or resumes) a march — a commit, not a
+	# browse. The disabled row is armed too and simply never fires.
+	_arm_shell_button(btn, "commit")
+	# ── AND THE SAME GUTTER ON THE LEFT (2026-09-03) ──
+	# The reserved delete column below fixed the rows against EACH OTHER; it left
+	# the block wrong against the COLUMN. Reserving 52px (44 + the HBox's
+	# separation) on the right alone means the plates occupy 568 of the screen's
+	# 620-wide centred column, flush left — so on a fresh profile, where no slot
+	# has a delete button and nothing fills that gutter, all three plates sit
+	# 26px left of the centred "LOAD GAME" title above them. Measured off the
+	# audit render: title ink centre 800.5, plate centre 773.5.
+	# Mirroring the reservation puts the plate back on the screen's axis, and
+	# `_show_load_screen` widens the column by the same 52 so the plates keep
+	# the width they have today rather than shrinking to pay for it.
+	var lead_gap := Control.new()
+	lead_gap.custom_minimum_size = Vector2(44, 0)
+	lead_gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(lead_gap)
 	row.add_child(btn)
 
 	# Delete button — only meaningful on filled slots, and only in normal load
@@ -679,26 +1191,50 @@ func _make_slot_row(slot: int, overwrite_mode: bool = false) -> Control:
 		del.add_theme_font_size_override("font_size", 18)
 		del.add_theme_color_override("font_color", Color(0.92, 0.65, 0.55))
 		del.add_theme_color_override("font_hover_color", Color(1.0, 0.40, 0.30))
-		var del_bg := Color(0.20, 0.10, 0.09)
-		var del_normal := _make_button_stylebox(del_bg, Color(0.55, 0.25, 0.20), 8)
-		del.add_theme_stylebox_override("normal", del_normal)
-		var del_hover := del_normal.duplicate() as GameTheme.ChartPanelStyle
-		del_hover.bg_color = del_bg.lightened(0.20)
-		del_hover.border_color = Color(0.95, 0.45, 0.30)
+		# Same plate and same chamfer as the row it sits beside — it was a red
+		# FILL at corner 8 against the row's 5, so it read as a loose badge
+		# floating off the end of the list rather than as that row's own control.
+		del.add_theme_stylebox_override("normal", GameTheme.make_panel_style(
+			GameTheme.PARCHMENT, Color(0.62, 0.28, 0.22, 0.80), 2, 5, false))
+		var del_hover := GameTheme.make_panel_style(
+			Color(0.20, 0.075, 0.060, 0.96), Color(0.95, 0.45, 0.30), 2, 5, true)
 		del.add_theme_stylebox_override("hover", del_hover)
 		del.add_theme_stylebox_override("focus", del_hover)
+		del.add_theme_stylebox_override("pressed", GameTheme.make_panel_style(
+			Color(0.10, 0.045, 0.038, 0.98), Color(0.78, 0.36, 0.26), 2, 5, false))
+		del.tooltip_text = "Delete this save."
 		del.pressed.connect(_on_slot_delete.bind(slot))
+		_arm_shell_button(del, "back")
 		row.add_child(del)
+	else:
+		# THE DELETE COLUMN IS RESERVED ON EVERY ROW (2026-08-03), even where no
+		# delete exists. The X is a sibling of the plate, so a row that carried
+		# one handed 52px (44 + the HBox's 8 separation) of its width to it and a
+		# row that did not kept them — three stacked plates with two different
+		# right edges, and because each plate centres its own two lines, three
+		# different centre axes. On the audit shot SLOT 1's title sat 40px left of
+		# SLOT 2's. A list whose rows do not share an axis reads as three widgets.
+		var del_gap := Control.new()
+		del_gap.custom_minimum_size = Vector2(44, 0)
+		del_gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		row.add_child(del_gap)
 	return row
 
 
+## `stretch` makes `width` a MINIMUM and lets the rule fill whatever the parent
+## gives it. A section divider inside a panel needs that: the muster panels call
+## this with `minimum_width - 42`, and a panel that stretches past its minimum
+## left the rule at its old length — 658px of rule under a heading in a box
+## 1066px wide, stopping 62% of the way across. Only that caller opts in; the
+## title column and the load screen want a rule of a chosen length, not a rule
+## that grows to the whole column.
 func _make_ornament_row(width: float, left_aligned: bool = false,
-		glyph: bool = false) -> Control:
+		glyph: bool = false, stretch: bool = false) -> Control:
 	# 2026-07-30 — THE GLYPH IS NOW OPT-IN, AND EXACTLY ONE CALLER TAKES IT.
 	#
 	# The defence written below is real: this flourish is what stops the title
 	# screen looking like a generic Godot template. But it was on TWELVE rows
-	# across the menu, the run setup, the hero roster and the blessing pick, and
+	# across the menu, the run setup, the hero roster and the writ pick, and
 	# a flourish that appears twelve times is wallpaper, not a flourish. Nine of
 	# those sat directly under a heading that already announced its own section,
 	# so the diamond was restating something the type had said better.
@@ -716,34 +1252,56 @@ func _make_ornament_row(width: float, left_aligned: bool = false,
 	# diamond.png texture and forces the lines to a fixed thin height.
 	# left_aligned: a short lead-in stub + diamond + long trailing line, flushed
 	# to the column's left edge (for the left-column menu layout).
+	#
+	# `width` IS THE ROW'S TOTAL RENDERED WIDTH (2026-09-03). It used to be a
+	# loose scale factor — each half was sized `width * 0.45` and the separations
+	# and the diamond were then added ON TOP — which happened to come out right
+	# for the centred glyphed row (0.9w + 34 ≈ w at w=340) and was wrong
+	# everywhere else. The dossier asked for 340 and got 183: a rule that stopped
+	# barely past half the panel it was meant to divide, twice, on the title
+	# screen. Every caller passes a number it means literally (`minimum_width -
+	# 42.0` is the panel's inner width), so the parameter now means that.
+	# Gate: `tools/_probe_alignment.gd`, HELPER CONTRACT section.
+	const SEP := 10.0
+	const DIAMOND := 14.0
+	const STUB := 20.0
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
-	if left_aligned:
+	row.add_theme_constant_override("separation", int(SEP))
+	if stretch:
+		row.alignment = BoxContainer.ALIGNMENT_BEGIN
+		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	elif left_aligned:
 		row.alignment = BoxContainer.ALIGNMENT_BEGIN
 		row.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	else:
 		row.alignment = BoxContainer.ALIGNMENT_CENTER
 		row.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 
+	# Furniture the glyphed row spends before either rule gets any width: the
+	# diamond plus the separation on both sides of it.
+	var spent: float = DIAMOND + SEP * 2.0 if glyph else 0.0
+	var left_w: float = width
+	if glyph:
+		left_w = STUB if left_aligned else (width - spent) * 0.5
+
 	var left := ColorRect.new()
-	left.custom_minimum_size = Vector2(20.0 if left_aligned else width * 0.45, 2)
+	left.custom_minimum_size = Vector2(maxf(2.0, left_w), 2)
 	left.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	left.color = Color(GILT.r, GILT.g, GILT.b, 0.55)
 	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# On a stretching row the LAST rule takes the slack, so an unglyphed row
+	# (which is a single rule) takes it here and a glyphed one takes it below.
+	if stretch and not glyph:
+		left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(left)
 
 	var diamond_tex := GameTheme.tex_icon_diamond
 	if not glyph:
-		# No ornament: the rule runs unbroken. Rejoin the two halves so the row
-		# doesn't print as two stubs with a 10px hole where the diamond was.
-		left.custom_minimum_size = Vector2(
-			20.0 if left_aligned else width * 0.45, 2)
-		var solo := ColorRect.new()
-		solo.custom_minimum_size = Vector2(width * 0.45, 2)
-		solo.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		solo.color = Color(GILT.r, GILT.g, GILT.b, 0.55)
-		solo.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_child(solo)
+		# No ornament: the rule runs unbroken — which means ONE rect, already
+		# sized to the full width above. The previous version added a SECOND
+		# rect here in the name of "rejoining the two halves", and so re-opened
+		# the very 10px hole (the HBox separation still sits between siblings)
+		# that this branch exists to close.
 		return row
 	if diamond_tex != null:
 		var diamond := TextureRect.new()
@@ -767,34 +1325,48 @@ func _make_ornament_row(width: float, left_aligned: bool = false,
 		row.add_child(diamond)
 
 	var right := ColorRect.new()
-	right.custom_minimum_size = Vector2(width * 0.45, 2)
+	right.custom_minimum_size = Vector2(maxf(2.0, width - spent - left_w), 2)
 	right.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	if stretch:
+		right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	right.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	right.color = Color(GILT.r, GILT.g, GILT.b, 0.55)
 	row.add_child(right)
 	return row
 
 
+## ONE SEPARATOR PER JOB (2026-08-04). The opening flow was running five of them
+## — ` / `, ` · `, ` — `, ` - ` and `: ` — plus this line's `•`, four of which
+## were doing the identical job of joining facts in a list. The house rule from
+## here on: `·` joins facts, `—` introduces an appositive or an eyebrow's
+## subject. The hyphen-minus was simply a typo for one of the two.
 func _stats_text() -> String:
-	var text := "Runs %d  •  Victories %d  •  Defeats %d" % [
+	var text := "Runs %d  ·  Wins %d  ·  Losses %d" % [
 		MetaState.total_runs, MetaState.total_victories, MetaState.total_defeats,
 	]
 	# fastest_victory_floors was tracked from day one but shown nowhere.
 	if MetaState.fastest_victory_floors > 0:
-		text += "  •  Best run: %d provinces" % MetaState.fastest_victory_floors
+		text += "  ·  Best win: %d provinces" % MetaState.fastest_victory_floors
 	return text
 
 
+## The short form is what prints under CONTINUE, where the CURRENT RUN dossier is
+## already carrying act / province / health / gold as ruled figures — so it names
+## the run instead of restating them. The verbose form is the button's tooltip,
+## which has no dossier beside it and so still spells the state out.
 func _continue_preview_line(slot: int, verbose: bool = false) -> String:
 	if slot < 0:
 		return "No run in progress."
-	var s := RunState.get_slot_summary(slot)
+	var s := _slot_summary(slot)
 	if not bool(s.get("has_save", false)):
 		return "No run in progress."
 	var asc := ""
 	if int(s.get("ascension", 0)) > 0:
-		asc = " - Asc %d" % int(s.get("ascension", 0))
-	var line := "Act %d, Province %d - HP %d/%d - %dg%s" % [
+		asc = "  ·  Ascension %d" % int(s.get("ascension", 0))
+	if not verbose:
+		return "Continue from Act %d, Province %d.%s" % [
+			int(s.get("act", 1)), int(s.get("floor", 0)), asc]
+	return "Resume your saved run: Act %d, Province %d  ·  HP %d/%d  ·  %dg%s" % [
 		int(s.get("act", 1)),
 		int(s.get("floor", 0)),
 		int(s.get("hp", 0)),
@@ -802,7 +1374,6 @@ func _continue_preview_line(slot: int, verbose: bool = false) -> String:
 		int(s.get("gold", 0)),
 		asc,
 	]
-	return "Resume your saved run: " + line if verbose else line
 
 
 func _remove_command_dossier() -> void:
@@ -821,7 +1392,14 @@ func _build_command_dossier(has_any_save: bool) -> void:
 	panel.anchor_right = 1.0
 	panel.anchor_top = 0.0
 	panel.anchor_bottom = 0.0
-	panel.offset_left = -500.0
+	# ONE SOURCE FOR THE WIDTH. The panel's box, its padding and the divider
+	# rules inside it were three independent numbers (388 / 22 / 340) that had
+	# already drifted: the rules were 4px short of the content box, so both of
+	# them stopped just before the right-hand edge everything else lined up on.
+	const DOSSIER_W := 388.0
+	const DOSSIER_PAD := 22.0
+	const DOSSIER_INNER := DOSSIER_W - DOSSIER_PAD * 2.0
+	panel.offset_left = -(112.0 + DOSSIER_W)
 	panel.offset_right = -112.0
 	panel.offset_top = 170.0
 	# Height comes from the content. It used to be pinned to 350px with an
@@ -833,8 +1411,8 @@ func _build_command_dossier(has_any_save: bool) -> void:
 		Color(0.045, 0.034, 0.027, 0.78),
 		Color(0.70, 0.58, 0.35, 0.58),
 		1, 6, true)
-	st.content_margin_left = 22
-	st.content_margin_right = 22
+	st.content_margin_left = DOSSIER_PAD
+	st.content_margin_right = DOSSIER_PAD
 	st.content_margin_top = 20
 	st.content_margin_bottom = 20
 	panel.add_theme_stylebox_override("panel", st)
@@ -853,24 +1431,30 @@ func _build_command_dossier(has_any_save: bool) -> void:
 	var hstack := VBoxContainer.new()
 	hstack.add_theme_constant_override("separation", 0)
 	header.add_child(hstack)
-	var title_text := "CURRENT RUN" if has_any_save else "START HERE"
+	# "GETTING STARTED", not "START HERE" (2026-09-10). START HERE is already the
+	# recommended-hero badge on the run-setup roster, so the same two words named
+	# two different things one screen apart — the exact one-term-two-concepts fault
+	# COPY_STYLE §12 was written against. The badge keeps the phrase (it IS a
+	# "start here" pointer at one row among five); this is a panel heading and gets
+	# a heading's name.
+	var title_text := "CURRENT RUN" if has_any_save else "GETTING STARTED"
 	var title := _make_display_label(title_text, 26, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	hstack.add_child(title)
-	var sub_text := "saved progress" if has_any_save else "begin a new run"
-	var sub := _make_display_label(sub_text, 14,
+	var sub_text := "saved progress" if has_any_save else "start a new run"
+	var sub := _make_caption_label(sub_text, 15,
 		Color(0.82, 0.74, 0.58))
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	hstack.add_child(sub)
 
-	root.add_child(_make_ornament_row(340.0, true))
+	root.add_child(_make_ornament_row(DOSSIER_INNER, true))
 
 	if has_any_save:
 		# Ruled figures, not nested boxes: a dispatch prints a value against a
 		# dotted leader. The old two-panels-inside-a-panel stack read as UI
 		# furniture stacked on UI furniture, and buried the numbers a returning
 		# player actually opens the game to see.
-		var s := RunState.get_slot_summary(_most_recent_slot())
+		var s := _slot_summary(_most_recent_slot())
 		_dossier_row(root, "ACT", str(int(s.get("act", 1))), GILT_BRIGHT)
 		_dossier_row(root, "PROVINCE", str(int(s.get("floor", 0))), GILT_BRIGHT)
 		_dossier_row(root, "HEALTH", "%d / %d" % [
@@ -886,10 +1470,10 @@ func _build_command_dossier(has_any_save: bool) -> void:
 		pitch.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		root.add_child(pitch)
 
-	root.add_child(_make_ornament_row(340.0, true))
+	root.add_child(_make_ornament_row(DOSSIER_INNER, true))
 
-	var foot_text := "Press CONTINUE to resume." if has_any_save \
-		else "Press NEW RUN to begin."
+	var foot_text := "Press Continue to resume." if has_any_save \
+		else "Press New Run to begin."
 	var foot := _make_display_label(foot_text,
 		15, Color(0.78, 0.72, 0.60))
 	foot.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -905,7 +1489,7 @@ func _dossier_row(parent: VBoxContainer, caption: String, value: String,
 	row.add_theme_constant_override("separation", 10)
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var cap := _make_display_label(caption, 15, Color(0.74, 0.66, 0.52))
+	var cap := _make_caption_label(caption, 15, Color(0.74, 0.66, 0.52))
 	cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	row.add_child(cap)
 	row.add_child(DotLeader.new())
@@ -931,6 +1515,19 @@ func _dossier_icon(path: String, sz: float, tint: Color) -> TextureRect:
 # INTERACTIONS
 # ---------------------------------------------------------------------------
 
+func _refresh_slot_summary_cache() -> void:
+	_slot_summary_cache.clear()
+	for slot in range(RunState.SAVE_SLOTS):
+		_slot_summary_cache.append(RunState.get_slot_summary(slot))
+
+
+func _slot_summary(slot: int) -> Dictionary:
+	if slot >= 0 and slot < _slot_summary_cache.size():
+		return _slot_summary_cache[slot]
+	# Defensive fallback for helper calls made before the first menu build.
+	return RunState.get_slot_summary(slot)
+
+
 func _any_save_exists() -> bool:
 	for i in range(RunState.SAVE_SLOTS):
 		if RunState.has_save(i):
@@ -953,7 +1550,7 @@ func _most_recent_slot() -> int:
 	var best := -1
 	var best_time := -1
 	for i in range(RunState.SAVE_SLOTS):
-		var s := RunState.get_slot_summary(i)
+		var s := _slot_summary(i)
 		if not s.get("has_save", false):
 			continue
 		var t: int = int(s.get("saved_at", 0))
@@ -980,6 +1577,24 @@ func _on_continue_recent() -> void:
 	_load_slot_into_game(slot)
 
 
+## THE EXIT BUTTON STAYS LIVE THROUGH ITS OWN WIPE.
+## fade_out_then_change_scene parents its ink overlay to the TREE ROOT (never to
+## the outgoing scene) and only calls change_scene_to_file when the 0.34s tween
+## lands — so nothing under the pointer is disabled for the whole transition. A
+## second click on SKIRMISH / COLLECTION / credits / a save slot therefore queued
+## a SECOND transition, and the scene the first one had just loaded was torn down
+## and rebuilt a third of a second later: the lobby dropped a connection attempt
+## already in flight, the Collection threw away a gallery build mid-bake, and the
+## menu's own music restarted. Every one of these paths ends in a scene change,
+## so the latch is one-way by construction; the only caller that can decline to
+## leave (_load_slot_into_game, on an unreadable save) hands it back itself.
+func _leave_for(scene_path: String, duration: float = 0.34) -> void:
+	if _scene_exit_locked:
+		return
+	_scene_exit_locked = true
+	GameTheme.fade_out_then_change_scene(self, scene_path, duration)
+
+
 func _on_new_run() -> void:
 	var empty := _first_empty_slot()
 	if empty >= 0:
@@ -995,9 +1610,16 @@ func _on_load_game() -> void:
 
 
 func _load_slot_into_game(slot: int) -> void:
+	# Claim the exit BEFORE the load: a double-click on a slot row used to run
+	# load_run twice and queue two transitions, the second re-loading the room the
+	# first had already entered.
+	if _scene_exit_locked:
+		return
+	_scene_exit_locked = true
 	if not RunState.load_run(slot):
 		# Keep corrupt, incompatible, or temporarily unreadable files recoverable.
 		# The load screen labels the slot and leaves deletion to an explicit X.
+		_scene_exit_locked = false
 		_show_load_screen(false)
 		return
 	# If the save was written while the player was mid-room (visit_node committed
@@ -1022,7 +1644,10 @@ func _begin_new_in_slot(slot: int) -> void:
 	# the slot summary, so an extra confirmation here would just be friction).
 	RunState.clear_save(slot)
 	RunState.active_slot = slot
-	_show_hero_select()
+	if MetaState.total_runs <= 0:
+		_show_quick_march()
+	else:
+		_show_hero_select()
 
 
 func _on_slot_delete(slot: int) -> void:
@@ -1042,6 +1667,11 @@ func _center_menu_for_subscreen(width: float = 620.0, height: float = 640.0) -> 
 	var menu := get_node_or_null("Menu")
 	if menu == null:
 		return
+	# The writ pickers hide this column (they lay themselves out full-screen over
+	# the menu background). Every sub-screen comes through here, so unhiding it
+	# here is what makes that safe rather than a one-way trip.
+	menu.visible = true
+	_set_subscreen_scrim(true)
 	menu.anchor_left = 0.5
 	menu.anchor_right = 0.5
 	menu.anchor_top = 0.5
@@ -1050,6 +1680,81 @@ func _center_menu_for_subscreen(width: float = 620.0, height: float = 640.0) -> 
 	menu.offset_right = width / 2.0
 	menu.offset_top = -height / 2.0
 	menu.offset_bottom = height / 2.0
+
+
+## The menu's legibility scrim is built for the MAIN menu: a left-edge gradient
+## that seats the column and is clear by mid-screen, so the painted hero on the
+## centre-right stays unobstructed. Every sub-screen then re-anchors that column
+## to the MIDDLE of the canvas — straight over the brightest, busiest part of the
+## fire, with nothing but its own panel fills between the text and the flames.
+## THE TERMS was the proof: the four tiles are one row, and the leftmost sat on
+## warm-black while the rightmost (THE PACT, the one tile that prices itself in
+## max HP) was read against open flame, so the same 16px ink was legible at one
+## end of the row and washed out at the other.
+##
+## So a centred screen gets a centred scrim: full-rect and warm-black. It is the
+## same node, re-textured — the main menu rebuilds it from scratch in
+## _rebuild_menu, so this only flips one way.
+##
+## ── 2026-08-05: THE GRADIENT RAN THE WRONG WAY, AND ONLY MEASURING SHOWED IT ──
+## It was 0.56 at the top rising to 0.78 at the bottom, on the stated reasoning
+## that the bottom is "where the fire is". Sampled off the real render
+## (`_runstart_menu.png`, whose right half is unscrimmed art), the painting's
+## luminance is:
+##
+##     upper sky      p90 0.047      <- nearly black already
+##     fire wall      p90 0.203  max 0.433   <- y 450-800, the MIDDLE
+##     lower meadow   p90 0.066      <- nearly black already
+##
+## The bright band is the middle, not the bottom. So the old ramp put its
+## HEAVIEST wash (0.78) over some of the darkest art in the frame and its
+## LIGHTEST (0.56) over the darkest — spending the painting everywhere except
+## where it needed spending, and leaving the fire wall on ~0.68.
+##
+## Weighted to the middle instead. Worst-case ivory contrast (against the fire's
+## MAX pixel, not its median) goes from 4.6:1 to 5.2:1 — i.e. this is a
+## legibility IMPROVEMENT, not a trade — while the top and bottom of the frame
+## come back at 10:1 to spare. Numbers for the record:
+##
+##     band        old a   old contrast     new a   new contrast
+##     sky          0.56       12.6:1        0.42       10.8:1
+##     fire wall    0.68        4.6:1        0.74        5.2:1
+##     meadow       0.78       12.9:1        0.52       10.4:1
+##
+## If you change these, re-sample the art — do not eyeball it. The whole reason
+## the ramp was backwards is that the fire LOOKS brightest at the bottom of the
+## composition and measures brightest in the middle.
+func _set_subscreen_scrim(on: bool) -> void:
+	var scrim := get_node_or_null("MenuScrim") as TextureRect
+	if scrim == null:
+		return
+	var grad := Gradient.new()
+	var gtex := GradientTexture2D.new()
+	if on:
+		grad.offsets = PackedFloat32Array([0.0, 0.30, 0.58, 1.0])
+		grad.colors = PackedColorArray([
+			Color(0.03, 0.015, 0.0, 0.42),
+			Color(0.03, 0.015, 0.0, 0.62),
+			Color(0.02, 0.010, 0.0, 0.74),   # the fire wall — the real bright band
+			Color(0.02, 0.008, 0.0, 0.52),
+		])
+		gtex.fill_from = Vector2(0, 0)
+		gtex.fill_to = Vector2(0, 1)
+		gtex.width = 8
+		gtex.height = 256
+	else:
+		grad.offsets = PackedFloat32Array([0.0, 0.42, 0.70])
+		grad.colors = PackedColorArray([
+			Color(0.03, 0.015, 0.0, 0.66),
+			Color(0.03, 0.015, 0.0, 0.44),
+			Color(0.0, 0.0, 0.0, 0.0),
+		])
+		gtex.fill_from = Vector2(0, 0)
+		gtex.fill_to = Vector2(1, 0)
+		gtex.width = 256
+		gtex.height = 8
+	gtex.gradient = grad
+	scrim.texture = gtex
 
 
 func _show_load_screen(overwrite_mode: bool) -> void:
@@ -1063,7 +1768,10 @@ func _show_load_screen(overwrite_mode: bool) -> void:
 		return
 	for child in menu.get_children():
 		child.queue_free()
-	_center_menu_for_subscreen()
+	# +52 (the 44px delete gutter plus the row's 8px separation) so that the
+	# gutter now reserved on BOTH sides of every slot row is paid for by the
+	# column rather than out of the plates — see _make_slot_row's lead_gap.
+	_center_menu_for_subscreen(672.0)
 
 	var title_text := "OVERWRITE A SLOT" if overwrite_mode else "LOAD GAME"
 	var title := _make_display_label(title_text, 30, GILT_BRIGHT)
@@ -1088,13 +1796,40 @@ func _show_load_screen(overwrite_mode: bool) -> void:
 	back_spacer.custom_minimum_size = Vector2(0, 8)
 	menu.add_child(back_spacer)
 
-	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 15, 40)
+	# BACK sat out-dented under the slot list: `_make_menu_button` puts a 28px
+	# flame slot ahead of every label, so the word started 40px left of the
+	# plates it belonged under while the row itself began at their left edge.
+	# Same structural fault, same fix, as _build_muster_nav's BACK — drop the
+	# flame and keep the lead, so the B lands on the list's own column.
+	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 17, 44, false)
+	back.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	back.custom_minimum_size = Vector2(180, 44)
 	back.pressed.connect(_rebuild_menu)
-	menu.add_child(back)
+	_set_shell_cue(back, "back")
+	# ON THE LIST'S RAIL, WHICH THE SLOT ROWS' NEW LEAD GUTTER MOVED. The plates
+	# now start 52px into the column, so a BACK flush to the column would sit
+	# out-dented from the very list it belongs under — the same defect the note
+	# above describes, reintroduced from the other side. It rides a matching
+	# gutter instead of a hardcoded number, so the two cannot drift apart.
+	var back_row := HBoxContainer.new()
+	back_row.add_theme_constant_override("separation", 8)
+	var back_gap := Control.new()
+	back_gap.custom_minimum_size = Vector2(44, 0)
+	back_gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	back_row.add_child(back_gap)
+	back_row.add_child(back)
+	menu.add_child(back_row)
 	_animate_subscreen_reveal(menu)
 
 
-func _show_hero_select() -> void:
+## `at_step` lets a caller land the player deeper into the flow with everything
+## behind them already restored — MARCH AGAIN opens on THE TERMS. It must still
+## come through HERE rather than calling _show_muster_step directly, because this
+## is the only place that rolls a fresh seed and deals the slate.
+## A new profile makes one meaningful choice before play: who leads.
+## three-step Muster remains one click away, but its banner, term, seed and
+## difficulty controls no longer stand between a first-time player and combat.
+func _show_quick_march() -> void:
 	_set_subscreen_motion_obscured(true)
 	_remove_command_dossier()
 	var menu := get_node_or_null("Menu")
@@ -1103,6 +1838,401 @@ func _show_hero_select() -> void:
 	for child in menu.get_children():
 		child.queue_free()
 	_hide_deck_preview()
+	_hide_deck_inspector()
+	_hero_cards.clear()
+	_hero_portraits.clear()
+	_muster_banner_buttons.clear()
+	_muster_writ_buttons.clear()
+	_quick_march_active = true
+	_muster_advanced_open = false
+	_muster_step = 1
+	_daily_pick = false
+	_daily_btn = null
+	_seed_edit = null
+	_asc_label = null
+	_asc_rules_label = null
+	_run_commit_locked = false
+	_picker_commit_locked = false
+	_writ_resolution_rng = null
+	_selected_ascension = 0
+	_selected_banner_tribe = BannerDB.DEFAULT_BANNER
+	_muster_alt_relic = false
+	_muster_alt_deck = false
+	_muster_random_seed = randi()
+	if _muster_random_seed == 0:
+		_muster_random_seed = 1
+	_muster_seed_text = ""
+	_selected_hero = HeroDB.HERO_ORDER[0]
+	var first_term := WritDB.get_writ("campaign_chest").duplicate(true)
+	_muster_writ_slate = [first_term]
+	_selected_writ_id = "campaign_chest"
+
+	_quick_march_stage = 1
+	_show_quick_hero_stage()
+
+
+## Quick March step 1 has one job: choose the person whose play pattern sounds
+## appealing. Cards, relics, campaign rules and the commit button live on the
+## next screen, so the roster is no longer competing with its own consequences.
+func _show_quick_hero_stage() -> void:
+	var menu := get_node_or_null("Menu")
+	if menu == null:
+		return
+	_quick_march_active = true
+	_quick_march_stage = 1
+	for child in menu.get_children():
+		child.queue_free()
+	_hide_deck_preview()
+	_hide_deck_inspector()
+	_hero_cards.clear()
+	_hero_portraits.clear()
+	# 700, not 790. The playstyle capsules used to spend ~210px of the right pane
+	# saying nine words (see _make_trait_chip); the chips that replaced them spend
+	# 36, and handing the difference back to the screen as a bottom margin left
+	# the identity pane a third empty under its own text. The height now measures
+	# the roster, which is what actually sets it: five host rows plus the pane's
+	# heading and rule.
+	_center_menu_for_subscreen(1500.0, 700.0)
+	menu.add_theme_constant_override("separation", 10)
+	var title := _make_display_label("CHOOSE YOUR HERO", 32, GILT_BRIGHT)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	menu.add_child(title)
+	var intro := _make_display_label(
+		"Pick the style you want to learn first. You will review the deck before anything is committed.",
+		17, IVORY)
+	intro.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	menu.add_child(intro)
+
+	var main_row := HBoxContainer.new()
+	main_row.custom_minimum_size = Vector2(0, 470)
+	main_row.add_theme_constant_override("separation", 18)
+	main_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	menu.add_child(main_row)
+	var host := _make_muster_section(main_row, "THE FIVE HEROES", 430.0)
+	host.add_theme_constant_override("separation", 4)
+	for hid in HeroDB.HERO_ORDER:
+		var row := _make_muster_host_row(hid)
+		host.add_child(row)
+		GameTheme.hover_lift(row, 1.012)
+	var identity := _make_muster_section(main_row, "HOW THIS HERO FIGHTS", 820.0, true)
+	_hero_detail = VBoxContainer.new()
+	_hero_detail.add_theme_constant_override("separation", 10)
+	_hero_detail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# Vertical too, on THIS screen only: the pane's height is set by the roster
+	# next to it, and without the flag the detail stack keeps its minimum and
+	# leaves the surplus as a hole under the portrait. With it, the portrait (the
+	# only child that asked to expand) takes the difference.
+	_hero_detail.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	identity.add_child(_hero_detail)
+	var hero := _selected_hero if HeroDB.has_hero(_selected_hero) else HeroDB.HERO_ORDER[0]
+	_selected_hero = ""
+	_focus_hero(String(hero), true)
+	var hero_focus = _hero_cards.get(String(hero))
+	if hero_focus != null and is_instance_valid(hero_focus):
+		hero_focus.call_deferred("grab_focus")
+
+	_muster_slack(menu)
+	var actions := HBoxContainer.new()
+	actions.add_theme_constant_override("separation", 18)
+	menu.add_child(actions)
+	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 17, 48, false)
+	back.custom_minimum_size = Vector2(180, 48)
+	back.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	back.pressed.connect(_abandon_muster)
+	_set_shell_cue(back, "back")
+	actions.add_child(back)
+	# This screen builds its own nav rather than calling _build_muster_nav, so it
+	# did not inherit the 2026-08-05 primary treatment and SEE YOUR COMPANY was
+	# still the same ivory word as the BACK beside it — on the FIRST screen a new
+	# profile ever reaches. Same helper, same grammar as every muster step.
+	var lead := Control.new()
+	lead.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lead.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	actions.add_child(lead)
+	var next := _make_primary_action("SEE YOUR DECK", 48)
+	next.custom_minimum_size = Vector2(NAV_PRIMARY_W, 48)
+	next.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	next.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	next.pressed.connect(_show_quick_company)
+	actions.add_child(next)
+	var trail := Control.new()
+	trail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	trail.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	actions.add_child(trail)
+	var balance := Control.new()
+	balance.custom_minimum_size = Vector2(180, 0)
+	balance.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	actions.add_child(balance)
+	_animate_subscreen_reveal(menu)
+
+
+## Quick March step 2 shows the actual package the selected hero will carry.
+## This is the first place the player sees cards, the signature and the final
+## commit, because all three answer the same question: "What am I taking?"
+func _show_quick_company() -> void:
+	var menu := get_node_or_null("Menu")
+	if menu == null or not HeroDB.has_hero(_selected_hero):
+		return
+	_quick_march_active = true
+	_quick_march_stage = 2
+	for child in menu.get_children():
+		child.queue_free()
+	_hide_deck_preview()
+	_hide_deck_inspector()
+	_hero_cards.clear()
+	_hero_portraits.clear()
+	# 672, not 720 — and the number is measured, not chosen. The frame carries
+	# SIZE_EXPAND_FILL, so it swallows every pixel the rect has spare, and a
+	# geometry dump of this screen read: rect 720, frame height 563 against a
+	# content minimum of 483. Eighty pixels of nothing INSIDE a bordered pane,
+	# all of it pooled below the signature's last line, so the pane's bottom rule
+	# printed 80px under the text it was supposed to be enclosing.
+	#
+	# The stack measures 157 (title 45 + nav 56 + promise 26 + three 10px gaps)
+	# plus the frame's 483 = 640. 672 leaves 32, and one wrapped relic rule (+26)
+	# still fits without pushing the nav row down.
+	_center_menu_for_subscreen(1380.0, 672.0)
+	menu.add_theme_constant_override("separation", 10)
+	var hero := HeroDB.get_hero(_selected_hero)
+	var title := _make_display_label(
+		"%s'S STARTING DECK" % String(hero.get("name", _selected_hero)).to_upper(),
+		32, GILT_BRIGHT)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	menu.add_child(title)
+	var company := _make_muster_section(menu, "WHAT YOU START WITH", 1240.0, true)
+	_hero_detail = VBoxContainer.new()
+	_hero_detail.add_theme_constant_override("separation", 8)
+	_hero_detail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# NOT vertical, and the attempt is worth recording: handing this stack the
+	# frame's surplus does not spread it around the content. BoxContainer splits
+	# slack proportionally and then DROPS any expand child whose share lands under
+	# its own minimum — the card group's is 216 against the signature row's 81, so
+	# it drops out every time and the whole surplus goes to the signature row
+	# anyway. Same pixels, same hole, one more flag. The rect above is the fix.
+	company.add_child(_hero_detail)
+	_build_quick_march_roll(_selected_hero)
+
+	var actions := HBoxContainer.new()
+	actions.add_theme_constant_override("separation", 18)
+	menu.add_child(actions)
+	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 17, 48)
+	back.custom_minimum_size = Vector2(180, 48)
+	back.pressed.connect(_show_quick_hero_stage)
+	actions.add_child(back)
+	var customize := _make_menu_button(
+		"FULL SETUP", Color(0.25, 0.19, 0.15), 17, 48)
+	customize.custom_minimum_size = Vector2(240, 48)
+	customize.tooltip_text = "Choose the hero, banner, bonus, difficulty, Daily Run or seed."
+	customize.pressed.connect(_customize_quick_march)
+	actions.add_child(customize)
+	var take := _make_begin_button()
+	take.name = "QuickMarchTakeField"
+	take.custom_minimum_size = Vector2(470, 56)
+	take.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	take.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	actions.add_child(take)
+	var take_trail := Control.new()
+	take_trail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	take_trail.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	actions.add_child(take_trail)
+	take.call_deferred("grab_focus")
+	var promise := _make_display_label(
+		WritDB.muster_copy("subtitle"), 15, Color(0.80, 0.75, 0.65))
+	promise.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	menu.add_child(promise)
+	_animate_subscreen_reveal(menu)
+
+
+func _quick_hero_traits(hid: String) -> Array[String]:
+	match hid:
+		"raider":
+			return ["Move first", "Attack open lanes", "Relocate allies"]
+		"stalwart":
+			return ["Build a durable line", "Protect the back row", "Win long clashes"]
+		"acolyte":
+			return ["Use deaths as fuel", "Raise the fallen", "Trade bodies for value"]
+		"pyromancer":
+			return ["Build Doom", "Burn several enemies", "Finish explosively"]
+		"kindler":
+			return ["Grow through sacrifice", "Spread fire", "Turn losses into power"]
+		_:
+			# The fallback arm, for a hero HeroDB gains after this match was
+			# written. "Break the hold" needed the setting to decode ("hold" is
+			# the docs' word for a fight site, and no screen ever says it) —
+			# COPY_STYLE §12 bans a riddle in UI chrome even in a branch nobody
+			# has reached yet, because the day it renders is the day nobody is
+			# looking at it.
+			return ["Build a line", "Read the lanes", "Break the enemy line"]
+
+
+func _build_quick_hero_identity(hid: String) -> void:
+	if _hero_detail == null or not is_instance_valid(_hero_detail):
+		return
+	for child in _hero_detail.get_children():
+		child.queue_free()
+	var hero := HeroDB.get_hero(hid)
+	var top := HBoxContainer.new()
+	top.add_theme_constant_override("separation", 24)
+	top.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_hero_detail.add_child(top)
+	var portrait_path := "res://assets/portraits/hero_portrait_%s.png" % hid
+	var portrait: Control
+	if ResourceLoader.exists(portrait_path):
+		var tex := TextureRect.new()
+		tex.texture = load(portrait_path)
+		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		portrait = tex
+	else:
+		var plate := PanelContainer.new()
+		plate.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
+			Color(0.10, 0.08, 0.09, 0.95), _faction_accent(hid), 2, 4, false))
+		var monogram := _make_display_label(
+			String(hero.get("name", hid)).left(1), 54, GILT_BRIGHT)
+		monogram.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		monogram.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		plate.add_child(monogram)
+		portrait = plate
+	# GIVE THE HERO THE PANE (2026-08-05). This was 230 wide inside a ~1250px
+	# pane — a narrow vertical strip of commissioned portrait art on the screen
+	# whose entire job is to sell the run, with the ~950px beside it holding
+	# roughly 280px of copy and a large dark void beneath. Measured on the render
+	# it was the single biggest empty region in the shell.
+	#
+	# 400 is a third of the pane. Every surveyed game makes the chosen character
+	# the screen (Hades gives Zagreus the full right half; StS runs a full-bleed
+	# Ironclad), and the width costs nothing that was being used: the copy column
+	# gets narrower and therefore TALLER, which closes the void from the other
+	# side at the same time.
+	portrait.custom_minimum_size = Vector2(400, 292)
+	# The pane's height is set by the five-name roster beside it, not by this
+	# column, so there is always more of it than the copy needs. Spend it on the
+	# painting rather than on a hole: KEEP_ASPECT_COVERED means a taller frame
+	# just shows more of the same portrait.
+	portrait.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	# The painting is the star of this screen, so it stands on the page like one:
+	# a real plate with a lit fillet, the same furniture a card's art mount wears.
+	var frame := PanelContainer.new()
+	frame.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	frame.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
+		Color(0.02, 0.015, 0.012, 0.5), _faction_accent(hid), 2, 4, true))
+	frame.clip_contents = true
+	frame.add_child(portrait)
+	portrait = frame
+	portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	top.add_child(portrait)
+	var copy := VBoxContainer.new()
+	copy.add_theme_constant_override("separation", 10)
+	copy.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top.add_child(copy)
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 16)
+	copy.add_child(head)
+	var name := _make_display_label(String(hero.get("name", hid)), 30,
+		_faction_accent(hid))
+	name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(name)
+	# (RECOMMENDED FIRST HERO used to print here, in this pane's top-right corner
+	# — ~1100px from the roster, and only AFTER the hero was already focused.
+	# It now rides the roster row itself as START HERE, where the advice is in
+	# front of the player before the click rather than confirming one they have
+	# made. Printing it in both places was just saying it twice.)
+	var tagline := _make_display_label(String(hero.get("tagline", "")), 19,
+		Color(0.98, 0.83, 0.58))
+	tagline.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	copy.add_child(tagline)
+	# DESC_DIM, not IVORY. This is the paragraph UNDER the hero's nameplate, and
+	# at full ivory (luminance 0.91) it outshone the 30px name above it — the
+	# largest text in the pane was also the faintest. Body ink is 0.74; the
+	# accent floor is 0.80, so the heading now leads its own pane.
+	var pitch := _make_display_label(String(hero.get("desc", "")), 17,
+		GameTheme.DESC_DIM)
+	pitch.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	pitch.custom_minimum_size = Vector2(0, 72)
+	copy.add_child(pitch)
+	copy.add_child(_make_caption_label("PLAYSTYLE", 15,
+		Color(0.76, 0.69, 0.56)))
+	# THREE SHORT PHRASES, NOT THREE EMPTY PANELS (2026-08-03). These were built
+	# out of _make_quick_march_fact — a titled fact plate 58px tall with a 12px
+	# margin and a title label — called with an EMPTY title. So each trait got a
+	# full-width capsule holding a blank line and three words, and the three of
+	# them spent ~210px of the pane's height saying nine words. Rendered, the
+	# right-hand pane read as three unfilled fields rather than as a summary.
+	#
+	# They are a caption list, so they are laid out as one: a single row of tight
+	# chips that measure to their own text. Same words, a fifth of the height, and
+	# the pane's remaining space goes back to the portrait and the pitch.
+	var traits := HBoxContainer.new()
+	traits.add_theme_constant_override("separation", 22)
+	traits.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	copy.add_child(traits)
+	var playstyle_lines := _quick_hero_traits(hid)
+	for i in range(playstyle_lines.size()):
+		traits.add_child(_make_trait_chip(playstyle_lines[i], i > 0))
+
+	# ── THE SIGNATURE, PRINTED (2026-08-05) ──
+	# Below the traits this pane held ~240px of bare plate. Widening the portrait
+	# closed most of the void from the left, but a hole under the copy is still a
+	# hole — and the honest thing to put in it is not air but the OTHER HALF of
+	# what picking a lord hands you. A hero is a deck plus a doctrine relic; this
+	# screen was pitching only the deck, and the relic is what makes each of the
+	# five actually feel different in the first fight.
+	#
+	# Step I of THE MUSTER already prints exactly this block (see
+	# _build_muster_column's signature row). Printing it here means the first
+	# screen a new profile meets answers "what am I taking?" one screen earlier,
+	# in the same words it will be answered in later.
+	var relic_id := String(hero.get("relic", ""))
+	if relic_id != "":
+		var relic := RelicDB.get_relic(relic_id)
+		var spacer := Control.new()
+		spacer.custom_minimum_size = Vector2(0, 6)
+		spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		copy.add_child(spacer)
+		var sig_row := HBoxContainer.new()
+		sig_row.add_theme_constant_override("separation", 12)
+		sig_row.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+		copy.add_child(sig_row)
+		var chip := GameTheme.make_relic_chip(relic_id, 50)
+		chip.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+		sig_row.add_child(chip)
+		var sig := VBoxContainer.new()
+		sig.add_theme_constant_override("separation", 0)
+		sig.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		sig_row.add_child(sig)
+		sig.add_child(_make_caption_label("SIGNATURE RELIC", 15, Color(0.76, 0.69, 0.56)))
+		sig.add_child(_make_display_label(
+			String(relic.get("name", relic_id)), 19, GILT_BRIGHT))
+		var relic_desc := _make_display_label(
+			String(relic.get("desc", "")), 15, GameTheme.DESC_DIM)
+		relic_desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		relic_desc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		sig.add_child(relic_desc)
+
+func _customize_quick_march() -> void:
+	_muster_setup_preset = {
+		"hero": _selected_hero,
+		"banner_tribe": _selected_banner_tribe,
+		"alt_relic": false,
+		"alt_deck": false,
+	}
+	_quick_march_active = false
+	_show_hero_select(1)
+
+
+func _show_hero_select(at_step: int = 1) -> void:
+	_set_subscreen_motion_obscured(true)
+	_remove_command_dossier()
+	var menu := get_node_or_null("Menu")
+	if menu == null:
+		return
+	for child in menu.get_children():
+		child.queue_free()
+	_hide_deck_preview()
+	_hide_deck_inspector()
+	_quick_march_active = false
+	_muster_advanced_open = false
 	_hero_cards.clear()
 	_hero_portraits.clear()
 	_muster_banner_buttons.clear()
@@ -1114,7 +2244,6 @@ func _show_hero_select() -> void:
 	_asc_label = null
 	_asc_rules_label = null
 	_run_commit_locked = false
-	_blessing_commit_locked = false
 	_picker_commit_locked = false
 	_writ_resolution_rng = null
 	var preset: Dictionary = _muster_setup_preset.duplicate(true)
@@ -1124,87 +2253,797 @@ func _show_hero_select() -> void:
 	_muster_random_seed = randi()
 	if _muster_random_seed == 0:
 		_muster_random_seed = 1
+	_muster_seed_text = ""
 
-	_center_menu_for_subscreen(1540.0, 878.0)
+	var first_hero := String(preset.get("hero", HeroDB.HERO_ORDER[0]))
+	if not HeroDB.has_hero(first_hero):
+		first_hero = HeroDB.HERO_ORDER[0]
+	_selected_hero = first_hero
+	# Set UNCONDITIONALLY, not only when a preset restores them. These two live on
+	# the object and _focus_hero is the only other writer, so an abandoned muster
+	# used to leave them standing: focus a mastered lord, switch his deck to the
+	# alternate, back out to the menu, start a new run — and the next lord marched
+	# with HIS alternate deck without the toggle ever being pressed for him.
+	_muster_alt_relic = bool(preset.get("alt_relic", false))
+	_muster_alt_deck = bool(preset.get("alt_deck", false))
+	_normalize_muster_doctrine(first_hero)
+	# Deal the terms up front even though they are not drawn until step III:
+	# _begin_run_with resolves the chosen tile out of _muster_writ_slate, and a
+	# probe (or a player on a fast path) can reach the commit without the terms
+	# row ever having been built.
+	_refresh_muster_deals()
+	_show_muster_step(at_step)
+
+
+## THE MUSTER is four steps, not one screen. They are ordered by dependency:
+## the host brings ten cards, the banner adds the eleventh, and the terms are
+## weighed against the column those two produced. State lives on the object, so
+## stepping back and forth is free and nothing commits until TAKE THE FIELD.
+func _show_muster_step(step: int) -> void:
+	_set_subscreen_motion_obscured(true)
+	var menu := get_node_or_null("Menu")
+	if menu == null:
+		return
+	_muster_step = clampi(step, 1, 4)
+	_hide_deck_preview()
+	for child in menu.get_children():
+		child.queue_free()
+	# Every per-step node reference dies with the screen. Consumers all guard
+	# with is_instance_valid, but a stale entry in these maps would keep a freed
+	# button alive in _focus_hero's sweep.
+	_hero_cards.clear()
+	_hero_portraits.clear()
+	_muster_banner_buttons.clear()
+	_muster_writ_buttons.clear()
+	_hero_detail = null
+	_muster_writ_row = null
+	_muster_campaign_label = null
+	_muster_gloss_label = null
+	_muster_order_term_detail = null
+	_asc_label = null
+	_asc_rules_label = null
+	_daily_btn = null
+	_seed_edit = null
+
+	# ONE RECT FOR ALL FOUR STEPS, AND THE CHROME IS NAILED TO IT (2026-08-03).
+	# The height used to be picked per step (864 on I/II, 846 on III) against a
+	# CENTER-aligned column, so where the title and the step rail LANDED was a
+	# function of how tall that step's content happened to be. Measured on the
+	# rendered frames: the title sat at y=178 on step I, 158 on II, 318 on III and
+	# 258 on IV. The one piece of furniture whose whole job is to say "you are
+	# here, and here is the rest of the walk" jumped 160px while you walked it, so
+	# every step arrived as a new screen rather than as the next page of one.
+	#
+	# One rect for everything, and each step hands its slack to a `Slack` spacer
+	# (see _muster_slack) instead of to the column's centring. Fixed header, fixed
+	# commit row at the foot, elastic middle — so the rail is a rail.
+	#
+	# 780, not the old 864. Once the steps stop floating, the rect stops being a
+	# floor to clear and becomes the actual page: every pixel of it is now real
+	# margin somewhere. The tallest step (I, whose two panes ask for 452 plus the
+	# head furniture and the nav row) needs ~622, and 780 leaves that step ~90 of
+	# growth in the panes while giving THE TERMS — one 196px row on an otherwise
+	# empty page — a body band it can sit in the middle of rather than 400px of
+	# bare canvas below the deepest thing on screen.
+	_center_menu_for_subscreen(1540.0, 780.0)
 	menu.add_theme_constant_override("separation", 8)
 	var title := _make_display_label(WritDB.muster_copy("title"), 31, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	menu.add_child(title)
-	var instruction := _make_display_label(
-		WritDB.muster_copy("subtitle"), 16, IVORY)
-	instruction.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	menu.add_child(instruction)
+	menu.add_child(_make_muster_step_rail(_muster_step))
+	# TWO LINES OF HEAD FURNITURE, NOT FOUR (2026-08-01). Every step opened on a
+	# title, the rail, a per-step instruction and the standing promise — four
+	# stacked centred lines, ~170px of the canvas, before a single decision. And
+	# they are not the fine print the sizes suggest: _make_display_label floors at
+	# GameTheme.MIN_LABEL_SIZE, so the "16" instruction and the "15" promise both
+	# render at 18 and read as loud as each other.
+	#
+	# Both cut lines were saying something already on screen:
+	#   STEP I — "Who leads the march, and the company that marches with them" is
+	#   a gloss of the two panel headings directly beneath it, THE HOST and THE
+	#   COLUMN.
+	#   STEP II — "Declare your colours. One of them falls in with you now, and
+	#   more of them will find you on the road" is a near-verbatim restatement of
+	#   banner_rule_text, which that step prints under its own chips ("Whichever
+	#   you raise: one of its own joins your opening deck now, and its kind turns
+	#   up more often at every Recruit Camp"). The same sentence twice on one
+	#   screen, forty words apart.
+	#   STEP III keeps its line: "Accept one term" is the pick-ONE rule of the
+	#   row, and no tile states it — the tiles each state their own slot.
+	#
+	# The promise is not deleted, it MOVES (see _build_muster_nav): it is the
+	# sentence that makes BACK and the rail safe to press, so it belongs beside
+	# those buttons rather than at the top of a screen whose buttons are at the
+	# bottom. Net height is unchanged on step III and one line shorter on I/II,
+	# so the reserved rects above still centre honestly.
+	#
+	# THE INSTRUCTION IS NOT HEAD FURNITURE (2026-08-04). Step III's desc used to
+	# be appended HERE, above `_build_muster_step_terms`'s leading slack — measured
+	# on the canvas, the rail's hairline ended at y 162.5, "Accept one term." ran
+	# 176.7-195.0, and the four tiles it instructs began at 304.2. Fourteen pixels
+	# to the rail against a hundred and nine to the row: it read as a subtitle of
+	# the rail, which is the one thing on the screen it is not about. It is built
+	# inside the step now, below the slack, so it travels with its row.
+	match _muster_step:
+		1:
+			_build_muster_step_host(menu)
+		2:
+			_build_muster_step_banner(menu)
+		3:
+			_build_muster_step_terms(menu)
+		4:
+			_build_muster_step_orders(menu)
+	_animate_subscreen_reveal(menu)
 
+
+## The rail is what turns three screens into one flow: it names where you are,
+## what is behind you and what is still to come, and EVERY step is a live button
+## — so BACK is never the only way out, and the walk forward is never compulsory.
+func _make_muster_step_rail(step: int) -> Control:
+	var rail := HBoxContainer.new()
+	rail.alignment = BoxContainer.ALIGNMENT_CENTER
+	# A TAB STRIP, NOT THREE WORDS (2026-08-01). Owner's report on the rendered
+	# step I, verbatim: "what are these 3 banners what do they even do". Every
+	# chip has been a live button since the rail was built, and not one pixel said
+	# so — the two chips you can travel to carried StyleBoxEmpty on NORMAL, HOVER
+	# and PRESSED alike, so pointing at one changed nothing but the cursor, and
+	# only the step you were already standing on had any furniture at all. Three
+	# centred words under a title read as decoration, which is exactly how they
+	# were read; the fact that one of them is called THE BANNER — the name of an
+	# unrelated thing the run also offers — is what turned the whole rail into
+	# "banners".
+	#
+	# So the strip now wears the one shape nobody has to be taught: chips flush
+	# against each other over a continuous hairline, the standing step lit, the
+	# rest of the rule dim but unbroken. The em-dashes are gone — they made three
+	# separate signs; the shared baseline makes one control with three seats. The
+	# numerals still carry the order.
+	rail.add_theme_constant_override("separation", 0)
+	var labels := [
+		WritDB.muster_copy("step_host_text"),
+		WritDB.muster_copy("step_banner_text"),
+		WritDB.muster_copy("step_terms_text"),
+		"IV · REVIEW",
+	]
+	var subtitles := [
+		"CHOOSE YOUR HERO",
+		"CHOOSE A BANNER",
+		"CHOOSE A BONUS",
+		"CHECK AND START",
+	]
+	for i in range(labels.size()):
+		var index := i + 1
+		var is_here := index == step
+		var is_done := index < step
+		var chip := Button.new()
+		chip.custom_minimum_size = Vector2(0, 52)
+		# Every chip is live, not just the struck ones. The rail used to be a
+		# backward-only breadcrumb, which meant the flow DEMANDED all three steps
+		# even though it only OFFERS three: the lord defaults to the first of the
+		# roster, the banner to The Colours, and the term to slot I, so a player
+		# who wants none of them still had to walk two screens to reach TAKE THE
+		# FIELD. Nothing is committed until that button, so skipping forward is
+		# safe by construction — _show_hero_select has already dealt the slate and
+		# every default is seeded before step I is drawn.
+		chip.focus_mode = Control.FOCUS_ALL if not is_here else Control.FOCUS_NONE
+		chip.disabled = is_here
+		chip.mouse_default_cursor_shape = Control.CURSOR_ARROW if is_here \
+			else Control.CURSOR_POINTING_HAND
+		# The still-to-come tint was (0.48, 0.44, 0.38) and its subtitle rode at
+		# 78% of that — roughly (0.37, 0.34, 0.30) worth of ink for the two words
+		# naming what a step is FOR, which is the half of the rail a first-time
+		# player actually needs. Dim enough to say "not yet", light enough to read.
+		var tint: Color = GILT_BRIGHT if is_here else (GILT if is_done else Color(0.64, 0.58, 0.49))
+		if is_here:
+			chip.add_theme_stylebox_override("disabled",
+				_make_rail_seat(GILT_BRIGHT, 0.07, 2))
+		else:
+			# The seat you are NOT standing in still draws its stretch of the rule
+			# — dimmer behind a step still to come than behind one already struck,
+			# so the rail keeps saying where you are — and it answers the pointer:
+			# the hairline comes up to full gilt and a faint wash lights under the
+			# words. That hover is the whole answer to "what do they even do".
+			var rule_tint := Color(GILT.r, GILT.g, GILT.b, 0.42) if is_done \
+				else Color(0.52, 0.46, 0.38, 0.34)
+			chip.add_theme_stylebox_override("normal", _make_rail_seat(rule_tint, 0.0, 1))
+			for state in ["hover", "pressed", "focus"]:
+				chip.add_theme_stylebox_override(state,
+					_make_rail_seat(GILT_BRIGHT, 0.05, 2))
+		var copy := VBoxContainer.new()
+		copy.set_anchors_preset(Control.PRESET_FULL_RECT)
+		copy.alignment = BoxContainer.ALIGNMENT_CENTER
+		copy.add_theme_constant_override("separation", -2)
+		copy.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		chip.add_child(copy)
+		var lbl := _make_display_label(String(labels[i]), 16, tint)
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		copy.add_child(lbl)
+		var plain := Label.new()
+		plain.text = String(subtitles[i])
+		plain.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		plain.add_theme_font_size_override("font_size", 15)
+		plain.add_theme_color_override("font_color",
+			Color(tint.r, tint.g, tint.b, 0.88))
+		if GameTheme.font_body:
+			plain.add_theme_font_override("font", GameTheme.font_body)
+		plain.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		copy.add_child(plain)
+		chip.custom_minimum_size.x = maxf(200.0, lbl.get_minimum_size().x + 36.0)
+		if not is_here:
+			# A step ahead of you stays DIM at rest — it is still a promise, not a
+			# breadcrumb. Under the pointer it comes all the way up to gilt: a
+			# stylebox alone lights the seat, but the WORDS are what the eye is on,
+			# so the label answers too.
+			chip.tooltip_text = "Go to %s" % String(labels[i])
+			chip.mouse_entered.connect(_tint_rail_chip.bind(lbl, GILT_BRIGHT))
+			chip.focus_entered.connect(_tint_rail_chip.bind(lbl, GILT_BRIGHT))
+			chip.mouse_exited.connect(_tint_rail_chip.bind(lbl, tint))
+			chip.focus_exited.connect(_tint_rail_chip.bind(lbl, tint))
+			chip.pressed.connect(_show_muster_step.bind(index))
+			# The rail walks both ways, so the cue has to as well: jumping BACK
+			# down the rail is a retreat and gets the retreat's pitch.
+			_arm_shell_button(chip, "back" if index < step else "select")
+		rail.add_child(chip)
+	return rail
+
+
+## One seat of the step rail: a stretch of hairline with an optional wash over
+## it. Built here rather than inline because the rail now needs five of them
+## (standing / struck / still-to-come / hover / pressed) and they must share a
+## geometry — different content margins between states would shuffle the words
+## sideways under the pointer.
+func _make_rail_seat(rule: Color, wash_alpha: float, thickness: int) -> StyleBoxFlat:
+	var box := StyleBoxFlat.new()
+	box.bg_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, wash_alpha)
+	box.border_width_bottom = thickness
+	box.border_color = rule
+	box.content_margin_left = 14
+	box.content_margin_right = 14
+	box.content_margin_top = 3
+	box.content_margin_bottom = 3
+	return box
+
+
+func _tint_rail_chip(lbl: Label, color: Color) -> void:
+	if is_instance_valid(lbl):
+		lbl.add_theme_color_override("font_color", color)
+
+
+func _build_muster_step_host(menu: VBoxContainer) -> void:
 	var main_row := HBoxContainer.new()
-	main_row.custom_minimum_size = Vector2(0, 414)
+	main_row.custom_minimum_size = Vector2(0, 452)
 	main_row.add_theme_constant_override("separation", 16)
 	main_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# The panes are NOT the thing that takes the step's leftover height — a `Slack`
+	# below them is (see _muster_slack). Measured: their content asks for 480 and
+	# stretching them to the rect gave 615, so THE COLUMN printed its last line
+	# 185px above its own bottom rule and the pane read as a form with fields
+	# missing. The panes now hug what they hold; the air goes under them, where
+	# air is just margin.
 	menu.add_child(main_row)
 
+	# 430, not 350. The roster's taglines were ellipsised on every one of the
+	# five heroes — each overflowed its box by only 2-6 characters, and what got
+	# eaten was the second clause, which is the half that differentiates the
+	# heroes ("Move first" says nothing; "strike where they are not" is the
+	# pitch). The alternate-doctrine taglines run to 42 characters, so the box is
+	# sized for those, not for the shortest one that happens to fit today.
 	var host := _make_muster_section(main_row,
-		WritDB.muster_copy("host_head_text"), 350.0)
-	host.add_theme_constant_override("separation", 3)
+		WritDB.muster_copy("host_head_text"), 430.0)
+	host.add_theme_constant_override("separation", 4)
 	for hid in HeroDB.HERO_ORDER:
 		var row := _make_muster_host_row(hid)
 		host.add_child(row)
 		GameTheme.hover_lift(row, 1.012)
 
-	var roll := _make_muster_section(main_row,
-		WritDB.muster_copy("column_head_text"), 760.0)
-	roll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var column := _make_muster_section(main_row,
+		WritDB.muster_copy("column_head_text"), 700.0, true)
 	_hero_detail = VBoxContainer.new()
 	_hero_detail.add_theme_constant_override("separation", 6)
 	_hero_detail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	roll.add_child(_hero_detail)
+	column.add_child(_hero_detail)
+
+	var hero := _selected_hero if HeroDB.has_hero(_selected_hero) else HeroDB.HERO_ORDER[0]
+	# _focus_hero clears the doctrine toggles, which is right when the player
+	# picks a DIFFERENT lord and wrong when they merely step back onto this one.
+	# `keep_doctrine` carries them through the re-focus that repaints the roster's
+	# selection, so the pane is built ONCE with the right flags already standing.
+	_normalize_muster_doctrine(String(hero))
+	_selected_hero = ""
+	_focus_hero(String(hero), true)
+	var hero_focus = _hero_cards.get(String(hero))
+	if hero_focus != null and is_instance_valid(hero_focus):
+		hero_focus.call_deferred("grab_focus")
+	_muster_slack(menu)
+	_build_muster_nav(menu, _abandon_muster,
+		WritDB.muster_copy("next_banner_text"), _show_muster_step.bind(2))
+
+
+func _build_muster_step_banner(menu: VBoxContainer) -> void:
+	var main_row := HBoxContainer.new()
+	main_row.custom_minimum_size = Vector2(0, 452)
+	main_row.add_theme_constant_override("separation", 16)
+	main_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	menu.add_child(main_row)
 
 	var banners := _make_muster_section(main_row,
-		WritDB.muster_copy("banner_head_text"), 300.0)
-	banners.add_theme_constant_override("separation", 6)
+		WritDB.muster_copy("banner_head_text"), 430.0)
+	banners.add_theme_constant_override("separation", 7)
 	for bid in BannerDB.BANNER_ORDER:
 		var chip := _make_muster_banner_chip(bid)
 		banners.add_child(chip)
+		GameTheme.hover_lift(chip, 1.012)
 		_muster_banner_buttons[bid] = chip
 
-	var writ_head := HBoxContainer.new()
-	writ_head.add_theme_constant_override("separation", 14)
-	menu.add_child(writ_head)
-	writ_head.add_child(_make_display_label(
-		WritDB.muster_copy("terms_head_text"), 19, GILT_BRIGHT))
-	var writ_rule := _make_display_label(
-		WritDB.muster_copy("terms_rule_text"), 15, Color(0.76, 0.69, 0.56))
-	writ_rule.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	writ_head.add_child(writ_rule)
+	# The column is repeated here on purpose. The banner's whole effect is one
+	# card joining the opener, and a chip that says so while the opener is on
+	# another screen is a claim the player cannot check.
+	var column := _make_muster_section(main_row,
+		WritDB.muster_copy("column_head_text"), 700.0, true)
+	_hero_detail = VBoxContainer.new()
+	_hero_detail.add_theme_constant_override("separation", 6)
+	_hero_detail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	column.add_child(_hero_detail)
 
+	_refresh_muster_banner_styles()
+	var banner_focus = _muster_banner_buttons.get(_selected_banner_tribe)
+	if banner_focus != null and is_instance_valid(banner_focus):
+		banner_focus.call_deferred("grab_focus")
+	if HeroDB.has_hero(_selected_hero):
+		_build_muster_banner_summary(_selected_hero)
+	# What raising a banner DOES is identical for all six, so it prints once here
+	# rather than six times in the list — the chips are then free to spend their
+	# one line on the thing that actually differs, which is what the tribe does on
+	# the field. Screen-scoped, same rule as the terms glossary.
+	var rule := _make_display_label(WritDB.muster_copy("banner_rule_text"), 15,
+		Color(0.80, 0.73, 0.60))
+	rule.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	rule.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	menu.add_child(rule)
+	_muster_slack(menu)
+	_build_muster_nav(menu, _show_muster_step.bind(1),
+		WritDB.muster_copy("next_terms_text"), _show_muster_step.bind(3))
+
+
+func _build_muster_step_terms(menu: VBoxContainer) -> void:
+	# Terms now get the whole decision surface. The finished company is available
+	# from the rail and will be summarized on March Orders; it no longer crowds
+	# four mutually exclusive offers the player is trying to compare.
+	#
+	# The row is the only thing on this step, so it sits between the pinned rail
+	# and the pinned commit row rather than taking all of that space (four tiles
+	# stretched to 450 tall read as four empty frames).
+	#
+	# Not centred in it, though: 2 above against 5 below. "Accept one term." is
+	# the rule of THIS row, and an even split parked 230px of bare canvas between
+	# the instruction and the four things it instructs — the two elements on the
+	# screen that most need to be read as one. The slack under the tiles buys
+	# nothing by comparison; BACK and the forward button are chrome, and they are
+	# on the same baseline as every other step's.
+	#
+	# 2026-08-04: the instruction MOVED here, below the slack (see the note in
+	# _show_muster_step). With it bound to its row rather than to the rail, the
+	# band above can be bigger than the band below without stranding it, so the
+	# bias goes 3-above / 4-below: the row lands a little under the vertical
+	# middle, which is where a single decision belongs on an otherwise bare page.
+	_muster_slack(menu, 3)
+	menu.add_child(_make_muster_step_desc("terms_step_desc_text"))
 	_muster_writ_row = HBoxContainer.new()
-	_muster_writ_row.custom_minimum_size = Vector2(0, 140)
-	_muster_writ_row.add_theme_constant_override("separation", 10)
+	# 150, matching the tile's own minimum — this row used to force 196 onto tiles
+	# that asked for 178, so it was adding 18px of emptiness to all four.
+	_muster_writ_row.custom_minimum_size = Vector2(0, 150)
+	_muster_writ_row.add_theme_constant_override("separation", 12)
 	_muster_writ_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	menu.add_child(_muster_writ_row)
 
-	_build_muster_footer(menu)
+	_muster_gloss_label = _make_display_label("", 15, Color(0.78, 0.72, 0.60))
+	_muster_gloss_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_muster_gloss_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	menu.add_child(_muster_gloss_label)
 
-	var first_hero := String(preset.get("hero", HeroDB.HERO_ORDER[0]))
-	if not HeroDB.has_hero(first_hero):
-		first_hero = HeroDB.HERO_ORDER[0]
-	_focus_hero(first_hero)
-	if not preset.is_empty():
-		_muster_alt_relic = bool(preset.get("alt_relic", false))
-		_muster_alt_deck = bool(preset.get("alt_deck", false))
-		_normalize_muster_doctrine(first_hero)
-		_build_muster_roll(first_hero)
-	_refresh_muster_banner_styles()
 	_refresh_muster_deals()
+	var term_focus = _muster_writ_buttons.get(_selected_writ_id)
+	if term_focus != null and is_instance_valid(term_focus):
+		term_focus.call_deferred("grab_focus")
+	_muster_slack(menu, 4)
+	# "ORDERS", not "MARCH ORDERS". The destination chip on the rail says
+	# "IV · ORDERS" and the screen title says "ORDER OF MARCH", so the same two
+	# words were arranged three ways in one flow — and "orders" already means enemy
+	# intents in combat. The button names its destination and nothing else.
+	_build_muster_nav(menu, _show_muster_step.bind(2),
+		"NEXT: REVIEW", _show_muster_step.bind(4))
+
+
+## The final step gathers reference and run controls, not new build choices:
+## company, chosen term, road preview, optional settings, then commit.
+func _build_muster_step_orders(menu: VBoxContainer) -> void:
+	# This step reviews rather than offers, so its content is short and the
+	# leftover height is real. Split it above and below the review block — 2 above
+	# against 3 below, the same bias as THE TERMS: the rail stays where the other
+	# three steps left it, TAKE THE FIELD stays on the same baseline as their
+	# BACK/NEXT row, and the review sits nearer the rail that introduced it.
+	_muster_slack(menu, 2)
+	if HeroDB.has_hero(_selected_hero):
+		menu.add_child(_make_muster_compact_summary())
+
+	# ── THE TERM STANDS BESIDE THE ROAD IT MARCHES INTO (2026-08-05) ──
+	# The chosen-term tile was a full-width EXPAND_FILL slab — 1840px of plate
+	# holding three short left-packed lines, so roughly 1400px of it was empty
+	# and it was the largest single void left in the muster. Underneath it, the
+	# road preview (season + lords) was a centred paragraph floating on bare
+	# canvas with no plate at all.
+	#
+	# They are the same question asked twice — "what did I agree to" and "what am
+	# I walking into" — so they are one row of two panes rather than a slab above
+	# a caption. The width is spent on content instead of on margin, the road
+	# preview gains the plate it never had, and the band below shrinks by the
+	# height the paragraph used to occupy.
+	var review_row := HBoxContainer.new()
+	review_row.add_theme_constant_override("separation", 14)
+	review_row.custom_minimum_size = Vector2(0, 126)
+	review_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	menu.add_child(review_row)
+
+	var term_frame := PanelContainer.new()
+	term_frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	term_frame.size_flags_stretch_ratio = 1.15   # the term is the louder half
+	var term_style := GameTheme.make_panel_style(
+		Color(0.055, 0.038, 0.035, 0.88),
+		Color(0.78, 0.58, 0.25, 0.68), 1, 4, false)
+	term_style.content_margin_left = 18
+	term_style.content_margin_right = 18
+	term_style.content_margin_top = 12
+	term_style.content_margin_bottom = 12
+	term_frame.add_theme_stylebox_override("panel", term_style)
+	review_row.add_child(term_frame)
+	_muster_order_term_detail = VBoxContainer.new()
+	_muster_order_term_detail.add_theme_constant_override("separation", 4)
+	term_frame.add_child(_muster_order_term_detail)
+	_refresh_muster_order_term()
+
+	var road_frame := PanelContainer.new()
+	road_frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var road_style := GameTheme.make_panel_style(
+		Color(0.042, 0.032, 0.034, 0.86),
+		Color(0.58, 0.50, 0.34, 0.55), 1, 4, false)
+	road_style.content_margin_left = 18
+	road_style.content_margin_right = 18
+	road_style.content_margin_top = 12
+	road_style.content_margin_bottom = 12
+	road_frame.add_theme_stylebox_override("panel", road_style)
+	review_row.add_child(road_frame)
+	var road_col := VBoxContainer.new()
+	road_col.add_theme_constant_override("separation", 4)
+	road_frame.add_child(road_col)
+	road_col.add_child(_make_caption_label("WHAT YOU FACE", 15,
+		Color(0.76, 0.69, 0.56)))
+	# Warm bone, not the sage it was: green >= red is the cold-ink tell, and this
+	# is one of the last two live instances in the opening.
+	# Left-flush now that it has a pane of its own — a centred paragraph inside a
+	# left-headed plate reads as two unrelated blocks.
+	_muster_campaign_label = _make_display_label("", 16, Color(0.88, 0.83, 0.68))
+	_muster_campaign_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_muster_campaign_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_muster_campaign_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	road_col.add_child(_muster_campaign_label)
 	_refresh_muster_campaign()
-	_animate_subscreen_reveal(menu)
+	_build_muster_settings(menu)
+	_muster_slack(menu, 3)
+
+	var take := _make_begin_button()
+	take.name = "MusterTakeField"
+	# Measured, not stretched: 27px Cinzel + two 28px flames + 16px gaps + the
+	# plate's 22px margins ≈ 400. 470 gives the biggest thing in the shell a
+	# margin of its own without becoming a bar.
+	take.custom_minimum_size = Vector2(470, 56)
+	take.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	take.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_build_muster_nav(menu, _show_muster_step.bind(3), "", Callable(), take)
+	take.call_deferred("grab_focus")
+
+
+func _refresh_muster_order_term() -> void:
+	if _muster_order_term_detail == null or not is_instance_valid(
+			_muster_order_term_detail):
+		return
+	for child in _muster_order_term_detail.get_children():
+		child.queue_free()
+	var chosen: Dictionary = {}
+	for entry in _muster_writ_slate:
+		if String(entry.get("id", "")) == _selected_writ_id:
+			chosen = entry
+			break
+	if chosen.is_empty():
+		# An empty state names the cause AND what to do about it (COPY_STYLE §12).
+		# "NO BONUS CHOSEN" stated a fact and left the player on a review page with
+		# no route back to the thing that was missing.
+		_muster_order_term_detail.add_child(_make_display_label(
+			"No bonus chosen — go back to step III.", 18, Color(0.88, 0.48, 0.40)))
+		return
+	var slot := String(chosen.get("slot", ""))
+	var eyebrow := _make_caption_label("YOUR BONUS — %s" % String(
+		WritDB.SLOT_LABELS.get(slot, "")), 14, GILT)
+	eyebrow.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_muster_order_term_detail.add_child(eyebrow)
+	var name := _make_display_label(String(chosen.get("name", "")), 22, IVORY)
+	name.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_muster_order_term_detail.add_child(name)
+	var desc := _make_display_label(String(chosen.get("desc", "")), 16,
+		GameTheme.DESC_DIM)
+	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_muster_order_term_detail.add_child(desc)
+
+## The banner decision is one card and one recruitment bias. Show exactly those
+## consequences instead of reprinting the entire eleven-card opener.
+func _build_muster_banner_summary(hid: String) -> void:
+	if _hero_detail == null or not is_instance_valid(_hero_detail):
+		return
+	_hide_deck_preview()
+	for child in _hero_detail.get_children():
+		child.queue_free()
+	var hero := HeroDB.get_hero(hid)
+	var banner := BannerDB.get_banner(_selected_banner_tribe)
+	var card_id := BannerDB.card_id(_selected_banner_tribe)
+	var card := CardDB.get_card_data(card_id)
+	var heading := _make_display_label(
+		"%s raises %s" % [hero.get("name", hid), banner.get("name", "")],
+		22, _faction_accent(hid))
+	heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_hero_detail.add_child(heading)
+	var pitch := _make_display_label(
+		"Your banner changes two things. Nothing else in your starting deck changes.",
+		15, GameTheme.DESC_DIM)
+	pitch.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_hero_detail.add_child(pitch)
+	# THE TWO CONSEQUENCES SIT SIDE BY SIDE, AND THE OPENER IS UNDER THEM
+	# (2026-08-04). Ink-density map of this pane's interior, 40px cells: 74.7% of
+	# it held nothing — a contiguous void wider than the content, inside a bordered
+	# frame, which reads as a panel that failed to populate rather than as margin.
+	# The pane is 1070 wide and its content asked for 395 of that.
+	#
+	# Both halves of the fix are content the screen was already claiming to show.
+	# The two consequences are a matched pair (eyebrow over datum) so they are laid
+	# out as a pair rather than stacked in one narrow column; and the opening column
+	# itself goes underneath, because this pane's own comment says it exists so that
+	# "one of its own joins your opener" is a claim the player can CHECK — and until
+	# now the only card on the screen was the banner's own, with the opener two
+	# screens back. The banner's card leads the strip, so the single 0.70 mini that
+	# used to stand beside the copy is not lost, it is in its column.
+	var consequence := HBoxContainer.new()
+	consequence.add_theme_constant_override("separation", 28)
+	_hero_detail.add_child(consequence)
+	var copy := VBoxContainer.new()
+	copy.add_theme_constant_override("separation", 4)
+	copy.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	consequence.add_child(copy)
+	copy.add_child(_make_caption_label("ADDED TO YOUR DECK", 15,
+		Color(0.68, 0.61, 0.48)))
+	var card_name := _make_display_label(
+		"+ %s" % String(card.get("name", card_id)), 22, GILT_BRIGHT)
+	card_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	copy.add_child(card_name)
+	# The banner's `line_text` is NOT reprinted here (audit, 2026-08-03). The chip
+	# that raised it is on the same screen, 600px left, still showing that exact
+	# sentence — so the screen carried it twice, 40px apart vertically. Worse, in
+	# THIS pane it landed directly under "+ Line Marker" and so read as Line
+	# Marker's rules text; Line Marker's actual rule is "Guardian.", printed on
+	# the card 200px to the left. The card's own rules are on the card.
+	var bias_col := VBoxContainer.new()
+	bias_col.add_theme_constant_override("separation", 4)
+	bias_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	consequence.add_child(bias_col)
+	bias_col.add_child(_make_caption_label("AT RECRUIT CAMPS", 15,
+		Color(0.68, 0.61, 0.48)))
+	var tribe := String(banner.get("tribe", "this kind"))
+	# A DATUM, NOT THE RULE AGAIN (2026-08-04). This read "Soldier cards appear
+	# more often at every Recruit Camp." — and `banner_rule_text`, printed at the
+	# foot of this same screen 240px below, says "...its kind turns up more often
+	# at every Recruit Camp." One fact, two wordings, one screen. The shared rule
+	# is the footer's job by design (see _probe_muster's banner check: the half
+	# that is identical for all six banners is printed ONCE), so what belongs here
+	# is only the half the footer cannot know — WHICH kind. Written as a datum it
+	# also matches "+ Line Marker" opposite it: eyebrow over answer, twice.
+	#
+	# "%s cards", not a plural of the tribe word: BannerDB stores the singular
+	# ("Dead", "Stray"), and "More Deads" is what pluralising it produces.
+	var bias := _make_display_label("More %s cards" % tribe, 22, GILT_BRIGHT)
+	bias.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	bias_col.add_child(bias)
+	var opener: Array[String] = RunState.opening_deck_for(
+		hid, _muster_alt_deck, _selected_banner_tribe)
+	var shown: Array[String] = _representative_opening_cards(
+		opener, card_id, _strip_rank_capacity(MUSTER_STRIP_WIDTH_SPLIT))
+	_warm_deck_strip(shown, hid)
+	var strip_head := HBoxContainer.new()
+	strip_head.add_theme_constant_override("separation", 18)
+	_hero_detail.add_child(strip_head)
+	strip_head.add_child(_make_caption_label(
+		"YOUR STARTING DECK  ·  %d cards" % opener.size(), 15,
+		Color(0.76, 0.69, 0.56)))
+	var inspect := _make_secondary_action("VIEW FULL DECK", 220, 32)
+	inspect.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	inspect.tooltip_text = "Open the complete starting deck."
+	inspect.pressed.connect(_show_muster_deck_inspector)
+	strip_head.add_child(inspect)
+	_hero_detail.add_child(_make_muster_deck_strip(shown))
+
+
+## Terms need the size and identity of the finished column, but not eleven cards
+## printed for a third time. The full list remains one explicit click away.
+func _make_muster_compact_summary() -> Control:
+	var frame := PanelContainer.new()
+	frame.custom_minimum_size = Vector2(0, 62)
+	frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var style := GameTheme.make_panel_style(
+		Color(0.045, 0.032, 0.038, 0.90),
+		Color(0.60, 0.51, 0.34, 0.50), 1, 4, false)
+	style.content_margin_left = 16
+	style.content_margin_right = 16
+	style.content_margin_top = 8
+	style.content_margin_bottom = 8
+	frame.add_theme_stylebox_override("panel", style)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 18)
+	frame.add_child(row)
+	var hero := HeroDB.get_hero(_selected_hero)
+	var opener: Array[String] = RunState.opening_deck_for(
+		_selected_hero, _muster_alt_deck, _selected_banner_tribe)
+	var summary := _make_display_label(
+		"%s  ·  %d cards  ·  %s  ·  %d max HP" % [
+			hero.get("name", _selected_hero), opener.size(),
+			BannerDB.display_name(_selected_banner_tribe), RunState.STARTING_MAX_HP],
+		16, IVORY)
+	summary.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	summary.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(summary)
+	var inspect := _make_secondary_action("VIEW FULL DECK", 220, 36)
+	inspect.size_flags_horizontal = Control.SIZE_SHRINK_END
+	inspect.tooltip_text = "Open the complete starting deck."
+	inspect.pressed.connect(_show_muster_deck_inspector)
+	row.add_child(inspect)
+	return frame
+
+
+## A stretch of empty height that absorbs whatever the step does not use. Named
+## so _animate_subscreen_reveal can skip it: the reveal staggers 45ms per child,
+## and spending two of those beats fading in nothing delayed the commit row by a
+## tenth of a second for no pixels.
+func _muster_slack(parent: Container, stretch: int = 1) -> void:
+	var slack := Control.new()
+	slack.name = "Slack"
+	slack.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	slack.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	slack.size_flags_stretch_ratio = float(stretch)
+	parent.add_child(slack)
+
+
+func _make_muster_step_desc(key: String) -> Label:
+	var lbl := _make_display_label(WritDB.muster_copy(key), 16, IVORY)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	return lbl
+
+
+## THE FOOTER HAS A FIXED HEIGHT, WHICH IS WHAT MAKES BACK STAND STILL
+## (2026-08-04). The pass that pinned the header shipped a 39px jump at the
+## other end and did not notice — measured: the BACK ink band is canvas y
+## 809.2–820.8 on steps I, II and III (identical to the pixel) and 770.0–782.5
+## on IV. Two causes, both here: `_make_begin_button` is 56 tall against
+## `_make_menu_button`'s 46, and the promise line is appended ONLY on the commit
+## step. So the one screen where the escape hatch matters is the one screen
+## where it is not where the previous three taught you to look.
+##
+## Both halves are reserved on every step now — the actions row takes the taller
+## of the two button heights, and the promise's line box is held open whether or
+## not it has words in it.
+const MUSTER_NAV_ROW_H := 56
+const MUSTER_NAV_PROMISE_H := 26
+
+func _build_muster_nav(parent: VBoxContainer, back_cb: Callable,
+		next_text: String, next_cb: Callable, next_control: Control = null) -> void:
+	var actions := HBoxContainer.new()
+	actions.add_theme_constant_override("separation", 18)
+	actions.custom_minimum_size = Vector2(0, MUSTER_NAV_ROW_H)
+	parent.add_child(actions)
+	# NO FLAME ON THIS ONE, SO ITS WORD LANDS ON THE PANE'S COLUMN (2026-08-04).
+	# Measured: BACK's ink began at canvas x 70.8 while the panes above it start
+	# their content at x 44.5 — a 26px out-dent, and a near-miss reads worse than
+	# an obvious misalignment because the eye keeps re-checking it. The cause is
+	# structural: the flame slot (28) plus its gap (12) sits ahead of every menu
+	# label, while _make_muster_section indents its content by 12. Dropping the
+	# flame and keeping the 12 puts BACK's B at 42 — the pane's own column, to
+	# within a glyph's side bearing.
+	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 17, 46, false)
+	back.custom_minimum_size = Vector2(180, MUSTER_NAV_ROW_H)
+	# MEASURE, don't expand. `_make_menu_button` hands every button EXPAND_FILL,
+	# which was harmless while the forward action was frameless and expanding
+	# too — but with the primary now a fixed-width plate, BACK's expanding cell
+	# took a third of the row and pushed the plate ~140px right of canvas centre.
+	# Pinned to its 180, BACK is mirrored exactly by the trailing balance dummy.
+	back.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	back.pressed.connect(back_cb)
+	_set_shell_cue(back, "back")
+	actions.add_child(back)
+	if next_control != null:
+		# The caller's control (TAKE THE FIELD) rides the SAME centring as the
+		# built-in primary below — it is a plate now too, so EXPAND_FILL would
+		# stretch it the full width of the canvas.
+		var cta_lead := Control.new()
+		cta_lead.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		cta_lead.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		actions.add_child(cta_lead)
+		actions.add_child(next_control)
+		var cta_trail := Control.new()
+		cta_trail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		cta_trail.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		actions.add_child(cta_trail)
+		var cta_balance := Control.new()
+		cta_balance.custom_minimum_size = Vector2(180, 0)
+		cta_balance.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		actions.add_child(cta_balance)
+	else:
+		# THE FORWARD MOVE IS PLATED AND ALREADY BURNING (2026-08-05). This was
+		# `_make_menu_button` — the same frameless ivory word, at 19px against
+		# BACK's 17, standing in the same row. On a render neither read as the
+		# way on. The primary is a warm document tab with its flame lit at rest;
+		# BACK keeps the frameless treatment, so the pair is now a hierarchy
+		# rather than two labels. It is CENTRED in its own expanding cell, which
+		# also stops a long step name ("SEE YOUR COMPANY") from drifting the
+		# whole row off the pane's column.
+		# Centred on the CANVAS, not on the leftover width: expanding spacers
+		# either side plus a dummy matching BACK's 180 on the right, or the
+		# plate sits visibly right of centre with BACK's cell pushing it.
+		var lead := Control.new()
+		lead.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		lead.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		actions.add_child(lead)
+		var next := _make_primary_action(next_text, MUSTER_NAV_ROW_H)
+		next.custom_minimum_size = Vector2(NAV_PRIMARY_W, MUSTER_NAV_ROW_H)
+		next.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		next.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		next.pressed.connect(next_cb)
+		actions.add_child(next)
+		var trail := Control.new()
+		trail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		trail.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		actions.add_child(trail)
+		var balance := Control.new()
+		balance.custom_minimum_size = Vector2(180, 0)
+		balance.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		actions.add_child(balance)
+	# Reversibility is visible in BACK and the live step rail. The safety promise
+	# is WORDED only beside the actual commit — but its height is reserved on
+	# every step, or the commit step's footer grows and lifts BACK off the
+	# baseline the other three just taught the player.
+	var promise := _make_display_label(
+		WritDB.muster_copy("subtitle") if next_control != null else "", 15,
+		# ASH (0.62 grey) is the fine-print colour for text that sits on a panel.
+		# This line does not — it prints under TAKE THE FIELD, at the foot of the
+		# canvas, directly on the brightest flame in the painting. Same reason the
+		# main menu's own subtitle was lifted off ASH years ago.
+		Color(0.80, 0.75, 0.65))
+	promise.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	promise.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	promise.custom_minimum_size = Vector2(0, MUSTER_NAV_PROMISE_H)
+	parent.add_child(promise)
 
 
 func _make_muster_section(parent: Container, heading: String,
-		minimum_width: float) -> VBoxContainer:
+		minimum_width: float, expand: bool = false) -> VBoxContainer:
 	var frame := PanelContainer.new()
 	frame.custom_minimum_size = Vector2(minimum_width, 0)
 	frame.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	# The flag has to land on the FRAME. This helper returns the inner VBox, so
+	# callers setting `size_flags_horizontal` on the return value were flagging a
+	# child of a PanelContainer, which ignores it — the wide pane never grew past
+	# its minimum and ~390px of the screen sat empty to the right of it.
+	if expand:
+		frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var style := GameTheme.make_panel_style(
-		Color(0.045, 0.032, 0.038, 0.78), Color(0.60, 0.51, 0.34, 0.42), 1, 5, false)
+		Color(0.045, 0.032, 0.038, 0.88), Color(0.60, 0.51, 0.34, 0.52), 1, 5, false)
 	style.content_margin_left = 12
 	style.content_margin_right = 12
 	style.content_margin_top = 8
@@ -1217,7 +3056,7 @@ func _make_muster_section(parent: Container, heading: String,
 	var label := _make_display_label(heading, 18, GILT_BRIGHT)
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	content.add_child(label)
-	content.add_child(_make_ornament_row(minimum_width - 42.0, true))
+	content.add_child(_make_ornament_row(minimum_width - 42.0, true, false, true))
 	return content
 
 
@@ -1236,7 +3075,12 @@ func _make_muster_host_row(hid: String) -> Button:
 	# TRUNCATED DUPLICATE of the hero's desc, which THE COLUMN pane prints in
 	# full, unclipped, for whichever hero is focused. The list needs to identify
 	# and differentiate; the detail pane explains. Two lines do the first job.
-	btn.custom_minimum_size = Vector2(320, 66)
+	#
+	# 2026-07-31: 400 wide, not 320. Every one of the five taglines was being
+	# ellipsised — they run 35-39 characters against a box that held ~33, and the
+	# alternate-doctrine taglines reach 42. What the clip ate was always the
+	# second clause, which is the differentiating half.
+	btn.custom_minimum_size = Vector2(400, 84 if _quick_march_active else 66)
 	btn.focus_mode = Control.FOCUS_ALL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	for state in ["normal", "hover", "pressed", "focus"]:
@@ -1267,18 +3111,39 @@ func _make_muster_host_row(hid: String) -> Button:
 		monogram.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		plate.add_child(monogram)
 		portrait = plate
-	portrait.custom_minimum_size = Vector2(46, 62)
+	portrait.custom_minimum_size = Vector2(58, 78) if _quick_march_active \
+		else Vector2(46, 62)
 	portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(portrait)
 	_hero_portraits[hid] = portrait
 	var copy := VBoxContainer.new()
 	copy.add_theme_constant_override("separation", 0)
+	if _quick_march_active:
+		copy.alignment = BoxContainer.ALIGNMENT_CENTER
 	copy.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	copy.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(copy)
-	var name_label := _make_display_label(String(hero.get("name", hid)), 18, GILT_BRIGHT)
+	# THE RECOMMENDATION BELONGS ON THE ROW IT RECOMMENDS (2026-08-05). It used
+	# to print only in the detail pane's top-RIGHT corner, ~1100px away from the
+	# roster and only once that hero was already focused — so on the screen a
+	# first-time player meets first, the advice was somewhere they were not
+	# looking, about a choice they had already made. Here it rides the name, in
+	# the roster, before the click. The pane keeps its copy for the player who
+	# lands on Raider by another route.
+	var name_row := HBoxContainer.new()
+	name_row.add_theme_constant_override("separation", 10)
+	name_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	copy.add_child(name_row)
+	var name_label := _make_display_label(String(hero.get("name", hid)), 21, GILT_BRIGHT)
 	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	copy.add_child(name_label)
+	name_row.add_child(name_label)
+	if _quick_march_active and hid == HeroDB.HERO_ORDER[0]:
+		# Only on the first-run screen. In THE MUSTER proper the player has
+		# marched before and does not need to be told where to start.
+		var star := _make_caption_label("START HERE", 14, Color(0.90, 0.74, 0.44))
+		star.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		star.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		name_row.add_child(star)
 	var tag := _make_display_label(String(hero.get("tagline", "")), 14, Color(0.98, 0.83, 0.58))
 	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	tag.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
@@ -1287,9 +3152,19 @@ func _make_muster_host_row(hid: String) -> Button:
 	# printed in full by THE COLUMN pane, so the roster keeps the tooltip and
 	# drops the ellipsised copy.)
 	btn.tooltip_text = String(hero.get("desc", ""))
-	btn.mouse_entered.connect(_focus_hero.bind(hid))
-	btn.focus_entered.connect(_focus_hero.bind(hid))
+	# PREVIEW is not SELECTION. Hover and keyboard focus only light the row;
+	# `pressed` is the one thing that changes which lord marches. Bound to
+	# `mouse_entered`, choosing a lord was a side effect of where the pointer
+	# travelled — and since BACK sits directly under this column, reaching for it
+	# re-selected every row on the way down and wiped the doctrine toggles with
+	# it. See _focus_hero for the full account.
+	btn.mouse_entered.connect(_preview_hero.bind(hid, true))
+	btn.mouse_exited.connect(_preview_hero.bind(hid, false))
+	btn.focus_entered.connect(_preview_hero.bind(hid, true))
+	btn.focus_exited.connect(_preview_hero.bind(hid, false))
 	btn.pressed.connect(_focus_hero.bind(hid))
+	# Choosing a lord is a pick that does not advance — "select", not "commit".
+	_arm_shell_button(btn, "select")
 	_hero_cards[hid] = btn
 	return btn
 
@@ -1299,7 +3174,7 @@ func _make_muster_banner_chip(bid: String) -> Button:
 	var btn := Button.new()
 	# 56, not 48: the chip stacks a name over a one-line rule, and at 48 the
 	# selected chip's highlight cut across the rule exactly like the host rows.
-	btn.custom_minimum_size = Vector2(270, 56)
+	btn.custom_minimum_size = Vector2(270, 64)
 	btn.focus_mode = Control.FOCUS_ALL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	for state in ["normal", "hover", "pressed", "focus"]:
@@ -1313,19 +3188,37 @@ func _make_muster_banner_chip(bid: String) -> Button:
 	copy.add_theme_constant_override("separation", 0)
 	copy.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	btn.add_child(copy)
+	# THE NAME OUTRANKS ITS OWN RULE (2026-08-03). BannerDB's colours are heraldic
+	# dyes — The Works is a flat grey, The Roll a dark brown — and at a 45% wash
+	# they landed around 0.62 luminance UNDER a rule line printed in full IVORY.
+	# So on every chip the small print was the brightest thing in it and the eye
+	# read six rules before it read a single tribe. The dye still carries the
+	# identity (the hue survives the wash toward ivory, which is why it is not
+	# lerped toward gilt), it just stops losing to its own body text: name up to
+	# a floor, rule down to the standard description ink.
 	var accent: Color = data.get("color", GILT)
-	var name_label := _make_display_label(String(data.get("name", bid)), 18,
-		accent.lerp(IVORY, 0.45))
+	# 0.86, not 0.74 — and lifted with _lift_to_luminance, not `lightened()`.
+	# The first cut of this fix set the floor to 0.74 and the rule line to
+	# GameTheme.DESC_DIM, whose luminance is 0.7399. The floor WAS the body text,
+	# to three decimals, so the "hierarchy" it bought was a dead tie. And
+	# `lightened(a)` is `c + (1-c)*a` per channel, which moves luminance by about
+	# `(1-lum)*a` — passing the raw difference as the amount undershoots the
+	# target every time, so two of the six tribes still came out UNDER their own
+	# small print (The Hunt 0.730, The Coven 0.722, against a 0.741 rule).
+	var tint: Color = _lift_to_luminance(accent.lerp(IVORY, 0.62), 0.86)
+	var name_label := _make_display_label(String(data.get("name", bid)), 20, tint)
 	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	copy.add_child(name_label)
-	var line := _make_display_label(String(data.get("line_text", "")), 15, IVORY)
+	var line := _make_display_label(String(data.get("line_text", "")), 15,
+		GameTheme.DESC_DIM)
 	line.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	copy.add_child(line)
-	btn.tooltip_text = "%s adds %s to the opening roll." % [
+	btn.tooltip_text = "%s adds %s to your starting deck." % [
 		String(data.get("tribe", bid)),
 		String(CardDB.get_card_data(String(data.get("card_id", ""))).get(
 			"name", WritDB.muster_copy("banner_card_fallback_text")))]
 	btn.pressed.connect(_select_muster_banner.bind(bid))
+	_arm_shell_button(btn, "select")
 	return btn
 
 
@@ -1335,7 +3228,7 @@ func _select_muster_banner(bid: String) -> void:
 	_selected_banner_tribe = bid
 	_refresh_muster_banner_styles()
 	if _selected_hero != "":
-		_build_muster_roll(_selected_hero)
+		_build_muster_banner_summary(_selected_hero)
 	_refresh_muster_campaign()
 
 
@@ -1348,36 +3241,356 @@ func _refresh_muster_banner_styles() -> void:
 		var style: StyleBox = _hero_focus_box() if selected else StyleBoxEmpty.new()
 		for state in ["normal", "hover", "pressed"]:
 			btn.add_theme_stylebox_override(state, style)
+		# The selected chip's focus slot carries the underline WITHOUT the wash —
+		# see _hero_selected_focus_box; the focus box composites over the state
+		# box, so repeating the fill here is what doubled it into a plate.
+		btn.add_theme_stylebox_override("focus",
+			_hero_selected_focus_box() if selected else _hero_cursor_box())
 
 
-func _build_muster_roll(hid: String) -> void:
+## `compact` drops the hero heading, the pitch and the signature block and keeps
+## only the line and the cards. Step III needs the DECK on screen to price its
+## terms, but it does not need a third printing of a lord the player chose two
+## screens ago — and it has no vertical room for one.
+func _build_muster_roll(hid: String, compact: bool = false) -> void:
+	if _quick_march_active:
+		if _quick_march_stage == 1:
+			_build_quick_hero_identity(hid)
+		else:
+			_build_quick_march_roll(hid)
+		return
 	if _hero_detail == null or not is_instance_valid(_hero_detail):
 		return
 	_hide_deck_preview()
 	for child in _hero_detail.get_children():
 		child.queue_free()
 	var hero := HeroDB.get_hero(hid)
-	var heading := _make_display_label(String(hero.get("name", hid)), 22, _faction_accent(hid))
-	heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	_hero_detail.add_child(heading)
-	var pitch := _make_display_label(String(hero.get("desc", "")), 15, IVORY)
-	pitch.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	pitch.custom_minimum_size = Vector2(0, 36)
-	_hero_detail.add_child(pitch)
+	if not compact:
+		# The lord's nameplate, with his CAMPAIGN RECORD hung off the far end of the
+		# same row. On the same row on purpose: THE COLUMN's height is spent to the
+		# last pixel by the two-rank card strip and the signature block below it, so
+		# a record on its own line would have to push something off the canvas. The
+		# heading row is the one piece of furniture on this pane with empty space to
+		# its right.
+		var head_row := HBoxContainer.new()
+		head_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		head_row.add_theme_constant_override("separation", 24)
+		_hero_detail.add_child(head_row)
+		var heading := _make_display_label(String(hero.get("name", hid)), 22,
+			_faction_accent(hid))
+		heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		heading.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+		head_row.add_child(heading)
+		# (A "RECOMMENDED FIRST HERO" chip stood here until 2026-08-03. It was
+		# gated on `_quick_march_active`, and this function returns to the quick
+		# builders at its FIRST LINE whenever that flag is set — so the branch was
+		# unreachable by construction and had never drawn a pixel. The live chip
+		# is in _build_quick_hero_identity, which is the screen it belongs to.
+		# Deleting it also settles the head row: it claimed EXPAND_FILL on the
+		# same row as the record, which does too, so had it ever fired the two
+		# would have split the row and pulled the record off its right edge.)
+		# THE RECORD STANDS BESIDE THE NAME IT QUALIFIES (2026-08-04). It used to
+		# claim EXPAND_FILL on this row and right-align into it, which on a pane
+		# that grew to 1070 put "0 won · 1 lost" 871px from the word "Raider" — at
+		# that distance a qualifier is not a qualifier, it is a second, unrelated
+		# reading on the far side of the pane. Left-packed after the name with the
+		# row's 24px separation, it reads as the appositive it is; the row's
+		# remaining width was already empty and stays empty.
+		var record := _muster_record_line(hid)
+		if record != "":
+			var rec_lbl := _make_caption_label(record, 15, Color(0.72, 0.66, 0.54))
+			rec_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+			rec_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			rec_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			head_row.add_child(rec_lbl)
+		var pitch := _make_display_label(String(hero.get("desc", "")), 15,
+			GameTheme.DESC_DIM)
+		pitch.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		pitch.custom_minimum_size = Vector2(0, 36)
+		_hero_detail.add_child(pitch)
 	var opener: Array[String] = RunState.opening_deck_for(
 		hid, _muster_alt_deck, _selected_banner_tribe)
 	var banner_card := BannerDB.card_id(_selected_banner_tribe)
 	var banner_name := String(CardDB.get_card_data(banner_card).get("name", banner_card))
-	var roll_line := _make_display_label("%d cards  ·  %s adds %s" % [
-		opener.size(), BannerDB.display_name(_selected_banner_tribe), banner_name],
+	# On the terms step the line names the lord and the standing HP instead of the
+	# banner's card: THE PACT prices itself at "Lose 6 max HP" and the screen never
+	# printed the denominator, so on the first screen a new player ever sees, the
+	# one number with a cost attached was 6 out of an unstated total.
+	# The line and the action share a row. Both are short and both are ABOUT the
+	# strip below them, so stacking them spent two rows of the pane's height on one
+	# caption's worth of ink — height the strip now needs.
+	var roll_row := HBoxContainer.new()
+	roll_row.add_theme_constant_override("separation", 18)
+	roll_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_hero_detail.add_child(roll_row)
+	var roll_line := _make_caption_label(
+		("%s  ·  %d cards  ·  %d max HP" % [String(hero.get("name", hid)),
+			opener.size(), RunState.STARTING_MAX_HP]) if compact
+		else ("%d cards  ·  %s adds %s" % [opener.size(),
+			BannerDB.display_name(_selected_banner_tribe), banner_name]),
 		15, Color(0.76, 0.69, 0.56))
 	roll_line.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	_hero_detail.add_child(roll_line)
-	_warm_deck_strip(opener, hid)
-	_hero_detail.add_child(_make_muster_deck_strip(opener))
-	_build_muster_doctrine_row(_hero_detail, hid, hero)
+	roll_line.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	roll_row.add_child(roll_line)
+	var inspect := _make_secondary_action("VIEW FULL DECK", 218, 34)
+	inspect.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	inspect.tooltip_text = "Open the complete starting deck."
+	inspect.pressed.connect(_show_muster_deck_inspector)
+	roll_row.add_child(inspect)
+	# AS MANY OF THE COLUMN AS THE PANE CAN PRINT, NOT THREE (2026-08-04). The
+	# strip was hard-coded to three representative cards, which measured 437px
+	# inside a pane measured at 1070 — 633px of a bordered frame holding nothing,
+	# and the biggest single contributor to this pane's 68.5% empty ink map. One
+	# rank of the full-size card fits SEVEN, so seven is what it asks for, and the
+	# height does not move at all: a rank is 186px tall whether it holds three
+	# minis or seven. The banner's card leads (see _representative_opening_cards) —
+	# display order only, the run's deck is untouched.
+	var shown: Array[String] = _representative_opening_cards(
+		opener, banner_card, _strip_rank_capacity(
+			MUSTER_STRIP_WIDTH_FULL if compact else MUSTER_STRIP_WIDTH_SPLIT))
+
+	_warm_deck_strip(shown, hid)
+	_hero_detail.add_child(_make_muster_deck_strip(shown))
+	_build_muster_doctrine_row(_hero_detail, hid, hero, compact)
 
 
+func _build_quick_march_roll(hid: String) -> void:
+	if _hero_detail == null or not is_instance_valid(_hero_detail):
+		return
+	_hide_deck_preview()
+	for child in _hero_detail.get_children():
+		child.queue_free()
+	var hero := HeroDB.get_hero(hid)
+
+	var opener: Array[String] = RunState.opening_deck_for(
+		hid, false, _selected_banner_tribe)
+	var banner_card := BannerDB.card_id(_selected_banner_tribe)
+	var shown: Array[String] = _representative_opening_cards(opener, banner_card)
+	_warm_deck_strip(shown, hid)
+	# THE CAPTION SITS OVER THE CARDS IT NAMES (2026-08-03). It was flushed to the
+	# pane's left edge while the row it labels is centred in a 1216px pane — three
+	# minis measure 530, so the words "THREE DEFINING CARDS" ended 343px short of
+	# the first card, with nothing in between. On the quick-company shot the label
+	# reads as a stray caption and the cards as an unlabelled float.
+	#
+	# Centred, not left-flushed: the cards are the SUBJECT of this screen and
+	# their symmetry is worth keeping (it echoes the centred "<HERO>'S COMPANY"
+	# above), so the label moves to them. The lead spacer is the width of the
+	# action on the right — without it "centre of the remaining box" is 118px left
+	# of the centre of the pane, and the caption would miss the cards the other way.
+	const CARD_HEAD_ACTION_W := 235.0
+	var card_head := HBoxContainer.new()
+	card_head.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_hero_detail.add_child(card_head)
+	var head_lead := Control.new()
+	head_lead.custom_minimum_size = Vector2(CARD_HEAD_ACTION_W, 0)
+	head_lead.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	card_head.add_child(head_lead)
+	var card_title := _make_caption_label("THREE DEFINING CARDS", 15,
+		Color(0.76, 0.69, 0.56))
+	card_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	card_title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	card_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	card_head.add_child(card_title)
+	# "VIEW FULL DECK", the same words the other three call sites use for the same
+	# action (COPY_STYLE §12, one term per concept). This one printed the count as
+	# well — "VIEW ALL 11 CARDS" — which made one button read as a different
+	# control from its three twins; the count is still on screen in the
+	# "YOU START WITH" fact directly below.
+	var inspect := _make_secondary_action(
+		"VIEW FULL DECK", CARD_HEAD_ACTION_W, 36)
+	inspect.tooltip_text = "Open the complete starting deck."
+	inspect.pressed.connect(_show_muster_deck_inspector)
+	card_head.add_child(inspect)
+	var card_center := CenterContainer.new()
+	card_center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	card_center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var card_row := HBoxContainer.new()
+	card_row.add_theme_constant_override("separation", 22)
+	for cid in shown:
+		card_row.add_child(_make_deck_mini(cid, 1, 0.72))
+	card_center.add_child(card_row)
+	_hero_detail.add_child(card_center)
+
+	var facts := HBoxContainer.new()
+	facts.add_theme_constant_override("separation", 12)
+	facts.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_hero_detail.add_child(facts)
+	facts.add_child(_make_quick_march_fact(
+		"YOU START WITH", "%d cards  ·  %d max HP" % [opener.size(),
+			RunState.STARTING_MAX_HP], Color(0.76, 0.69, 0.56)))
+	# Copper, not the sage (0.72, 0.80, 0.66) this carried until 2026-08-03. The
+	# three facts are told apart by their accent, and that one was the only cold
+	# hue in the run opening: on the quick-company shot the middle tile's hairline
+	# and caption read GREEN between a bone tile and a gilt one, which is the
+	# project's #1 recorded art defect (cold ink on the ember palette) printed on
+	# the screen a first-time player spends longest reading. Bone / copper / gilt
+	# are three distinct warm values and separate the tiles just as well.
+	# The caption is READ OFF the banner, not typed: it used to be the literal
+	# "THE COLOURS", which is only the name of BannerDB.DEFAULT_BANNER — correct
+	# today by coincidence, and a caption naming the wrong banner the moment the
+	# default moves or this screen learns to show another one.
+	facts.add_child(_make_quick_march_fact(
+		BannerDB.display_name(_selected_banner_tribe).to_upper(),
+		"Adds %s to your deck" % String(
+			CardDB.get_card_data(banner_card).get("name", "one Soldier")),
+		Color(0.87, 0.63, 0.39)))
+	facts.add_child(_make_quick_march_fact(
+		"CAMPAIGN CHEST", "+10 gold after every victory",
+		Color(0.94, 0.76, 0.34)))
+	_build_muster_doctrine_row(_hero_detail, hid, hero, false)
+
+
+## One playstyle phrase, sized to its own words.
+##
+## A CAPTION, NOT A CONTROL (2026-08-04). These were bordered, filled,
+## EXPAND_FILL equal-width pills — which is exactly what `_make_secondary_action`
+## draws elsewhere in this same flow, so "Move first", "Attack open lanes" and
+## "Relocate allies" rendered as three buttons directly under a live hero
+## portrait on the screen a first-time player meets first. A player WILL click
+## one of those, and nothing will happen, which is the worst thing a screen can
+## teach in its first five seconds. The list is descriptive, so it is drawn as a
+## description: no frame, no fill, no equal widths, each phrase measuring to its
+## own words with a gilt separator dot carried by the row's spacing.
+##
+## Gilt on warm-black rather than the hero's faction colour: the factions are MAP
+## washes (grasswake is a teal, lanternhall a slate blue), and cold ink was the
+## one thing on this screen that did not belong to the fire.
+func _make_trait_chip(text: String, lead_separator: bool) -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	row.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	# The dot goes BETWEEN phrases, never in front of the first one — a leading
+	# bullet on a horizontal list reads as a stray mark, not as punctuation.
+	if lead_separator:
+		var bullet := _make_caption_label("·", 17, Color(0.72, 0.58, 0.34))
+		bullet.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		row.add_child(bullet)
+	var lbl := _make_caption_label(text, 16, Color(0.94, 0.88, 0.72))
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	row.add_child(lbl)
+	return row
+
+
+func _make_quick_march_fact(title: String, value: String, accent: Color) -> Control:
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(0, 58)
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var style := GameTheme.make_panel_style(
+		Color(0.055, 0.038, 0.035, 0.88), accent.darkened(0.28), 1, 4, false)
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 7
+	style.content_margin_bottom = 7
+	panel.add_theme_stylebox_override("panel", style)
+	var copy := VBoxContainer.new()
+	copy.add_theme_constant_override("separation", 1)
+	panel.add_child(copy)
+	# THE CAPTION AND THE DATUM WERE THE SAME SIZE (2026-08-03). 14 and 15 both
+	# floored to MIN_LABEL_SIZE (18), so a tile written as "small label over a
+	# value" rendered as two lines of identical type and the eye had to read both
+	# to find out which one it wanted. The first fix pushed the value up to 20; the
+	# caption now also comes DOWN to a legal 15 through _make_caption_label
+	# (2026-08-04), so the pair reads 15-over-20 as written instead of 18-over-20.
+	copy.add_child(_make_caption_label(title, 15, accent))
+	var body := _make_display_label(value, 20, IVORY)
+	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	copy.add_child(body)
+	return panel
+
+
+## As much of the opener as the strip can print in ONE rank, banner card first,
+## every pick carrying its REAL number of copies.
+##
+## THE BANNER'S CARD WAS THE ONE CARD THIS EXCLUDED (2026-08-04). The old body
+## `continue`d on `banner_card` and appended it only if the deck could not supply
+## three others — so on step I the caption read "11 cards · The Colours adds Line
+## Marker" directly above a strip in which Line Marker did not appear, and
+## _build_muster_roll's own comment ("The banner's card leads the strip") had been
+## describing a behaviour the code undid. It leads now, for real.
+##
+## THE COUNTS WERE ALL LIES (same pass). The result was a unique-id list, and
+## _make_muster_deck_strip derives its ×N chips by counting the array it is
+## handed — so every chip on every muster strip read "×1", including Outrider,
+## which the Raider opens with TWO of. Returning the picks with multiplicity
+## makes the chip true without touching the strip.
+##
+## `want` is a UNIQUE-card budget, not a mini budget: the caller measures how many
+## minis its pane can print (see _strip_rank_capacity) and the copies ride along.
+func _representative_opening_cards(opener: Array[String],
+		banner_card: String, want: int = 3) -> Array[String]:
+	var order: Array[String] = []
+	if banner_card != "" and opener.has(banner_card):
+		order.append(banner_card)
+	for cid in opener:
+		if order.size() >= maxi(1, want):
+			break
+		if order.has(cid):
+			continue
+		order.append(cid)
+	var picks: Array[String] = []
+	for cid in order:
+		for i in range(opener.count(cid)):
+			picks.append(cid)
+	return picks
+
+
+## How many minis _make_muster_deck_strip can lay in one rank of `avail` px at the
+## full card size. Same arithmetic the strip itself uses, exposed so a caller can
+## ASK for that many cards instead of printing three into a pane that measured
+## 1070 wide and standing 633px of it empty.
+func _strip_rank_capacity(avail: float) -> int:
+	const SEP := 9.0
+	return maxi(1, int(floor((avail + SEP) / (225.0 * DECK_MINI_SCALE + SEP))))
+
+
+
+## This lord's record across every march on the profile (MetaState.hero_stats),
+## as one line — or "" for a lord who has never marched.
+##
+## The empty case is the whole point of the function. "0 won · 0 lost" is not a
+## record, it is a row of zeroes on the first screen a new player sees, printed
+## five times as they walk the roster; and the unlocks it would sit beside
+## (relic_alt at one win, deck_alt at Ascension 4) already carry their own locked
+## state. Show the line only once it says something.
+##
+## Lived in the deleted _build_hero_detail until 2026-08-01 — the run opening had
+## no record on it at all between the muster split and this.
+func _muster_record_line(hid: String) -> String:
+	var hs: Dictionary = MetaState.hero_stats.get(hid, {})
+	var wins: int = int(hs.get("wins", 0))
+	var losses: int = int(hs.get("losses", 0))
+	if wins + losses <= 0:
+		return ""
+	var line := "%d won · %d lost" % [wins, losses]
+	var best: int = int(hs.get("best_asc", -1))
+	if best > 0:
+		line += " · best win at Ascension %d" % best
+	return line
+
+
+## THE COLUMN, drawn up in as many equal RANKS as the pane will hold — and
+## never behind a scrollbar.
+##
+## The opener is ten minis wide (nine retinue uniques + the banner's card) and a
+## mini at DECK_MINI_SCALE is 139.5 across, so at separation 9 one rank measures
+## 1471. Step III hands the column the whole menu (1516 usable) and it fits with
+## 45px to spare. Steps I and II hang it beside the fixed 430 picker, which
+## leaves 1070 — so the two steps where the deck IS the decision were hiding
+## 401px of it, near enough three cards, behind a SCROLL_MODE_AUTO bar. Worse,
+## the push-front above guarantees the BANNER's card is visible by shoving the
+## tail further out of sight, so the strip's own fix was making the clip bite.
+##
+## Shrinking one rank to fit 1070 was the wrong trade: it needs scale 0.44,
+## which renders the card's 18px rules line at 8px — that is the size the strip
+## was RAISED from (see the DECK_MINI_SCALE note). So the cards keep their size
+## and the column forms up in two ranks of five instead, 688px wide, well inside
+## the pane. Step III still measures a single rank and is left untouched.
+##
+## Even ranks, not a full row and a stub: the pane's other content is a short
+## left column, so a ragged 7-then-3 reads as an overflow, while two equal ranks
+## read as a column drawn up — and the player can count the deck at a glance.
 func _make_muster_deck_strip(deck: Array) -> Control:
 	var counts: Dictionary = {}
 	var order: Array[String] = []
@@ -1387,54 +3600,121 @@ func _make_muster_deck_strip(deck: Array) -> Control:
 			counts[id] = 0
 			order.append(id)
 		counts[id] += 1
-	var strip := HBoxContainer.new()
-	strip.add_theme_constant_override("separation", 9)
+	var sep := 9
+	var avail: float = MUSTER_STRIP_WIDTH_FULL if _muster_step == 3 \
+		else MUSTER_STRIP_WIDTH_SPLIT
+	var n: int = maxi(1, order.size())
+	# Full size whenever the pane can print the whole column in one rank; the
+	# ranked size only when it cannot. The pane decides the card, not the step.
+	var mini_scale: float = DECK_MINI_SCALE
+	if float(n) * (225.0 * mini_scale + sep) - sep > avail:
+		mini_scale = DECK_MINI_SCALE_RANKS
+	var mini_w: float = 225.0 * mini_scale
+	var per_rank: int = maxi(1, int(floor((avail + sep) / (mini_w + sep))))
+	var ranks: int = maxi(1, int(ceil(float(n) / float(per_rank))))
+	var strip := GridContainer.new()
+	strip.columns = maxi(1, int(ceil(float(n) / float(ranks))))
+	strip.add_theme_constant_override("h_separation", sep)
+	# 10, not 9: _make_deck_mini hangs each ×N count chip 6px ABOVE its slot, so
+	# the gap between ranks has to clear it or the second rank's chips sit on the
+	# first rank's cards.
+	strip.add_theme_constant_override("v_separation", 10)
+	strip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	strip.tree_exiting.connect(_hide_deck_preview)
 	for id in order:
-		strip.add_child(_make_deck_mini(id, int(counts[id])))
-	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(700, ceil(300.0 * DECK_MINI_SCALE) + 16.0)
-	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
-	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.add_child(strip)
-	return scroll
+		strip.add_child(_make_deck_mini(id, int(counts[id]), mini_scale))
+	return strip
 
 
 func _build_muster_doctrine_row(parent: VBoxContainer, hid: String,
-		hero: Dictionary) -> void:
+		hero: Dictionary, compact: bool = false) -> void:
+	# COMPACT DROPS THIS ENTIRELY, which is what _build_muster_roll's docstring
+	# has always claimed and what the code never did. Two separate costs were
+	# being paid on step III because of it:
+	#
+	#   HEIGHT — the signature block (icon + name + wrapped rule) is ~90px, and
+	#   step III is the one step whose content already overruns the 900px canvas.
+	#   With the column, writ row, gloss, campaign line, settings footer and nav
+	#   stacked, TAKE THE FIELD was being laid out BELOW the bottom of the screen:
+	#   the commit button of the whole run opening, off-canvas, worse at higher
+	#   Ascension because the rules readout grows a line per unlocked tier.
+	#
+	#   DECISIONS — the doctrine toggles below are step I's choice. Re-rendering
+	#   them here put them on screen twice, so THE TERMS carried six decisions for
+	#   a returning player: as many as the single screen this flow was split up to
+	#   fix. The split is only worth its extra clicks if the load actually leaves.
+	#
+	# Step III wants the deck as REFERENCE (its terms name specific cards, so the
+	# player must not pick from memory — see _build_muster_step_terms). It does not
+	# want the lord's identity furniture a second time.
+	if compact:
+		return
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
+	row.add_theme_constant_override("separation", 12)
+	row.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	parent.add_child(row)
 	var relic_id := String(hero.get("relic_alt", "")) if _muster_alt_relic \
 		else String(hero.get("relic", ""))
 	var relic := RelicDB.get_relic(relic_id)
-	var relic_label := _make_display_label("SIGNATURE: %s" % String(
-		relic.get("name", relic_id)), 15, GILT)
-	relic_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	relic_label.tooltip_text = String(relic.get("desc", ""))
-	row.add_child(relic_label)
+	# The signature relic is HALF of what choosing a lord hands you — the deck is
+	# the other half and gets eleven baked cards. It used to be the bare line
+	# "SIGNATURE: Marching Spurs" with the rule itself buried in a tooltip, in a
+	# panel that had ~100px of empty space under it. Icon, name and rule, printed.
+	var chip := GameTheme.make_relic_chip(relic_id, 54)
+	chip.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	row.add_child(chip)
+	var sig := VBoxContainer.new()
+	sig.add_theme_constant_override("separation", 0)
+	sig.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(sig)
+	sig.add_child(_make_caption_label("SIGNATURE RELIC", 15, Color(0.68, 0.61, 0.48)))
+	sig.add_child(_make_display_label(String(relic.get("name", relic_id)), 20, GILT_BRIGHT))
+	var relic_desc := _make_display_label(String(relic.get("desc", "")), 15,
+		GameTheme.DESC_DIM)
+	relic_desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	relic_desc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sig.add_child(relic_desc)
 	if not _bound_doctrine_unlocked(hid):
 		return
+	# THE UNLOCK TOGGLES ARE NOW FRAMED (2026-08-03), because at 32px tall they
+	# were not buttons at all to look at. _make_menu_button's frameless treatment
+	# only grows its affordances — the flame cursor and the gilt underline — at
+	# height >= 40; below that every state is a StyleBoxEmpty and nothing happens
+	# until the cursor is already on the word. So on the step-1 shot the two live
+	# cross-run unlocks printed as "STANDARD DECK   STANDARD RELIC", two dim
+	# 14px phrases floating in the top-right of the signature block, visually
+	# identical to the "SIGNATURE" caption two inches to their left. This is the
+	# exact case _make_secondary_action was written for (see its header): one
+	# quiet, PERSISTENT document-tab frame, subordinate to TAKE THE FIELD but
+	# plainly operable before hover. Tooltips because a toggle labelled with its
+	# CURRENT state does not say what pressing it does.
 	if not _doctrine_mastery_unlocked(hid):
 		var alt: Dictionary = hero.get("deck_alt", {})
 		var doctrine_name := String(alt.get("name", "Alternate")) \
-			if _muster_alt_deck else "Standard Doctrine"
-		var toggle := _make_menu_button(doctrine_name, Color(0.22, 0.17, 0.14), 15, 32)
-		toggle.custom_minimum_size = Vector2(218, 32)
+			if _muster_alt_deck else "Standard Deck"
+		var toggle := _make_secondary_action(doctrine_name, 218, 32)
+		toggle.tooltip_text = "Switch this hero's starting deck."
+		toggle.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+		toggle.size_flags_horizontal = Control.SIZE_SHRINK_END
 		toggle.pressed.connect(_set_bound_doctrine.bind(hid, not _muster_alt_deck))
 		row.add_child(toggle)
 		return
-	var deck_btn := _make_menu_button(
-		"ALT DECK" if _muster_alt_deck else "STANDARD DECK",
-		Color(0.22, 0.17, 0.14), 14, 32)
-	deck_btn.custom_minimum_size = Vector2(154, 32)
+	# "ALTERNATE", not "ALT". These two toggles are the only place in the shell
+	# that abbreviated a word, and "ALT" beside "STANDARD" reads as a keyboard
+	# modifier before it resolves as an adjective (COPY_STYLE §12: no riddles).
+	# Both widths grew to hold the longer word rather than clipping it.
+	var deck_btn := _make_secondary_action(
+		"ALTERNATE DECK" if _muster_alt_deck else "STANDARD DECK", 196, 32)
+	deck_btn.tooltip_text = "Switch between this hero's two starting decks."
+	deck_btn.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	deck_btn.size_flags_horizontal = Control.SIZE_SHRINK_END
 	deck_btn.pressed.connect(_toggle_muster_deck.bind(hid))
 	row.add_child(deck_btn)
-	var relic_btn := _make_menu_button(
-		"ALT RELIC" if _muster_alt_relic else "STANDARD RELIC",
-		Color(0.22, 0.17, 0.14), 14, 32)
-	relic_btn.custom_minimum_size = Vector2(164, 32)
+	var relic_btn := _make_secondary_action(
+		"ALTERNATE RELIC" if _muster_alt_relic else "STANDARD RELIC", 196, 32)
+	relic_btn.tooltip_text = "Switch between this hero's two signature relics."
+	relic_btn.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	relic_btn.size_flags_horizontal = Control.SIZE_SHRINK_END
 	relic_btn.pressed.connect(_toggle_muster_relic.bind(hid))
 	row.add_child(relic_btn)
 
@@ -1453,67 +3733,123 @@ func _toggle_muster_relic(hid: String) -> void:
 	_build_muster_roll(hid)
 
 
-func _build_muster_footer(parent: VBoxContainer) -> void:
+## The march's session settings — difficulty, today's run, the seed. They sit on
+## the terms step because that is where their consequences are visible: the four
+## tiles are dealt off this seed and re-deal live as it is typed, and the road
+## lords printed above are previewed from it.
+func _build_muster_settings(parent: VBoxContainer) -> void:
 	var footer := VBoxContainer.new()
 	footer.add_theme_constant_override("separation", 5)
 	parent.add_child(footer)
-	_muster_campaign_label = _make_display_label("", 15, Color(0.72, 0.80, 0.66))
-	_muster_campaign_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_muster_campaign_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	footer.add_child(_muster_campaign_label)
 
+	# One term per concept, and every item in this list is written the same way:
+	# "Daily" was a clipped form of the button 40px below it (DAILY RUN), and
+	# "custom seed" was the only lower-cased entry in a list of three.
+	var active: Array[String] = []
+	if _selected_ascension > 0:
+		active.append("Ascension %d" % _selected_ascension)
+	if _daily_pick:
+		active.append("Daily Run")
+	if _muster_seed_text.strip_edges() != "":
+		active.append("Custom seed")
+	var advanced_text := "MORE RUN OPTIONS — %s" % (
+		"HIDE" if _muster_advanced_open else "SHOW")
+	if not active.is_empty():
+		advanced_text += "  ·  ACTIVE: %s" % ", ".join(PackedStringArray(active))
+	var advanced := _make_secondary_action(
+		advanced_text, 560 if not active.is_empty() else 420, 38)
+	advanced.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	advanced.tooltip_text = "Optional: change difficulty, Daily Run, or the seed."
+	advanced.pressed.connect(_toggle_muster_advanced)
+	footer.add_child(advanced)
+	if not _muster_advanced_open:
+		return
+	# _make_menu_button hardcodes EXPAND_FILL, so a plain HBox flung these five
+	# controls across the full 1540: the "-" landed against the left screen edge,
+	# a hand's width from the ascension number it decrements. Centering the row
+	# needs the children to SHRINK, so every control below re-flags itself.
 	var setup := HBoxContainer.new()
 	setup.alignment = BoxContainer.ALIGNMENT_CENTER
 	setup.add_theme_constant_override("separation", 12)
+	setup.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	footer.add_child(setup)
+	# THE LADDER IS NOT DRAWN UNTIL IT HAS A RUNG. Below the first win, the
+	# stepper was a permanently disabled "-" and "+" flanking the words
+	# "Ascension 0 / 0" — three dead controls in the middle of the commit row on
+	# the first screen of a player's first run, next to live build choices they
+	# are still trying to read. Every roguelike surveyed either locks its
+	# difficulty ladder behind a win (Slay the Spire needs a full three-act
+	# clear before A1 exists; Balatro's stakes unlock per deck), defers it to a
+	# prompt after run one, or keeps it in a different mode; not one presents an
+	# inert difficulty control beside a build offer.
+	#
+	# The promise still prints — _update_asc_rules_text writes "Take a keep to
+	# open the next tier" into the line below — so the ladder is announced
+	# without being operable. The label stays null on this path and every
+	# consumer already guards with is_instance_valid.
 	var asc_unlocked: int = MetaState.unlocked_ascension
-	var minus := _make_menu_button("-", Color(0.20, 0.16, 0.14), 17, 34)
-	minus.custom_minimum_size = Vector2(36, 34)
-	minus.disabled = asc_unlocked <= 0
-	minus.pressed.connect(_change_ascension.bind(-1))
-	setup.add_child(minus)
-	_asc_label = _make_display_label("Ascension %d / %d" % [
-		_selected_ascension, asc_unlocked], 15, IVORY)
-	_asc_label.custom_minimum_size = Vector2(154, 34)
-	_asc_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_asc_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	setup.add_child(_asc_label)
-	var plus := _make_menu_button("+", Color(0.20, 0.16, 0.14), 17, 34)
-	plus.custom_minimum_size = Vector2(36, 34)
-	plus.disabled = asc_unlocked <= 0
-	plus.pressed.connect(_change_ascension.bind(1))
-	setup.add_child(plus)
+	if asc_unlocked > 0:
+		var minus := _make_menu_button("-", Color(0.20, 0.16, 0.14), 17, 34)
+		minus.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		minus.custom_minimum_size = Vector2(36, 34)
+		minus.pressed.connect(_change_ascension.bind(-1))
+		setup.add_child(minus)
+		_asc_label = _make_display_label("Ascension %d / %d" % [
+			_selected_ascension, asc_unlocked], 15, IVORY)
+		_asc_label.custom_minimum_size = Vector2(154, 34)
+		_asc_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_asc_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		setup.add_child(_asc_label)
+		var plus := _make_menu_button("+", Color(0.20, 0.16, 0.14), 17, 34)
+		plus.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		plus.custom_minimum_size = Vector2(36, 34)
+		plus.pressed.connect(_change_ascension.bind(1))
+		setup.add_child(plus)
 
-	var daily_text := "DAILY MARCH: OFF"
+	# Read the live toggle, not just the ledger: the settings block is rebuilt
+	# every time the player steps back onto the terms, and a button that reset
+	# itself to OFF while _daily_pick stayed true would misreport which seed the
+	# run is about to commit.
+	# A BLOCKED STATE NAMES THE CAUSE AND THE EFFECT (COPY_STYLE §12). Three of
+	# these four labels are on a DISABLED button, and "DAILY RUN — WON" /
+	# "— UNAVAILABLE" told the player a fact about the past without ever saying
+	# why the control had stopped answering. "TODAY" is the whole cause (one Daily
+	# Run per day) and the tooltip carries the effect in a sentence.
+	var daily_text := "DAILY RUN — ON" if _daily_pick else "DAILY RUN — OFF"
 	var daily_blocked := false
 	var today_daily: Dictionary = MetaState.todays_daily()
 	if not today_daily.is_empty():
 		match String(today_daily.get("result", "")):
 			"won":
-				daily_text = "DAILY MARCH: WON"
+				daily_text = "DAILY RUN — WON TODAY"
 				daily_blocked = true
 			"lost":
-				daily_text = "DAILY MARCH: LOST"
+				daily_text = "DAILY RUN — LOST TODAY"
 				daily_blocked = true
 			_:
-				daily_text = "CONTINUE DAILY MARCH" \
-					if _daily_resume_slot(today_daily) >= 0 else "DAILY MARCH: UNAVAILABLE"
+				daily_text = "CONTINUE DAILY RUN" \
+					if _daily_resume_slot(today_daily) >= 0 \
+					else "DAILY RUN — ALREADY STARTED"
 				daily_blocked = _daily_resume_slot(today_daily) < 0
 	_daily_btn = _make_menu_button(daily_text, Color(0.30, 0.24, 0.34), 15, 34)
-	_daily_btn.custom_minimum_size = Vector2(238, 34)
+	_daily_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	# Measured from the label, not pinned: the blocked states are longer than the
+	# ON/OFF pair the old 238 was cut for, and an overrunning label on this row
+	# runs straight into the seed field beside it.
+	_daily_btn.custom_minimum_size = Vector2(
+		maxf(238.0, float(daily_text.length()) * 10.0 + 24.0), 34)
 	_daily_btn.tooltip_text = _daily_tooltip()
 	_daily_btn.disabled = daily_blocked
 	_daily_btn.pressed.connect(_on_daily_button_pressed)
 	setup.add_child(_daily_btn)
 
 	_seed_edit = LineEdit.new()
-	_seed_edit.placeholder_text = "seed (optional)"
+	_seed_edit.placeholder_text = "Seed (optional)"
 	_seed_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_seed_edit.add_theme_font_size_override("font_size", 16)
 	_seed_edit.add_theme_color_override("font_color", IVORY)
 	_seed_edit.add_theme_color_override("font_placeholder_color", Color(0.55, 0.50, 0.42))
 	_seed_edit.custom_minimum_size = Vector2(188, 34)
-	_seed_edit.tooltip_text = WritDB.muster_copy("seed_tooltip_text")
 	if GameTheme.font_display:
 		_seed_edit.add_theme_font_override("font", GameTheme.font_display)
 	var well := StyleBoxFlat.new()
@@ -1527,6 +3863,8 @@ func _build_muster_footer(parent: VBoxContainer) -> void:
 	var well_focus := well.duplicate() as StyleBoxFlat
 	well_focus.border_color = GILT_BRIGHT
 	_seed_edit.add_theme_stylebox_override("focus", well_focus)
+	_seed_edit.text = _muster_seed_text
+	_refresh_seed_field_state()
 	_seed_edit.text_changed.connect(_on_muster_seed_changed)
 	setup.add_child(_seed_edit)
 
@@ -1536,16 +3874,29 @@ func _build_muster_footer(parent: VBoxContainer) -> void:
 	footer.add_child(_asc_rules_label)
 	_update_asc_rules_text()
 
-	var actions := HBoxContainer.new()
-	actions.add_theme_constant_override("separation", 18)
-	footer.add_child(actions)
-	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 17, 46)
-	back.custom_minimum_size = Vector2(180, 46)
-	back.pressed.connect(_abandon_muster)
-	actions.add_child(back)
-	var take := _make_begin_button()
-	take.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	actions.add_child(take)
+
+## The seed field's live state, in ONE place so the build path and the Daily Run
+## toggle cannot drift apart.
+##
+## A BLOCKED CONTROL NAMES ITS CAUSE (COPY_STYLE §12). Turning Daily Run on
+## greys this field out and stops it accepting text, and nothing anywhere said
+## why — a dimmed box beside a lit one is the shape of a bug, not of a rule. The
+## tooltip is the only channel a LineEdit has, so it carries the cause and the
+## effect while the field is shut.
+func _refresh_seed_field_state() -> void:
+	if _seed_edit == null or not is_instance_valid(_seed_edit):
+		return
+	_seed_edit.editable = not _daily_pick
+	_seed_edit.modulate = Color(1, 1, 1, 0.45 if _daily_pick else 1.0)
+	_seed_edit.tooltip_text = (
+		"Seed locked: a Daily Run always uses today's seed. Turn Daily Run off to type your own."
+		if _daily_pick else WritDB.muster_copy("seed_tooltip_text"))
+
+
+func _toggle_muster_advanced() -> void:
+	_muster_advanced_open = not _muster_advanced_open
+	_show_muster_step(4)
+
 
 
 func _make_muster_writ_tile(entry: Dictionary) -> Button:
@@ -1556,7 +3907,20 @@ func _make_muster_writ_tile(entry: Dictionary) -> Button:
 	# you max HP — and the longest of them (THE PACT) ellipsised mid-clause at
 	# "Lose 6 ma...". A term you cannot finish reading is a term you cannot
 	# weigh. One more line, and the height to hold it.
-	btn.custom_minimum_size = Vector2(350, 136)
+	#
+	# 2026-07-31: 178 tall on a step of its own. The 3-line clamp below was
+	# doing real work at 136 — with the terms now holding the screen alone there
+	# is room for the longest term to print whole, so the clamp is gone rather
+	# than merely loosened. (236 was the first try and left every tile two-thirds
+	# empty, which reads as a missing element rather than as breathing room.)
+	#
+	# 2026-08-04: 150. 178 was reproducing 236's fault at a smaller scale —
+	# measured, tiles I, II and IV hold 117-121px of content inside a 178px tile
+	# forced up to 196 by the row, so roughly two fifths of each was empty. The
+	# tallest thing the row must hold is THE ARSENAL's four lines (eyebrow 24 +
+	# name 29 + desc 24 + offer 20, plus 6 of separation and 14 of margin = 117),
+	# and 150 clears that with a real margin rather than a hole.
+	btn.custom_minimum_size = Vector2(340, 150)
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	btn.focus_mode = Control.FOCUS_ALL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -1571,23 +3935,153 @@ func _make_muster_writ_tile(entry: Dictionary) -> Button:
 	copy.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	btn.add_child(copy)
 	var slot := String(entry.get("slot", ""))
-	var slot_label := _make_display_label("%s — %s" % [
+	var slot_row := HBoxContainer.new()
+	slot_row.add_theme_constant_override("separation", 8)
+	copy.add_child(slot_row)
+	var slot_label := _make_caption_label("%s — %s" % [
 		String(WritDB.SLOT_LABELS.get(slot, "")),
 		String(WritDB.SLOT_HINTS.get(slot, ""))], 15,
 		Color(0.88, 0.48, 0.40) if bool(entry.get("is_pact", false)) else GILT)
 	slot_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	copy.add_child(slot_label)
-	var name_label := _make_display_label(String(entry.get("name", "")), 19, IVORY)
+	slot_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slot_row.add_child(slot_label)
+	# ── THE ACCEPTED TERM IS SEALED, NOT LABELLED (2026-08-05) ──
+	# This was the word "CHOSEN" in 15px gilt in the tile's top-right corner —
+	# on the one screen in the game where a wax seal is the literally correct
+	# object. These tiles are dealt by WritDB, the copy calls them TERMS, and
+	# the game's own cards are "illuminated writs" whose stats are pressed wax.
+	# `WaxSeal` has been in scripts/ui/painters/ since the backend restructure
+	# and is the house's visual verb for *this is now binding*.
+	#
+	# ★3 (SIZE) passes with room to spare: a 34px seal on a 340px tile. The
+	# word is KEPT as the seal's tooltip and as its accessible name — a mark
+	# nobody can read is a worse affordance than a label, and the copy-lint /
+	# text-floor gates are entitled to find the string.
+	var chosen_marker := Control.new()
+	chosen_marker.name = "TermChosenMarker"
+	chosen_marker.custom_minimum_size = Vector2(TERM_SEAL, TERM_SEAL)
+	chosen_marker.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	chosen_marker.tooltip_text = "Your chosen bonus."
+	chosen_marker.visible = false
+	var seal := WaxSeal.new()
+	seal.set_anchors_preset(Control.PRESET_FULL_RECT)
+	# The PACT is the tile that prices itself in max HP; it seals in the same
+	# crimson its own slot label already warns in, so the mark inherits the
+	# tile's argument instead of contradicting it in gilt.
+	seal.wax = Color(0.62, 0.15, 0.12) if bool(entry.get("is_pact", false)) \
+		else Color(0.54, 0.13, 0.10)
+	seal.seed_text = "term-%s" % String(entry.get("id", slot))
+	chosen_marker.add_child(seal)
+	# THE SEAL BEARS A DEVICE. WaxSeal draws an IMPRESSION — a sunk dark face
+	# with a lit far wall — because on a card that recess holds the stat numeral;
+	# its own header calls this "the numeral-legibility contract". Pressed with
+	# nothing in it, the recess reads as a hole and the whole mark as a washer
+	# (caught on the first render of this change). The slots are already numbered
+	# in Roman on their own labels, so the seal bears the numeral of the term it
+	# closed — and THE PACT, which deliberately carries no numeral, takes the
+	# house diamond instead.
+	var device := Label.new()
+	device.text = "◆" if bool(entry.get("is_pact", false)) \
+		else String(WritDB.SLOT_LABELS.get(slot, "")).split(" ")[0]
+	device.set_anchors_preset(Control.PRESET_FULL_RECT)
+	device.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	device.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	device.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if GameTheme.font_display:
+		device.add_theme_font_override("font", GameTheme.font_display)
+	device.add_theme_font_size_override("font_size", 14)
+	device.add_theme_color_override("font_color", Color(1.0, 0.90, 0.76, 0.94))
+	chosen_marker.add_child(device)
+	slot_row.add_child(chosen_marker)
+	var name_label := _make_display_label(String(entry.get("name", "")), 22, IVORY)
 	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	copy.add_child(name_label)
-	var desc := _make_display_label(String(entry.get("desc", "")), 15, GameTheme.DESC_DIM)
+	# NO EXPAND_FILL ON THE DESC (2026-08-04). It carried it, so the description
+	# absorbed the whole tile's slack and drove the relic preview down onto the
+	# tile floor — a ~50px gap between "Choose 1 of 3 relics." and the three relic
+	# names, which then read as an unlabelled list rather than as that sentence's
+	# answer. The question and its answer are adjacent now; the slack goes to a
+	# spacer AFTER the last written line, where empty space is margin.
+	var desc := _make_display_label(String(entry.get("desc", "")), 16, GameTheme.DESC_DIM)
 	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc.max_lines_visible = 3
-	desc.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	copy.add_child(desc)
+	# THE ARSENAL used to be the one BLIND tile standing beside three transparent
+	# ones: "Choose 1 of 3 relics" named no pool, no rarity and no examples, and
+	# the three plates were not drawn until after TAKE THE FIELD. So the player
+	# was asked to weigh a known deck surgery against three unnamed relics — not a
+	# comparison, a coin flip. The roll is a pure static off a stream derived from
+	# a seed that is already fixed at this point, so the answer can simply be
+	# shown; naming them here cannot change what _pick_blessing later deals.
+	var offer := _writ_arsenal_preview(entry)
+	if not offer.is_empty():
+		var names: Array[String] = []
+		var rules: Array[String] = []
+		for rid in offer:
+			var relic: Dictionary = RelicDB.get_relic(rid)
+			names.append(String(relic.get("name", rid)))
+			rules.append("%s — %s" % [relic.get("name", rid), relic.get("desc", "")])
+		# The offer is a caption of the desc above it, and at the floored 18 the
+		# three names needed ~385px against a 352px tile — so "Rear Guard Charm"
+		# broke and left "Charm" orphaned on a line of its own. At a legal 15 the
+		# list measures ~322 and holds one line.
+		var offer_label := _make_caption_label(" · ".join(names), 15, GILT)
+		offer_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		offer_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		copy.add_child(offer_label)
+		btn.tooltip_text = "\n".join(rules)
+	# Whatever the tile does not use falls to the bottom, below the last written
+	# line — never between two lines that answer each other.
+	var tail := Control.new()
+	tail.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tail.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	copy.add_child(tail)
 	btn.pressed.connect(_select_muster_writ.bind(id))
+	# A term is ACCEPTED, not browsed — it is the one pick on the walk that binds
+	# the whole run, and it takes a wax seal. It sounds like one.
+	_arm_shell_button(btn, "commit")
 	return btn
+
+
+## The three relics THE ARSENAL will actually offer, resolved BEFORE commit.
+##
+## Reproducing the resolution roll rather than caching it is deliberate: caching
+## would mean two sources of truth for the same three ids, and the one that is
+## wrong would be the one printed on a screen that promises nothing is final.
+## Three things have to match _pick_blessing's call exactly — the stream seed,
+## the hero, and the relics already held, which at that moment is the signature
+## alone (start_new_run clears `relics` and appends only it).
+func _writ_arsenal_preview(entry: Dictionary) -> Array[String]:
+	if String(entry.get("effect", "")) != "arsenal":
+		return []
+	if not HeroDB.has_hero(_selected_hero):
+		return []
+	var rng := RandomNumberGenerator.new()
+	rng.seed = _pending_run_seed() ^ 0x57524954 ^ 0x5245534F
+	var held: Array[String] = []
+	var signature := _muster_signature_relic(_selected_hero)
+	if signature != "":
+		held.append(signature)
+	return RelicDB.roll_foundation_relics(
+		int(entry.get("value", 3)), held, _selected_hero, rng)
+
+
+## The relic this lord will ACTUALLY march with, given the doctrine toggles and
+## what the profile has authorised. One writer, because two readers now need the
+## same answer: the commit, and THE ARSENAL's pre-commit preview — and a preview
+## that resolves the signature differently would name three relics the picker
+## then does not offer. RunState re-applies the identical gates in start_new_run,
+## so this can only ever be a faithful mirror or a bug.
+func _muster_signature_relic(hero_id: String) -> String:
+	var hero_data := HeroDB.get_hero(hero_id)
+	var alt := String(hero_data.get("relic_alt", ""))
+	var use_alt := false
+	if _bound_doctrine_unlocked(hero_id):
+		if _doctrine_mastery_unlocked(hero_id):
+			use_alt = _muster_alt_relic
+		elif _muster_alt_relic and _muster_alt_deck:
+			use_alt = true
+	return alt if use_alt and alt != "" else String(hero_data.get("relic", ""))
 
 
 func _select_muster_writ(id: String) -> void:
@@ -1603,11 +4097,17 @@ func _refresh_muster_writ_styles() -> void:
 		if not is_instance_valid(btn):
 			continue
 		var selected := String(id) == _selected_writ_id
-		var bg: Color = Color(0.12, 0.085, 0.065, 0.92) if selected \
-			else Color(0.035, 0.025, 0.03, 0.70)
-		var width: int = 2 if selected else 1
+		# 0.93, not 0.70. The chosen tile has always been near-opaque; the other
+		# three were a 70% wash, and this row is the one element of the Muster
+		# that sits low enough on the canvas to be read against open flame. The
+		# leftmost term was ink on warm-black and the rightmost was ink on fire —
+		# same size, same colour, half the legibility. The unselected border comes
+		# up with it, because at 0.38 over a bright frame the tile had no edge.
+		var bg: Color = Color(0.17, 0.105, 0.06, 0.97) if selected \
+			else Color(0.035, 0.025, 0.03, 0.93)
+		var width: int = 3 if selected else 1
 		var normal := GameTheme.make_panel_style(bg,
-			GILT_BRIGHT if selected else Color(0.50, 0.43, 0.31, 0.38),
+			GILT_BRIGHT if selected else Color(0.54, 0.46, 0.33, 0.62),
 			width, 4, false)
 		btn.add_theme_stylebox_override("normal", normal)
 		btn.add_theme_stylebox_override("pressed", normal)
@@ -1620,14 +4120,58 @@ func _refresh_muster_writ_styles() -> void:
 		var hover := GameTheme.make_panel_style(bg, GILT_BRIGHT, width, 4, false)
 		btn.add_theme_stylebox_override("hover", hover)
 		btn.add_theme_stylebox_override("focus", hover)
+		# The marker is a WaxSeal host now, not a Label — `as Label` would silently
+		# yield null here and the accepted term would carry no mark at all.
+		var marker := btn.find_child("TermChosenMarker", true, false) as Control
+		if marker != null:
+			var was_visible: bool = marker.visible
+			marker.visible = selected
+			# PRESS IT, don't pop it. A seal that appears on frame 1 reads as a
+			# badge toggling; a seal that comes down under the stamp reads as an
+			# act. Only on the TRANSITION into chosen — repainting the row (which
+			# happens on every deal refresh) must not re-stamp a term the player
+			# accepted several seconds ago.
+			if selected and not was_visible and not _reduce_motion():
+				marker.pivot_offset = marker.size * 0.5
+				marker.scale = Vector2(1.55, 1.55)
+				marker.modulate.a = 0.0
+				var tw := marker.create_tween().set_parallel(true)
+				tw.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+				tw.tween_property(marker, "scale", Vector2.ONE, 0.16)
+				tw.tween_property(marker, "modulate:a", 1.0, 0.10)
+			elif selected:
+				marker.scale = Vector2.ONE
+				marker.modulate.a = 1.0
 
 
 func _refresh_muster_deals() -> void:
-	if _muster_writ_row == null or not is_instance_valid(_muster_writ_row):
-		return
+	# Deals the slate as DATA first and paints it only if the row is on screen.
+	# _begin_run_with resolves the committed term out of _muster_writ_slate, so
+	# the roll cannot be conditional on the terms step having been built — an
+	# early-out here used to be safe when there was one screen and is not now.
 	var rng := RandomNumberGenerator.new()
 	rng.seed = _pending_run_seed() ^ 0x57524954
 	_muster_writ_slate = WritDB.roll_slate(rng)
+	# Forge is valuable only after the player has learned what a card does in
+	# combat. A brand-new profile may still open Customize, but its first slate
+	# cannot ask for a permanent card upgrade before that lesson exists.
+	if MetaState.total_runs <= 0:
+		# THE LOOP MUST RE-DEAL, not just re-read. It used to test the SAME slate 64
+		# times and then fall through with the forge still on it, so the guard was
+		# inert: THE ROLL has four entries, one of which is the Whetstone Cart (and
+		# its pact is a second forge tile), so roughly a quarter of all first-ever
+		# musters opened by asking a player who has never seen a card in combat to
+		# pick a permanent card upgrade. Re-rolling off the SAME rng keeps the deal
+		# deterministic — a given seed still produces one fixed slate.
+		for _attempt in range(64):
+			var has_forge := false
+			for entry in _muster_writ_slate:
+				if String(entry.get("effect", "")) == "forge":
+					has_forge = true
+					break
+			if not has_forge:
+				break
+			_muster_writ_slate = WritDB.roll_slate(rng)
 	var still_present := false
 	for entry in _muster_writ_slate:
 		if String(entry.get("id", "")) == _selected_writ_id:
@@ -1635,6 +4179,11 @@ func _refresh_muster_deals() -> void:
 	if not still_present:
 		_selected_writ_id = String(_muster_writ_slate[0].get("id", "")) \
 			if not _muster_writ_slate.is_empty() else ""
+	if _muster_gloss_label != null and is_instance_valid(_muster_gloss_label):
+		_muster_gloss_label.text = WritDB.gloss_for_slate(_muster_writ_slate)
+	_refresh_muster_order_term()
+	if _muster_writ_row == null or not is_instance_valid(_muster_writ_row):
+		return
 	for child in _muster_writ_row.get_children():
 		child.queue_free()
 	_muster_writ_buttons.clear()
@@ -1648,10 +4197,9 @@ func _refresh_muster_deals() -> void:
 func _pending_run_seed() -> int:
 	if _daily_pick:
 		return RunState.daily_seed()
-	if _seed_edit != null and is_instance_valid(_seed_edit):
-		var typed := _seed_edit.text.strip_edges().to_lower()
-		if typed != "":
-			return RunState.seed_from_string(typed)
+	var typed := _muster_seed_text.strip_edges().to_lower()
+	if typed != "":
+		return RunState.seed_from_string(typed)
 	return _muster_random_seed
 
 
@@ -1668,135 +4216,65 @@ func _refresh_muster_campaign() -> void:
 	var final_id := String(deal.get("finale_rival", ""))
 	var final_name := String(HeroDB.get_hero(final_id).get("name", final_id)) \
 		if final_id != "" else "unknown"
-	_muster_campaign_label.text = "%s\nRoad lords: %s. Last claimant: %s." % [
+	_muster_campaign_label.text = "%s\nRival lords: %s. Final boss: %s." % [
 		RunState.season_line_for(tribes),
 		" · ".join(PackedStringArray(rival_names)), final_name]
 
 
-func _on_muster_seed_changed(_new_text: String) -> void:
+## Debounce token — see _on_muster_seed_changed.
+var _seed_deal_token: int = 0
+
+func _on_muster_seed_changed(new_text: String) -> void:
 	if _daily_pick:
 		return
-	_refresh_muster_deals()
+	_muster_seed_text = new_text
+	# The campaign line is derived text, not a deal — it can follow every letter.
 	_refresh_muster_campaign()
+	# THE DEAL IS DEBOUNCED, and that is a correctness fix rather than a
+	# performance one. _refresh_muster_deals re-rolls the whole writ slate off
+	# _pending_run_seed(), and when the player's chosen term is not in the new
+	# deal it silently reassigns _selected_writ_id to slate[0]. Fired on
+	# text_changed, typing a seven-character seed re-dealt SEVEN times and could
+	# quietly swap a term the player had already chosen for a different one —
+	# on the screen whose standing promise is "Nothing is final until you take
+	# the field", which the player reasonably reads as "nothing changes without
+	# me". Let the field settle, then deal once.
+	_seed_deal_token += 1
+	var token: int = _seed_deal_token
+	await get_tree().create_timer(0.35).timeout
+	# Superseded by a later keystroke, or the player left the step / the screen.
+	if token != _seed_deal_token or not is_inside_tree():
+		return
+	if _muster_step == 3:
+		if _muster_writ_row == null or not is_instance_valid(_muster_writ_row):
+			return
+	elif _muster_step == 4:
+		if _muster_order_term_detail == null or not is_instance_valid(
+				_muster_order_term_detail):
+			return
+	else:
+		return
+	var previous_term := _selected_writ_id
+	_refresh_muster_deals()
+	# If the new seed no longer contains the term the player chose, send them
+	# back to the comparison instead of silently replacing it on the review page.
+	if _muster_step == 4 and previous_term != _selected_writ_id:
+		_show_muster_step(3)
 
 
 func _abandon_muster() -> void:
+	_hide_deck_inspector()
+	_quick_march_active = false
+	_muster_advanced_open = false
 	RunState.pending_signature_relic = ""
 	RunState.pending_deck_variant = ""
 	RunState.pending_banner_tribe = ""
 	_muster_setup_preset.clear()
 	_selected_writ_id = ""
+	_muster_seed_text = ""
+	_muster_step = 1
 	_muster_writ_slate.clear()
 	_rebuild_menu()
-
-func _show_hero_select_legacy() -> void:
-	_set_subscreen_motion_obscured(true)
-	# Cast-lineup hero pick (StS/Hades pattern): a row of frameless portrait cards
-	# over the burning-meadow background. Each card stays down to portrait + name +
-	# tagline; hovering a hero spotlights it and fills the shared detail pane below
-	# with that hero's lore / loadout / relic. Clicking a card starts the run.
-	_remove_command_dossier()
-	var menu := get_node_or_null("Menu")
-	if menu == null:
-		# Fallback: never block starting a run if the menu node is missing.
-		RunState.start_new_run()
-		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
-		return
-	for child in menu.get_children():
-		child.queue_free()
-	_hero_cards.clear()
-	_hero_portraits.clear()
-	_selected_hero = ""
-	# Fresh setup screen = fresh run options (a stale daily toggle from a
-	# previous visit must not silently seed the next run).
-	_daily_pick = false
-	_daily_btn = null
-	_seed_edit = null
-	_asc_label = null
-	_run_commit_locked = false
-	# Master-detail split (StS/Hades pattern): a left roster of the five lords —
-	# hover/click to FOCUS, never to commit — beside a war-dossier pane that
-	# showcases the focused hero at size: portrait, pitch, the opening deck as
-	# real cards, relic, and the run settings living WITH the BEGIN button.
-	# 872, not 850: the readable deck strip plus the always-present ascension
-	# readout spend the pane's old slack, and TAKE THE FIELD is the control that
-	# must never be the one pushed under the fold. 872 in a 900-tall canvas
-	# still leaves a margin top and bottom.
-	_center_menu_for_subscreen(1500.0, 872.0)
-
-	var main_row := HBoxContainer.new()
-	main_row.add_theme_constant_override("separation", 34)
-	main_row.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	menu.add_child(main_row)
-
-	# ── Left: the roster ──
-	var roster := VBoxContainer.new()
-	roster.custom_minimum_size = Vector2(370, 0)
-	roster.add_theme_constant_override("separation", 8)
-	main_row.add_child(roster)
-
-	var title := _make_display_label("CHOOSE YOUR HERO", 27, GILT_BRIGHT)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	roster.add_child(title)
-	roster.add_child(_make_ornament_row(220.0, true))
-	var tgap := Control.new()
-	tgap.custom_minimum_size = Vector2(0, 4)
-	roster.add_child(tgap)
-
-	var hero_i := 0
-	for hid in HeroDB.HERO_ORDER:
-		var row := _make_roster_row(hid)
-		roster.add_child(row)
-		GameTheme.deal_in(row, 0.08 + hero_i * 0.045)
-		GameTheme.hover_lift(row, 1.018)
-		hero_i += 1
-
-	var rstretch := Control.new()
-	rstretch.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	roster.add_child(rstretch)
-
-	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 20, 44)
-	back.pressed.connect(_rebuild_menu)
-	roster.add_child(back)
-	GameTheme.hover_lift(back, 1.02)
-
-	# ── Right: the dossier ──
-	# Chart kit at whisper volume: soft translucent scrim + faint bronze
-	# hairline, so the pane reads as a mounted plate, not a CSS rectangle.
-	var detail_frame := PanelContainer.new()
-	var detail_bg := GameTheme.make_panel_style(
-		Color(0.05, 0.035, 0.045, 0.66), Color(0.60, 0.51, 0.34, 0.38), 1, 6, false)
-	detail_bg.content_margin_left = 30
-	detail_bg.content_margin_right = 30
-	detail_bg.content_margin_top = 12
-	detail_bg.content_margin_bottom = 12
-	detail_frame.add_theme_stylebox_override("panel", detail_bg)
-	detail_frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	main_row.add_child(detail_frame)
-	GameTheme.deal_in(detail_frame, 0.16)
-
-	var dossier := VBoxContainer.new()
-	dossier.add_theme_constant_override("separation", 10)
-	detail_frame.add_child(dossier)
-
-	_hero_detail = VBoxContainer.new()
-	_hero_detail.add_theme_constant_override("separation", 7)
-	_hero_detail.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	dossier.add_child(_hero_detail)
-
-	# ── Persistent dossier footer ──
-	# The run's "march orders" (ascension / daily / seed) + the primary commit
-	# button, grouped WITH the hero they configure. Built ONCE here (never inside
-	# _build_hero_detail) so the seed field keeps its text as the spotlight moves,
-	# and pinned to the pane's bottom by _hero_detail's vertical expand. This
-	# replaces the old orphaned setup row that floated in the dead space below the
-	# panes — and the duplicate BACK button that lived down there (the roster keeps
-	# the one BACK link).
-	_build_dossier_footer(dossier)
-
-	# Default the spotlight to the first hero so the pane is never blank.
-	_focus_hero(HeroDB.HERO_ORDER[0])
-	_animate_subscreen_reveal(menu)
 
 
 func _update_asc_rules_text() -> void:
@@ -1804,159 +4282,137 @@ func _update_asc_rules_text() -> void:
 		return
 	if _selected_ascension <= 0:
 		if MetaState.unlocked_ascension <= 0:
-			# Nothing unlocked yet: name the ladder rather than leaving a
-			# disabled stepper unexplained. One line — the footer has no slack.
-			_asc_rules_label.text = "No added rules. Take a keep to open the next tier."
+			# Nothing unlocked yet: name the ladder so it is a promise rather than
+			# an absence. One line — the footer has no slack.
+			#
+			# "Take a keep" was wrong. MetaState.record_victory is what raises
+			# unlocked_ascension, and that fires on WINNING THE MARCH — taking act
+			# one's keep unlocks nothing, so the old line pointed a new player at
+			# the wrong milestone in undefined vocabulary.
+			_asc_rules_label.text = "No added rules yet. Win a run to unlock Ascension levels."
 		else:
-			_asc_rules_label.text = "The war as first written — no added rules."
+			_asc_rules_label.text = "Ascension 0 — no added rules."
 		return
+	# ONE LINE, ALWAYS. This used to print one rule per unlocked tier, so the
+	# readout grew ~23px per Ascension — a VARIABLE-height element inside step
+	# III's fixed height budget, on the step that already had the least slack.
+	# At A3+ it pushed BACK and TAKE THE FIELD off the bottom of the 900px
+	# canvas: the commit control of the entire run opening, unreachable, and
+	# only for the players who had earned the most.
+	#
+	# Trimming neighbours could not fix that — anything saved is a ONE-TIME
+	# gain against something that keeps growing. The height has to become
+	# constant, so the stack collapses to a count and the rules move to the
+	# hover. The stepper beside it is a difficulty CHOICE, not a contract to
+	# read line by line, and every other block on this screen already states
+	# itself in one line.
 	var lines: Array[String] = []
 	for tier in range(1, _selected_ascension + 1):
 		if tier < RunState.ASCENSION_RULES.size():
 			lines.append(RunState.ASCENSION_RULES[tier])
-	_asc_rules_label.text = "\n".join(lines)
+	if lines.is_empty():
+		_asc_rules_label.text = "Ascension 0 — no added rules."
+		return
+	# Both halves of the plural agree. At Ascension 1 this used to read "1 added
+	# rule in force. Hover to read them." — the pronoun disagreeing with the count
+	# in the same sentence.
+	var one := lines.size() == 1
+	_asc_rules_label.text = "Ascension %d — %d added rule%s in force. Hover to read %s." \
+		% [_selected_ascension, lines.size(), "" if one else "s",
+			"it" if one else "them"]
+	_asc_rules_label.tooltip_text = "\n".join(lines)
+	_asc_rules_label.mouse_filter = Control.MOUSE_FILTER_STOP
 
 
 ## The kingdom's political dye, lifted to a legible-on-dark ink (keeps its hue,
 ## gains brightness) — used for the focused hero's nameplate accents so each
 ## lord reads in their faction's colour without leaving the sepia world.
+## Raise a colour to a TARGET relative luminance, keeping its hue.
+##
+## `Color.lightened(a)` is `c + (1 - c) * a` per channel, so it moves luminance
+## by roughly `(1 - lum) * a` — passing `target - lum` as the amount lands short
+## of the target, and the shortfall grows the darker the colour is. Two menu
+## call sites were doing exactly that and both were silently missing their
+## floor. Solving `lum + (1 - lum) * a = target` for `a` is the whole fix.
+func _lift_to_luminance(c: Color, target: float) -> Color:
+	var lum := c.get_luminance()
+	if lum >= target or lum >= 1.0:
+		return c
+	return c.lightened((target - lum) / (1.0 - lum))
+
+
+## The lord's colour, WARMED AND LIFTED for use as ink (2026-08-03).
+##
+## The source is HeroDB's faction colour, and that field is documented as a
+## "banner/political-wash tint for map skinning" — a flat dye laid under a sepia
+## parchment plate, where a teal (grasswake 0.33/0.50/0.55) or a slate blue
+## (lanternhall 0.52/0.60/0.78) is doing its job. Used raw as TEXT on the fire it
+## does the opposite: the old lerp toward IVORY only desaturated it, so Raider's
+## 30px nameplate — the largest word on the hero screen — rendered as a cold
+## grey-green sitting on an ember background, the single coldest thing on any
+## menu. The house note on the art pass names pervasive cyan/teal as the #1
+## defect; this is where the menus were still importing it.
+##
+## Lerping toward GILT_BRIGHT instead keeps the five lords distinguishable (they
+## stay olive / bronze / green-gold / pale gold / ember, in that order) while
+## putting every one of them inside the fire's palette, and the value floor stops
+## the darkest faction from printing dim.
+## A 0.42 lerp DOES NOT CONVERT A TEAL, and 0.46 is not a floor for ink (audit,
+## 2026-08-03). Grasswake is (0.33, 0.50, 0.55); at 42% toward gilt it lands on
+## (0.611, 0.647, 0.508) — green still dominant, i.e. a sage, which is what
+## Raider's 30px nameplate actually rendered as (measured (156,165,130) on the
+## frame: an exact match, so the arithmetic here IS what ships). And a 0.46
+## luminance floor put every accent heading ~30% DIMMER than the ivory paragraph
+## underneath it, so on Quick March the largest text in the pane was also the
+## faintest, and the "recommended" badge beside it outranked the hero's name.
+##
+## Two changes. A cold source (green or blue at or above red) is lerped much
+## harder, because half-warming a cold dye just desaturates it. And the floor
+## goes to 0.80, which is above DESC_DIM (0.74) — the ink the paragraphs under
+## these headings now use — so the heading wins its own pane. The dyes stay
+## distinguishable: everflame ember, owed bronze, last_wall bone, grasswake
+## warm-olive, lanternhall pale gold.
 func _faction_accent(hid: String) -> Color:
 	var fac := HeroDB.faction_info(HeroDB.get_faction(hid))
 	if fac.is_empty():
 		return GILT
 	var c: Color = fac.get("color", GILT)
-	return c.lerp(IVORY, 0.34)
+	var toward_gilt := 0.62 if (c.g >= c.r or c.b >= c.r) else 0.42
+	return _lift_to_luminance(c.lerp(GILT_BRIGHT, toward_gilt), 0.80)
 
 
-## Persistent footer for the dossier pane: MARCH ORDERS (ascension stepper /
-## DAILY MARCH / seed) over the TAKE THE FIELD commit button. Built once so the
-## seed LineEdit survives per-focus rebuilds of the detail pane above it.
-func _build_dossier_footer(parent: VBoxContainer) -> void:
-	var footer := VBoxContainer.new()
-	footer.add_theme_constant_override("separation", 8)
-	footer.size_flags_vertical = Control.SIZE_SHRINK_END
-	parent.add_child(footer)
-
-	footer.add_child(_make_ornament_row(320.0, true))
-	footer.add_child(_make_display_label("RUN SETUP", 16, GILT_BRIGHT))
-
-	# One quiet row: ascension stepper · daily toggle · seed field. Left-packed
-	# to sit under the left-aligned dossier.
-	var setup_row := HBoxContainer.new()
-	setup_row.alignment = BoxContainer.ALIGNMENT_BEGIN
-	setup_row.add_theme_constant_override("separation", 22)
-	footer.add_child(setup_row)
-
-	# The stepper ALWAYS renders, even at tier 0 with nothing unlocked. It used
-	# to be gated on `unlocked_ascension > 0`, which meant a fresh profile never
-	# saw the control at all and never learned the ladder existed — the section
-	# heading promised march orders and delivered a daily toggle and a seed box.
-	# An explained, disabled zero teaches the axis; an absent control cannot.
-	var asc_unlocked: int = MetaState.unlocked_ascension
-	var asc_box := HBoxContainer.new()
-	asc_box.alignment = BoxContainer.ALIGNMENT_CENTER
-	asc_box.add_theme_constant_override("separation", 10)
-	var minus := _make_menu_button("−", Color(0.20, 0.16, 0.14), 18, 36)
-	minus.custom_minimum_size = Vector2(40, 36)
-	minus.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	minus.disabled = asc_unlocked <= 0
-	minus.pressed.connect(_change_ascension.bind(-1))
-	asc_box.add_child(minus)
-	_asc_label = _make_display_label("Ascension %d / %d" % [
-		_selected_ascension, asc_unlocked], 16, IVORY)
-	_asc_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_asc_label.custom_minimum_size = Vector2(168, 36)
-	_asc_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	asc_box.add_child(_asc_label)
-	var plus := _make_menu_button("+", Color(0.20, 0.16, 0.14), 18, 36)
-	plus.custom_minimum_size = Vector2(40, 36)
-	plus.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	plus.disabled = asc_unlocked <= 0
-	plus.pressed.connect(_change_ascension.bind(1))
-	asc_box.add_child(plus)
-	setup_row.add_child(asc_box)
-
-	var daily_text := "DAILY MARCH: OFF"
-	var daily_blocked := false
-	var today_daily: Dictionary = MetaState.todays_daily()
-	if not today_daily.is_empty():
-		match String(today_daily.get("result", "")):
-			"won":
-				daily_text = "DAILY MARCH: WON"
-				daily_blocked = true
-			"lost":
-				daily_text = "DAILY MARCH: LOST"
-				daily_blocked = true
-			_:
-				if _daily_resume_slot(today_daily) >= 0:
-					daily_text = "CONTINUE DAILY MARCH"
-				else:
-					daily_text = "DAILY MARCH: UNAVAILABLE"
-					daily_blocked = true
-	_daily_btn = _make_menu_button(daily_text,
-		Color(0.30, 0.24, 0.34), 16, 36)
-	_daily_btn.custom_minimum_size = Vector2(260, 36)
-	_daily_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	_daily_btn.tooltip_text = _daily_tooltip()
-	_daily_btn.disabled = daily_blocked
-	_daily_btn.pressed.connect(_on_daily_button_pressed)
-	setup_row.add_child(_daily_btn)
-
-	_seed_edit = LineEdit.new()
-	_seed_edit.placeholder_text = "seed (optional)"
-	_seed_edit.alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_seed_edit.add_theme_font_size_override("font_size", 18)
-	_seed_edit.add_theme_color_override("font_color", IVORY)
-	_seed_edit.add_theme_color_override("font_placeholder_color", Color(0.55, 0.50, 0.42))
-	_seed_edit.custom_minimum_size = Vector2(210, 36)
-	_seed_edit.tooltip_text = "Same seed, same map — share one with a friend and compare runs."
-	if GameTheme.font_display:
-		_seed_edit.add_theme_font_override("font", GameTheme.font_display)
-	# Ink-well recess (the NetLobby text-entry convention) — the default OS
-	# LineEdit box was the last raw rectangle on the setup screen.
-	_seed_edit.add_theme_color_override("caret_color", GILT_BRIGHT)
-	var well := StyleBoxFlat.new()
-	well.bg_color = Color(0.02, 0.015, 0.01, 0.85)
-	well.border_color = Color(0.60, 0.51, 0.34, 0.75)
-	well.set_border_width_all(1)
-	well.set_corner_radius_all(3)
-	well.content_margin_left = 10
-	well.content_margin_right = 10
-	well.content_margin_top = 6
-	well.content_margin_bottom = 6
-	_seed_edit.add_theme_stylebox_override("normal", well)
-	var well_focus := well.duplicate() as StyleBoxFlat
-	well_focus.border_color = GILT_BRIGHT
-	_seed_edit.add_theme_stylebox_override("focus", well_focus)
-	setup_row.add_child(_seed_edit)
-
-	# The ascension RULES readout: the stepper number is meaningless unless the
-	# player can see what each tier adds. Cumulative list, dimmed ink. Always
-	# built (see the stepper note above) — at tier 0 it explains the zero.
-	_asc_rules_label = _make_display_label("", 15, Color(0.72, 0.64, 0.52))
-	_asc_rules_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	_asc_rules_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_asc_rules_label.custom_minimum_size = Vector2(560, 0)
-	footer.add_child(_asc_rules_label)
-	_update_asc_rules_text()
-
-	var gap := Control.new()
-	gap.custom_minimum_size = Vector2(0, 4)
-	footer.add_child(gap)
-	footer.add_child(_make_begin_button())
-
-
-## Primary call-to-action — frameless (no boxy rectangle, per house style): a
-## large gilt Cinzel command flanked by flames over a persistent gilt underline
-## that brightens on hover. Commits whichever hero is currently spotlighted.
+## THE COMMIT — the largest instance of the shell's one forward-action shape.
+##
+## This was frameless, and until 2026-08-05 that was consistent: every forward
+## move in the muster was a frameless word. Now steps I-III each carry a plated
+## primary tab, so leaving the LAST step frameless taught the player one shape
+## three times and then changed it on the one press that matters. It keeps
+## everything that made it the climax — 27px Cinzel against the tabs' 19, two
+## flames instead of one, its own underline — and puts them on the same plate,
+## so the walk reads as one escalating gesture rather than four designs.
 func _make_begin_button() -> Control:
 	var btn := Button.new()
 	btn.custom_minimum_size = Vector2(0, 56)
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	btn.focus_mode = Control.FOCUS_ALL
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	for st in ["normal", "hover", "pressed", "focus"]:
-		btn.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+	btn.clip_contents = false
+	var cta_normal := GameTheme.make_panel_style(
+		Color(0.135, 0.072, 0.034, 0.94), Color(0.84, 0.64, 0.32, 0.86),
+		2, 6, false)
+	var cta_hover := GameTheme.make_panel_style(
+		Color(0.235, 0.120, 0.048, 0.98), GILT_BRIGHT, 3, 6, true)
+	var cta_pressed := GameTheme.make_panel_style(
+		Color(0.095, 0.052, 0.028, 0.98), Color(0.90, 0.72, 0.36), 2, 6, false)
+	for style in [cta_normal, cta_hover, cta_pressed]:
+		style.content_margin_left = 22
+		style.content_margin_right = 22
+		style.content_margin_top = 6
+		style.content_margin_bottom = 6
+	btn.add_theme_stylebox_override("normal", cta_normal)
+	btn.add_theme_stylebox_override("hover", cta_hover)
+	btn.add_theme_stylebox_override("focus", cta_hover)
+	btn.add_theme_stylebox_override("pressed", cta_pressed)
 
 	var inner := HBoxContainer.new()
 	inner.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -1974,7 +4430,7 @@ func _make_begin_button() -> Control:
 	stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	inner.add_child(stack)
 
-	var lbl := _make_display_label("TAKE THE FIELD", 27, GILT_BRIGHT)
+	var lbl := _make_display_label("START RUN", 27, GILT_BRIGHT)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.add_theme_color_override("font_outline_color", Color(0.05, 0.02, 0.0, 0.85))
 	lbl.add_theme_constant_override("outline_size", 5)
@@ -1991,7 +4447,14 @@ func _make_begin_button() -> Control:
 	var flame_r := _make_flame_accent()
 	inner.add_child(flame_r)
 
+	# LIT AT REST (2026-08-05). Both flames used to start invisible and ignite on
+	# hover — the same tell every other item in the column gives. But this is the
+	# button that spends the next forty minutes, and on a cold render it was
+	# indistinguishable from the BACK beside it. The commit burns before you
+	# reach it; hover takes it the rest of the way to full.
 	var flames: Array[TextureRect] = [flame_l, flame_r]
+	for f in flames:
+		f.modulate = Color(1, 1, 1, TAKE_FIELD_FLAME_REST)
 	btn.mouse_entered.connect(func() -> void:
 		lbl.add_theme_color_override("font_color", Color(1.0, 0.94, 0.66))
 		var tw := create_tween().set_parallel(true)
@@ -2005,12 +4468,13 @@ func _make_begin_button() -> Control:
 		var tw := create_tween().set_parallel(true)
 		tw.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 		for f in flames:
-			tw.tween_property(f, "modulate:a", 0.0, 0.18)
+			tw.tween_property(f, "modulate:a", TAKE_FIELD_FLAME_REST, 0.18)
 		tw.tween_property(rule, "modulate:a", 0.7, 0.18)
 		tw.tween_property(inner, "position:x", 0.0, 0.18))
 	btn.focus_entered.connect(func() -> void: btn.mouse_entered.emit())
 	btn.focus_exited.connect(func() -> void: btn.mouse_exited.emit())
 	btn.pressed.connect(_on_take_field_pressed.bind(btn))
+	_arm_shell_button(btn, "commit", 1.03)
 	return btn
 
 
@@ -2018,90 +4482,28 @@ func _on_take_field_pressed(btn: Control) -> void:
 	if _run_commit_locked or _selected_hero == "" or _selected_writ_id == "":
 		return
 	_run_commit_locked = true
+	# FLUSH ANY DEBOUNCED SEED DEAL. _on_muster_seed_changed waits 0.35s before
+	# re-rolling the slate, so a player who types a seed and immediately commits
+	# would otherwise march with a slate rolled from the PREVIOUS seed while
+	# _pending_run_seed() reports the new one — the run and its opening term
+	# disagreeing about which seed they came from. Cancelling the pending deal
+	# and taking it now keeps the committed term the one actually on screen.
+	if _seed_deal_token > 0:
+		_seed_deal_token += 1   # supersede the in-flight timer
+		if _muster_step == 4 and _muster_order_term_detail != null \
+				and is_instance_valid(_muster_order_term_detail):
+			var previous_term := _selected_writ_id
+			_refresh_muster_deals()
+			if previous_term != _selected_writ_id:
+				_run_commit_locked = false
+				_show_muster_step(3)
+				return
 	GameTheme.claim_pop(btn)
 	if UserSettings == null or not UserSettings.reduce_motion:
 		await get_tree().create_timer(0.12).timeout
 	if not is_inside_tree():
 		return
 	_begin_run_with(_selected_hero)
-
-
-func _make_roster_row(hid: String) -> Button:
-	# Compact hero-list row for the left side of the run setup screen. The old
-	# full portrait-card builder still exists below for reference/old layouts, but
-	# the current master-detail screen needs five heroes to fit in one column.
-	var hero := HeroDB.get_hero(hid)
-	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(350, 78)
-	btn.focus_mode = Control.FOCUS_ALL
-	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	for state in ["normal", "hover", "pressed", "focus"]:
-		btn.add_theme_stylebox_override(state, StyleBoxEmpty.new())
-
-	var row := HBoxContainer.new()
-	row.set_anchors_preset(Control.PRESET_FULL_RECT)
-	row.offset_left = 8
-	row.offset_right = -8
-	row.offset_top = 5
-	row.offset_bottom = -5
-	row.add_theme_constant_override("separation", 12)
-	row.alignment = BoxContainer.ALIGNMENT_BEGIN
-	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	btn.add_child(row)
-
-	var port_size := Vector2(52, 68)
-	var portrait_path := "res://assets/portraits/hero_portrait_%s.png" % hid
-	var portrait: Control = null
-	if ResourceLoader.exists(portrait_path):
-		var tex := TextureRect.new()
-		tex.texture = load(portrait_path)
-		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		tex.clip_contents = true
-		portrait = tex
-	else:
-		var plate := PanelContainer.new()
-		plate.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
-			Color(0.10, 0.085, 0.11, 0.92),
-			Color(GILT.r, GILT.g, GILT.b, 0.45), 1, 4, false))
-		var mono := _make_display_label(
-			String(hero.get("name", hid)).strip_edges().left(1).to_upper(),
-			34, Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.85))
-		mono.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		mono.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		plate.add_child(mono)
-		portrait = plate
-	portrait.custom_minimum_size = port_size
-	portrait.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(portrait)
-	_hero_portraits[hid] = portrait
-
-	var copy := VBoxContainer.new()
-	copy.add_theme_constant_override("separation", 0)
-	copy.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	copy.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	copy.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(copy)
-
-	var name_lbl := _make_display_label(String(hero.get("name", hid)), 23, GILT_BRIGHT)
-	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	copy.add_child(name_lbl)
-
-	var tag_lbl := _make_display_label(String(hero.get("tagline", "")), 16, Color(1.0, 0.88, 0.62))
-	tag_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	tag_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	tag_lbl.custom_minimum_size = Vector2(245, 0)
-	copy.add_child(tag_lbl)
-
-	# Hover OR click SELECTS (spotlights) — never commits. Starting the run is the
-	# one deliberate act of the TAKE THE FIELD button in the dossier footer, so a
-	# player browsing the roster can never trip into a run they didn't mean to.
-	btn.mouse_entered.connect(_focus_hero.bind(hid))
-	btn.focus_entered.connect(_focus_hero.bind(hid))
-	btn.pressed.connect(_focus_hero.bind(hid))
-	_hero_cards[hid] = btn
-	return btn
 
 
 # Cross-run muster picks (per focused hero; reset when the focus moves so a
@@ -2142,33 +4544,170 @@ func _set_bound_doctrine(hid: String, use_alt: bool) -> void:
 	_build_muster_roll(hid)
 
 
-func _focus_hero(hid: String) -> void:
-	# Spotlight one hero: brighten its portrait, dim the rest, light its gilt
-	# underline, and repaint the shared detail pane. Pane-only update — never
-	# rebuilds the cards (which would re-load() portrait textures and flicker).
+# Portrait tints for the three states a roster row can be in. Named because
+# _focus_hero and _preview_hero must agree on them exactly — a preview that
+# restores to a slightly different resting value leaves a trail of half-lit
+# lords behind the cursor.
+const HERO_TINT_CHOSEN := Color(1.08, 1.04, 0.98)
+const HERO_TINT_UNDER_CURSOR := Color(0.96, 0.93, 0.90)
+const HERO_TINT_RESTING := Color(0.78, 0.76, 0.74)
+
+
+## THE DELIBERATE ACT — this is where a lord is actually CHOSEN, and it is
+## reachable only from `pressed` (a click, or Enter/A on the focused row).
+##
+## It used to be bound to `mouse_entered` as well, which made choosing a lord an
+## accident of where the pointer happened to rest. BACK sits at x 0-180 directly
+## beneath the roster column at x 0-430: moving the cursor from a top row down to
+## BACK swept through every lord under it, selected each in turn, and left the
+## run standing on whichever one the pointer crossed last. Worse, the two lines
+## below wipe the doctrine toggles — so a returning player who had set ALT DECK,
+## then reached for BACK, silently marched under STANDARD DECK with no toggle
+## ever having been pressed. Hover now PREVIEWS (see _preview_hero); only a press
+## commits.
+##
+## Spotlight one hero: brighten its portrait, dim the rest, light its gilt
+## underline, and repaint the shared detail pane. Pane-only update — never
+## rebuilds the cards (which would re-load() portrait textures and flicker).
+## `keep_doctrine` is for the ONE caller that is not a change of lord: rebuilding
+## step I onto the lord already chosen. Picking a DIFFERENT lord must clear the
+## toggles (they name his predecessor's unlocks), but re-entering the step must
+## not — so _build_muster_step_host used to save the pair, call this, restore
+## them, and then call _build_muster_roll a SECOND time to repaint what the first
+## call had just drawn wrong. That cost ten Card2D minis instantiated, freed and
+## re-instantiated plus two bake passes on every entry to step I, including every
+## back-navigation, on the screen whose whole job is to feel unhurried.
+func _focus_hero(hid: String, keep_doctrine: bool = false) -> void:
 	if _selected_hero == hid and _hero_detail != null and _hero_detail.get_child_count() > 0:
 		return
-	_muster_alt_relic = false
-	_muster_alt_deck = false
+	if not keep_doctrine:
+		_muster_alt_relic = false
+		_muster_alt_deck = false
 	_selected_hero = hid
 	for k in _hero_portraits:
 		var p = _hero_portraits[k]
 		if is_instance_valid(p):
-			p.modulate = Color(1.08, 1.04, 0.98) if k == hid else Color(0.78, 0.76, 0.74)
+			p.modulate = HERO_TINT_CHOSEN if k == hid else HERO_TINT_RESTING
 	for k in _hero_cards:
 		var b = _hero_cards[k]
 		if is_instance_valid(b):
-			var box: StyleBox = _hero_focus_box() if k == hid else StyleBoxEmpty.new()
+			var chosen: bool = k == hid
+			var box: StyleBox = _hero_focus_box() if chosen else StyleBoxEmpty.new()
 			b.add_theme_stylebox_override("normal", box)
-			b.add_theme_stylebox_override("hover", box)
 			b.add_theme_stylebox_override("pressed", box)
+			# Hover is no longer a COPY of the selection mark. The 3px gilt
+			# underline means "this lord marches"; an unchosen row under the
+			# cursor gets a bronze hairline instead, so the roster can never show
+			# two rows wearing the same badge and let the player guess which one
+			# the run is actually standing on.
+			b.add_theme_stylebox_override("hover", box if chosen else _hero_hover_box())
+			b.add_theme_stylebox_override("focus",
+				_hero_selected_focus_box() if chosen else _hero_cursor_box())
 	_build_muster_roll(hid)
 	_refresh_muster_campaign()
 
 
+## What hovering (or arrowing onto) a lord is allowed to do: lift his portrait
+## out of the dim, and nothing else. No `_selected_hero` write, no doctrine
+## reset, and deliberately NO detail-pane repaint — the pane is the record of
+## what you have chosen, and a pane that follows the cursor would put a lord's
+## deck on screen beside a run that is not his. `_warm_deck_strip` also stands
+## its bake down the moment `_selected_hero != hid`, so a previewed strip would
+## render half-baked anyway. Correctness over flourish.
+func _preview_hero(hid: String, lit: bool) -> void:
+	if hid == _selected_hero:
+		return
+	var port = _hero_portraits.get(hid)
+	if port == null or not is_instance_valid(port):
+		return
+	# The unlit path asks the button whether it still holds keyboard focus, so
+	# walking the roster with a controller and then moving the mouse away does
+	# not dim the row the stick is standing on.
+	var held := lit
+	if not held:
+		var btn = _hero_cards.get(hid)
+		held = btn != null and is_instance_valid(btn) and btn.has_focus()
+	port.modulate = HERO_TINT_UNDER_CURSOR if held else HERO_TINT_RESTING
+
+
+## The hover mark: a bronze hairline at whisper volume, one third the weight of
+## _hero_focus_box's gilt underline and with no glow. Same kit, clearly quieter —
+## "you could pick this" against "this one marches".
+func _hero_hover_box() -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.045)
+	sb.border_width_bottom = 1
+	sb.border_color = Color(GILT.r, GILT.g, GILT.b, 0.38)
+	sb.corner_radius_top_left = 4
+	sb.corner_radius_top_right = 4
+	sb.corner_radius_bottom_left = 4
+	sb.corner_radius_bottom_right = 4
+	return sb
+
+
+## Keyboard/controller location. This must read without color and without moving
+## selection: a bronze keyline says "A/Enter would choose this"; the selected
+## hero keeps the heavier gilt underline from _hero_focus_box.
+##
+## AND IT WAS HEAVIER THAN THE SELECTION IT MUST NOT OUTRANK (2026-08-04). The
+## old note claimed "one third the weight"; measured on a 406x66 roster row, in
+## alpha-weighted pixels of ink:
+##   selection  = 3px full-gilt underline (1218) + 0.07 wash (1876)      = 3094
+##   cursor     = 0.075 wash (2010) + 7px of border at 0.82 (1215)
+##                + shadow_size 4 at 0.14 (~4340)                        = 7565
+## Two and a half times, and the term that dominates is the shadow — the same
+## mechanism _hero_focus_box had to delete a day earlier for the same reason:
+## `shadow_size` draws BEHIND a 93%-transparent box, so it reads straight through
+## its own fill as a second, larger wash rather than as a glow.
+##
+## So the shadow goes here too, the wash drops to 0.03, the border becomes an
+## even keyline with only the left edge thickened (the caret-in-the-margin
+## idiom), and the bronze comes down to 0.62. That lands at ~1471 — 48% of the
+## selection mark, which is the relationship the docstring always claimed.
+func _hero_cursor_box() -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.03)
+	sb.border_width_left = 3
+	sb.border_width_top = 1
+	sb.border_width_right = 1
+	sb.border_width_bottom = 1
+	sb.border_color = Color(GILT.r, GILT.g, GILT.b, 0.62)
+	sb.corner_radius_top_left = 4
+	sb.corner_radius_top_right = 4
+	sb.corner_radius_bottom_left = 4
+	sb.corner_radius_bottom_right = 4
+	return sb
+
+
+## THE SELECTION MARK WAS A SOLID GOLD PLATE, AND THE CODE DID NOT SAY SO
+## (2026-08-03). Reported symptom: the lord you have chosen is the hardest row on
+## the screen to read. Measured on the render, selected row plate = rgb(151,127,69),
+## luminance 0.50 — so its own gilt name sat at 2.85:1 and its tagline at 2.7:1,
+## against 9.9–14.1:1 for the five rows the player did NOT pick. Selection was
+## subtracting legibility. Step II's banner chips shared the box and the fault
+## (2.28:1 on the chosen tribe's name, 2.05:1 on its rule).
+##
+## Nothing in this function looked capable of that — the wash is alpha 0.07. Two
+## compounding causes, both invisible at the call site:
+##   1. `shadow_size` on a StyleBoxFlat draws the glow BEHIND the box, and this
+##      box is 93% transparent, so the shadow reads straight through its own
+##      fill. At size 10 on a 66px row it covers the whole row: not a glow, a
+##      second fill at alpha 0.28.
+##   2. Godot draws the state box AND THEN the `focus` box over it. Both callers
+##      hand the selected row this same box for `focus`, so the pair above is
+##      composited TWICE.
+## Hand-compositing 0.28-shadow + 0.07-fill, twice, over the pane's rgb(19,13,12)
+## predicts rgb(149,125,69). The render measures rgb(151,127,69) — the whole
+## discrepancy, to 2/255 on every channel.
+##
+## So the shadow goes. The wash and the 3px gilt underline are the selection
+## mark, and a single 0.07 pass leaves the plate at luminance 0.11 and the name
+## back at 5.6:1. `_hero_selected_focus_box` below keeps the second draw from
+## putting the fill back.
 func _hero_focus_box() -> StyleBoxFlat:
-	# Frameless-friendly selection: a faint warm wash, a gilt underline, and a
-	# soft glow — no full rectangle border (the dev dislikes boxy tiles).
+	# Frameless-friendly selection: a faint warm wash and a gilt underline — no
+	# full rectangle border (the dev dislikes boxy tiles), and no shadow, which
+	# on a translucent box is a fill by another name.
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.07)
 	sb.border_width_bottom = 3
@@ -2177,391 +4716,25 @@ func _hero_focus_box() -> StyleBoxFlat:
 	sb.corner_radius_top_right = 4
 	sb.corner_radius_bottom_left = 4
 	sb.corner_radius_bottom_right = 4
-	sb.shadow_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.28)
-	sb.shadow_size = 10
 	return sb
 
 
-## Ambient life for the focused lord's portrait well: a slow Ken Burns push on
-## the painting plus an additive lamp biased to the top third, breathing.
-## Mirrors the skirmish lobby's banner plates ([[MP menus polish]]) so the
-## campaign's own hero pick isn't the deadest portrait in the game.
-##
-## Both beats are decorative, so both gate on Reduce Motion. The portrait's
-## size is 0 at build time, so the push is armed a frame later.
-func _light_hero_well(well: Control, port: Control, accent: Color) -> void:
-	var glow := TextureRect.new()
-	glow.name = "WellLamp"
-	glow.texture = _lamp_glow_texture()
-	glow.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	glow.stretch_mode = TextureRect.STRETCH_SCALE
-	glow.set_anchors_preset(Control.PRESET_FULL_RECT)
-	glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	glow.modulate = Color(1.0, 0.86, 0.62, 0.16)
-	var mat := CanvasItemMaterial.new()
-	mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
-	glow.material = mat
-	well.add_child(glow)
-
-	if UserSettings != null and UserSettings.reduce_motion:
-		return
-	_arm_well_life.call_deferred(port, glow)
-
-
-func _arm_well_life(port: Control, glow: Control) -> void:
-	if not is_instance_valid(port) or not is_instance_valid(glow):
-		return
-	await get_tree().process_frame
-	await get_tree().process_frame
-	if not is_instance_valid(port) or not is_instance_valid(glow):
-		return
-	if port.size.x > 1.0:
-		GameTheme.ken_burns(port, port.size * 0.5, 1.05, 16.0)
-	var tw := glow.create_tween().set_loops()
-	tw.set_trans(Tween.TRANS_SINE)
-	tw.tween_property(glow, "modulate:a", 0.24, 3.1)
-	tw.tween_property(glow, "modulate:a", 0.11, 3.1)
-
-
-## Shared radial lamp texture for the portrait wells — pooled on first use so
-## five hero picks don't each bake their own gradient.
-var _lamp_tex: GradientTexture2D = null
-
-func _lamp_glow_texture() -> GradientTexture2D:
-	if _lamp_tex != null:
-		return _lamp_tex
-	var grad := Gradient.new()
-	grad.offsets = PackedFloat32Array([0.0, 0.55, 1.0])
-	grad.colors = PackedColorArray([
-		Color(1.0, 0.90, 0.68, 0.85),
-		Color(1.0, 0.72, 0.40, 0.28),
-		Color(0.9, 0.55, 0.25, 0.0)])
-	_lamp_tex = GradientTexture2D.new()
-	_lamp_tex.gradient = grad
-	_lamp_tex.fill = GradientTexture2D.FILL_RADIAL
-	_lamp_tex.fill_from = Vector2(0.5, 0.30)
-	_lamp_tex.fill_to = Vector2(1.05, 0.30)
-	_lamp_tex.width = 192
-	_lamp_tex.height = 192
-	return _lamp_tex
-
-
-func _build_hero_detail(hid: String) -> void:
-	# Fills the shared pane with the focused hero's lore + mechanical pitch + deck
-	# composition + starting relic. This is where the text we pulled off the cards
-	# now lives — once, with reading room.
-	if _hero_detail == null:
-		return
-	_hide_deck_preview()
-	for c in _hero_detail.get_children():
-		c.queue_free()
-	var hero := HeroDB.get_hero(hid)
-
-	# Generous wrap width so the now-larger text fills the wide pane instead of
-	# rag-wrapping in a narrow column.
-	const DETAIL_WRAP := 910.0
-
-	# ── Nameplate: the focused hero at size ──
-	# A framed portrait beside the name, tagline, and the KINGDOM this lord rules
-	# (Successor Wars identity). Anchors the top of the pane — the old build opened
-	# straight into a lore line with no portrait, so ~60% of the pane read as empty
-	# void — and carries the per-hero faction colour so each hero feels distinct.
-	var accent := _faction_accent(hid)
-	var plate := HBoxContainer.new()
-	plate.add_theme_constant_override("separation", 22)
-	plate.alignment = BoxContainer.ALIGNMENT_BEGIN
-	_hero_detail.add_child(plate)
-
-	# The lord's well. Sized 236×210 — this is the single most committing
-	# choice in the campaign, and it was staged at 176×232 and dead still,
-	# which left the SKIRMISH lobby's practice-bot seat (236×296, breathing,
-	# lamplit) with more presence than the run you actually keep. Same
-	# treatment here: a slow Ken Burns push and a lamp that breathes over the
-	# top third. Both decorative — gated off under Reduce Motion.
-	var port_frame := PanelContainer.new()
-	# 236x250, not 310 tall: the readable deck strip and the always-present
-	# ascension readout both grew the pane, and TAKE THE FIELD was the thing
-	# pushed off the bottom. The portrait had the most slack.
-	port_frame.custom_minimum_size = Vector2(236, 184)
-	port_frame.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-	port_frame.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
-		Color(0.08, 0.065, 0.06, 0.90),
-		Color(accent.r, accent.g, accent.b, 0.72), 1, 4, false))
-	port_frame.clip_contents = true
-	var portrait_path := "res://assets/portraits/hero_portrait_%s.png" % hid
-	if ResourceLoader.exists(portrait_path):
-		var tex := TextureRect.new()
-		tex.texture = load(portrait_path)
-		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		tex.custom_minimum_size = Vector2(234, 182)
-		tex.clip_contents = true
-		port_frame.add_child(tex)
-		_light_hero_well(port_frame, tex, accent)
-	else:
-		# No painted portrait — a monogram plate keeps the footprint (graceful).
-		var mono := _make_display_label(
-			String(hero.get("name", hid)).strip_edges().left(1).to_upper(), 92, accent)
-		mono.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		mono.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		port_frame.add_child(mono)
-	plate.add_child(port_frame)
-
-	var idcol := VBoxContainer.new()
-	idcol.add_theme_constant_override("separation", 3)
-	idcol.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	idcol.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	plate.add_child(idcol)
-
-	var name_lbl := _make_display_label(String(hero.get("name", hid)), 42, GILT_BRIGHT)
-	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	idcol.add_child(name_lbl)
-
-	var tag_lbl := _make_display_label(String(hero.get("tagline", "")), 20, Color(1.0, 0.88, 0.62))
-	tag_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	idcol.add_child(tag_lbl)
-
-	# Kingdom band: "The Last Wall  ·  Stone  ·  Formation" under a faction-tinted
-	# rule, with the kingdom's one-line engine flavour beneath.
-	var fac := HeroDB.faction_info(String(hero.get("faction", "")))
-	if not fac.is_empty():
-		var ugap := Control.new()
-		ugap.custom_minimum_size = Vector2(0, 7)
-		idcol.add_child(ugap)
-		var underline := ColorRect.new()
-		underline.custom_minimum_size = Vector2(300, 2)
-		underline.color = Color(accent.r, accent.g, accent.b, 0.85)
-		underline.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		idcol.add_child(underline)
-		var kgap := Control.new()
-		kgap.custom_minimum_size = Vector2(0, 5)
-		idcol.add_child(kgap)
-		var kingdom := _make_display_label("%s  ·  %s  ·  %s" % [
-			String(fac.get("name", "")), String(fac.get("element", "")),
-			String(fac.get("engine", ""))], 18, accent)
-		kingdom.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-		idcol.add_child(kingdom)
-		var engine_line := _make_display_label(
-			String(fac.get("engine_line", "")), 16, Color(0.78, 0.73, 0.64))
-		engine_line.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-		engine_line.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		engine_line.custom_minimum_size = Vector2(560, 0)
-		idcol.add_child(engine_line)
-
-	_hero_detail.add_child(_make_ornament_row(320.0, true))
-
-	var lore := String(hero.get("lore", ""))
-	if lore != "":
-		var lore_lbl := _make_display_label(lore, 19, Color(0.90, 0.84, 0.96))
-		lore_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-		lore_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		lore_lbl.custom_minimum_size = Vector2(DETAIL_WRAP, 0)
-		_hero_detail.add_child(lore_lbl)
-
-	var desc_lbl := _make_display_label(String(hero.get("desc", "")), 18, IVORY)
-	desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	desc_lbl.custom_minimum_size = Vector2(DETAIL_WRAP, 0)
-	_hero_detail.add_child(desc_lbl)
-
-	_hero_detail.add_child(_make_ornament_row(320.0, true))
-
-	# ── Loadout band: the opening deck as REAL mini cards (left) beside the
-	# signature relic (right) — the MP-draft treatment instead of a names-only
-	# summary line nobody can picture. Hovering a mini floats the full card.
-	# The strip always shows the SELECTED muster (default or unlocked alternate).
-	var alt_deck: Dictionary = hero.get("deck_alt", {})
-	var doctrine_unlocked := _bound_doctrine_unlocked(hid)
-	var mastery_unlocked := _doctrine_mastery_unlocked(hid)
-	_normalize_muster_doctrine(hid)
-	var deck_unlocked: bool = doctrine_unlocked
-	var deck_for_display: Array = hero.get("deck", [])
-	if _muster_alt_deck and deck_unlocked:
-		deck_for_display = alt_deck.get("deck", deck_for_display)
-
-	# The deck strip and the relic block STACK now, they no longer sit side by
-	# side. At a readable card scale the strip needs the pane's full width (six
-	# uniques ≈ 890px against ~1036px of inner pane), so the old horizontal band
-	# pushed the relic column off the right edge. Vertical costs ~70px of height,
-	# which the shortened portrait below pays for.
-	var band := VBoxContainer.new()
-	band.add_theme_constant_override("separation", 12)
-	band.alignment = BoxContainer.ALIGNMENT_BEGIN
-	_hero_detail.add_child(band)
-
-
-	# Before mastery the package is one decision: deck and relic are authored as
-	# a pair. At A4 these rows disappear and the independent controls below open.
-	if doctrine_unlocked and not mastery_unlocked:
-		var doctrine_col := VBoxContainer.new()
-		doctrine_col.add_theme_constant_override("separation", 4)
-		band.add_child(doctrine_col)
-		doctrine_col.add_child(_make_display_label("DOCTRINE", 18, GILT_BRIGHT))
-		var doctrine_std := _make_muster_row("Standard Doctrine",
-			not _muster_alt_deck, _set_bound_doctrine.bind(hid, false))
-		doctrine_std.custom_minimum_size = Vector2(910.0, 28)
-		doctrine_col.add_child(doctrine_std)
-		var doctrine_alt := _make_muster_row("%s - %s" % [
-			String(alt_deck.get("name", "Alternate Doctrine")),
-			String(alt_deck.get("tagline", "alternate doctrine"))],
-			_muster_alt_deck, _set_bound_doctrine.bind(hid, true))
-		doctrine_alt.custom_minimum_size = Vector2(910.0, 28)
-		doctrine_col.add_child(doctrine_alt)
-		band.add_child(_make_ornament_row(260.0, true))
-	var deck_col := VBoxContainer.new()
-	deck_col.add_theme_constant_override("separation", 5)
-	deck_col.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-	band.add_child(deck_col)
-	deck_col.add_child(_make_display_label("DECK", 18, GILT_BRIGHT))
-	_warm_deck_strip(deck_for_display, hid)
-	deck_col.add_child(_make_deck_strip(deck_for_display))
-
-	# Muster toggle / locked hint for the alternate deck. Options, not stats:
-	# the unlock widens the choice of how this lord starts, never their power.
-	if mastery_unlocked:
-		var std_row := _make_muster_row(
-			"Standard deck", not _muster_alt_deck,
-			func():
-				_muster_alt_deck = false
-				_build_hero_detail(hid))
-		std_row.custom_minimum_size = Vector2(470.0, 28)
-		deck_col.add_child(std_row)
-		var alt_row := _make_muster_row(
-			"%s — %s" % [String(alt_deck.get("name", "Alternate")),
-				String(alt_deck.get("tagline", "alternate deck"))],
-			_muster_alt_deck,
-			func():
-				_muster_alt_deck = true
-				_build_hero_detail(hid))
-		alt_row.custom_minimum_size = Vector2(470.0, 28)
-		deck_col.add_child(alt_row)
-	# No "locked" hint line. The pane's prime real estate is for the deck the
-	# player is choosing RIGHT NOW; two lines advertising variants they cannot
-	# have pushed the readable deck strip down and taught nothing actionable.
-	# The unlock announces itself on the victory screen, where it is earned.
-
-	var alt_relic := String(hero.get("relic_alt", ""))
-	var relic_unlocked: bool = doctrine_unlocked
-	var relic_id := String(hero.get("relic", ""))
-	if _muster_alt_relic and relic_unlocked:
-		relic_id = alt_relic
-	var relic_col := VBoxContainer.new()
-	relic_col.add_theme_constant_override("separation", 5)
-	relic_col.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-	band.add_child(relic_col)
-	if relic_id != "":
-		relic_col.add_child(_make_display_label("RELIC", 18, GILT_BRIGHT))
-		var relic_row := HBoxContainer.new()
-		relic_row.add_theme_constant_override("separation", 14)
-		relic_row.alignment = BoxContainer.ALIGNMENT_BEGIN
-		var chip := GameTheme.make_relic_chip(relic_id, 52)
-		chip.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-		relic_row.add_child(chip)
-		var rcol := VBoxContainer.new()
-		rcol.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		rcol.add_theme_constant_override("separation", 2)
-		relic_row.add_child(rcol)
-		var rd := RelicDB.get_relic(relic_id)
-		var rname := _make_display_label(String(rd.get("name", relic_id)), 19, GILT_BRIGHT)
-		rcol.add_child(rname)
-		var rdesc := _make_display_label(String(rd.get("desc", "")), 17, IVORY)
-		rdesc.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-		rdesc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		rdesc.custom_minimum_size = Vector2(290.0, 0)
-		rcol.add_child(rdesc)
-		relic_col.add_child(relic_row)
-
-	# Muster toggle / locked hint for the alternate signature relic.
-	if mastery_unlocked:
-		var def_rd := RelicDB.get_relic(String(hero.get("relic", "")))
-		var alt_rd := RelicDB.get_relic(alt_relic)
-		var sig_row := _make_muster_row(
-			"%s — signature" % String(def_rd.get("name", "Signature relic")),
-			not _muster_alt_relic,
-			func():
-				_muster_alt_relic = false
-				_build_hero_detail(hid))
-		sig_row.custom_minimum_size = Vector2(356.0, 28)
-		relic_col.add_child(sig_row)
-		var vet_row := _make_muster_row(
-			"%s — the veteran's pick" % String(alt_rd.get("name", "Alternate relic")),
-			_muster_alt_relic,
-			func():
-				_muster_alt_relic = true
-				_build_hero_detail(hid))
-		vet_row.custom_minimum_size = Vector2(356.0, 28)
-		relic_col.add_child(vet_row)
-	# No "locked" hint line here either — see the deck note above.
-
-	# Campaign ledger line — this hero's record across all runs. Quiet ink;
-	# absent entirely until the hero has marched at least once.
-	var hs: Dictionary = MetaState.hero_stats.get(hid, {})
-	var wins: int = int(hs.get("wins", 0))
-	var losses: int = int(hs.get("losses", 0))
-	if wins + losses > 0:
-		var ledger_text := "Runs: %d won · %d lost" % [wins, losses]
-		var best: int = int(hs.get("best_asc", -1))
-		if best > 0:
-			ledger_text += " · highest victory at Ascension %d" % best
-		var ledger := _make_display_label(ledger_text, 16, Color(0.76, 0.70, 0.56))
-		ledger.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-		_hero_detail.add_child(ledger)
-	_animate_hero_detail_reveal()
-	# (No "click a hero to begin" hint here anymore — the commit is the explicit
-	# TAKE THE FIELD button in the persistent dossier footer below.)
-
-
-func _animate_hero_detail_reveal() -> void:
-	if _hero_detail == null or not is_instance_valid(_hero_detail):
-		return
-	if UserSettings != null and UserSettings.reduce_motion:
-		return
-	_hero_detail_reveal_seq += 1
-	var seq := _hero_detail_reveal_seq
-	await get_tree().process_frame
-	if seq != _hero_detail_reveal_seq \
-			or _hero_detail == null or not is_instance_valid(_hero_detail):
-		return
-	var i := 0
-	for child in _hero_detail.get_children():
-		if not (child is Control):
-			continue
-		var c := child as Control
-		if not is_instance_valid(c):
-			continue
-		var rest_x := c.position.x
-		c.modulate.a = 0.0
-		c.position.x = rest_x + 12.0
-		var tw := c.create_tween()
-		tw.set_parallel(true)
-		tw.tween_interval(0.015 + i * 0.025)
-		tw.tween_property(c, "modulate:a", 1.0, 0.18).set_ease(Tween.EASE_OUT)
-		tw.tween_property(c, "position:x", rest_x, 0.22) \
-			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		i += 1
-
-
-# A selectable single-line option in the hero detail pane (muster picks).
-# Frameless — the selected row reads gilt with a "▸" pip, the other sits dim.
-func _make_muster_row(text: String, selected: bool, on_pick: Callable) -> Button:
-	var btn := Button.new()
-	btn.flat = true
-	btn.focus_mode = Control.FOCUS_ALL
-	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	for state in ["normal", "hover", "pressed", "focus"]:
-		btn.add_theme_stylebox_override(state, StyleBoxEmpty.new())
-	btn.custom_minimum_size = Vector2(910.0, 28)
-	var lbl := _make_display_label(
-		("★ " if selected else "·  ") + text, 16,
-		GILT_BRIGHT if selected else Color(0.78, 0.74, 0.66))
-	lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
-	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	btn.add_child(lbl)
-	btn.pressed.connect(on_pick)
-	GameTheme.hover_lift(btn, 1.01)
-	return btn
+## What the SELECTED row wears in the `focus` slot: the underline alone. Godot
+## composites `focus` on top of the state box, so handing it `_hero_focus_box`
+## paints that box's wash a second time — which is half of why the plate above
+## ran away. The underline is idempotent (it redraws over itself), the fill is
+## not. Unselected rows are unaffected: they get `_hero_cursor_box`, whose whole
+## job is to be visible against an EMPTY state box.
+func _hero_selected_focus_box() -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0, 0, 0, 0)
+	sb.border_width_bottom = 3
+	sb.border_color = GILT_BRIGHT
+	sb.corner_radius_top_left = 4
+	sb.corner_radius_top_right = 4
+	sb.corner_radius_bottom_left = 4
+	sb.corner_radius_bottom_right = 4
+	return sb
 
 
 # ── Deck strip (hero select): the opening ten as REAL cards ─────────────────
@@ -2570,6 +4743,32 @@ func _make_muster_row(text: String, selected: bool, on_pick: Callable) -> Button
 # the deck at the moment they were asked to commit to it. The strip is the
 # subject of this screen; it has to be legible without a hover.
 const DECK_MINI_SCALE := 0.62
+
+## The second, slightly smaller size the muster strip falls back to when the
+## pane forces the column into two ranks (see _make_muster_deck_strip).
+##
+## Not a guess — a budget. Two ranks cost the screen `2*300*s + 10` where one
+## rank cost 202 (186 of card + 16 of scrollbar reserve), and step II is the
+## binding case: its content already stands at 701px on a 900px canvas, because
+## the banner step prints a rule line under the panes that step I does not.
+## Above 0.58 the whole screen runs out of canvas — at 0.62 step II measures
+## 881 and lands the title and the nav row within 9px of the screen edges. At
+## 0.58 it measures 857 and keeps ~21px of air top and bottom.
+##
+## The cost is 6.5% off the card: the 18px rules line renders at 10.4px instead
+## of 11.2px. That is a hairline against the alternative, which was three of the
+## eleven cards not on screen at all.
+const DECK_MINI_SCALE_RANKS := 0.58
+
+## THE COLUMN's usable inner width, per step. Both are measured, not guessed.
+##
+## Steps I and II hang the deck beside the picker: the menu VBox is 1540, the
+## picker frame is pinned at 430 (sized for the roster taglines, which ellipsised
+## at 350 — see _build_muster_step_host), the row separation is 16, so the column
+## frame gets 1094 and its 12px content margins leave 1070.
+## Step III gives the column the whole menu: 1540 - the same 24 = 1516.
+const MUSTER_STRIP_WIDTH_SPLIT := 1070.0
+const MUSTER_STRIP_WIDTH_FULL := 1516.0
 
 ## Warm every distinct card in one hero's opener in a SINGLE batched pass.
 ##
@@ -2598,46 +4797,11 @@ func _warm_deck_strip(deck: Array, hid: String) -> void:
 		func() -> bool: return is_inside_tree() and _selected_hero == hid)
 
 
-## The hero's opening deck as a row of mini Card2D nodes — one per unique card,
-## first-seen order preserved (the deck leads with its heaviest cards), each
-## wearing a ×N count chip. Hovering a mini floats a full-size readable copy.
-##
-## The BAKES ARE BATCHED at the call site (`_build_hero_detail`), not fired per
-## card here: `CardTextureCache.bake()` costs two `frame_post_draw` waits behind
-## a global mutex, so a per-card loop off `mouse_entered` queued 25-40 serialized
-## bakes when the cursor swept the roster. See CLAUDE.md's batched-path note.
-func _make_deck_strip(deck: Array) -> Control:
-	var counts: Dictionary = {}
-	var order: Array[String] = []
-	for cid in deck:
-		var id: String = String(cid)
-		if not counts.has(id):
-			counts[id] = 0
-			order.append(id)
-		counts[id] += 1
-	var strip := HBoxContainer.new()
-	strip.add_theme_constant_override("separation", 10)
-	strip.alignment = BoxContainer.ALIGNMENT_BEGIN
-	# Any route off this pane (rebuild, screen change) kills a live hover preview.
-	strip.tree_exiting.connect(_hide_deck_preview)
-	for id in order:
-		strip.add_child(_make_deck_mini(id, int(counts[id])))
-	# Nine distinct cards no longer fit in the dossier's width at a readable
-	# scale. Keep the cards legible and make width navigable instead of shrinking
-	# their rules text back under the copy floor.
-	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(910.0,
-		ceil(300.0 * DECK_MINI_SCALE) + 20.0)
-	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
-	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.add_child(strip)
-	return scroll
-
-
-func _make_deck_mini(id: String, count: int) -> Control:
-	var w: float = 225.0 * DECK_MINI_SCALE
-	var h: float = 300.0 * DECK_MINI_SCALE
+## `mini_scale` defaults to the full size; the muster strip passes the ranked
+## size when its pane cannot hold the column in one rank.
+func _make_deck_mini(id: String, count: int, mini_scale: float = DECK_MINI_SCALE) -> Control:
+	var w: float = 225.0 * mini_scale
+	var h: float = 300.0 * mini_scale
 	var slot := Control.new()
 	slot.custom_minimum_size = Vector2(w, h)
 	var card = CARD_SCENE.instantiate()
@@ -2647,7 +4811,7 @@ func _make_deck_mini(id: String, count: int) -> Control:
 	card.live_baked_mode = true
 	# No bake call here — the whole strip is warmed in ONE batched, cancellable
 	# pass by _warm_deck_strip() before this runs.
-	card.scale = Vector2(DECK_MINI_SCALE, DECK_MINI_SCALE)
+	card.scale = Vector2(mini_scale, mini_scale)
 	card.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	slot.add_child(card)
 	# ×N count chip on the mini's top-right corner — the chip is what makes
@@ -2668,11 +4832,40 @@ func _make_deck_mini(id: String, count: int) -> Control:
 	slot.add_child(catcher)
 	catcher.mouse_entered.connect(_show_deck_preview.bind(id, slot))
 	catcher.mouse_exited.connect(_hide_deck_preview)
+	catcher.tooltip_text = _deck_mini_tooltip(id)
 	return slot
 
 
 ## Float a full-size copy of the hovered deck mini above the strip (NetDraft's
 ## ledger-preview behaviour). Mouse-transparent so it never eats a click.
+## THE GLOSSARY, REACHABLE. Card2D gilds its keywords and hangs a `[hint]` hover
+## definition off them, but neither survives on this screen: the mini's topmost
+## catcher stops the mouse before the rules text sees it, and the floating
+## preview is MOUSE_FILTER_IGNORE by design (it sits over the anchor, so making
+## it interactive would fight the hover that spawned it).
+##
+## So on the first screen of the game, a new player reads Guardian, Swift, Doom,
+## Wither, Overrun, Rampage, Thorns and Regenerate on the cards they are being
+## asked to choose between, with no way to look any of them up. The catcher is
+## already a Control under the cursor; a plain tooltip is the one channel that
+## costs nothing and cannot be swallowed.
+func _deck_mini_tooltip(id: String) -> String:
+	var data: Dictionary = CardDB.get_card_data(id)
+	if data.is_empty():
+		return ""
+	var lines: Array[String] = [String(data.get("name", id))]
+	for kw in data.get("keywords", []):
+		var entry: Dictionary = KeywordEffects.KEYWORDS.get(String(kw), {})
+		if entry.is_empty():
+			continue
+		lines.append("%s — %s" % [entry.get("display", kw), entry.get("desc", "")])
+	# A card whose keywords are all unglossed (on_enter/on_death markers carry no
+	# KEYWORDS entry) would leave a bare name repeating the plate under it.
+	if lines.size() == 1:
+		return ""
+	return "\n".join(lines)
+
+
 func _show_deck_preview(id: String, anchor: Control) -> void:
 	_hide_deck_preview()
 	var card = CARD_SCENE.instantiate()
@@ -2699,6 +4892,104 @@ func _hide_deck_preview() -> void:
 	_deck_preview = null
 
 
+
+func _show_muster_deck_inspector() -> void:
+	var return_focus := get_viewport().gui_get_focus_owner()
+	_hide_deck_inspector()
+	_deck_inspect_return_focus = return_focus
+	if not HeroDB.has_hero(_selected_hero):
+		return
+	var opener: Array[String] = RunState.opening_deck_for(
+		_selected_hero, _muster_alt_deck, _selected_banner_tribe)
+	_warm_deck_strip(opener, _selected_hero)
+	var overlay := Control.new()
+	overlay.name = "DeckInspector"
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	overlay.z_index = 520
+	add_child(overlay)
+	_deck_inspect_overlay = overlay
+	var veil := ColorRect.new()
+	veil.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	veil.color = Color(0.008, 0.006, 0.008, 0.88)
+	veil.mouse_filter = Control.MOUSE_FILTER_STOP
+	veil.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	veil.gui_input.connect(func(event: InputEvent) -> void:
+		if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+			_hide_deck_inspector())
+	overlay.add_child(veil)
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	overlay.add_child(center)
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(1240, 760)
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	var style := GameTheme.make_panel_style(
+		Color(0.035, 0.025, 0.03, 0.98), Color(0.72, 0.60, 0.36, 0.82),
+		2, 6, false)
+	style.content_margin_left = 28
+	style.content_margin_right = 28
+	style.content_margin_top = 20
+	style.content_margin_bottom = 20
+	panel.add_theme_stylebox_override("panel", style)
+	center.add_child(panel)
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 14)
+	panel.add_child(content)
+	var hero := HeroDB.get_hero(_selected_hero)
+	# "·", not "-". Every other joined heading in the opening uses the middot
+	# ("SLOT 1 · Continue Run", "11 cards · The Colours adds ..."), and a hyphen
+	# between a Title Case name and an ALL CAPS phrase reads for a beat as a
+	# compound word — "Raider-FULL" — before it resolves as a separator.
+	var title := _make_display_label(
+		"%s  ·  FULL STARTING DECK" % String(hero.get("name", _selected_hero)),
+		27, GILT_BRIGHT)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	content.add_child(title)
+	var summary := _make_display_label(
+		"%d cards  ·  %s adds %s" % [opener.size(),
+			BannerDB.display_name(_selected_banner_tribe),
+			CardDB.get_card_data(BannerDB.card_id(_selected_banner_tribe)).get(
+				"name", "one card")],
+		15, Color(0.76, 0.69, 0.56))
+	summary.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	content.add_child(summary)
+	var counts: Dictionary = {}
+	var order: Array[String] = []
+	for cid in opener:
+		if not counts.has(cid):
+			counts[cid] = 0
+			order.append(cid)
+		counts[cid] += 1
+	var grid := GridContainer.new()
+	grid.columns = 5
+	grid.add_theme_constant_override("h_separation", 18)
+	grid.add_theme_constant_override("v_separation", 18)
+	var grid_center := CenterContainer.new()
+	grid_center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	grid_center.add_child(grid)
+	content.add_child(grid_center)
+	for cid in order:
+		grid.add_child(_make_deck_mini(cid, int(counts[cid]), 0.72))
+	var close := _make_menu_button(
+		"CLOSE", Color(0.24, 0.18, 0.14), 18, 48)
+	close.name = "DeckInspectorReturn"
+	close.custom_minimum_size = Vector2(300, 48)
+	close.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	close.pressed.connect(_hide_deck_inspector)
+	content.add_child(close)
+	close.call_deferred("grab_focus")
+
+
+func _hide_deck_inspector() -> void:
+	var restore_focus := _deck_inspect_return_focus
+	_deck_inspect_return_focus = null
+	if _deck_inspect_overlay != null and is_instance_valid(_deck_inspect_overlay):
+		_deck_inspect_overlay.queue_free()
+	_deck_inspect_overlay = null
+	if restore_focus != null and is_instance_valid(restore_focus):
+		restore_focus.call_deferred("grab_focus")
+
 func _begin_run_with(hero_id: String) -> void:
 	var seed_to_use := _pending_run_seed()
 	if _daily_pick and not MetaState.todays_daily().is_empty():
@@ -2710,14 +5001,13 @@ func _begin_run_with(hero_id: String) -> void:
 	RunState.pending_signature_relic = ""
 	RunState.pending_deck_variant = ""
 	RunState.pending_banner_tribe = _selected_banner_tribe
-	if _bound_doctrine_unlocked(hero_id):
-		if _doctrine_mastery_unlocked(hero_id):
-			if _muster_alt_relic:
-				RunState.pending_signature_relic = String(hero_data.get("relic_alt", ""))
-			if _muster_alt_deck:
-				RunState.pending_deck_variant = "alt"
-		elif _muster_alt_relic and _muster_alt_deck:
-			RunState.pending_signature_relic = String(hero_data.get("relic_alt", ""))
+	# The relic half goes through _muster_signature_relic so THE ARSENAL's
+	# preview and this commit cannot disagree about which relic is already held.
+	var signature := _muster_signature_relic(hero_id)
+	if signature != "" and signature == String(hero_data.get("relic_alt", "")):
+		RunState.pending_signature_relic = signature
+	if _bound_doctrine_unlocked(hero_id) and _muster_alt_deck:
+		if _doctrine_mastery_unlocked(hero_id) or _muster_alt_relic:
 			RunState.pending_deck_variant = "alt"
 
 	RunState.start_new_run(hero_id, _selected_ascension, seed_to_use)
@@ -2741,52 +5031,6 @@ func _begin_run_with(hero_id: String) -> void:
 		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 		return
 	_pick_blessing(chosen)
-
-
-func _begin_run_with_legacy(hero_id: String) -> void:
-	# Seed comes from the setup row on the hero-select screen: DAILY MARCH
-	# locks today's deterministic seed (same map for everyone), a typed seed
-	# hashes to a custom one, otherwise 0 = roll fresh.
-	var seed_to_use := 0
-	if _daily_pick:
-		# Second guard behind the disabled/status button: a record created after
-		# this setup screen opened must not be overwritten by a second attempt.
-		if not MetaState.todays_daily().is_empty():
-			_daily_pick = false
-			_run_commit_locked = false
-			return
-		seed_to_use = RunState.daily_seed()
-	elif _seed_edit != null and is_instance_valid(_seed_edit):
-		var s: String = _seed_edit.text.strip_edges().to_lower()
-		if s != "":
-			seed_to_use = RunState.seed_from_string(s)
-	# Cross-run muster picks — handed to start_new_run via the pending fields
-	# (consumed and cleared there). Unlocks re-checked so a stale toggle can
-	# never smuggle a locked option into the run.
-	var hero_data := HeroDB.get_hero(hero_id)
-	RunState.pending_signature_relic = ""
-	RunState.pending_deck_variant = ""
-	if _bound_doctrine_unlocked(hero_id):
-		if _doctrine_mastery_unlocked(hero_id):
-			if _muster_alt_relic:
-				RunState.pending_signature_relic = String(hero_data.get("relic_alt", ""))
-			if _muster_alt_deck:
-				RunState.pending_deck_variant = "alt"
-		elif _muster_alt_relic and _muster_alt_deck:
-			# First-win doctrine: both halves cross the start boundary together.
-			RunState.pending_signature_relic = String(hero_data.get("relic_alt", ""))
-			RunState.pending_deck_variant = "alt"
-	RunState.start_new_run(hero_id, _selected_ascension, seed_to_use)
-	# Daily March: arm today's omen (run-wide mutator) and stamp the ledger —
-	# start_new_run just reset both flags, so this must come after it.
-	if _daily_pick:
-		RunState.is_daily_run = true
-		RunState.daily_date = MetaState.today_str()
-		RunState.daily_mutator_id = RunState.daily_mutator_id_for_today()
-	# After the hero is locked in, offer the run's opening provisioning — 3
-	# safe tiles (one per reward family) + 1 risky tile (real cost, bigger
-	# payoff). Skipping is allowed and routes straight to the map.
-	_show_blessing_select()
 
 
 func _change_ascension(delta: int) -> void:
@@ -2833,18 +5077,20 @@ func _daily_resume_slot(record: Dictionary) -> int:
 
 
 func _toggle_daily_pick() -> void:
-	# DAILY MARCH locks the run to today's deterministic seed; the free-seed
-	# field goes quiet while it's on (the two would fight over the same roll).
+	# DAILY RUN locks the run to today's deterministic seed; the free-seed
+	# field goes quiet while it's on (the two would fight over the same roll),
+	# and _refresh_seed_field_state is what tells the player so.
 	_daily_pick = not _daily_pick
 	if _seed_edit != null and is_instance_valid(_seed_edit):
-		_seed_edit.editable = not _daily_pick
-		_seed_edit.modulate = Color(1, 1, 1, 0.45 if _daily_pick else 1.0)
 		if _daily_pick:
 			_seed_edit.text = ""
+		_refresh_seed_field_state()
+	if _daily_pick:
+		_muster_seed_text = ""
 	if _daily_btn != null and is_instance_valid(_daily_btn):
 		var lbl := _menu_button_label(_daily_btn)
 		if lbl != null:
-			lbl.text = "DAILY MARCH: ON" if _daily_pick else "DAILY MARCH: OFF"
+			lbl.text = "DAILY RUN — ON" if _daily_pick else "DAILY RUN — OFF"
 	_refresh_muster_deals()
 	_refresh_muster_campaign()
 
@@ -2853,21 +5099,33 @@ func _daily_tooltip() -> String:
 	# Today's seed + today's omen + whether the player already marched. The
 	# daily is a MODE now, not just a locked seed — the tooltip is where its
 	# identity lives without widening the quiet setup row.
-	var text := "Today's seed — everyone who marches today walks the same map."
+	var text := "Today's seed — everyone playing today gets the same map."
 	var omen_id: String = RunState.daily_mutator_id_for_today()
 	var omen: Dictionary = MutatorDB.get_mutator(omen_id)
 	if not omen.is_empty():
-		text += "\nToday's omen: %s — %s" % [
+		text += "\nToday's Battle Rule: %s — %s" % [
 			String(omen.get("name", omen_id)), String(omen.get("desc", ""))]
 	var today: Dictionary = MetaState.todays_daily()
 	if not today.is_empty():
+		# The HERO'S NAME, not its id. MetaState stores the identifier ("raider"),
+		# and this line printed it raw — a lower-case code word in the middle of a
+		# sentence the player reads.
+		var hero_id := String(today.get("hero", ""))
+		var hero_name := String(HeroDB.get_hero(hero_id).get("name", hero_id))
+		# Every branch here is a BLOCKED or REDIRECTED state, so each names what
+		# it stops you doing as well as why (COPY_STYLE §12).
 		match String(today.get("result", "")):
 			"won":
-				text += "\nYou marched today and WON (%s)." % String(today.get("hero", ""))
+				text += "\nYou already played today's Daily Run as %s and won." % hero_name
+				text += "\nThe next one unlocks tomorrow."
 			"lost":
-				text += "\nYou marched today and fell (%s)." % String(today.get("hero", ""))
+				text += "\nYou already played today's Daily Run as %s and lost." % hero_name
+				text += "\nThe next one unlocks tomorrow."
 			_:
-				text += "\nA march is already underway today (%s)." % String(today.get("hero", ""))
+				text += "\nToday's Daily Run is already under way as %s." % hero_name
+				text += ("\nPress to pick it back up." if _daily_resume_slot(today) >= 0
+					else "\nIts save is gone, and there is one Daily Run per day."
+						+ " The next one unlocks tomorrow.")
 	return text
 
 
@@ -2912,8 +5170,14 @@ func _on_quit() -> void:
 
 func _show_how_to_play() -> void:
 	# One overlay at a time — re-pressing the button shouldn't stack scrims.
+	# Detach, don't only queue_free: the replacement below is also named
+	# "HowToPlayOverlay", so a deferred free leaves both in the tree for a frame
+	# and the INCOMING one gets renamed. This lookup would then miss it forever
+	# and the third press really would stack a scrim — the exact thing the line
+	# above claims to prevent. Same defect as _rebuild_menu's; see the note there.
 	var existing := get_node_or_null("HowToPlayOverlay")
 	if existing != null:
+		remove_child(existing)
 		existing.queue_free()
 	_how_to_play_overlay = GameTheme.make_how_to_play_overlay()
 	add_child(_how_to_play_overlay)
@@ -2971,7 +5235,7 @@ func _animate_subscreen_reveal(menu: Control) -> void:
 	tw.set_parallel(true)
 	var delay := 0.0
 	for child in menu.get_children():
-		if child.is_queued_for_deletion():
+		if child.is_queued_for_deletion() or child.name == "Slack":
 			continue
 		child.modulate.a = 0.0
 		tw.tween_property(child, "modulate:a", 1.0, 0.25).set_delay(delay)
@@ -3099,7 +5363,21 @@ func _add_menu_embers() -> void:
 	embers.add_to_group("ambient_particles")
 	embers.position = Vector2(vp.x * 0.5, vp.y + 16.0)
 	embers.z_index = 6
-	embers.amount = 40
+	# THE MEADOW BURNS WITH YOUR RECORD (2026-08-05). The title screen was byte-
+	# identical on march 1 and march 200: one static main_menu.png, and the only
+	# thing on the whole screen that answered a player's history was a 17px grey
+	# line reading "Marches 24 · Victories 0 · Defeats 24". This is a game about
+	# an isle that is on fire and a record that accumulates — the ONE ambient
+	# system already running here should be reading that ledger.
+	#
+	# Deliberately keyed to MARCHES, not victories. A player 30 defeats deep has
+	# spent the most time on this screen and earned the most changed version of
+	# it; keying to wins would show the least to whoever has seen it most. The
+	# curve is a soft sqrt so the early marches each register and the far tail
+	# does not turn the menu into a bonfire the text cannot survive.
+	var marches: float = float(MetaState.total_runs) if MetaState != null else 0.0
+	var burn: float = clampf(sqrt(marches / 40.0), 0.0, 1.0)
+	embers.amount = int(round(lerpf(40.0, 96.0, burn)))
 	embers.lifetime = 6.5
 	embers.preprocess = 5.0   # start with the screen already full of drifting embers
 	embers.randomness = 1.0
@@ -3108,15 +5386,22 @@ func _add_menu_embers() -> void:
 	embers.direction = Vector2(0, -1)
 	embers.spread = 16.0
 	embers.gravity = Vector2(8.0, -18.0)   # rise, with a gentle lateral lean
-	embers.initial_velocity_min = 16.0
-	embers.initial_velocity_max = 44.0
+	# A hotter fire throws its sparks higher and further, so the burn rides the
+	# velocity too — otherwise a deep profile just gets a denser field of
+	# identical motes, which reads as a particle-count slider rather than as a
+	# fire that has been running longer.
+	embers.initial_velocity_min = lerpf(16.0, 24.0, burn)
+	embers.initial_velocity_max = lerpf(44.0, 70.0, burn)
 	embers.scale_amount_min = 1.4
-	embers.scale_amount_max = 3.2
+	embers.scale_amount_max = lerpf(3.2, 4.0, burn)
 	# Fade in then out over life so embers wink in and burn out rather than pop.
+	# The peak also heats: 0.66 green at march 0 → 0.74 deep in, i.e. the sparks
+	# go from a settled orange toward a live yellow-white core.
 	var ramp := Gradient.new()
 	ramp.set_color(0, Color(1.0, 0.62, 0.26, 0.0))
 	ramp.set_color(1, Color(1.0, 0.40, 0.14, 0.0))
-	ramp.add_point(0.18, Color(1.0, 0.66, 0.32, 0.85))
+	ramp.add_point(0.18, Color(1.0, lerpf(0.66, 0.74, burn), lerpf(0.32, 0.44, burn),
+		lerpf(0.85, 0.95, burn)))
 	ramp.add_point(0.7, Color(1.0, 0.46, 0.18, 0.6))
 	embers.color_ramp = ramp
 	embers.emitting = true
@@ -3153,168 +5438,28 @@ func _start_title_shimmer() -> void:
 
 
 # ---------------------------------------------------------------------------
-# THE WAR CHEST (opening provisioning)
+# WRIT RESOLUTION (the committed term, paid out)
 # ---------------------------------------------------------------------------
-# After the hero is picked, the player gets a single opening requisition: 3
-# "safe" tiles drawn from the seven reward families (gold, heal, max HP, free
-# relic, free potion, free card, free upgrade) plus 1 "risky" tile with a real
-# cost and a bigger payoff. SKIP is always available — the run can start cold
-# if the player wants the full StS opening. Framed as the campaign's war
-# chest so the run opener speaks the same Successor Wars register as the map.
+# The four-slot writ slate is DEALT on step III of THE MUSTER
+# (_refresh_muster_deals → _make_muster_writ_tile) and COMMITTED by
+# _begin_run_with, which hands the chosen entry straight to _pick_blessing.
+# Everything below this line is the payout half: it runs AFTER start_new_run,
+# so it has a real deck, relics and purse to touch.
 #
-# The card-touching entries (Whetstone sharpen, Butcher's Kindness, Remount
-# trades, Muster Tent recruit, Hollow Levy removals) open pick-a-card grids
-# instead of hitting a random card — the rest of the game sets an agency
-# standard (forge previews, chosen sacrifices) that a random permanent mod
-# on screen one was violating.
+# There is no separate war-chest SCREEN any more. It was a fourth full screen
+# asking a fifth question after the run had already begun, and its tiles are
+# now the terms the player weighed on step III against the column they had just
+# built. The old `_show_blessing_select` / `_make_blessing_choice` /
+# `_on_blessing_choice_pressed` / `_roll_blessings` set was deleted 2026-08-01;
+# only its follow-up pickers survive, because a writ that says "choose 1 card"
+# still has to show a grid.
 #
-# This is built in MainMenu (rather than a dedicated scene) so it reuses the
-# atmosphere/parallax already running behind the menu and shares the hero-
-# pick sub-screen pattern (replace the Menu VBox in place, no scene change).
-
-func _show_blessing_select() -> void:
-	_set_subscreen_motion_obscured(true)
-	_remove_command_dossier()
-	_blessing_commit_locked = false
-	_picker_commit_locked = false
-	var menu := get_node_or_null("Menu")
-	if menu == null:
-		# If the menu node somehow vanished, never block the run from starting.
-		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
-		return
-	# Hide the centered Menu VBox used by every other sub-screen — the blessing
-	# screen lays itself out as a full-screen event-style composition (title
-	# top-left, choices stacked bottom-left) so it reads like the in-run event
-	# rooms instead of a boxed picker dialog.
-	menu.visible = false
-
-	# Defensive cleanup in case the screen is re-entered.
-	for child in get_children():
-		var cname: String = child.name
-		if cname in ["Background", "Atmosphere", "Menu"]:
-			continue
-		child.queue_free()
-
-	const COLUMN_LEFT := 110
-	const COLUMN_WIDTH := 760
-
-	var title := _make_display_label("THE WAR CHEST", 38, GILT_BRIGHT)
-	title.name = "BlessingTitle"
-	title.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	title.offset_left = COLUMN_LEFT
-	title.offset_top = 90
-	title.offset_right = COLUMN_LEFT + COLUMN_WIDTH
-	title.offset_bottom = 90 + 60
-	title.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
-	title.add_theme_constant_override("outline_size", 5)
-	title.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.75))
-	title.add_theme_constant_override("shadow_offset_x", 0)
-	title.add_theme_constant_override("shadow_offset_y", 2)
-	add_child(title)
-	GameTheme.deal_in(title, 0.02)
-
-	var ornament := _make_ornament_row(220.0, true)
-	ornament.name = "BlessingOrnament"
-	ornament.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	ornament.offset_left = COLUMN_LEFT
-	ornament.offset_top = 154
-	ornament.offset_right = COLUMN_LEFT + 260
-	ornament.offset_bottom = 174
-	add_child(ornament)
-	GameTheme.deal_in(ornament, 0.06)
-
-	var hint := _make_display_label(
-		"Take one commission. Each moves a different part of the march.",
-		17, IVORY)
-	hint.name = "BlessingHint"
-	hint.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	hint.offset_left = COLUMN_LEFT
-	hint.offset_top = 184
-	hint.offset_right = COLUMN_LEFT + COLUMN_WIDTH
-	hint.offset_bottom = 184 + 60
-	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	hint.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
-	hint.add_theme_constant_override("outline_size", 3)
-	hint.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.85))
-	hint.add_theme_constant_override("shadow_offset_x", 0)
-	hint.add_theme_constant_override("shadow_offset_y", 2)
-	add_child(hint)
-	GameTheme.deal_in(hint, 0.10)
-
-	# Season winds: announce the run's dealt tribes before the first road is
-	# picked, so the muster lean downstream reads as weather the player was
-	# told about, never as a rigged slate.
-	var season_text: String = RunState.season_line()
-	if season_text != "":
-		var season := _make_display_label(season_text, 16, Color(0.64, 0.74, 0.60))
-		season.name = "BlessingSeason"
-		season.set_anchors_preset(Control.PRESET_TOP_LEFT)
-		season.offset_left = COLUMN_LEFT
-		season.offset_top = 240
-		season.offset_right = COLUMN_LEFT + COLUMN_WIDTH
-		season.offset_bottom = 240 + 30
-		season.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
-		season.add_theme_constant_override("outline_size", 3)
-		season.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.85))
-		season.add_theme_constant_override("shadow_offset_x", 0)
-		season.add_theme_constant_override("shadow_offset_y", 2)
-		add_child(season)
-		GameTheme.deal_in(season, 0.13)
-
-	# Frameless gem-prefixed choices, stacked bottom-left like the in-run event
-	# screen. Same composition as Event.gd: the choice ladder is the focal point,
-	# the description floats above, the skip is tucked beneath.
-	var num_choices := 4
-	# 112, not 84: each tile now carries THREE lines (slot rule / name / clause),
-	# and at 84 the next tile's slot label butted against the previous tile's
-	# clause — so "II · THE ARSENAL" read as part of the ROLL entry above it,
-	# which is exactly the grouping the slot labels exist to prevent.
-	var choice_h := 112
-	var gap := 18
-	var stack_h := num_choices * choice_h + (num_choices - 1) * gap
-	var choices_vbox := VBoxContainer.new()
-	choices_vbox.name = "BlessingChoices"
-	choices_vbox.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	choices_vbox.offset_left = COLUMN_LEFT
-	choices_vbox.offset_right = COLUMN_LEFT + COLUMN_WIDTH
-	choices_vbox.offset_top = -(stack_h + 120)
-	choices_vbox.offset_bottom = -96
-	choices_vbox.add_theme_constant_override("separation", gap)
-	add_child(choices_vbox)
-
-	var blessings := _roll_blessings()
-	var choice_i := 0
-	for entry in blessings:
-		var choice := _make_blessing_choice(entry, choice_h)
-		choices_vbox.add_child(choice)
-		GameTheme.deal_in(choice, 0.16 + choice_i * 0.055)
-		GameTheme.hover_lift(choice, 1.014)
-		choice_i += 1
-
-	# NO SKIP. It was audited as never correct — all the honest tiles were free,
-	# so skipping was strictly dominated and taxed only the players who did not
-	# know that. Under the four-slot writ model there is no "none of these" case
-	# by construction: the slots are four axes, and every run wants one moved.
-
-
-# Roll the displayed tiles: 3 distinct honest entries + 1 priced entry.
-# Remade 2026-07-03: the old pool was flat handouts, and two of them (Heal 12 /
-# full heal) were DEAD at run start — the march begins at full HP. Every honest
-# entry now aims at a run SHAPE (economy / deck quality / bottle-craft / body),
-# and every priced entry is a real pact, so the first decision of the run is a
-# direction, not a coin pickup.
-func _roll_blessings() -> Array:
-	# Deals the four-slot writ slate (WritDB): one tile from THE ROLL, THE
-	# ARSENAL and THE PURSE, plus THE PACT as the escalated twin of whichever
-	# ROLL or PURSE tile is already on screen.
-	#
-	# SEEDED off the run seed. The old roll used the global shuffle()/randi(),
-	# so two players on the same Daily March seed got the same map and DIFFERENT
-	# opening gifts — the one screen in the run that was not reproducible.
-	# start_new_run has already assigned run_seed by the time this screen opens.
-	var rng := RandomNumberGenerator.new()
-	rng.seed = int(RunState.run_seed) ^ 0x57524954  # "WRIT"
-	return WritDB.roll_slate(rng)
+# The card-touching writs (forge, transform, enlist, remove) open pick-a-card
+# grids instead of hitting a random card — the rest of the game sets an agency
+# standard (forge previews, chosen sacrifices) that a random permanent mod on
+# screen one was violating. They are built in MainMenu rather than a dedicated
+# scene so they reuse the atmosphere/parallax already running behind the menu
+# (replace the Menu VBox in place, no scene change).
 
 
 ## The stream every writ RESOLUTION rolls against, as opposed to the stream that
@@ -3324,13 +5469,52 @@ func _roll_blessings() -> Array:
 ## until 2026-07-30, which meant two players on the same seed saw the same four
 ## tiles and then different consequences, i.e. the reproducibility was cosmetic.
 ##
-## Lazily built so the legacy entry point and any probe that drives _pick_blessing
-## directly still get a seeded stream instead of a null crash.
+## Lazily built so any probe that drives _pick_blessing directly still gets a
+## seeded stream instead of a null crash.
 func _writ_rng() -> RandomNumberGenerator:
 	if _writ_resolution_rng == null:
 		_writ_resolution_rng = RandomNumberGenerator.new()
 		_writ_resolution_rng.seed = int(RunState.run_seed) ^ 0x57524954 ^ 0x5245534F
 	return _writ_resolution_rng
+
+
+## Clear the screen down to its background for a full-screen writ picker.
+##
+## The `visible = false` is the load-bearing line and it was MISSING until
+## 2026-08-01. The pickers keep the Menu VBox alive (they only free their own
+## siblings), and the one place that ever hid it was `_show_blessing_select` —
+## a screen the live flow stopped visiting when the writ model landed. So
+## TAKE THE FIELD on a Forge term drew the card grid straight over a fully
+## visible THE MUSTER: two screens of cards at once, the muster's own eleven
+## legible behind the ten the player was being asked to choose from.
+## _center_menu_for_subscreen puts it back.
+##
+## THE SCRIM SURVIVES THIS SWEEP (2026-08-03). It did not, and the pickers were
+## the only screens in the whole opening with no seat under them at all: the
+## sweep freed every child that was not Menu/Background/Atmosphere, and MenuScrim
+## is exactly such a child, so TAKE THE FIELD on a Forge term laid eleven cards
+## and a 30px question straight onto the painted fire. Measured on
+## `_shot_runstart` frame `writ_forge_picker`: the left third of the grid sat on
+## warm-black and the right third on open flame, the same one-row-two-legibilities
+## split that _set_subscreen_scrim was written for. Keeping the node and flipping
+## it to the centred profile costs one line and covers all three pickers (forge /
+## enlist / arsenal), which are full-canvas and therefore need it MORE than the
+## centred sub-screens that at least carry their own panel fills.
+func _clear_for_picker() -> void:
+	_set_subscreen_motion_obscured(true)
+	for child in get_children():
+		var cname: String = child.name
+		if cname == "Menu":
+			(child as CanvasItem).visible = false
+			continue
+		if cname in ["Background", "Atmosphere", "MenuScrim"]:
+			continue
+		child.queue_free()
+	# Full-rect, heaviest at the bottom where the fire is. Every picker adds its
+	# title and grid as LATER siblings, so they draw over this by tree order.
+	_set_subscreen_scrim(true)
+	_picker_commit_locked = false
+	_picker_build_generation += 1
 
 
 ## Fisher-Yates against a local stream — Array.shuffle() only ever uses the
@@ -3341,172 +5525,6 @@ func _seeded_shuffle(arr: Array, rng: RandomNumberGenerator) -> void:
 		var tmp = arr[i]
 		arr[i] = arr[j]
 		arr[j] = tmp
-
-
-func _make_blessing_choice(entry: Dictionary, height: int) -> Button:
-	# Frameless gem-prefixed choice — mirrors the in-run Event.gd choice style
-	# (gem on the left, headline + body to its right, no panel chrome).
-	#
-	# The SLOT LABEL ("I · THE ROLL") is the load-bearing piece of furniture on
-	# this screen, not decoration. Four tiles without it are four unrelated
-	# nouns and the player has to price a relic against gold against max HP;
-	# with it they answer one question they can actually answer at minute one —
-	# which axis of the run do I want moved? The pact keeps a wine gem and a
-	# price chip, but it is now labelled by its ROLE (IV · THE PACT) rather than
-	# by the word "RISKY", which the audit showed was pointing at the wrong tile.
-	var risky: bool = bool(entry.get("is_pact", false))
-	var slot: String = String(entry.get("slot", ""))
-	var slot_text: String = String(WritDB.SLOT_LABELS.get(slot, ""))
-	var slot_hint: String = String(WritDB.SLOT_HINTS.get(slot, ""))
-	var name_text: String = String(entry.get("name", ""))
-	var desc_text: String = String(entry.get("desc", ""))
-
-	var btn := Button.new()
-	btn.flat = true
-	btn.custom_minimum_size = Vector2(560, height)
-	btn.focus_mode = Control.FOCUS_ALL
-	btn.size_flags_horizontal = Control.SIZE_FILL
-	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-
-	var transparent := StyleBoxFlat.new()
-	transparent.bg_color = Color(0, 0, 0, 0)
-	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
-		btn.add_theme_stylebox_override(state, transparent)
-
-	btn.pressed.connect(_on_blessing_choice_pressed.bind(btn, entry))
-
-	var hbox := HBoxContainer.new()
-	hbox.set_anchors_preset(Control.PRESET_FULL_RECT)
-	hbox.offset_left = 24
-	hbox.offset_right = -24
-	hbox.add_theme_constant_override("separation", 20)
-	hbox.alignment = BoxContainer.ALIGNMENT_BEGIN
-	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	btn.add_child(hbox)
-
-	var gem := TextureRect.new()
-	var diamond_tex := GameTheme.tex_icon_diamond
-	if diamond_tex:
-		gem.texture = diamond_tex
-	gem.custom_minimum_size = Vector2(18, 18)
-	gem.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	gem.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	var base_gem_color: Color = (
-		Color(0.85, 0.32, 0.30, 0.95) if risky
-		else Color(GILT.r, GILT.g, GILT.b, 0.85))
-	var hover_gem_color: Color = (
-		Color(1.0, 0.50, 0.40, 1.0) if risky
-		else Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 1.0))
-	gem.modulate = base_gem_color
-	gem.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	gem.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hbox.add_child(gem)
-
-	var vbox := VBoxContainer.new()
-	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vbox.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	vbox.add_theme_constant_override("separation", 4)
-	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hbox.add_child(vbox)
-
-	# Slot rule: the axis this tile moves, in small gilt caps above the name.
-	if slot_text != "":
-		var slot_lbl := Label.new()
-		slot_lbl.text = "%s — %s" % [slot_text, slot_hint]
-		slot_lbl.add_theme_font_size_override("font_size", 15)
-		slot_lbl.add_theme_color_override("font_color",
-			Color(0.85, 0.45, 0.38) if risky else Color(GILT.r, GILT.g, GILT.b, 0.92))
-		slot_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
-		slot_lbl.add_theme_constant_override("outline_size", 3)
-		if GameTheme.font_display:
-			slot_lbl.add_theme_font_override("font", GameTheme.font_display)
-		slot_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		vbox.add_child(slot_lbl)
-
-	# Headline row: name, then the price chip IMMEDIATELY beside it.
-	var headline_row := HBoxContainer.new()
-	headline_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	headline_row.add_theme_constant_override("separation", 12)
-	headline_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(headline_row)
-
-	var headline := Label.new()
-	headline.text = name_text
-	headline.add_theme_font_size_override("font_size", 26)
-	headline.add_theme_color_override("font_color", IVORY)
-	headline.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.80))
-	headline.add_theme_constant_override("outline_size", 3)
-	headline.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.75))
-	headline.add_theme_constant_override("shadow_offset_x", 0)
-	headline.add_theme_constant_override("shadow_offset_y", 2)
-	if GameTheme.font_display:
-		headline.add_theme_font_override("font", GameTheme.font_display)
-	headline.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	# SHRINK_BEGIN, not EXPAND_FILL: with expand, the price chip was shoved to
-	# the far edge of the 760px column and floated orphaned in the middle of the
-	# screen, visually detached from the row it labels. The chip has to touch
-	# the name it prices.
-	headline.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
-	headline_row.add_child(headline)
-
-	if risky:
-		# The price, stated as a number in one fixed currency. Every pact costs
-		# the same 6 max HP, so this chip is the whole comparison: the player
-		# reads one number against the escalation on the twin tile beside it.
-		var chip := Label.new()
-		chip.text = "− %d MAX HP" % WritDB.PACT_COST_MAX_HP
-		chip.add_theme_font_size_override("font_size", 16)
-		chip.add_theme_color_override("font_color", Color(1.0, 0.55, 0.42))
-		chip.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
-		chip.add_theme_constant_override("outline_size", 3)
-		if GameTheme.font_display:
-			chip.add_theme_font_override("font", GameTheme.font_display)
-		chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		headline_row.add_child(chip)
-
-	var head_pad := Control.new()
-	head_pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	head_pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	headline_row.add_child(head_pad)
-
-	var body := Label.new()
-	body.text = desc_text
-	body.add_theme_font_size_override("font_size", 18)
-	body.add_theme_color_override("font_color", GameTheme.DESC_DIM)
-	body.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.70))
-	body.add_theme_constant_override("outline_size", 2)
-	body.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.65))
-	body.add_theme_constant_override("shadow_offset_x", 0)
-	body.add_theme_constant_override("shadow_offset_y", 1)
-	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	if GameTheme.font_body:
-		body.add_theme_font_override("font", GameTheme.font_body)
-	body.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vbox.add_child(body)
-
-	btn.mouse_entered.connect(func() -> void:
-		gem.modulate = hover_gem_color
-		headline.add_theme_color_override("font_color", GameTheme.KEYWORD_GOLD)
-	)
-	btn.mouse_exited.connect(func() -> void:
-		gem.modulate = base_gem_color
-		headline.add_theme_color_override("font_color", IVORY)
-	)
-
-	return btn
-
-
-func _on_blessing_choice_pressed(btn: Control, entry: Dictionary) -> void:
-	if _blessing_commit_locked:
-		return
-	_blessing_commit_locked = true
-	GameTheme.claim_pop(btn)
-	if UserSettings == null or not UserSettings.reduce_motion:
-		await get_tree().create_timer(0.11).timeout
-	if not is_inside_tree():
-		return
-	_pick_blessing(entry)
 
 
 func _pick_blessing(entry: Dictionary) -> void:
@@ -3543,7 +5561,7 @@ func _pick_blessing(entry: Dictionary) -> void:
 			if offered.is_empty():
 				GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 				return
-			_show_writ_relic_picker("Draw which relic from the arsenal?", offered,
+			_show_writ_relic_picker("Choose a relic", offered,
 				func(rid: String) -> void:
 					RunState.add_relic(rid)
 					GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45))
@@ -3570,7 +5588,7 @@ func _writ_forge_step(remaining: int, taken: Array) -> void:
 		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 		return
 	var suffix: String = "  (%d left)" % remaining if remaining > 1 else ""
-	_show_blessing_card_picker("Forge which card?" + suffix, candidates,
+	_show_blessing_card_picker("Choose a card to forge" + suffix, candidates,
 		func(i: int) -> void:
 			RunState.upgrade_card(i, "plus")
 			var next_taken: Array = taken.duplicate()
@@ -3590,7 +5608,7 @@ func _writ_enlist_step(picks: int, width: int) -> void:
 		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 		return
 	var suffix: String = "  (%d left)" % picks if picks > 1 else ""
-	_show_blessing_offer_picker("Enlist which recruit?" + suffix, offered,
+	_show_blessing_offer_picker("Choose a card to add" + suffix, offered,
 		func(cid: String) -> void:
 			RunState.add_card(cid)
 			_writ_enlist_step(picks - 1, width))
@@ -3606,7 +5624,7 @@ func _blessing_transform_step(remaining: int) -> void:
 		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 		return
 	var suffix: String = "  (%d left)" % remaining if remaining > 1 else ""
-	_show_blessing_card_picker("Transform which card?" + suffix, eligible,
+	_show_blessing_card_picker("Choose a card to transform" + suffix, eligible,
 		func(i: int):
 			_blessing_transform_at(i)
 			_blessing_transform_step(remaining - 1))
@@ -3644,7 +5662,7 @@ func _blessing_remove_step(remaining: int) -> void:
 	for i in RunState.deck.size():
 		all_idx.append(i)
 	var suffix: String = "  (%d left)" % remaining if remaining > 1 else ""
-	_show_blessing_card_picker("Remove which card?" + suffix, all_idx,
+	_show_blessing_card_picker("Choose a card to remove" + suffix, all_idx,
 		func(i: int):
 			RunState.remove_card_at(i)
 			_blessing_remove_step(remaining - 1))
@@ -3676,52 +5694,92 @@ const CARD_SCENE_PICKER = preload("res://scenes/card_2d.tscn")
 
 func _show_blessing_card_picker(title_text: String, indices: Array,
 		on_pick: Callable) -> void:
-	_set_subscreen_motion_obscured(true)
 	# Full-screen card grid over the menu background — the run-start deck is
 	# 10 cards, so this is two rows of five. Same wrapper-plus-transparent-
 	# button pattern as the in-run pickers (Event/Rest), so click semantics
 	# match everywhere the player picks a card.
-	for child in get_children():
-		var cname: String = child.name
-		if cname in ["Background", "Atmosphere", "Menu"]:
-			continue
-		child.queue_free()
-	_picker_commit_locked = false
+	_clear_for_picker()
 
 	var title := _make_display_label(title_text, 30, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	title.offset_top = 36
 	title.offset_bottom = 88
+	var preparing := _make_display_label("PREPARING THE DECK...", 16,
+		Color(IVORY.r, IVORY.g, IVORY.b, 0.72))
+	preparing.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	preparing.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	preparing.offset_top = 82
+	preparing.offset_bottom = 108
+	preparing.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(preparing)
 	title.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
 	title.add_theme_constant_override("outline_size", 5)
 	add_child(title)
 	GameTheme.deal_in(title, 0.02)
 
+	# SIX COLUMNS, AND THE BOX WIDENED TO HOLD THEM — the two halves are one fix
+	# and changing either alone just moves the clip. Every one of this picker's
+	# three callers (forge / transform / remove) is offered at the muster, where
+	# the deck is exactly ELEVEN cards, and the card you have to scroll to find is
+	# the one that does not get picked.
+	#
+	# The arithmetic, because guessing it wrong is how this was clipped twice:
+	# the canvas is the 1600x900 project viewport, and a card wrapper is 225x300
+	# at h/v separation 20.
+	#   5 cols = 1205 wide (fits) but THREE rows = 940 tall against 690 — the last
+	#           row sat below the fold behind a scrollbar. The original bug.
+	#   6 cols = 1450 wide, which does NOT fit the old 150px insets (1300 usable),
+	#           so the sixth card clipped at the right edge instead. Same bug, new
+	#           axis.
+	# At 64px insets the usable width is 1472, so 1450 fits with 22 to spare, and
+	# two rows measure 620 against 690. No scrollbar on either axis.
 	var scroll := ScrollContainer.new()
 	scroll.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	scroll.offset_left = 150
-	scroll.offset_right = -150
+	scroll.offset_left = 64
+	scroll.offset_right = -64
 	scroll.offset_top = 110
 	scroll.offset_bottom = 800
 	add_child(scroll)
 
 	var grid := GridContainer.new()
-	grid.columns = 5
+	grid.columns = 6
 	grid.add_theme_constant_override("h_separation", 20)
 	grid.add_theme_constant_override("v_separation", 20)
 	scroll.add_child(grid)
 
+	var build_generation := _picker_build_generation
+	var scroll_ref: WeakRef = weakref(scroll)
+	var picker_alive := func() -> bool:
+		if not is_inside_tree() or build_generation != _picker_build_generation \
+				or _picker_commit_locked:
+			return false
+		var live_scroll = scroll_ref.get_ref()
+		return live_scroll != null and is_instance_valid(live_scroll)
+	var card_datas: Array[Dictionary] = []
+	for deck_index in indices:
+		card_datas.append(RunState.get_upgraded_card_data(int(deck_index)))
+	# These cards never exceed their native picker face. Warm the lightweight
+	# gallery cache before parenting Card2D, otherwise _ready sees a miss once
+	# and permanently builds the expensive live card hierarchy.
+	for data in card_datas:
+		if not CardTextureCache.has_gallery(data):
+			await CardTextureCache.bake_gallery(data, picker_alive)
+		if not picker_alive.call():
+			return
+	if is_instance_valid(preparing):
+		preparing.queue_free()
+
 	var pick_i := 0
-	for i in indices:
-		var data: Dictionary = RunState.get_upgraded_card_data(i)
+	for ei in range(indices.size()):
+		var data: Dictionary = card_datas[ei]
 		var wrapper := Control.new()
 		wrapper.custom_minimum_size = Vector2(225, 300)
 		var card_node = CARD_SCENE_PICKER.instantiate()
 		card_node.static_display = true
 		card_node.card_data = data
 		card_node.live_baked_mode = true
-		CardTextureCache.bake(data)
+		card_node.gallery_baked_mode = true
 		wrapper.add_child(card_node)
 		var click_btn := Button.new()
 		click_btn.flat = true
@@ -3733,12 +5791,19 @@ func _show_blessing_card_picker(title_text: String, indices: Array,
 		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
 		click_btn.pressed.connect(_on_blessing_card_pick_pressed.bind(
-			wrapper, on_pick, int(i)))
+			wrapper, on_pick, int(indices[ei])))
 		wrapper.add_child(click_btn)
 		grid.add_child(wrapper)
 		GameTheme.deal_in(wrapper, 0.08 + pick_i * 0.035)
 		GameTheme.hover_lift(wrapper, 1.025)
 		pick_i += 1
+
+		if DisplayServer.get_name() == "headless":
+			await get_tree().process_frame
+		else:
+			await RenderingServer.frame_post_draw
+		if not picker_alive.call():
+			return
 
 
 func _on_blessing_card_pick_pressed(target: Control, on_pick: Callable,
@@ -3759,13 +5824,7 @@ func _on_blessing_card_pick_pressed(target: Control, on_pick: Callable,
 # grid, same click semantics; the callback receives the card id string.
 func _show_blessing_offer_picker(title_text: String, ids: Array,
 		on_pick: Callable) -> void:
-	_set_subscreen_motion_obscured(true)
-	for child in get_children():
-		var cname: String = child.name
-		if cname in ["Background", "Atmosphere", "Menu"]:
-			continue
-		child.queue_free()
-	_picker_commit_locked = false
+	_clear_for_picker()
 
 	var title := _make_display_label(title_text, 30, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -3777,6 +5836,14 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 	add_child(title)
 	GameTheme.deal_in(title, 0.02)
 
+	var preparing := _make_display_label("PREPARING THE CARDS...", 16,
+		Color(IVORY.r, IVORY.g, IVORY.b, 0.72))
+	preparing.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	preparing.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	preparing.offset_top = 92
+	preparing.offset_bottom = 120
+	preparing.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(preparing)
 	var row := HBoxContainer.new()
 	row.set_anchors_preset(Control.PRESET_CENTER)
 	var total_w: int = ids.size() * 225 + (ids.size() - 1) * 40
@@ -3787,16 +5854,38 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 	row.add_theme_constant_override("separation", 40)
 	add_child(row)
 
+	var build_generation := _picker_build_generation
+	var row_ref: WeakRef = weakref(row)
+	var picker_alive := func() -> bool:
+		if not is_inside_tree() or build_generation != _picker_build_generation \
+				or _picker_commit_locked:
+			return false
+		var live_row = row_ref.get_ref()
+		return live_row != null and is_instance_valid(live_row)
+	var card_datas: Array[Dictionary] = []
+	for offered_id in ids:
+		card_datas.append(CardDB.get_card_data(String(offered_id)))
+	# These cards never exceed their native picker face. Warm the lightweight
+	# gallery cache before parenting Card2D, otherwise _ready sees a miss once
+	# and permanently builds the expensive live card hierarchy.
+	for cd in card_datas:
+		if not CardTextureCache.has_gallery(cd):
+			await CardTextureCache.bake_gallery(cd, picker_alive)
+		if not picker_alive.call():
+			return
+	if is_instance_valid(preparing):
+		preparing.queue_free()
+
 	var pick_i := 0
-	for cid in ids:
-		var data: Dictionary = CardDB.get_card_data(String(cid))
+	for ei in range(ids.size()):
+		var data: Dictionary = card_datas[ei]
 		var wrapper := Control.new()
 		wrapper.custom_minimum_size = Vector2(225, 300)
 		var card_node = CARD_SCENE_PICKER.instantiate()
 		card_node.static_display = true
 		card_node.card_data = data
 		card_node.live_baked_mode = true
-		CardTextureCache.bake(data)
+		card_node.gallery_baked_mode = true
 		wrapper.add_child(card_node)
 		var click_btn := Button.new()
 		click_btn.flat = true
@@ -3808,12 +5897,19 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
 		click_btn.pressed.connect(_on_blessing_card_pick_pressed.bind(
-			wrapper, on_pick, String(cid)))
+			wrapper, on_pick, String(ids[ei])))
 		wrapper.add_child(click_btn)
 		row.add_child(wrapper)
 		GameTheme.deal_in(wrapper, 0.08 + pick_i * 0.055)
 		GameTheme.hover_lift(wrapper, 1.025)
 		pick_i += 1
+
+		if DisplayServer.get_name() == "headless":
+			await get_tree().process_frame
+		else:
+			await RenderingServer.frame_post_draw
+		if not picker_alive.call():
+			return
 
 
 ## THE ARSENAL's picker: choose 1 of N relics. Modelled on the card offer
@@ -3826,13 +5922,7 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 ## lords; when it is one of three on screen, nobody is forced to take it.
 func _show_writ_relic_picker(title_text: String, ids: Array,
 		on_pick: Callable) -> void:
-	_set_subscreen_motion_obscured(true)
-	for child in get_children():
-		var cname: String = child.name
-		if cname in ["Background", "Atmosphere", "Menu"]:
-			continue
-		child.queue_free()
-	_picker_commit_locked = false
+	_clear_for_picker()
 
 	var title := _make_display_label(title_text, 30, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
