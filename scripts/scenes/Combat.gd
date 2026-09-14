@@ -4879,11 +4879,24 @@ func _do_combat() -> void:
 
 	# CLASH caption (guarded) — show only if someone is still poised to strike.
 	# Snapshot the headcount so we can tell afterward whether anyone fell.
+	#
+	# AND ONLY IF IT WILL SURVIVE LONG ENOUGH TO BE READ. "FRONT ROW ATTACKS" is
+	# set a few statements below with no frame in between, so whenever the front
+	# rank is striking — which is nearly always — this caption was written and
+	# overwritten inside a single frame. The player never saw the word, and
+	# `_set_phase_caption` fired a `_spawn_phase_pulse` animating a line that was
+	# already gone: a beat spent on nothing.
+	#
+	# It still earns its place in the case it was actually built for: a clash
+	# where only the BACK rank swings. Then no front caption replaces it and
+	# "CLASH" stands through the front row's (empty) lane passes, which is the
+	# one time it is the truest available word.
 	var _alive_before_clash := _all_creatures_both_sides().size()
-	for c in _all_creatures_both_sides():
-		if c.can_attack() and not c.has_attacked_this_turn:
-			_set_phase_caption("CLASH")
-			break
+	if not _rank_will_strike(ROW_FRONT):
+		for c in _all_creatures_both_sides():
+			if c.can_attack() and not c.has_attacked_this_turn:
+				_set_phase_caption("CLASH")
+				break
 
 	# SIMULTANEOUS COMBAT — both sides attack per lane and deaths are HELD until
 	# the whole clash resolves (Card2D.defer_deaths), so a creature slain by the
@@ -18102,6 +18115,15 @@ func _check_game_over() -> void:
 		if _is_host():
 			_net_host_check_match_over()
 		return
+	# Both campaign exits hold the verdict before fading. Use those otherwise
+	# idle frames to prime the chronicle typography; ordinary wins never pay it.
+	var opens_game_over := player_hp <= 0 or (
+		enemy_hp <= 0
+		and RunState.current_node_type == "boss"
+		and RunState.is_final_boss()
+	)
+	if opens_game_over:
+		ScenePreload.warm_game_over_ui()
 	if (player_hp <= 0 or enemy_hp <= 0) and _clash_lane_focus != null \
 			and is_instance_valid(_clash_lane_focus):
 		_clash_lane_focus.clear_focus()

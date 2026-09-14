@@ -1886,10 +1886,25 @@ static func tick_number(lbl: Label, from_val: int, to_val: int,
 		lbl.text = template % to_val
 		return
 	var tw := lbl.create_tween()
+	# EASED, NOT LINEAR. A counter climbing at a constant rate is the temporal
+	# twin of a flat stroke: nothing in the world changes at a fixed rate, and
+	# the eye reads the uniformity instantly as "a machine moved this". QUAD-out
+	# puts most of the travel in the first third, so the number LEAPS and then
+	# settles onto its answer — which also makes the final value the part that
+	# lingers, rather than one more frame of a ramp.
+	#
+	# DELIBERATELY NOT A SLOT-REEL. The obvious upgrade from the juice
+	# literature is Balatro's staggered digit roll, and it is the wrong borrow:
+	# that reel works because the number IS the game — vast, dramatic, and the
+	# only thing on screen. These are gold and HP, which are INFORMATIONAL, and
+	# a reel hides exactly the intermediate values a count-up exists to show.
+	# Clarity before spectacle is the house rule and it applies to its own
+	# influences too.
 	tw.tween_method(func(v: float):
 		if is_instance_valid(lbl):
 			lbl.text = template % int(round(v)),
-		float(from_val), float(to_val), dur)
+		float(from_val), float(to_val), dur) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	pulse_label(lbl, Color(1.0, 0.85, 0.30) if to_val > from_val \
 		else Color(1.0, 0.45, 0.20))
 

@@ -8,11 +8,41 @@ const KEYWORDS: Dictionary = {
 	"charge":     {"display": "Charge",      "desc": "Attacks during the round it is played, including against enemy face."},
 	"thorns":     {"display": "Thorns",      "desc": "Deals 1 damage back to each creature that attacks this."},
 	"regenerate": {"display": "Regenerate",  "desc": "Heals 1 HP at the start of each round."},
-	"summon":     {"display": "Summon",      "desc": "When played, also summons a 1/1 token in an adjacent empty lane."},
+	# decorate_keywords gilds EVERY occurrence of a display name in a card's
+	# rules text and hangs this glossary on it — it does not check whether the
+	# card carries the keyword (nor should it: Hooked Pike must still gild the
+	# Piercing it grants). So this line has to be true wherever the word is
+	# printed. 15 pool cards say "summon" meaning "put a body on the board"
+	# (Reanimate, Provision, Husk, Summoner...) and were being told the Mule's
+	# rule instead. Same trap fixed on `sacrifice` below.
+	"summon":     {"display": "Summon",      "desc": "Puts a new creature on the board. As a keyword: when played, this also summons a 1/1 token in an adjacent empty lane."},
 	"last_stand": {"display": "Last Stand",  "desc": "Survives the first killing blow at 1 HP. Once per fight."},
-	"piercing":   {"display": "Piercing",    "desc": "When this kills its target, leftover damage carries to the creature behind it, then to enemy face."},
-	"sniper":     {"display": "Sniper",      "desc": "After the clash, attacks a chosen enemy. Drag it onto a target; otherwise it attacks the weakest. It attacks again after each kill."},
-	"sacrifice":  {"display": "Sacrifice",   "desc": "Cost: destroy one of your own creatures to play this card."},
+	# THE OLD TEXT PRINTED OVERKILL AS THOUGH THE KEYWORD OWNED IT, and that is
+	# what taught players a chump block still negates a whole attack. Since the
+	# 2026-07-28 blocker pass EVERY killing blow spills into the body behind —
+	# `_apply_piercing_overflow` does that with `reach_face` false — so the spill
+	# is universal and is not Piercing's. It also read as a CHAIN ("behind it,
+	# then to enemy face"); the resolver RETURNS after hitting the body behind, so
+	# the face arm is reached only when that slot is empty. What the keyword
+	# actually buys is exactly one thing: the overflow reads on to the hero.
+	# WHAT THE KEYWORD BUYS, not what every blow already does. It read "carries
+	# on to the enemy face if no creature stands behind" — but a body behind is
+	# not a gate, it is the next thing in the way: the spill runs front-to-back
+	# through the column and whatever is LEFT reaches the face. Worse, the old
+	# wording described a case where Piercing is indistinguishable from plain
+	# OVERKILL, which is universal and free, so the keyword read as something the
+	# player already had. The premium is that it does not stop.
+	"piercing":   {"display": "Piercing",    "desc": "When this kills its target, leftover damage carries through whatever stands behind and on to the enemy face."},
+	# "After the clash" alone read as ADDITIVE and the keyword is SUBSTITUTIVE:
+	# _resolve_column_attack returns early on a sniper, so the body forfeits its
+	# column swing entirely. A player granting this to an 8-ATK veteran at the
+	# 10-kill rung was being shown text for a bonus and handed a trade.
+	"sniper":     {"display": "Sniper",      "desc": "Skips its column clash. Afterward it strikes a chosen enemy — drag to aim — or the weakest, and again after each kill."},
+	# No card in the pool carries this keyword, but five print the WORD as their
+	# effect (Offering, Thin the Ranks, Fuel the Pyre, The Last Due, Blood Pyre),
+	# and the old line called it a play cost on every one of them. See the note
+	# on `summon` above for why the decorator can't just check the carrier.
+	"sacrifice":  {"display": "Sacrifice",   "desc": "Destroy one of your own creatures. Only a card that says so can do it — never a free action."},
 	"exhaust":    {"display": "Exhaust",     "desc": "Once played, this card is gone for the rest of the fight."},
 	"retain":     {"display": "Retain",      "desc": "Stays in your hand at end of turn instead of being discarded."},
 	"wither":     {"display": "Wither N",    "desc": "Loses N ATK at the start of each round."},
@@ -21,14 +51,23 @@ const KEYWORDS: Dictionary = {
 	"adj_buff":   {"display": "Adj. Buff",   "desc": "Friendlies beside it or in the other slot of its column gain a stat bonus while this remains in play."},
 	"poison":     {"display": "Poison",      "desc": "Any creature it damages dies, no matter its remaining HP."},
 	"shield":     {"display": "Shield",      "desc": "Absorbs the first hit completely, then Shield is removed."},
-	"guardian":   {"display": "Guardian",    "desc": "Enemies to its left and right must attack this creature."},
-	"structure":  {"display": "Structure",   "desc": "Can't be attacked or targeted by spells."},
+	# Wrong on two counts before 2026-07-30: nothing is COMPELLED (the blow is
+	# rerouted onto this body), and "left and right" under-describes the reach —
+	# adjacency in this project includes the column-mate, as the `adjacent` entry
+	# below says, so a Guardian covers up to three neighbours, not two.
+	"guardian":   {"display": "Guardian",    "desc": "Blows aimed at an adjacent friendly strike this creature instead."},
+	# `attackable` (EncounterDB.make_card_data's whitelist) makes a structure a
+	# real obstacle — Card2D.is_inert_structure() is the predicate the clash and
+	# targeting filters read. The Iron Warden's Trebuchet is one, and its fight
+	# text says "Destroy the Trebuchet to stop it", so an unconditional
+	# "can't be attacked" here contradicted the encounter on the same screen.
+	"structure":  {"display": "Structure",   "desc": "Never attacks. Can't be attacked or targeted by spells — unless the fight says this one can be broken."},
 	"slay":       {"display": "Slay",        "desc": "Triggers when this kills the creature it is fighting."},
 	"adjacent":   {"display": "Adjacent",    "desc": "Creatures to the left, right, or in the other row of the same column."},
 	"doom":       {"display": "Doom N",      "desc": "Forms up, then counts down 1 per round. At 0 it hits enemy face for its ATK and dies. Killed early, bursts in-lane."},
 	"rampage":    {"display": "Rampage",     "desc": "Gains +1 ATK this fight each time it kills an enemy creature (more if a number is shown)."},
 	"lifelink":   {"display": "Lifesteal",   "desc": "You heal HP equal to the damage this deals in battle."},
-	"overrun":    {"display": "Overrun",     "desc": "Start of each round: +1 ATK this round if no enemy stands directly across."},
+	"overrun":    {"display": "Overrun",     "desc": "Start of each round: +1 ATK this round if the enemy front lane across from it is empty (more if a number is shown)."},
 	"formation":  {"display": "Formation",   "desc": "Start of each round: +1/+1 this fight if a friendly stands beside it."},
 }
 
@@ -123,6 +162,21 @@ const INLINE_KEYWORD_STAMPS := false
 # Keyword id -> device path, resolved once ("" = no device SVG registered;
 # the word still gilds + hints, it just gets no stamp).
 static var _stamp_paths: Dictionary = {}
+# Card rules are immutable strings in practice, but the same text is decorated
+# again whenever a Card2D is rebuilt on another screen. Cache the exact BBCode
+# output and the longest-first keyword table instead of rescanning all keywords.
+static var _decorated_cache: Dictionary = {}
+static var _decorated_names: Array = []
+
+
+static func _keyword_names_longest_first() -> Array:
+	if _decorated_names.is_empty():
+		for k in KEYWORDS.keys():
+			var disp := String(KEYWORDS[k].display).trim_suffix(" N")
+			_decorated_names.append([disp, String(k)])
+		_decorated_names.sort_custom(
+			func(a, b): return a[0].length() > b[0].length())
+	return _decorated_names
 
 
 static func _stamp_path(kw_id: String) -> String:
@@ -135,14 +189,13 @@ static func _stamp_path(kw_id: String) -> String:
 static func decorate_keywords(text: String, stamp_px: int) -> String:
 	if text.is_empty():
 		return ""
+	var cache_key := "%d\u001f%s" % [stamp_px, text]
+	if _decorated_cache.has(cache_key):
+		return String(_decorated_cache[cache_key])
 	# Display name -> id, matching colorize_keywords' longest-first order so
 	# "Last Stand" claims its span before a shorter name could. "Doom N" /
 	# "Wither N" match their bare word — the printed text says "Doom 3".
-	var names: Array = []
-	for k in KEYWORDS.keys():
-		var disp := String(KEYWORDS[k].display).trim_suffix(" N")
-		names.append([disp, String(k)])
-	names.sort_custom(func(a, b): return a[0].length() > b[0].length())
+	var names: Array = _keyword_names_longest_first()
 	var lowered := text.to_lower()
 	var claimed: Array = []  # [start, end, kw_id], non-overlapping
 	for pair in names:
@@ -192,6 +245,7 @@ static func decorate_keywords(text: String, stamp_px: int) -> String:
 		out += "[hint=%s]%s[/hint]" % [tip, deco]
 		pos = end
 	out += text.substr(pos)
+	_decorated_cache[cache_key] = out
 	return out
 
 
@@ -518,7 +572,7 @@ static func _effect_label(effect: Dictionary, is_death: bool, side_is_enemy: boo
 			"summon":                return "SUMMON"
 			"draw":                  return "" if side_is_enemy else "DRAW %d" % v
 			"return_to_hand_once":   return "" if side_is_enemy else "RETURN"
-			"heal_enemy_face":       return "" if side_is_enemy else "FOE HEALS %d" % v
+			"heal_enemy_face":       return "" if side_is_enemy else "ENEMY HEALS %d" % v
 			"steal_opposing":        return "" if side_is_enemy else "DESERTION"
 			"damage_face":           return "TO FACE %d" % v
 			"debuff_all_player_atk": return ("WEAKEN ALL %d" % v) if side_is_enemy else ""
@@ -617,7 +671,8 @@ static func _run_on_enter(effect: Dictionary, card, lane_idx: int, is_enemy: boo
 			# Falls through to nothing when the column is empty or the foe is simply
 			# swinging: the body is still a plain body, which is the positivity floor.
 			var order_t = ctx.get_opposing_card(lane_idx, is_enemy)
-			if order_t != null and is_instance_valid(order_t) 					and ctx.has_method("_wears_an_order") and ctx._wears_an_order(order_t):
+			if order_t != null and is_instance_valid(order_t) \
+					and ctx.has_method("_wears_an_order") and ctx._wears_an_order(order_t):
 				order_t.take_damage(effect.get("value", 4) + on_enter_bonus)
 				if ctx.has_method("log_status"):
 					ctx.log_status(order_t, "caught out of position")

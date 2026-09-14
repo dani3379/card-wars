@@ -264,9 +264,12 @@ User direction: route choice should have mechanical weight, not just length. The
 > `_probe_campaign_walk` passes 36 acts / 648 visits with no pool exhaustion.
 >
 > **WHAT REMAINS IS CONTENT.** Every non-rival encounter is faction-tagged, but
-> **8 of 15 faction×act elite slots are empty** and five combat pools hold one
-> fight, so those kingdoms repeat an encounter within a run. See the roadmap's
-> 2026-09-13 status entry for the per-faction tally.
+> The 8 empty faction×act elite slots are now FILLED (2026-09-13), each as data
+> over an engine that already existed. Five combat pools still hold a single
+> authored fight, but that is a variety nicety and NOT repetition: borrowing
+> lifts every kingdom-act to 4-8 distinct combats and the generator walks a
+> shuffled pool, so an act's ~4 plain fights never wrap. See the roadmap's
+> 2026-09-13 entries.
 
 1. ~~**Faction worksheet**~~ **DONE 2026-06-10 → [`FACTION_WORKSHEET.md`](FACTION_WORKSHEET.md)** — all **40** live encounters tagged (the "41" count was off by one: A1 13 / A2 13 / A3 14), coverage matrix + gap list included. Net-new estimate drops to ~8–12 encounters after re-leveling existing fights via their deck variants; Owed is the donor faction, Lanternhall still the front-load.
 2. **Phase 0–1 scaffolding** — RunState fields, `faction` tag, `get_ids_for` filter, rival selection; **SAVE_VERSION 2→3**.

@@ -7,6 +7,7 @@ extends Node
 ## protected by the terminology searches and text/layout probes.
 
 const PROBE_NAME := "copy_lint"
+const COVERAGE_FLOOR := 2950
 const EVENT_DESC_WORD_LIMIT := 40
 const EVENT_RESULT_WORD_LIMIT := 60
 const CARD_DESC_CHAR_LIMIT := 90
@@ -44,17 +45,29 @@ const OPAQUE_TERMS := [
 	# is not doing the job it looks like it is doing.
 ]
 const CAPS_OK := [
-	"IV", "HP", "ATK", "ALL", "SPELL", "EXHAUST", "RETAIN", "OK",
+	# Only entries of 3+ characters can ever be consulted — _check_shouting
+	# gates on first.length() >= 3 first. "IV"/"HP"/"OK" lived here as dead
+	# code; Roman numerals are handled by _is_roman_numeral instead.
+	"ATK", "ALL", "SPELL", "EXHAUST", "RETAIN",
 ]
 const COPY_KEYS := [
 	"name", "desc", "label", "text", "title", "subtitle", "prompt",
 	"tooltip", "caption", "flavor", "brief", "tagline", "lore", "blurb",
 	"display", "short", "won", "lost", "head", "note", "passive_desc",
 	"engine", "engine_line", "lord_title", "season_line",
+	# Added 2026-07-31. All of these hold prose that RENDERS, and all were
+	# invisible because the key was not on this list. The sharpest case is
+	# `rule`: Combat assigns `siege.rule` into the very same standing-rule
+	# plaque that `passive_desc` fills, so one slot was wording-gated and
+	# word-budgeted while the other was not gated at all.
+	"preamble", "scope", "tell", "rule", "order", "break_noun",
+	"breach_log", "after_breach", "sub", "action", "speaker",
+	"msg", "transition_msg",
 ]
 
 var _fails: Array[String] = []
 var _scanned := 0
+var _read_constants: Dictionary = {}
 
 
 func _ready() -> void:
@@ -71,9 +84,22 @@ func _ready() -> void:
 	_scan_modes()
 	_scan_ascension_rules()
 	_scan_tutorial()
+	_scan_lessons()
+	# The Field Manual's group headings, and the three Coaching settings the
+	# player picks between. Both are copy by construction — id keys, player text
+	# for values — which is exactly what _scan_copy_map exists for.
+	_scan_copy_map("res://scripts/data/TutorialDB.gd", "GROUP_TITLES", "lessongroup")
+	_scan_copy_map("res://scripts/data/TutorialDB.gd", "COACH_MODE_LABELS", "coachmode")
+	_assert_constants_covered()
 	print("[copy-lint] scanned %d player-facing strings" % _scanned)
-	if _scanned < 1500:
-		_fails.append("Coverage regression: scanned only %d strings (expected at least 1500)" % _scanned)
+	# Coverage RATCHET. The old floor of 1500 sat ~1200 strings below the real
+	# count, so not one of the scanned constants could vanish individually and
+	# trip it — the flat-dict bug that hid MUSTER_COPY cost 16 strings, roughly
+	# two orders of magnitude under the guard. Raise this when coverage grows;
+	# a drop means a source stopped being read, which is the whole point.
+	if _scanned < COVERAGE_FLOOR:
+		_fails.append("Coverage regression: scanned only %d strings (expected at least %d)"
+			% [_scanned, COVERAGE_FLOOR])
 	if _fails.is_empty():
 		print("PROBE PASS: %s" % PROBE_NAME)
 		get_tree().quit(0)
@@ -95,6 +121,10 @@ func _script_constant(path: String, constant_name: String) -> Variant:
 		_fails.append("Cannot compile %s: %s" % [path, error_string(err)])
 		return null
 	var constants := script.get_script_constant_map()
+	if not _read_constants.has(path):
+		_read_constants[path] = []
+	if not (_read_constants[path] as Array).has(constant_name):
+		(_read_constants[path] as Array).append(constant_name)
 	if not constants.has(constant_name):
 		_fails.append("%s has no %s constant" % [path, constant_name])
 		return null
@@ -130,7 +160,7 @@ func _scan_event_result_budgets(value: Variant, owner: String, path: String) -> 
 			var key := String(key_value)
 			var child: Variant = dict[key_value]
 			var child_path := key if path == "" else path + "." + key
-			if child is String and (key == "text" or key.ends_with("_text")):
+			if child is String and _is_copy_key(key):
 				var words := _word_count(String(child))
 				if words > EVENT_RESULT_WORD_LIMIT:
 					_fails.append("%s %s is %d words (result budget %d)" % [
@@ -173,8 +203,12 @@ func _scan_cards() -> void:
 			if upgrade_value is Dictionary:
 				var upgrade_desc := String((upgrade_value as Dictionary).get("desc", ""))
 				_check("card+:" + id, "desc", upgrade_desc)
-				_check_card_desc("card+:" + id, upgrade_desc,
-					card.get("keywords", []))
+				# Validate the "+" text against the UPGRADED keywords: passing the
+				# base list means an upgrade that ADDS on_enter/on_death
+				# false-positives the "says On-Enter but has no on_enter" rule.
+				var up_kw: Variant = (upgrade_value as Dictionary).get(
+					"keywords", card.get("keywords", []))
+				_check_card_desc("card+:" + id, upgrade_desc, up_kw)
 	for upgrade_key in upgrades.keys():
 		if not cards.has(upgrade_key):
 			_fails.append("CardDB.UPGRADES[%s] has no base card" % upgrade_key)
@@ -281,6 +315,21 @@ func _scan_mutators() -> void:
 
 func _scan_set_pieces() -> void:
 	_scan_constant_tree("res://scripts/data/SetPieceDB.gd", "SET_PIECES", "setpiece")
+	# Constants living INSIDE files the probe already loads, never wired up. The
+	# same failure class as an unscanned file, and larger: BOSS_PHASES carries
+	# `passive_desc`, the exact field this probe budgets at 32 words when it
+	# arrives via ENCOUNTERS.
+	_scan_constant_tree("res://scripts/data/CardDB.gd", "ENEMY_POOL", "enemy")
+	_scan_constant_tree("res://scripts/data/EncounterDB.gd", "BOSS_PHASES", "phase")
+	_scan_constant_tree("res://scripts/data/EncounterDB.gd",
+		"ENCOUNTER_SCRIPTS", "script")
+	_scan_constant_tree("res://scripts/data/EncounterDB.gd",
+		"AMALGAM_HISTORY_PHASES", "amalgam")
+	_scan_copy_map("res://scripts/GameTheme.gd", "RELIC_TIER_TAGS", "relic-tier")
+	# Prose that renders: the veterancy epithet stamped on a card's name, and the
+	# tribe forms the season announce line is assembled from.
+	_scan_copy_list("res://scripts/state/RunState.gd", "VETERAN_EPITHETS", "epithet")
+	_scan_copy_map("res://scripts/state/RunState.gd", "SEASON_TRIBE_NAMES", "season-tribe")
 
 
 func _scan_writs() -> void:
@@ -293,9 +342,18 @@ func _scan_writs() -> void:
 	# The opening screen's own chrome, moved out of MainMenu 2026-07-30 for
 	# exactly this reason — it said "sign one Writ" and the lint could not see it.
 	_scan_constant_tree("res://scripts/data/WritDB.gd", "MUSTER_COPY", "opening")
+	# The house-word glossary (2026-07-31). Definitions of the vocabulary the
+	# opening prices its decisions in are the MOST wording-sensitive copy on the
+	# screen — if a definition is wrong or opaque, every term quoting that word
+	# inherits the error.
+	_scan_constant_tree("res://scripts/data/WritDB.gd", "GLOSSARY", "gloss")
 	# The six banner declarations are choice copy in every sense that matters and
 	# were unscanned until the same pass.
 	_scan_constant_tree("res://scripts/data/BannerDB.gd", "BANNERS", "banner")
+	# The slot furniture printed BESIDE the terms on the same screen. Keyed by
+	# slot id, so it needs the copy-map entry point, not the tree walker.
+	_scan_copy_map("res://scripts/data/WritDB.gd", "SLOT_LABELS", "slot-label")
+	_scan_copy_map("res://scripts/data/WritDB.gd", "SLOT_HINTS", "slot-hint")
 
 
 func _scan_modes() -> void:
@@ -320,6 +378,9 @@ func _scan_ascension_rules() -> void:
 		_check("ascension:%d" % index, "rule", String(rules[index]))
 
 
+## THE HOW-TO-PLAY PRIMER. Note the name: this scans `HOW_TO_PLAY_PRIMER`, which
+## is the manual's campaign page — NOT the coaching registry. `_scan_lessons`
+## below is the one that covers the tutorial proper.
 func _scan_tutorial() -> void:
 	var value: Variant = _script_constant(
 		"res://scripts/GameTheme.gd", "HOW_TO_PLAY_PRIMER")
@@ -340,6 +401,84 @@ func _scan_tutorial() -> void:
 		_check("tutorial:%d" % index, "body", String(entry[1]))
 
 
+## THE COACHING REGISTRY — `TutorialDB.LESSONS`, 22 lessons of `title` + `body`.
+##
+## THIS WAS A REAL HOLE, and it had already cost something. Despite the name,
+## `_scan_tutorial` above covers the MANUAL's primer page; nothing scanned the
+## lessons themselves. `tools/_probe_tutorial.gd` checks them for "mana", "elite"
+## and `(s)`, but not for this file's OPAQUE_TERMS, its cliché list, or the
+## shouting rule — so the primer was linted for words the tutorial was not, and
+## a lesson shipped saying "the front **rank**" when COPY_STYLE §12 settles
+## combat rows as *rows*, never ranks. The registry is the most-read copy in the
+## game for a new player; it gets the same lint as everything else.
+##
+## `{n}` is substituted the way the Field Manual substitutes it — a raw token
+## would trip the lint on a brace the player never sees.
+func _scan_lessons() -> void:
+	var value: Variant = _script_constant(
+		"res://scripts/data/TutorialDB.gd", "LESSONS")
+	if not (value is Dictionary):
+		_fails.append("TutorialDB.LESSONS is not a Dictionary")
+		return
+	var lessons: Dictionary = value
+	if lessons.is_empty():
+		_fails.append("TutorialDB.LESSONS is empty — the scan would be vacuous")
+		return
+	for id in lessons:
+		var entry_value: Variant = lessons[id]
+		if not (entry_value is Dictionary):
+			_fails.append("LESSONS[%s] is not a Dictionary" % id)
+			continue
+		var entry: Dictionary = entry_value
+		var owner := "lesson:%s" % id
+		_check(owner, "title", String(entry.get("title", "")))
+		_check(owner, "body", String(entry.get("body", "")).replace("{n}", "2"))
+
+
+## For dictionaries that are copy BY CONSTRUCTION — every value is player text,
+## and the KEY is a domain id (`roll`, `arsenal`) rather than a copy-key name.
+## _scan_constant_tree cannot serve these: it key-gates through _is_copy_key, so
+## wiring WritDB.SLOT_LABELS there would have scanned zero strings and reported
+## success. Using this instead also retires the fragile `_text`-suffix naming
+## convention for any new copy map.
+func _scan_copy_map(path: String, constant_name: String, prefix: String) -> void:
+	var value: Variant = _script_constant(path, constant_name)
+	if not (value is Dictionary):
+		_fails.append("%s.%s is not a Dictionary" % [path, constant_name])
+		return
+	var dict: Dictionary = value
+	if dict.is_empty():
+		_fails.append("%s.%s is an empty copy map" % [path, constant_name])
+		return
+	# `str()`, NOT `String()` — and this was a live hole, not a style nit.
+	# Godot 4's String has constructors for String / StringName / NodePath and
+	# NOTHING ELSE, so `String(0)` raises "Nonexistent 'String' constructor" and
+	# ABORTS the function where it stands. `COACH_MODE_LABELS` is keyed by the
+	# COACH_* ints, so this threw on its very first key and that map has never
+	# been linted at all — while the probe went on to print PROBE PASS, because
+	# the abort kills the scan and not the verdict. A gate that reports success
+	# on a scan it never performed is the exact failure the method doc calls a
+	# FAKE GATE. Whether the runner NOTICED depended on stdout/stderr buffering
+	# order, which is why it surfaced intermittently.
+	for key_value in dict.keys():
+		_check(prefix, str(key_value), str(dict[key_value]))
+
+
+## Array[String] counterpart to _scan_copy_map — every element is player text.
+func _scan_copy_list(path: String, constant_name: String, prefix: String) -> void:
+	var value: Variant = _script_constant(path, constant_name)
+	if not (value is Array):
+		_fails.append("%s.%s is not an Array" % [path, constant_name])
+		return
+	var list: Array = value
+	if list.is_empty():
+		_fails.append("%s.%s is an empty copy list" % [path, constant_name])
+		return
+	for i in list.size():
+		# `str()` for the same reason as its sibling above.
+		_check(prefix, "[%d]" % i, str(list[i]))
+
+
 func _scan_constant_tree(path: String, constant_name: String, prefix: String) -> void:
 	var value: Variant = _script_constant(path, constant_name)
 	if not (value is Dictionary):
@@ -347,7 +486,28 @@ func _scan_constant_tree(path: String, constant_name: String, prefix: String) ->
 		return
 	var dict: Dictionary = value
 	for id_value in dict.keys():
-		_scan_text_tree(dict[id_value], prefix + ":" + String(id_value), "")
+		# Every entry must yield at least one player-facing string. This asserts a
+		# STRUCTURAL invariant rather than a count, so it never churns on a copy
+		# edit — and it is the assertion that would have caught MUSTER_COPY's 16
+		# entries silently producing 0, which the global 1500 floor cannot see
+		# (the slack above that floor is ~1200 strings).
+		var produced_before := _scanned
+		var entry: Variant = dict[id_value]
+		# FLAT dictionaries (key → copy) such as WritDB.MUSTER_COPY and
+		# WritDB.GLOSSARY. _scan_text_tree only descends Dictionaries and Arrays,
+		# so a top-level String hit neither branch and was dropped in silence —
+		# every one of the opening screen's chrome strings was passing this gate
+		# by never reaching it, which is the same class of hole as authoring the
+		# copy inline. Caught 2026-07-31 when adding three glossary entries did
+		# not move the scanned-string count.
+		if entry is String:
+			if _is_copy_key(String(id_value)):
+				_check(prefix, String(id_value), String(entry))
+		else:
+			_scan_text_tree(entry, prefix + ":" + String(id_value), "")
+		if _scanned == produced_before:
+			_fails.append("%s.%s[%s] produced no player-facing text" % [
+				path, constant_name, String(id_value)])
 
 
 func _scan_text_tree(value: Variant, owner: String, path: String) -> void:
@@ -359,6 +519,18 @@ func _scan_text_tree(value: Variant, owner: String, path: String) -> void:
 			var child_path := key if path == "" else path + "." + key
 			if child is String and _is_copy_key(key):
 				_check(owner, child_path, String(child))
+			elif child is Array and _is_copy_key(key):
+				# The Array branch below only RECURSES, and a bare String element
+				# then matches neither branch and is dropped in silence, so copy
+				# held as ["line", "line"] was unreachable under any key. Scoped
+				# to copy keys because the other 814 dropped strings are ids.
+				var lines: Array = child
+				for li in lines.size():
+					var el_path := "%s[%d]" % [child_path, li]
+					if lines[li] is String:
+						_check(owner, el_path, String(lines[li]))
+					else:
+						_scan_text_tree(lines[li], owner, el_path)
 			else:
 				_scan_text_tree(child, owner, child_path)
 	elif value is Array:
@@ -368,7 +540,12 @@ func _scan_text_tree(value: Variant, owner: String, path: String) -> void:
 
 
 func _is_copy_key(key: String) -> bool:
-	return key in COPY_KEYS or key.ends_with("_text")
+	# SEGMENT test, not a suffix test. `leave_text_early` (EventDB) is prose that
+	# renders on a gamble result screen, and it escaped every wording rule for the
+	# life of this probe purely because the key ends `_early` rather than `_text`
+	# — its sibling `leave_text`, one line above in the same dict, was gated.
+	# Verified across every scanned constant: this matches exactly one new key.
+	return key in COPY_KEYS or "text" in key.split("_") 		or key.ends_with("_label") or key.ends_with("_sub") 		or key.ends_with("_body") or key.ends_with("_title")
 
 
 func _check(owner: String, field: String, copy: String) -> void:
@@ -382,7 +559,7 @@ func _check(owner: String, field: String, copy: String) -> void:
 	if _has_word(low, "elite"):
 		_fails.append("%s %s says elite; player-facing word is General" % [
 			owner, field])
-	if copy.contains("(s)"):
+	if low.contains("(s)"):
 		_fails.append("%s %s leaks an (s) pluralisation artifact" % [
 			owner, field])
 	for phrase in MOUTH:
@@ -417,18 +594,47 @@ func _check_shouting(owner: String, field: String, copy: String) -> void:
 	var run := 0
 	var first := ""
 	for i in words.size() + 1:
-		var word := "" if i >= words.size() else _bare(words[i])
+		var at_end := i >= words.size()
+		var word := "" if at_end else _bare(words[i])
+		# A token carrying fewer than two LETTERS is run-NEUTRAL: it neither joins
+		# a run of signage nor breaks one. Separators and numbers are not words,
+		# but `_bare` reduces them to "" or a stray letter ("%d" -> "d"), which
+		# used to reset the run and strand the capped word beside them as a "lone
+		# shout". That is why "III · THE TERMS" flagged, and it is a whole family:
+		# "+%d GOLD", "-%d COMMAND", "TAKES %d WOUNDS", "WIN - BLOCK - CENTER".
+		# Patching those one at a time is how CAPS_OK ended up carrying "IV".
+		# Cost: a genuine one-letter word ("a") also stops breaking a run, which
+		# no real copy in this project depends on.
+		if not at_end and word.length() < 2:
+			continue
 		var capped := word.length() >= 2 and word == word.to_upper() 			and word.to_lower() != word.to_upper()
 		if capped:
 			if run == 0:
 				first = word
 			run += 1
 			continue
-		if run == 1 and first.length() >= 3 and not (first in CAPS_OK):
+		if run == 1 and first.length() >= 3 and not (first in CAPS_OK) \
+				and not _is_roman_numeral(first):
 			_fails.append("%s %s shouts a lone word: %s" % [
 				owner, field, first])
 		run = 0
 		first = ""
+
+
+## A Roman numeral is a NUMBER, not a shouted word. The game sets its slots and
+## steps in them ("III · THE TERMS", "I · THE ROLL"), and the separator breaks
+## the capped run the shout rule uses to recognise signage, so "III" read as a
+## lone shout while "I" and "II" slipped under the 3-character threshold —
+## inconsistent treatment of one series.
+##
+## Matched strictly (1-39) rather than by character set: "CIVIL" is composed
+## entirely of numeral letters and must still be able to trip the shout rule.
+func _is_roman_numeral(word: String) -> bool:
+	var re := RegEx.new()
+	if re.compile("^(X{0,3})(IX|IV|V?I{0,3})$") != OK:
+		return false
+	var m := re.search(word)
+	return m != null and m.get_string(0) == word and word != ""
 
 
 func _bare(word: String) -> String:
@@ -437,3 +643,84 @@ func _bare(word: String) -> String:
 		if (character >= "A" and character <= "Z") 				or (character >= "a" and character <= "z"):
 			out += character
 	return out
+
+## Every container constant in a file this probe already opens must be either
+## SCANNED or explicitly WAIVED. Nothing else closes the failure that has now
+## happened three times in this repo: a new copy dictionary is authored, nobody
+## wires it into a _scan_* function, and it stays invisible forever while the
+## probe reports PASS (MUSTER_COPY, SLOT_LABELS, SLOT_HINTS).
+##
+## The cost is honest: one waiver line per new NON-copy constant. That is a
+## deliberate trade — the friction is a single line carrying a message that
+## names the exact fix, versus the status quo where the omission is silent.
+const CONTAINER_WAIVERS: Dictionary = {	"res://scripts/data/CardDB.gd": [
+		"STARTER_DECK", "CURSE_IDS", "_CURSE_WEIGHTS", "RARITY_WEIGHT",
+		"ACT_REWARD_WEIGHTS", "SKIRMISH_DENYLIST", "CARD_RARITY",
+	],
+	"res://scripts/data/RelicDB.gd": [
+		"RELIC_RARITY", "TIER_COLORS", "FOUNDATION_RELICS", "BOSS_RELICS",
+		"RARITY_WEIGHT",
+		# relic id -> stand-in ICON id. Both halves are asset/entry identifiers
+		# that never reach the player; the relic's own player-facing name and desc
+		# are scanned where they are authored, in RELICS.
+		"ICON_FALLBACKS",
+	],
+	"res://scripts/data/EncounterDB.gd": [
+		"ACT_FACE_HP_NORM", "REACTIVE_PASSIVES", "TERRAIN_KW",
+		# Encounter ids, not prose — the lineups they name are scanned where they
+		# are authored, in ENCOUNTERS.
+		"LANDING_POOL",
+	],
+	"res://scripts/data/HeroDB.gd": ["HERO_ORDER"],
+	"res://scripts/data/TutorialDB.gd": [
+		# Group ids in reading order — the group's player-facing heading lives in
+		# GROUP_TITLES, which IS scanned (see _scan_lessons' siblings below).
+		"GROUP_ORDER",
+	],
+	"res://scripts/data/BannerDB.gd": ["BANNER_ORDER"],
+	"res://scripts/data/WritDB.gd": ["GLOSSARY_ORDER"],
+	"res://scripts/GameTheme.gd": [
+		"CARD_TRIBES", "TRIBE_COLORS", "TRIBE_COLORS_BRIGHT", "SCREEN_MOODS",
+	],
+	"res://scripts/data/KeywordEffects.gd": ["COMBAT_KEYWORDS"],
+	"res://scripts/state/RunState.gd": [
+		"FIGHT_ROWS", "ELITE_ROWS", "SEASON_TRIBE_POOL",
+		# The run-history CSV's known-result VOCABULARY, not prose. It exists to
+		# tell a real record from a garbled line: a row is accepted if it carries
+		# a plausible ISO stamp OR a result word from this list, so noise produces
+		# neither and is dropped rather than rendered as an invented run. The
+		# player never meets these strings — Collection's HISTORY_OUTCOMES maps
+		# each to its own label, and that map is where the read words are authored.
+		# (Combat writes "withdraw" at a set-piece withdrawal, which is NOT here —
+		# but that is a PlayLog telemetry event, a different log, so this
+		# vocabulary is complete for the file it guards.)
+		"RUN_RESULTS",
+	],
+	"res://scripts/net/SkirmishState.gd": [
+		"CombatMode", "MatchMode", "SKIRMISH_RARITY_TIERS",
+		"SKIRMISH_DRAFT_WEIGHTS", "SKIRMISH_RARITY_OVERRIDES",
+		"SKIRMISH_DENYLIST", "DRAFTABLE_RARITIES", "NET_RELIC_POOL",
+		"NET_POTION_POOL", "BOT_RELIC_POOL", "NET_SPELL_TYPES",
+		"NET_SPELL_CUSTOMS",
+	],
+}
+
+
+func _assert_constants_covered() -> void:
+	for path_value in _read_constants.keys():
+		var path := String(path_value)
+		var resource := ResourceLoader.load(path, "GDScript")
+		if resource == null or not (resource is GDScript):
+			continue
+		var scanned: Array = _read_constants[path_value]
+		var waived: Array = CONTAINER_WAIVERS.get(path, [])
+		for cname_value in (resource as GDScript).get_script_constant_map().keys():
+			var cname := String(cname_value)
+			if scanned.has(cname) or waived.has(cname):
+				continue
+			var v: Variant = (resource as GDScript).get_script_constant_map()[cname_value]
+			if not (v is Dictionary or v is Array):
+				continue
+			_fails.append(("%s.%s is a container constant this probe never reads"
+				+ " — scan it in a _scan_* function, or add it to CONTAINER_WAIVERS")
+				% [path, cname])
