@@ -2330,7 +2330,8 @@ func _show_muster_step(step: int) -> void:
 	var title := _make_display_label(WritDB.muster_copy("title"), 31, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	menu.add_child(title)
-	menu.add_child(_make_muster_step_rail(_muster_step))
+	# (The four-chip step rail stood here until 2026-09-14. THE MUSTER is one
+	# screen now, so there is no walk to narrate — see _build_muster_screen.)
 	# TWO LINES OF HEAD FURNITURE, NOT FOUR (2026-08-01). Every step opened on a
 	# title, the rail, a per-step instruction and the standing promise — four
 	# stacked centred lines, ~170px of the canvas, before a single decision. And
@@ -2364,172 +2365,48 @@ func _show_muster_step(step: int) -> void:
 	# to the rail against a hundred and nine to the row: it read as a subtitle of
 	# the rail, which is the one thing on the screen it is not about. It is built
 	# inside the step now, below the slack, so it travels with its row.
-	match _muster_step:
-		1:
-			_build_muster_step_host(menu)
-		2:
-			_build_muster_step_banner(menu)
-		3:
-			_build_muster_step_terms(menu)
-		4:
-			_build_muster_step_orders(menu)
+	_build_muster_screen(menu)
 	_animate_subscreen_reveal(menu)
 
 
-## The rail is what turns three screens into one flow: it names where you are,
-## what is behind you and what is still to come, and EVERY step is a live button
-## — so BACK is never the only way out, and the walk forward is never compulsory.
-func _make_muster_step_rail(step: int) -> Control:
-	var rail := HBoxContainer.new()
-	rail.alignment = BoxContainer.ALIGNMENT_CENTER
-	# A TAB STRIP, NOT THREE WORDS (2026-08-01). Owner's report on the rendered
-	# step I, verbatim: "what are these 3 banners what do they even do". Every
-	# chip has been a live button since the rail was built, and not one pixel said
-	# so — the two chips you can travel to carried StyleBoxEmpty on NORMAL, HOVER
-	# and PRESSED alike, so pointing at one changed nothing but the cursor, and
-	# only the step you were already standing on had any furniture at all. Three
-	# centred words under a title read as decoration, which is exactly how they
-	# were read; the fact that one of them is called THE BANNER — the name of an
-	# unrelated thing the run also offers — is what turned the whole rail into
-	# "banners".
-	#
-	# So the strip now wears the one shape nobody has to be taught: chips flush
-	# against each other over a continuous hairline, the standing step lit, the
-	# rest of the rule dim but unbroken. The em-dashes are gone — they made three
-	# separate signs; the shared baseline makes one control with three seats. The
-	# numerals still carry the order.
-	rail.add_theme_constant_override("separation", 0)
-	var labels := [
-		WritDB.muster_copy("step_host_text"),
-		WritDB.muster_copy("step_banner_text"),
-		WritDB.muster_copy("step_terms_text"),
-		"IV · REVIEW",
-	]
-	var subtitles := [
-		"CHOOSE YOUR HERO",
-		"CHOOSE A BANNER",
-		"CHOOSE A BONUS",
-		"CHECK AND START",
-	]
-	for i in range(labels.size()):
-		var index := i + 1
-		var is_here := index == step
-		var is_done := index < step
-		var chip := Button.new()
-		chip.custom_minimum_size = Vector2(0, 52)
-		# Every chip is live, not just the struck ones. The rail used to be a
-		# backward-only breadcrumb, which meant the flow DEMANDED all three steps
-		# even though it only OFFERS three: the lord defaults to the first of the
-		# roster, the banner to The Colours, and the term to slot I, so a player
-		# who wants none of them still had to walk two screens to reach TAKE THE
-		# FIELD. Nothing is committed until that button, so skipping forward is
-		# safe by construction — _show_hero_select has already dealt the slate and
-		# every default is seeded before step I is drawn.
-		chip.focus_mode = Control.FOCUS_ALL if not is_here else Control.FOCUS_NONE
-		chip.disabled = is_here
-		chip.mouse_default_cursor_shape = Control.CURSOR_ARROW if is_here \
-			else Control.CURSOR_POINTING_HAND
-		# The still-to-come tint was (0.48, 0.44, 0.38) and its subtitle rode at
-		# 78% of that — roughly (0.37, 0.34, 0.30) worth of ink for the two words
-		# naming what a step is FOR, which is the half of the rail a first-time
-		# player actually needs. Dim enough to say "not yet", light enough to read.
-		var tint: Color = GILT_BRIGHT if is_here else (GILT if is_done else Color(0.64, 0.58, 0.49))
-		if is_here:
-			chip.add_theme_stylebox_override("disabled",
-				_make_rail_seat(GILT_BRIGHT, 0.07, 2))
-		else:
-			# The seat you are NOT standing in still draws its stretch of the rule
-			# — dimmer behind a step still to come than behind one already struck,
-			# so the rail keeps saying where you are — and it answers the pointer:
-			# the hairline comes up to full gilt and a faint wash lights under the
-			# words. That hover is the whole answer to "what do they even do".
-			var rule_tint := Color(GILT.r, GILT.g, GILT.b, 0.42) if is_done \
-				else Color(0.52, 0.46, 0.38, 0.34)
-			chip.add_theme_stylebox_override("normal", _make_rail_seat(rule_tint, 0.0, 1))
-			for state in ["hover", "pressed", "focus"]:
-				chip.add_theme_stylebox_override(state,
-					_make_rail_seat(GILT_BRIGHT, 0.05, 2))
-		var copy := VBoxContainer.new()
-		copy.set_anchors_preset(Control.PRESET_FULL_RECT)
-		copy.alignment = BoxContainer.ALIGNMENT_CENTER
-		copy.add_theme_constant_override("separation", -2)
-		copy.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		chip.add_child(copy)
-		var lbl := _make_display_label(String(labels[i]), 16, tint)
-		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		copy.add_child(lbl)
-		var plain := Label.new()
-		plain.text = String(subtitles[i])
-		plain.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		plain.add_theme_font_size_override("font_size", 15)
-		plain.add_theme_color_override("font_color",
-			Color(tint.r, tint.g, tint.b, 0.88))
-		if GameTheme.font_body:
-			plain.add_theme_font_override("font", GameTheme.font_body)
-		plain.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		copy.add_child(plain)
-		chip.custom_minimum_size.x = maxf(200.0, lbl.get_minimum_size().x + 36.0)
-		if not is_here:
-			# A step ahead of you stays DIM at rest — it is still a promise, not a
-			# breadcrumb. Under the pointer it comes all the way up to gilt: a
-			# stylebox alone lights the seat, but the WORDS are what the eye is on,
-			# so the label answers too.
-			chip.tooltip_text = "Go to %s" % String(labels[i])
-			chip.mouse_entered.connect(_tint_rail_chip.bind(lbl, GILT_BRIGHT))
-			chip.focus_entered.connect(_tint_rail_chip.bind(lbl, GILT_BRIGHT))
-			chip.mouse_exited.connect(_tint_rail_chip.bind(lbl, tint))
-			chip.focus_exited.connect(_tint_rail_chip.bind(lbl, tint))
-			chip.pressed.connect(_show_muster_step.bind(index))
-			# The rail walks both ways, so the cue has to as well: jumping BACK
-			# down the rail is a retreat and gets the retreat's pitch.
-			_arm_shell_button(chip, "back" if index < step else "select")
-		rail.add_child(chip)
-	return rail
-
-
-## One seat of the step rail: a stretch of hairline with an optional wash over
-## it. Built here rather than inline because the rail now needs five of them
-## (standing / struck / still-to-come / hover / pressed) and they must share a
-## geometry — different content margins between states would shuffle the words
-## sideways under the pointer.
-func _make_rail_seat(rule: Color, wash_alpha: float, thickness: int) -> StyleBoxFlat:
-	var box := StyleBoxFlat.new()
-	box.bg_color = Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, wash_alpha)
-	box.border_width_bottom = thickness
-	box.border_color = rule
-	box.content_margin_left = 14
-	box.content_margin_right = 14
-	box.content_margin_top = 3
-	box.content_margin_bottom = 3
-	return box
-
-
-func _tint_rail_chip(lbl: Label, color: Color) -> void:
-	if is_instance_valid(lbl):
-		lbl.add_theme_color_override("font_color", color)
-
-
-func _build_muster_step_host(menu: VBoxContainer) -> void:
+## THE MUSTER IS ONE SCREEN (2026-09-14).
+##
+## It was four, walked in dependency order: host → banner → terms → review. The
+## SPLIT was the defect, not the content. Four decisions do not earn a wizard —
+## the form literature puts the break-even at seven-plus steps and calls the
+## extra Next clicks pure overhead below that — and the genre's own benchmark
+## puts character, ascension and seed on ONE screen with the modifiers in a
+## corner. Hick's law counts TOTAL options, not options-per-screen, so spreading
+## four choices over four pages reduced nothing; it added three clicks and a rail
+## carrying eight strings of navigation chrome.
+##
+## Two symptoms proved the split was load-bearing waste. Both are gone now
+## rather than relocated, which is the test of whether a merge was real:
+##
+##   THE DECK STRIP WAS BUILT THREE TIMES. Step II's own comment said why: "a
+##   chip that says so while the opener is on another screen is a claim the
+##   player cannot check." With the banner chips standing beside THE COLUMN, the
+##   banner's card lands in the one live strip as you press it.
+##
+##   STEP IV EXISTED ONLY TO UNDO STEPS I-III. A review page that restates
+##   choices the player made ninety seconds ago is the standard tell of an
+##   over-split flow — it is the split apologising for itself.
+##
+## Three panes across the main row, because that is what puts each choice beside
+## the thing it changes: the roster picks the lord, THE COLUMN shows what he
+## brings, the banner chips add the eleventh card to it. THE TERMS run full width
+## beneath (four 340px tiles need 1396 of the 1516 available), and the run
+## controls sit in the footer. Measured total: 730 inside the 780 rect.
+func _build_muster_screen(menu: VBoxContainer) -> void:
 	var main_row := HBoxContainer.new()
-	main_row.custom_minimum_size = Vector2(0, 452)
+	# 436: the deepest pane is THE BANNER — six 64px chips is 384, plus the
+	# section's heading, ornament and margins (~52). The roster's five 66px rows
+	# come to 330 and ride the same rect with room to spare.
+	main_row.custom_minimum_size = Vector2(0, 436)
 	main_row.add_theme_constant_override("separation", 16)
 	main_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	# The panes are NOT the thing that takes the step's leftover height — a `Slack`
-	# below them is (see _muster_slack). Measured: their content asks for 480 and
-	# stretching them to the rect gave 615, so THE COLUMN printed its last line
-	# 185px above its own bottom rule and the pane read as a form with fields
-	# missing. The panes now hug what they hold; the air goes under them, where
-	# air is just margin.
 	menu.add_child(main_row)
 
-	# 430, not 350. The roster's taglines were ellipsised on every one of the
-	# five heroes — each overflowed its box by only 2-6 characters, and what got
-	# eaten was the second clause, which is the half that differentiates the
-	# heroes ("Move first" says nothing; "strike where they are not" is the
-	# pitch). The alternate-doctrine taglines run to 42 characters, so the box is
-	# sized for those, not for the shortest one that happens to fit today.
 	var host := _make_muster_section(main_row,
 		WritDB.muster_copy("host_head_text"), 430.0)
 	host.add_theme_constant_override("separation", 4)
@@ -2545,94 +2422,23 @@ func _build_muster_step_host(menu: VBoxContainer) -> void:
 	_hero_detail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	column.add_child(_hero_detail)
 
-	var hero := _selected_hero if HeroDB.has_hero(_selected_hero) else HeroDB.HERO_ORDER[0]
-	# _focus_hero clears the doctrine toggles, which is right when the player
-	# picks a DIFFERENT lord and wrong when they merely step back onto this one.
-	# `keep_doctrine` carries them through the re-focus that repaints the roster's
-	# selection, so the pane is built ONCE with the right flags already standing.
-	_normalize_muster_doctrine(String(hero))
-	_selected_hero = ""
-	_focus_hero(String(hero), true)
-	var hero_focus = _hero_cards.get(String(hero))
-	if hero_focus != null and is_instance_valid(hero_focus):
-		hero_focus.call_deferred("grab_focus")
-	_muster_slack(menu)
-	_build_muster_nav(menu, _abandon_muster,
-		WritDB.muster_copy("next_banner_text"), _show_muster_step.bind(2))
-
-
-func _build_muster_step_banner(menu: VBoxContainer) -> void:
-	var main_row := HBoxContainer.new()
-	main_row.custom_minimum_size = Vector2(0, 452)
-	main_row.add_theme_constant_override("separation", 16)
-	main_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	menu.add_child(main_row)
-
+	# 296: the chips carry their own 270px minimum plus the section's 24px of
+	# margin. They keep their full rule line at that width, which is why the
+	# banner sits in this row rather than as a strip beneath — six chips laid
+	# across the page would have to drop to 244 and ellipsise every verb.
 	var banners := _make_muster_section(main_row,
-		WritDB.muster_copy("banner_head_text"), 430.0)
-	banners.add_theme_constant_override("separation", 7)
+		WritDB.muster_copy("banner_head_text"), 296.0)
+	banners.add_theme_constant_override("separation", 2)
 	for bid in BannerDB.BANNER_ORDER:
 		var chip := _make_muster_banner_chip(bid)
 		banners.add_child(chip)
 		GameTheme.hover_lift(chip, 1.012)
 		_muster_banner_buttons[bid] = chip
 
-	# The column is repeated here on purpose. The banner's whole effect is one
-	# card joining the opener, and a chip that says so while the opener is on
-	# another screen is a claim the player cannot check.
-	var column := _make_muster_section(main_row,
-		WritDB.muster_copy("column_head_text"), 700.0, true)
-	_hero_detail = VBoxContainer.new()
-	_hero_detail.add_theme_constant_override("separation", 6)
-	_hero_detail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	column.add_child(_hero_detail)
-
-	_refresh_muster_banner_styles()
-	var banner_focus = _muster_banner_buttons.get(_selected_banner_tribe)
-	if banner_focus != null and is_instance_valid(banner_focus):
-		banner_focus.call_deferred("grab_focus")
-	if HeroDB.has_hero(_selected_hero):
-		_build_muster_banner_summary(_selected_hero)
-	# What raising a banner DOES is identical for all six, so it prints once here
-	# rather than six times in the list — the chips are then free to spend their
-	# one line on the thing that actually differs, which is what the tribe does on
-	# the field. Screen-scoped, same rule as the terms glossary.
-	var rule := _make_display_label(WritDB.muster_copy("banner_rule_text"), 15,
-		Color(0.80, 0.73, 0.60))
-	rule.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	rule.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	menu.add_child(rule)
-	_muster_slack(menu)
-	_build_muster_nav(menu, _show_muster_step.bind(1),
-		WritDB.muster_copy("next_terms_text"), _show_muster_step.bind(3))
-
-
-func _build_muster_step_terms(menu: VBoxContainer) -> void:
-	# Terms now get the whole decision surface. The finished company is available
-	# from the rail and will be summarized on March Orders; it no longer crowds
-	# four mutually exclusive offers the player is trying to compare.
-	#
-	# The row is the only thing on this step, so it sits between the pinned rail
-	# and the pinned commit row rather than taking all of that space (four tiles
-	# stretched to 450 tall read as four empty frames).
-	#
-	# Not centred in it, though: 2 above against 5 below. "Accept one term." is
-	# the rule of THIS row, and an even split parked 230px of bare canvas between
-	# the instruction and the four things it instructs — the two elements on the
-	# screen that most need to be read as one. The slack under the tiles buys
-	# nothing by comparison; BACK and the forward button are chrome, and they are
-	# on the same baseline as every other step's.
-	#
-	# 2026-08-04: the instruction MOVED here, below the slack (see the note in
-	# _show_muster_step). With it bound to its row rather than to the rail, the
-	# band above can be bigger than the band below without stranding it, so the
-	# bias goes 3-above / 4-below: the row lands a little under the vertical
-	# middle, which is where a single decision belongs on an otherwise bare page.
-	_muster_slack(menu, 3)
+	# THE TERMS keep their instruction. "Accept one term" is the rule of the ROW,
+	# and no tile states it — each tile states only its own slot.
 	menu.add_child(_make_muster_step_desc("terms_step_desc_text"))
 	_muster_writ_row = HBoxContainer.new()
-	# 150, matching the tile's own minimum — this row used to force 196 onto tiles
-	# that asked for 178, so it was adding 18px of emptiness to all four.
 	_muster_writ_row.custom_minimum_size = Vector2(0, 150)
 	_muster_writ_row.add_theme_constant_override("separation", 12)
 	_muster_writ_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -2643,268 +2449,189 @@ func _build_muster_step_terms(menu: VBoxContainer) -> void:
 	_muster_gloss_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	menu.add_child(_muster_gloss_label)
 
+	var hero := _selected_hero if HeroDB.has_hero(_selected_hero) \
+		else HeroDB.HERO_ORDER[0]
+	# _focus_hero clears the doctrine toggles, which is right when the player
+	# picks a DIFFERENT lord and wrong when a rebuild merely repaints this one.
+	_normalize_muster_doctrine(String(hero))
+	_selected_hero = ""
+	_focus_hero(String(hero), true)
+	_refresh_muster_banner_styles()
 	_refresh_muster_deals()
-	var term_focus = _muster_writ_buttons.get(_selected_writ_id)
-	if term_focus != null and is_instance_valid(term_focus):
-		term_focus.call_deferred("grab_focus")
-	_muster_slack(menu, 4)
-	# "ORDERS", not "MARCH ORDERS". The destination chip on the rail says
-	# "IV · ORDERS" and the screen title says "ORDER OF MARCH", so the same two
-	# words were arranged three ways in one flow — and "orders" already means enemy
-	# intents in combat. The button names its destination and nothing else.
-	_build_muster_nav(menu, _show_muster_step.bind(2),
-		"NEXT: REVIEW", _show_muster_step.bind(4))
+
+	_muster_slack(menu)
+	_build_muster_footer(menu)
+
+	var hero_focus = _hero_cards.get(String(hero))
+	if hero_focus != null and is_instance_valid(hero_focus):
+		hero_focus.call_deferred("grab_focus")
 
 
-## The final step gathers reference and run controls, not new build choices:
-## company, chosen term, road preview, optional settings, then commit.
-func _build_muster_step_orders(menu: VBoxContainer) -> void:
-	# This step reviews rather than offers, so its content is short and the
-	# leftover height is real. Split it above and below the review block — 2 above
-	# against 3 below, the same bias as THE TERMS: the rail stays where the other
-	# three steps left it, TAKE THE FIELD stays on the same baseline as their
-	# BACK/NEXT row, and the review sits nearer the rail that introduced it.
-	_muster_slack(menu, 2)
-	if HeroDB.has_hero(_selected_hero):
-		menu.add_child(_make_muster_compact_summary())
-
-	# ── THE TERM STANDS BESIDE THE ROAD IT MARCHES INTO (2026-08-05) ──
-	# The chosen-term tile was a full-width EXPAND_FILL slab — 1840px of plate
-	# holding three short left-packed lines, so roughly 1400px of it was empty
-	# and it was the largest single void left in the muster. Underneath it, the
-	# road preview (season + lords) was a centred paragraph floating on bare
-	# canvas with no plate at all.
-	#
-	# They are the same question asked twice — "what did I agree to" and "what am
-	# I walking into" — so they are one row of two panes rather than a slab above
-	# a caption. The width is spent on content instead of on margin, the road
-	# preview gains the plate it never had, and the band below shrinks by the
-	# height the paragraph used to occupy.
-	var review_row := HBoxContainer.new()
-	review_row.add_theme_constant_override("separation", 14)
-	review_row.custom_minimum_size = Vector2(0, 126)
-	review_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	menu.add_child(review_row)
-
-	var term_frame := PanelContainer.new()
-	term_frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	term_frame.size_flags_stretch_ratio = 1.15   # the term is the louder half
-	var term_style := GameTheme.make_panel_style(
-		Color(0.055, 0.038, 0.035, 0.88),
-		Color(0.78, 0.58, 0.25, 0.68), 1, 4, false)
-	term_style.content_margin_left = 18
-	term_style.content_margin_right = 18
-	term_style.content_margin_top = 12
-	term_style.content_margin_bottom = 12
-	term_frame.add_theme_stylebox_override("panel", term_style)
-	review_row.add_child(term_frame)
-	_muster_order_term_detail = VBoxContainer.new()
-	_muster_order_term_detail.add_theme_constant_override("separation", 4)
-	term_frame.add_child(_muster_order_term_detail)
-	_refresh_muster_order_term()
-
-	var road_frame := PanelContainer.new()
-	road_frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var road_style := GameTheme.make_panel_style(
-		Color(0.042, 0.032, 0.034, 0.86),
-		Color(0.58, 0.50, 0.34, 0.55), 1, 4, false)
-	road_style.content_margin_left = 18
-	road_style.content_margin_right = 18
-	road_style.content_margin_top = 12
-	road_style.content_margin_bottom = 12
-	road_frame.add_theme_stylebox_override("panel", road_style)
-	review_row.add_child(road_frame)
-	var road_col := VBoxContainer.new()
-	road_col.add_theme_constant_override("separation", 4)
-	road_frame.add_child(road_col)
-	road_col.add_child(_make_caption_label("WHAT YOU FACE", 15,
-		Color(0.76, 0.69, 0.56)))
-	# Warm bone, not the sage it was: green >= red is the cold-ink tell, and this
-	# is one of the last two live instances in the opening.
-	# Left-flush now that it has a pane of its own — a centred paragraph inside a
-	# left-headed plate reads as two unrelated blocks.
-	_muster_campaign_label = _make_display_label("", 16, Color(0.88, 0.83, 0.68))
-	_muster_campaign_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	_muster_campaign_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_muster_campaign_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	road_col.add_child(_muster_campaign_label)
-	_refresh_muster_campaign()
+## The run controls and the commit share the footer. Ascension, seed and Daily
+## Run are MODIFIERS, not build choices — they stay collapsed behind MORE RUN
+## OPTIONS, so the default path from opening this screen to marching is one
+## press. BACK is the only other exit and nothing commits until START RUN, which
+## is what the rail's travelling promise used to have to explain.
+func _build_muster_footer(menu: VBoxContainer) -> void:
 	_build_muster_settings(menu)
-	_muster_slack(menu, 3)
-
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	menu.add_child(row)
+	var back := _make_secondary_action("BACK", 180, 40)
+	back.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	back.pressed.connect(_abandon_muster)
+	row.add_child(back)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(spacer)
 	var take := _make_begin_button()
 	take.name = "MusterTakeField"
-	# Measured, not stretched: 27px Cinzel + two 28px flames + 16px gaps + the
-	# plate's 22px margins ≈ 400. 470 gives the biggest thing in the shell a
-	# margin of its own without becoming a bar.
 	take.custom_minimum_size = Vector2(470, 56)
-	take.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	take.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	_build_muster_nav(menu, _show_muster_step.bind(3), "", Callable(), take)
+	row.add_child(take)
 	take.call_deferred("grab_focus")
 
 
-func _refresh_muster_order_term() -> void:
-	if _muster_order_term_detail == null or not is_instance_valid(
-			_muster_order_term_detail):
-		return
-	for child in _muster_order_term_detail.get_children():
-		child.queue_free()
-	var chosen: Dictionary = {}
-	for entry in _muster_writ_slate:
-		if String(entry.get("id", "")) == _selected_writ_id:
-			chosen = entry
-			break
-	if chosen.is_empty():
-		# An empty state names the cause AND what to do about it (COPY_STYLE §12).
-		# "NO BONUS CHOSEN" stated a fact and left the player on a review page with
-		# no route back to the thing that was missing.
-		_muster_order_term_detail.add_child(_make_display_label(
-			"No bonus chosen — go back to step III.", 18, Color(0.88, 0.48, 0.40)))
-		return
-	var slot := String(chosen.get("slot", ""))
-	var eyebrow := _make_caption_label("YOUR BONUS — %s" % String(
-		WritDB.SLOT_LABELS.get(slot, "")), 14, GILT)
-	eyebrow.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	_muster_order_term_detail.add_child(eyebrow)
-	var name := _make_display_label(String(chosen.get("name", "")), 22, IVORY)
-	name.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	_muster_order_term_detail.add_child(name)
-	var desc := _make_display_label(String(chosen.get("desc", "")), 16,
-		GameTheme.DESC_DIM)
-	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_muster_order_term_detail.add_child(desc)
-
-## The banner decision is one card and one recruitment bias. Show exactly those
-## consequences instead of reprinting the entire eleven-card opener.
-func _build_muster_banner_summary(hid: String) -> void:
-	if _hero_detail == null or not is_instance_valid(_hero_detail):
-		return
-	_hide_deck_preview()
-	for child in _hero_detail.get_children():
-		child.queue_free()
-	var hero := HeroDB.get_hero(hid)
-	var banner := BannerDB.get_banner(_selected_banner_tribe)
-	var card_id := BannerDB.card_id(_selected_banner_tribe)
-	var card := CardDB.get_card_data(card_id)
-	var heading := _make_display_label(
-		"%s raises %s" % [hero.get("name", hid), banner.get("name", "")],
-		22, _faction_accent(hid))
-	heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	_hero_detail.add_child(heading)
-	var pitch := _make_display_label(
-		"Your banner changes two things. Nothing else in your starting deck changes.",
-		15, GameTheme.DESC_DIM)
-	pitch.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_hero_detail.add_child(pitch)
-	# THE TWO CONSEQUENCES SIT SIDE BY SIDE, AND THE OPENER IS UNDER THEM
-	# (2026-08-04). Ink-density map of this pane's interior, 40px cells: 74.7% of
-	# it held nothing — a contiguous void wider than the content, inside a bordered
-	# frame, which reads as a panel that failed to populate rather than as margin.
-	# The pane is 1070 wide and its content asked for 395 of that.
+## THE WHOLE OPENER, AS PICTURES (2026-09-14).
+##
+## This strip used to be seven baked Card2D faces at DECK_MINI_SCALE 0.62, and it
+## was the loudest ink on the screen. Card2D holds rules text at an ABSOLUTE 18px
+## floor: _fit_desc_to_box refuses to shrink a glyph and would rather clip the
+## card, COPY_STYLE §11 sets that floor, and tools/_probe_text_floor.gd fails the
+## build below 14. Scaling the NODE to 0.62 rendered that text at 11.2px — and no
+## gate could see it, because the probe reads font-size OVERRIDES and a
+## Control.scale is not one. (That blind spot is general: any scaled subtree
+## defeats a size-literal check.)
+##
+## So the biggest element on the run-setup screen was rules text nobody could
+## read — decoration wearing the costume of information. The fix is not a bigger
+## strip, because seven READABLE faces do not fit in any pane this screen can
+## spare. It is the right unit: a card's ART is what the eye actually recognises
+## a card by, at roughly a third of the ink. Pictures instead of faces also buy
+## the room to show all ELEVEN cards rather than a seven-card sample, so the
+## strip now says strictly more than the thing it replaces.
+##
+## The rules are not gone, they are one gesture away, twice: hovering any tile
+## floats the full readable card (_show_deck_preview), and VIEW FULL DECK opens
+## the inspector. That is one level of progressive disclosure — the most NN/g's
+## guidance allows before users start getting lost between levels.
+func _make_opener_art_strip(opener: Array[String], banner_card: String) -> Control:
+	var counts: Dictionary = {}
+	var order: Array[String] = []
+	for cid in opener:
+		var id := String(cid)
+		if not counts.has(id):
+			counts[id] = 0
+			order.append(id)
+		counts[id] = int(counts[id]) + 1
+	# The banner's card LEADS, so pressing a banner chip visibly changes the head
+	# of the strip instead of shuffling something into the middle of it.
+	if banner_card != "" and banner_card in order:
+		order.erase(banner_card)
+		order.push_front(banner_card)
+	# SIX ACROSS, NOT ELEVEN — and the tiles are LANDSCAPE. The first cut laid one
+	# rank of portrait tiles at the card's own 3:4, which was wrong twice over:
+	# card art ships 3:2 LANDSCAPE (768×512), so covering a portrait tile with it
+	# crops to the middle 50% of the painting's width, and the middle of a
+	# painting is very often its background. Measured on the rendered strip:
+	# eleven tiles of sky, mud and foliage with not one recognisable subject in
+	# them — which looks exactly like a broken image loader.
 	#
-	# Both halves of the fix are content the screen was already claiming to show.
-	# The two consequences are a matched pair (eyebrow over datum) so they are laid
-	# out as a pair rather than stacked in one narrow column; and the opening column
-	# itself goes underneath, because this pane's own comment says it exists so that
-	# "one of its own joins your opener" is a claim the player can CHECK — and until
-	# now the only card on the screen was the banner's own, with the opener two
-	# screens back. The banner's card leads the strip, so the single 0.70 mini that
-	# used to stand beside the copy is not lost, it is in its column.
-	var consequence := HBoxContainer.new()
-	consequence.add_theme_constant_override("separation", 28)
-	_hero_detail.add_child(consequence)
-	var copy := VBoxContainer.new()
-	copy.add_theme_constant_override("separation", 4)
-	copy.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	consequence.add_child(copy)
-	copy.add_child(_make_caption_label("ADDED TO YOUR DECK", 15,
-		Color(0.68, 0.61, 0.48)))
-	var card_name := _make_display_label(
-		"+ %s" % String(card.get("name", card_id)), 22, GILT_BRIGHT)
-	card_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	copy.add_child(card_name)
-	# The banner's `line_text` is NOT reprinted here (audit, 2026-08-03). The chip
-	# that raised it is on the same screen, 600px left, still showing that exact
-	# sentence — so the screen carried it twice, 40px apart vertically. Worse, in
-	# THIS pane it landed directly under "+ Line Marker" and so read as Line
-	# Marker's rules text; Line Marker's actual rule is "Guardian.", printed on
-	# the card 200px to the left. The card's own rules are on the card.
-	var bias_col := VBoxContainer.new()
-	bias_col.add_theme_constant_override("separation", 4)
-	bias_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	consequence.add_child(bias_col)
-	bias_col.add_child(_make_caption_label("AT RECRUIT CAMPS", 15,
-		Color(0.68, 0.61, 0.48)))
-	var tribe := String(banner.get("tribe", "this kind"))
-	# A DATUM, NOT THE RULE AGAIN (2026-08-04). This read "Soldier cards appear
-	# more often at every Recruit Camp." — and `banner_rule_text`, printed at the
-	# foot of this same screen 240px below, says "...its kind turns up more often
-	# at every Recruit Camp." One fact, two wordings, one screen. The shared rule
-	# is the footer's job by design (see _probe_muster's banner check: the half
-	# that is identical for all six banners is printed ONCE), so what belongs here
-	# is only the half the footer cannot know — WHICH kind. Written as a datum it
-	# also matches "+ Line Marker" opposite it: eyebrow over answer, twice.
-	#
-	# "%s cards", not a plural of the tribe word: BannerDB stores the singular
-	# ("Dead", "Stray"), and "More Deads" is what pluralising it produces.
-	var bias := _make_display_label("More %s cards" % tribe, 22, GILT_BRIGHT)
-	bias.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	bias_col.add_child(bias)
-	var opener: Array[String] = RunState.opening_deck_for(
-		hid, _muster_alt_deck, _selected_banner_tribe)
-	var shown: Array[String] = _representative_opening_cards(
-		opener, card_id, _strip_rank_capacity(MUSTER_STRIP_WIDTH_SPLIT))
-	_warm_deck_strip(shown, hid)
-	var strip_head := HBoxContainer.new()
-	strip_head.add_theme_constant_override("separation", 18)
-	_hero_detail.add_child(strip_head)
-	strip_head.add_child(_make_caption_label(
-		"YOUR STARTING DECK  ·  %d cards" % opener.size(), 15,
-		Color(0.76, 0.69, 0.56)))
-	var inspect := _make_secondary_action("VIEW FULL DECK", 220, 32)
-	inspect.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
-	inspect.tooltip_text = "Open the complete starting deck."
-	inspect.pressed.connect(_show_muster_deck_inspector)
-	strip_head.add_child(inspect)
-	_hero_detail.add_child(_make_muster_deck_strip(shown))
+	# Two ranks of six at the art's OWN aspect crops nothing, and the tile grows
+	# from 65×87 to ~113×75, so the thing the player is being shown is the whole
+	# picture rather than a core sample of it.
+	var grid := GridContainer.new()
+	grid.columns = OPENER_STRIP_COLUMNS
+	grid.add_theme_constant_override("h_separation", 6)
+	grid.add_theme_constant_override("v_separation", 6)
+	grid.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	grid.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	var cols: float = float(OPENER_STRIP_COLUMNS)
+	var tile_w: float = (OPENER_STRIP_WIDTH - 6.0 * (cols - 1.0)) / cols
+	for id in order:
+		grid.add_child(_make_opener_art_tile(String(id), int(counts[id]),
+			tile_w, String(id) == banner_card))
+	return grid
 
 
-## Terms need the size and identity of the finished column, but not eleven cards
-## printed for a third time. The full list remains one explicit click away.
-func _make_muster_compact_summary() -> Control:
-	var frame := PanelContainer.new()
-	frame.custom_minimum_size = Vector2(0, 62)
-	frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var style := GameTheme.make_panel_style(
-		Color(0.045, 0.032, 0.038, 0.90),
-		Color(0.60, 0.51, 0.34, 0.50), 1, 4, false)
-	style.content_margin_left = 16
-	style.content_margin_right = 16
-	style.content_margin_top = 8
-	style.content_margin_bottom = 8
-	frame.add_theme_stylebox_override("panel", style)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 18)
-	frame.add_child(row)
-	var hero := HeroDB.get_hero(_selected_hero)
-	var opener: Array[String] = RunState.opening_deck_for(
-		_selected_hero, _muster_alt_deck, _selected_banner_tribe)
-	var summary := _make_display_label(
-		"%s  ·  %d cards  ·  %s  ·  %d max HP" % [
-			hero.get("name", _selected_hero), opener.size(),
-			BannerDB.display_name(_selected_banner_tribe), RunState.STARTING_MAX_HP],
-		16, IVORY)
-	summary.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	summary.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(summary)
-	var inspect := _make_secondary_action("VIEW FULL DECK", 220, 36)
-	inspect.size_flags_horizontal = Control.SIZE_SHRINK_END
-	inspect.tooltip_text = "Open the complete starting deck."
-	inspect.pressed.connect(_show_muster_deck_inspector)
-	row.add_child(inspect)
-	return frame
+## One art tile. A Control with the painting inside it and the frame drawn OVER
+## it: PanelContainer would inset the art by its own content margins, and
+## clip_children is inert on gl_compatibility (so the art cannot be trimmed to a
+## rounded plate). STRETCH_KEEP_ASPECT_COVERED does the cropping instead — it
+## clips to the node's own rect by definition.
+func _make_opener_art_tile(id: String, count: int, w: float,
+		is_banner: bool) -> Control:
+	var data: Dictionary = CardDB.get_card_data(id)
+	# The CARD is 3:4; the PAINTING is 3:2, and it is the painting being shown.
+	var h: float = w / OPENER_ART_ASPECT
+	var slot := Control.new()
+	slot.custom_minimum_size = Vector2(w, h)
+	slot.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	var art_path := CardArtAliases.card_art_path(data)
+	if art_path != "" and ResourceLoader.exists(art_path):
+		# THE CLIP IS ITS OWN NODE, and it has to be. STRETCH_KEEP_ASPECT_COVERED
+		# scales the painting until it COVERS the rect and lets the overflow draw
+		# past the node — it does not crop by itself, it needs a scissor. Without
+		# one the eleven tiles each painted a full-height column straight down the
+		# page, over the signature relic and the terms row beneath them.
+		#
+		# It cannot be `slot.clip_contents`, because slot also carries the ×N
+		# chip, which deliberately sits at the tile's own top edge and would be
+		# scissored away with the overflow. So the scissor wraps the art alone.
+		# (`clip_contents` is a real scissor rect and works on gl_compatibility —
+		# it is CanvasItem.clip_children that is inert on this renderer.)
+		var art_clip := Control.new()
+		art_clip.set_anchors_preset(Control.PRESET_FULL_RECT)
+		art_clip.clip_contents = true
+		art_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.add_child(art_clip)
+		var tex := TextureRect.new()
+		tex.set_anchors_preset(Control.PRESET_FULL_RECT)
+		tex.texture = load(art_path)
+		# EXPAND_IGNORE_SIZE IS LOAD-BEARING. TextureRect's default expand_mode is
+		# EXPAND_KEEP_SIZE, under which the node's minimum size is the TEXTURE's
+		# full size — 768×512 here — so the anchors never got it down to the tile
+		# and stretch_mode had nothing to do. The painting drew at 1:1 and the clip
+		# above scissored a 113×75 window out of its TOP-LEFT CORNER, which is why
+		# every tile read as sky or mud: it was a core sample at full resolution,
+		# not a thumbnail. The art was never the problem.
+		tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		tex.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		art_clip.add_child(tex)
+	# The banner's card wears the gilt edge — the one tile on the strip that the
+	# chip column to the right is responsible for.
+	var frame := Panel.new()
+	frame.set_anchors_preset(Control.PRESET_FULL_RECT)
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	frame.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
+		Color(0, 0, 0, 0.0),
+		Color(0.80, 0.62, 0.28, 0.92) if is_banner else Color(0.50, 0.43, 0.31, 0.66),
+		2 if is_banner else 1, 3, false))
+	slot.add_child(frame)
+	if count > 1:
+		var chip := _make_display_label("×%d" % count, 15, GILT_BRIGHT)
+		chip.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.92))
+		chip.add_theme_constant_override("outline_size", 6)
+		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.add_child(chip)
+		chip.size = Vector2(30, 20)
+		chip.position = Vector2(w - 31.0, 2.0)
+	# Topmost catcher: the tooltip names the card (the tile is a picture, and a
+	# picture alone cannot be looked up), and the hover floats the readable face.
+	var catcher := Control.new()
+	catcher.set_anchors_preset(Control.PRESET_FULL_RECT)
+	catcher.mouse_filter = Control.MOUSE_FILTER_STOP
+	catcher.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	slot.add_child(catcher)
+	var tip := String(data.get("name", id))
+	var gloss := _deck_mini_tooltip(id)
+	catcher.tooltip_text = gloss if gloss != "" else tip
+	catcher.mouse_entered.connect(_show_deck_preview.bind(id, slot))
+	catcher.mouse_exited.connect(_hide_deck_preview)
+	return slot
 
 
 ## A stretch of empty height that absorbs whatever the step does not use. Named
@@ -3227,8 +2954,13 @@ func _select_muster_banner(bid: String) -> void:
 		return
 	_selected_banner_tribe = bid
 	_refresh_muster_banner_styles()
+	# Rebuild THE COLUMN itself rather than a separate summary block. The
+	# banner's entire effect is one card joining the opener, and on a single
+	# screen the player can watch it land at the head of the live strip — which
+	# is the thing the three duplicated deck strips were imitating from two pages
+	# away, and the reason they existed at all.
 	if _selected_hero != "":
-		_build_muster_banner_summary(_selected_hero)
+		_build_muster_roll(_selected_hero)
 	_refresh_muster_campaign()
 
 
@@ -3345,12 +3077,10 @@ func _build_muster_roll(hid: String, compact: bool = false) -> void:
 	# height does not move at all: a rank is 186px tall whether it holds three
 	# minis or seven. The banner's card leads (see _representative_opening_cards) —
 	# display order only, the run's deck is untouched.
-	var shown: Array[String] = _representative_opening_cards(
-		opener, banner_card, _strip_rank_capacity(
-			MUSTER_STRIP_WIDTH_FULL if compact else MUSTER_STRIP_WIDTH_SPLIT))
-
-	_warm_deck_strip(shown, hid)
-	_hero_detail.add_child(_make_muster_deck_strip(shown))
+	# THE WHOLE OPENER AS ART, not a seven-card sample of baked faces — see
+	# _make_opener_art_strip for why the faces had to go (11.2px rules text
+	# against an absolute 18px floor that no gate could see).
+	_hero_detail.add_child(_make_opener_art_strip(opener, banner_card))
 	_build_muster_doctrine_row(_hero_detail, hid, hero, compact)
 
 
@@ -4181,7 +3911,6 @@ func _refresh_muster_deals() -> void:
 			if not _muster_writ_slate.is_empty() else ""
 	if _muster_gloss_label != null and is_instance_valid(_muster_gloss_label):
 		_muster_gloss_label.text = WritDB.gloss_for_slate(_muster_writ_slate)
-	_refresh_muster_order_term()
 	if _muster_writ_row == null or not is_instance_valid(_muster_writ_row):
 		return
 	for child in _muster_writ_row.get_children():
@@ -4769,6 +4498,17 @@ const DECK_MINI_SCALE_RANKS := 0.58
 ## Step III gives the column the whole menu: 1540 - the same 24 = 1516.
 const MUSTER_STRIP_WIDTH_SPLIT := 1070.0
 const MUSTER_STRIP_WIDTH_FULL := 1516.0
+## Usable width of THE COLUMN pane on the single-screen muster: the main row's
+## 1516 less the roster (430), the banner column (296), two 16px separations and
+## the pane's own 24px of margin. The art strip divides this by however many
+## DISTINCT cards the opener holds, so it stays one rank at any deck size.
+const OPENER_STRIP_WIDTH := 710.0
+## Card art ships 3:2 landscape (768×512 and 1344×896 throughout
+## assets/creatures). The tiles are built at that ratio so COVERED crops nothing.
+const OPENER_ART_ASPECT := 1.5
+## Two ranks of six holds an 11-card opener (max 10 distinct after duplicates)
+## without a third rank appearing for one card.
+const OPENER_STRIP_COLUMNS := 6
 
 ## Warm every distinct card in one hero's opener in a SINGLE batched pass.
 ##
