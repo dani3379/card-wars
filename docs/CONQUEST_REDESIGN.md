@@ -251,6 +251,23 @@ User direction: route choice should have mechanical weight, not just length. The
 - **The bill is smaller than spec'd:** 41 encounters exist (not 26), ~80% pre-mappable; the Everflame engine is fully live (Kindler Doom/Rampage/Lifelink); scry half-exists; act sizing + the territorial map already shipped. Rival-lord portraits: redress existing hero art before commissioning. Net-new work concentrates in Lanternhall content, 5 boss kits + amalgams, `overrun`/`formation`, and the matchup matrix.
 
 ### 15.3 Amended build order (replaces §14 sequencing)
+
+> **STATUS 2026-09-13 — STEPS 1–5 ARE DONE. Do not re-implement them.** This
+> list was written 2026-06-10 and read as a to-do for three months after the
+> work had landed; a session acting on it started rebuilding step 2 before
+> noticing. Verified in code: the RunState rival/faction fields and their
+> selection functions, `get_ids_for`'s faction filter with cross-act borrowing,
+> the Reward.gd rival-choice UI, rival columns in `_append_run_log`, and
+> faction-curated Recruit drafts. **`SAVE_VERSION` is at 4**, past the "2→3"
+> below. §15.2's rules are live as well (per-faction wave schedules, per-faction
+> combat moods, `overrun`/`formation`, map faction skinning).
+> `_probe_campaign_walk` passes 36 acts / 648 visits with no pool exhaustion.
+>
+> **WHAT REMAINS IS CONTENT.** Every non-rival encounter is faction-tagged, but
+> **8 of 15 faction×act elite slots are empty** and five combat pools hold one
+> fight, so those kingdoms repeat an encounter within a run. See the roadmap's
+> 2026-09-13 status entry for the per-faction tally.
+
 1. ~~**Faction worksheet**~~ **DONE 2026-06-10 → [`FACTION_WORKSHEET.md`](FACTION_WORKSHEET.md)** — all **40** live encounters tagged (the "41" count was off by one: A1 13 / A2 13 / A3 14), coverage matrix + gap list included. Net-new estimate drops to ~8–12 encounters after re-leveling existing fights via their deck variants; Owed is the donor faction, Lanternhall still the front-load.
 2. **Phase 0–1 scaffolding** — RunState fields, `faction` tag, `get_ids_for` filter, rival selection; **SAVE_VERSION 2→3**.
 3. **One-matchup vertical slice** — invade **the Last Wall** in act 1 (wall/armor is the best-stocked theme), seeded order, one free recruit node, one pre-authored amalgam: a full run end-to-end **before** authoring the ~13–17 gap encounters.

@@ -282,6 +282,10 @@ const LANE_DWELL_KILL: float = 0.52   # a lane that produced a corpse earns a lo
 ## claiming a registration slot of its own. This is what keeps a full board inside
 ## its time budget while leaving the decisive lanes their full dwell.
 const LANE_DWELL_MINOR: float = 0.09
+# How far a blow must stray from its printed ATK before `_flash_strike_provenance`
+# names the cause. A SURPRISE test, not a size test: +1 is noise the player
+# forgives, but a card that says 3 and swings for 7 reads as a card that lies.
+const STRIKE_PROVENANCE_MIN_DELTA: int = 2
 ## Impact hold floor/ceiling. Fighting games ship this band and stay readable at
 ## 60 fps: Street Fighter IV freezes 9/11/13 frames (150/183/217 ms) by strength.
 ## Sakurai's rule — scale by damage, but CAP it — is why this is a clamp, not a curve.
@@ -6529,6 +6533,73 @@ func _show_lifelink_heal(amount: int) -> void:
 		_punch_label(_player_hp_label, 1.12)
 
 
+## Name the CAUSE of a blow that disagrees with its card, in the wind-up before
+## the number lands.
+##
+## A creature printed 3 that swings for 7 is, to the player, a card that lies.
+## The hover readout can explain it (`_stat_provenance_text`) but only if they
+## stop and hover, which nobody does mid-clash. So the sources announce
+## themselves instead: the relic chips that are lending pulse in the rail, and a
+## neighbour whose aura is lending gets a beat of its own — then the blow lands.
+## Opaque arithmetic becomes visible causality, which is the one Balatro
+## technique this game did not already have.
+##
+## IT COSTS NO TIME, and that is why it is here rather than as its own beat. It
+## runs inside the lunge's existing travel to LUNGE_APEX — the same reasoning
+## and the same window as the defender's brace above. A standalone beat could
+## not have been added at any price: the clash is already serialized to 15.7s on
+## a full board (the reason "hold to rush" exists), and the perceptual model
+## this project gates on forbids the 100–500ms band outright, so a new pause
+## would have to be ≥500ms — half a second per strike, on every strike.
+##
+## THE THRESHOLD IS A SURPRISE TEST, not a size test. It fires when the effective
+## number differs from the printed one by 2 or more, because that is exactly when
+## the card stops agreeing with the board. A +1 is noise the player forgives; a
+## blow four points off its card is the one they misread.
+##
+## SOLO ONLY, same contract as the hover readout it borrows from: a net client's
+## snapshot folds every buff into one ATK number at spawn, so the split would
+## name causes that peer cannot verify — and `_relic_atk_for` is player-side
+## anyway (the enemy holds no relics).
+func _flash_strike_provenance(attacker: Control, lane_idx: int,
+		attacker_is_enemy: bool) -> void:
+	if attacker_is_enemy or _is_net():
+		return
+	if DisplayServer.get_name() == "headless":
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	if attacker == null or not is_instance_valid(attacker):
+		return
+	var printed: int = int(attacker.card_data.get("atk", 0))
+	var shown: int = _effective_attack(attacker, lane_idx, attacker_is_enemy)
+	if absi(shown - printed) < STRIKE_PROVENANCE_MIN_DELTA:
+		return
+	# The relic rail first — `_relic_fired` is the house funnel (it debounces and
+	# pulses the owner's chip), so this never animates a chip by hand.
+	for rid in _relic_atk_sources(attacker):
+		_relic_fired(String(rid))
+	# Then the neighbour actually lending an aura. `adj_atk_buff` is the folded
+	# total, so the SOURCE is whichever adjacent friendly carries an adj_buff —
+	# pulsing the recipient would point at the wrong card entirely.
+	if int(attacker.adj_atk_buff) == 0:
+		return
+	# Adjacency per the design doc and `_count_adjacent_friendlies`: +/-1 COLUMN,
+	# both rows; same-column other-row is NOT adjacent.
+	var lane: int = attacker.current_lane
+	for adj_lane in [lane - 1, lane + 1]:
+		if adj_lane < 0 or adj_lane >= LANES_PER_ROW:
+			continue
+		for row in [ROW_FRONT, ROW_BACK]:
+			var nb = _row_array(false, row)[adj_lane]
+			if nb == null or not is_instance_valid(nb):
+				continue
+			var ab: Dictionary = nb.card_data.get("adj_buff", {})
+			if int(ab.get("atk", 0)) <= 0:
+				continue
+			ring_over(nb, GameTheme.KEYWORD_GOLD, 26.0)
+
+
 func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: int, attacker_is_enemy: bool) -> void:
 	if attacker.has_method("play_attack_lunge"):
 		attacker.play_attack_lunge(
@@ -6541,6 +6612,7 @@ func _creature_attacks_creature(attacker: Control, defender: Control, lane_idx: 
 	if defender != null and is_instance_valid(defender) \
 			and defender.has_method("play_defend_brace"):
 		defender.play_defend_brace(not attacker_is_enemy)
+	_flash_strike_provenance(attacker, lane_idx, attacker_is_enemy)
 	_net_log_lunge(attacker, defender)
 	await _short_pause(LUNGE_APEX)
 	if not is_instance_valid(attacker) or not is_instance_valid(defender):
@@ -7426,6 +7498,42 @@ func _relic_atk_for(card: Control) -> int:
 	if round_number == 1 and _has_relic("steady_banner"):
 		atk -= 1
 	return atk
+
+
+## WHICH relics are moving this creature's ATK right now — the attribution
+## `_relic_atk_for` throws away by summing.
+##
+## THE SUM IS NOT THE STORY. A creature printed 3 that swings for 7 is, to the
+## player, a number that disagrees with the card; the four points came from
+## somewhere and nothing on screen says where. Balatro's sharpest trick is not
+## its shake or its particles, it is that each Joker fires in turn with its own
+## pulse, so opaque arithmetic becomes visible causality — you watch the number
+## get built. This is the same move with the objects this game already has on
+## screen: the relic chips in the rail, and the neighbour whose aura is lending.
+##
+## MIRRORS `_relic_atk_for`'s CONDITIONS EXACTLY, and must keep doing so. The
+## two are a matched pair — one returns the amount, one returns the names — and
+## a condition that drifts between them would light a chip that contributed
+## nothing, which is worse than lighting none. `steady_banner` is deliberately
+## included even though it SUBTRACTS: a blow that came in lighter than the card
+## promised needs its cause named just as much as a heavy one.
+func _relic_atk_sources(card: Control) -> PackedStringArray:
+	var out := PackedStringArray()
+	if card == null or not is_instance_valid(card):
+		return out
+	if _is_swift_attacker(card) and _has_relic("swift_boots"):
+		out.append("swift_boots")
+	if _has_relic("glass_cannon"):
+		out.append("glass_cannon")
+	if _has_relic("linked_banner") and _count_adjacent_friendlies(card) >= 2:
+		out.append("linked_banner")
+	if _champions_belt_active and _has_relic("champions_belt"):
+		out.append("champions_belt")
+	if _has_relic("phalanx_stone") and _front_row_full(false):
+		out.append("phalanx_stone")
+	if round_number == 1 and _has_relic("steady_banner"):
+		out.append("steady_banner")
+	return out
 
 
 func _front_row_full(is_enemy: bool) -> bool:
