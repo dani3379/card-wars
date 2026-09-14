@@ -83,16 +83,103 @@ const TERRAIN_KW := {
 var _terrain_aff_cache: Dictionary = {}
 
 
+## THE LANDING POOL — the curated openers for a run's first hold.
+##
+## The industry answer to "what is the first fight" is a small hand-picked
+## EASY POOL, not one bespoke encounter (Slay the Spire draws its opening
+## act-1 combats from a dedicated set of four lineups). One fixed opener is
+## the same fight forever; an arbitrary draw from the act's whole bench is
+## what shipped here, and it opened brand-new runs on Doom bombs and on a
+## borrowed act-2 lineup whose passive does not act-scale.
+##
+## Membership rule, and it is a hard one: an act-1 `combat` with `passive_id`
+## EMPTY. The opening hold teaches the board — the clash, the muster delay,
+## the Command curve — and a standing rule on top of that is one lesson too
+## many. One kit per kingdom, so the landing can stay on-banner (see
+## landing_pool below) without ever borrowing across acts.
+## `tools/_probe_firstfight.gd` re-asserts both properties on every run.
+const LANDING_POOL: Array[String] = [
+	"goblin_scouts",    # grasswake   — also the hand-picked first-run on-ramp
+	"powderkeg_run",    # everflame
+	"scarecrow_field",  # owed
+	"lamp_picket",      # lanternhall — authored 2026-08-01
+	"border_toll",      # last_wall   — authored 2026-08-01
+]
+
+
+func is_landing_kit(enc_id: String) -> bool:
+	return LANDING_POOL.has(enc_id)
+
+
+## The ordered candidates for an act's row-0 holds. The caller (the map
+## generator, which owns the act's seeded stream) takes as many as the
+## landing band is wide and shuffles which column each lands on.
+##
+## ELEMENT 0 IS THE KINGDOM'S OWN LANDING KIT and the rest follow, because
+## the beachhead should still read as the right kingdom's border while the
+## other lanes of the band vary run to run.
+##
+## Acts 2-3 have no curated bench and do not need one — the run's on-ramp is
+## act 1. They fall back to the act's own kingdom pool read light->heavy,
+## which is what apply_terrain_redeal's Stage 0 was reaching for; the act
+## term inside kit_weight is what makes that read correct across borrows.
+func landing_pool(act: int, faction: String) -> Array:
+	if act == 1:
+		var own: Array = []
+		var rest: Array = []
+		for id in LANDING_POOL:
+			var eid := String(id)
+			if not ENCOUNTERS.has(eid):
+				continue
+			if faction != "" and String(ENCOUNTERS[eid].get("faction", "")) == faction:
+				own.append(eid)
+			else:
+				rest.append(eid)
+		own.append_array(rest)
+		return own
+	var pool: Array = get_kingdom_pool(act, "combat", faction)
+	pool.sort_custom(func(a, b):
+		var wa: int = kit_weight(String(a))
+		var wb: int = kit_weight(String(b))
+		return wa < wb if wa != wb else String(a) < String(b))
+	return pool
+
+
+## One authored band step, in kit_weight points. It has to exceed the whole
+## within-act spread of the raw statline score (measured 2026-08-01: 47..76
+## across all 28 authored combats, spread 29) so the band term can never be
+## out-argued by the statline.
+const KIT_ACT_BAND: int = 32
+
+
 ## Total statline + body count of an authored kit — the "how heavy is this
 ## deal" read used by the meadow affinity AND the road's escalation sort
-## (light kits land at the landing, heavy kits near the keep).
+## (light kits land at the landing, heavy kits near the keep) — PLUS the
+## band the kit was authored for.
+##
+## THE BAND TERM IS NOT DECORATION (2026-08-01). Read on the statline alone
+## the score is not a difficulty read at all, it is a body-count read, and
+## the two disagree hardest exactly across acts: act-2 lineups are five big
+## bodies (signal_glass = 27 stats over 5 bodies -> 47) while act-1 chaff is
+## seven small ones (goblin_scouts = 28 over 7 -> 56). So a BORROWED act-2
+## fight scored as the LIGHTEST deal in an act-1 kingdom and kept winning
+## the landing slot — with an act-2 passive that get_face_hp and
+## _act_scale_creature cannot touch, because passives are hardcoded handlers.
+## Measured: 39.9% of veteran first fights were act-2 borrows.
+##
+## Every consumer compares kits WITHIN one act's deal, so folding the
+## authored band into the score fixes all three call sites at once with no
+## signature change: a borrow sorts heavy in an earlier act (correct — it is
+## a bigger fight than the act's own) and light in a later one (also correct
+## — a rescaled act-1 lineup is the gentlest thing in an act-3 kingdom).
 func kit_weight(enc_id: String) -> int:
 	var enc: Dictionary = ENCOUNTERS.get(enc_id, {})
 	var deck: Array = enc.get("deck", [])
 	var stats := 0
 	for c in deck:
 		stats += int(c.get("atk", 0)) + int(c.get("hp", 0))
-	return stats + deck.size() * 4
+	var band: int = clampi(int(enc.get("act", 1)), 1, 3) - 1
+	return stats + deck.size() * 4 + band * KIT_ACT_BAND
 
 
 func terrain_affinity(enc_id: String, terrain: String) -> int:
@@ -216,6 +303,14 @@ func make_card_data(creature: Dictionary) -> Dictionary:
 		data["doom"] = int(creature.doom)
 	if creature.has("doom_damage"):
 		data["doom_damage"] = int(creature.doom_damage)
+	# Overrun magnitude. `KeywordEffects` reads `card_data.overrun` and falls
+	# back to 1, and the keyword's own glossary line promises "more if a number
+	# is shown" — but without this passthrough the number could never BE shown
+	# from an authored deck: the whitelist below drops any key it does not name,
+	# silently, exactly as it once dropped The Old King's Body's `effect_immune`.
+	# A deck asking for Overrun 2 got Overrun 1 and looked entirely correct.
+	if creature.has("overrun"):
+		data["overrun"] = int(creature.overrun)
 	if creature.has("intents"):
 		data["intents"] = creature.intents.duplicate()
 	if creature.has("ability"):
@@ -263,7 +358,24 @@ func build_siege_fortifications(encounter_id: String,
 	return out
 
 
-func build_enemy_deck(encounter_id: String, target_act: int = 0) -> Array[Dictionary]:
+## COMPOSITION ROLLS ARE THE CALLER'S SEED, NOT OURS (2026-08-01).
+## `build_enemy_deck` and `get_reinforcement` each roll ONE authored option, and
+## both rolls change what the player fights — so on a Daily March they have to
+## land the same way on every machine. EncounterDB is a stateless data autoload
+## with no run state and no business owning a stream, so the CALLER hands one
+## in: Combat supplies `_encounter_roll_stream()` (derived from `_combat_seed()`).
+## `rng == null` keeps the historical global `randi()` for the offline analysis
+## probes, which want variety across repeats and have no run to be faithful to.
+func _roll_index(rng: RandomNumberGenerator, size: int) -> int:
+	if size <= 0:
+		return 0
+	if rng == null:
+		return randi() % size
+	return rng.randi() % size
+
+
+func build_enemy_deck(encounter_id: String, target_act: int = 0,
+		rng: RandomNumberGenerator = null) -> Array[Dictionary]:
 	var enc = get_encounter(encounter_id)
 	if enc.is_empty():
 		return []
@@ -278,7 +390,7 @@ func build_enemy_deck(encounter_id: String, target_act: int = 0) -> Array[Dictio
 		var options: Array = [enc.deck]
 		for v in variants:
 			options.append(v)
-		source_deck = options[randi() % options.size()]
+		source_deck = options[_roll_index(rng, options.size())]
 	# Cross-act borrow (Successor Wars): a fight placed outside its authored
 	# act scales each body by the act delta. target_act 0 = authored act.
 	var delta: int = 0
@@ -290,7 +402,8 @@ func build_enemy_deck(encounter_id: String, target_act: int = 0) -> Array[Dictio
 	return deck
 
 
-func get_reinforcement(encounter_id: String, target_act: int = 0) -> Dictionary:
+func get_reinforcement(encounter_id: String, target_act: int = 0,
+		rng: RandomNumberGenerator = null) -> Dictionary:
 	var enc = get_encounter(encounter_id)
 	if enc.is_empty():
 		return {}
@@ -305,7 +418,8 @@ func get_reinforcement(encounter_id: String, target_act: int = 0) -> Dictionary:
 		var options: Array = [enc.reinforcement]
 		for p in pool:
 			options.append(p)
-		return _act_scale_creature(make_card_data(options[randi() % options.size()]), delta)
+		return _act_scale_creature(
+			make_card_data(options[_roll_index(rng, options.size())]), delta)
 	return _act_scale_creature(make_card_data(enc.reinforcement), delta)
 
 
@@ -742,7 +856,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE STALWART", "act": 1, "type": "boss", "faction": "last_wall", "hp": 23,
 		"passive_id": "formation_muster",
 		"passive_desc": "Start of each round from round 3: each enemy front-row creature with an adjacent friendly gains +1/+1.",
-		"preamble": "Break both gate sections. Damage aimed at the Stalwart strikes the gate until both sections fall.",
+		"preamble": "The gate holds while the Stalwart waits behind it. Break both sections.",
 		"siege": {
 			"id": "pass_gate",
 			"order": "BREACH THE GATE",
@@ -1507,7 +1621,7 @@ const ENCOUNTERS: Dictionary = {
 		"passive_desc": "Enemy Swift creatures deal +1 face damage when attacking through empty lanes.",
 		"deck": [
 			{"name": "Chick", "atk": 1, "hp": 1, "kw": ["swift", "last_stand"]},
-			{"name": "Wind Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
+			{"name": "Storm Owl", "atk": 3, "hp": 2, "kw": ["swift"]},
 			{"name": "Storm Harpy", "atk": 2, "hp": 2, "kw": ["swift"]},
 			{"name": "Plunderer", "atk": 2, "hp": 3, "kw": ["swift"],
 				"on_enter": {"type": "damage_face", "value": 1}},
@@ -1619,6 +1733,75 @@ const ENCOUNTERS: Dictionary = {
 		"reinforcement_pool": [
 			{"name": "Sneak", "atk": 2, "hp": 2, "kw": ["swift"]},
 			{"name": "Cinder", "atk": 1, "hp": 2, "kw": ["doom"], "doom": 2, "doom_damage": 4},
+		],
+	},
+
+	# ---- The two landing kits authored 2026-08-01 -----------------------
+	# Written for LANDING_POOL (see the block above kit_weight). Before these,
+	# lanternhall had ZERO act-1 fights and last_wall had exactly one — the
+	# heaviest kit in the act, stone_sentinels — so a run whose act-1 rival
+	# was either lord opened on a BORROWED act-2 lineup, rescaled in HP but
+	# NOT in its standing rule (passives are hardcoded handlers; get_face_hp
+	# and _act_scale_creature are the only things that scale across bands).
+	# Both of these are act-1 native, rule-free, and light: the opening hold
+	# teaches the board and nothing else.
+
+	"lamp_picket": {
+		# The Lamplighters (Act 1 combat, lanternhall) — STRIKE FIRST, FOLD
+		# FAST. The Hall's road watch, not its glassworks: almost every body
+		# is Swift and almost every body dies to one hit. It is the Hall's
+		# own version of the job goblin_scouts does for grasswake — teach the
+		# Swift pre-phase with no standing rule attached. The Star-Reader is
+		# the lever: kill the buffer and the picket stops adding up.
+		"name": "The Lamplighters", "act": 1, "type": "combat",
+		"faction": "lanternhall", "hp": 11,
+		"preamble": "Lamplighters hold the crossroads with signal mirrors. Almost all of them strike first and die easily. Clear the road before the light reaches the hall.",
+		"passive_id": "", "passive_desc": "",
+		"deck": [
+			{"name": "Glass Shard", "atk": 2, "hp": 1, "kw": ["swift"]},
+			{"name": "Mirror Wisp", "atk": 1, "hp": 2, "kw": ["swift"]},
+			{"name": "Glass Shard", "atk": 2, "hp": 1, "kw": ["swift"]},
+			{"name": "Reflection", "atk": 2, "hp": 3, "kw": []},
+			{"name": "Star-Reader", "atk": 1, "hp": 3, "kw": [],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Burning Glass", "atk": 2, "hp": 2, "kw": ["swift"],
+				"on_enter": {"type": "damage_face", "value": 1}},
+			{"name": "Hall-Watcher", "atk": 3, "hp": 3, "kw": []},
+		],
+		"reinforcement": {"name": "Glass Shard", "atk": 2, "hp": 1, "kw": ["swift"]},
+		"reinforcement_pool": [
+			{"name": "Mirror Wisp", "atk": 1, "hp": 2, "kw": ["swift"]},
+			{"name": "Reflection", "atk": 2, "hp": 3, "kw": []},
+		],
+	},
+
+	"border_toll": {
+		# The Border Toll (Act 1 combat, last_wall) — ONE WALL, NOT SEVEN.
+		# The Wall's road crew rather than its fortress: exactly one Armored
+		# body and one buffer, so the player meets Armored as a puzzle piece
+		# instead of a blanket rule. That distinction is the whole reason
+		# this exists — stone_sentinels puts Armored on the entire board AND
+		# carries an uncounterable tremor, which is a fine third hold and a
+		# terrible first one.
+		"name": "The Border Toll", "act": 1, "type": "combat",
+		"faction": "last_wall", "hp": 10,
+		"preamble": "A gate crew holds the road and taxes everyone who crosses. Their shields blunt small hits, so lead with your heaviest creatures.",
+		"passive_id": "", "passive_desc": "",
+		"deck": [
+			{"name": "Footman", "atk": 2, "hp": 2, "kw": []},
+			{"name": "Footman", "atk": 2, "hp": 2, "kw": []},
+			{"name": "Shieldbearer", "atk": 1, "hp": 4, "kw": ["armored"]},
+			{"name": "Pikeman", "atk": 2, "hp": 3, "kw": []},
+			{"name": "Crossbow Guard", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Bannerman", "atk": 1, "hp": 3, "kw": [],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Gate Captain", "atk": 3, "hp": 3, "kw": [],
+				"on_enter": {"type": "damage_face", "value": 1}},
+		],
+		"reinforcement": {"name": "Footman", "atk": 2, "hp": 2, "kw": []},
+		"reinforcement_pool": [
+			{"name": "Crossbow Guard", "atk": 2, "hp": 2, "kw": ["swift"]},
+			{"name": "Pikeman", "atk": 2, "hp": 3, "kw": []},
 		],
 	},
 
@@ -1761,7 +1944,7 @@ const ENCOUNTERS: Dictionary = {
 				"on_death": {"type": "debuff_all_player_atk", "value": 1}},
 			{"name": "Zealot", "atk": 3, "hp": 3, "kw": ["piercing"],
 				"on_death": {"type": "damage_face", "value": 2}},
-			{"name": "Dark Priest", "atk": 2, "hp": 4, "kw": ["regenerate"],
+			{"name": "Candle-Priest", "atk": 2, "hp": 4, "kw": ["regenerate"],
 				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
 			{"name": "Devotee", "atk": 2, "hp": 2,
 				"on_death": {"type": "damage_opposing", "value": 3}},
@@ -1790,7 +1973,7 @@ const ENCOUNTERS: Dictionary = {
 					"on_death": {"type": "debuff_all_player_atk", "value": 1}},
 				{"name": "Hexer", "atk": 1, "hp": 3, "kw": ["thorns"],
 					"on_death": {"type": "debuff_all_player_atk", "value": 1}},
-				{"name": "Dark Priest", "atk": 2, "hp": 4, "kw": ["regenerate"],
+				{"name": "Candle-Priest", "atk": 2, "hp": 4, "kw": ["regenerate"],
 					"on_death": {"type": "summon", "atk": 2, "hp": 2}},
 				{"name": "Devotee", "atk": 2, "hp": 2,
 					"on_death": {"type": "damage_opposing", "value": 3}},
@@ -1976,6 +2159,213 @@ const ENCOUNTERS: Dictionary = {
 			{"name": "Squire", "atk": 2, "hp": 2, "kw": ["armored"]},
 			{"name": "Crossbow Knight", "atk": 2, "hp": 3, "kw": ["armored"]},
 		],
+	},
+
+	# ══ THE LAST WALL'S GENERALS ══════════════════════════════════════════════
+	# The kingdom had NO elite in any act (measured 2026-09-13: 8 of the 15
+	# faction x act elite slots were empty, and a run through the Wall drew the
+	# same two combats every time). These three fill its column.
+	#
+	# ALL THREE ARE DATA. `formation_drill_tick` already implements the Wall's
+	# engine in three escalating tiers — `formation_muster` (front rank only,
+	# from round 3), `formation_drill` (both rows, from round 2), and
+	# `formation_lockstep` (both rows, plus Armored on the front) — but every
+	# one of them was reachable ONLY through a rival lord or a throne amalgam.
+	# The ordinary road never met the mechanic its kingdom is built on.
+	#
+	# THE LESSON EACH ONE TEACHES IS ISOLATION, and it is the same lesson three
+	# times at rising cost: a body only drills if it is STANDING BESIDE another,
+	# so the counterplay is never raw damage — it is breaking the line's middle
+	# and leaving the ends alone. Act 1 teaches it on four bodies in one row
+	# from round 3; act 2 moves it to both rows and a round earlier; act 3 adds
+	# the Armored grant, so waiting is strictly worse than cutting.
+	"the_unfinished_wall": {
+		"name": "The Unfinished Wall", "act": 1, "type": "elite",
+		"faction": "last_wall", "hp": 17,
+		"passive_id": "formation_muster",
+		"passive_desc": "Start of each round from round 3: each enemy front-row creature with an adjacent friendly gains +1/+1.",
+		"preamble": "Masons finish the wall while you fight it. Bodies standing side by side grow every round from the third — break the middle and the ends stop growing.",
+		"deck": [
+			{"name": "Mason", "atk": 1, "hp": 4, "kw": ["armored"]},
+			{"name": "Footing Stone", "atk": 2, "hp": 4, "kw": ["armored"]},
+			{"name": "Mason", "atk": 1, "hp": 4, "kw": ["armored"]},
+			{"name": "Course-Layer", "atk": 2, "hp": 3,
+				"adj_buff": {"atk": 0, "hp": 1}},
+			{"name": "Footing Stone", "atk": 2, "hp": 4, "kw": ["armored"]},
+			{"name": "Wall-Captain", "atk": 3, "hp": 5, "kw": ["armored"]},
+		],
+		"reinforcement": {"name": "Mason", "atk": 1, "hp": 4, "kw": ["armored"]},
+	},
+
+	"the_testudo": {
+		"name": "The Testudo", "act": 2, "type": "elite",
+		"faction": "last_wall", "hp": 24,
+		"passive_id": "formation_drill",
+		"passive_desc": "Start of each round from round 2: each enemy creature standing beside another gains +1/+1.",
+		"preamble": "They lock shields and walk. Any of them standing beside another grows every round from the second, in both rows — so the line is the target, not the biggest body in it.",
+		"deck": [
+			{"name": "Shield-Brother", "atk": 2, "hp": 4, "kw": ["armored"]},
+			{"name": "Shield-Brother", "atk": 2, "hp": 4, "kw": ["armored"]},
+			{"name": "Pike Under Shield", "atk": 3, "hp": 3, "kw": ["thorns"]},
+			{"name": "Shield-Brother", "atk": 2, "hp": 4, "kw": ["armored"]},
+			{"name": "Rank-Sergeant", "atk": 2, "hp": 5, "kw": ["armored"],
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Pike Under Shield", "atk": 3, "hp": 3, "kw": ["thorns"]},
+			{"name": "Shield-Captain", "atk": 4, "hp": 6, "kw": ["armored", "last_stand"]},
+		],
+		"reinforcement": {"name": "Shield-Brother", "atk": 2, "hp": 4, "kw": ["armored"]},
+	},
+
+	"the_buried_army": {
+		"name": "THE BURIED ARMY", "act": 3, "type": "elite",
+		"faction": "last_wall", "hp": 29,
+		"passive_id": "formation_lockstep",
+		"passive_desc": "Start of each round from round 2: each enemy creature standing beside another gains +1/+1, and enemy front-row creatures gain Armored.",
+		"preamble": "Clay soldiers stand up out of the field, already in rank. Every round they touch, they grow and the front goes Armored — every round you wait costs more than the last.",
+		"deck": [
+			{"name": "Clay Ranker", "atk": 3, "hp": 5},
+			{"name": "Clay Ranker", "atk": 3, "hp": 5},
+			{"name": "Kiln-Sergeant", "atk": 3, "hp": 6,
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Clay Ranker", "atk": 3, "hp": 5},
+			{"name": "Terracotta Pike", "atk": 4, "hp": 4, "kw": ["thorns"]},
+			{"name": "Clay Ranker", "atk": 3, "hp": 5},
+			{"name": "The First Rank", "atk": 5, "hp": 7, "kw": ["armored", "last_stand"]},
+		],
+		"reinforcement": {"name": "Clay Ranker", "atk": 3, "hp": 5},
+	},
+
+	# ══ THE LAST THREE, AND THEIR ENGINES ARE KEYWORDS ════════════════════════
+	# The Wall, the Everflame's pyres and the Owed's mausoleum all run on
+	# PASSIVES. These three kingdoms' engines are KEYWORDS instead, so these
+	# fights carry no passive at all — the line itself is the mechanic.
+	#
+	# `overrun` is the starkest case. It is the Grasswake's entire stated
+	# identity — the empty lane is their highway — and before this it appeared
+	# in the whole encounter database exactly ONCE, inside a terrain-affinity
+	# table. No hold in the game fielded a single rider carrying it.
+	"the_horse_sea": {
+		"name": "THE HORSE-SEA", "act": 3, "type": "elite",
+		"faction": "grasswake", "hp": 27,
+		"passive_id": "", "passive_desc": "",
+		"preamble": "They do not want your line broken — they want it thin. Every rider facing an empty lane of yours hits harder for the round, so the ground you leave open is the weapon they brought.",
+		"deck": [
+			{"name": "Grass-Rider", "atk": 3, "hp": 3, "kw": ["overrun", "swift"],
+				"overrun": 2},
+			{"name": "Grass-Rider", "atk": 3, "hp": 3, "kw": ["overrun", "swift"],
+				"overrun": 2},
+			{"name": "Long-Spear Rider", "atk": 2, "hp": 4, "kw": ["overrun", "piercing"],
+				"overrun": 2},
+			{"name": "Outrunner", "atk": 4, "hp": 2, "kw": ["overrun", "swift"],
+				"overrun": 3},
+			{"name": "Grass-Rider", "atk": 3, "hp": 3, "kw": ["overrun", "swift"],
+				"overrun": 2},
+			{"name": "The Wide Rider", "atk": 4, "hp": 5,
+				"kw": ["overrun", "piercing", "last_stand"], "overrun": 3},
+		],
+		"reinforcement": {"name": "Grass-Rider", "atk": 3, "hp": 3,
+			"kw": ["overrun", "swift"], "overrun": 2},
+	},
+
+	"the_first_spark": {
+		"name": "The First Spark", "act": 1, "type": "elite",
+		"faction": "everflame", "hp": 16,
+		"passive_id": "", "passive_desc": "",
+		"preamble": "The fire-faith does not fight to live. Each of these counts down, and at nothing it strikes your champion for its attack and is gone — kill one early and it bursts in its own lane instead.",
+		"deck": [
+			{"name": "First Spark", "atk": 2, "hp": 3, "doom": 2, "doom_damage": 3},
+			{"name": "Tinder-Carrier", "atk": 2, "hp": 4},
+			{"name": "First Spark", "atk": 2, "hp": 3, "doom": 3, "doom_damage": 3},
+			{"name": "Ember-Priest", "atk": 2, "hp": 4,
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Long Fuse", "atk": 1, "hp": 5, "doom": 4, "doom_damage": 5},
+			{"name": "The Kindler's Voice", "atk": 3, "hp": 5, "kw": ["rampage"]},
+		],
+		"reinforcement": {"name": "Tinder-Carrier", "atk": 2, "hp": 4},
+	},
+
+	"the_reading_room": {
+		"name": "The Reading Room", "act": 1, "type": "elite",
+		"faction": "lanternhall", "hp": 17,
+		"passive_id": "", "passive_desc": "",
+		"preamble": "Few of them, and none of them strong. They do their work by reading — every scholar that takes the field casts on arrival, so the fight is decided by what you let them draw up to.",
+		"deck": [
+			{"name": "Under-Reader", "atk": 1, "hp": 4,
+				"on_enter": {"type": "cast_random_spell"}},
+			{"name": "Frost Clerk", "atk": 2, "hp": 3},
+			{"name": "Under-Reader", "atk": 1, "hp": 4,
+				"on_enter": {"type": "cast_random_spell"}},
+			{"name": "Star-Reader", "atk": 2, "hp": 5,
+				"on_enter": {"type": "look_top"}},
+			{"name": "Frost Clerk", "atk": 2, "hp": 3},
+			{"name": "The Chief Reader", "atk": 3, "hp": 6,
+				"on_enter": {"type": "cast_random_spell"}},
+		],
+		"reinforcement": {"name": "Frost Clerk", "atk": 2, "hp": 3},
+	},
+
+	# ══ TWO MORE ENGINES THAT NOTHING COULD REACH ═════════════════════════════
+	# Same finding as the Wall trio: `pyre_ritual` and `crypt_rite` are complete,
+	# self-contained structure engines — each enemy death feeds the engine, and
+	# at full charge the NEXT round's open fires it, so the bang is telegraphed
+	# a whole round before it lands. Both were implemented, dispatched on two
+	# channels each (on-death to feed, start-of-round to fire) and reachable by
+	# no encounter in the game.
+	#
+	# They are also, exactly, the two kingdoms' stated engines. The Everflame is
+	# THE FUSE — nothing pays now, everything pays later and bigger. The Owed are
+	# THE TITHE — deaths are deposits, banked and then cashed out. A pyre that
+	# loads on corpses, and a mausoleum that pays one back, are those sentences
+	# with no translation needed.
+	#
+	# THE COUNTERPLAY IS THE STRUCTURE, and it is why both are `attackable`. A
+	# countdown the player cannot touch is a fake affordance (the 2026-07-28
+	# Trebuchet ruling); these can be broken, so the fight is a real choice —
+	# race the charge, or spend a column silencing the engine.
+	"the_last_kindling": {
+		"name": "THE LAST KINDLING", "act": 3, "type": "elite",
+		"faction": "everflame", "hp": 28,
+		"passive_id": "pyre_ritual",
+		"passive_desc": "Enemy death: the nearest Pyre gains 1 Charge. At 3 it ignites at the start of the next round. Destroy a Pyre to stop it.",
+		"preamble": "They have stopped fighting for ground and started feeding the fires. Every one of them that falls loads the nearest pyre — and a loaded pyre burns at the top of the next round.",
+		"structures": [
+			{"name": "Pyre", "atk": 0, "hp": 12, "attackable": true,
+				"kw": ["structure"], "charge_max": 3, "lane": 0},
+			{"name": "Pyre", "atk": 0, "hp": 12, "attackable": true,
+				"kw": ["structure"], "charge_max": 3, "lane": 3},
+		],
+		"deck": [
+			{"name": "Kindling-Bearer", "atk": 3, "hp": 3},
+			{"name": "Ash Zealot", "atk": 4, "hp": 2, "kw": ["swift"]},
+			{"name": "Kindling-Bearer", "atk": 3, "hp": 3},
+			{"name": "Fire-Tender", "atk": 2, "hp": 5, "kw": ["regenerate"]},
+			{"name": "Ash Zealot", "atk": 4, "hp": 2, "kw": ["swift"]},
+			{"name": "The Last Torch", "atk": 5, "hp": 5, "kw": ["piercing", "last_stand"]},
+		],
+		"reinforcement": {"name": "Kindling-Bearer", "atk": 3, "hp": 3},
+	},
+
+	"the_mausoleum_debt": {
+		"name": "The Mausoleum", "act": 2, "type": "elite",
+		"faction": "owed", "hp": 23,
+		"passive_id": "crypt_rite",
+		"passive_desc": "Enemy death: the Mausoleum gains 1 Charge. At 3 it opens at the start of the next round and a 6/6 Piercing Lich takes its place. Destroy the Mausoleum to stop it.",
+		"preamble": "The clerks of the Owed bury their own as they fall, and the ledger is kept in stone. Three funerals open the door — and something with tenure walks out.",
+		"structures": [
+			{"name": "Mausoleum", "atk": 0, "hp": 15, "attackable": true,
+				"kw": ["structure"], "charge_max": 3, "lane": 2},
+		],
+		"deck": [
+			{"name": "Pallbearer", "atk": 2, "hp": 4},
+			{"name": "Grave-Clerk", "atk": 1, "hp": 4,
+				"adj_buff": {"atk": 1, "hp": 0}},
+			{"name": "Pallbearer", "atk": 2, "hp": 4},
+			{"name": "Mourner", "atk": 3, "hp": 2,
+				"on_death": {"type": "damage_opposing_lane", "value": 2}},
+			{"name": "Pallbearer", "atk": 2, "hp": 4},
+			{"name": "Debt-Keeper", "atk": 3, "hp": 5, "kw": ["last_stand"]},
+		],
+		"reinforcement": {"name": "Pallbearer", "atk": 2, "hp": 4},
 	},
 
 	"ash_hounds": {
