@@ -2464,14 +2464,26 @@ func _build_muster_screen(menu: VBoxContainer) -> void:
 		GameTheme.hover_lift(chip, 1.012)
 		_muster_banner_buttons[bid] = chip
 
-	# THE TERMS keep their instruction. "Accept one term" is the rule of the ROW,
-	# and no tile states it — each tile states only its own slot.
-	menu.add_child(_make_muster_step_desc("terms_step_desc_text"))
+	# ── THE FOURTH DECISION WEARS THE SAME UNIFORM AS THE OTHER THREE ──
+	#
+	# The terms row used to be introduced by a CENTRED SENTENCE with no rule under
+	# it, while the three panes above carried left-aligned small-caps captions over
+	# a hairline. Two labelling systems on one screen, and the odd one out was the
+	# row carrying the single most consequential pick on the page — so it read as
+	# an aside rather than as a peer of the hero and the banner. Same caption, same
+	# rule, same left edge; the pick-ONE rule rides inside the caption because no
+	# tile states it.
+	var terms := _make_muster_section(menu,
+		WritDB.muster_copy("terms_step_desc_text"), MUSTER_STRIP_WIDTH_FULL, true)
+	# _make_muster_section hands every section EXPAND_FILL so it can share a row's
+	# height; here it is stacked in the menu's own VBox, where expanding would eat
+	# the slack that keeps START RUN off the canvas edge.
+	terms.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 	_muster_writ_row = HBoxContainer.new()
 	_muster_writ_row.custom_minimum_size = Vector2(0, 150)
 	_muster_writ_row.add_theme_constant_override("separation", 12)
 	_muster_writ_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	menu.add_child(_muster_writ_row)
+	terms.add_child(_muster_writ_row)
 
 	_muster_gloss_label = _make_display_label("", 15, Color(0.78, 0.72, 0.60))
 	_muster_gloss_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -2684,13 +2696,6 @@ func _muster_slack(parent: Container, stretch: int = 1) -> void:
 	slack.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	slack.size_flags_stretch_ratio = float(stretch)
 	parent.add_child(slack)
-
-
-func _make_muster_step_desc(key: String) -> Label:
-	var lbl := _make_display_label(WritDB.muster_copy(key), 16, IVORY)
-	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	return lbl
 
 
 ## THE FOOTER HAS A FIXED HEIGHT, WHICH IS WHAT MAKES BACK STAND STILL
