@@ -23,7 +23,7 @@ const POOL_THUMB_SIZE := Vector2(103.5, 138.0) # 225x300 at THUMB_SCALE (0.46)
 const POOL_VIRTUAL_REFRESH := 0.08
 const POOL_WARM_MARGIN_SCREENS := 0.35
 const POOL_COLD_MARGIN_SCREENS := 0.85
-const POOL_PLACEHOLDER_YIELD_EVERY := 48
+const POOL_PLACEHOLDER_YIELD_EVERY := 12
 const POOL_HYDRATE_YIELD_EVERY := 4
 const POOL_CARD_SCENE := preload("res://scenes/card_2d.tscn")
 
@@ -48,11 +48,12 @@ var _deck_count_lbl: Label
 var _ready_btn: Button
 var _name_field: LineEdit         # save-as name
 var _saved_option: OptionButton   # saved-deck picker
+var _mode_ui_ready := false
 
 
 ## One CanvasItem ghost replaces the ornate ~20-node Card2D until its tile is
-## near the scroll viewport. It stays identifiable and clickable through the
-## permanent slot Button, while costing no image decode and no card-art pin.
+## near the scroll viewport. It stays identifiable while the permanent slot
+## keeps geometry stable; interaction unlocks when its ornate face is hydrated.
 class PoolCardGhost extends Control:
 	var title_text: String = ""
 	var command_cost: int = 0
@@ -127,12 +128,22 @@ func _ready() -> void:
 	NetMatch.peer_left.connect(_on_peer_lost)
 	NetMatch.host_closed.connect(_on_peer_lost)
 
+	# Every net game opens with the shared arsenal stage (3 relics + 2 potions);
+	# present it before constructing the obscured 100+ card catalogue.
+	_begin_arsenal()
+	_prepare_mode_ui()
+
+
+func _prepare_mode_ui() -> void:
+	if DisplayServer.get_name() != "headless":
+		await RenderingServer.frame_post_draw
+	await get_tree().process_frame
+	if not is_inside_tree() or not NetMatch.is_connected_to_peer():
+		return
 	_build_scaffold()
+	_mode_ui_ready = true
 	_refresh_all()
 	_install_net_chrome()
-	# Every net game opens with the shared arsenal stage (3 relics + 2 potions);
-	# the overlay sits above the deck builder until the picks are made.
-	_begin_arsenal()
 	_flatten_net_chart_styles(self)
 
 
@@ -287,7 +298,6 @@ func _populate_pool() -> void:
 	_pool_rows.clear()
 	_ensure_pool_shared_styles()
 
-	var built_since_yield := 0
 	for id in _pool:
 		if not _pool_build_valid(generation):
 			return
@@ -307,14 +317,9 @@ func _populate_pool() -> void:
 			"button": parts["button"],
 			"badge": parts["badge"],
 			"card": parts["visual"],
+			"hydrated": false,
 		}
 		_apply_pool_row_state(id, _deck.size() >= _target)
-		built_since_yield += 1
-		if built_since_yield >= POOL_PLACEHOLDER_YIELD_EVERY:
-			built_since_yield = 0
-			await get_tree().process_frame
-			if not _pool_build_valid(generation):
-				return
 
 	# The flow needs one layout pass before slot global rects are meaningful.
 	await get_tree().process_frame
@@ -488,97 +493,140 @@ func _refresh_pool_virtual_window(generation: int) -> void:
 		job["state"] = "placeholder"
 		job["busy"] = false
 		_pool_jobs[i] = job
-		_set_pool_row_visual(String(job.get("id", "")), ghost)
+		_set_pool_row_visual(String(job.get("id", "")), ghost, false)
 	if _pool_hydration_generation != generation:
 		_hydrate_visible_pool_cards(generation)
 
 
-func _next_pool_placeholder(rect: Rect2) -> int:
+func _pool_placeholder_batch(rect: Rect2) -> Array[int]:
+	var indices: Array[int] = []
 	for i in range(_pool_jobs.size()):
 		var job: Dictionary = _pool_jobs[i]
 		if String(job.get("state", "")) == "placeholder" \
 				and not bool(job.get("busy", false)) \
 				and _pool_job_intersects(job, rect):
-			return i
-	return -1
+			indices.append(i)
+	return indices
 
 
 func _hydrate_visible_pool_cards(generation: int) -> void:
 	_pool_hydration_generation = generation
-	var hydrated_since_yield := 0
 	while _pool_hydration_valid(generation):
-		# Prioritize what is actually on-screen, then prepare a small scroll runway.
-		var job_index := _next_pool_placeholder(_pool_virtual_rect(0.0))
-		if job_index < 0:
-			job_index = _next_pool_placeholder(
-				_pool_virtual_rect(POOL_WARM_MARGIN_SCREENS))
-		if job_index < 0:
+		# Capture a whole visible set before doing any expensive work. Faces stage
+		# hidden over their named backs and commit together only after the batch is
+		# complete; the runway is a second (normally offscreen) batch.
+		var batch := _pool_placeholder_batch(_pool_virtual_rect(0.0))
+		if batch.is_empty():
+			batch = _pool_placeholder_batch(_pool_virtual_rect(POOL_WARM_MARGIN_SCREENS))
+		if batch.is_empty():
 			break
 
-		var job: Dictionary = _pool_jobs[job_index]
-		job["busy"] = true
-		_pool_jobs[job_index] = job
-		var data: Dictionary = job.get("data", {})
-		var baked: Texture2D = null
-		var loaded_source_art := false
-		if CardTextureCache.has_gallery(data):
-			baked = CardTextureCache.get_gallery_texture(data)
-		elif DisplayServer.get_name() == "headless":
-			# Dummy rendering never posts the frame signal needed by the baker. Leave
-			# the fully interactive ghost model in place for headless behavior probes.
-			job["busy"] = false
-			_pool_jobs[job_index] = job
-			break
-		else:
-			await CardArtAliases.prewarm_card_art(data)
-			loaded_source_art = true
+		var staged: Array[int] = []
+		var hydrated_since_yield := 0
+		for raw_job_index in batch:
 			if not _pool_hydration_valid(generation):
+				break
+			var job_index: int = raw_job_index
+			var job: Dictionary = _pool_jobs[job_index]
+			job["busy"] = true
+			_pool_jobs[job_index] = job
+			var data: Dictionary = job.get("data", {})
+			var baked: Texture2D = null
+			var loaded_source_art := false
+			if CardTextureCache.has_gallery(data):
+				baked = CardTextureCache.get_gallery_texture(data)
+			elif DisplayServer.get_name() == "headless":
+				# Dummy rendering never posts the frame signal needed by the baker. Leave
+				# the fixed named back in place for headless behavior probes.
+				job["busy"] = false
+				_pool_jobs[job_index] = job
+				break
+			else:
+				await CardArtAliases.prewarm_card_art(data)
+				loaded_source_art = true
+				if not _pool_hydration_valid(generation):
+					CardArtAliases.release_card_art(data)
+					_clear_pool_job_busy(job_index, generation)
+					break
+				baked = await CardTextureCache.bake_gallery(
+					data, _pool_hydration_valid.bind(generation))
+			if loaded_source_art:
+				# The gallery texture owns the flattened pixels; keeping the full source
+				# painting pinned would defeat the memory bound provided by virtualization.
 				CardArtAliases.release_card_art(data)
+			if not _pool_hydration_valid(generation):
 				_clear_pool_job_busy(job_index, generation)
 				break
-			baked = await CardTextureCache.bake_gallery(
-				data, _pool_hydration_valid.bind(generation))
-		if loaded_source_art:
-			# The gallery texture owns the flattened pixels; keeping the full source
-			# painting pinned would defeat the memory bound provided by virtualization.
-			CardArtAliases.release_card_art(data)
-		if not _pool_hydration_valid(generation):
-			_clear_pool_job_busy(job_index, generation)
-			break
 
-		job = _pool_jobs[job_index]
-		job["busy"] = false
-		if baked == null:
+			job = _pool_jobs[job_index]
+			job["busy"] = false
+			if baked == null:
+				_pool_jobs[job_index] = job
+				break
+			var slot: Control = job.get("slot", null)
+			var old_visual: Control = job.get("visual", null)
+			if slot != null and old_visual != null and is_instance_valid(slot) \
+					and is_instance_valid(old_visual) \
+					and _pool_job_intersects(job,
+						_pool_virtual_rect(POOL_COLD_MARGIN_SCREENS)):
+				var card = POOL_CARD_SCENE.instantiate()
+				card.card_data = data.duplicate(true)
+				card.card_id = data.get("id", "")
+				card.is_on_battlefield = true
+				card.static_display = true
+				card.live_baked_mode = true
+				card.gallery_baked_mode = true
+				card.scale = Vector2(THUMB_SCALE, THUMB_SCALE)
+				card.position = Vector2.ZERO
+				slot.add_child(card)
+				# Keep the named back in front until every face in this viewport batch
+				# is complete. The face is edge-hidden, not progressively exposed.
+				slot.move_child(card, 1)
+				_stage_complete_hand_member(card)
+				job["pending_visual"] = card
+				job["state"] = "staged"
+				staged.append(job_index)
 			_pool_jobs[job_index] = job
-			break
-		var slot: Control = job.get("slot", null)
-		var old_visual: Control = job.get("visual", null)
-		if slot != null and old_visual != null and is_instance_valid(slot) \
-				and is_instance_valid(old_visual) \
-				and _pool_job_intersects(job,
-					_pool_virtual_rect(POOL_COLD_MARGIN_SCREENS)):
-			var card = POOL_CARD_SCENE.instantiate()
-			card.card_data = data.duplicate(true)
-			card.card_id = data.get("id", "")
-			card.is_on_battlefield = true
-			card.static_display = true
-			card.live_baked_mode = true
-			card.gallery_baked_mode = true
-			card.scale = Vector2(THUMB_SCALE, THUMB_SCALE)
-			card.position = Vector2.ZERO
-			slot.add_child(card)
-			slot.move_child(card, 0)
-			slot.remove_child(old_visual)
-			old_visual.queue_free()
-			job["visual"] = card
-			job["state"] = "card"
-			_set_pool_row_visual(String(job.get("id", "")), card)
-		_pool_jobs[job_index] = job
 
-		hydrated_since_yield += 1
-		if hydrated_since_yield >= POOL_HYDRATE_YIELD_EVERY:
-			hydrated_since_yield = 0
-			await get_tree().process_frame
+			hydrated_since_yield += 1
+			if hydrated_since_yield >= POOL_HYDRATE_YIELD_EVERY:
+				hydrated_since_yield = 0
+				await get_tree().process_frame
+
+		if not _pool_hydration_valid(generation):
+			break
+		if staged.is_empty():
+			break
+
+		var faces: Array[Control] = []
+		var covers: Array[Control] = []
+		for job_index in staged:
+			if job_index < 0 or job_index >= _pool_jobs.size():
+				continue
+			var job: Dictionary = _pool_jobs[job_index]
+			var slot: Control = job.get("slot", null)
+			var face: Control = job.get("pending_visual", null)
+			var cover: Control = job.get("visual", null)
+			job.erase("pending_visual")
+			if slot == null or face == null or cover == null \
+					or not is_instance_valid(slot) or not is_instance_valid(face) \
+					or not is_instance_valid(cover) \
+					or not _pool_job_intersects(job,
+						_pool_virtual_rect(POOL_COLD_MARGIN_SCREENS)):
+				if face != null and is_instance_valid(face):
+					face.queue_free()
+				job["state"] = "placeholder"
+				job["busy"] = false
+				_pool_jobs[job_index] = job
+				continue
+			job["visual"] = face
+			job["state"] = "card"
+			job["busy"] = false
+			_pool_jobs[job_index] = job
+			_set_pool_row_visual(String(job.get("id", "")), face, true)
+			faces.append(face)
+			covers.append(cover)
+		_reveal_complete_hand(faces, covers)
 	_pool_hydration_generation = -1 \
 		if _pool_hydration_generation == generation \
 		else _pool_hydration_generation
@@ -593,11 +641,13 @@ func _clear_pool_job_busy(job_index: int, generation: int) -> void:
 	_pool_jobs[job_index] = job
 
 
-func _set_pool_row_visual(id: String, visual: Control) -> void:
+func _set_pool_row_visual(id: String, visual: Control,
+		hydrated: bool = true) -> void:
 	if not _pool_rows.has(id):
 		return
 	var refs: Dictionary = _pool_rows[id]
 	refs["card"] = visual
+	refs["hydrated"] = hydrated
 	_pool_rows[id] = refs
 	_apply_pool_row_state(id, _deck.size() >= _target)
 
@@ -771,12 +821,13 @@ func _apply_pool_row_state(id: String, full: bool) -> void:
 	var badge: Label = refs.get("badge", null)
 	var button: Button = refs.get("button", null)
 	var visual: Control = refs.get("card", null)
+	var hydrated := bool(refs.get("hydrated", false))
 	if badge != null and is_instance_valid(badge):
-		badge.text = "\u00d7%d" % n
+		badge.text = "×%d" % n
 		badge.visible = n > 0
 	var copies_maxed := n >= MAX_COPIES
 	if button != null and is_instance_valid(button):
-		button.disabled = _local_finished or full or copies_maxed
+		button.disabled = not hydrated or _local_finished or full or copies_maxed
 	if visual != null and is_instance_valid(visual):
 		visual.modulate = Color(0.45, 0.45, 0.45, 0.8) \
 			if copies_maxed else Color.WHITE
