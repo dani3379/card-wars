@@ -834,14 +834,37 @@ func _make_secondary_action(text: String, width: float = 220.0,
 	btn.add_theme_color_override("font_outline_color", Color(0.04, 0.02, 0.01, 0.80))
 	btn.add_theme_constant_override("outline_size", 3)
 
-	var normal := GameTheme.make_panel_style(
-		Color(0.035, 0.025, 0.028, 0.78), Color(0.53, 0.45, 0.32, 0.52),
-		1, 4, false)
-	var hover := GameTheme.make_panel_style(
-		Color(0.11, 0.070, 0.040, 0.94), GILT_BRIGHT, 2, 4, true)
-	var pressed := GameTheme.make_panel_style(
-		Color(0.055, 0.035, 0.028, 0.96), Color(0.76, 0.59, 0.30),
-		1, 4, false)
+	# ── A TAB, NOT A FRAME (2026-09-15) ──
+	#
+	# The block above explains why these got a box in the first place, and it is
+	# still true: at 14px with no flame and no rule, a frameless secondary reads
+	# as a passive CAPTION, and a control nobody can see is a control nobody
+	# presses. So this is not a strip-the-box change — that would walk straight
+	# back into the bug the frame was built to fix.
+	#
+	# What was wrong is that a FULL border makes a rectangle, and after the
+	# frameless pass these were the last rectangles on the page. A single bottom
+	# rule keeps the affordance and loses the box: an underlined label is about as
+	# universally "operable" as UI gets, and it is the same shape as the section
+	# captions' hairline, so the screen keeps one vocabulary of rules instead of
+	# gaining a second vocabulary of frames.
+	#
+	# Built as StyleBoxFlat directly because ChartPanelStyle draws its rule on all
+	# four sides. Not a CAST of a kit style — that is the documented panel-kit trap
+	# and yields null. Content margins are byte-identical to the framed version so
+	# nothing on any of the six call sites shifts by a pixel.
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0, 0, 0, 0)
+	normal.border_width_bottom = 1
+	normal.border_color = Color(0.56, 0.48, 0.34, 0.80)
+	var hover := StyleBoxFlat.new()
+	hover.bg_color = Color(0.11, 0.070, 0.040, 0.34)
+	hover.border_width_bottom = 2
+	hover.border_color = GILT_BRIGHT
+	var pressed := StyleBoxFlat.new()
+	pressed.bg_color = Color(0.055, 0.035, 0.028, 0.45)
+	pressed.border_width_bottom = 2
+	pressed.border_color = Color(0.76, 0.59, 0.30)
 	for style in [normal, hover, pressed]:
 		style.content_margin_left = 12
 		style.content_margin_right = 12
@@ -2351,10 +2374,18 @@ func _show_muster_step(step: int) -> void:
 	# growth in the panes while giving THE TERMS — one 196px row on an otherwise
 	# empty page — a body band it can sit in the middle of rather than 400px of
 	# bare canvas below the deepest thing on screen.
-	# 840, not 780. The frameless pass gave the hero a 96px plate and a 30px name,
-	# and the extra height pushed START RUN off the bottom of the canvas — the
-	# commit button, clipped. 840 centred in 900 leaves a 30px margin each side.
-	_center_menu_for_subscreen(1540.0, 840.0)
+	# 840, not 780. The frameless pass gave the hero a portrait plate and a 30px
+	# name, and the extra height pushed START RUN off the bottom of the canvas —
+	# the commit button, clipped. 840 centred in 900 leaves a 30px margin each side.
+	#
+	# MORE RUN OPTIONS opens INLINE on this screen (it had a page to itself while
+	# the muster was a wizard), and it adds three rows: the Daily/seed controls,
+	# the ascension rules line, and the term gloss above them. That is ~40px more
+	# than the collapsed slack can absorb, and the overflow lands on START RUN
+	# again. The rect grows with the disclosure rather than reserving the space
+	# permanently, so the closed screen — the one nearly every player sees — keeps
+	# its margin.
+	_center_menu_for_subscreen(1540.0, 884.0 if _muster_advanced_open else 840.0)
 	menu.add_theme_constant_override("separation", 8)
 	var title := _make_display_label(WritDB.muster_copy("title"), 31, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -2917,7 +2948,15 @@ func _make_muster_host_row(hid: String) -> Button:
 		star.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		star.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		name_row.add_child(star)
-	var tag := _make_display_label(String(hero.get("tagline", "")), 14, Color(0.98, 0.83, 0.58))
+	# A CAPTION, NOT A SECOND HEADLINE (2026-09-15). This was a display label at
+	# Color(0.98, 0.83, 0.58) — a hair off GILT_BRIGHT — and `_make_display_label`
+	# floors every size at MIN_LABEL_SIZE, so the "14" rendered at 18. Five
+	# taglines therefore sat at near-name brightness and near-name size directly
+	# under five names, and the roster read as ten headlines rather than as five
+	# heroes. The tagline is the DIFFERENTIATOR and stays; it just stops competing
+	# with the word it qualifies.
+	var tag := _make_caption_label(String(hero.get("tagline", "")), 15,
+		Color(0.72, 0.65, 0.55))
 	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	tag.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	copy.add_child(tag)
@@ -2982,9 +3021,22 @@ func _make_muster_banner_chip(bid: String) -> Button:
 	var name_label := _make_display_label(String(data.get("name", bid)), 20, tint)
 	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	copy.add_child(name_label)
+	# ── ONLY THE RAISED BANNER EXPLAINS ITSELF (2026-09-15) ──
+	#
+	# All six chips printed their verb at once: six names over six full sentences,
+	# in a column 296px wide, when at most ONE of those sentences can be true of
+	# the run being built. It was also the third printing of the same fact — the
+	# chosen banner's card already leads the deck strip wearing a gilt edge, and
+	# the roll line above the strip names it outright.
+	#
+	# Held on the button and toggled by _refresh_muster_banner_styles, so the
+	# column reads as five quiet names and one raised colour with its rule under
+	# it. The list reflows deliberately: the selected chip is TALLER, which is the
+	# cheapest possible "you are here" and costs no extra ink at all.
 	var line := _make_display_label(String(data.get("line_text", "")), 15,
 		GameTheme.DESC_DIM)
 	line.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	line.name = "BannerRule"
 	copy.add_child(line)
 	btn.tooltip_text = "%s adds %s to your starting deck." % [
 		String(data.get("tribe", bid)),
@@ -3016,6 +3068,13 @@ func _refresh_muster_banner_styles() -> void:
 		if not is_instance_valid(btn):
 			continue
 		var selected := String(bid) == _selected_banner_tribe
+		# The rule line belongs to the raised banner alone — see the note in
+		# _make_muster_banner_chip. The chip shrinks with it, so an unraised
+		# colour costs one line of ink instead of two.
+		var rule := btn.find_child("BannerRule", true, false) as Label
+		if rule != null:
+			rule.visible = selected
+		btn.custom_minimum_size.y = 64.0 if selected else 38.0
 		var style: StyleBox = _hero_focus_box() if selected else StyleBoxEmpty.new()
 		for state in ["normal", "hover", "pressed"]:
 			btn.add_theme_stylebox_override(state, style)
@@ -3176,7 +3235,10 @@ func _build_muster_roll(hid: String, compact: bool = false) -> void:
 	roll_line.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	roll_line.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	roll_row.add_child(roll_line)
-	var inspect := _make_secondary_action("VIEW FULL DECK", 218, 34)
+	# 0, not 218: the tab treatment underlines the control, and a fixed width left
+	# ~90px of bare rule running past the last letter. An underline has to be as
+	# wide as its word.
+	var inspect := _make_secondary_action("VIEW FULL DECK", 0, 34)
 	inspect.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	inspect.tooltip_text = "Open the complete starting deck."
 	inspect.pressed.connect(_show_muster_deck_inspector)
@@ -3598,8 +3660,11 @@ func _build_muster_settings(parent: VBoxContainer) -> void:
 		"HIDE" if _muster_advanced_open else "SHOW")
 	if not active.is_empty():
 		advanced_text += "  ·  ACTIVE: %s" % ", ".join(PackedStringArray(active))
-	var advanced := _make_secondary_action(
-		advanced_text, 560 if not active.is_empty() else 420, 38)
+	# Hug the label. The width used to be picked from whether any run option is
+	# active, because the framed version had to reserve room for the longer
+	# "· ACTIVE: …" string; the tab sizes itself to whatever it is actually
+	# carrying, so the rule ends where the words do in both states.
+	var advanced := _make_secondary_action(advanced_text, 0, 38)
 	advanced.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	advanced.tooltip_text = "Optional: change difficulty, Daily Run, or the seed."
 	advanced.pressed.connect(_toggle_muster_advanced)
