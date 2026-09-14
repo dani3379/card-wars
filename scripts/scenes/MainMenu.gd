@@ -3038,6 +3038,11 @@ func _build_muster_roll(hid: String, compact: bool = false) -> void:
 	for child in _hero_detail.get_children():
 		child.queue_free()
 	var hero := HeroDB.get_hero(hid)
+	# Where the roll line and the deck strip land. On the full pane they go in the
+	# column BESIDE the portrait, which is what lets the hero plate be tall without
+	# pushing anything off the canvas — a portrait stacked ABOVE the text costs its
+	# own height twice over. Compact keeps the old single stack.
+	var pane: VBoxContainer = _hero_detail
 	if not compact:
 		# The lord's nameplate, with his CAMPAIGN RECORD hung off the far end of the
 		# same row. On the same row on purpose: THE COLUMN's height is spent to the
@@ -3063,9 +3068,18 @@ func _build_muster_roll(hid: String, compact: bool = false) -> void:
 		_hero_detail.add_child(head_row)
 		var portrait_path := "res://assets/portraits/hero_portrait_%s.png" % hid
 		if ResourceLoader.exists(portrait_path):
+			# 180×248, not 96×96. A square thumbnail beside a name is an AVATAR; a
+			# tall plate is a PORTRAIT, and that is the difference between a pane
+			# that reads as a row in a list and one that reads as the hero you are
+			# about to play. It costs no vertical space at all, because everything
+			# that used to sit UNDER it now sits to the RIGHT of it.
+			# 216×287 is the portrait's OWN 3:4 (the files are 928×1232), so COVERED
+			# crops essentially nothing — and the height is chosen to finish level
+			# with the deck strip beside it, so the plate spans its whole column
+			# instead of stopping half way down and leaving a notch.
 			var plate := Control.new()
-			plate.custom_minimum_size = Vector2(96, 96)
-			plate.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			plate.custom_minimum_size = Vector2(216, 287)
+			plate.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 			plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			var clip := Control.new()
 			clip.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -3089,9 +3103,12 @@ func _build_muster_roll(hid: String, compact: bool = false) -> void:
 				Color(0, 0, 0, 0.0), _faction_accent(hid), 1, 3, false))
 			plate.add_child(edge)
 			head_row.add_child(plate)
+		# This is the whole RIGHT-HAND COLUMN, not just the nameplate: the name,
+		# the record, the pitch, the roll line and the deck strip all live in it,
+		# so the portrait can stand the full height of the pane beside them.
 		var name_col := VBoxContainer.new()
-		name_col.add_theme_constant_override("separation", 0)
-		name_col.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		name_col.add_theme_constant_override("separation", 4)
+		name_col.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 		name_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		head_row.add_child(name_col)
 		# 30, not 22. This is the loudest word on the screen by intent — the page
@@ -3102,6 +3119,7 @@ func _build_muster_roll(hid: String, compact: bool = false) -> void:
 		heading.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		name_col.add_child(heading)
 		head_row = name_col
+		pane = name_col
 		# (A "RECOMMENDED FIRST HERO" chip stood here until 2026-08-03. It was
 		# gated on `_quick_march_active`, and this function returns to the quick
 		# builders at its FIRST LINE whenever that flag is set — so the branch was
@@ -3128,7 +3146,7 @@ func _build_muster_roll(hid: String, compact: bool = false) -> void:
 			GameTheme.DESC_DIM)
 		pitch.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		pitch.custom_minimum_size = Vector2(0, 36)
-		_hero_detail.add_child(pitch)
+		head_row.add_child(pitch)
 	var opener: Array[String] = RunState.opening_deck_for(
 		hid, _muster_alt_deck, _selected_banner_tribe)
 	var banner_card := BannerDB.card_id(_selected_banner_tribe)
@@ -3143,7 +3161,7 @@ func _build_muster_roll(hid: String, compact: bool = false) -> void:
 	var roll_row := HBoxContainer.new()
 	roll_row.add_theme_constant_override("separation", 18)
 	roll_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_hero_detail.add_child(roll_row)
+	pane.add_child(roll_row)
 	var roll_line := _make_caption_label(
 		("%s  ·  %d cards  ·  %d max HP" % [String(hero.get("name", hid)),
 			opener.size(), RunState.STARTING_MAX_HP]) if compact
@@ -3169,7 +3187,7 @@ func _build_muster_roll(hid: String, compact: bool = false) -> void:
 	# THE WHOLE OPENER AS ART, not a seven-card sample of baked faces — see
 	# _make_opener_art_strip for why the faces had to go (11.2px rules text
 	# against an absolute 18px floor that no gate could see).
-	_hero_detail.add_child(_make_opener_art_strip(opener, banner_card))
+	pane.add_child(_make_opener_art_strip(opener, banner_card))
 	_build_muster_doctrine_row(_hero_detail, hid, hero, compact)
 
 
@@ -4603,7 +4621,12 @@ const MUSTER_STRIP_WIDTH_FULL := 1516.0
 ## 1516 less the roster (430), the banner column (296), two 16px separations and
 ## the pane's own 24px of margin. The art strip divides this by however many
 ## DISTINCT cards the opener holds, so it stays one rank at any deck size.
-const OPENER_STRIP_WIDTH := 710.0
+## 550, not 710: the hero portrait takes 216 of THE COLUMN's width plus an 18px
+## gutter, and the strip shares the remainder with the name and the pitch. The
+## tiles pay for the portrait — 86×58 rather than 113×75 — which is the right
+## trade here, because a tile is a REMINDER of a card the player can hover or
+## open in full, while the portrait is the only picture of the hero on the page.
+const OPENER_STRIP_WIDTH := 550.0
 ## Card art ships 3:2 landscape (768×512 and 1344×896 throughout
 ## assets/creatures). The tiles are built at that ratio so COVERED crops nothing.
 const OPENER_ART_ASPECT := 1.5
