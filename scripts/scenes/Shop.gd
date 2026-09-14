@@ -13,6 +13,7 @@ extends Control
 
 const MAP_SCENE = "res://scenes/map.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+const CARD_BACK_TEXTURE = preload("res://assets/ui/card_back.png")
 
 const BASE_PRICES: Dictionary = {
 	"common": 50, "uncommon": 75, "rare": 120,
@@ -50,9 +51,9 @@ const SVC_TILE_SIZE := Vector2(272, 196)
 # One line of the sutler's patter per visit — picked once in _ready so UI
 # rebuilds (purchases) don't make him change the subject mid-sentence.
 const BARKS: Array = [
-	"\"Everything is for sale. Most of it belonged to someone else.\"",
+	"\"Everything on these shelves is for sale.\"",
 	"\"Prices rise during a war. Blame the war.\"",
-	"\"No refunds. The road does not offer them either.\"",
+	"\"No refunds. Choose carefully.\"",
 	"\"I only accept payment in advance.\"",
 ]
 
@@ -69,6 +70,7 @@ var _gold_shown: int = -1
 var _gold_label: Label = null
 var _transaction_busy: bool = false
 var _sell_card_nodes: Array[Control] = []
+var _sell_build_generation := 0
 
 
 func _ready() -> void:
@@ -90,11 +92,16 @@ func _ready() -> void:
 	_discount = 0.75 if RunState.has_relic("merchants_license") else 1.0
 	_bark = BARKS[randi() % BARKS.size()]
 	_roll_stock()
-	# Keep art decode + GPU card readbacks out of the shelf-construction frame.
-	await ScenePreload.warm_card_ids(_card_stock)
-	_build_ui()
+	# _build_ui streams native 1x gallery snapshots before each static shelf card
+	# appears. Prewarming the 3x gameplay class here doubled the work and made
+	# the first oversized texture upload the screen's largest frame.
+	await _build_ui(true)
 	GameTheme.fade_in(self, 0.22)
 	GameTheme.make_settings_gear(self)
+	# The purse is the subject: the lesson is that gold is spent here AND earned
+	# back here, and the buy-back is the only deck-thinning the game has. The
+	# stalls themselves are labelled with their prices and teach themselves.
+	TutorialCoach.teach(self, "shop_trade", [_gold_label])
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -143,7 +150,11 @@ func _price(base: int) -> int:
 	return int(base * _discount)
 
 
-func _build_ui() -> void:
+func _build_ui(stagger_initial_cards: bool = false) -> void:
+	_sell_build_generation += 1
+	var build_generation := _sell_build_generation
+	var builder_alive := func() -> bool:
+		return is_inside_tree() and build_generation == _sell_build_generation
 	_transaction_busy = false
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere":
@@ -194,8 +205,86 @@ func _build_ui() -> void:
 	card_row.add_theme_constant_override("separation", 28)
 	add_child(card_row)
 
+	# Reserve the entire centred shelf before the first await. Rich faces will be
+	# built inside these exact footprints behind card backs, so completion order
+	# can never change the row width or shove an existing card sideways.
+	var stock_staged: Array[Dictionary] = []
 	for id in _card_stock:
-		var data = CardDB.get_card_data(id)
+		var data: Dictionary = CardDB.get_card_data(id)
+		var slot := VBoxContainer.new()
+		slot.custom_minimum_size = Vector2(Card2D.CARD_W, Card2D.CARD_H + 52.0)
+		slot.add_theme_constant_override("separation", 8)
+		slot.alignment = BoxContainer.ALIGNMENT_CENTER
+		card_row.add_child(slot)
+
+		var card_wrap := Control.new()
+		card_wrap.custom_minimum_size = Vector2(Card2D.CARD_W, Card2D.CARD_H)
+		card_wrap.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		card_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		card_wrap.pivot_offset = card_wrap.custom_minimum_size * 0.5
+		card_wrap.draw.connect(_draw_shelf_shadow.bind(card_wrap))
+		slot.add_child(card_wrap)
+		var face_host := Control.new()
+		face_host.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		card_wrap.add_child(face_host)
+		face_host.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		var back := _make_loading_card_back()
+		card_wrap.add_child(back)
+		back.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		stock_staged.append({
+			"slot": slot, "wrap": card_wrap, "host": face_host, "back": back,
+		})
+
+	# Cards/buttons are accumulated invisibly, then the whole logical offer flips
+	# face-up and becomes interactive in one coordinated beat.
+	var staged_cards: Array[Control] = []
+	var staged_backs: Array[Control] = []
+	var staged_buttons: Array[Button] = []
+	var staged_wraps: Array[Control] = []
+	var staged_rarities: Array[String] = []
+
+	# Start every cold art request before joining any of them. The old per-card
+	# prewarm serialized four image decodes even though ResourceLoader can do them
+	# concurrently; prewarm_card_art below then only installs the resolved alias.
+	var stock_datas: Array[Dictionary] = []
+	var cold_art_paths: Array[String] = []
+	for id in _card_stock:
+		var stock_data: Dictionary = CardDB.get_card_data(id)
+		stock_datas.append(stock_data)
+		if CardTextureCache.has(stock_data) or CardTextureCache.has_gallery(stock_data):
+			continue
+		var art_path := String(CardArtAliases.card_art_path(stock_data))
+		if art_path != "" and not cold_art_paths.has(art_path):
+			cold_art_paths.append(art_path)
+	if not cold_art_paths.is_empty():
+		await CardArtAliases.prewarm_texture_paths(cold_art_paths)
+		if not builder_alive.call():
+			return
+
+	for stock_i in range(_card_stock.size()):
+		var id: String = _card_stock[stock_i]
+		var data: Dictionary = stock_datas[stock_i]
+		# These cards never enter a hand and are shown at their native 225x300
+		# size. A native gallery snapshot is pixel-exact here and avoids the
+		# 3x+mipmap gameplay bake that owned the remaining Shop entry hitch.
+		if not CardTextureCache.has(data) and not CardTextureCache.has_gallery(data):
+			await CardArtAliases.prewarm_card_art(data)
+			if not builder_alive.call():
+				CardArtAliases.release_card_art(data)
+				return
+			var baked_gallery := false
+			if not CardTextureCache.has(data):
+				await CardTextureCache.bake_gallery(data, builder_alive)
+				baked_gallery = CardTextureCache.has_gallery(data)
+			CardArtAliases.release_card_art(data)
+			if not builder_alive.call():
+				return
+			if baked_gallery:
+				# Do not stack the synchronous readback/upload with construction of
+				# the visible baked-overlay Card2D in the same presented frame.
+				await get_tree().process_frame
+		if not builder_alive.call():
+			return
 		var price = _price(BASE_PRICES.get(data.rarity, 50))
 		var slot := VBoxContainer.new()
 		slot.add_theme_constant_override("separation", 8)
@@ -210,14 +299,18 @@ func _build_ui() -> void:
 		card_wrap.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		card_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		card_wrap.pivot_offset = card_wrap.custom_minimum_size * 0.5
+		# The shelf's stock stands on the counter — a contact shadow that spreads
+		# and pales while the card is in the air (see `_draw_shelf_shadow`).
+		card_wrap.draw.connect(_draw_shelf_shadow.bind(card_wrap))
 		slot.add_child(card_wrap)
 
 		var card = CARD_SCENE.instantiate()
 		card.card_data = data.duplicate(true)
 		card.card_id = id
 		card.is_on_battlefield = true  # no drag / hover-scale; static gallery card
+		card.static_display = true
 		card.live_baked_mode = true
-		CardTextureCache.bake(data)
+		card.gallery_baked_mode = not CardTextureCache.has(data) and CardTextureCache.has_gallery(data)
 		card_wrap.add_child(card)
 
 		var buy_btn = _make_buy_button("Buy — %dg" % price,
@@ -228,13 +321,29 @@ func _build_ui() -> void:
 		slot.add_child(buy_btn)
 		if not _entered:
 			var deal_at: float = 0.08 + card_row.get_child_count() * 0.06
-			GameTheme.deal_in(slot, deal_at)
+			# THE STOCK IS DEALT; THE PRICE TAG IS UI (2026-09-10). `deal_in` on
+			# the whole slot faded card and buy-button together, which made the
+			# card behave like a panel. They are not the same kind of thing: a
+			# card is an OBJECT and gets thrown onto the counter, a price is a
+			# LABEL and may honestly fade in behind it. Splitting the two is most
+			# of what makes the shelf read as stock rather than as a form.
+			Motion.deal_card(card_wrap, deal_at, {
+				"from": Vector2(-70.0, 300.0), "spin": 0.30, "dur": 0.40,
+			})
+			GameTheme.deal_in(buy_btn, deal_at + 0.34)
 			# The shelf is a ROLLED offer, exactly like the muster slate and the
 			# reliquary — so a good roll announces itself here too (uncommons
 			# glint silver, rares erupt in gilt). Only on arrival: `_entered`
 			# keeps a re-shelf after a purchase from re-shining the leftovers.
 			GameTheme.rarity_reveal(card_wrap, String(data.get("rarity", "")),
 				deal_at + 0.36)
+		if stagger_initial_cards:
+			# Upload/present one baked face per frame. Four entering together was
+			# a single 469 ms Compatibility frame even though every cache hit was
+			# complete; sequential presentation keeps the scene responsive.
+			await get_tree().process_frame
+			if not builder_alive.call():
+				return
 
 	# Relic + Services — one centered row below the cards.
 	var svc_label = GameTheme.make_section_divider("Relics & Services", GameTheme.DESC_DIM, 22)
@@ -247,7 +356,18 @@ func _build_ui() -> void:
 
 	# The shelf panel hugs the re-cut tiles — it was 250 tall to contain the old
 	# text-grown ones and left an empty band under the row once they shrank.
-	add_child(_make_stage_panel(Rect2(50, 548, 1500, 218),
+	#
+	# ── AND THE WIDTH WAS THE OTHER HALF OF THAT (2026-09-03) ──
+	# Only the HEIGHT was re-cut. The width stayed at 1500 from the text-grown
+	# tiles, so a shelf 1500 wide carried 860 of content — ~320px of empty plate
+	# at each end — while sitting directly under a Cards shelf that is 1100 wide
+	# and nearly full. Two stacked shelves on one page, both centred, one jutting
+	# 200px further out on each side than the other.
+	# `roll_field_relics(1, ...)` caps this row at three tiles (relic + potion +
+	# buy-back), so 1100 holds it with room to spare AND lands the two shelves on
+	# the same left and right edges, which is what makes the screen read as one
+	# page rather than two unrelated plates. Gate: `tools/_probe_alignment.gd`.
+	add_child(_make_stage_panel(Rect2(250, 548, 1100, 218),
 		Color(0.76, 0.50, 0.26, 0.95)))
 
 	var svc_row = HBoxContainer.new()
@@ -306,8 +426,8 @@ func _build_ui() -> void:
 		GameTheme.make_potion_chip(_shop_potion_id, SVC_ICON_PX),
 		pname, pdesc, "— %dg —" % potion_price, pcolor)
 	if RunState.has_downside("no_potions"):
-		_set_tile_status(potion, "Temperance Vow")
-		_make_unavailable_tile(potion.button, "Temperance Vow")
+		_set_tile_status(potion, "No potions (Temperance Vow)")
+		_make_unavailable_tile(potion.button, "No potions (Temperance Vow)")
 	elif RunState.gold < potion_price:
 		_set_tile_status(potion, "Need %d gold" % potion_price)
 		_make_unavailable_tile(potion.button, "Need %d gold" % potion_price)
@@ -331,14 +451,19 @@ func _build_ui() -> void:
 	if RunState.has_relic("scavengers_pouch"):
 		sell_body += " Your Trader's Marker doubles these prices."
 	var sell = _make_service_slot(
-		_make_icon_chip("res://assets/icons/downloaded/cards1.png", SVC_ICON_PX),
-		"The Buy-Back", sell_body, "— by weight —", Color(0.45, 0.15, 0.15))
+		# The sutler's purse — he PAYS you. This chip was
+		# assets/icons/downloaded/cards1.png: a raw icon ATLAS, eight unrelated
+		# coloured glyphs in a grid, sitting in a gilt chip between a painted relic
+		# and a painted potion. It is the only thing in the game still loaded out of
+		# `icons/downloaded/`.
+		_make_icon_chip("res://assets/icons/relics/coin_purse.png", SVC_ICON_PX),
+		"Sell a Card", sell_body, "— by card cost —", Color(0.45, 0.15, 0.15))
 	if _sold_this_visit:
-		_set_tile_status(sell, "He's bought his one")
-		_make_unavailable_tile(sell.button, "He's bought his one")
+		_set_tile_status(sell, "Already sold this visit")
+		_make_unavailable_tile(sell.button, "Already sold this visit")
 	elif RunState.deck.size() <= 1:
-		_set_tile_status(sell, "Won't take your last card")
-		_make_unavailable_tile(sell.button, "Won't take your last card")
+		_set_tile_status(sell, "Can't sell your last card")
+		_make_unavailable_tile(sell.button, "Can't sell your last card")
 	else:
 		sell.button.pressed.connect(_start_sell_mode)
 	svc_row.add_child(sell.slot)
@@ -361,19 +486,41 @@ func _build_ui() -> void:
 	# Leave button — gold pill with ← arrow, distinct from the buy buttons.
 	# Centered off size.x (the 1600×900 stretch canvas) rather than a hardcoded
 	# window pixel, so it stays put if the canvas changes.
-	var leave_btn = GameTheme.make_back_button("Leave the Wagon", Vector2(220, 50), 20)
+	# Worded as a departure, but it is the only way on from this stop — so it
+	# wears the forward-move plate, not the frameless retreat treatment.
+	var leave_btn = GameTheme.make_primary_button("Leave the Wagon", Vector2(240, 50), 20)
 	leave_btn.anchor_left = 0.5
 	leave_btn.anchor_right = 0.5
-	leave_btn.offset_left = -110
-	leave_btn.offset_right = 110
+	# Half the button's own width, not a leftover number: `make_primary_button`
+	# stamps 240 into custom_minimum_size, and a rect narrower than that is
+	# widened RIGHTWARD — so the ±110 the 220-wide back button left behind put
+	# this plate 10px right of the centre it claims to sit on.
+	leave_btn.offset_left = -120
+	leave_btn.offset_right = 120
 	leave_btn.offset_top = 822
 	leave_btn.offset_bottom = 872
 	leave_btn.pressed.connect(_leave_shop)
+	GameTheme.arm_ui_press(leave_btn, "commit")
 	add_child(leave_btn)
 	if not _entered:
 		GameTheme.deal_in(leave_btn, 0.58)
 		GameTheme.hover_lift(leave_btn, 1.04)
 	_entered = true
+
+
+## The face-down back a shelf slot wears until its ornate face is hydrated, so
+## the row's geometry is reserved before any card is built and a late arrival
+## cannot re-centre the shelf. Twin of Recruit's helper of the same name — this
+## screen already had the CARD_BACK_TEXTURE const and the call site; only the
+## function itself was missing, which took Shop.gd (and with it the whole game)
+## out of compilation.
+func _make_loading_card_back() -> TextureRect:
+	var back := TextureRect.new()
+	back.texture = CARD_BACK_TEXTURE
+	back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return back
 
 
 func _make_stage_panel(rect: Rect2, accent: Color) -> Panel:
@@ -721,13 +868,15 @@ func _sell_price(card_id: String) -> int:
 func _start_sell_mode() -> void:
 	if _transaction_busy:
 		return
+	_sell_build_generation += 1
+	var build_generation := _sell_build_generation
 	_transaction_busy = false
 	_sell_card_nodes.clear()
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
 
-	var title = GameTheme.make_label("Lay one on the counter. He pays by weight.",
+	var title := GameTheme.make_label("Choose a card to sell",
 		GameTheme.FONT_TITLE, GameTheme.KEYWORD_GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.position = Vector2(300, 26)
@@ -735,7 +884,8 @@ func _start_sell_mode() -> void:
 	add_child(title)
 	GameTheme.deal_in(title, 0.02)
 
-	var purse = GameTheme.make_label("%d gold" % RunState.gold, 22, GameTheme.KEYWORD_GOLD, true)
+	var purse := GameTheme.make_label("%d gold" % RunState.gold, 22,
+		GameTheme.KEYWORD_GOLD, true)
 	_gold_label = purse
 	purse.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	purse.position = Vector2(680, 62)
@@ -743,19 +893,63 @@ func _start_sell_mode() -> void:
 	add_child(purse)
 	GameTheme.deal_in(purse, 0.06)
 
-	var scroll = ScrollContainer.new()
-	scroll.position = Vector2(100, 80)
-	scroll.size = Vector2(1400, 700)
+	var preparing := GameTheme.make_label("PREPARING THE DECK...", 15,
+		Color(GameTheme.IVORY.r, GameTheme.IVORY.g, GameTheme.IVORY.b, 0.72))
+	preparing.position = Vector2(104, 52)
+	preparing.size = Vector2(360, 26)
+	preparing.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(preparing)
+
+	var scroll := ScrollContainer.new()
+	scroll.position = Vector2(95, 80)
+	scroll.size = Vector2(1410, 700)
 	add_child(scroll)
 
-	var grid = GridContainer.new()
+	var grid := GridContainer.new()
 	grid.columns = 6
-	grid.add_theme_constant_override("h_separation", 16)
+	grid.add_theme_constant_override("h_separation", 10)
 	grid.add_theme_constant_override("v_separation", 16)
 	scroll.add_child(grid)
 
+	# Cancellation is live while a cold late-run deck is being flattened.
+	# _build_ui advances the generation so stale cards cannot arrive behind it.
+	var cancel_btn := GameTheme.make_back_button("Cancel", Vector2(180, 40))
+	cancel_btn.position = Vector2(720, 800)
+	cancel_btn.pressed.connect(func():
+		if not _transaction_busy:
+			_build_ui())
+	add_child(cancel_btn)
+	GameTheme.deal_in(cancel_btn, 0.18)
+	GameTheme.hover_lift(cancel_btn, 1.04)
+
+	var grid_ref: WeakRef = weakref(grid)
+	var picker_alive := func() -> bool:
+		if not is_inside_tree() or build_generation != _sell_build_generation \
+				or _transaction_busy:
+			return false
+		var live_grid: GridContainer = grid_ref.get_ref() as GridContainer
+		return live_grid != null and is_instance_valid(live_grid) \
+			and not live_grid.is_queued_for_deletion()
+
 	for i in range(RunState.deck.size()):
-		var data = RunState.get_upgraded_card_data(i)
+		var data: Dictionary = RunState.get_upgraded_card_data(i)
+		# Reuse a gameplay face if combat/map warming already paid for it. Only
+		# create the native-resolution gallery class on a genuine cold miss.
+		if not CardTextureCache.has(data) \
+				and not CardTextureCache.has_gallery(data):
+			await CardArtAliases.prewarm_card_art(data)
+			if not picker_alive.call():
+				CardArtAliases.release_card_art(data)
+				return
+			# A concurrent deck warmer may finish during the threaded art load.
+			if not CardTextureCache.has(data):
+				await CardTextureCache.bake_gallery(data, picker_alive)
+			CardArtAliases.release_card_art(data)
+		if not picker_alive.call():
+			return
+		var use_gallery := not CardTextureCache.has(data) \
+			and CardTextureCache.has_gallery(data)
+
 		var slot := VBoxContainer.new()
 		slot.add_theme_constant_override("separation", 4)
 		var wrapper := Control.new()
@@ -763,8 +957,9 @@ func _start_sell_mode() -> void:
 		var card_node = CARD_SCENE.instantiate()
 		card_node.static_display = true
 		card_node.card_data = data
+		card_node.card_id = String(data.get("id", ""))
 		card_node.live_baked_mode = true
-		CardTextureCache.bake(data)
+		card_node.gallery_baked_mode = use_gallery
 		wrapper.add_child(card_node)
 		var click_btn := Button.new()
 		click_btn.flat = true
@@ -790,14 +985,16 @@ func _start_sell_mode() -> void:
 		GameTheme.deal_in(slot, 0.04 + minf(float(i), 12.0) * 0.025)
 		GameTheme.hover_lift(slot, 1.025)
 
-	var cancel_btn = GameTheme.make_back_button("Keep your pack", Vector2(180, 40))
-	cancel_btn.position = Vector2(720, 800)
-	cancel_btn.pressed.connect(func():
-		if not _transaction_busy:
-			_build_ui())
-	add_child(cancel_btn)
-	GameTheme.deal_in(cancel_btn, 0.18)
-	GameTheme.hover_lift(cancel_btn, 1.04)
+		preparing.text = "LAYING OUT THE DECK...  %d / %d" % [
+			i + 1, RunState.deck.size()]
+		if DisplayServer.get_name() == "headless":
+			await get_tree().process_frame
+		else:
+			await RenderingServer.frame_post_draw
+		if not picker_alive.call():
+			return
+	if is_instance_valid(preparing):
+		preparing.queue_free()
 
 
 func _confirm_sell(deck_index: int, slot: Control = null) -> void:
@@ -810,6 +1007,7 @@ func _confirm_sell(deck_index: int, slot: Control = null) -> void:
 		_build_ui()
 		return
 	_transaction_busy = true
+	_sell_build_generation += 1
 	var price := _sell_price(RunState.deck[deck_index])
 	_sold_this_visit = true
 	var old_gold := RunState.gold
@@ -831,3 +1029,13 @@ func _confirm_sell(deck_index: int, slot: Control = null) -> void:
 	# the trade has a direction (buys dive down to you, sales rise to him).
 	await GameTheme.pocket_away(slot, Vector2(vp.x * 0.5, 40.0))
 	_build_ui()
+
+
+## The counter shadow under a shelved card. Same helper the recruit slate uses,
+## reading the height `Motion.deal_card` writes to the wrapper — so the shadow
+## spreads and pales while the card is in the air and snaps tight on contact.
+func _draw_shelf_shadow(card_wrap: Control) -> void:
+	Motion.card_shadow(card_wrap,
+		Vector2(Card2D.CARD_W * 0.5, Card2D.CARD_H + 8.0),
+		float(card_wrap.get_meta("deal_lift", 0.0)), 96.0,
+		card_wrap.get_meta("deal_off", Vector2.ZERO))
