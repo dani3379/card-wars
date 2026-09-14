@@ -2351,7 +2351,10 @@ func _show_muster_step(step: int) -> void:
 	# growth in the panes while giving THE TERMS — one 196px row on an otherwise
 	# empty page — a body band it can sit in the middle of rather than 400px of
 	# bare canvas below the deepest thing on screen.
-	_center_menu_for_subscreen(1540.0, 780.0)
+	# 840, not 780. The frameless pass gave the hero a 96px plate and a 30px name,
+	# and the extra height pushed START RUN off the bottom of the canvas — the
+	# commit button, clipped. 840 centred in 900 leaves a 30px margin each side.
+	_center_menu_for_subscreen(1540.0, 840.0)
 	menu.add_theme_constant_override("separation", 8)
 	var title := _make_display_label(WritDB.muster_copy("title"), 31, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -2425,10 +2428,10 @@ func _show_muster_step(step: int) -> void:
 ## controls sit in the footer. Measured total: 730 inside the 780 rect.
 func _build_muster_screen(menu: VBoxContainer) -> void:
 	var main_row := HBoxContainer.new()
-	# 436: the deepest pane is THE BANNER — six 64px chips is 384, plus the
-	# section's heading, ornament and margins (~52). The roster's five 66px rows
-	# come to 330 and ride the same rect with room to spare.
-	main_row.custom_minimum_size = Vector2(0, 436)
+	# 416: the deepest pane is THE BANNER — six 64px chips is 384, plus the
+	# section's caption and rule (~29). Twenty shorter than the framed version,
+	# which had to pay for the panel's content margins as well.
+	main_row.custom_minimum_size = Vector2(0, 416)
 	main_row.add_theme_constant_override("separation", 16)
 	main_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	menu.add_child(main_row)
@@ -2504,7 +2507,17 @@ func _build_muster_footer(menu: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 16)
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	menu.add_child(row)
-	var back := _make_secondary_action("BACK", 180, 40)
+	# The FRAMELESS back, matching every other shell screen (the quick march, the
+	# load screen, the writ pickers all use this one). It was the boxed
+	# `_make_secondary_action`, which left run setup the only screen in the shell
+	# whose BACK wore a panel — and after the frameless pass it was one of the
+	# last rectangles standing on the page.
+	#
+	# Pinned, not expanded: _make_menu_button hands every button EXPAND_FILL, and
+	# an expanding BACK steals a third of the row and shoves START RUN off centre.
+	var back := _make_menu_button("BACK", Color(0.22, 0.16, 0.14), 17, 46, false)
+	back.custom_minimum_size = Vector2(180, MUSTER_NAV_ROW_H)
+	back.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	back.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	back.pressed.connect(_abandon_muster)
 	row.add_child(back)
@@ -2786,31 +2799,33 @@ func _build_muster_nav(parent: VBoxContainer, back_cb: Callable,
 
 func _make_muster_section(parent: Container, heading: String,
 		minimum_width: float, expand: bool = false) -> VBoxContainer:
-	var frame := PanelContainer.new()
-	frame.custom_minimum_size = Vector2(minimum_width, 0)
-	frame.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	# The flag has to land on the FRAME. This helper returns the inner VBox, so
-	# callers setting `size_flags_horizontal` on the return value were flagging a
-	# child of a PanelContainer, which ignores it — the wide pane never grew past
-	# its minimum and ~390px of the screen sat empty to the right of it.
+	# ── FRAMELESS (2026-09-15) ──
+	#
+	# This built a bordered, FILLED PanelContainer per section. The muster stands
+	# three of them side by side above four more bordered term tiles, so the
+	# screen was eight boxes and thirty-two corner ornaments, with the painted
+	# background visible only in the seams between them. Decoration applied
+	# uniformly to everything is noise, not craft — and the house style is
+	# frameless: the heading and its rule carry the grouping, `_set_subscreen_scrim`
+	# already carries the contrast, and the art stays visible behind the words.
+	# A section is A COLUMN OF TYPE, not a box.
+	#
+	# The heading is also a CAPTION now, not a title. At 18px GILT_BRIGHT it was
+	# the same weight as the hero's own name two lines below it, so three section
+	# labels competed with the one element on the screen that should lead. Small,
+	# dim and letter-spaced, it names the column and then gets out of the way.
+	var col := VBoxContainer.new()
+	col.custom_minimum_size = Vector2(minimum_width, 0)
+	col.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	if expand:
-		frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var style := GameTheme.make_panel_style(
-		Color(0.045, 0.032, 0.038, 0.88), Color(0.60, 0.51, 0.34, 0.52), 1, 5, false)
-	style.content_margin_left = 12
-	style.content_margin_right = 12
-	style.content_margin_top = 8
-	style.content_margin_bottom = 8
-	frame.add_theme_stylebox_override("panel", style)
-	parent.add_child(frame)
-	var content := VBoxContainer.new()
-	content.add_theme_constant_override("separation", 6)
-	frame.add_child(content)
-	var label := _make_display_label(heading, 18, GILT_BRIGHT)
+		col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_theme_constant_override("separation", 6)
+	parent.add_child(col)
+	var label := _make_caption_label(heading, 15, Color(0.68, 0.60, 0.47))
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	content.add_child(label)
-	content.add_child(_make_ornament_row(minimum_width - 42.0, true, false, true))
-	return content
+	col.add_child(label)
+	col.add_child(_make_ornament_row(minimum_width - 18.0, true, false, true))
+	return col
 
 
 func _make_muster_host_row(hid: String) -> Button:
@@ -3030,15 +3045,63 @@ func _build_muster_roll(hid: String, compact: bool = false) -> void:
 		# a record on its own line would have to push something off the canvas. The
 		# heading row is the one piece of furniture on this pane with empty space to
 		# its right.
-		var head_row := HBoxContainer.new()
+		# ── THE HERO GETS A FACE (2026-09-15) ──
+		#
+		# This pane named the lord in 22px type and showed nothing of him. The
+		# only portrait on the screen was the 52px thumbnail in the roster, so on
+		# a screen titled RUN SETUP the hero carried less visual weight than one
+		# card tile in his own deck — the focal point inverted. Every game in the
+		# genre gives the chosen thing presence: Slay the Spire stands the
+		# character up, Hades stands the weapon up. A 96px plate beside a 30px
+		# name is what makes this pane about a PERSON rather than about a list.
+		# Typed BoxContainer, not HBoxContainer: the record line below is appended
+		# to `head_row`, and the name column takes that role once it exists so the
+		# record sits under the name rather than beside the portrait.
+		var head_row: BoxContainer = HBoxContainer.new()
 		head_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		head_row.add_theme_constant_override("separation", 24)
+		head_row.add_theme_constant_override("separation", 16)
 		_hero_detail.add_child(head_row)
-		var heading := _make_display_label(String(hero.get("name", hid)), 22,
+		var portrait_path := "res://assets/portraits/hero_portrait_%s.png" % hid
+		if ResourceLoader.exists(portrait_path):
+			var plate := Control.new()
+			plate.custom_minimum_size = Vector2(96, 96)
+			plate.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			var clip := Control.new()
+			clip.set_anchors_preset(Control.PRESET_FULL_RECT)
+			clip.clip_contents = true
+			clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			plate.add_child(clip)
+			var face := TextureRect.new()
+			face.set_anchors_preset(Control.PRESET_FULL_RECT)
+			face.texture = load(portrait_path)
+			# EXPAND_IGNORE_SIZE or the node claims the texture's full size as its
+			# minimum and the anchors never bring it down — the trap the opener
+			# strip was built through.
+			face.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			face.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+			face.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			clip.add_child(face)
+			var edge := Panel.new()
+			edge.set_anchors_preset(Control.PRESET_FULL_RECT)
+			edge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			edge.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
+				Color(0, 0, 0, 0.0), _faction_accent(hid), 1, 3, false))
+			plate.add_child(edge)
+			head_row.add_child(plate)
+		var name_col := VBoxContainer.new()
+		name_col.add_theme_constant_override("separation", 0)
+		name_col.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		name_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		head_row.add_child(name_col)
+		# 30, not 22. This is the loudest word on the screen by intent — the page
+		# title is chrome, the section captions are labels, the lord is the answer.
+		var heading := _make_display_label(String(hero.get("name", hid)), 30,
 			_faction_accent(hid))
 		heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-		heading.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
-		head_row.add_child(heading)
+		heading.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		name_col.add_child(heading)
+		head_row = name_col
 		# (A "RECOMMENDED FIRST HERO" chip stood here until 2026-08-03. It was
 		# gated on `_quick_march_active`, and this function returns to the quick
 		# builders at its FIRST LINE whenever that flag is set — so the branch was
@@ -3861,9 +3924,21 @@ func _refresh_muster_writ_styles() -> void:
 		# up with it, because at 0.38 over a bright frame the tile had no edge.
 		var bg: Color = Color(0.17, 0.105, 0.06, 0.97) if selected \
 			else Color(0.035, 0.025, 0.03, 0.93)
-		var width: int = 3 if selected else 1
+		# ── ONE CHOSEN TERM, NOT FOUR FRAMED BOXES (2026-09-15) ──
+		#
+		# The frameless pass took the borders off every section, which left this
+		# row as the only framed thing on the screen — four gilt-edged boxes in a
+		# line, reading as a form rather than as an offer. The unselected tiles
+		# now carry NO rule at all (alpha 0, which also stops ChartPanelStyle
+		# drawing its corner marks), so the eye sees one lit term among three
+		# quiet ones instead of four equal frames.
+		#
+		# THE FILL STAYS, and must: this row sits low enough on the canvas to be
+		# read against open flame, so the wash is legibility, not decoration. It
+		# is the border that was noise, never the background.
+		var width: int = 2 if selected else 1
 		var normal := GameTheme.make_panel_style(bg,
-			GILT_BRIGHT if selected else Color(0.54, 0.46, 0.33, 0.62),
+			GILT_BRIGHT if selected else Color(0.54, 0.46, 0.33, 0.0),
 			width, 4, false)
 		btn.add_theme_stylebox_override("normal", normal)
 		btn.add_theme_stylebox_override("pressed", normal)
