@@ -17,6 +17,7 @@ const COLLECTION_SCENE = "res://scenes/collection.tscn"
 const CREDITS_SCENE = "res://scenes/credits.tscn"
 const SKIRMISH_SCENE = "res://scenes/net_lobby.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+const CARD_BACK_TEXTURE_PICKER = preload("res://assets/ui/card_back.png")
 
 const GILT := Color(0.83, 0.74, 0.54, 1.0)
 const GILT_BRIGHT := Color(1.0, 0.85, 0.45, 1.0)
@@ -1672,6 +1673,31 @@ func _center_menu_for_subscreen(width: float = 620.0, height: float = 640.0) -> 
 	# here is what makes that safe rather than a one-way trip.
 	menu.visible = true
 	_set_subscreen_scrim(true)
+	# ── THE RECT FOLLOWS THE CANVAS (2026-09-14, CLASS C32) ──
+	#
+	# Every size handed to this function was authored against the 1600×900 design
+	# canvas. UI Scale DIVIDES the logical canvas — at 60% the UI lays itself out
+	# on 2667×1500 — so a fixed offset pair made every subscreen a shrinking
+	# island: `_probe_uiscale` measured run setup covering 98%×93% of the canvas
+	# at 100% and **59%×56% at 60%**, while every other shell screen held 99% at
+	# all three. The player who picks 60% is asking to fit MORE on screen and was
+	# getting the same panel with a wider margin of background around it.
+	#
+	# Scaling by canvas/design keeps the FRACTION each constant was chosen for,
+	# and is exactly a no-op at 100%.
+	#
+	# READ BEFORE "FIXING" THIS BACK: ProjectSettings is used here as the
+	# AUTHORING REFERENCE — the static canvas the callers' numbers were written
+	# against — which is the one honest use of it. The 2026-09-03 decorative-frame
+	# bug was the opposite mistake: reading ProjectSettings as if it were the
+	# RUNTIME canvas. Static reference, live target; never the other way round.
+	var canvas: Vector2 = get_viewport_rect().size
+	var design := Vector2(
+		float(ProjectSettings.get_setting("display/window/size/viewport_width", 1600)),
+		float(ProjectSettings.get_setting("display/window/size/viewport_height", 900)))
+	if design.x > 0.0 and design.y > 0.0 and canvas.x > 0.0 and canvas.y > 0.0:
+		width *= canvas.x / design.x
+		height *= canvas.y / design.y
 	menu.anchor_left = 0.5
 	menu.anchor_right = 0.5
 	menu.anchor_top = 0.5
@@ -5432,6 +5458,109 @@ func _blessing_creature_candidates() -> Array:
 
 const CARD_SCENE_PICKER = preload("res://scenes/card_2d.tscn")
 
+
+## Reserve a picker's complete geometry before any cache wait. The back and
+## disabled click-catcher are cheap; the ornate Card2D face is hydrated behind
+## them later. Container children are never added during the visible load, so a
+## late card cannot recenter the row or push an earlier card into a new column.
+func _make_blessing_card_shell(parent: Control, on_pick: Callable,
+		picked: Variant) -> Dictionary:
+	var wrapper := Control.new()
+	wrapper.name = "BlessingCardSlot"
+	wrapper.custom_minimum_size = Vector2(225, 300)
+	wrapper.set_meta("coordinated_card_slot", true)
+	parent.add_child(wrapper)
+
+	var back := TextureRect.new()
+	back.name = "LoadingBack"
+	back.texture = CARD_BACK_TEXTURE_PICKER
+	back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	back.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wrapper.add_child(back)
+
+	var click_btn := Button.new()
+	click_btn.name = "CardPickButton"
+	click_btn.flat = true
+	click_btn.focus_mode = Control.FOCUS_ALL
+	click_btn.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
+	click_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	click_btn.disabled = true
+	click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+	click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
+	click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
+	click_btn.pressed.connect(_on_blessing_card_pick_pressed.bind(
+		wrapper, on_pick, picked))
+	wrapper.add_child(click_btn)
+	GameTheme.hover_lift(wrapper, 1.025)
+	return {"wrapper": wrapper, "back": back, "button": click_btn}
+
+
+## Renderer work may finish one card at a time; presentation never does. Each
+## full face is built invisibly inside its already-reserved slot, then the whole
+## logical offer turns over on one shared beat. Reduce Motion/headless snaps the
+## same group to its final state in one frame.
+func _hydrate_blessing_card_group(card_datas: Array[Dictionary], shells: Array,
+		picker_alive: Callable, preparing: Label) -> void:
+	for i in range(card_datas.size()):
+		if not picker_alive.call():
+			return
+		var data: Dictionary = card_datas[i]
+		if not CardTextureCache.has_gallery(data):
+			await CardTextureCache.bake_gallery(data, picker_alive)
+		if not picker_alive.call():
+			return
+		var wrapper: Control = shells[i].wrapper
+		var card_node = CARD_SCENE_PICKER.instantiate()
+		card_node.static_display = true
+		card_node.card_data = data
+		card_node.live_baked_mode = true
+		card_node.gallery_baked_mode = true
+		card_node.defer_baked_rules_text = DisplayServer.get_name() != "headless"
+		card_node.visible = false
+		wrapper.add_child(card_node)
+		wrapper.move_child(card_node, 0)
+		shells[i]["card"] = card_node
+		if DisplayServer.get_name() == "headless":
+			await get_tree().process_frame
+		else:
+			await RenderingServer.frame_post_draw
+			if not picker_alive.call():
+				return
+			card_node.complete_deferred_baked_rules()
+			await RenderingServer.frame_post_draw
+
+	if not picker_alive.call():
+		return
+	preparing.text = "UNSEALING THE DECK..."
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	if not snap:
+		AudioBank.play_sfx("card_draw", 0.04, -6.0)
+		for shell in shells:
+			Motion.flip_out(shell.back as Control, 0.13)
+		await get_tree().create_timer(Motion.time(0.13)).timeout
+		if not picker_alive.call():
+			return
+	for shell in shells:
+		var card: Control = shell.card
+		var back: Control = shell.back
+		if snap and is_instance_valid(back):
+			back.queue_free()
+		card.visible = true
+		if not snap:
+			Motion.flip_in(card, 0.0, 0.17)
+	if not snap:
+		await get_tree().create_timer(Motion.time(0.17)).timeout
+		if not picker_alive.call():
+			return
+	for shell in shells:
+		(shell.button as Button).disabled = false
+	preparing.text = ""
+
+
 func _show_blessing_card_picker(title_text: String, indices: Array,
 		on_pick: Callable) -> void:
 	# Full-screen card grid over the menu background — the run-start deck is
@@ -5483,10 +5612,18 @@ func _show_blessing_card_picker(title_text: String, indices: Array,
 	add_child(scroll)
 
 	var grid := GridContainer.new()
+	grid.set_meta("coordinated_card_group", true)
 	grid.columns = 6
 	grid.add_theme_constant_override("h_separation", 20)
 	grid.add_theme_constant_override("v_separation", 20)
 	scroll.add_child(grid)
+
+	# The complete two-row spread exists before the first await. Card backs carry
+	# the wait without exposing renderer order or changing GridContainer geometry.
+	var shells: Array = []
+	for ei in range(indices.size()):
+		shells.append(_make_blessing_card_shell(
+			grid, on_pick, int(indices[ei])))
 
 	var build_generation := _picker_build_generation
 	var scroll_ref: WeakRef = weakref(scroll)
@@ -5499,51 +5636,8 @@ func _show_blessing_card_picker(title_text: String, indices: Array,
 	var card_datas: Array[Dictionary] = []
 	for deck_index in indices:
 		card_datas.append(RunState.get_upgraded_card_data(int(deck_index)))
-	# These cards never exceed their native picker face. Warm the lightweight
-	# gallery cache before parenting Card2D, otherwise _ready sees a miss once
-	# and permanently builds the expensive live card hierarchy.
-	for data in card_datas:
-		if not CardTextureCache.has_gallery(data):
-			await CardTextureCache.bake_gallery(data, picker_alive)
-		if not picker_alive.call():
-			return
-	if is_instance_valid(preparing):
-		preparing.queue_free()
-
-	var pick_i := 0
-	for ei in range(indices.size()):
-		var data: Dictionary = card_datas[ei]
-		var wrapper := Control.new()
-		wrapper.custom_minimum_size = Vector2(225, 300)
-		var card_node = CARD_SCENE_PICKER.instantiate()
-		card_node.static_display = true
-		card_node.card_data = data
-		card_node.live_baked_mode = true
-		card_node.gallery_baked_mode = true
-		wrapper.add_child(card_node)
-		var click_btn := Button.new()
-		click_btn.flat = true
-		click_btn.focus_mode = Control.FOCUS_ALL
-		click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
-		click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
-		click_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
-		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
-		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-		click_btn.pressed.connect(_on_blessing_card_pick_pressed.bind(
-			wrapper, on_pick, int(indices[ei])))
-		wrapper.add_child(click_btn)
-		grid.add_child(wrapper)
-		GameTheme.deal_in(wrapper, 0.08 + pick_i * 0.035)
-		GameTheme.hover_lift(wrapper, 1.025)
-		pick_i += 1
-
-		if DisplayServer.get_name() == "headless":
-			await get_tree().process_frame
-		else:
-			await RenderingServer.frame_post_draw
-		if not picker_alive.call():
-			return
+	await _hydrate_blessing_card_group(
+		card_datas, shells, picker_alive, preparing)
 
 
 func _on_blessing_card_pick_pressed(target: Control, on_pick: Callable,
@@ -5585,6 +5679,7 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 	preparing.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(preparing)
 	var row := HBoxContainer.new()
+	row.set_meta("coordinated_card_group", true)
 	row.set_anchors_preset(Control.PRESET_CENTER)
 	var total_w: int = ids.size() * 225 + (ids.size() - 1) * 40
 	row.offset_left = -total_w / 2
@@ -5593,6 +5688,12 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 	row.offset_bottom = 150
 	row.add_theme_constant_override("separation", 40)
 	add_child(row)
+
+	# As above: the centered row's width is final before rendering can yield.
+	var shells: Array = []
+	for ei in range(ids.size()):
+		shells.append(_make_blessing_card_shell(
+			row, on_pick, String(ids[ei])))
 
 	var build_generation := _picker_build_generation
 	var row_ref: WeakRef = weakref(row)
@@ -5605,51 +5706,8 @@ func _show_blessing_offer_picker(title_text: String, ids: Array,
 	var card_datas: Array[Dictionary] = []
 	for offered_id in ids:
 		card_datas.append(CardDB.get_card_data(String(offered_id)))
-	# These cards never exceed their native picker face. Warm the lightweight
-	# gallery cache before parenting Card2D, otherwise _ready sees a miss once
-	# and permanently builds the expensive live card hierarchy.
-	for cd in card_datas:
-		if not CardTextureCache.has_gallery(cd):
-			await CardTextureCache.bake_gallery(cd, picker_alive)
-		if not picker_alive.call():
-			return
-	if is_instance_valid(preparing):
-		preparing.queue_free()
-
-	var pick_i := 0
-	for ei in range(ids.size()):
-		var data: Dictionary = card_datas[ei]
-		var wrapper := Control.new()
-		wrapper.custom_minimum_size = Vector2(225, 300)
-		var card_node = CARD_SCENE_PICKER.instantiate()
-		card_node.static_display = true
-		card_node.card_data = data
-		card_node.live_baked_mode = true
-		card_node.gallery_baked_mode = true
-		wrapper.add_child(card_node)
-		var click_btn := Button.new()
-		click_btn.flat = true
-		click_btn.focus_mode = Control.FOCUS_ALL
-		click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
-		click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
-		click_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
-		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
-		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-		click_btn.pressed.connect(_on_blessing_card_pick_pressed.bind(
-			wrapper, on_pick, String(ids[ei])))
-		wrapper.add_child(click_btn)
-		row.add_child(wrapper)
-		GameTheme.deal_in(wrapper, 0.08 + pick_i * 0.055)
-		GameTheme.hover_lift(wrapper, 1.025)
-		pick_i += 1
-
-		if DisplayServer.get_name() == "headless":
-			await get_tree().process_frame
-		else:
-			await RenderingServer.frame_post_draw
-		if not picker_alive.call():
-			return
+	await _hydrate_blessing_card_group(
+		card_datas, shells, picker_alive, preparing)
 
 
 ## THE ARSENAL's picker: choose 1 of N relics. Modelled on the card offer
