@@ -3623,7 +3623,7 @@ func _build_muster_doctrine_row(parent: VBoxContainer, hid: String,
 		var alt: Dictionary = hero.get("deck_alt", {})
 		var doctrine_name := String(alt.get("name", "Alternate")) \
 			if _muster_alt_deck else "Standard Deck"
-		var toggle := _make_secondary_action(doctrine_name, 218, 32)
+		var toggle := _make_secondary_action(doctrine_name, 0, 32)
 		toggle.tooltip_text = "Switch this hero's starting deck."
 		toggle.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 		toggle.size_flags_horizontal = Control.SIZE_SHRINK_END
@@ -3633,16 +3633,20 @@ func _build_muster_doctrine_row(parent: VBoxContainer, hid: String,
 	# "ALTERNATE", not "ALT". These two toggles are the only place in the shell
 	# that abbreviated a word, and "ALT" beside "STANDARD" reads as a keyboard
 	# modifier before it resolves as an adjective (COPY_STYLE §12: no riddles).
-	# Both widths grew to hold the longer word rather than clipping it.
+	#
+	# The widths were 196 to hold the longer word without the FRAME resizing as
+	# the label toggles. The tab has no frame to resize, and a fixed width there
+	# just leaves ~50px of bare rule past each end of "STANDARD DECK" — so they
+	# hug, like the other four secondaries.
 	var deck_btn := _make_secondary_action(
-		"ALTERNATE DECK" if _muster_alt_deck else "STANDARD DECK", 196, 32)
+		"ALTERNATE DECK" if _muster_alt_deck else "STANDARD DECK", 0, 32)
 	deck_btn.tooltip_text = "Switch between this hero's two starting decks."
 	deck_btn.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 	deck_btn.size_flags_horizontal = Control.SIZE_SHRINK_END
 	deck_btn.pressed.connect(_toggle_muster_deck.bind(hid))
 	row.add_child(deck_btn)
 	var relic_btn := _make_secondary_action(
-		"ALTERNATE RELIC" if _muster_alt_relic else "STANDARD RELIC", 196, 32)
+		"ALTERNATE RELIC" if _muster_alt_relic else "STANDARD RELIC", 0, 32)
 	relic_btn.tooltip_text = "Switch between this hero's two signature relics."
 	relic_btn.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 	relic_btn.size_flags_horizontal = Control.SIZE_SHRINK_END
