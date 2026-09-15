@@ -5526,7 +5526,7 @@ func _pick_blessing(entry: Dictionary) -> void:
 			if offered.is_empty():
 				GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 				return
-			_show_writ_relic_picker("Choose a relic", offered,
+			_show_writ_relic_picker("CHOOSE A RELIC", offered,
 				func(rid: String) -> void:
 					RunState.add_relic(rid)
 					GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45))
@@ -5552,8 +5552,8 @@ func _writ_forge_step(remaining: int, taken: Array) -> void:
 	if remaining <= 0 or candidates.is_empty():
 		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 		return
-	var suffix: String = "  (%d left)" % remaining if remaining > 1 else ""
-	_show_blessing_card_picker("Choose a card to forge" + suffix, candidates,
+	var suffix: String = "  (%d LEFT)" % remaining if remaining > 1 else ""
+	_show_blessing_card_picker("CHOOSE A CARD TO FORGE" + suffix, candidates,
 		func(i: int) -> void:
 			RunState.upgrade_card(i, "plus")
 			var next_taken: Array = taken.duplicate()
@@ -5572,8 +5572,8 @@ func _writ_enlist_step(picks: int, width: int) -> void:
 	if offered.is_empty():
 		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 		return
-	var suffix: String = "  (%d left)" % picks if picks > 1 else ""
-	_show_blessing_offer_picker("Choose a card to add" + suffix, offered,
+	var suffix: String = "  (%d LEFT)" % picks if picks > 1 else ""
+	_show_blessing_offer_picker("CHOOSE A CARD TO ADD" + suffix, offered,
 		func(cid: String) -> void:
 			RunState.add_card(cid)
 			_writ_enlist_step(picks - 1, width))
@@ -5588,8 +5588,8 @@ func _blessing_transform_step(remaining: int) -> void:
 	if remaining <= 0 or eligible.is_empty():
 		GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.45)
 		return
-	var suffix: String = "  (%d left)" % remaining if remaining > 1 else ""
-	_show_blessing_card_picker("Choose a card to transform" + suffix, eligible,
+	var suffix: String = "  (%d LEFT)" % remaining if remaining > 1 else ""
+	_show_blessing_card_picker("CHOOSE A CARD TO TRANSFORM" + suffix, eligible,
 		func(i: int):
 			_blessing_transform_at(i)
 			_blessing_transform_step(remaining - 1))
@@ -5626,8 +5626,8 @@ func _blessing_remove_step(remaining: int) -> void:
 	var all_idx: Array = []
 	for i in RunState.deck.size():
 		all_idx.append(i)
-	var suffix: String = "  (%d left)" % remaining if remaining > 1 else ""
-	_show_blessing_card_picker("Choose a card to remove" + suffix, all_idx,
+	var suffix: String = "  (%d LEFT)" % remaining if remaining > 1 else ""
+	_show_blessing_card_picker("CHOOSE A CARD TO REMOVE" + suffix, all_idx,
 		func(i: int):
 			RunState.remove_card_at(i)
 			_blessing_remove_step(remaining - 1))
