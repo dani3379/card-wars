@@ -86,7 +86,7 @@ const WRITS: Dictionary = {
 	"provosts_broom": {
 		"id": "provosts_broom", "slot": "roll", "verb": "strike",
 		"name": "The Discharge Papers",
-		"desc": "Remove 1 card of your choice from your deck.",
+		"desc": "Remove 1 card from your deck.",
 		"effect": "remove", "value": 1,
 	},
 	"muster_tent": {
@@ -98,7 +98,7 @@ const WRITS: Dictionary = {
 	"remount_line": {
 		"id": "remount_line", "slot": "roll", "verb": "raise",
 		"name": "The Horse Fair",
-		"desc": "Choose 1 card. It becomes a random card one rarity higher.",
+		"desc": "1 card becomes a random card one rarity higher.",
 		"effect": "remount", "value": 1,
 	},
 
@@ -140,7 +140,7 @@ const WRITS: Dictionary = {
 	"paymasters_ledger": {
 		"id": "paymasters_ledger", "slot": "purse", "verb": "coin",
 		"name": "The Paymaster's Ledger",
-		"desc": "The shop pays double for every card you sell.",
+		"desc": "The shop pays double for cards you sell.",
 		"effect": "purse", "relic": "scavengers_pouch",
 	},
 	# Replaces `recruiting_warrant` (The Second Look → collectors_tome). Ids are
@@ -149,7 +149,7 @@ const WRITS: Dictionary = {
 	"campaign_chest": {
 		"id": "campaign_chest", "slot": "purse", "verb": "coin",
 		"name": "The Campaign Chest",
-		"desc": "Every fight you win pays 10 more gold.",
+		"desc": "Each win pays 10 more gold.",
 		"effect": "purse", "relic": "coin_purse",
 	},
 	# Replaces `armourers_writ` (The Armourer's Order → whetstone). The one road
@@ -158,7 +158,7 @@ const WRITS: Dictionary = {
 	"field_surgery": {
 		"id": "field_surgery", "slot": "purse", "verb": "mend",
 		"name": "The Camp Surgeon",
-		"desc": "After every fight you win, heal 1 HP for each friendly that fell. Up to 5.",
+		"desc": "After each win, heal 1 HP per friendly that fell. Up to 5.",
 		"effect": "purse", "relic": "vultures_feast",
 	},
 }
@@ -243,27 +243,27 @@ const PACTS: Dictionary = {
 	# a third of an eleven-card opener re-rolled upward, sight unseen.
 	"remount_line": {
 		"name": "Pact of the Fair", "verb": "raise",
-		"desc": "Choose 3 cards. Each becomes a random card one rarity higher. Lose 6 max HP.",
+		"desc": "3 cards each become a random card one rarity higher. Lose 6 max HP.",
 		"effect": "remount", "value": 3,
 	},
 	"sutlers_bond": {
 		"name": "Pact of the Bond", "verb": "coin",
-		"desc": "Shop goods cost a quarter less, and the shop pays double for cards you sell. Lose 6 max HP.",
+		"desc": "Shop goods cost a quarter less; sales pay double. Lose 6 max HP.",
 		"effect": "purse2", "relic": "merchants_license", "relic2": "scavengers_pouch",
 	},
 	"paymasters_ledger": {
 		"name": "Pact of the Ledger", "verb": "coin",
-		"desc": "The shop pays double for cards you sell, and every fight you win pays 10 more gold. Lose 6 max HP.",
+		"desc": "Sales pay double; each win pays 10 more gold. Lose 6 max HP.",
 		"effect": "purse2", "relic": "scavengers_pouch", "relic2": "coin_purse",
 	},
 	"campaign_chest": {
 		"name": "Pact of the Chest", "verb": "coin",
-		"desc": "Every fight you win pays 10 more gold, and shop goods cost a quarter less. Lose 6 max HP.",
+		"desc": "Each win pays 10 more gold; shop goods cost a quarter less. Lose 6 max HP.",
 		"effect": "purse2", "relic": "coin_purse", "relic2": "merchants_license",
 	},
 	"field_surgery": {
 		"name": "Pact of the Surgeon", "verb": "mend",
-		"desc": "Each death heals you 1 HP: enemies now, friendlies after the fight. Up to 5 each. Lose 6 max HP.",
+		"desc": "Each death heals 1 HP: enemies now, friendlies after. Up to 5 each. Lose 6 max HP.",
 		"effect": "purse2", "relic": "vultures_feast", "relic2": "stygian_soul",
 	},
 }
