@@ -3278,6 +3278,26 @@ func _build_quick_march_roll(hid: String) -> void:
 	var banner_card := BannerDB.card_id(_selected_banner_tribe)
 	var shown: Array[String] = _representative_opening_cards(opener, banner_card)
 	_warm_deck_strip(shown, hid)
+	# ── FOLD THE COPIES BEFORE ANYTHING COUNTS THEM (2026-09-15) ──
+	#
+	# `_representative_opening_cards` returns its picks WITH MULTIPLICITY — that is
+	# deliberate, and it is what makes the ×N chip true on the muster strip. This
+	# screen then drew one mini per ARRAY ENTRY with a hardcoded count of 1, so the
+	# Raider's two Outriders rendered as two separate cards each stamped "×1"
+	# (a chip that says "one copy" beside a second copy of itself), and the row
+	# showed FOUR cards under a caption reading THREE DEFINING CARDS.
+	#
+	# Same counts/order fold `_make_muster_deck_strip` has always used. `want` is a
+	# UNIQUE budget, so folding makes the row exactly as long as the caption claims
+	# — and the caption is derived from the fold now, so it cannot drift again.
+	var counts: Dictionary = {}
+	var order: Array[String] = []
+	for cid in shown:
+		var id := String(cid)
+		if not counts.has(id):
+			counts[id] = 0
+			order.append(id)
+		counts[id] = int(counts[id]) + 1
 	# THE CAPTION SITS OVER THE CARDS IT NAMES (2026-08-03). It was flushed to the
 	# pane's left edge while the row it labels is centred in a 1216px pane — three
 	# minis measure 530, so the words "THREE DEFINING CARDS" ended 343px short of
@@ -3297,8 +3317,8 @@ func _build_quick_march_roll(hid: String) -> void:
 	head_lead.custom_minimum_size = Vector2(CARD_HEAD_ACTION_W, 0)
 	head_lead.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	card_head.add_child(head_lead)
-	var card_title := _make_caption_label("THREE DEFINING CARDS", 15,
-		Color(0.76, 0.69, 0.56))
+	var card_title := _make_caption_label(
+		"%d DEFINING CARDS" % order.size(), 15, Color(0.76, 0.69, 0.56))
 	card_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	card_title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	card_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -3318,8 +3338,8 @@ func _build_quick_march_roll(hid: String) -> void:
 	card_center.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	var card_row := HBoxContainer.new()
 	card_row.add_theme_constant_override("separation", 22)
-	for cid in shown:
-		card_row.add_child(_make_deck_mini(cid, 1, 0.72))
+	for id in order:
+		card_row.add_child(_make_deck_mini(id, int(counts[id]), 0.72))
 	card_center.add_child(card_row)
 	_hero_detail.add_child(card_center)
 
