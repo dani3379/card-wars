@@ -3,11 +3,29 @@ extends Node
 ## Run: Godot.exe --headless --path "D:\Godot" res://tools/_probe_copy_lint.tscn
 ##
 ## This intentionally covers every structured copy source, including nested
-## event outcomes and upgrade descriptions. UI-only literal strings remain
-## protected by the terminology searches and text/layout probes.
+## event outcomes and upgrade descriptions, plus the terminology rules over
+## literals authored directly in scene scripts (see _scan_ui_literals).
+##
+## ── A BROKEN PROBE IS INVISIBLE, AND IT LOOKS LIKE A HANG (2026-09-15) ──
+##
+## `_probe_parsecheck` compiles everything under `scripts/` — it does NOT read
+## `tools/`. So a parse error in THIS file is caught by nothing: the scene loads
+## with no script attached, `_ready` never runs, the probe never calls quit, and
+## the process sits there printing absolutely nothing until the runner's timeout
+## kills it. That reads exactly like an infinite loop in whatever you last
+## touched, and it is not.
+##
+## The tell is ZERO OUTPUT. A probe that hangs mid-scan still prints whatever it
+## printed before the stall; a probe that prints nothing at all never started.
+## When that happens, compile the probe itself before debugging its logic:
+##
+##     Godot.exe --headless --path "D:\Godot" --check-only --script res://tools/<probe>.gd
+##
+## (What it caught here: a helper added to the bottom of this file duplicated a
+## function name already defined further up.)
 
 const PROBE_NAME := "copy_lint"
-const COVERAGE_FLOOR := 2950
+const COVERAGE_FLOOR := 5150
 const EVENT_DESC_WORD_LIMIT := 40
 const EVENT_RESULT_WORD_LIMIT := 60
 const CARD_DESC_CHAR_LIMIT := 90
@@ -90,6 +108,7 @@ func _ready() -> void:
 	# for values — which is exactly what _scan_copy_map exists for.
 	_scan_copy_map("res://scripts/data/TutorialDB.gd", "GROUP_TITLES", "lessongroup")
 	_scan_copy_map("res://scripts/data/TutorialDB.gd", "COACH_MODE_LABELS", "coachmode")
+	_scan_ui_literals()
 	_assert_constants_covered()
 	print("[copy-lint] scanned %d player-facing strings" % _scanned)
 	# Coverage RATCHET. The old floor of 1500 sat ~1200 strings below the real
@@ -108,6 +127,127 @@ func _ready() -> void:
 		printerr("[copy-lint] FAIL: " + failure)
 	printerr("PROBE FAIL: %s (%d failures)" % [PROBE_NAME, _fails.size()])
 	get_tree().quit(1)
+
+
+## ── THE SCENE-SCRIPT BLIND SPOT (2026-09-15) ──
+##
+## Everything above reads DB DICTIONARIES, and that is deliberate: a structured
+## dict lets this lint read only name/desc fields, so it never trips over a code
+## identifier — every Command identifier in the engine still says `mana`.
+##
+## The cost was that copy authored INSIDE a scene script was size-gated by
+## _probe_text_floor and never wording-gated by anything. This file already
+## carries two scars from it: "loose" was removed from OPAQUE_TERMS because the
+## Strongbox wording it targeted lives in Event.gd, and the note above "seated"
+## says outright that it "is not doing the job it looks like it is doing".
+## Measured at the time of writing: 2,482 prose-like literals across
+## scripts/scenes and scripts/ui, none of them checked by anything.
+##
+## SCOPE IS NARROW ON PURPOSE. Only the three TERMINOLOGY rules run here —
+## "mana", "elite", and the "(s)" plural — because those are decidable on a bare
+## string with no false positives (measured: zero hits across all 2,482 today,
+## so this ships GREEN and exists to stop drift, not to fix a backlog). The
+## wordier rules — MOUTH, CLICHE, word budgets — stay DB-only, where the probe
+## knows a field is prose rather than guessing. A lint that guesses is a lint
+## people learn to ignore.
+##
+## A literal counts as prose if it holds a SPACE and is not a res:// path or a
+## bare snake_case identifier. Comment lines are skipped — a comment is not
+## shipped copy, and this file's own header would otherwise fail the gate by
+## quoting the very words it bans.
+const UI_LITERAL_DIRS := [
+	"res://scripts/scenes", "res://scripts/ui",
+]
+## Keyed "basename.gd::needle". An entry here is visible debt, not absolution.
+const UI_LITERAL_WAIVERS := {}
+
+
+func _scan_ui_literals() -> void:
+	for dir_path in UI_LITERAL_DIRS:
+		var dir := DirAccess.open(String(dir_path))
+		if dir == null:
+			_fails.append("Cannot open UI source dir: %s" % dir_path)
+			continue
+		for file_name in dir.get_files():
+			if not String(file_name).ends_with(".gd"):
+				continue
+			_scan_ui_literal_file("%s/%s" % [dir_path, file_name])
+
+
+func _scan_ui_literal_file(path: String) -> void:
+	var handle := FileAccess.open(path, FileAccess.READ)
+	if handle == null:
+		_fails.append("Cannot read UI source: %s" % path)
+		return
+	var owner := path.get_file()
+	var line_no := 0
+	while not handle.eof_reached():
+		var line := handle.get_line()
+		line_no += 1
+		# CHEAPEST TEST FIRST, and it is load-bearing rather than tidy. The scan
+		# covers ~50,000 lines (Combat.gd alone is 20,400) and the first cut
+		# split every one of them on the quote character, which pushed this probe
+		# past a five-minute budget it used to clear comfortably. The large
+		# majority of lines carry no quote at all, so one `in` test retires them
+		# before any allocation happens.
+		if not ("\"" in line):
+			continue
+		var trimmed := line.strip_edges()
+		if trimmed.begins_with("#"):
+			continue
+		for literal in _extract_literals(line):
+			if not _is_prose_literal(literal):
+				continue
+			_scanned += 1
+			_check_ui_terminology(owner, line_no, literal)
+	handle.close()
+
+
+## Every double-quoted run on the line. Deliberately simple: a GDScript escape
+## inside player copy is vanishingly rare, and the failure mode of getting one
+## wrong is a slightly short literal, not a wrong verdict.
+func _extract_literals(line: String) -> Array[String]:
+	var out: Array[String] = []
+	var parts := line.split("\"")
+	# Quoted runs are the ODD indices of a split on the quote character.
+	var i := 1
+	while i < parts.size():
+		out.append(String(parts[i]))
+		i += 2
+	return out
+
+
+func _is_prose_literal(text: String) -> bool:
+	# Space first: it rejects most literals (ids, keys, paths, node names) in one
+	# test, before anything walks the string.
+	if not (" " in text):
+		return false
+	if text.begins_with("res://") or text.begins_with("user://"):
+		return false
+	# A format-only fragment ("%d / %d") carries no words to police.
+	var wordy := false
+	for c in text:
+		if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z"):
+			wordy = true
+			break
+	return wordy
+
+
+func _check_ui_terminology(owner: String, line_no: int, text: String) -> void:
+	var low := text.to_lower()
+	var where := "%s:%d" % [owner, line_no]
+	for needle in ["mana", "elite"]:
+		# The house _has_word treats a trailing 's' as part of the word, so the
+		# plural is asked for by name rather than by loosening the shared test.
+		if not (_has_word(low, needle) or _has_word(low, needle + "s")):
+			continue
+		if UI_LITERAL_WAIVERS.has("%s::%s" % [owner, needle]):
+			continue
+		var house := "Command" if needle == "mana" else "General"
+		_fails.append("%s says \"%s\" in player text (house word: %s): \"%s\""
+			% [where, needle, house, text])
+	if "(s)" in low and not UI_LITERAL_WAIVERS.has("%s::(s)" % owner):
+		_fails.append("%s uses the \"(s)\" plural: \"%s\"" % [where, text])
 
 
 func _script_constant(path: String, constant_name: String) -> Variant:
