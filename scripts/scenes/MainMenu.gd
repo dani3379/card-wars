@@ -2516,10 +2516,17 @@ func _build_muster_screen(menu: VBoxContainer) -> void:
 	_muster_writ_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	terms.add_child(_muster_writ_row)
 
-	_muster_gloss_label = _make_display_label("", 15, Color(0.78, 0.72, 0.60))
-	_muster_gloss_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	# The gloss belongs TO the row it defines, and on its left edge. It was the
+	# last centred prose on an otherwise left-aligned page, floating under a
+	# full-width row with nothing to anchor it — the same alignment split that
+	# made the terms caption read as an aside, one element further down. Parented
+	# into the terms section so it sits on the caption's own margin, and dimmer
+	# than the tiles, because a definition is footnote weight beside the four
+	# offers it footnotes.
+	_muster_gloss_label = _make_caption_label("", 15, Color(0.62, 0.57, 0.48))
+	_muster_gloss_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_muster_gloss_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	menu.add_child(_muster_gloss_label)
+	terms.add_child(_muster_gloss_label)
 
 	var hero := _selected_hero if HeroDB.has_hero(_selected_hero) \
 		else HeroDB.HERO_ORDER[0]

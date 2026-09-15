@@ -557,8 +557,11 @@ static func muster_copy(key: String) -> String:
 ## suffix decides which keys inside a scanned dict get read; `_scan_writs`
 ## decides whether the dict is read at all. Both are required.
 const GLOSSARY: Dictionary = {
-	"forge_text": "Forge — permanently upgrade a card. Every card has one"
-		+ " stronger version; forging is how you get it.",
+	# "…; forging is how you get it" was the sentence explaining that the verb in
+	# the tile above is the verb in this definition, which the reader had already
+	# worked out by reading them in order.
+	"forge_text": "Forge — permanently upgrade a card."
+		+ " Every card has one stronger version.",
 	"enlist_text": "Enlist — the card joins your deck for the rest of the run.",
 	"strike_text": "Strike — the card leaves your deck for good.",
 }
