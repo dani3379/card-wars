@@ -4781,13 +4781,24 @@ func _make_deck_mini(id: String, count: int, mini_scale: float = DECK_MINI_SCALE
 	slot.add_child(card)
 	# ×N count chip on the mini's top-right corner — the chip is what makes
 	# "five minis" read as "ten cards".
-	var chip := _make_display_label("×%d" % count, 15, GILT_BRIGHT)
-	chip.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.92))
-	chip.add_theme_constant_override("outline_size", 6)
-	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	slot.add_child(chip)
-	chip.size = Vector2(34, 20)
-	chip.position = Vector2(w - 30.0, -6.0)
+	#
+	# ONLY WHEN IT SAYS SOMETHING (2026-09-15). This drew unconditionally, so the
+	# full-deck inspector hung "×1" on nine of its ten tiles — the chip announcing
+	# the default, nine times, on a panel whose own subtitle already reads "11
+	# cards". One copy is what a card tile means; the chip exists for the tile that
+	# is an exception, and an exception marked on every tile marks nothing. Same
+	# rule the opener art strip is built on.
+	# NOT an early return: the hover catcher below is what gives this tile its
+	# tooltip and its floating full-size preview, so bailing here would trade nine
+	# redundant chips for ten dead cards.
+	if count > 1:
+		var chip := _make_display_label("×%d" % count, 15, GILT_BRIGHT)
+		chip.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.92))
+		chip.add_theme_constant_override("outline_size", 6)
+		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.add_child(chip)
+		chip.size = Vector2(34, 20)
+		chip.position = Vector2(w - 30.0, -6.0)
 	# Topmost transparent catcher — Card2D's inner panels would otherwise eat
 	# the hover, so the slot itself never sees mouse_entered.
 	var catcher := Control.new()
