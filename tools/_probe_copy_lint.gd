@@ -421,6 +421,30 @@ func _scan_encounters() -> void:
 		if words > ENCOUNTER_PASSIVE_WORD_LIMIT:
 			_fails.append("%s passive is %d words (budget %d)" % [
 				owner, words, ENCOUNTER_PASSIVE_WORD_LIMIT])
+	_scan_passive_rungs()
+
+
+## PASSIVE_RUNG_DESC is the canonical text for a passive that has an ACT LADDER
+## (`EncounterDB.get_passive_for` steps a borrowed lineup down a rung rather than
+## dropping its rule). That text reaches the player through the edict banner and
+## the route tooltip exactly as an authored `passive_desc` does, so it gets the
+## same register rules and the same word budget — a rung sentence that is exempt
+## from the budget is how the banner grows a paragraph nobody reads.
+func _scan_passive_rungs() -> void:
+	var value: Variant = _script_constant(
+		"res://scripts/data/EncounterDB.gd", "PASSIVE_RUNG_DESC")
+	if not (value is Dictionary):
+		_fails.append("EncounterDB.PASSIVE_RUNG_DESC is not a Dictionary")
+		return
+	var rungs: Dictionary = value
+	for id_value in rungs.keys():
+		var owner := "passive-rung:" + String(id_value)
+		var text := String(rungs[id_value])
+		_check(owner, "desc", text)
+		var words := _word_count(text)
+		if words > ENCOUNTER_PASSIVE_WORD_LIMIT:
+			_fails.append("%s is %d words (budget %d)" % [
+				owner, words, ENCOUNTER_PASSIVE_WORD_LIMIT])
 
 
 func _scan_heroes_and_factions() -> void:
@@ -487,9 +511,6 @@ func _scan_writs() -> void:
 	# screen — if a definition is wrong or opaque, every term quoting that word
 	# inherits the error.
 	_scan_constant_tree("res://scripts/data/WritDB.gd", "GLOSSARY", "gloss")
-	# The six banner declarations are choice copy in every sense that matters and
-	# were unscanned until the same pass.
-	_scan_constant_tree("res://scripts/data/BannerDB.gd", "BANNERS", "banner")
 	# The slot furniture printed BESIDE the terms on the same screen. Keyed by
 	# slot id, so it needs the copy-map entry point, not the tree walker.
 	_scan_copy_map("res://scripts/data/WritDB.gd", "SLOT_LABELS", "slot-label")
@@ -807,6 +828,10 @@ const CONTAINER_WAIVERS: Dictionary = {	"res://scripts/data/CardDB.gd": [
 	],
 	"res://scripts/data/EncounterDB.gd": [
 		"ACT_FACE_HP_NORM", "REACTIVE_PASSIVES", "TERRAIN_KW",
+		# Passive IDs in act order — code identifiers, never shown. The player-
+		# facing sentence for each rung lives in PASSIVE_RUNG_DESC, which IS
+		# scanned (see _scan_passive_rungs) and budgeted like any passive_desc.
+		"PASSIVE_ACT_LADDERS",
 		# Encounter ids, not prose — the lineups they name are scanned where they
 		# are authored, in ENCOUNTERS.
 		"LANDING_POOL",
@@ -817,7 +842,6 @@ const CONTAINER_WAIVERS: Dictionary = {	"res://scripts/data/CardDB.gd": [
 		# GROUP_TITLES, which IS scanned (see _scan_lessons' siblings below).
 		"GROUP_ORDER",
 	],
-	"res://scripts/data/BannerDB.gd": ["BANNER_ORDER"],
 	"res://scripts/data/WritDB.gd": ["GLOSSARY_ORDER"],
 	"res://scripts/GameTheme.gd": [
 		"CARD_TRIBES", "TRIBE_COLORS", "TRIBE_COLORS_BRIGHT", "SCREEN_MOODS",

@@ -19,10 +19,20 @@ extends SceneTree
 ##     loadout by rolling real rewards through `CardDB.roll_card_reward` and
 ##     `RelicDB.roll_relic_reward`, so an act-3 encounter is met by an act-3 deck.
 ##
-## The pilot is the `_probe_cardpower` policy (creatures placed by a lane heuristic,
-## then targeted + untargeted spells, then a second creature pass). It is a decent
-## floor, NOT a good player: no discards, no potions, no banking, no modal cards,
-## no upgrades. See the LIMITATIONS block printed at the end of a run.
+## The DEFAULT pilot is the `_probe_cardpower` policy (creatures placed by a lane
+## heuristic, then targeted + untargeted spells, then a second creature pass). It is
+## a decent floor, NOT a good player: no discards, no potions, no banking, no modal
+## cards, no upgrades. See the LIMITATIONS block printed at the end of a run.
+##
+## `--persona=<id>` REPLACES that policy with a procedural persona (2026-09-16):
+## every decision goes through `BoardEval` under that persona's weight vector. Run
+## the roster and read difficulty as the ENVELOPE across it, not as one number — a
+## win rate is only ever true relative to the agent that produced it, and this
+## probe has already reported two figures that were its own ceiling rather than a
+## property of the fight (every act-3 boss at 0% either side of a real change, and
+## `bandit_camp` unmoved by a face-HP cut that demonstrably worked). Omitting the
+## flag keeps the historical policy byte-for-byte, so older numbers stay comparable.
+## See scripts/combat/Personas.gd.
 ##
 ## Run:
 ##   Godot.exe --headless --path "D:\Godot" --script res://tools/_probe_encwin.gd -- --samples=6
@@ -34,6 +44,9 @@ extends SceneTree
 ##   --type=T        only encounters of type T (combat/elite/boss)
 ##   --maxrounds=N   stalemate cap (default 30)
 ##   --starter       fight with the bare hero deck (no drafts, no extra relics)
+##   --persona=ID    play through a procedural persona instead of the fixed policy
+##                   (curve / aggro / control / trader / novice). Omit for the
+##                   historical pilot.
 ##   --hp=N          player starting HP override (default 30 = full)
 ##   --tag=NAME      label printed on every row (for combining shard logs)
 ##   --forceact=N    fight every encounter as if the run were in act N. This is the
@@ -60,6 +73,8 @@ const RELIC_BLOCKLIST := ["mime"]
 const DRAFTS_PER_ACT := [4, 10, 16]
 const RELICS_PER_ACT := [1, 3, 5]
 
+const Personas = preload("res://scripts/combat/Personas.gd")
+
 # Pilot policy (lifted verbatim from _probe_cardpower so the two are comparable).
 const SAC_FODDER := ["dark_pact", "offering"]
 const SAC_CANNON := ["fuel_the_pyre"]
@@ -72,6 +87,7 @@ var SS: Node
 var NM: Node
 var CDB: Node
 var RDB: Node
+var PDB: Node
 var combat: Node
 
 var _started := false
@@ -85,6 +101,13 @@ var _starter_only := false
 var _hp_override := 0
 var _tag := "-"
 var _force_act := 0
+## PROCEDURAL PERSONAS (2026-09-16). Empty = the historical policy, unchanged, so
+## every number measured before this flag existed stays comparable. Naming a
+## persona routes every decision through `BoardEval` under that persona's weights
+## instead — see scripts/combat/Personas.gd for why difficulty is only ever true
+## relative to the agent that measured it.
+var _persona := ""
+var _persona_rng := RandomNumberGenerator.new()
 var _rows: Array = []          # per-encounter aggregate dicts
 var _draft_pool: Array = []    # ids the pilot can actually play
 
@@ -109,6 +132,7 @@ func _run() -> void:
 		elif arg.begins_with("--tag="): _tag = arg.substr(6)
 		elif arg.begins_with("--forceact="): _force_act = int(arg.substr(11))
 		elif arg == "--starter": _starter_only = true
+		elif arg.begins_with("--persona="): _persona = arg.substr(10)
 
 	RS = root.get_node_or_null("RunState")
 	EDB = root.get_node_or_null("EncounterDB")
@@ -117,6 +141,7 @@ func _run() -> void:
 	NM = root.get_node_or_null("NetMatch")
 	CDB = root.get_node_or_null("CardDB")
 	RDB = root.get_node_or_null("RelicDB")
+	PDB = root.get_node_or_null("PotionDB")
 	if RS == null or EDB == null or CDB == null or RDB == null:
 		printerr("[encwin] FATAL: autoloads missing")
 		quit(1)
@@ -186,10 +211,17 @@ func _run() -> void:
 				_:
 					row.stuck += 1
 					row.loss_bodies_sum += int(r.get("ebodies", 0))
-			print("[encwin] FIGHT tag=%s enc=%s act=%d type=%s hero=%s s=%d result=%s rounds=%d php=%d ehp=%d/%d ebodies=%d"
+			print("[encwin] FIGHT tag=%s enc=%s act=%d type=%s hero=%s s=%d result=%s rounds=%d php=%d ehp=%d/%d ebodies=%d elive=%d eclear=%d"
+				# `elive`/`eclear` were added to the format string and NOT to this
+				# array (2026-09-26). A short argument list does not print a partial
+				# line — it THROWS, and a GDScript runtime error neither stops the
+				# probe nor changes its exit code, so this line printed NOTHING for
+				# every fight while the run still reported PASS. The per-fight detail
+				# that makes an encounter's losses readable was simply gone.
 				% [_tag, enc_id, act, etype, hero, s, String(r.get("result", "?")),
 					int(r.get("rounds", 0)), int(r.get("php", 0)), int(r.get("ehp", 0)),
-					int(r.get("ehp_max", 0)), int(r.get("ebodies", 0))])
+					int(r.get("ehp_max", 0)), int(r.get("ebodies", 0)),
+					int(r.get("elive", 0)), int(r.get("eclear", 0))])
 		_rows.append(row)
 		var decided: int = row.wins + row.losses
 		print("[encwin] ENC tag=%s %-26s act=%d %-6s n=%d W=%d L=%d stuck=%d wr=%s"
@@ -230,10 +262,20 @@ func _report() -> void:
 		% [tw, tl, ts, 100.0 * tw / maxf(1.0, float(tw + tl))])
 	print("")
 	print("[encwin] LIMITATIONS — the pilot is a floor, not a player:")
-	print("[encwin]   * no potions, no discards (right-click mark), no Command banking")
+	if _persona == "":
+		print("[encwin]   * FIXED POLICY (no --persona): one agent, so every rate below")
+		print("[encwin]     is true only OF THAT AGENT. Run the persona roster and read")
+		print("[encwin]     the spread before calling any fight hard or easy.")
+		print("[encwin]   * no potions, no discards (right-click mark), no Command banking")
+		print("[encwin]   * placement is a one-ply lane heuristic; no multi-round planning")
+	else:
+		print("[encwin]   * persona '%s' — ONE point on the difficulty envelope, not the" % _persona)
+		print("[encwin]     envelope. A single persona's rate is exactly the single-policy")
+		print("[encwin]     mistake this flag exists to fix.")
+		print("[encwin]   * no discards (right-click mark); potions only when untargeted")
+		print("[encwin]   * placement is BoardEval's one-ply score; no multi-round planning")
 	print("[encwin]   * never plays a card needing a pick UI (%d ids blocked)" % MODAL.size())
 	print("[encwin]   * no card upgrades (+ forges) or veterancy carried in")
-	print("[encwin]   * placement is a one-ply lane heuristic; no multi-round planning")
 	print("[encwin]   * deck is a RANDOM roll of act-appropriate rewards, not a built deck")
 	print("[encwin]   * every fight starts at full HP with a fresh deck (best case)")
 	print("[encwin] DONE")
@@ -242,6 +284,7 @@ func _report() -> void:
 func _fight(enc_id: String, enc: Dictionary, act: int, etype: String, hero: String,
 		rng_seed: int) -> Dictionary:
 	seed(rng_seed)
+	_persona_rng.seed = rng_seed
 	RS.start_new_run(hero, 0, 4242)
 	# THE FIX the older harnesses miss: put the run in the encounter's own act so
 	# Combat does not rescale an act-3 kit down to act-1 strength.
@@ -287,6 +330,7 @@ func _fight(enc_id: String, enc: Dictionary, act: int, etype: String, hero: Stri
 
 	var rounds := 0
 	while is_instance_valid(combat) and combat.phase != combat.Phase.GAME_OVER and rounds < _max_rounds:
+		await _settle_hand()
 		await _auto_play_turn()
 		if not is_instance_valid(combat): break
 		combat._end_turn_confirmed = true
@@ -306,17 +350,45 @@ func _snapshot(rounds: int) -> Dictionary:
 	var ehp := 0
 	var ehp_max := 0
 	var bodies := 0
+	var live := 0     # enemy bodies with current_hp > 0 (the rule's predicate)
+	var clear := 0    # columns open to the face (the rule's actual subject)
 	if is_instance_valid(combat):
 		php = int(combat.player_hp)
 		ehp = int(combat.enemy_hp)
 		ehp_max = int(combat.enemy_max_hp)
 		bodies = combat._all_enemy_creatures().size()
+		# `bodies` COUNTS CORPSES, and that made it the wrong instrument for the
+		# question it was being used to answer (2026-09-19).
+		#
+		# `_all_friendly` appends every NON-NULL node in the rows with no HP test,
+		# and `defer_deaths` deliberately holds a dead body standing so a
+		# simultaneous trade resolves both ways — while this snapshot fires at
+		# `phase == GAME_OVER`, i.e. exactly when a lethal clash has just resolved
+		# and corpses are most likely still upright. So an `ebodies=8` reading
+		# cannot be told apart from "6 live + 2 corpses".
+		#
+		# That matters because `ebodies` is what ECONOMY_REDESIGN §3d's saturation
+		# claim rests on ("every remaining loss sitting at exactly ebodies=6 — the
+		# cap the rule predicts, observed"). The rule it validates,
+		# `_hold_would_seal_board` via `_column_is_open_for_face`, tests
+		# `current_hp > 0` — a DIFFERENT predicate. A metric that disagrees with
+		# the rule it is checking cannot confirm or refute it.
+		#
+		# `elive` matches the rule's predicate. `eclear` is the rule's ACTUAL
+		# subject: a board is sealed when no column is open to the face, and
+		# `eclear == 0` at a loss is the real saturation signal — not a body count.
+		for c in combat._all_enemy_creatures():
+			if c != null and is_instance_valid(c) and int(c.current_hp) > 0:
+				live += 1
+		for lane in range(int(combat.LANES_PER_ROW)):
+			if combat._column_is_open_for_face(lane):
+				clear += 1
 		if int(combat.round_number) > 0:
 			rounds = int(combat.round_number)
 		if combat.phase == combat.Phase.GAME_OVER:
 			res = "WIN" if ehp <= 0 else "LOSS"
 	return {"result": res, "rounds": rounds, "php": php, "ehp": ehp,
-		"ehp_max": ehp_max, "ebodies": bodies}
+		"ehp_max": ehp_max, "ebodies": bodies, "elive": live, "eclear": clear}
 
 
 func _wait_turn() -> bool:
@@ -332,10 +404,135 @@ func _wait_turn() -> bool:
 
 # ── Pilot (same policy as _probe_cardpower) ────────────────────────────────
 
+## Poll until the hand has finished ARRIVING, not just until input is accepted.
+##
+## Combat._start_round STAGGERS the deal: only the first card is drawn inline,
+## and every one after it lands on a `create_timer(0.08 * i)` — no headless
+## branch, no reduce_motion branch, not scaled by `anim_speed` — while `phase`
+## ALREADY reads PLAYER_TURN. A driver that starts there is playing a hand the
+## game has not finished dealing it: on round 1 that is ONE card of five, and at
+## Command 1 a single 2-drop means the whole turn plays nothing.
+##
+## Rounds 2+ hide it, because the hand is PERSISTENT and carries unplayed stock
+## forward — so the fault is worst exactly where round-1 measurements live. It
+## cost `_probe_deploy_curve` a published number before it was found; see
+## CLAUDE.md's settle-until-stable note.
+##
+## Stability polling, NOT a computed deal window: draw_count is the ramp plus
+## four relics plus two mutators, and restating that arithmetic in a probe is
+## the duplicate-rule pathology. Bounded, because an unbounded `while await`
+## spins to the harness timeout and reports NOTHING at all.
+func _settle_hand() -> void:
+	const SETTLE_TICK := 0.03    # poll interval
+	const STABLE_TICKS := 5      # 0.15s unchanged, a 1.9x margin on the 0.08s gap
+	const SETTLE_BUDGET := 40    # ~1.2s ceiling
+	var last := -1
+	var stable := 0
+	var waited := 0
+	while waited < SETTLE_BUDGET:
+		if not is_instance_valid(combat) or combat.phase != combat.Phase.PLAYER_TURN:
+			return
+		var n: int = combat._hand.size()
+		if n == last:
+			stable += 1
+			if stable >= STABLE_TICKS:
+				return
+		else:
+			stable = 0
+			last = n
+		await create_timer(SETTLE_TICK).timeout
+		waited += 1
+
+
 func _auto_play_turn() -> void:
+	if _persona != "":
+		await _persona_play_turn()
+		return
 	await _play_creatures()
 	await _play_spells()
 	await _play_creatures()
+
+
+## One turn played by a PERSONA — every decision through BoardEval under that
+## persona's weights, instead of the fixed creatures-then-spells policy above.
+##
+## It re-chooses after EVERY play rather than picking a whole turn at once, which
+## costs a little speed and buys correctness: BoardEval reads the live board, so a
+## batch of intents would score every creature into the same empty lane (the
+## `occ_override` hazard its own header names). Re-reading after each play makes
+## the board its own bookkeeping.
+func _persona_play_turn() -> void:
+	await _persona_maybe_drink()
+	for _pass in 10:
+		if not _turn_live():
+			return
+		var play: Dictionary = Personas.choose(
+			combat, _persona, combat._hand, _persona_rng, MODAL)
+		if play.is_empty():
+			return                      # nothing affordable and worth playing: pass
+		var card = play.get("card")
+		if not _card_live(card):
+			return
+		var cd: Dictionary = card.card_data
+		if String(play.get("kind", "")) == "creature":
+			# BoardEval names the seat it scored. Fall back to the heuristic picker
+			# if that seat is somehow gone — a refusal here would silently turn a
+			# persona into a passer and report the fight as unwinnable.
+			var slot = _persona_slot(int(play.get("row", -1)), int(play.get("lane", -1)))
+			if slot == null:
+				slot = _pick_slot(cd)
+			if slot == null:
+				return
+			card.global_position = slot.global_position + slot.size * 0.5 - card.size * 0.5
+			combat._on_card_played(card)
+			await create_timer(0.02).timeout
+		else:
+			# Prefer the target BoardEval chose; fall back to `_smart_target`, which
+			# carries hand-won special cases (sacrifice fodder, heal targets) that a
+			# generic scorer does not model.
+			var target = play.get("target")
+			if target == null or not is_instance_valid(target):
+				target = _smart_target(cd)
+			if not await _cast_spell_card(card, target):
+				return
+		if not _turn_live():
+			return
+
+
+## Reach for the belt, if this persona drinks and is hurt enough to want to.
+##
+## NON-TARGETED potions only, and that is a real limit rather than an oversight: a
+## targeted potion enters `_targeting_potion_idx` mode and waits for a click that
+## never comes headless, so drinking one would park the turn. Healing — the pity-
+## weighted safety net and the bottle that actually answers "the pilot dies" — is
+## untargeted, so the useful case is covered and the rest are left alone.
+func _persona_maybe_drink() -> void:
+	if not _turn_live() or not Personas.should_drink(combat, _persona):
+		return
+	var belt: Array = RS.potions
+	for i in range(belt.size()):
+		var pid := String(belt[i])
+		if pid == "":
+			continue
+		var pd: Dictionary = PDB.get_potion(pid) if PDB != null else {}
+		if String(pd.get("targeting", "none")) != "none":
+			continue
+		if String(pd.get("usable_in", "both")) == "map":
+			continue
+		combat._use_combat_potion(i)
+		await create_timer(0.05).timeout
+		return                      # one bottle a turn; a persona is not a vending machine
+
+
+## The slot BoardEval picked, or null if it is not actually free.
+func _persona_slot(row: int, lane: int):
+	if row < 0 or lane < 0 or not is_instance_valid(combat):
+		return null
+	if row > combat.ROW_BACK or lane >= combat.LANES_PER_ROW:
+		return null
+	if combat._row_array(false, row)[lane] != null:
+		return null
+	return combat._slot_array(false, row)[lane]
 
 
 func _play_creatures() -> void:
@@ -379,17 +576,43 @@ func _play_spells() -> void:
 			else:
 				var target = _smart_target(cd)
 				if target == null or not is_instance_valid(target): continue
-				var lane: int = maxi(0, int(target.current_lane))
-				combat.player_mana -= cost
-				combat._first_spell_this_turn = true
-				combat._cards_played_this_turn += 1
-				combat._hand.erase(card)
-				if card.get_parent() != null: card.get_parent().remove_child(card)
-				await combat._resolve_spell(card.card_data, target, lane)
-				if is_instance_valid(card): combat._after_spell(card)
+				if not await _cast_spell_card(card, target): continue
 				played = true
-				await create_timer(0.02).timeout
 		if not played: return
+
+
+## Cast one spell. Extracted so the persona driver and the fixed policy share ONE
+## spelling of the resolution sequence — two copies of a play path are how the
+## two drivers would end up measuring subtly different games while both looking
+## like "the probe". Returns false if the card could not be cast.
+func _cast_spell_card(card, target) -> bool:
+	if not _card_live(card):
+		return false
+	var cd: Dictionary = card.card_data
+	var cost: int = int(cd.get("cost", 0))
+	if int(combat.player_mana) < cost:
+		return false
+	if String(cd.get("targeting", "none")) == "none":
+		if String(cd.get("scope", "")) == "YOUR ARMY" \
+				and combat._all_player_creatures().is_empty():
+			return false
+		combat._on_card_played(card)
+		await create_timer(0.02).timeout
+		return true
+	if target == null or not is_instance_valid(target):
+		return false
+	var lane: int = maxi(0, int(target.current_lane))
+	combat.player_mana -= cost
+	combat._first_spell_this_turn = true
+	combat._cards_played_this_turn += 1
+	combat._hand.erase(card)
+	if card.get_parent() != null:
+		card.get_parent().remove_child(card)
+	await combat._resolve_spell(card.card_data, target, lane)
+	if is_instance_valid(card):
+		combat._after_spell(card)
+	await create_timer(0.02).timeout
+	return true
 
 
 func _turn_live() -> bool:

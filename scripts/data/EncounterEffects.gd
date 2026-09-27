@@ -129,8 +129,8 @@ static func exile_top_draw(ctx) -> void:
 	var data: Dictionary = ctx._resolve_card_data(
 		ctx._entry_id(entry), ctx._entry_uid(entry))
 	var lost := String(data.get("name", "a card"))
-	ctx._show_info("The foe reads your draw pile — %s is exiled." % lost)
-	ctx._log_event("The foe exiles %s from your draw pile — gone from this fight."
+	ctx._show_info("The enemy reads your draw pile — %s is exiled." % lost)
+	ctx._log_event("The enemy exiles %s from your draw pile — gone from this fight."
 		% lost, data, 0)
 
 
@@ -269,7 +269,7 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 						c.update_stat_display()
 						sentinel_dug_in = true
 			if sentinel_dug_in:
-				ctx._show_info("The Tooth-Stones dig in — enemy front rank gains +1 ATK.")
+				ctx._show_info("The Tooth-Stones dig in — enemy front row gains +1 ATK.")
 			if ctx.round_number >= 3:
 				# Was 2 face on a pure clock, and the Tooth-Stones were the single
 				# worst offender in Act 1 — a five-hero simulation died here on 4
@@ -310,8 +310,8 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 							c.update_stat_display()
 							rallied = true
 					if rallied:
-						ctx._show_info("The Chieftain rallies the front rank.")
-						ctx._log_event("The Chieftain rallies the front rank: enemy front row gains [color=#f2e6c8]+1 ATK[/color] this round.")
+						ctx._show_info("The Chieftain rallies the front row.")
+						ctx._log_event("The Chieftain rallies: the enemy front row gains [color=#f2e6c8]+1 ATK[/color] this round.")
 		"stampede_charge":
 			if ctx.round_number <= 2:
 				var charged := false
@@ -538,7 +538,7 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 						+ ctx._all_enemy_creatures().size(), ctx.enemy_max_hp) - ctx.enemy_hp
 					ctx.enemy_hp += devil_healed
 					if devil_healed > 0:
-						ctx._show_info("The devil drinks from its own — the foe heals %d HP."
+						ctx._show_info("The devil drinks from its own — the enemy heals %d HP."
 							% devil_healed)
 				2:
 					var highest = ctx._highest_atk_player_creature()
@@ -601,7 +601,7 @@ static func dispatch_passive_start_of_round(ctx) -> void:
 						+ ctx._all_enemy_creatures().size() * 2, ctx.enemy_max_hp) - ctx.enemy_hp
 					ctx.enemy_hp += devil2_healed
 					if devil2_healed > 0:
-						ctx._show_info("The devil drinks from its own — the foe heals %d HP."
+						ctx._show_info("The devil drinks from its own — the enemy heals %d HP."
 							% devil2_healed)
 				2:
 					var highest = ctx._highest_atk_player_creature()
@@ -649,7 +649,7 @@ static func dispatch_passive_end_of_round(ctx) -> void:
 				ctx.damage_player_hero(choke)
 				ctx._show_info("The spores knit the wounded (+2 HP) and choke you for %d." % choke)
 		"iron_warden_burn":
-			strike_the_line(ctx, 2, "Burning pitch comes over the wall — 2 to your front rank.")
+			strike_the_line(ctx, 2, "Burning pitch comes over the wall — 2 to your front row.")
 		"iron_warden_siege":
 			# The Warden's artillery now ranges on the biggest thing on the field
 			# instead of taxing the player directly (see the retarget note up top).
@@ -961,8 +961,8 @@ static func grant_field_keyword(card, keyword: String) -> bool:
 static func has_encounter_passive_keyword(ctx, card, keyword: String) -> bool:
 	# THE RECEIPT ANSWERS FIRST (2026-07-29). A keyword this fight lent the body
 	# belongs to the fight however it was recorded — see grant_field_keyword above.
-	# Checked ahead of the match because sentinel_stone / formation_lockstep /
-	# iron_warden_siege grant STATEFULLY rather than by a standing rule: there is
+	# Checked ahead of the match because formation_lockstep / iron_warden_siege
+	# grant STATEFULLY rather than by a standing rule: there is
 	# no round number, ATK threshold or boss phase to re-derive the answer from,
 	# so the receipt IS the answer. Null-safe, and never true for a body that
 	# prints the keyword itself.
@@ -1008,6 +1008,31 @@ static func has_encounter_passive_keyword(ctx, card, keyword: String) -> bool:
 ## the keywords array so the armor shows on the card chips — through
 ## grant_field_keyword, which files the provenance receipt beside it (a body
 ## that already PRINTS Armored is left alone and keeps no receipt).
+## HOW TALL THE WALL IS ALLOWED TO GET (2026-09-24).
+##
+## The drill used to add +1/+1 every round FOREVER, and a wall with no ceiling
+## is not a hard fight, it is an arithmetic one: whatever you can kill this
+## round, you cannot kill next round. Measured across 118 lord fights, THE
+## STALWART — whose whole kit is this engine — was the worst fight in the game
+## by a distance, and the spread is not subtle:
+##
+##   act 1   THE ACOLYTE     93% won,  6.4 hero HP     (it SACRIFICES its own line)
+##           THE PYROMANCER  75%,      6.8
+##           THE KINDLER     55%,     13.7
+##           THE STALWART    41%,     21.1            <- same 18 face HP as the Acolyte
+##
+## Identical face HP, three times the bill, half the win rate. The difference is
+## entirely the uncapped compounding: over an 8.4-round fight the drill ticks six
+## times, so a four-body front line ends +6/+6 across the board — and
+## reinforcements arrive and start growing too.
+##
+## A CEILING KEEPS THE IDENTITY AND REMOVES THE ARITHMETIC. The wall still grows,
+## still outpaces you early, and still ends taller than it started — but it tops
+## out, which turns "you cannot win this" into "you have five rounds". It is also
+## more legible: a player can SEE it stop.
+const FORMATION_MAX_STACKS: int = 3
+
+
 static func formation_drill_tick(ctx, lockstep: bool, front_only := false) -> void:
 	# front_only = the gentler act-1 "muster" cadence: only the front rank drills
 	# (the back row is queue space, not part of the growing wall) and it starts a
@@ -1017,6 +1042,7 @@ static func formation_drill_tick(ctx, lockstep: bool, front_only := false) -> vo
 	if ctx.round_number < (3 if front_only else 2):
 		return
 	var grew := false
+	var topped_out := false
 	var rows: Array = [ctx.ROW_FRONT] if front_only else [ctx.ROW_FRONT, ctx.ROW_BACK]
 	for row in rows:
 		var arr: Array = ctx._row_array(true, row)
@@ -1028,6 +1054,17 @@ static func formation_drill_tick(ctx, lockstep: bool, front_only := false) -> vo
 			var right = arr[i + 1] if i < arr.size() - 1 else null
 			if left == null and right == null:
 				continue
+			# PER BODY, not per fight — a creature that arrives on round 6 still
+			# gets its own drill, it simply cannot exceed the same ceiling as the
+			# one that has been standing since the muster. Held in a meta rather
+			# than on CreatureInstance because this is within-fight state and
+			# every field on that class has to be round-tripped by the snapshot
+			# (C8 enumerates them); a fight does not survive a save.
+			var stacks: int = int(c.get_meta("formation_stacks", 0))
+			if stacks >= FORMATION_MAX_STACKS:
+				topped_out = true
+				continue
+			c.set_meta("formation_stacks", stacks + 1)
 			c.current_atk += 1
 			c.card_data.hp += 1
 			c.current_hp = mini(c.current_hp + 1, c.card_data.hp)
@@ -1044,11 +1081,17 @@ static func formation_drill_tick(ctx, lockstep: bool, front_only := false) -> vo
 	# appear), but a keyword arriving on four bodies at once still needs the beat
 	# said out loud — otherwise your blows just start doing 1 less for no reason.
 	if grew and closed_ranks:
-		ctx._show_info("The wall holds — its line grows +1/+1 and the front rank goes Armored.")
+		ctx._show_info("The wall holds — its line grows +1/+1 and the front row goes Armored.")
 	elif grew:
 		ctx._show_info("The wall holds — its line grows +1/+1.")
 	elif closed_ranks:
-		ctx._show_info("The wall closes ranks — its front rank goes Armored.")
+		ctx._show_info("The wall closes ranks — its front row goes Armored.")
+	elif topped_out:
+		# A CEILING THE PLAYER CANNOT SEE IS NOT A CEILING — it is the fight
+		# quietly getting easier for reasons nobody can name. The growth line
+		# has been announced every round up to this point, so its absence would
+		# read as the effect breaking rather than as the wall being finished.
+		ctx._show_info("The wall is built — it grows no further.")
 
 
 static func curses_in_deck(ctx) -> int:

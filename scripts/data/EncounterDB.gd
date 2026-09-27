@@ -240,6 +240,127 @@ func get_face_hp(encounter_id: String, target_act: int, target_type: String = ""
 	var to_norm: float = ACT_FACE_HP_NORM[to_type][target_act - 1]
 	return maxi(4, int(round(hp * to_norm / from_norm)))
 
+## HOW FAR A PASSIVE MAY TRAVEL (2026-09-26).
+##
+## `get_kingdom_pool` tops a thin faction pool up from neighbouring acts, `dist` 1
+## then 2, so **54% of every pool entry in this game is authored for a different
+## act than the slot it is dealt into** (measured by `tools/_probe_pool_borrow.tscn`;
+## 69 of those carry a passive, 11 of them two acts away). Combat already scales
+## the borrow — `get_face_hp(enc, t_act, ...)` and `build_enemy_deck(enc, t_act, ...)`
+## both take the TARGET act, and the comment above that block says so outright.
+##
+## The PASSIVE was the one thing read raw. A standing rule is not a number, so it
+## cannot be rescaled — it was authored against the deck of its own act, and there
+## is no arithmetic that moves `drake_breath` down two tiers.
+##
+## THE DIRECTION IS ASYMMETRIC, which is what makes a small fix correct. Borrowing
+## DOWNWARD (an act-1 lineup dealt at act 3) lands an easy rule on a strong deck —
+## harmless, and dropping it there would only make a soft fight softer. Borrowing
+## UPWARD two acts lands an act-3 rule on an act-1 deck, and that is measurable:
+## `Where the Old Drake Sleeps` is authored act 3, was dealt on ACT 1, and went
+## **0 of 2 at a cost of 30.5 hero HP** against an act-1 plain-combat average of
+## 95% and 3.6 HP. `owed`'s act-1 BOSS pool is three entries, all borrowed, two
+## from act 3 — one of them THE BLACK TIDE, the hold CLAUDE.md §3b measured
+## deploying 26 bodies through round 11.
+##
+## So: a lineup dealt two or more acts BELOW where it was written fights without
+## its standing rule. The lineup still appears (variety and faction flavour are
+## untouched — CLAUDE.md's 2026-09-13 pass measured the larger pools as the reason
+## repetition is NOT a problem here, and shrinking them to pay for this would
+## trade a measured good for a measured good), and its stats are already correct
+## for the act. Five pool entries are affected, and they include both of the worst
+## fights in the corpus.
+##
+## `passive_desc` must travel with it or the edict banner posts a rule the fight
+## does not have — a lie on screen is worse than a missing rule, and the banner is
+## keyed off the id being non-empty.
+const PASSIVE_TRAVEL_LIMIT: int = 2
+
+
+## SOME FAMILIES ALREADY HAVE AN ACT LADDER, so a borrow can STEP instead of
+## being dropped — which is strictly better, because the fight keeps its identity.
+##
+## The Wall's formation engine is written as three rungs, and this file says so in
+## its own words at `the_unfinished_wall`: *"Act 1 teaches it on four bodies in one
+## row from round 3; act 2 moves it to both rows and a round earlier; act 3 adds
+## the Armored grant."* **Those three ids ARE this family's act scaling** — so when
+## `The Testudo` (authored act 2, `formation_drill`) is dealt on act 1, the correct
+## rule is not "no rule" and it is certainly not the act-2 rung: it is
+## `formation_muster`.
+##
+## Measured before this existed: The Testudo dealt at ACT 1 took a hero from 32 HP
+## to -13 in six rounds, because a one-act borrow is inside PASSIVE_TRAVEL_LIMIT
+## and handed an act-1 board both rows drilling from round 2.
+##
+## Index 0 is the act-1 rung. A family listed here never falls back to the blanket
+## drop, at any distance.
+const PASSIVE_ACT_LADDERS: Array = [
+	["formation_muster", "formation_drill", "formation_lockstep"],
+]
+
+## The canonical text for a rung, because a stepped rule must restate ITSELF — the
+## edict banner is keyed off the id being non-empty, and posting the authored act's
+## sentence over a different rung is a lie on screen. Keyed by passive id, since
+## each rung means exactly one thing wherever it is used; this is the statement of
+## the rule, not a per-encounter variant of it.
+##
+## THE CAP IS PART OF THE RULE AND MUST BE PRINTED (2026-09-26). `formation_drill_tick`
+## caps growth at FORMATION_MAX_STACKS per body; a desc that promises unbounded
+## growth is the "rules text is a design surface" failure from ONBOARDING §5, and
+## here it would understate the player's own clock — the whole value of the cap is
+## that "you cannot win this" becomes "you have five rounds", which is worth
+## nothing if the card does not say so.
+const PASSIVE_RUNG_DESC: Dictionary = {
+	"formation_muster":
+		"Start of each round from round 3: each enemy front-row creature with an "
+		+ "adjacent friendly gains +1/+1, up to three times each.",
+	"formation_drill":
+		"Start of each round from round 2: each enemy creature standing beside "
+		+ "another gains +1/+1, up to three times each.",
+	"formation_lockstep":
+		"Start of each round from round 2: each enemy creature standing beside "
+		+ "another gains +1/+1, up to three times each, and enemy front-row "
+		+ "creatures gain Armored.",
+}
+
+
+## The standing rule this encounter brings to `target_act`, and the text for it.
+## Returns `{"passive_id": String, "passive_desc": String}` — one funnel, because
+## the two must never disagree. Pass `target_act <= 0` to get the authored pair.
+func get_passive_for(encounter_id: String, target_act: int) -> Dictionary:
+	var enc := get_encounter(encounter_id)
+	if enc.is_empty():
+		return {"passive_id": "", "passive_desc": ""}
+	var pid := String(enc.get("passive_id", ""))
+	var pdesc := String(enc.get("passive_desc", ""))
+	if pid == "" or target_act < 1 or target_act > 3:
+		return {"passive_id": pid, "passive_desc": pdesc}
+	var from_act: int = clampi(int(enc.get("act", 1)), 1, 3)
+	var steps: int = from_act - target_act   # > 0 = the fight travelled DOWN
+	if steps <= 0:
+		# DOWNWARD ONLY, deliberately. Stepping a borrowed act-1 lineup UP to the
+		# act-3 rung would be the symmetric reading of "the rungs are the act
+		# scale", and it is the honest one — act 3 offers 8 combats of which 5 are
+		# act-1 fights, so it is too EASY by the same mechanism. It is not done
+		# here because act 3 is reached in 1 run of 47 in the corpus: raising
+		# difficulty on a path no measurement can see is how you break something
+		# and find out months later. Revisit when act 3 is reachable.
+		return {"passive_id": pid, "passive_desc": pdesc}
+	for ladder in PASSIVE_ACT_LADDERS:
+		var rung: int = (ladder as Array).find(pid)
+		if rung < 0:
+			continue
+		var want: int = maxi(0, rung - steps)
+		var stepped := String((ladder as Array)[want])
+		return {"passive_id": stepped,
+			"passive_desc": String(PASSIVE_RUNG_DESC.get(stepped, pdesc))}
+	# No ladder for this family: a rule is not a number, so past the travel limit
+	# it simply does not come.
+	if steps >= PASSIVE_TRAVEL_LIMIT:
+		return {"passive_id": "", "passive_desc": ""}
+	return {"passive_id": pid, "passive_desc": pdesc}
+
+
 ## Optional capital-siege layer for a boss encounter. Kept on the encounter
 ## rather than in SetPieceDB because a capital is still a lethal boss fight:
 ## normal boss rewards, phases and defeat flow remain in charge.
@@ -484,7 +605,7 @@ const AMALGAM_HISTORY_PHASES: Dictionary = {
 	},
 	"stalwart": {
 		"passive_id": "formation_drill",
-		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
+		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1, up to three times each.",
 		"transition_msg": "THE LAST WALL CLOSES RANKS AGAIN!",
 		"transition_effect": {"type": "summon_multiple", "name": "Shieldbearer",
 			"atk": 2, "hp": 4, "count": 2, "kw": ["armored"]},
@@ -520,7 +641,7 @@ const BOSS_PHASES: Dictionary = {
 		{"threshold": 27, "passive_id": "throne_husks",
 			"passive_desc": "Start of each round (from round 2): summon a 2/2 Swift creature in an empty enemy lane."},
 		{"threshold": 14, "passive_id": "formation_drill",
-			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
+			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1, up to three times each.",
 			"transition_msg": "THE WALL YOU BURNED CLOSES RANKS!",
 			"transition_effect": {"type": "summon_multiple", "name": "Shieldbearer",
 				"atk": 2, "hp": 4, "count": 2, "kw": ["armored"]}},
@@ -531,7 +652,7 @@ const BOSS_PHASES: Dictionary = {
 	],
 	"amalgam_raider": [
 		{"threshold": 27, "passive_id": "formation_drill",
-			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1."},
+			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1, up to three times each."},
 		{"threshold": 14, "passive_id": "crypt_ghost",
 			"passive_desc": "When an enemy creature dies: summon a 1/1 Swift Ghost in a random empty enemy lane.",
 			"transition_msg": "EVERY KINGDOM'S DEAD RIDE WITH HIM!",
@@ -544,7 +665,7 @@ const BOSS_PHASES: Dictionary = {
 	],
 	"amalgam_stalwart": [
 		{"threshold": 27, "passive_id": "formation_drill",
-			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1."},
+			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1, up to three times each."},
 		{"threshold": 14, "passive_id": "void_exile",
 			"passive_desc": "Start of your turn: the top card of your draw pile is exiled (removed from this fight).",
 			"transition_msg": "THE LANTERNHALL READS YOUR LAST PAGES!",
@@ -559,7 +680,7 @@ const BOSS_PHASES: Dictionary = {
 		{"threshold": 27, "passive_id": "throne_husks",
 			"passive_desc": "Start of each round (from round 2): summon a 2/2 Swift creature in an empty enemy lane."},
 		{"threshold": 14, "passive_id": "formation_drill",
-			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
+			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1, up to three times each.",
 			"transition_msg": "THE BROKEN WALL REBUILDS ITSELF!",
 			"transition_effect": {"type": "summon_multiple", "name": "Shieldbearer",
 				"atk": 2, "hp": 4, "count": 2, "kw": ["armored"]}},
@@ -577,7 +698,7 @@ const BOSS_PHASES: Dictionary = {
 			"transition_effect": {"type": "summon", "name": "Vault Warden",
 				"atk": 2, "hp": 6, "kw": ["armored", "last_stand"]}},
 		{"threshold": 0, "passive_id": "formation_lockstep",
-			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1, and enemy front-row creatures gain Armored.",
+			"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1, up to three times each, and enemy front-row creatures gain Armored.",
 			"transition_msg": "THE WALL YOU BROKE STANDS WITH HIM!",
 			"transition_effect": {"type": "summon_multiple", "name": "Shieldbearer",
 				"atk": 2, "hp": 4, "count": 2, "kw": ["armored"]}},
@@ -588,7 +709,7 @@ const BOSS_PHASES: Dictionary = {
 		# passive_id (formation_muster, the gentler act-1 cadence); the threshold
 		# 11 here is what triggers the endgame jump to lockstep below.
 		{"threshold": 11, "passive_id": "formation_muster",
-			"passive_desc": "Start of each round from round 3: each enemy front-row creature with an adjacent friendly gains +1/+1."},
+			"passive_desc": "Start of each round from round 3: each enemy front-row creature with an adjacent friendly gains +1/+1, up to three times each."},
 		{"threshold": 0, "passive_id": "formation_lockstep",
 			"passive_desc": "The previous formation effect continues. Enemy front-row creatures also gain Armored.",
 			"transition_msg": "THE WALL CLOSES RANKS!",
@@ -660,11 +781,11 @@ const BOSS_PHASES: Dictionary = {
 			"transition_effect": {"type": "debuff_all_player_atk", "value": 1}},
 	],
 	"the_devil": [
-		{"threshold": 20, "passive_id": "devil_cycle", "passive_desc": "3-round cycle. Round 1: deal 2 face damage. Round 2: heal 1 HP per enemy. Round 3: deal 3 to your highest-ATK creature."},
+		{"threshold": 20, "passive_id": "devil_cycle", "passive_desc": "3-round cycle. Round 1: deal 2 to your highest-ATK creature. Round 2: heal 1 HP per enemy. Round 3: deal 3 to your highest-ATK creature."},
 		{"threshold": 10, "passive_id": "devil_phase2", "passive_desc": "The three-round cycle's effects double. All enemy creatures gain +1 ATK.",
 			"transition_msg": "THE DEVIL REVEALS HIS TRUE FORM!",
 			"transition_effect": {"type": "summon", "name": "Pit Fiend", "atk": 4, "hp": 5, "kw": ["armored", "regenerate"]}},
-		{"threshold": 0, "passive_id": "devil_phase3", "passive_desc": "Each round: deal 3 face damage, summon a creature, and give all enemies +1 ATK.",
+		{"threshold": 0, "passive_id": "devil_phase3", "passive_desc": "Each round: deal 3 damage to your highest-ATK creature, summon a creature, and give all enemies +1 ATK.",
 			"transition_msg": "THE DEVIL UNLEASHES HIS FULL POWER!",
 			"transition_effect": {"type": "buff_all_enemies_atk", "value": 1}},
 	],
@@ -855,7 +976,7 @@ const ENCOUNTERS: Dictionary = {
 		# ends, never let two of his walls stand touching for free.
 		"name": "THE STALWART", "act": 1, "type": "boss", "faction": "last_wall", "hp": 23,
 		"passive_id": "formation_muster",
-		"passive_desc": "Start of each round from round 3: each enemy front-row creature with an adjacent friendly gains +1/+1.",
+		"passive_desc": "Start of each round from round 3: each enemy front-row creature with an adjacent friendly gains +1/+1, up to three times each.",
 		"preamble": "The gate holds while the Stalwart waits behind it. Break both sections.",
 		"siege": {
 			"id": "pass_gate",
@@ -1222,7 +1343,7 @@ const ENCOUNTERS: Dictionary = {
 		# and face-hungry the whole climb.
 		"name": "THE RAIDER ASCENDANT", "act": 3, "type": "boss", "faction": "grasswake", "hp": 40,
 		"passive_id": "formation_drill",
-		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
+		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1, up to three times each.",
 		"preamble": "Every kingdom you defeated added riders to his army. His Swift creatures will keep pressing open lanes.",
 		"deck": [
 			{"name": "Salt Harpy", "atk": 3, "hp": 2, "kw": ["swift"]},
@@ -1249,7 +1370,7 @@ const ENCOUNTERS: Dictionary = {
 		# chaff cooks. Break the wall before the fire does his work for him.
 		"name": "THE STALWART ASCENDANT", "act": 3, "type": "boss", "faction": "last_wall", "hp": 40,
 		"passive_id": "formation_drill",
-		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1.",
+		"passive_desc": "Start of each round: each enemy creature standing beside another gains +1/+1, up to three times each.",
 		"preamble": "He rebuilt the kingdoms you defeated into one final wall. Break the formation before it gains more defenses.",
 		"deck": [
 			{"name": "Pikeman", "atk": 1, "hp": 4, "kw": ["thorns", "armored"]},
@@ -1443,7 +1564,18 @@ const ENCOUNTERS: Dictionary = {
 	},
 
 	"bandit_camp": {
-		"name": "The Toll-Takers", "act": 1, "type": "combat", "faction": "grasswake", "hp": 20,
+		# FACE HP 20 -> 12 (2026-09-16). It was an act-1 plain combat carrying an
+		# ACT-3 face pool: ACT_FACE_HP_NORM puts act-1 combat at 11.4, so 20 was
+		# 1.75x its own band — higher than every act-1 ELITE (15-18) and every
+		# act-2 plain combat (15-18), and level with the act-3 combat norm (20.7).
+		# Measured at 13% win over 8 samples while every other act-1 plain combat
+		# scored 100%, and in 7 of 8 losses the face was still on 18-20 of 20: the
+		# player never got through the line at all. The passive is the fight's
+		# identity and is untouched — the camp still never runs out of men — but
+		# "a fast one ends the fight before it matters" (below) is only true if the
+		# face is raceable, and at 20 behind an endlessly replenishing wall it was
+		# not. 12 is the band median.
+		"name": "The Toll-Takers", "act": 1, "type": "combat", "faction": "grasswake", "hp": 12,
 		"preamble": "Bandits have blocked the road and demand payment. Defeat them before their reinforcements fill the board.",
 		"passive_id": "bandit_reinforce",
 		"passive_desc": "Start of each round from round 2: summon one 2/2 Swift Raider. From round 4, summon two instead.",
@@ -1582,10 +1714,26 @@ const ENCOUNTERS: Dictionary = {
 		# simulation across all five heroes died here on 4 of 5 seeds, and the
 		# owner reported the same fight in play. The long fight was the amplifier —
 		# every extra round is another 2 face you cannot prevent.
+		#
+		# THE BLANKET ARMORED GRANT IS GONE (2026-09-16). That earlier pass cut the
+		# HP and left the grant, and the fight was still the act-1 outlier at 38%
+		# against 100% for every other plain combat. The reason it resists tuning is
+		# that Armored is a FLAT -1, so its cost is decided by how big the player's
+		# attackers are — and measured against the live pool, of the 69 draftable
+		# creatures at cost <= 3 (what an act-1 board is made of) 62% have ATK <= 1,
+		# which Armored nullifies outright, and 96% have ATK <= 2, which it halves.
+		# A blanket grant there is not a difficulty dial, it is a check for one
+		# answer: every win in the sample was Kindler, whose Doom kills on a timer
+		# without attacking and does not care about Armored at all.
+		#
+		# The DECK still carries the identity, which is the point — "every sentinel
+		# is armored or thorns or both" was always true of the printed cards, and
+		# only Pebble and Quarry Brute (both Thorns) lose anything here. The stones
+		# still bite; they no longer blunt every blow in the game.
 		"name": "The Tooth-Stones", "act": 1, "type": "combat", "faction": "last_wall", "hp": 12,
-		"preamble": "Ancient stone guards still hold this forgotten border. Their Armored front row becomes more dangerous each round.",
+		"preamble": "Ancient stone guards still hold this forgotten border. Their front row digs in deeper each round.",
 		"passive_id": "sentinel_stone",
-		"passive_desc": "All enemies have Armored. From round 2, enemy front-row creatures gain +1 ATK. From round 3, take 2 face damage each round.",
+		"passive_desc": "From round 2, enemy front-row creatures gain +1 ATK. From round 3, deal 2 damage to your highest-ATK creature each round.",
 		# Stone Sentinels — heavy fortress: walls, hurlers, breakers, an animator.
 		# Stone Sentinels — STONE THAT BITES BACK. Every sentinel is armored
 		# or thorns or both. Spells get through fine; weapon trades are
@@ -1809,27 +1957,63 @@ const ENCOUNTERS: Dictionary = {
 
 	"orc_warband": {
 		# Orc Warband (Act 1 elite) — BARBARIC RALLY. Inspired by Total War orc
-		# waves: small grunts get permanent +1 ATK every round (orc_random_buff
-		# passive), so the longer the fight runs the more dangerous the chaff
-		# gets. Every orc carries Swift or Piercing — there's nowhere safe to
+		# waves. Every orc carries Swift or Piercing — there's nowhere safe to
 		# stall. Kill the Chieftain fast or the buffs land on the wrong guys.
+		# (The comment here used to credit an `orc_random_buff` passive. This
+		# encounter runs `chieftain_rally`, and has for a long time — the stale
+		# name sent one pass looking for an uncapped per-round ramp that is not
+		# here. `chieftain_rally` is `temp_atk_buff`, this round only, and
+		# conditional on a killable body: the correct shape.)
+		#
+		# ── RE-COSTED 2026-09-26, and it was the worst fight in the game ──────
+		#
+		# Measured over the first corpus that could reach it at all (the pilot
+		# played THE RAIDER for 236 consecutive runs, and `_select_rivals` excludes
+		# your own lord, so grasswake — the Raider's kingdom — was unreachable and
+		# this encounter had NEVER BEEN FOUGHT ONCE; see §20/§24):
+		#
+		#   The Long Drumming    20% win   30.4 hero HP   8.0% of ALL hero HP spent
+		#   act-1 General tier   72% win   10.5 hero HP
+		#
+		# Three ATK multipliers stacked on a Swift body, and it was the only act-1
+		# General carrying more than one:
+		#
+		#   deck          swift bodies   adj_buff auras   mean ATK
+		#   Long Drumming       4              2            2.38
+		#   every other        0-1            0-1         1.57-1.86
+		#
+		# A 3/3 Swift Warrior seated between the Bannerman and the Chieftain was a
+		# 5-ATK body that strikes in the pre-phase — before the blocker you put up
+		# to answer it ever swings — and 6 once `chieftain_rally` fired. The kit's
+		# stated identity is Swift everywhere plus ONE buffer worth killing ("kill
+		# the Chieftain", singular), so what is removed is the DUPLICATE aura and
+		# the Swift bodies' outlier ATK. Swift, Piercing, the Chieftain puzzle and
+		# the drummer that names the encounter all stay.
 		"name": "The Long Drumming", "act": 1, "type": "elite", "faction": "grasswake", "hp": 18,
 		"preamble": "A warband is marching toward you. While the Chieftain lives, its front row attacks harder.",
 		"passive_id": "chieftain_rally",
 		"passive_desc": "From round 2: if the Chieftain lives, enemy front-row creatures gain +1 ATK this round.",
 		"deck": [
-			{"name": "Warrior", "atk": 3, "hp": 3, "kw": ["swift"]},
-			{"name": "Warrior", "atk": 3, "hp": 3, "kw": ["swift"]},
+			# Swift AND 3 ATK was the outlier: 3 unanswerable damage a round each,
+			# before the blocker meant to stop them ever swings. 2/3 leaves this the
+			# highest mean ATK in the act (correct — it is the act's aggro General)
+			# without making the pre-phase decide the fight on its own.
+			{"name": "Warrior", "atk": 2, "hp": 3, "kw": ["swift"]},
+			{"name": "Warrior", "atk": 2, "hp": 3, "kw": ["swift"]},
 			{"name": "Brute", "atk": 3, "hp": 4, "kw": ["piercing"]},
 			{"name": "Brute", "atk": 3, "hp": 4, "kw": ["piercing"]},
-			{"name": "Bannerman", "atk": 1, "hp": 3, "kw": ["swift"],
-				"adj_buff": {"atk": 1, "hp": 0}},
+			# The Bannerman's aura was a SECOND copy of the Chieftain's, which is
+			# what let one body hold +2 before the rally. He keeps the drum (and the
+			# encounter's name) and the Chieftain keeps the only aura worth killing.
+			{"name": "Bannerman", "atk": 1, "hp": 3, "kw": ["swift"]},
 			{"name": "Chieftain", "atk": 4, "hp": 4, "kw": ["swift"],
 				"adj_buff": {"atk": 1, "hp": 0}},
 		],
 		"reinforcement": {"name": "Grunt", "atk": 2, "hp": 2, "kw": ["swift"]},
 		"reinforcement_pool": [
-			{"name": "Warrior", "atk": 3, "hp": 3, "kw": ["swift"]},
+			# Matches the deck's Warrior, or the drip walks the 3-ATK Swift body
+			# back onto the board a round later.
+			{"name": "Warrior", "atk": 2, "hp": 3, "kw": ["swift"]},
 			{"name": "Brute", "atk": 3, "hp": 4, "kw": ["piercing"]},
 		],
 	},
@@ -2183,7 +2367,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "The Unfinished Wall", "act": 1, "type": "elite",
 		"faction": "last_wall", "hp": 17,
 		"passive_id": "formation_muster",
-		"passive_desc": "Start of each round from round 3: each enemy front-row creature with an adjacent friendly gains +1/+1.",
+		"passive_desc": "Start of each round from round 3: each enemy front-row creature with an adjacent friendly gains +1/+1, up to three times each.",
 		"preamble": "Masons finish the wall while you fight it. Bodies standing side by side grow every round from the third — break the middle and the ends stop growing.",
 		"deck": [
 			{"name": "Mason", "atk": 1, "hp": 4, "kw": ["armored"]},
@@ -2201,7 +2385,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "The Testudo", "act": 2, "type": "elite",
 		"faction": "last_wall", "hp": 24,
 		"passive_id": "formation_drill",
-		"passive_desc": "Start of each round from round 2: each enemy creature standing beside another gains +1/+1.",
+		"passive_desc": "Start of each round from round 2: each enemy creature standing beside another gains +1/+1, up to three times each.",
 		"preamble": "They lock shields and walk. Any of them standing beside another grows every round from the second, in both rows — so the line is the target, not the biggest body in it.",
 		"deck": [
 			{"name": "Shield-Brother", "atk": 2, "hp": 4, "kw": ["armored"]},
@@ -2220,7 +2404,7 @@ const ENCOUNTERS: Dictionary = {
 		"name": "THE BURIED ARMY", "act": 3, "type": "elite",
 		"faction": "last_wall", "hp": 29,
 		"passive_id": "formation_lockstep",
-		"passive_desc": "Start of each round from round 2: each enemy creature standing beside another gains +1/+1, and enemy front-row creatures gain Armored.",
+		"passive_desc": "Start of each round from round 2: each enemy creature standing beside another gains +1/+1, up to three times each, and enemy front-row creatures gain Armored.",
 		"preamble": "Clay soldiers stand up out of the field, already in rank. Every round they touch, they grow and the front goes Armored — every round you wait costs more than the last.",
 		"deck": [
 			{"name": "Clay Ranker", "atk": 3, "hp": 5},
@@ -2641,23 +2825,56 @@ const ENCOUNTERS: Dictionary = {
 		# this round, and most of the column is Swift. Trading bodies into the
 		# riders arms them; the fight rewards Armored walls, healing, and
 		# killing the Chief (the adj-buff heart) before the toll compounds.
+		#
+		# ── RE-COSTED 2026-09-26, the SAME defect as The Long Drumming ────────
+		#
+		# The two worst act-1 Generals measured were BOTH grasswake — 20% and 33%
+		# win at 30.4 and 28.3 hero HP against a tier at 72% and 10.5 — and that is
+		# not a coincidence about the faction's design, it is a coincidence about
+		# its MEASUREMENT: the pilot played THE RAIDER for 236 consecutive runs and
+		# `_select_rivals` excludes your own lord, so grasswake (the Raider's
+		# kingdom) was unreachable and neither of these fights had ever been fought.
+		# **This column never received balance feedback.** See §20/§24/§26.
+		#
+		# Identical shape to the Drumming, down to the authoring habit:
+		#
+		#   swift bodies 4      mean deck ATK 3.00 (act-1 Generals run 1.57-1.86)
+		#   adj_buff auras 2    Chief AND Banner-Bearer, the same +1 ATK twice
+		#
+		# And here the duplication is worse than arithmetic, because it feeds a
+		# LOOP: Swift bodies strike in the pre-phase, so your blocker dies before it
+		# swings, and `pack_hunt` reads that death and arms every Swift body again.
+		# The passive is fed by exactly what the deck is built to do. `pack_hunt`
+		# itself is `temp_atk_buff` — this round only, self-correcting, the correct
+		# shape — so the deck is what was wrong, not the rule.
+		#
+		# Removed: the duplicate aura, and the outlier ATK on the Swift bodies that
+		# open the loop. Kept: four Swift riders, the Armored Chief as the one heart
+		# worth killing, the Alpha's bequest, and `pack_hunt` untouched.
 		"name": "The Horse-Lords' Toll", "act": 2, "type": "elite", "faction": "grasswake", "hp": 24,
 		"preamble": "The riders grow stronger whenever one of your creatures dies. Protect your board from their Swift attacks.",
 		"passive_id": "pack_hunt",
 		"passive_desc": "When one of your creatures dies: all Swift enemies gain +1 ATK this round.",
 		"deck": [
-			{"name": "Flanker", "atk": 3, "hp": 3, "kw": ["swift"]},
-			{"name": "Flanker", "atk": 3, "hp": 3, "kw": ["swift"]},
-			{"name": "Bloodfang", "atk": 4, "hp": 4, "kw": ["swift"]},
+			# The bodies that OPEN the pack_hunt loop. A 3-ATK Swift rider kills an
+			# act-1 blocker outright in the pre-phase, which arms every other rider;
+			# at 2 it has to trade first, which is the decision the fight is for.
+			{"name": "Flanker", "atk": 2, "hp": 3, "kw": ["swift"]},
+			{"name": "Flanker", "atk": 2, "hp": 3, "kw": ["swift"]},
+			{"name": "Bloodfang", "atk": 3, "hp": 4, "kw": ["swift"]},
 			{"name": "Chief", "atk": 3, "hp": 7, "kw": ["armored"],
 				"adj_buff": {"atk": 1, "hp": 0}},
 			{"name": "Alpha", "atk": 4, "hp": 5, "kw": [],
 				"on_death": {"type": "summon", "atk": 2, "hp": 2}},
 			{"name": "Stalker", "atk": 2, "hp": 4, "kw": ["swift"]},
-			{"name": "Banner-Bearer", "atk": 2, "hp": 5, "kw": [],
-				"adj_buff": {"atk": 1, "hp": 0}},
+			# Aura removed — it was the Chief's, a second time. The Chief is the
+			# heart the preamble and the design comment both point at; two hearts
+			# means neither is the answer. He keeps his standard and his body.
+			{"name": "Banner-Bearer", "atk": 2, "hp": 5, "kw": []},
 		],
-		"reinforcement": {"name": "Flanker", "atk": 3, "hp": 3, "kw": ["swift"]},
+		# Matches the deck's Flanker, or the drip re-introduces the 3-ATK Swift
+		# rider every round and the cut above buys one round.
+		"reinforcement": {"name": "Flanker", "atk": 2, "hp": 3, "kw": ["swift"]},
 		"reinforcement_pool": [
 			{"name": "Stalker", "atk": 2, "hp": 4, "kw": ["swift"]},
 		],
@@ -3181,7 +3398,7 @@ const ENCOUNTERS: Dictionary = {
 		# play differently so the cycle hits different things.
 		"name": "THE DEVIL", "act": 3, "type": "boss", "faction": "everflame", "hp": 36,
 		"passive_id": "devil_cycle",
-		"passive_desc": "3-round cycle. Round 1: deal 2 face damage. Round 2: heal 1 HP per enemy. Round 3: deal 3 to your highest-ATK creature.",
+		"passive_desc": "3-round cycle. Round 1: deal 2 to your highest-ATK creature. Round 2: heal 1 HP per enemy. Round 3: deal 3 to your highest-ATK creature.",
 		"preamble": "The Devil follows a repeating three-round cycle: face damage, healing, then an attack on your strongest creature.",
 		"deck": [
 			{"name": "Demon Soldier", "atk": 3, "hp": 4, "kw": ["armored", "piercing"]},

@@ -5,6 +5,7 @@ extends Control
 ## Combat happens every round (no setup-only round).
 
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+const CARD_BACK_TEXTURE = preload("res://assets/ui/card_back.png")
 const REWARD_SCENE = "res://scenes/reward.tscn"
 const GAMEOVER_SCENE = "res://scenes/game_over.tscn"
 const MAP_SCENE = "res://scenes/map.tscn"
@@ -30,6 +31,10 @@ const ClosedGround := preload("res://scripts/ui/painters/ClosedGround.gd")
 const TablePlate := preload("res://scripts/ui/painters/TablePlate.gd")
 const LaneAftermath := preload("res://scripts/ui/painters/LaneAftermath.gd")
 const RubricStroke := preload("res://scripts/ui/painters/RubricStroke.gd")
+# The lane forecast's kit (2026-09-16) — see _add_lane_forecast.
+const WoundSeal := preload("res://scripts/ui/painters/WoundSeal.gd")
+const StruckBracket := preload("res://scripts/ui/painters/StruckBracket.gd")
+const MusterHaze := preload("res://scripts/ui/painters/MusterHaze.gd")
 const CombatOpsScript := preload("res://scripts/combat/CombatOps.gd")
 
 # The online-skirmish layer (extracted 2026-07-14). Function bodies live in
@@ -126,20 +131,77 @@ var _relic_chip_by_id: Dictionary = {}
 # (Tome of Many's 2 draws, Bulwark over 3 creatures) into ONE flash.
 var _relic_fx_gate: Dictionary = {}
 
+## HOW MUCH Command can carry into the next round — for a run that has EARNED
+## carryover at all. WHETHER it can is `_bank_cap()`, and the default is zero.
+##
+## 2026-09-16: unspent Command used to carry over for everybody, always. That
+## outlived the reasoning that was supposed to govern it — Miser's Coffer (the
+## uncapped-banking relic) was retired 2026-07-25 because "Command is a FIXED
+## resource and banking is the clearest violation of that", and the universal
+## 2-point bank was then left standing, so the rule that retired the relic was
+## never applied to the rule. Under the ramp it also had a second cost: a round
+## you deliberately sat out paid you back, which is the one move a rising cost
+## curve must not reward.
+##
+## The constant stays THE authority on the amount, because three things read it —
+## this file, NetPlayerState's host-side model of the client, and the wire
+## compatibility fingerprint — and a relic `value` allowed to outrun it is
+## exactly how those part company. `field_chest` is the GATE, not the number.
 const MAX_BANKED_MANA: int = 2
-const HAND_DRAW_PER_TURN: int = 4
+## The relic that grants carryover at all. Named once, here, because five places
+## ask the question (the round open, the pips, the hover lesson, the tutorial and
+## the skirmish mirror) and an id spelled five times is an id that gets misspelled
+## once — silently, since `_has_relic` on an unknown id is simply false.
+const BANK_RELIC: String = "field_chest"
+# ── THE COMMAND RAMP (2026-09-16) ─────────────────────────────────────────
+# Command opens at 1 on round 1 and gains +1 every round to a ceiling —
+# Hearthstone's curve exactly. This REPLACED a flat 3/turn.
+#
+# It is one of THREE dials that only work together (ramp + fixed draw + a cost
+# curve rescaled to span them). Read docs/ECONOMY_REDESIGN_20260916.md before
+# moving any one of them alone — a ramp against the old refill-to-N hand does
+# almost nothing, because that hand returned exactly what you spent.
+#
+# WHY: measured, three instruments agreeing. Throughput was pinned at ~2.9
+# plays/turn regardless of the resource, Command left unspent was 0.02-0.40 per
+# turn, banking fired on 12% of turns, and COMBAT_SHAPE_PASS_20260727 §3.3
+# concluded "cost is the only lever that both reduces plays and creates an arc".
+#
+# command_for_round() is STATIC and PURE on purpose. The client's Command is
+# modelled by a SECOND implementation host-side (NetPlayerState.begin_turn), and
+# those two parting company silently on one player's pool is the exact pathology
+# _probe_net_relic_parity exists for — so the mirror is diffed against THIS
+# function directly rather than eyeballed, and a probe can enumerate it with no
+# Combat scene at all.
+const COMMAND_START: int = 1
+const COMMAND_RAMP_PER_ROUND: int = 1
+const COMMAND_RAMP_CAP: int = 6
+## What a flat baseline USED to be. The ramp is applied as a signed delta from
+## this, which is what keeps `RunState.base_max_mana` (and therefore every save,
+## every boss-relic "+1 max Command" arm, and the net slot field) meaning
+## exactly what it meant before — see the _start_round Command block.
+const LEGACY_FLAT_COMMAND: int = 3
+static func command_for_round(r: int) -> int:
+	return clampi(COMMAND_START + (maxi(1, r) - 1) * COMMAND_RAMP_PER_ROUND,
+		COMMAND_START, COMMAND_RAMP_CAP)
+# Cards drawn at the top of every round from round 2 on. FIXED, not a refill
+# target: a target that tops you back up to N returns exactly what you played,
+# which is what made draw dead as a payoff (drawing extra only meant refilling
+# less next turn) and made the discard mark free.
+const HAND_DRAW_PER_TURN: int = 2
 const MAX_HAND_SIZE := 10
-# ── Persistent-hand A/B toggle ────────────────────────────────────────────
-# true  = PERSISTENT hand: unplayed cards are KEPT at end of turn, and the
-#         start-of-round draw REFILLS up to HAND_REFILL_TARGET (draw-to-N).
-#         You hold cards across turns and choose when to play them.
-# false = original FRESH hand: discard the whole hand each turn and draw a
-#         fixed HAND_DRAW_PER_TURN. Flip this const to A/B the two loops.
+# ── Hand model ────────────────────────────────────────────────────────────
+# true = PERSISTENT hand: unplayed cards are KEPT at end of turn. Round 1 deals
+#        HAND_REFILL_TARGET; every round after draws a fixed HAND_DRAW_PER_TURN.
+#        The hand thickens while Command is small and empties once it is large,
+#        which is the arc a flat budget had no way to produce.
+# false = legacy FRESH hand: discard everything each turn, draw a fixed count.
+#        Kept only because the draw block still branches on it.
 const PERSISTENT_HAND := true
-# Refill target back to 5 (2026-07-07 discard rework): the 6-card refill is now
-# a RELIC payoff (Deep Satchel, +1 target) instead of the baseline, and the hand's
-# churn valve is the end-of-turn discard below — right-click marks a card and it's
-# thrown out when the turn ends, up to MAX_DISCARD_MARKS of them.
+# Round 1's opening hand, and the skirmish pre-deal size (CombatNet reads it for
+# both). NO LONGER a per-turn refill target despite the name — renaming it
+# reaches CombatNet x3, NetMatch, NetPlayerState and three probes, so it is a
+# deliberate Phase-1 deferral rather than an oversight.
 const HAND_REFILL_TARGET := 5
 # Battlefield repositioning — how many friendly creatures the player may drag to
 # a new slot per turn. The cap is the opportunity cost: you can't re-solve the
@@ -167,6 +229,13 @@ const PRESENCE_H: int = 372
 # Front blocks back from melee. Ranged prefers back. Piercing spills back→face.
 const LANES_PER_ROW: int = 4
 const ROW_FRONT: int = 0
+## Swift = LoR's QUICK ATTACK: strike first, take nothing back — and NOTHING MORE.
+## When true, a body slain in the Swift pre-phase keeps occupying its lane for the
+## rest of the round instead of being swept before the main clash, so a Swift kill
+## no longer hands the face to every other attacker in that column. See the block
+## in the Swift phase for the full reasoning and for why it is scoped to the
+## pre-phase only. False restores the pre-2026-09-15 behaviour.
+const SWIFT_HOLDS_THE_LANE: bool = true
 const ROW_BACK: int = 1
 
 # Round-flow tuning knobs (pulled out of inline magic numbers).
@@ -180,6 +249,77 @@ const PASSIVE_HEAL_INTERVAL: int = 3         # Happy Flower interval.
 const ESCALATION_REINFORCE_ROUND: int = 4       # Round a generic hold commits reserves (double-place).
 const ESCALATION_REINFORCE_BUFF_ROUND: int = 7  # Round drip reinforcements start gaining +1/+1.
 const ESCALATION_ELITE_BUFF_ROUND: int = 6      # Elite +1 ATK/round trigger.
+## Bodies a GENERAL may bring per round after the opening (see the branch in
+## `_enemy_place_creatures` for the measurement). A keep keeps 2; a plain hold runs
+## ~1.06. At 2 an elite refilled its board exactly as fast as an act-1 player
+## clears it, which is a stalemate rather than a hard fight — and the player's win
+## condition needs a column with both enemy rows EMPTY, so a board that never
+## clears is a fight that cannot be won at all.
+##
+## MEASURED, 12 seeds x 5 lords, matched arms (PLAYTEST_MEASUREMENT_20260919.md §26):
+##
+##   act-1 General   50% -> 86% win    16.4 -> 5.7 hero HP
+##   composition-matched over 7 shared encounters:  61% -> 89%,  14.5 -> 4.0 HP
+##   run-wide: median fights/run 3 -> 5, HP per fight 8.81 -> 5.68, deck 15.2 -> 17.9
+##
+## The single largest improvement in that document, and it helped the WEAKEST kit
+## most (acolyte 59% -> 81%). The plain-combat control was unmoved by the change
+## itself — this constant is only read when `enc_type == "elite"` — and its apparent
+## gain is the feedback path: runs that survive a General go on to fight more act-1
+## combats with a bigger deck.
+##
+## THE TENSION AT 1 IS REAL AND A LATE RAMP DOES NOT FIX IT — MEASURED AND REVERTED
+## (2026-09-26, PLAYTEST_MEASUREMENT_20260919.md §28).
+##
+## At a flat 1 a General's drip equals a plain hold's, so what separates the tiers is
+## only the authored lineup, the passive, the reinforcement pool and a full opening
+## formation — 86%/5.7hp against a hold's 92%/3.6hp, which is thin for the act's
+## hardest optional fight. The obvious answer was a RAMP, the shape
+## `hold_arrivals_for_round` already uses: 1 early, 2 from round 6 (deliberately the
+## same round as `ESCALATION_ELITE_BUFF_ROUND`, so the General's commitment would be
+## one legible beat instead of two). It was built, measured over 12 seeds x 5 lords,
+## and it was WORSE ON EVERY AXIS:
+##
+##   act-1 General   86% -> 70% win    5.7 -> 10.9 hero HP   (n 36 -> 54, 2.8 sigma)
+##   act-2 General   76% -> 36% win    8.2 -> 14.7
+##   runs won             2 -> 0       median fights/run 5 -> 4
+##   HP per fight      5.68 -> 7.76    act-3 boss reached 4x -> never
+##
+## **The reason is the fight's own length: an act-1 General runs 7.2 rounds.** Round
+## 6 is not "late", it is the round the fight is decided on — the player has finally
+## assembled a board and is one clash from breaking through, and doubling arrivals
+## exactly there restores the stalemate flat-2 produced from the opening. Pushing the
+## ramp later does not rescue it either: past ~8 it never fires in a fight that long,
+## which is flat 1 with extra machinery.
+##
+## So the tier separation has to come from somewhere other than the refill rate —
+## the lineup, the passive, the face, the opening formation. NOT from arrivals at any
+## reachable round. Do not re-try this dial.
+const ELITE_ARRIVALS_PER_ROUND: int = 1
+## HOW MANY TIMES A GENERAL MAY PRESS THE ATTACK (2026-09-26).
+##
+## `ESCALATION_ELITE_BUFF_ROUND` gave EVERY enemy body a permanent +1 ATK every
+## round from 6, with no ceiling — the same unbounded shape as the Last Wall's
+## formation drill (see `EncounterEffects.FORMATION_MAX_STACKS`), but applied
+## blanket to the whole General TIER rather than authored per encounter, and on top
+## of a deployment rate that already out-paced a lord's keep. A lord's keep carries
+## no equivalent: `ESCALATION_BOSS_STALL_ROUND` forces a PHASE, which is an authored
+## beat, not a stat ramp.
+##
+## §18's rule is that a boss or a General may carry an unbounded clock while an
+## ordinary hold may not. That was about an encounter's OWN authored passive — a
+## thing the player can read on the plaque and plan around. A tier-wide ramp that
+## every General gets in addition to its passive is not that, and the measurement
+## says so: the General tier sits at 39% win (act 1) and 15% (act 2) against keeps
+## at 85% and 50%.
+##
+## Capped PER BODY in a node meta, for the same two reasons the formation cap is:
+## a late reinforcement must get its own allowance (a per-fight counter arrives
+## pre-capped and reads as the rule breaking), and C8 round-trips every field on
+## `CreatureInstance` from `get_property_list()` while a fight does not survive a
+## save. The ceiling is ANNOUNCED — the round-6 line has been firing every round up
+## to that point, so its bare absence would read as the effect breaking.
+const ESCALATION_ELITE_BUFF_MAX_STACKS: int = 2
 const ESCALATION_BOSS_STALL_ROUND: int = 7      # Boss force-phase if stalled this long.
 const WAVE_SCHEDULE_CUTOFF_ROUND: int = 8       # Round authored faction waves end and the drip resumes.
 const COMBAT_PAUSE_SHORT: float = 0.15
@@ -223,25 +363,140 @@ const NAME_SPREAD_FRACTION: float = 0.6
 ## Raising it back is also what makes OVERKILL legible — a foe that dies before
 ## the board develops never shows you that stats matter.
 const ENEMY_HP_SCALE: float = 1.00
+## A General's face, on top of the global scale. See `_scale_enemy_hp` for the
+## measurement this comes from — elites ran 7.8 rounds against a plain hold's
+## 5.8 and cost 3.7x the hero HP, for a 42% win rate against 89%.
+## ...AND IT HAD TO BECOME ACT-AWARE (2026-09-24). A flat 0.80 left act-1
+## Generals at a defensible 70% win and act-2 Generals at **0 wins in 11**.
+##
+## It is the WHOLE BAND, not a few bad lineups — the same encounter flips across
+## the act boundary, which is what says the scaling rather than the content:
+##
+##   encounter              act 1            act 2
+##   The Unfinished Wall    3/4, face 14.0   0/4, face 19.2
+##   The Reading Room       6/9, face 14.3   0/1, face 23.0
+##   The Mausoleum          5/7, face 14.9   0/1, face 23.0
+##   The Puppeteer          3/9, face 14.7   0/1, face 23.0
+##
+## The base curve is `[18, 26, 30]`, so act 2 arrives with **+44% face HP** — on
+## top of `ENEMY_BODY_HP_BY_ACT` giving every body +1 and `_act_scale_creature`
+## raising the lineup. Three compounding raises against a player deck that grows
+## 12.4 -> 17.1 cards. The face curve now rises ~23% an act instead of 44%.
+##
+## Act 1 is deliberately UNCHANGED at 0.80: it is the control for this
+## measurement and it is already where a General should sit.
+const ELITE_HP_SCALE_BY_ACT: Array[float] = [0.80, 0.68, 0.64]
 ## Enemy CREATURE hit points added per act (index = act, 0-based). The authored
 ## body curve is nearly flat — median enemy HP moves 3 -> 4 across the whole
 ## campaign while the player's deck compounds forges, drills, veterancy and
 ## relics — so act 2 and 3 bodies died to the same swing that killed act 1's.
 ## Applied in _place_enemy_card. A dial rather than 781 hand-edits, and HP only:
 ## bumping enemy ATK too would just shorten fights from the other end.
-const ENEMY_BODY_HP_BY_ACT: Array[int] = [0, 1, 2]
-## THE HOLD'S HAND (2026-07-27). Bodies the enemy may commit in ONE round, across
-## every source — the wave schedule, the uniform drip, pursuit outriders, and the
-## escalation double-place. Before this, those stacked: an Everflame fight at
-## round 4 with outriders could field `after:2` + `surge_bonus:1` + pursuit `+1`,
-## and then `_enemy_place_creatures` was called a SECOND time by the escalation
-## branch for up to four more. Five-plus arrivals in a round against a player who
-## gets ~2.4 plays is not a fight, it is a flood. The player's ceiling is the
-## design target: the hold commits like a hand, not like a tap.
-const ENEMY_ARRIVALS_PER_ROUND: int = 2
-## Licensed spikes only — the escalation banner ("THE TIDE TURNS"), the Everflame
-## surge, and pursuit rounds. Still a beat the player can read, not a wall.
-const ENEMY_ARRIVALS_SURGE: int = 3
+##
+## THE THICKENING STARTS AN ACT LATER (2026-09-24). Measured over 12 seeds /
+## 241 fights, act 2 is not harder than act 1 — it is a cliff, and it is the
+## whole act rather than one fight type:
+##
+##   act 1 combat 95% win      act 2 combat 68%   (-27 points)
+##   act 1 boss   72%          act 2 boss   33%   (-39)
+##   act 1 elite  72%          act 2 elite  20%   (-52)
+##
+## Every kind drops together, so the cause is something that applies to every
+## act-2 fight — and this is that dial: +1 HP on EVERY enemy body, against a
+## median authored enemy of 3 HP, is a ~33% thickening of the whole hold. It
+## lands on top of the face curve rising (`[12,17,21]` combat / `[18,26,30]`
+## elite) while the player's deck grows only 12.4 -> 17.1 cards.
+##
+## `[0, 0, 1]` keeps the curve's SHAPE — the hold still thickens as the campaign
+## goes on — and moves it one act later, so act 2 is a step up rather than a
+## wall. Act 1 is untouched and remains the control for this measurement.
+const ENEMY_BODY_HP_BY_ACT: Array[int] = [0, 0, 1]
+## THE HOLD'S HAND (2026-07-27, RAMPED + MADE TRUE 2026-09-16). Bodies the enemy
+## may commit in ONE round, across every source — the wave schedule, the uniform
+## drip, pursuit outriders, the escalation double-place, **and the encounter
+## passive's own summons**, which escaped it entirely until 2026-09-16 and are the
+## subject of `_spend_hold_hand`. Before this, those
+## stacked: an Everflame fight at round 4 with outriders could field `after:2` +
+## `surge_bonus:1` + pursuit `+1`, and then `_enemy_place_creatures` was called a
+## SECOND time by the escalation branch for up to four more. Five-plus arrivals
+## in a round against a player who gets ~2.4 plays is not a fight, it is a flood.
+## The player's ceiling is the design target: the hold commits like a hand, not
+## like a tap.
+##
+## THAT PRINCIPLE IS UNCHANGED. What changed is the player's ceiling, and this
+## is the restoration rather than a new rule. "~2.4 plays" was measured against a
+## FLAT 3 Command from round 1; under the ramp (COMMAND_START 1, +1/round) the
+## player fields roughly ONE card on round 1 and does not reach the old 2.4 until
+## round 4. A hold that keeps committing 2 a round from round 1 therefore
+## out-deploys the player 2:1 in exactly the window
+## docs/PILOT_DIFFICULTY_20260915.md measured the fight being decided in
+## ("ahead until round 1.4 of a 10.4-round fight"). See
+## docs/ECONOMY_REDESIGN_20260916.md §3, which calls this Phase 2 and says it is
+## "not optional and not a later phase".
+##
+## So the hold's hand RAMPS, the same shape its opponent's does, and is derived
+## from one static pure function for the same reason command_for_round() is: the
+## budget is read by the placement, by the round-start telegraph and by the
+## opening muster, and three restatements of one curve is how they drift.
+##
+## SURGE is now a BONUS ON TOP of the ramp, not a second flat ceiling. It kept
+## its exact old meaning — a licensed spike is worth one extra body — while no
+## longer handing a round-2 surge the round-6 allowance.
+const HOLD_ARRIVALS_START: int = 1
+const HOLD_ARRIVALS_CAP: int = 2
+## Rounds per +1 body. 2 means the hold reaches its old flat 2/round at round 3
+## and the old SURGE 3 at round 3 with a spike — so a LONG fight still escalates
+## to exactly the pressure it always had, and only the opening is changed.
+## 3 since 2026-09-16 (was 2). The drip reaches its old flat 2/round at round
+## 4 now rather than round 3, which is the mid-game half of the same finding:
+## the hold saturated its front line at 3.30-3.46 bodies over rounds 4-6 while
+## the player, spending every point of Command, held 1.30-1.72. The CAP is
+## untouched, so a long fight still escalates to exactly the pressure it always
+## had — only the slope into it moved.
+const HOLD_ARRIVALS_RAMP_EVERY: int = 3
+## A licensed spike — the escalation banner ("THE TIDE TURNS"), the Everflame
+## surge, a pursuit round — is worth this many extra bodies. Still a beat the
+## player can read, not a wall.
+const HOLD_ARRIVALS_SURGE_BONUS: int = 1
+
+## Bodies taken OFF the round-1 opening formation to pay for the Command ramp.
+## Read at the one site that sizes the opening (_deal_opening_muster) — see the
+## long note there for why this is the load-bearing number, and re-read it after
+## the Phase 3 cost rescale.
+## THE HOLD MAY NOT BRING A LID — see `_hold_would_seal_board` for the full
+## reasoning and the measurement. false restores the pre-2026-09-16 behaviour
+## exactly (the drip may seal all four columns), which is what the A/B arm uses.
+const HOLD_LEAVES_A_PATH: bool = true
+
+const OPENING_MUSTER_RAMP_RELIEF: int = 1
+
+## ...and a PLAIN hold gives up one more (2026-09-16, Phase 3 follow-up).
+##
+## Measured after the cost rescale, same seed, plain combats: the player held
+## 0.23 bodies at the top of round 2 against the hold's 1.93, and left 1.13 of
+## its 1.4 Command UNSPENT on round 1 — a dead opening turn, because a mid-run
+## deck is now mostly drafted pool cards and the rescaled pool's median is 3.
+## Rounds 2-5 then showed 0.00 unspent, so the deficit is the PRICE of the
+## cards, not a pilot failing to spend its turn.
+##
+## WHY THIS IS SPLIT FROM THE RELIEF ABOVE RATHER THAN JUST RAISING IT: the
+## instrument (`tools/_probe_deploy_curve.gd`) samples PLAIN COMBATS ONLY, on
+## purpose — elites and bosses carry authored kits, so pooling them measures the
+## author. A single relief dial applied to all three fight types would therefore
+## be tuned on evidence that by construction cannot see two of them, and at 2 it
+## drops an act-1/act-2 KEEP to a one-body opening. A climax that opens on one
+## creature is a different fight, and nothing in this measurement would have
+## reported it. So only the arm the evidence covers is moved.
+const OPENING_MUSTER_COMBAT_RELIEF: int = 2
+
+## Bodies the hold may commit in round `r`, before any licensed spike.
+## STATIC and PURE, like command_for_round() and for the same reason — a probe
+## can enumerate the whole curve with no Combat scene at all, and the telegraph
+## cannot disagree with the muster.
+static func hold_arrivals_for_round(r: int) -> int:
+	return clampi(
+		HOLD_ARRIVALS_START + (maxi(1, r) - 1) / HOLD_ARRIVALS_RAMP_EVERY,
+		HOLD_ARRIVALS_START, HOLD_ARRIVALS_CAP)
 const COMBAT_PAUSE_MEDIUM: float = 0.30
 # Combat-cascade pacing — see _do_combat. All run through _short_pause(), so the
 # player's anim-speed setting (Instant included) scales every beat automatically.
@@ -389,6 +644,10 @@ var _targeting_potion_idx: int = -1
 # Cached container for the potion HUD bar so the per-potion buttons can be
 # rebuilt in-place when a potion is consumed without redrawing the whole HUD.
 var _potion_bar_root: Control = null
+# The portrait's swallow-wash from _play_potion_drink_fx. Kept as a member so a
+# second draught landing inside the first one's tail kills the old wash instead
+# of stacking two modulate tweens on the same portrait.
+var _portrait_gulp_tween: Tween = null
 # Skirmish: how many potion slots the belt draws (frozen at the drafted count
 # on fight start so a consumed potion leaves an empty slot, not a shrinking bar).
 var _net_potion_slots: int = 0
@@ -747,7 +1006,33 @@ var _info_token: int = 0                     # generation guard so a stale _show
 ## also lights the rule plaque — which is how the player learns WHERE the
 ## sentence came from. Set/cleared around the three dispatchers; they are
 ## synchronous, so the window is exact.
+##
+## THIS IS THE PLAQUE'S FLAG AND ONLY THE PLAQUE'S. The hold's-hand budget wants a
+## window that looks almost identical and is NOT the same — see
+## `_hold_rule_deploying` directly below, and the note there on why sharing this
+## one was tried and rejected.
 var _passive_speaking: bool = false
+
+## DEPTH of the "the fight's own rule is deploying" window. An enemy body seated
+## inside it was put there by the encounter passive, so it spends the hold's hand
+## (see _spend_hold_hand and ECONOMY_REDESIGN_20260916.md §3b). Held by all FOUR
+## dispatchers: start-of-round, end-of-round, on-enemy-death, and REACTIVE.
+##
+## WHY NOT JUST REUSE `_passive_speaking`. It was tried first, and the reactive
+## dispatcher is what kills it: `_dispatch_reactive` pulses the rule plaque
+## ITSELF, deliberately and unconditionally, rather than going through
+## `_passive_speaking` at all ("a rule that fires invisibly reads as the game
+## cheating"). Widening that flag to cover reactive would have double-pulsed the
+## plaque on every reactive trigger, and narrowing it later for a plaque reason
+## would silently stop a passive paying for its summons. Two windows that merely
+## look alike; one flag each.
+##
+## A COUNTER, NOT A BOOL, because these dispatchers NEST — `puppeteer` answers
+## ON_PLAYER_SUMMON, and a summon can be made by a start-of-round passive, so the
+## reactive window opens inside the start-of-round one. A bool would be cleared by
+## the inner scope while the outer was still running, and every body the outer
+## passive seated after that point would silently stop paying.
+var _hold_rule_deploying: int = 0
 var _info_queue: Array = []                  # pending info lines — see _show_info (same-frame callers used to clobber each other)
 var _info_showing: bool = false              # true while a line owns the label and its hold timer is running
 var _mana_bank_pips: Array = []              # banking carry-over pips under the Command seal
@@ -944,18 +1229,27 @@ var _enemy_presence: Control = null
 var _presence_art: TextureRect = null
 var _presence_flash: ColorRect = null         # red hit-flash overlay
 
-# ── Drag ember trail (JUICE) ──
-# A short comet ribbon behind a held card: Card2D's `dragging` signal drops
-# breadcrumb points and _process ages them out, so the ribbon chases the card
-# while it moves and burns away the instant it stops or is released. Ember for
-# creatures, arcane pale-blue for spells — the board's damage/spell language.
-var _drag_trail: Line2D = null
-var _drag_trail_pts: Array = []          # [{p: Vector2, born: float}]
-const DRAG_TRAIL_LIFE := 0.24
+# ── The drag's juice lives on the CARD now (2026-09-17) ──
+# There used to be a glowing ember ribbon here, fed by Card2D's `dragging`
+# signal. It was rebuilt properly and then CUT, because the rebuild only ever
+# fixed its craft and never its premise: a bright ribbon is PROJECTILE language
+# — the stroke is the object — and a card being carried over a table is not
+# emitting anything. It was also the one non-diegetic effect on a board made
+# entirely of wax, parchment, ink and candle stubs.
+#
+# What replaced it is physical and lives in Card2D, where the card's own pose
+# already is: the lift shadow now throws from the board's LAMP and lags behind
+# a fast card (`_update_lift_shadow`), and travel leaves unstretched MULTIPLES
+# of the card itself (`_maybe_drag_smear`). See Card2D's "THE BOARD HAS A LAMP"
+# block. Nothing in Combat drives the drag's look any more.
 var _presence_hp_fill: ColorRect = null       # antagonist health bar fill
 var _presence_bark: Label = null              # spoken-line caption
 var _presence_bark_scrim: Panel = null        # soft dark scrim behind the bark
 var _presence_bark_tween: Tween = null
+# How many barks of each kind this fight has spoken. See _pick_bark: the line is
+# derived from (combat seed, kind, this count), so it is stable per boot and
+# still varies when one kind speaks more than once.
+var _bark_counts: Dictionary = {}
 var _presence_react_tween: Tween = null
 var _presence_hp_tween: Tween = null
 
@@ -1206,12 +1500,15 @@ func _combat_seed() -> int:
 ## Deliberately NOT `_combat_ops`: a composition roll must be a pure function of
 ## (run seed × fight), never of how many gameplay draws happened to precede it.
 ## Riding the shared stream would mean any new `_combat_ops` call added upstream
-## silently re-deals every variant encounter in the game, and it would let the
-## PRESENTATION-side rebuild in `_resolve_enemy_portrait` shift the whole
-## gameplay stream behind it. Reseeding from `_combat_seed()` per roll costs one
-## RNG init and makes each call site independently reproducible — which is why
-## the portrait fallback can safely reuse SALT_DECK and get, by construction,
-## the exact lineup the setup path would have built.
+## silently re-deals every variant encounter in the game. Reseeding from
+## `_combat_seed()` per roll costs one RNG init and makes each call site
+## independently reproducible — so any second caller of SALT_DECK gets, by
+## construction, the exact lineup the setup path built.
+##
+## (Until 2026-09-17 `_resolve_enemy_portrait` was such a second caller: it
+## rebuilt `_enemy_deck` to read the lead creature's card art. That fallback is
+## gone — the plate borrows a portrait now, never a card — so `_setup_fight_state`
+## is once again the only place the lineup is dealt.)
 const ENC_ROLL_SALT_DECK := 1
 const ENC_ROLL_SALT_REINFORCEMENT := 2
 
@@ -1240,6 +1537,18 @@ func _trace(label: String) -> void:
 		float(Time.get_ticks_usec() - _trace_t0) / 1000.0, label])
 
 
+## A skirmish launch reached this scene with its connection already torn down.
+## Bail to the menu instead of building a fight: the alternative is the campaign
+## fallback, which opens whatever run the player last saved and starts damaging
+## it. Clears the stale mode on the way out so the NEXT campaign fight — the
+## legitimate one, entered from the chart — boots clean.
+func _abandoned_skirmish_to_menu() -> void:
+	push_warning("Combat: skirmish launch abandoned before the scene booted "
+		+ "(NetMatch.leave() landed inside the deferred swap) — returning to the menu.")
+	SkirmishState.combat_mode = SkirmishState.CombatMode.SOLO
+	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
+
+
 func _ready() -> void:
 	_trace_open = OS.get_cmdline_user_args().has("--combat_trace")
 	_trace_t0 = Time.get_ticks_usec()
@@ -1251,9 +1560,31 @@ func _ready() -> void:
 	# Decide combat mode FIRST — everything downstream branches on it. Gated on a
 	# live NetMatch connection so a stale SkirmishState left over from a previous
 	# skirmish can never make a campaign fight think it's networked.
+	#
+	# THE THIRD STATE (2026-09-15). That gate's `else` used to fall straight into
+	# SOLO, which treats two unrelated situations as one: a genuine campaign
+	# fight, and a SKIRMISH whose connection died between `_enter_combat_local`
+	# — which queues a DEFERRED change_scene_to_file — and this `_ready`.
+	# `NetMatch.leave()` clears every term of `is_connected_to_peer()`, and it sits
+	# one Esc away on every deck screen (`NetDeckBuilder._unhandled_input`) and on
+	# the BACK TO MENU button the draft raises on its OWN waiting screen, which is
+	# displayed inside exactly that window. The queued swap still landed, so a
+	# practice drill opened the player's LIVE CAMPAIGN RUN — encounter passive,
+	# reinforcements, reserves and all — and began spending its HP.
+	#
+	# `launch_armed` is the one-shot that separates them. Only a real launch sets
+	# it and reading spends it, so a stale `combat_mode` from an earlier skirmish
+	# still reads as SOLO and the campaign stays defended exactly as before.
+	var skirmish_launched: bool = SkirmishState.consume_launch_armed()
 	if SkirmishState.combat_mode != SkirmishState.CombatMode.SOLO \
 			and NetMatch.is_connected_to_peer():
 		combat_mode = SkirmishState.combat_mode   # int values align with CombatMode
+	elif skirmish_launched:
+		# An abandoned skirmish. Opening the campaign behind it would be silent
+		# damage to a save the player never chose to load, so leave instead —
+		# which is what every caller of `leave()` was asking for anyway.
+		_abandoned_skirmish_to_menu()
+		return
 	else:
 		combat_mode = CombatMode.SOLO
 	_combat_ops.reseed(_combat_seed())
@@ -1290,37 +1621,14 @@ func _ready() -> void:
 			"combat_act2", "combat_act2_b", "combat_act2_c", "combat_act2_d",
 			"combat_act3", "combat_act3_b", "combat_act3_c", "combat_act3_d"])
 	else:
-		match node_type:
-			"boss":
-				# Act 3 keeps its fixed heavyweight. Earlier keeps: each rival
-				# lord carries his own leitmotif; non-rival strongholds rotate
-				# the general boss book.
-				if act >= 3:
-					AudioBank.play_music("combat_boss_act3")
-				else:
-					match String(RunState.current_encounter_id):
-						"rival_stalwart":  # the Last Wall — a forge-march
-							AudioBank.play_music("combat_boss_b")
-						"rival_raider":  # the Grasswake — driving pursuit
-							AudioBank.play_music("combat_boss_c")
-						"rival_acolyte":  # the Owed — gothic choral rite
-							AudioBank.play_music("combat_boss_e")
-						"rival_pyromancer":  # the Lanternhall — cold spellwork
-							AudioBank.play_music("combat_boss_d")
-						"rival_kindler":  # the Everflame — building force
-							AudioBank.play_music("combat_boss")
-						_:
-							AudioBank.play_music_random(["combat_boss", "combat_boss_b", "combat_boss_c"])
-			"elite":
-				AudioBank.play_music_random(
-					["combat_elite", "combat_elite_b", "combat_elite_c"])
-			_:
-				var pool: Array
-				match act:
-					2: pool = ["combat_act2", "combat_act2_b", "combat_act2_c", "combat_act2_d"]
-					3: pool = ["combat_act3", "combat_act3_b", "combat_act3_c", "combat_act3_d"]
-					_: pool = ["combat", "combat_act1_b", "combat_act1_c", "combat_act1_d"]
-				AudioBank.play_music_random(pool)
+		# ONE FUNNEL for every fight class (2026-09-14). The book is decided by
+		# _combat_music_book, which is a pure function of the three inputs — so
+		# the probe can enumerate every fight in the game and check each one, and
+		# the layered-cue attempt applies uniformly instead of being wired into
+		# one arm and forgotten in the others (which is how elite and boss fights
+		# spent a pass playing flat while the plain fights were layered).
+		_play_combat_music(_combat_music_book(
+			node_type, act, String(RunState.current_encounter_id)))
 	_trace("music started")
 	# THE OPENING BUILD IS INTERLEAVED (2026-07-26). Board + ambient FX + grade +
 	# HUD + decks is ~340 ms of contiguous main-thread work, and run in one block
@@ -1873,9 +2181,16 @@ func _setup_fight_state() -> void:
 			var face_hp: int = EncounterDB.get_siege_face_hp(enc_id, t_act, t_type) \
 				if _siege_active else EncounterDB.get_face_hp(enc_id, t_act, t_type)
 			enemy_max_hp = _scale_enemy_hp(face_hp, t_type)
-			_encounter_passive = enc.get("passive_id", "")
+			# THE PASSIVE TRAVELS WITH THE FIGHT, AND IT HAS A RANGE. Face HP and
+			# the deck above are both scaled to `t_act` because this pool borrows
+			# across acts; the standing rule used to be read RAW from the authored
+			# entry, which is how an act-3 rule arrived on an act-1 deck. A rule is
+			# not a number, so it cannot be rescaled — past two acts it does not
+			# come at all. See EncounterDB.get_passive_for.
+			var _pv: Dictionary = EncounterDB.get_passive_for(enc_id, t_act)
+			_encounter_passive = String(_pv.get("passive_id", ""))
 			_encounter_name = enc.get("name", "")
-			_encounter_passive_desc = enc.get("passive_desc", "")
+			_encounter_passive_desc = String(_pv.get("passive_desc", ""))
 			_encounter_preamble = enc.get("preamble", "")
 			if _siege_active:
 				_siege_saved_passive = _encounter_passive
@@ -1997,6 +2312,28 @@ func _scale_enemy_hp(base: int, fight_type: String = "") -> int:
 	# on top of the global bump).
 	if RunState.asc_active(5) and fight_type == "boss":
 		scaled *= 1.25
+	# THE GENERAL'S NERF (2026-09-24, owner: "nerf the elites"), and it is the
+	# lever the comment at the top of this function already names: HP is the
+	# fight's LENGTH, and length is what kills here.
+	#
+	# MEASURED over 56 pilot fights, split by node type for the first time:
+	#
+	#   kind     fights  face HP  rounds  HP cost  win%  run-ending deaths
+	#   combat     35      13.5     5.8      5.7   89%         25%
+	#   elite      12      18.1     7.8     20.9   42%         58%
+	#
+	# A General cost 3.7x a plain hold and 21% of fights produced 58% of the
+	# deaths — an agent winning 89% of ordinary holds won 42% of these. That is
+	# a cliff, not a curve. Applied to FACE HP rather than to the hold's bodies
+	# because the extra two rounds are where the bill is run up: every round is
+	# another reinforcement and another tick of passive damage.
+	#
+	# 0.80 deliberately does NOT level it with a plain combat (18.1 -> ~14.5
+	# against a combat's 13.5 would erase the distinction). A General is meant
+	# to be the hard fight; it was meant to be a hard fight, not a coin toss.
+	if fight_type == "elite":
+		var a: int = clampi(RunState.get_act(), 1, ELITE_HP_SCALE_BY_ACT.size())
+		scaled *= ELITE_HP_SCALE_BY_ACT[a - 1]
 	return int(round(scaled))
 
 
@@ -2727,7 +3064,7 @@ func _look_top_pick(n: int) -> void:
 	_draw_card(entry)
 
 
-func cast_random_spell_free() -> void:
+func cast_random_spell_free(max_cost: int = 1, caster_name: String = "Chaos Imp") -> void:
 	# Chaos Imp: cast a random spell from the card pool for free.
 	# Auto-targets a random valid creature. Custom spells are allowed but a
 	# denylist excludes ones that hurt the player or run (Bloodletting, Black Contract),
@@ -2759,7 +3096,7 @@ func cast_random_spell_free() -> void:
 			continue
 		# Cap the roll at cheap spells (cost 1 or less): a 1-mana 1/2 free-casting a
 		# 4-cost Inferno was a pure high-roll. Keeps the chaos fun, not a blowout.
-		if d.get("type", "") == "spell" and not CardDB.is_curse(id) and int(d.get("cost", 0)) <= 1 \
+		if d.get("type", "") == "spell" and not CardDB.is_curse(id) and int(d.get("cost", 0)) <= max_cost \
 				and bool(_random_spell_context_for(d).get("ok", false)):
 			candidates.append(id)
 	if candidates.is_empty():
@@ -2770,10 +3107,10 @@ func cast_random_spell_free() -> void:
 		return
 	var target: Control = cast_ctx.get("target", null)
 	var tl: int = int(cast_ctx.get("lane", -1))
-	_show_info("Chaos Imp casts %s!" % data.get("name", "a spell"))
+	_show_info("%s casts %s!" % [caster_name, data.get("name", "a spell")])
 	# Show the actual card — a random cast used to be a mystery (you saw the
 	# effect but never which spell). Fire-and-forget; it doesn't gate the resolve.
-	_reveal_cast_card(data, "CHAOS IMP CASTS")
+	_reveal_cast_card(data, caster_name.to_upper() + " CASTS")
 	await _resolve_spell(data, target, tl)
 	# The Imp's cast is a real cast: it counts for the distinct-name set and the
 	# damage/non-damage test exactly like a card played from hand.
@@ -3383,6 +3720,11 @@ func _place_starting_board() -> void:
 	# refuses every body that arrived this round, and `_creature_hits_face`
 	# separately bars arriving Swift from the face.
 	_opening_muster_pending = true
+	# Planned HERE, and the position in this function is load-bearing: the
+	# encounter's structures and a siege fight's gates are seated immediately
+	# above, so the plan can see what ground is already taken. Planning earlier
+	# would claim slots that are about to be occupied by scenery.
+	_plan_opening_muster()
 
 
 func _run_opening_muster() -> void:
@@ -3421,6 +3763,44 @@ func _run_opening_muster() -> void:
 	_update_hud()
 
 
+## WHERE THE HOLD WILL STAND, decided BEFORE the player sets their line.
+##
+## This roll used to happen at the END of round 1, inside the dealer, and that is
+## the whole reason the round-1 telegraph could not say anything useful: the
+## answer did not exist yet, so the old mark covered every empty front lane and
+## was wrong on most fights. The owner's ruling was blunt and correct — "if it is
+## here it should show where they will go."
+##
+## MOVING IT IS BEHAVIOURALLY FREE, and the dealer's own comment is what proves
+## it rather than an argument: the blind formation reads NOTHING about the
+## player's board. Nothing the player does during round 1 feeds this, so rolling
+## it at the top of the round instead of the bottom produces the same result from
+## the same seed. What it is not free of is ORDERING — these draws now leave the
+## shared CombatOps stream earlier, so any later roll in round 1 shifts and
+## `tools/_probe_golden` wants a deliberate re-bless.
+##
+## AN EMPTY PLAN IS MEANINGFUL, not a failure: it is how a reactive opening tells
+## the forecast that there is nothing honest to show yet.
+func _plan_opening_muster() -> void:
+	_opening_muster_plan.clear()
+	_opening_muster_count = 0
+	if _is_net():
+		return
+	var enc = EncounterDB.get_encounter(_encounter_id) if _encounter_id != "" else {}
+	var enc_type = String(enc.get("type", "combat"))
+	_opening_muster_count = _opening_muster_size(
+		enc_type, int(enc.get("act", RunState.get_act())))
+	# THE INITIATIVE's reactive opening is DELIBERATELY LEFT UNPLANNED. GO FIRST
+	# means the hold answers the line you set, so the slots do not exist until you
+	# commit and a mark naming them would be inventing information the game does
+	# not have. The count is still rolled here, so both openings take it off the
+	# stream at the same point and only the SHAPE differs.
+	if _initiative == "field":
+		return
+	_opening_muster_plan = _resolve_opening_slots(
+		_build_blind_formation(enc_type, _opening_muster_count))
+
+
 func _deal_opening_muster() -> void:
 	## The hold's opening formation, dealt one body at a time on round 1.
 	## 4x4: scales starting count up a touch since there are more slots, and
@@ -3435,8 +3815,25 @@ func _deal_opening_muster() -> void:
 	## player's board.
 	var enc = EncounterDB.get_encounter(_encounter_id) if _encounter_id != "" else {}
 	var enc_type = enc.get("type", "combat")
-	var act = enc.get("act", RunState.get_act())
+	# THE PLAN WAS MADE AT SETUP — `_plan_opening_muster` — so that the round-1
+	# mark could SHOW it. Re-rolling here would deal a line the telegraph never
+	# promised, which is precisely the defect that mark was rebuilt to end.
+	#
+	# THE INITIATIVE is the one opening that cannot be planned, and that is the
+	# honest half of the whole design: GO FIRST means the hold ANSWERS your line
+	# through `_get_placement_priority_4x4`, which reads the board. Where they
+	# will stand genuinely does not exist until you have committed, so it is
+	# resolved here and the forecast is told to claim nothing.
+	if _initiative == "field":
+		await _seat_opening_line(_resolve_opening_slots(
+			_get_placement_priority_4x4(enc_type)), _opening_muster_count)
+		return
+	await _seat_opening_line(_opening_muster_plan, _opening_muster_count)
 
+
+## HOW MANY. Split from the shape because only the count is needed by BOTH
+## openings — the reactive one still has to know how many bodies it is seating.
+func _opening_muster_size(enc_type: String, act: int) -> int:
 	# A LANE IS ALWAYS LEFT OPEN (2026-07-27). The ceiling is LANES_PER_ROW - 1,
 	# not LANES_PER_ROW: with four lanes, a four-body opening seals every one of
 	# them, and a sealed front means the player's win condition — the lord's own
@@ -3445,21 +3842,50 @@ func _deal_opening_muster() -> void:
 	# 16 -> 14 across NINE rounds for exactly that reason: the board was contested
 	# the whole time and never once opened. The hold may bring a wall; it may not
 	# bring a lid.
+	# THE RAMP RELIEF (2026-09-16). One body off every opening, and it is the
+	# single most load-bearing number in the enemy half of the economy redesign.
+	#
+	# The formation below is dealt at the END of round 1 and fights in round 2's
+	# clash. So does whatever the player laid down. Under a FLAT 3 Command the
+	# player put ~2.9 cards on the table in round 1 and met an opening of 2-3 with
+	# a line of their own; under the ramp they have Command 1, field ONE card, and
+	# meet the same opening two bodies down — in the exact window
+	# docs/PILOT_DIFFICULTY_20260915.md measured the fight being decided
+	# ("ahead until round 1.4 of a 10.4-round fight"). The hold was never retuned
+	# for the opponent it now has.
+	#
+	# ONE named dial rather than four re-picked literals, because this is the
+	# number that must be re-read once the cost rescale lands
+	# (docs/ECONOMY_REDESIGN_20260916.md Phase 3): a rescaled curve changes how
+	# much ONE Command buys, and that is precisely what this compensates for.
+	# Floors are kept — an elite never opens on a single body, and a formation
+	# needs two to read as a shape at all.
 	var starting_count := 0
 	var open_lane_cap: int = maxi(1, LANES_PER_ROW - 1)
 	match enc_type:
 		"combat":
 			# Base count varies by act, then ±1 random for fight-to-fight variety.
-			var base: int = [2, 3, 3][act - 1]
+			var base: int = [2, 3, 3][act - 1] - OPENING_MUSTER_COMBAT_RELIEF
 			starting_count = clampi(base + _combat_ops.rangei(-1, 1), 1, open_lane_cap)
 		"elite":
 			# Elites stay scarier — never just 1 creature on the field.
-			starting_count = clampi((3 if act == 1 else 4) + _combat_ops.rangei(-1, 1),
+			starting_count = clampi(
+				(3 if act == 1 else 4) - OPENING_MUSTER_RAMP_RELIEF + _combat_ops.rangei(-1, 1),
 				2, open_lane_cap)
 		"boss":
-			starting_count = mini(3, open_lane_cap)
+			# The keep keeps its full line in act 3 — the climax is allowed to
+			# open on a wall, and by then the player's deck has compounded
+			# forges, drills, veterancy and relics against it.
+			starting_count = mini(3 if act >= 3 else 3 - OPENING_MUSTER_RAMP_RELIEF,
+				open_lane_cap)
 
-	var placed := 0
+	return starting_count
+
+
+## THE SHAPE — the blind formation roll, and the reason a round-1 telegraph can
+## exist at all. Nothing in here reads the player's board, so the answer is the
+## same whether it is rolled at the top of round 1 or the bottom of it.
+func _build_blind_formation(enc_type: String, starting_count: int) -> Array:
 	var fill_order: Array = []
 
 	# Pick a random formation. Each shapes the opening read differently:
@@ -3467,26 +3893,19 @@ func _deal_opening_muster() -> void:
 	#   packed  — clumped on one half of front (flanking pressure)
 	#   split   — half front, half back (ambush formation)
 	#   siege   — back row only (creates breathing room turn 1)
+	#
 	# THE INITIATIVE — the price of moving first (2026-07-30, reworked same day).
-	#
 	# The first version priced it with one extra body in reserve, and that was
-	# measurably the wrong price: this function does not read the player's board
-	# AT ALL (the formation below is a blind roll, deliberately — see the comment
-	# on it), so "letting them commit first" cost the player nothing whatever. The
-	# hold's deployment was byte-identical either way, which made LET THEM COME a
-	# strictly better option carrying information, a smaller line AND the Coin.
+	# measurably the wrong price: NOTHING HERE READS THE PLAYER'S BOARD, so
+	# "letting them commit first" cost the player nothing whatever — the hold's
+	# deployment was byte-identical either way, which made LET THEM COME strictly
+	# better, carrying information AND the Coin. The honest price for moving first
+	# is that the hold ANSWERS YOU, which is why GO FIRST skips this function
+	# entirely and is dealt by the reactive drill back in `_deal_opening_muster`.
 	#
-	# The honest price for moving first is that the hold ANSWERS YOU. When the
-	# player has taken the field, the opening is dealt by the same reactive
-	# column-targeting drill the hold uses on every later round — it aims at the
-	# player's strongest creature's column instead of choosing a shape blind. That
-	# is what "they saw your line before they committed" actually means, and it
-	# costs no new numbers.
-	if _initiative == "field":
-		fill_order.append_array(_get_placement_priority_4x4(enc_type))
-		await _deal_opening_fill(fill_order, starting_count)
-		return
-
+	# That same fact is what makes THIS opening showable a round in advance, and
+	# the pair is now a real asymmetry the player can see rather than a line in a
+	# modal: commit blind and you are read; answer the board and you cannot be.
 	var formations: Array[String] = ["spread", "packed", "split"]
 	# Siege only makes sense with >=2 creatures, and only for non-boss fights.
 	if starting_count >= 2 and enc_type != "boss":
@@ -3521,15 +3940,28 @@ func _deal_opening_muster() -> void:
 			for l in _evenly_spread_lanes(starting_count):
 				fill_order.append({"row": ROW_BACK, "lane": l})
 
-	await _deal_opening_fill(fill_order, starting_count)
+	return fill_order
 
 
-## Complete a partial fill_order and seat the line. Shared by the blind-formation
-## opening and by THE INITIATIVE's reactive one, so both inherit the same
-## overflow rules, the same defensive occupancy check and the same one-body-at-a-
-## time pacing — the two paths cannot drift into placing bodies differently.
-func _deal_opening_fill(fill_order: Array, starting_count: int) -> void:
-	var placed := 0
+## Complete a partial fill_order and turn it into THE EXACT SLOTS the hold will
+## occupy. Shared by the blind opening and by THE INITIATIVE's reactive one, so
+## both inherit the same overflow rules and the same occupancy check and cannot
+## drift into placing bodies differently.
+##
+## SPLIT OUT OF THE SEATING (2026-09-17) because the answer is now needed a whole
+## round before any body is placed — the round-1 mark shows these slots. Deciding
+## and doing in one function is what made the old telegraph guess.
+##
+## IT RETURNS THE WHOLE ORDERED PREFERENCE, NOT A TRUNCATED CLAIM, and the
+## difference was a live regression the muster-delay probe caught within an hour.
+## Capping here and then seating only the capped list means a slot that has become
+## occupied since the plan was made is simply DROPPED — the hold rolls three
+## bodies and seats two, silently. The code this replaced walked the full order
+## and stopped once it had placed enough, which is what makes it resilient to the
+## board moving between the plan and the deal. That property is kept; the claim
+## the telegraph shows is layered on top as the first `_opening_muster_count`
+## entries (`_opening_muster_claim`).
+func _resolve_opening_slots(fill_order: Array) -> Array:
 	# Fallback / overflow — fill remaining lanes if the caller's order runs short.
 	for l in range(LANES_PER_ROW):
 		if not _slot_in_list(fill_order, ROW_FRONT, l):
@@ -3540,14 +3972,40 @@ func _deal_opening_fill(fill_order: Array, starting_count: int) -> void:
 		if not _slot_in_list(fill_order, ROW_BACK, l):
 			fill_order.append({"row": ROW_BACK, "lane": l})
 
+	var out: Array = []
 	for slot in fill_order:
-		if placed >= starting_count:
+		# Never claim an already-occupied slot. On round 1 that means the
+		# encounter's own structures and a siege fight's gates, which are seated
+		# in `_setup_fight_state` before any of this runs.
+		if _row_array(true, slot.row)[slot.lane] != null:
+			continue
+		out.append(slot)
+	return out
+
+
+## The slots the telegraph actually claims: the front of the resolved order, as
+## many as the hold rolled and as many as its deck can pay for.
+##
+## THE DECK IS A CEILING, not a detail — the seating loop has always stopped on
+## an empty deck, so a claim that ignored it would mark four slots and fill two.
+func _opening_muster_claim() -> Array:
+	if _opening_muster_plan.is_empty():
+		return []
+	return _opening_muster_plan.slice(
+		0, mini(_opening_muster_count, _enemy_deck.size()))
+
+
+## Seat a resolved line, one body at a time. Walks the ORDER and stops once it has
+## placed `count` — never "place exactly these slots" — so a slot taken since the
+## plan was made costs the hold its position, not its body.
+func _seat_opening_line(order: Array, count: int) -> void:
+	var placed := 0
+	var starting_count: int = count
+	for slot in order:
+		if placed >= count:
 			break
 		if _enemy_deck.is_empty():
 			break
-		# Defensive: never overwrite an already-occupied slot. The fill_order
-		# is built without duplicates, but if any caller ever reuses this
-		# logic on a non-empty board we want stacking ruled out at the source.
 		if _row_array(true, slot.row)[slot.lane] != null:
 			continue
 		var card_data = _enemy_deck.pop_front()
@@ -3582,8 +4040,101 @@ func _evenly_spread_lanes(n: int) -> Array:
 #  ROUND FLOW
 # =====================================================================
 
+## THE FIGHT'S BOOK (2026-09-14) — which music this combat gets.
+##
+## Returns the ordered pool for this fight. **pool[0] is the ANCHOR**: it is the
+## key the layered-cue registry is looked up under, and the track played when the
+## book holds only one. Keeping this a pure function of (node_type, act,
+## encounter_id) is what lets `tools/_probe_music_layers.gd` enumerate every
+## fight in the game and assert each one's anchor resolves — a reachability test
+## that scraping the source for pool literals could only approximate.
+static func _combat_music_book(node_type: String, act: int, encounter_id: String) -> Array:
+	match node_type:
+		"boss":
+			# Act 3 keeps its fixed heavyweight. Earlier keeps: each rival lord
+			# carries his own leitmotif; non-rival strongholds rotate the
+			# general boss book.
+			if act >= 3:
+				return ["combat_boss_act3"]
+			match encounter_id:
+				"rival_stalwart": return ["combat_boss_b"]    # the Last Wall — a forge-march
+				"rival_raider": return ["combat_boss_c"]      # the Grasswake — driving pursuit
+				"rival_acolyte": return ["combat_boss_e"]     # the Owed — gothic choral rite
+				"rival_pyromancer": return ["combat_boss_d"]  # the Lanternhall — cold spellwork
+				"rival_kindler": return ["combat_boss"]       # the Everflame — building force
+				_: return ["combat_boss", "combat_boss_b", "combat_boss_c"]
+		"elite":
+			return ["combat_elite", "combat_elite_b", "combat_elite_c"]
+		_:
+			match act:
+				2: return ["combat_act2", "combat_act2_b", "combat_act2_c", "combat_act2_d"]
+				3: return ["combat_act3", "combat_act3_b", "combat_act3_c", "combat_act3_d"]
+				_: return ["combat", "combat_act1_b", "combat_act1_c", "combat_act1_d"]
+
+
+func _play_combat_music(book: Array) -> void:
+	## VERTICAL LAYERING first, flat book as the fallback. The layered cue is
+	## keyed on the anchor, so it is always the SAME PIECE OF MUSIC as the
+	## fallback — a missing stem set is inaudible as a change of plan rather than
+	## a different song.
+	if book.is_empty():
+		return
+	var anchor := String(book[0])
+	if AudioBank.layered_cue_available(anchor):
+		AudioBank.play_layered_cue(anchor)
+		_update_music_layers()
+	elif book.size() > 1:
+		AudioBank.play_music_random(book)
+	else:
+		AudioBank.play_music(anchor)
+
+
+## MUSIC INTENSITY (2026-09-14) — the arrangement answers the board.
+##
+## Layer indices are AudioBank.LAYERED_CUES order and index 0 is the bed, which
+## is never dropped. The escalation is TEXTURAL, not a volume ramp: bed to full
+## measures +1.24 LU, so what the player notices is percussion arriving and
+## voices arriving, not the music getting louder. That is deliberate — an
+## intensity system that just rides the fader reads as a bug in the mix.
+const MUSIC_LAYER_PERC := 1
+const MUSIC_LAYER_CHOIR := 2
+## Below these fractions the fight is being decided, one way or the other.
+const MUSIC_PRESSED_HERO := 0.40
+const MUSIC_PRESSED_FOE := 0.35
+
+
+func _music_intensity() -> int:
+	# Round 1 is the MUSTER: both lines deploy and neither swings. Nothing has
+	# happened yet, so the bed plays alone and the percussion arriving at the top
+	# of round 2 lands on the first round that can actually kill someone.
+	if round_number <= 1:
+		return 0
+	var pressed := false
+	if player_max_hp > 0 and float(player_hp) / float(player_max_hp) < MUSIC_PRESSED_HERO:
+		pressed = true
+	if enemy_max_hp > 0 and float(enemy_hp) / float(enemy_max_hp) < MUSIC_PRESSED_FOE:
+		pressed = true
+	return 2 if pressed else 1
+
+
+func _update_music_layers() -> void:
+	## Safe to call unconditionally. music_layer_count() is 0 for every ordinary
+	## (non-layered) cue, which is what keeps this a no-op in skirmish and in
+	## every act that has no stems — the guard is the AUDIO state, not a flag
+	## somebody has to remember to set.
+	if AudioBank == null or AudioBank.music_layer_count() == 0:
+		return
+	var i := _music_intensity()
+	AudioBank.set_music_layer(MUSIC_LAYER_PERC, i >= 1)
+	AudioBank.set_music_layer(MUSIC_LAYER_CHOIR, i >= 2)
+
+
 func _start_round() -> void:
 	round_number += 1
+	# Re-read the arrangement against the new round's board. set_music_layer
+	# drops a call that asks for the level a layer is already heading to, so
+	# asserting this every round costs nothing and never stutters a fade.
+	_update_music_layers()
 	# THE MUSTER: every body that survived to see a new round has formed up and
 	# may swing in the clash that ends it. Bodies that arrive later this round
 	# stay unready (CreatureInstance defaults the flag false), so they wait one
@@ -3821,7 +4372,31 @@ func _start_round() -> void:
 	# placement site because the escalation branch calls _enemy_place_creatures
 	# a SECOND time in the same round — a per-call reset would hand it a fresh
 	# budget and the stack would survive the cap.
-	_enemy_arrivals_this_round = 0
+	#
+	# IT CARRIES THE DEBT RATHER THAN WIPING IT, and that is what makes an
+	# END-of-round passive pay at all (2026-09-16, §3b's second half; found by
+	# tools/_probe_hold_budget.gd, not by eye). §3b's own argument — "the ordering
+	# supports this for free: _start_round zeroes the counter, THEN dispatches
+	# passives; the drip runs at end of round" — is true of the START-of-round
+	# dispatcher and false of the end-of-round one. That one fires in
+	# _post_combat_sequence AFTER _enemy_place_creatures has already spent, so its
+	# _spend_hold_hand() landed on a counter this line was about to zero: the
+	# spend was real, and had no consequence anywhere. Three fights leaked past
+	# the cap on that alone — the_bellringer, the_crone, the_black_tide.
+	#
+	# So the overspend becomes a DEBT against the next round's hand. That is not a
+	# new rule, it is the stated one applied to a summon that arrives after the
+	# drip has gone: the signature always fires, and the drip yields to it — here
+	# by being smaller NEXT round, because there is no "later this round" left to
+	# yield in. The hold still commits like a hand rather than a tap; it has simply
+	# drawn against the next one.
+	#
+	# _hold_round_cap is the ceiling the round that just ENDED actually ran under,
+	# surge included, RECORDED by _enemy_place_creatures rather than recomputed
+	# here — the spike condition is decided there out of state this line would have
+	# to restate, and a second spelling of that rule is how two copies drift.
+	_enemy_arrivals_this_round = maxi(0, _enemy_arrivals_this_round - _hold_round_cap)
+	_hold_round_cap = hold_arrivals_for_round(round_number)
 	# BEAT 1 — the body ticks have spoken (regen heals, wither decay, doom
 	# counters and their detonations, the army's rations). Let them land before
 	# the board passives start granting keywords on top. Skipped when they said
@@ -3916,12 +4491,21 @@ func _start_round() -> void:
 	# Escalation check
 	_check_escalation()
 
-	# Mana — unspent mana carries over (banked)
-	# 2026-07-25: the uncapped-banking branch went with Miser's Coffer. Command is
-	# a FIXED resource — the bank cap is now the same for everyone, always.
-	var bank_cap = mini(player_mana, MAX_BANKED_MANA)
+	# Command — what you do not spend is GONE, unless the run holds the relic that
+	# keeps it. See MAX_BANKED_MANA / _bank_cap for why the default moved to zero.
+	# `bank_cap_source` is last round's leftover, read BEFORE player_mana is
+	# reassigned below; the Powder Horn block further down is its other consumer.
+	var bank_cap_source: int = player_mana
+	var bank_cap = mini(bank_cap_source, _bank_cap())
 	var banked = bank_cap if round_number > 1 else 0
-	player_max_mana = _ctx_max_mana() + _bonus_mana_next_turn
+	# THE RAMP supplies this round's baseline; _ctx_max_mana() supplies whatever
+	# the RUN has added on top of the old flat 3 (boss relics, through
+	# RunState.get_boss_mana_bonus). Subtracting LEGACY_FLAT_COMMAND is what lets
+	# base_max_mana keep the meaning it has always had — so no save migrates, the
+	# net slot field is untouched, and not one of the ten conditional relic arms
+	# below has to change.
+	player_max_mana = command_for_round(round_number) \
+		+ (_ctx_max_mana() - LEGACY_FLAT_COMMAND) + _bonus_mana_next_turn
 	# Mutator: "Blessed" adds permanent max-mana for the duration of this fight.
 	player_max_mana += _mutator_max_mana_increase
 	# Marked One: +1 max mana for every round of this fight if the player took
@@ -3973,6 +4557,14 @@ func _start_round() -> void:
 	# round's own lesson, and _show_tutorial_tip is first-claim-wins, so on an
 	# exact-round rung it would simply be lost whenever the round's lesson won.
 	if round_number >= 2 and not _is_net():
+		# THE RAMP GOES FIRST, and the ordering is load-bearing rather than
+		# stylistic. `_show_tutorial_tip` is first-claim-wins, so two lessons
+		# armed on the same round are not both taught — one is simply lost. The
+		# growing resource outranks the discard verb: it is the rule the whole
+		# cost curve is built on, and a player who has not got it misreads every
+		# card in their hand. Both use `>= 2`, so whichever yields retries on
+		# the next round rather than being dropped.
+		_maybe_show_command_ramp_tutorial()
 		_maybe_show_dismiss_tutorial()
 	player_mana = player_max_mana + banked
 	# Marathoner's Sash partial: round 1 starts with 1 mana (the "ramp" trade
@@ -3986,16 +4578,32 @@ func _start_round() -> void:
 		player_mana += wk_n
 		_pulse_mana_label(wk_n, true)   # random gift: silent, it reads as a miscount
 		_relic_fired("warm_knucklebone")  # ...and the pulse alone never names the bones
-	# Tutorial: first round where mana actually carries over.
+	# Tutorial: first round where Command actually carries over. Only reachable
+	# with the carryover relic now, which is correct — the lesson teaches a rule
+	# the run has, at the moment it first pays.
 	if banked > 0:
 		_maybe_show_banking_tutorial()
-		if _has_relic("powder_horn"):
-			_powder_charges = mini(3, _powder_charges + 1)
-			_relic_fired("powder_horn")
-		# Mana Tide: banking arms a "next creature costs 1 less" charge.
+		# Mana Tide: banking arms a "next creature costs 1 less" charge. RETIRED
+		# (merged into sigil_of_hunger) — the arm stays so an old save folds.
 		if _has_relic("mana_tide"):
 			_mana_tide_creature_discount += int(RelicDB.get_relic("mana_tide").get("value", 1))
 			_relic_fired("mana_tide")
+	# POWDER HORN KEYS OFF UNSPENT COMMAND, NOT OFF BANKING (2026-09-16).
+	#
+	# It used to sit inside the branch above, which was free while everyone
+	# banked. Once carryover became a relic that branch became "and you also hold
+	# the OTHER relic", so the Horn would have paid out only in the runs that
+	# least needed it and read as broken in every other — the dead-reward class,
+	# arriving silently because nothing gates a hook against a live constituency.
+	#
+	# `player_mana` has not been reassigned yet at the bank line above, so what it
+	# held there is LAST round's leftover. Captured rather than re-derived, for
+	# the same reason `_hold_round_cap` is recorded instead of recomputed: two
+	# spellings of one quantity are two things to keep in step.
+	var unspent_last_round: int = bank_cap_source if round_number > 1 else 0
+	if unspent_last_round > 0 and _has_relic("powder_horn"):
+		_powder_charges = mini(3, _powder_charges + 1)
+		_relic_fired("powder_horn")
 
 	# Sword on Credit bills after every start-of-turn Command source has landed.
 	# The option picker blocks input while this fire-and-forget coroutine runs.
@@ -4021,41 +4629,51 @@ func _start_round() -> void:
 	# (Card2D.set_hand_target); spacing the spawns by ~80 ms makes the deal
 	# read as a real motion sequence instead of a single fanned poof.
 	# Per-turn draw. PERSISTENT_HAND switches the model (see the const header):
-	#   • persistent → REFILL up to a target (draw-to-N). Draw-boosting relics
-	#     raise the target; if the hand is already at/over target, draw_count = 0.
-	#   • fresh → the original fixed HAND_DRAW_PER_TURN (+ relic/mutator mods).
+	#   • persistent → round 1 deals the opening hand, every round after draws a
+	#     FIXED HAND_DRAW_PER_TURN and keeps whatever went unplayed.
+	#   • fresh → legacy: discard everything, draw a fixed count.
 	var draw_count: int
 	if PERSISTENT_HAND:
-		var target := HAND_REFILL_TARGET
+		# FIXED DRAW (2026-09-16 economy redesign). The draw-to-N target that
+		# stood here returned exactly as many cards as you had played, which is
+		# why throughput never moved off ~2.9 plays/turn whatever the resource
+		# said, why a draw effect was never a payoff, and why marking a card for
+		# discard cost nothing. A fixed draw makes the hand a real stock: it
+		# thickens while Command is small and empties once the ramp is large.
+		draw_count = HAND_REFILL_TARGET if round_number <= 1 else HAND_DRAW_PER_TURN
+		# Draw relics are flat ADDERS now. They used to raise a refill TARGET,
+		# which is a different quantity — raising a target you already sit at
+		# grants nothing, while +1 draw always grants a card.
 		if _has_relic("snecko_eye"):
-			target = int(RelicDB.get_relic("snecko_eye").get("value", 6))
-		# Deep Satchel: the refill target itself grows by 1 (5 → 6) — the old
-		# baseline-6 hand as a relic payoff. Net-safe: the refill runs per-peer.
+			# Phase-1 magnitude: the old arm SET the target to 6 (a 4→6 bump on
+			# the fresh-hand branch, +50%), so +1 on a base of 2 preserves the
+			# intent. Its RelicDB desc still names the old numbers — rework is
+			# Phase 4 of docs/ECONOMY_REDESIGN_20260916.md — now done. Its
+			# `value` used to be that old TARGET (6) and is the ADDER now, so the
+			# magnitude is read off the relic instead of restated here: the relic
+			# is in NET_RELIC_POOL and NetPlayerState mirrors this same arm on
+			# the host's side, which is exactly where a literal would diverge.
+			draw_count += int(RelicDB.get_relic("snecko_eye").get("value", 1))
 		if _has_relic("deep_satchel"):
-			target += int(RelicDB.get_relic("deep_satchel").get("value", 1))
+			draw_count += int(RelicDB.get_relic("deep_satchel").get("value", 1))
 		if _has_relic("couriers_bag") and round_number == 1:
-			target += 1
+			draw_count += 1
 			_relic_fired("couriers_bag")
 		if _has_relic("tome_of_many") and _ctx_deck().size() >= 20:
-			target += int(RelicDB.get_relic("tome_of_many").get("value", 2))
+			draw_count += int(RelicDB.get_relic("tome_of_many").get("value", 2))
 			_relic_fired("tome_of_many")
 		if _mutator_hand_draw_increase > 0:
-			target += _mutator_hand_draw_increase
+			draw_count += _mutator_hand_draw_increase
 		if _mutator_hand_draw_reduce > 0:
-			target = maxi(1, target - _mutator_hand_draw_reduce)
-		draw_count = maxi(0, target - _hand.size())
-		# Always deal at least one fresh card per turn. With the persistent hand,
-		# holding a full hand (5+ at the default target) refilled to 0 cards, so a
-		# turn could open with no new option — which felt dead. Guarantee a single
-		# draw instead. draw_one() still respects MAX_HAND_SIZE, so a hand already
-		# at 10 simply no-ops here (no overflow).
-		if draw_count == 0:
-			draw_count = 1
+			draw_count = maxi(1, draw_count - _mutator_hand_draw_reduce)
+		# Never a dead turn. draw_one() still respects MAX_HAND_SIZE, so a hand
+		# already at 10 simply no-ops (no overflow).
+		draw_count = maxi(1, draw_count)
 	else:
 		draw_count = HAND_DRAW_PER_TURN
 		# Snecko Eye: draws 6 instead of 4 (boss-relic trade for the cost chaos).
 		if _has_relic("snecko_eye"):
-			draw_count = int(RelicDB.get_relic("snecko_eye").get("value", 6))
+			draw_count += int(RelicDB.get_relic("snecko_eye").get("value", 1))
 		# Mutator: "Famine" trims the per-turn draw, never below 1 card.
 		if _mutator_hand_draw_reduce > 0:
 			draw_count = maxi(1, draw_count - _mutator_hand_draw_reduce)
@@ -4875,7 +5493,42 @@ func _do_combat() -> void:
 		await _resolve_swift_attack(lane_idx, ROW_BACK, true)
 	Card2D.defer_deaths = false
 
-	await _cleanup_dead_paced()
+	# ── SWIFT IS QUICK ATTACK, NOT "OPEN THE LANE" (2026-09-15, owner's call) ──
+	#
+	# Swift is meant to read as Legends of Runeterra's QUICK ATTACK: strike before
+	# the other body, and if you kill it, take nothing back. It was quietly doing a
+	# third job as well. The Swift phase used to SWEEP ITS DEAD right here, before
+	# the main clash — and the clash's face arm reads LIVE occupancy (deliberately;
+	# the 2026-07-28 blocker-economy pass removed a stale snapshot that let a dead
+	# blocker go on denying a column). So a Swift kill emptied the lane, and every
+	# OTHER attacker standing in it reached the face that same round. One creature
+	# was paid twice: once for its own damage, once for the damage it unblocked.
+	#
+	# LoR has no such effect, because a block there is 1:1 and locked — killing
+	# your blocker never lets a different attacker through. MTG says it outright
+	# (509.1h: a blocked creature stays blocked even if its blockers are removed).
+	#
+	# So the corpse HOLDS THE LANE for the rest of the round. It is barred from
+	# swinging (`has_attacked_this_turn`, which `can_attack()` already honours), so
+	# Swift still denies retaliation exactly as before — the body is spent, not
+	# revived. It is swept by the post-clash cleanup with everything else.
+	#
+	# DELIBERATELY NARROW: this changes ONLY deaths from the Swift pre-phase.
+	# Deaths inside the main clash still open the lane live, so the 2026-07-28
+	# rule — a 1-cost wall must not deny a whole column once it is dead — is
+	# untouched. Set SWIFT_HOLDS_THE_LANE false to restore the old behaviour.
+	var swift_slain: Array = []
+	if SWIFT_HOLDS_THE_LANE:
+		for c in _all_creatures_both_sides():
+			if c != null and is_instance_valid(c) and c.current_hp <= 0:
+				c.has_attacked_this_turn = true
+				swift_slain.append(c)
+
+	if swift_slain.is_empty():
+		await _cleanup_dead_paced()
+	else:
+		# Hold them standing through the clash instead of sweeping them now.
+		Card2D.defer_deaths = true
 
 	# CLASH caption (guarded) — show only if someone is still poised to strike.
 	# Snapshot the headcount so we can tell afterward whether anyone fell.
@@ -6471,11 +7124,14 @@ func _defection_steal_target(attacker: Control, defender: Control) -> String:
 			# three passives its own comment named. That lookup matches on
 			# `_encounter_passive` and has arms only for the six conditional grants
 			# (`dragon_lord_piercing`, `swamp_thorns`, `merc_piercing`,
-			# `nexus_rotation`, `stampede_charge`, `stone_armor`); `sentinel_stone`,
-			# `formation_lockstep` and `iron_warden_siege` fall through to `false`.
-			# Those three write into `card_data.keywords` directly, so they need the
-			# provenance stamp (`_mark_field_granted`) instead. Checking both keeps
-			# the guard correct whichever way a passive chooses to grant.
+			# `nexus_rotation`, `stampede_charge`, `stone_armor`); `formation_lockstep`
+			# and `iron_warden_siege` fall through to `false`. Those two write into
+			# `card_data.keywords` directly, so they need the provenance stamp
+			# (`_mark_field_granted`) instead. Checking both keeps the guard correct
+			# whichever way a passive chooses to grant. (`sentinel_stone` was a third
+			# until 2026-09-16, when its blanket Armored grant was removed — see
+			# _place_enemy_card. The guard needs no change for that; one fewer
+			# passive reaches it.)
 			if defender.is_opponent \
 					and (_is_field_granted(defender, kw) \
 						or _has_encounter_passive_keyword(defender, kw)):
@@ -7611,6 +8267,55 @@ func _mime_trigger_floop_from_hand() -> void:
 		_resolve_on_play_ability(candidate, slot.lane, false)
 
 
+func _wire_combat_picker_hitbox(hitbox: BaseButton, card: Control) -> void:
+	## The transparent selection button sits above the face. Forward its hover
+	## boundary to Card2D so that arrangement keeps the normal rules inspector,
+	## and name the face as the shared press-feedback target.
+	if hitbox == null or card == null \
+			or not is_instance_valid(hitbox) or not is_instance_valid(card):
+		return
+	hitbox.set_meta("_motion_feel_target", card)
+	var entered := Callable(card, "_on_mouse_entered")
+	var exited := Callable(card, "_on_mouse_exited")
+	if not hitbox.mouse_entered.is_connected(entered):
+		hitbox.mouse_entered.connect(entered)
+	if not hitbox.mouse_exited.is_connected(exited):
+		hitbox.mouse_exited.connect(exited)
+
+
+func _present_combat_card_picker(title: Control, pieces: Array,
+		hitboxes: Array = []) -> void:
+	## A picker is one complete tabletop tableau, never a loop of unrelated card
+	## entrances. Every piece already owns its final container slot before this is
+	## called; only alpha/scale move, so presenting the choice cannot reflow it.
+	## All pieces share one start time rather than staggering by implementation
+	## order. That keeps a ten-card hand legible and makes a three-card Discover
+	## read as one choice arriving, not three asynchronous loads.
+	if DisplayServer.get_name() == "headless":
+		return
+	var moving := UserSettings == null or not UserSettings.reduce_motion
+	var locked: Array[WeakRef] = []
+	if moving:
+		for hitbox in hitboxes:
+			var btn := hitbox as BaseButton
+			if btn != null and is_instance_valid(btn):
+				btn.disabled = true
+				locked.append(weakref(btn))
+	if title != null and is_instance_valid(title):
+		Motion.stamp_in(title, 0.02)
+	for piece in pieces:
+		var ctrl := piece as Control
+		if ctrl != null and is_instance_valid(ctrl):
+			Motion.deal_in(ctrl, 0.06)
+	if not locked.is_empty():
+		var unlock := func() -> void:
+			for button_ref in locked:
+				var live := button_ref.get_ref() as BaseButton
+				if live != null:
+					live.disabled = false
+		get_tree().create_timer(0.42).timeout.connect(unlock, CONNECT_ONE_SHOT)
+
+
 func _show_mime_picker(candidates: Array[Control]) -> Control:
 	## Mime end-of-turn picker: show the hand creatures-with-floop; the player
 	## clicks one (returned) or cancels (null). Modeled on _show_recycle_modal.
@@ -7649,26 +8354,31 @@ func _show_mime_picker(candidates: Array[Control]) -> Control:
 	col.add_child(grid)
 
 	var result := {"card": null, "cancelled": false}
+	var card_hitboxes: Array[BaseButton] = []
 	for hand_card in candidates:
 		var data: Dictionary = hand_card.card_data
 		var slot := Control.new()
-		slot.custom_minimum_size = Vector2(220, 300)
+		slot.custom_minimum_size = Vector2(225, 300)
 		grid.add_child(slot)
 		var display = CARD_SCENE.instantiate()
 		display.card_id = hand_card.card_id
 		display.card_data = data.duplicate(true)
 		display.is_on_battlefield = true
+		display.static_display = true
+		display.live_baked_mode = true
 		slot.add_child(display)
 		var btn := Button.new()
 		btn.flat = true
 		btn.focus_mode = Control.FOCUS_NONE
 		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_wire_combat_picker_hitbox(btn, display)
 		var captured: Control = hand_card
 		btn.pressed.connect(func():
 			result["card"] = captured
 			overlay.queue_free()
 		)
 		slot.add_child(btn)
+		card_hitboxes.append(btn)
 
 	var cancel := GameTheme.make_back_button("CANCEL", Vector2(160, 40))
 	cancel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
@@ -7678,7 +8388,10 @@ func _show_mime_picker(candidates: Array[Control]) -> Control:
 	)
 	col.add_child(cancel)
 
-	while result["card"] == null and not result["cancelled"] and is_instance_valid(overlay):
+	_present_combat_card_picker(title, [grid, cancel], card_hitboxes)
+
+	while result["card"] == null and not result["cancelled"] and is_instance_valid(overlay) \
+			and is_inside_tree():
 		await get_tree().process_frame
 	return result["card"]
 
@@ -8909,14 +9622,14 @@ func _apply_ally_death_passives(owner_is_enemy: bool, dead_card: Control = null)
 				c.update_stat_display()
 				spawn_floating_number(c.global_position \
 					+ Vector2(c.size.x * c.scale.x * 0.5, -10),
-					"+%d ATK" % ge_gain, Color(1.0, 0.62, 0.20), false)
+					"+%d ATK" % ge_gain, GameTheme.ATK_BUFFED, false)
 				_net_fx_text(c, "+%d ATK" % ge_gain, Color(1.0, 0.62, 0.20))
 			"grow_on_any_death":
 				c.current_atk += 1
 				c.update_stat_display()
 				spawn_floating_number(c.global_position \
 					+ Vector2(c.size.x * c.scale.x * 0.5, -10),
-					"+1 ATK", Color(1.0, 0.62, 0.20), false)
+					"+1 ATK", GameTheme.ATK_BUFFED, false)
 				_net_fx_text(c, "+1 ATK", Color(1.0, 0.62, 0.20))
 			"drain_on_ally_death":
 				_hurt_opposing_hero(owner_is_enemy, 2 if bool(c.card_data.get("is_upgraded", false)) else 1)
@@ -9436,6 +10149,23 @@ func _update_wave_telegraph() -> void:
 	# visible Tithe corpse-counter.
 	if _hud_layer == null:
 		return
+	# THE MUSTER ROUND IS NOT A WAVE, and this chip was calling it one.
+	# `_enemy_place_creatures` returns early while `_opening_muster_pending`, so
+	# the opening formation REPLACES the drip — but this instrument, which
+	# describes the drip, went on printing the schedule's round-1 entry. Commonly
+	# that is "0 / THE LINES HOLD", on the exact turn the hold's entire line is
+	# about to walk on: two readouts on one screen contradicting each other about
+	# the same fact, and the one that was right is the board.
+	#
+	# HIDDEN RATHER THAN CORRECTED, deliberately. The opening's size is rolled
+	# inside `_deal_opening_muster` off the seeded stream, so computing it here in
+	# order to print it would consume that draw and shift every subsequent roll in
+	# the fight — a telegraph is not worth desyncing the seed for, and the board
+	# mark already carries the only claim that can honestly be made.
+	if _opening_muster_pending and not _is_net():
+		if _wave_chip != null:
+			_wave_chip.visible = false
+		return
 	var n: int = _next_wave_count()
 	if n < 0:
 		if _wave_chip != null:
@@ -9700,6 +10430,10 @@ var _escalation_banner_shown: bool = false
 # count/formation roll happens at muster time and a legacy save mid-fight (which
 # never carried this flag) correctly defaults to "already mustered".
 var _opening_muster_pending: bool = false
+## The hold's opening, decided at setup so the round-1 mark can show it. EMPTY on
+## a reactive (GO FIRST) opening — see `_plan_opening_muster`.
+var _opening_muster_plan: Array = []
+var _opening_muster_count: int = 0
 ## THE INITIATIVE (2026-07-30). "" on every ordinary hold, which is what keeps
 ## this change surgical: an unchosen fight opens EXACTLY as it did before.
 ##   "field"   — the player moves first against an empty field, and the hold
@@ -9712,9 +10446,50 @@ var _opening_muster_pending: bool = false
 var _initiative: String = ""
 ## Bodies the hold has committed THIS round, across every placement source.
 ## Reset in _start_round; spent in _enemy_place_creatures against
-## ENEMY_ARRIVALS_PER_ROUND / _SURGE. The opening muster is exempt — it is the
+## hold_arrivals_for_round() / _SURGE_BONUS. The opening muster is exempt — it is the
 ## formation, not reinforcement, and returns before the budget is consulted.
 var _enemy_arrivals_this_round: int = 0
+## The ceiling the CURRENT round is running under — hold_arrivals_for_round() plus
+## the surge bonus when this round spiked. Written by _enemy_place_creatures (the
+## one place the spike is decided) and read by _start_round to carry an end-of-round
+## passive's overspend into the next round's hand. Derived per round and never
+## saved: _start_round re-seeds it before anything can read a stale value, and the
+## opening muster returns before the budget is consulted at all. Seeded to the
+## round-1 allowance so the very first carry has a real ceiling to subtract rather
+## than a zero, which would bill round 1's formation to round 2.
+var _hold_round_cap: int = 1
+
+
+## Spend one body out of THE HOLD'S HAND. The ONE spelling of the increment —
+## every source that commits a body this round calls this and nothing writes
+## `_enemy_arrivals_this_round` directly.
+##
+## IT USED TO BE SPENT IN EXACTLY ONE PLACE, AND THAT WAS THE BUG (fixed
+## 2026-09-16, docs/ECONOMY_REDESIGN_20260916.md §3b). The counter was
+## incremented only by the reinforcement drip, while bodies ALSO arrive from the
+## encounter passive — twelve fights summon that way (`bandit_camp`,
+## `haunted_crypt`, `necromancer_tower`, `the_bellringer`, `the_crone`,
+## `the_black_tide`, the rival/amalgam kits). So the const's own header,
+## "Bodies the enemy may commit in ONE round, across every source", was never
+## true, and a summoning hold deployed its passive AND its full drip every round.
+## Survivable at a flat 3 Command; under the ramp it is the difference between a
+## fight and a flood. `bandit_camp` is the visible symptom — it summons 1/round
+## from round 2 and 2/round from round 4 on top of the drip, and it is the ONLY
+## act-1 plain combat that loses in the soak (14 rounds, against 10W/1L for the
+## rest of act 1).
+##
+## THE PASSIVE IS NEVER REFUSED, AND THAT IS THE WHOLE DESIGN. A clamp here would
+## be the wrong fix twice over: it would silently delete an authored signature,
+## and a passive that raises its banner and then summons nothing is precisely the
+## silent-refusal class `tools/_probe_silent_refusal.gd` exists for. Instead the
+## passive always fires and SPENDS, and the generic drip — which runs later in
+## the same round and reads what is left — yields to it. The hold commits like a
+## hand, not like a tap; the signature is simply what it spends the hand ON.
+##
+## The ordering this relies on is already free: `_start_round` zeroes the counter,
+## THEN dispatches passives; `_enemy_place_creatures` runs at the end of the round.
+func _spend_hold_hand() -> void:
+	_enemy_arrivals_this_round += 1
 # Bodies that arrived in the post-clash reinforcement window and must skip
 # exactly one _start_round sweep so they pay the same muster delay a played
 # card pays. Filled by the census/diff in _post_combat_sequence, drained by
@@ -9771,7 +10546,32 @@ func _enemy_place_creatures() -> void:
 				"The hold is half-broken — extra enemies arrive", Color(1.0, 0.45, 0.20))
 	elif round_number <= 2:
 		max_place = 1
-	elif enc_type == "elite" or enc_type == "boss":
+	elif enc_type == "elite":
+		# A GENERAL MAY NOT REFILL FASTER THAN THE PLAYER CAN CLEAR (2026-09-26).
+		#
+		# Elite shared the boss's 2 here. Measured over three arms, that is exactly
+		# the player's own act-1 kill rate, and matching it produces a STALEMATE the
+		# hero loses on the clock rather than a hard fight:
+		#
+		#   The Long Drumming, enemy board strength by round, after its deck was cut
+		#     r5 37.0   r6 44.1   r7 39.7   r8 38.0   r9 32.7   r10 35.3
+		#     player board reaches 20 and the foe's 14 HP face takes 10+ rounds
+		#
+		# The board never clears, and `_clash_lane_pass` only reaches the face
+		# through a column with BOTH enemy rows empty — so the win condition is
+		# unreachable while the drip keeps pace. This is the §3c asymmetry at its
+		# sharpest: the player pays Command per body and the hold pays nothing, so
+		# "same arrivals per round" is not a fair race, it is a losing one.
+		#
+		# A General keeps what makes it a General — its authored lineup, its
+		# passive, its reinforcement pool and a full opening formation. What it
+		# loses is the ability to replace losses as fast as they are inflicted.
+		# FLAT, deliberately — a late ramp back to 2 was built and measured and was
+		# worse on every axis, because an act-1 General runs 7.2 rounds and there is
+		# no round late enough to be a clock that is not also the round the fight is
+		# decided on. See the constant's own block.
+		max_place = ELITE_ARRIVALS_PER_ROUND
+	elif enc_type == "boss":
 		max_place = 2
 	else:
 		max_place = 1 if not _combat_ops.chance(1.0 / ENEMY_FLOOP_CHANCE_DENOM) else 2
@@ -9793,11 +10593,42 @@ func _enemy_place_creatures() -> void:
 	# escalation branch calls this function a second time in the same round, so
 	# the counter (not a per-call cap) is what actually stops the stack.
 	# A licensed spike — the escalation commit, the Everflame surge, an outrider
-	# round — may reach ENEMY_ARRIVALS_SURGE; everything else is held to
-	# ENEMY_ARRIVALS_PER_ROUND, the player's own ceiling.
+	# round — is worth HOLD_ARRIVALS_SURGE_BONUS extra bodies ON TOP of the round's
+	# ramped allowance; everything else is held to hold_arrivals_for_round(), the
+	# player's own ceiling. The ramp is what keeps a round-2 surge from being
+	# handed the round-6 allowance (see the const block).
+	# A GENERAL IS BOSS TIER, SO IT TAKES THE BOSS'S EXEMPTIONS (2026-09-26).
+	#
+	# This read `enc_type != "boss"`, which made a General take the PLAIN COMBAT's
+	# escalation surge on top of the BOSS's `max_place = 2` decided above — the
+	# union of two tiers rather than either one. Measured over 12 seeds / 5 heroes,
+	# from round 4 onward:
+	#
+	#   combat   max_place ~1.06, cap 3   -> ~1.06 bodies/round
+	#   boss     max_place 2,     cap 2   ->   2    bodies/round
+	#   elite    max_place 2,     cap 3   ->  up to 3 (the escalation branch calls
+	#                                        this function a second time in a round)
+	#
+	# **A General out-deployed a lord's keep by 50%**, and the result is the tier
+	# table: act-1 Generals 39% win at 22.7 hero HP against act-1 KEEPS at 85% and
+	# 5.8 HP. It is not face HP (an elite face is 13.9 against a boss's 19.4) and it
+	# is not length (7.2 rounds against 8.6) — it is the deployment RATE, 3.15 hero
+	# HP per round against a keep's 0.68. See PLAYTEST_MEASUREMENT_20260919.md §25.
+	#
+	# `_pursuit_tier()` already returns 0 for anything that is not a plain combat,
+	# so the pursuit term was never an elite's — this term was the only one that
+	# reached it, and it reached it by not naming it.
 	var spike: bool = surge_now or pt >= 1 \
-		or (enc_type != "boss" and round_number >= _esc_round(ESCALATION_REINFORCE_ROUND))
-	var round_cap: int = ENEMY_ARRIVALS_SURGE if spike else ENEMY_ARRIVALS_PER_ROUND
+		or (enc_type == "combat" and round_number >= _esc_round(ESCALATION_REINFORCE_ROUND))
+	var round_cap: int = hold_arrivals_for_round(round_number)
+	if spike:
+		round_cap += HOLD_ARRIVALS_SURGE_BONUS
+	# Record what THIS round was actually allowed, surge included, so _start_round
+	# can carry an end-of-round passive's overspend as a debt without restating the
+	# spike rule decided two lines up. Written on every pass: the escalation branch
+	# calls this function a second time in the same round and can raise the ceiling,
+	# and the debt must be measured against the ceiling that really applied.
+	_hold_round_cap = round_cap
 	var budget: int = maxi(0, round_cap - _enemy_arrivals_this_round)
 	max_place = mini(max_place, budget)
 	if max_place <= 0:
@@ -9819,6 +10650,12 @@ func _enemy_place_creatures() -> void:
 			continue
 		if _lane_is_salted(int(slot.lane)):
 			continue
+		# Checked HERE and not while building slot_priority: that list is built
+		# once and consumed as bodies land, so a build-time test would read a
+		# stale board and let the second body of a wave close the column the
+		# first one left. Same reason the occupancy check above is live.
+		if _hold_would_seal_board(int(slot.row), int(slot.lane)):
+			continue
 		if _enemy_deck.is_empty():
 			if not _reinforcement.is_empty():
 				var rf: Dictionary = _reinforcement.duplicate(true)
@@ -9837,7 +10674,7 @@ func _enemy_place_creatures() -> void:
 		await _announce_enemy_muster(card_data)
 		_place_enemy_card(card_data, slot.lane, slot.row, true)
 		placed += 1
-		_enemy_arrivals_this_round += 1   # spends the hold's per-round hand
+		_spend_hold_hand()   # spends the hold's per-round hand
 		if AudioBank != null:
 			AudioBank.play_sfx("card_play", 0.05, -3.0, 0.96)
 		# Deal a multi-body wave one card at a time (windowed only) so each
@@ -9966,6 +10803,13 @@ func _place_enemy_card(data: Dictionary, lane_idx: int, row: int = ROW_FRONT,
 	card.current_lane = lane_idx
 	card.current_row = row
 	_row_array(true, row)[lane_idx] = card
+	# The body is seated, so the arrival is real (the salted/closed redirect above
+	# either found a seat or returned). If the ENCOUNTER PASSIVE is what put it
+	# here, it spends the hold's hand — see _spend_hold_hand. The drip spends its
+	# own, explicitly, and never runs while a passive is speaking, so the two
+	# cannot double-count.
+	if _hold_rule_deploying > 0:
+		_spend_hold_hand()
 	# THE LOGICAL SEAT IS DONE ABOVE; THE SLOT IS THE VISUAL HALF. Read it
 	# defensively rather than indexing blind: `lane_idx` can have been REWRITTEN
 	# by the salted/closed-lane redirect further up, and the slot arrays are built
@@ -10036,25 +10880,23 @@ func _place_enemy_card(data: Dictionary, lane_idx: int, row: int = ROW_FRONT,
 	# so the freshly-placed card shows its modified numbers from frame one.
 	if not _is_fortification(card):
 		_mutator_apply_to_enemy(card)
-	# Encounter passives that grant a keyword to the WHOLE enemy line inject it
-	# onto the card here (Card2D.take_damage / the strike paths read the card's
-	# own keyword list — the encounter-keyword lookup is NOT consulted for
-	# Armored). sentinel_stone (The Tooth-Stones): every enemy is living stone.
-	# PROVENANCE (2026-07-29). `keywords` records THAT this body is Armored but not
-	# WHO made it so, and several readers cannot tell a field rule from a printed
-	# keyword — Defection loots it, Mirror Knight copies it, a deserter carries it
-	# across. `grant_field_keyword` does the SAME keywords append (it must:
-	# Card2D.has_keyword is the only reader of Armored for damage, the forecast and
-	# the overkill maths, so relocating the write would silently strip Armored from
-	# this fight) and files a receipt beside it.
+	# NO PLACEMENT-TIME FIELD GRANT LIVES HERE ANY MORE (2026-09-16).
+	# `sentinel_stone` was the only one: it blanket-Armored the Tooth-Stones line as
+	# each body landed. It is gone because a flat -1 is not a difficulty dial against
+	# this pool — of the 69 draftable creatures at cost <= 3, 62% have ATK <= 1
+	# (Armored nullifies them) and 96% have ATK <= 2 (it halves them), so the grant
+	# read as a check for one answer rather than a harder fight. See the encounter's
+	# own header in EncounterDB for the measurements. The deck still PRINTS Armored
+	# where it belongs, which needs nothing from this site.
 	#
-	# It returns false — and files nothing — for a body that already PRINTS Armored,
-	# which is the point: most of the Tooth-Stones deck prints it, and the Captain
-	# should still be able to loot a Granite Guard's own keyword. Only the LENT ones
-	# are protected. Shared with EncounterEffects so all three field grants
-	# (sentinel_stone here, iron_warden_siege and lockstep there) use one mechanism.
-	if not _is_fortification(card) and _encounter_passive == "sentinel_stone":
-		EncounterEffects.grant_field_keyword(card, "armored")
+	# THE MECHANISM IS STILL LIVE AND STILL CORRECT — `iron_warden_siege` and
+	# `formation_lockstep` grant through `EncounterEffects.grant_field_keyword`, and
+	# its provenance rules are documented there. Before adding a grant back here,
+	# know the two contracts it keeps: the write must go into `card_data.keywords`
+	# (Card2D.has_keyword is the ONLY reader of Armored for damage, the lane forecast
+	# and the overkill arithmetic, so moving it to a mirror silently deletes the
+	# keyword while looking cosmetic), and it must file a receipt so Defection,
+	# Mirror Knight and a deserter can tell a LENT keyword from a printed one.
 	card.update_stat_display()
 	if not _is_fortification(card):
 		KeywordEffects.dispatch_on_enter(card, lane_idx, true, self)
@@ -10553,7 +11395,8 @@ func _rushable_pause(duration: float) -> bool:
 	if UserSettings != null and UserSettings.anim_speed > 0.01:
 		scaled = duration / UserSettings.anim_speed
 	var deadline := Time.get_ticks_msec() + int(maxf(scaled, 0.0) * 1000.0)
-	while Time.get_ticks_msec() < deadline:
+	while Time.get_ticks_msec() < deadline \
+			and is_inside_tree():
 		await get_tree().process_frame
 		if _rush_requested():
 			return true
@@ -10594,7 +11437,8 @@ func _await_cinematic(tw: Tween, skip_surface: Control,
 		# it, which made it strictly weaker than the path it was shortcutting.
 		var done := {"v": false}
 		tw.finished.connect(func() -> void: done["v"] = true)
-		while not done["v"]:
+		while not done["v"] \
+				and is_inside_tree():
 			await get_tree().process_frame
 			if not tw.is_valid():
 				return
@@ -10608,7 +11452,8 @@ func _await_cinematic(tw: Tween, skip_surface: Control,
 	# A short guard so the very click that COMMITTED to this fight cannot also
 	# dismiss the banner it just opened.
 	var opened := Time.get_ticks_msec()
-	while not state["done"]:
+	while not state["done"] \
+			and is_inside_tree():
 		await get_tree().process_frame
 		if not tw.is_valid():
 			return
@@ -12314,7 +13159,7 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				c.update_stat_display()
 				spawn_floating_number(c.global_position \
 					+ Vector2(c.size.x * c.scale.x * 0.5, -10),
-					"+%d ATK" % kc_g, Color(1.0, 0.82, 0.4), false)
+					"+%d ATK" % kc_g, GameTheme.ATK_BUFFED, false)
 		"mass_grave":
 			# Vengeance clear: 1 per friendly fallen this fight (same counter
 			# Oathkeeper / Last Rites / Bloodletting read).
@@ -12671,7 +13516,11 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 			# creatures killed by the blast, so it rewards finishing the burn.
 			var wf_targets: Array = _all_enemy_creatures()
 			var wf_kills: int = 0
-			var wf_dmg: int = 2 + spell_dmg_bonus + plus_dmg
+			# 3, not 2: this is the pool's ONLY cost-5 spell and at 2 it was
+			# strictly worse than Inferno one Command later (4 to all + 4 to
+			# the face). A tier holding one card must at least be worth its
+			# rung on the ramp.
+			var wf_dmg: int = 3 + spell_dmg_bonus + plus_dmg
 			for c in wf_targets:
 				if c != null and is_instance_valid(c):
 					_vfx_fire(c.get_global_rect().get_center())
@@ -12684,6 +13533,62 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 				if _enemy_hp_label != null:
 					_vfx_fire(_enemy_hp_label.get_global_rect().get_center())
 				damage_enemy_hero(wf_kills)
+		"powder_store":
+			# The powder store goes up and takes the orders with it: three free
+			# casts, each a REAL cast that reveals its own card, so the player can
+			# read what happened. The roll is capped at cost 4, which is what stops
+			# the store finding ITSELF (cost 5) and recursing; Apocalypse is already
+			# on cast_random_spell_free's denylist for wiping your own line.
+			var ps_casts: int = 4 if is_plus else 3
+			for _ps_i in ps_casts:
+				await cast_random_spell_free(4, "The Powder Store")
+		"case_shot":
+			# Grapeshot: the load is fired as ONE shot and scatters. Every pellet
+			# re-rolls a LIVING target, so a body that dies mid-volley stops
+			# soaking and the rest of the load moves on — which is what makes a
+			# wide enemy line the wrong thing to present to it.
+			var cs_shots: int = 8 + spell_dmg_bonus + plus_dmg
+			for _cs_i in cs_shots:
+				var cs_pool: Array = []
+				for cs_c in _all_enemy_creatures():
+					if cs_c != null and is_instance_valid(cs_c) and cs_c.current_hp > 0:
+						cs_pool.append(cs_c)
+				if cs_pool.is_empty():
+					break
+				var cs_victim = _combat_ops.pick(cs_pool)
+				cs_victim.take_damage(1)
+				_vfx_fire(cs_victim.get_global_rect().get_center())
+			_cleanup_dead()
+		"press_gang":
+			# Rabble pressed into the line. Bodies are rolled from what a player
+			# could actually be OFFERED and capped at cost 3, so the gang cannot
+			# hand over a bomb nobody paid for. Each one is a TOKEN: the deck it
+			# came from is untouched and its death files into no pile.
+			var pg_count: int = 4 if is_plus else 3
+			var pg_pool: Array = []
+			for pg_id in CardDB.CARD_POOL:
+				var pg_d: Dictionary = CardDB.CARD_POOL[pg_id]
+				if String(pg_d.get("type", "")) != "creature":
+					continue
+				if not bool(pg_d.get("draftable", true)):
+					continue
+				if not (String(pg_d.get("rarity", "")) in ["common", "uncommon", "rare"]):
+					continue
+				if int(pg_d.get("cost", 0)) > 3:
+					continue
+				pg_pool.append(String(pg_id))
+			if not pg_pool.is_empty():
+				for pg_row in [ROW_FRONT, ROW_BACK]:
+					for pg_lane in range(LANES_PER_ROW):
+						if pg_count <= 0:
+							break
+						if _row_array(false, pg_row)[pg_lane] != null:
+							continue
+						var pg_data: Dictionary = CardDB.get_card_data(
+							String(_combat_ops.pick(pg_pool)))
+						_spawn_player_body(pg_data, pg_lane, pg_row,
+							int(pg_data.get("atk", 1)), int(pg_data.get("hp", 1)))
+						pg_count -= 1
 		"censer_light":
 			# Censer Light (2026-07-13 rework; retribed to Dead 2026-07-15): the
 			# smoke settles on the whole order — every friendly DEAD gains
@@ -12896,10 +13801,20 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 			# on a creature that PRINTS Poison stripped that printed keyword for
 			# good when the round ended. Every temp_armored / temp_thorns grant
 			# site already guards this way; this one didn't.
+			# THE FORGE MAKES IT STICK (2026-09-16). Venom Tip's "+" used to be
+			# "cost -1" and nothing else, which the rescaled 1-6 curve turned into
+			# no upgrade at all — a cost-1 spell cannot be discounted, so the
+			# forged card was byte-identical to the base and advertised a bonus it
+			# did not carry. Reading `is_upgraded` in the resolver is the house
+			# pattern for exactly this (The Long Roll pays 7/16 forged vs 5/12
+			# base entirely that way). Forged, the venom holds for the FIGHT: the
+			# keyword is granted without raising temp_poison, so end-of-round
+			# cleanup has no erase order to obey and leaves it on.
 			if target != null:
 				if not target.card_data.keywords.has("poison"):
 					target.card_data.keywords.append("poison")
-					target.state.temp_poison = true
+					if not bool(data.get("is_upgraded", false)):
+						target.state.temp_poison = true
 				target.update_stat_display()
 				spawn_keyword_callout_kw(target, "poison")
 		"reanimate":
@@ -12972,17 +13887,23 @@ func _resolve_custom_spell(spell_id: String, target: Control, _target_lane: int,
 					if opp.has_method("_spawn_keyword_chip"):
 						opp._spawn_keyword_chip("FROZEN", Color(0.55, 0.80, 1.0))
 		"ricochet":
-			var rc_back_dmg: int = 2 + spell_dmg_bonus + plus_dmg
-			var rc_fallback_dmg: int = 1 + spell_dmg_bonus + plus_dmg
-			var rc_hit_any: bool = false
+			# Crossfire rakes the row it can reach. A volley that found no back
+			# row used to clip ONE random body for half damage — a misfire the
+			# player could neither predict nor prevent, so the card read as
+			# broken exactly when the hold had no back line. It now sweeps the
+			# FRONT instead: the volley always does its whole job, and the
+			# hold's formation decides which row pays.
+			var rc_dmg: int = 2 + spell_dmg_bonus + plus_dmg
+			var rc_row: Array = []
 			for enemy in _enemy_back:
 				if enemy != null and is_instance_valid(enemy) and enemy.current_hp > 0:
-					enemy.take_damage(rc_back_dmg)
-					rc_hit_any = true
-			if not rc_hit_any:
-				var rc_pool: Array = _all_enemy_creatures()
-				if rc_pool.size() > 0:
-					_combat_ops.pick(rc_pool).take_damage(rc_fallback_dmg)
+					rc_row.append(enemy)
+			if rc_row.is_empty():
+				for enemy in _enemy_field:
+					if enemy != null and is_instance_valid(enemy) and enemy.current_hp > 0:
+						rc_row.append(enemy)
+			for enemy in rc_row:
+				enemy.take_damage(rc_dmg)
 			_cleanup_dead()
 		"gallows_writ":
 			if _target_lane >= 0 and _target_lane < LANES_PER_ROW:
@@ -13710,7 +14631,7 @@ func _apply_frenzy(target: Control, is_plus: bool) -> void:
 	target.update_stat_display()
 	spawn_floating_number(target.global_position \
 		+ Vector2(target.size.x * target.scale.x * 0.5, -10),
-		"+%d ATK" % atk_gain, Color(1.0, 0.48, 0.22), false)
+		"+%d ATK" % atk_gain, GameTheme.ATK_BUFFED, false)
 	if target.has_keyword("doom"):
 		_detonate_doom(target)
 		return
@@ -14153,6 +15074,11 @@ func _play_potion_drink_fx(pid: String, target: Control) -> void:
 	var to: Vector2 = from + Vector2(46.0, -110.0)
 	if target != null and is_instance_valid(target):
 		to = _card_center(target)
+	elif _player_portrait_rect != null and is_instance_valid(_player_portrait_rect):
+		# Untargeted draughts fly to the hero's OWN mouth, not a guessed offset
+		# above the belt — the fixed +46/-110 guess landed mid-table beside the
+		# portrait on some layouts, so the bottle splashed on nobody.
+		to = _player_portrait_rect.get_global_rect().get_center()
 	if icon != null:
 		var b := TextureRect.new()
 		b.texture = icon
@@ -14184,9 +15110,26 @@ func _play_potion_drink_fx(pid: String, target: Control) -> void:
 		tw.tween_property(b, "modulate:a", 0.0,
 			UserSettings.anim_time(0.18)).set_ease(Tween.EASE_IN)
 		tw.tween_callback(b.queue_free)
-	# The splash lands on the tip-back beat.
+	# The splash lands on the tip-back beat — and for an untargeted draught the
+	# PORTRAIT swallows: the hero's plate takes a quick colour wash of the
+	# potion itself and a small settle-punch, so the drink ends on the drinker
+	# instead of on empty table. Mirrors show_heal_number's 0.08-out / 0.25-back
+	# wash timing; Motion.punch gates Reduce Motion internally.
 	get_tree().create_timer(UserSettings.anim_time(0.24)).timeout.connect(func():
-		spawn_spell_burst(to, col))
+		spawn_spell_burst(to, col)
+		var portrait := _player_portrait_rect
+		if portrait != null and is_instance_valid(portrait):
+			if _portrait_gulp_tween != null and _portrait_gulp_tween.is_valid():
+				_portrait_gulp_tween.kill()
+			portrait.pivot_offset = portrait.size * 0.5
+			Motion.punch(portrait, 1.05)
+			var base := portrait.modulate
+			_portrait_gulp_tween = portrait.create_tween()
+			_portrait_gulp_tween.tween_property(portrait, "modulate",
+				Color(col.r, col.g, col.b, base.a).lerp(base, 0.30),
+				UserSettings.anim_time(0.08))
+			_portrait_gulp_tween.tween_property(portrait, "modulate", base,
+				UserSettings.anim_time(0.25)))
 
 
 func _dregs_bottle_throw() -> void:
@@ -14772,44 +15715,85 @@ func _finish_first_battle_tutorial() -> void:
 	UserSettings.mark_first_battle_tutorial_complete()
 
 
+## THE MUSTER MARK — "their ground is claimed, not empty." See MusterHaze's header
+## for what this replaced (four "MUSTER  ?" pills) and why the rebuild was decided
+## by the mark being WRONG rather than by it being ugly.
+##
+## IT SHOWS THE GROUND THEY WILL ACTUALLY TAKE — one mark per slot in
+## `_opening_muster_plan`, front row and back. Everything before this guessed:
+## the pills covered every empty front lane, the band that replaced them covered
+## every open RUN, and both were describing where the hold *could* go because
+## nothing yet knew where it *would*. Moving the formation roll to setup is what
+## made the honest version possible; the owner's ruling is the standard it is
+## held to — if this is on screen at all it has to say where they will go.
+##
+## IT REVEALS POSITION AND COUNT, NEVER IDENTITY, which is already the house line
+## on this: the reserves chip prints how many bodies are left precisely because
+## "knowing there are four is planning information, knowing WHICH four would end
+## the surprise." Where a line forms is the thing the player is deciding against.
+##
+## AN EMPTY PLAN DRAWS NOTHING. Under THE INITIATIVE's GO FIRST the hold answers
+## the board instead of committing blind, so there is no answer yet, and
+## inventing one would be the same lie in a better costume.
 func _show_opening_muster_forecast() -> void:
 	if _is_net() or not _opening_muster_pending:
 		return
 	if not _opening_muster_forecast.is_empty():
 		return
-	await get_tree().process_frame
-	if not is_inside_tree() or not _opening_muster_pending:
+	if _opening_muster_claim().is_empty():
 		return
-	for lane in range(LANES_PER_ROW):
-		if _enemy_field[lane] != null:
-			continue
-		var slot := _enemy_slots[lane]
-		if slot == null or not is_instance_valid(slot):
-			continue
-		var rect := slot.get_global_rect()
-		var ghost := PanelContainer.new()
-		ghost.position = rect.position + Vector2(8, 7)
-		ghost.size = Vector2(
-			maxf(70.0, rect.size.x - 16.0), 42.0)
-		ghost.z_index = 468
-		ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		ghost.modulate = Color(1.0, 0.90, 0.66, 0.86)
-		ghost.add_theme_stylebox_override("panel", BATCHED_CHART_STYLE.from_chart(
-			GameTheme.make_panel_style(
-				Color(0.20, 0.12, 0.05, 0.52), Color(0.95, 0.72, 0.28, 0.90),
-				2, 5, false)))
-		var label := GameTheme.make_label("MUSTER  ?", 15,
-			Color(1.0, 0.86, 0.52), true)
-		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		ghost.add_child(label)
-		_hud_layer.add_child(ghost)
-		_opening_muster_forecast.append(ghost)
+	await get_tree().process_frame
+	if not is_inside_tree() or not _opening_muster_pending or _hud_layer == null:
+		return
+	# The CLAIM, never the whole resolved order — the order ranks every legal slot
+	# so the seating can fall through to the next one, and marking all of it would
+	# put a telegraph on ground the hold has no bodies for.
+	for slot in _opening_muster_claim():
+		_add_muster_haze(int(slot.row), int(slot.lane))
 
 
-func _clear_opening_muster_forecast() -> void:
+func _add_muster_haze(row: int, lane: int) -> void:
+	var slots: Array = _slot_array(true, row)
+	if lane < 0 or lane >= slots.size():
+		return
+	var s: Control = slots[lane]
+	if s == null or not is_instance_valid(s):
+		return
+	# DERIVED FROM THE LIVE SLOT RECT, never from the constants that produced it.
+	# UI Scale sets `content_scale_factor`, which DIVIDES the logical canvas (at
+	# 60% the UI lays itself out on 2667x1500), so anything placed from a literal
+	# is wrong at four of the five settings the player is offered — the C32 class.
+	var band := s.get_global_rect()
+	if band.size.x < 8.0 or band.size.y < 8.0:
+		return
+	# Half a gutter either side, so two claimed neighbours read as one body of
+	# weather rather than two boxes — the 16px gutters are ground too — while a
+	# lone claim still reads as one column. Pulled down off the top edge so it
+	# never crowds the row above it.
+	band = band.grow_individual(10.0, -4.0, 10.0, 4.0)
+	var haze := MusterHaze.new()
+	haze.seed_val = lane * 13 + row * 7 + _encounter_id.length()
+	haze.position = band.position
+	haze.size = band.size
+	# Under every other instrument on this layer (chips, callouts, the forecast)
+	# and still above the whole board, because CanvasLayer order dominates
+	# z_index — the haze is the quietest thing on screen and must never be the
+	# thing covering a number.
+	haze.z_index = -1
+	_hud_layer.add_child(haze)
+	haze.settle()
+	_opening_muster_forecast.append(haze)
+
+
+## `lift` false is the hard cut, for teardown paths where the scene is going away
+## and a 0.7s dispersal would either be unseen or outlive its own board.
+func _clear_opening_muster_forecast(lift: bool = true) -> void:
 	for ghost in _opening_muster_forecast:
-		if ghost != null and is_instance_valid(ghost):
+		if ghost == null or not is_instance_valid(ghost):
+			continue
+		if lift and ghost.has_method("dissolve"):
+			ghost.dissolve()
+		else:
 			ghost.queue_free()
 	_opening_muster_forecast.clear()
 
@@ -14841,7 +15825,18 @@ func _teach_tip(id: String, target: Control = null, args: Dictionary = {}) -> bo
 
 
 func _maybe_show_banking_tutorial() -> void:
-	_teach_tip("banking", _mana_label)
+	# THIS RUN'S cap, not the constant. Same reason the discard tip reads its own,
+	# with one added since carryover became relic-gated: a lesson is stamped seen
+	# the moment it fires, so printing the constant would teach the amount to a
+	# run that has no carryover at all — and there is no second chance at it.
+	_teach_tip("banking", _mana_label, {"bank": _bank_cap()})
+
+
+## The ramp itself. Round 2 is the first turn on which the Command seal has
+## visibly moved, so it is the first turn the sentence describes something the
+## player has just watched rather than something they are being told.
+func _maybe_show_command_ramp_tutorial() -> void:
+	_teach_tip("command_ramp", _mana_label, {"cap": COMMAND_RAMP_CAP})
 
 
 ## Taught on round 2 — the first round with an enemy line on the table, and so
@@ -15443,8 +16438,6 @@ func _draw_card(entry: String) -> void:
 	if card.is_creature():
 		card.dragging.connect(_on_card_dragging.bind(card))
 		card.drag_ended.connect(_clear_slot_highlights)
-	# Every hand card (spells too) feeds the drag ember trail.
-	card.dragging.connect(_on_card_drag_trail.bind(card))
 	# Deal the card in from the deck pile: start it small at the LIVE pile's
 	# position (★10 — the historical hardcoded point drifts from the real
 	# chip) so the hand-reflow tween (Card2D.set_hand_target) slides it into
@@ -15502,19 +16495,54 @@ func _apply_curse_draw_sting(card_data: Dictionary) -> void:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Hand layout — Hearthstone-lite fan
+# Hand layout — the fan
 # ─────────────────────────────────────────────────────────────────────────
 #
-# Cards arc along a shallow circle: bottom-centres trace the arc, rotation
-# tangents to it, so the right cards lean clockwise and the left cards
-# counter-clockwise. With few cards the spread is wide (cards don't touch);
-# at MAX_HAND_SIZE (10) cards overlap by ~50% so the whole hand still fits
-# inside the container width. Pivot per card is bottom-centre (set in
-# Card2D.set_hand_target) so the rotation visually swings the TOP of the
-# card outward while the bottom stays anchored to the arc.
+# Cards ride one circle of radius FAN_RADIUS: the bottom-centres trace it and
+# each card's rotation is the TANGENT at its own point, so the wings lean out and
+# the middle stands up. Pivot per card is bottom-centre (Card2D.set_hand_target),
+# which is what makes a rotation swing the TOP of the card outward while its
+# bottom stays welded to the arc.
+#
+# ── ONE CIRCLE, NOT THREE CURVES (2026-09-17) ────────────────────────────────
+# This used to be three independent numbers — a linear x spacing, a parabolic
+# y drop capped at 18, and a linear rotation capped at 12° across the WHOLE hand —
+# each with its own ceiling, and the ceilings did not agree with each other. The
+# visible consequence was all at the top of the range: past six cards the spacing
+# went on tightening while the fan angle and the arc had both already stopped, so
+# a big hand stopped being a fan and became a flat overlapping PILE, which is
+# precisely where a hand most needs its shape to read. (The small end was fine and
+# is unchanged in kind: a two-card hand still barely fans.)
+#
+# Deriving both from one radius is what fixes it structurally rather than by
+# re-tuning a cap: `sag` and `rot` are now two readings of the same circle, so a
+# wider hand fans MORE and drops MORE automatically, and there is no pair of
+# constants that can fall out of step. The measured span roughly doubled at every
+# hand size — 9.6° → 19.5° at five cards, 12° → 22.4° at ten.
+#
+# THE CARDS ALSO SHRINK AS THE HAND GROWS, which is the other half of the crowded
+# read and the one that cannot be bought with geometry. At a fixed 0.72 a ten-card
+# hand shows 45% of each card; letting the rest scale ease to 0.64 buys that back
+# to ~49% AND narrows every card, so the whole fan needs less of the container.
+# PEEK rides the same ramp so the screen-edge crop keeps landing on the SAME PLACE
+# ON THE CARD at every hand size, which is the thing the old constant was tuned
+# for and would otherwise have quietly lost.
 #
 # Called any time _hand changes size: after _draw_card, _discard_hand, the
 # play-to-lane flow, and the various retain / exile paths.
+
+
+## How far a circle of `radius` has fallen away from its crest, `offset_x` to the
+## side of it. The ONE spelling of the fan's curve — `_layout_hand` reads it for
+## the drop and Card2D is handed the result so the hover can cancel it, rather
+## than either end re-deriving a circle of its own.
+static func _fan_sag(offset_x: float, radius: float) -> float:
+	var inner: float = radius * radius - offset_x * offset_x
+	if inner <= 0.0:
+		return radius
+	return radius - sqrt(inner)
+
+
 func _layout_hand() -> void:
 	if _hand_container == null:
 		return
@@ -15525,57 +16553,85 @@ func _layout_hand() -> void:
 	var area := _hand_container.size
 	const CARD_W := 225.0
 	const CARD_H := 300.0
-	# Resting scale — cards in the hand render at 80% of their native size
-	# so more cards fit comfortably and the fan is less cramped at the
-	# 10-card cap. Hover scales back to 1.15 (a 1.44x visual pop). Combined
-	# with the peek-below positioning, this is the Hearthstone-on-Switch
-	# silhouette: a row of trimmed thumbnails at the bottom that leap up
-	# and grow when you mouse one.
-	const REST_SCALE := Vector2(0.72, 0.72)
-	# How far below the container's bottom edge the cards' bottom-centres
-	# anchor. Cards at scale 0.72 have a rendered height of ~216 px; with
-	# PEEK 92 the resting bottom-centre lands at y=982, so the card TOP sits
-	# at ~y=766 — a 29px margin below the player back row (which ends at y=737).
-	# Tuned so the screen-edge crop lands at the TOP of the rules-text box:
-	# at the old PEEK 76 the edge cut rules text mid-sentence, which read as a
-	# layout bug. At rest a card shows cost + name + art (the identity read);
-	# the rules live in the hover detail panel anyway. Hover lifts the card by
-	# 96 px (Card2D._on_mouse_entered — raised in step with this +16) so the
-	# hovered pose is unchanged on screen.
-	const PEEK := 92.0
 
-	# Card-to-card centre spacing. Wide when there's room (cards don't touch);
-	# clamps when n is large so the hand fits the container width minus a
-	# half-card margin on each side. Tightened relative to the all-1.0-scale
-	# pass since each card now renders 34 px narrower (0.85 × 225 = 191 vs 225).
+	# ── THE REST SCALE RAMPS WITH THE HAND ───────────────────────────────────
+	# Held at 0.72 to REST_SCALE_FULL_UNTIL cards, easing to 0.64 at
+	# MAX_HAND_SIZE. A fixed scale pays for the whole crowding problem in overlap
+	# alone: at 0.72 a ten-card hand shows 45% of each card and needs the entire
+	# container to do it. Shrinking narrows the card AND the span it wants, so it
+	# buys back both at once — and it is what the form does, a Hearthstone hand
+	# visibly getting smaller as it fills.
+	const REST_SCALE_MAX := 0.72
+	const REST_SCALE_MIN := 0.64
+	const REST_SCALE_FULL_UNTIL := 6
+	var shrink_t: float = clampf(float(n - REST_SCALE_FULL_UNTIL)
+		/ float(maxi(MAX_HAND_SIZE - REST_SCALE_FULL_UNTIL, 1)), 0.0, 1.0)
+	var scl: float = lerpf(REST_SCALE_MAX, REST_SCALE_MIN, shrink_t)
+	var rest_scale := Vector2(scl, scl)
+	var card_w_on_screen: float = CARD_W * scl
+
+	# How far below the container's bottom edge the cards' bottom-centres anchor,
+	# i.e. how much of the card the screen edge eats. Tuned so the crop lands at
+	# the TOP of the rules-text box: at the old PEEK 76 the edge cut rules text
+	# mid-sentence, which read as a layout bug. At rest a card shows cost + name +
+	# art (the identity read); the rules live in the hover detail panel anyway.
+	#
+	# IT RIDES THE SCALE RAMP, or the tuning above silently stops holding: PEEK is
+	# in SCREEN pixels and the thing it is measured against — the distance from the
+	# card's foot up to its rules box — is in CARD pixels, so a card rendering at
+	# 0.64 with a fixed 92 would crop 20 card-pixels higher than one at 0.72. What
+	# was tuned is the fraction, so the fraction is what is held.
+	const PEEK_AT_FULL := 92.0
+	var peek: float = PEEK_AT_FULL * (scl / REST_SCALE_MAX)
+
+	# Card-to-card centre spacing. Wide when there is room (cards barely touch);
+	# clamps down as n grows so the hand still fits the container.
+	#
+	# TWO THINGS WERE WRONG WITH THE OLD MARGIN and they pulled opposite ways. It
+	# subtracted the UNSCALED 225 from the container while cards render at 162, so
+	# it gave away 63 px it did not owe; and it budgeted nothing at all for the
+	# wings' ROTATION, which about a bottom-centre pivot throws a card's top corner
+	# outward — ~46 px past its own half-width at the full fan. Netting them out
+	# was survivable only because the old fan barely turned. FAN_EDGE_PAD 48 pays
+	# the swing explicitly; the binding neighbour is the Command seal on the left,
+	# which ends at x=336 against a leftmost wing corner at ~372.
 	const SPREAD_MAX := 140.0
-	const SPREAD_MIN := 65.0
+	const SPREAD_MIN := 58.0
+	const FAN_EDGE_PAD := 48.0
 	var spread: float = SPREAD_MAX
 	if n > 1:
-		var max_total: float = area.x - CARD_W
-		spread = clamp(max_total / float(n - 1), SPREAD_MIN, SPREAD_MAX)
+		var max_total: float = maxf(
+			area.x - card_w_on_screen - FAN_EDGE_PAD * 2.0, card_w_on_screen)
+		spread = clampf(max_total / float(n - 1), SPREAD_MIN, SPREAD_MAX)
 
-	# Fan parameters — subtle preset:
-	#   total_angle: max angular spread across the whole hand (radians)
-	#   arc_drop:    Y offset of the outermost cards (parabolic curve)
-	# Both scale with card count so a 2-card hand barely fans, a full hand
-	# fans noticeably.
-	var total_angle: float = deg_to_rad(min(float(n - 1) * 2.4, 12.0))
-	var arc_drop: float = min(float(n - 1) * 3.2, 18.0)
-
-	# Anchor: bottom-centre of the hand area sits PEEK pixels past the
-	# container's bottom edge so cards visibly hang off the screen at rest.
+	# THE ONE PARAMETER OF THE FAN. Both the drop and the lean are read off this
+	# circle, so they cannot disagree and neither needs a ceiling of its own: a
+	# hand that spreads wider automatically leans harder and sags deeper.
 	#
-	# arc_drop is SUBTRACTED here so PEEK describes the DEEPEST card in the fan,
-	# not the middle one. It used to be added on top: the centre card sat at the
-	# tuned fold (crop landing just inside the rules box) and the outermost cards
-	# of a wide fan sank a further 18 px, which pushed the screen edge up through
-	# their NAME cartouche — the one thing a resting hand must still read, since
-	# the rules deliberately live below the fold. Re-basing keeps the parabola
-	# and the tuned worst-case crop identical while lifting the middle of the fan
-	# by at most 18 px, which the 29 px margin under the player back row absorbs.
+	# 2200 after checking the references: a Slay the Spire hand is close to FLAT —
+	# a few degrees across four cards — and a Hearthstone one only opens up when it
+	# fills. 1650 was landing ±11° on the wings, which is a playing-card fan rather
+	# than sheets laid down on a table, and at 25-50% overlap that much lean is what
+	# tips a crowded hand from "fanned" into "busy". This keeps the structure (one
+	# circle, scaling with count) and takes the magnitude down: ±5.0° at five cards,
+	# ±8.1° at ten.
+	const FAN_RADIUS := 2200.0
+	var half_span: float = spread * float(n - 1) * 0.5
+	var max_sag: float = _fan_sag(half_span, FAN_RADIUS)
+
+	# Anchor: the bottom-centre of the hand area sits `peek` past the container's
+	# bottom edge so cards visibly hang off the screen at rest.
+	#
+	# max_sag is SUBTRACTED so `peek` describes the DEEPEST card in the fan, not
+	# the middle one. It used to be added on top: the centre card sat at the tuned
+	# fold and the outermost cards of a wide fan sank further still, which pushed
+	# the screen edge up through their NAME cartouche — the one thing a resting
+	# hand must still read, since the rules deliberately live below it. Re-basing
+	# keeps the worst-case crop exactly as tuned while lifting the crest of the
+	# fan, which the margin under the player back row absorbs (the crest tops out
+	# at y≈736 on a six-card hand, against a back row ending at 737).
 	var anchor_x: float = area.x * 0.5
-	var anchor_y: float = area.y + PEEK - arc_drop
+	var anchor_y: float = area.y + peek - max_sag
 
 	for i in range(n):
 		var card = _hand[i]
@@ -15584,24 +16640,45 @@ func _layout_hand() -> void:
 		# t ∈ [0, 1]; t = 0.5 is the centre of the hand.
 		var t: float = 0.5 if n == 1 else float(i) / float(n - 1)
 		var x_offset: float = (t - 0.5) * spread * float(n - 1)
-		# Parabolic drop: (2|t-0.5|)^2 peaks at 1 on the outermost cards.
-		var y_offset: float = pow(abs(t - 0.5) * 2.0, 2.0) * arc_drop
+		# The circle, read twice: how far it has fallen at this offset, and the
+		# angle of its tangent there.
+		var sag: float = _fan_sag(x_offset, FAN_RADIUS)
+		var rot: float = asin(clampf(x_offset / FAN_RADIUS, -1.0, 1.0))
+		var y_offset: float = sag
 		# Marked-for-discard cards sink out of the fan line — already halfway
 		# to the pile. The ribbon + dim (Card2D.set_discard_marked) do the rest.
 		# Kept gentle (was 34) so the card's upper third — which now carries the
 		# DISCARD band — stays clear of the screen fold on a resting hand.
+		#
+		# Deliberately NOT part of the `sag` handed to the card: that value exists
+		# so the hover can cancel the ARC, and a marked card should still hover
+		# sitting low. It is the player's own mark, not a curve.
 		if card.marked_for_discard:
 			y_offset += 20.0
-		var rot: float = (t - 0.5) * total_angle
 		# Card's bottom-centre target. The card's pivot is its bottom-centre
-		# (set in set_hand_target) so the position we pass is the bottom-
-		# centre minus (W/2, H) to land the top-left. The pivot stays fixed
-		# under the rest-scale, so spacing math uses unscaled card width —
-		# what matters for collision-free spacing is the rendered width,
-		# which is what SPREAD_MIN/MAX above are calibrated for.
+		# (set in set_hand_target) so the position we pass is the bottom-centre
+		# minus (W/2, H) to land the top-left. The pivot is in UNSCALED card space
+		# and does not move with the rest scale, which is why this subtraction uses
+		# CARD_W/CARD_H while the spacing math above uses the rendered width.
 		var bottom_center := Vector2(anchor_x + x_offset, anchor_y + y_offset)
 		var top_left := bottom_center - Vector2(CARD_W * 0.5, CARD_H)
-		card.set_hand_target(top_left, rot, REST_SCALE)
+		card.set_hand_target(top_left, rot, rest_scale, sag)
+	# A CARD ARRIVES NOT KNOWING WHAT IT COSTS YOU (2026-09-16).
+	#
+	# `Card2D._affordable` DEFAULTS TO TRUE, and `_draw_card` ended on
+	# `_layout_hand()` with no affordability sweep — so every freshly drawn card
+	# rendered bright and payable until the next `_update_hud` happened to fire,
+	# whenever that was. It stayed quiet while the only symptom was a missing dim:
+	# photographed on a round-1 board, two cost-2 cards sat side by side at
+	# Command 1 with one correctly greyed and one not, because the second was
+	# dealt after the last sweep. With the playable crown it is loud — the
+	# unpayable card arrives LIT, i.e. the affordance states the opposite of the
+	# truth until something else happens to correct it.
+	#
+	# Here rather than in `_draw_card`, because the draw is one of half a dozen
+	# hand mutations and this function is the one they all end on. The sweep
+	# no-ops per card when nothing changed, so an ordinary reflow costs nothing.
+	_refresh_hand_affordability()
 
 
 func _discard_hand() -> void:
@@ -15920,13 +16997,21 @@ func _compute_spell_tome() -> void:
 
 
 func _snecko_randomize_card_cost(card: Control) -> void:
-	## Snecko Eye: replace this card's cost with a fresh 0-3 roll for this turn.
+	## Snecko Eye: replace this card's cost with a fresh roll for this turn.
 	## card_data is a per-card duplicate (see _draw_card / _resolve_card_data),
 	## so mutating it is safe — won't pollute CardDB or the run deck. The cost
 	## orb refreshes via _refresh_hand_affordability (inside _update_hud).
+	##
+	## THE RANGE IS RELIC DATA, not a literal here. NetPlayerState rolls the same
+	## relic twice on the host's side of a skirmish, so this magnitude has three
+	## call sites; restating it is how the client's costs and the host's part
+	## company silently, which is the exact fault _probe_net_relic_parity exists
+	## to catch.
 	if card == null or not is_instance_valid(card):
 		return
-	card.card_data["cost"] = _combat_ops.rangei(0, 3)
+	var r: Dictionary = RelicDB.get_relic("snecko_eye")
+	card.card_data["cost"] = _combat_ops.rangei(
+		int(r.get("cost_lo", 1)), int(r.get("cost_hi", 5)))
 
 
 func _pen_nib_trigger() -> void:
@@ -16106,6 +17191,12 @@ func summon_token(atk: int, hp: int, lane_idx: int, is_enemy: bool, row: int = R
 			tl_bonus = maxi(tl_bonus, 2 if bool(tl.card_data.get("is_upgraded", false)) else 1)
 	token_atk += tl_bonus
 	token_hp += tl_bonus
+	# Every bail-out above has passed, so this body IS arriving. `summon_token` is
+	# the SECOND enemy arrival funnel (it builds the card itself rather than going
+	# through _place_enemy_card), which is exactly why the hold's hand never saw
+	# a passive summon — see _spend_hold_hand.
+	if is_enemy and _hold_rule_deploying > 0:
+		_spend_hold_hand()
 	var card = CARD_SCENE.instantiate()
 	card.card_id = "token_%d_%d" % [token_atk, token_hp]
 	card.is_opponent = is_enemy
@@ -16269,27 +17360,32 @@ func _show_recycle_modal() -> Control:
 	col.add_child(grid)
 
 	var result := {"card": null, "cancelled": false}
+	var card_hitboxes: Array[BaseButton] = []
 	for hand_card in snapshot:
 		var data: Dictionary = hand_card.card_data
 		var slot := Control.new()
-		slot.custom_minimum_size = Vector2(220, 300)
+		slot.custom_minimum_size = Vector2(225, 300)
 		grid.add_child(slot)
 
 		var display: Control = CARD_SCENE.instantiate()
 		display.card_id = hand_card.card_id
 		display.card_data = data.duplicate(true)
 		display.is_on_battlefield = true
+		display.static_display = true
+		display.live_baked_mode = true
 		slot.add_child(display)
 
 		var btn := Button.new()
 		btn.flat = true
 		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_wire_combat_picker_hitbox(btn, display)
 		var captured: Control = hand_card
 		btn.pressed.connect(func():
 			result["card"] = captured
 			overlay.queue_free()
 		)
 		slot.add_child(btn)
+		card_hitboxes.append(btn)
 
 	var cancel := GameTheme.make_back_button("CANCEL", Vector2(160, 40))
 	cancel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
@@ -16299,7 +17395,10 @@ func _show_recycle_modal() -> Control:
 	)
 	col.add_child(cancel)
 
-	while result["card"] == null and not result["cancelled"] and is_instance_valid(overlay):
+	_present_combat_card_picker(title, [grid, cancel], card_hitboxes)
+
+	while result["card"] == null and not result["cancelled"] and is_instance_valid(overlay) \
+			and is_inside_tree():
 		await get_tree().process_frame
 	return result["card"]
 
@@ -16368,10 +17467,11 @@ func _show_discard_picker(target_count: int, title_text: String, allow_fewer: bo
 
 	# Visual markers + selection toggle for each hand card.
 	var slots: Array = []
+	var card_hitboxes: Array[BaseButton] = []
 	for hand_card in snapshot:
 		var data: Dictionary = hand_card.card_data
 		var slot := Panel.new()
-		slot.custom_minimum_size = Vector2(220, 300)
+		slot.custom_minimum_size = Vector2(225, 300)
 		var bg := StyleBoxFlat.new()
 		bg.bg_color = Color(0, 0, 0, 0)
 		bg.border_width_left = 4
@@ -16386,11 +17486,14 @@ func _show_discard_picker(target_count: int, title_text: String, allow_fewer: bo
 		display.card_id = hand_card.card_id
 		display.card_data = data.duplicate(true)
 		display.is_on_battlefield = true
+		display.static_display = true
+		display.live_baked_mode = true
 		slot.add_child(display)
 
 		var btn := Button.new()
 		btn.flat = true
 		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_wire_combat_picker_hitbox(btn, display)
 		var captured: Control = hand_card
 		var slot_ref: Panel = slot
 		var bg_ref: StyleBoxFlat = bg
@@ -16412,6 +17515,7 @@ func _show_discard_picker(target_count: int, title_text: String, allow_fewer: bo
 		)
 		slot.add_child(btn)
 		slots.append({"captured": captured, "bg": bg_ref})
+		card_hitboxes.append(btn)
 
 	caption.text = "Selected 0 / %d" % target_count
 
@@ -16438,7 +17542,11 @@ func _show_discard_picker(target_count: int, title_text: String, allow_fewer: bo
 		)
 		btn_row.add_child(skip_btn)
 
-	while not state.confirmed and not state.cancelled and is_instance_valid(overlay):
+	_present_combat_card_picker(title, [caption, grid, btn_row],
+		card_hitboxes)
+
+	while not state.confirmed and not state.cancelled and is_instance_valid(overlay) \
+			and is_inside_tree():
 		await get_tree().process_frame
 	if not state.picked.is_empty() and AudioBank != null:
 		# Every caller discards the picks, and they vanish from hand instantly —
@@ -16515,7 +17623,8 @@ func _pick_adjacent_friendly(lane_idx: int, my_row: int, prompt: String) -> Cont
 			result["cancelled"] = true
 	)
 
-	while result["card"] == null and not result["cancelled"]:
+	while result["card"] == null and not result["cancelled"] \
+			and is_inside_tree():
 		await get_tree().process_frame
 
 	for p in pulses:
@@ -16592,7 +17701,8 @@ func _pick_friendly_creature(exclude_card: Control, prompt: String) -> Control:
 			result["cancelled"] = true
 	)
 
-	while result["card"] == null and not result["cancelled"]:
+	while result["card"] == null and not result["cancelled"] \
+			and is_inside_tree():
 		await get_tree().process_frame
 
 	for p in pulses:
@@ -16673,7 +17783,8 @@ func _pick_empty_lane(my_row: int, exclude_lane: int, prompt: String) -> int:
 			result["cancelled"] = true
 	)
 
-	while result["lane"] == -1 and not result["cancelled"]:
+	while result["lane"] == -1 and not result["cancelled"] \
+			and is_inside_tree():
 		await get_tree().process_frame
 
 	for p in pulses:
@@ -16779,7 +17890,8 @@ func _pick_empty_slot_any(is_enemy: bool, prompt: String) -> Dictionary:
 			result["cancelled"] = true
 	)
 
-	while (result["pick"] as Dictionary).is_empty() and not result["cancelled"]:
+	while (result["pick"] as Dictionary).is_empty() and not result["cancelled"] \
+			and is_inside_tree():
 		await get_tree().process_frame
 
 	for p in pulses:
@@ -16840,6 +17952,7 @@ func _show_reorder_modal(n: int) -> void:
 	var picked_order: Array = []
 	# Cache slot nodes so a click on card i can dim its slot and stamp a badge.
 	var slots: Array[Control] = []
+	var card_hitboxes: Array[BaseButton] = []
 
 	for i in range(n):
 		var entry: String = top_entries[i]
@@ -16847,7 +17960,7 @@ func _show_reorder_modal(n: int) -> void:
 		if data.is_empty():
 			continue
 		var slot := Control.new()
-		slot.custom_minimum_size = Vector2(220, 320)
+		slot.custom_minimum_size = Vector2(225, 320)
 		slot.mouse_filter = Control.MOUSE_FILTER_PASS
 		row.add_child(slot)
 		slots.append(slot)
@@ -16856,6 +17969,8 @@ func _show_reorder_modal(n: int) -> void:
 		card_node.card_id = _entry_id(entry)
 		card_node.card_data = data
 		card_node.is_on_battlefield = true
+		card_node.static_display = true
+		card_node.live_baked_mode = true
 		slot.add_child(card_node)
 
 		# Numeric badge — hidden until this card is picked.
@@ -16879,6 +17994,7 @@ func _show_reorder_modal(n: int) -> void:
 		var btn := Button.new()
 		btn.flat = true
 		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_wire_combat_picker_hitbox(btn, card_node)
 		var captured_index: int = i
 		btn.pressed.connect(func():
 			if picked_order.has(captured_index):
@@ -16899,10 +18015,14 @@ func _show_reorder_modal(n: int) -> void:
 				overlay.queue_free()
 		)
 		slot.add_child(btn)
+		card_hitboxes.append(btn)
+
+	_present_combat_card_picker(title, [row], card_hitboxes)
 
 	# Same rationale as _show_scry_modal: block until the player finishes
 	# reordering, otherwise combat resolves while the modal is still up.
-	while is_instance_valid(overlay):
+	while is_instance_valid(overlay) \
+			and is_inside_tree():
 		await get_tree().process_frame
 
 
@@ -16948,6 +18068,8 @@ func _show_scry_modal() -> void:
 	card_node.card_id = top_id
 	card_node.card_data = data.duplicate(true)
 	card_node.is_on_battlefield = true
+	card_node.static_display = true
+	card_node.live_baked_mode = true
 	col.add_child(card_node)
 
 	var btn_row := HBoxContainer.new()
@@ -16972,10 +18094,14 @@ func _show_scry_modal() -> void:
 	)
 	btn_row.add_child(bottom_btn)
 
+	_present_combat_card_picker(title, [card_node, btn_row],
+		[keep_btn, bottom_btn])
+
 	# Block the caller until the player picks. Without this the floop dispatcher
 	# returns immediately and combat resolves behind the modal, so the deck the
 	# player is peeking at may already be different by the time they click.
-	while is_instance_valid(overlay):
+	while is_instance_valid(overlay) \
+			and is_inside_tree():
 		await get_tree().process_frame
 
 
@@ -17213,7 +18339,8 @@ func _keyword_choice_overlay() -> String:
 		)
 		row.add_child(tile)
 
-	while result["kw"] == "" and is_instance_valid(overlay):
+	while result["kw"] == "" and is_instance_valid(overlay) \
+			and is_inside_tree():
 		await get_tree().process_frame
 	return result["kw"]
 
@@ -17567,7 +18694,8 @@ func _doctrine_overlay(veteran_name: String, card_data: Dictionary,
 		)
 		row.add_child(tile)
 
-	while result["kw"] == "" and is_instance_valid(overlay):
+	while result["kw"] == "" and is_instance_valid(overlay) \
+			and is_inside_tree():
 		await get_tree().process_frame
 	# The modal no longer vanishes on the click: the lesson is written onto the
 	# veteran's writ first, and THEN the screen closes.
@@ -17737,7 +18865,8 @@ func _initiative_overlay() -> String:
 		)
 		row.add_child(tile)
 
-	while result["pick"] == "" and is_instance_valid(overlay):
+	while result["pick"] == "" and is_instance_valid(overlay) \
+			and is_inside_tree():
 		await get_tree().process_frame
 	return String(result["pick"])
 
@@ -17827,7 +18956,8 @@ func _war_school_overlay(veteran_name: String, card_data: Dictionary,
 		)
 		row.add_child(tile)
 
-	while result["kw"] == "" and is_instance_valid(overlay):
+	while result["kw"] == "" and is_instance_valid(overlay) \
+			and is_inside_tree():
 		await get_tree().process_frame
 	if is_instance_valid(overlay):
 		await _rung_overlay_writ_strike(overlay, writ,
@@ -17878,6 +19008,10 @@ func _build_discover_overlay(card_ids: Array, title_text: String = "Discover",
 	col.add_child(row)
 
 	var result := {"id": ""}
+	var option_datas: Array = []
+	var option_slots: Array[Control] = []
+	var option_backs: Array[Control] = []
+	var option_buttons: Array[BaseButton] = []
 	for cid in card_ids:
 		# Snapshot `cid` into a local before connecting the lambda. Inline `cid`
 		# in a `pressed.connect(func(): ...)` risks closing over the loop
@@ -17885,29 +19019,94 @@ func _build_discover_overlay(card_ids: Array, title_text: String = "Discover",
 		# "every pick gives the same card" complaint. Other pickers in this
 		# file (e.g. _show_discard_picker line 3560) already use this guard.
 		var captured_id: String = cid
-		var data := CardDB.get_card_data(cid)
+		var data: Dictionary = CardDB.get_card_data(cid)
 		var slot := VBoxContainer.new()
 		slot.add_theme_constant_override("separation", 10)
 		slot.alignment = BoxContainer.ALIGNMENT_CENTER
 		row.add_child(slot)
 
-		var card_node = CARD_SCENE.instantiate()
-		card_node.card_id = cid
-		card_node.card_data = data.duplicate(true)
-		card_node.is_on_battlefield = true  # static display, no drag
-		slot.add_child(card_node)
+		# Reserve the complete choice row before yielding. Random Discover and
+		# Informer faces are not guaranteed to be in the run-deck cache, so a fixed
+		# sleeve is the honest loading state while the three faces bake together.
+		var stage := _make_card_loading_stage(row)
+		var face_slot: Control = stage["slot"]
+		var back: Control = stage["back"]
+		slot.add_child(face_slot)
 
 		var pick_btn := GameTheme.make_themed_button(btn_text,
 			Color(0.34, 0.22, 0.08), Vector2(140, 40), 16)
 		pick_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		pick_btn.disabled = true
 		pick_btn.pressed.connect(func():
 			result["id"] = captured_id
 			overlay.queue_free()
 		)
 		slot.add_child(pick_btn)
+		option_datas.append(data)
+		option_slots.append(face_slot)
+		option_backs.append(back)
+		option_buttons.append(pick_btn)
+
+	# The title can strike while the complete face-down choice is already present;
+	# card identity itself is withheld until every option is ready.
+	Motion.stamp_in(title, 0.02)
+	var overlay_ref: WeakRef = weakref(overlay)
+	var row_ref: WeakRef = weakref(row)
+	var still_here := func() -> bool:
+		var live_overlay := overlay_ref.get_ref() as ColorRect
+		var live_row := row_ref.get_ref() as HBoxContainer
+		return is_inside_tree() \
+			and live_overlay != null and live_overlay.is_inside_tree() \
+			and live_row != null and live_row.is_inside_tree()
+
+	# Even a warm re-open gets one painted frame of the complete sleeve row. Cold
+	# construction then happens behind it, one cheap cached face per frame.
+	await get_tree().process_frame
+	if not still_here.call():
+		return ""
+	await CardTextureCache.bake_many(option_datas, still_here)
+	if not still_here.call():
+		return ""
+
+	var faces: Array[Control] = []
+	for i in option_datas.size():
+		var card_node: Control = CARD_SCENE.instantiate()
+		card_node.card_id = String(card_ids[i])
+		card_node.card_data = (option_datas[i] as Dictionary).duplicate(true)
+		card_node.is_on_battlefield = true
+		card_node.static_display = true
+		card_node.live_baked_mode = true
+		card_node.modulate.a = 0.0
+		option_slots[i].add_child(card_node)
+		faces.append(card_node)
+		await get_tree().process_frame
+		if not still_here.call():
+			return ""
+
+	var snap := UserSettings != null and UserSettings.reduce_motion
+	for face in faces:
+		if is_instance_valid(face):
+			face.modulate.a = 1.0
+	if snap:
+		for back in option_backs:
+			if is_instance_valid(back):
+				back.visible = false
+				back.queue_free()
+	else:
+		for i in faces.size():
+			if is_instance_valid(option_backs[i]) and is_instance_valid(faces[i]):
+				Motion.flip_out(option_backs[i], 0.13)
+				Motion.flip_in(faces[i], Motion.time(0.13), 0.17)
+		await get_tree().create_timer(Motion.time(0.31)).timeout
+		if not still_here.call():
+			return ""
+	for pick_btn in option_buttons:
+		if is_instance_valid(pick_btn):
+			pick_btn.disabled = false
 
 	# Wait for the player to click a Pick button (or for the overlay to free).
-	while result["id"] == "" and is_instance_valid(overlay):
+	while result["id"] == "" and is_instance_valid(overlay) \
+			and is_inside_tree():
 		await get_tree().process_frame
 	return result["id"]
 
@@ -17947,6 +19146,12 @@ func _add_discovered_card_to_hand(card_id: String) -> int:
 	# turn. The discount is a bonus on top of that, so it may make a card CHEAP but
 	# never free. A card that was already 0 or 1 keeps its printed cost rather than
 	# being pushed up.
+	# RE-CHECKED 2026-09-16 against the rescaled 1-6 curve, and deliberately
+	# UNCHANGED. The pool now centres on 3 rather than the 2 named above, so "-1"
+	# is a smaller proportional gift than when this was written — but the rule
+	# that matters is the FLOOR, and a ramping resource makes it stricter, not
+	# looser: "cost N is first affordable on round N" has no round for a free
+	# card. `_apply_plus_upgrade` was moved to this same floor in the same pass.
 	var find_cost: int = int(card_node.card_data.get("cost", 0))
 	card_node.card_data["cost"] = find_cost if find_cost <= 1 else maxi(1, find_cost - 1)
 	card_node.live_baked_mode = true   # baked frame+art, live text (see _draw_card note)
@@ -17963,7 +19168,6 @@ func _add_discovered_card_to_hand(card_id: String) -> int:
 	if card_node.is_creature():
 		card_node.dragging.connect(_on_card_dragging.bind(card_node))
 		card_node.drag_ended.connect(_clear_slot_highlights)
-	card_node.dragging.connect(_on_card_drag_trail.bind(card_node))
 	# Spawn the card at the deck pile and let _layout_hand tween it into the
 	# fan, matching how normal draws look (★10: live pile origin).
 	if _hand_container != null and _hand_container.global_position != Vector2.ZERO:
@@ -18235,11 +19439,33 @@ func _check_game_over() -> void:
 		# Gold reward — fights pay ground, not cards (Successor Wars Phase 4):
 		# the card drip moved to recruit stops, so the gold base is bumped to
 		# keep the shop a real deck-growth lever.
+		#
+		# 2026-09-16, +10 ACROSS THE BOARD (40/60/55 -> 50/70/65). This is the
+		# faucet that pays for the shop's removal FEE replacing the sutler's
+		# buy-back (Shop.REMOVE_FEE): the wagon used to hand the player ~84 gold
+		# a run for cards it bought, and now takes 60 a strike instead. A full
+		# 21-fight route earns ~210 more here, so a player who never thins is
+		# ~126 gold richer and one who thins twice is about where they were.
+		# DELIBERATELY NOT full compensation — a fee the run always affords is a
+		# fee that decides nothing. All three tiers move by the same flat amount
+		# rather than by a percentage, because the fee is flat too.
+		# RE-DENOMINATED 2026-09-19 for the shorter run. The mandatory fight
+		# spine went from 4 plain rows to 3 and both elite bands became
+		# declinable, so a route now walks 12-18 fights where it used to walk
+		# exactly 21 (`tools/_probe_fight_count.tscn`). Gold is a per-FIGHT
+		# faucet, and the shops, musters and wagons it feeds sit on wayside rows
+		# whose count did NOT change — so leaving the rates alone would have cut
+		# buying power ~23% against an unchanged number of places to spend it,
+		# which is a silent nerf to every deck the road can build. Derived, not
+		# guessed: a mean route earns ~295/act at the old rates against ~385
+		# before, and x1.30 returns it to ~382. THIS IS A PERCENTAGE, unlike the
+		# flat +10 above, because what changed is the NUMBER of payouts rather
+		# than the cost of any one thing.
 		var gold_won: int = 0
 		match node_type:
-			"combat": gold_won = RunState.roll_gold_reward(40)
-			"elite": gold_won = RunState.roll_gold_reward(60)
-			"boss": gold_won = RunState.roll_gold_reward(55)
+			"combat": gold_won = RunState.roll_gold_reward(65)
+			"elite": gold_won = RunState.roll_gold_reward(90)
+			"boss": gold_won = RunState.roll_gold_reward(85)
 		if gold_won > 0:
 			RunState.gain_gold(gold_won)
 		if gold_won + wagon_payout > 0:
@@ -18324,10 +19550,24 @@ func _check_game_over() -> void:
 				GameTheme.fade_out_then_change_scene(self, REWARD_SCENE, 0.35)
 			)
 		else:
-			# Normal holds pay out inline and march straight back to the map —
-			# no card pick, no interstitial screen. Pace is the point.
+			# A PLAIN HOLD PAYS A CARD AGAIN (2026-09-20, owner's call).
+			#
+			# This arm used to read "normal holds pay out inline and march
+			# straight back to the map — no card pick, no interstitial screen.
+			# Pace is the point." That came in with `2e53313` (Successor Wars),
+			# which moved deck growth onto the new recruit camps.
+			#
+			# Measured over 77 map stops: a muster is offered at 14% of stops and
+			# a wagon at 4%, so a run grew by ONE OR TWO CARDS against a 10-card
+			# opener — and two of eight runs finished smaller than they started.
+			# The camps alone cannot feed a deck.
+			#
+			# The interstitial is the price, and it is a real one: this is the
+			# most common node in the game, so Reward now opens on most stops.
+			# If the pacing reads badly, the lever is the screen's dwell, not the
+			# reward — the card is the thing the fight is for.
 			get_tree().create_timer(1.2).timeout.connect(func():
-				GameTheme.fade_out_then_change_scene(self, MAP_SCENE, 0.35)
+				GameTheme.fade_out_then_change_scene(self, REWARD_SCENE, 0.35)
 			)
 
 
@@ -18784,7 +20024,15 @@ func _dispatch_reactive(trigger: String, source_card: Control, _lane_idx: int) -
 	var react: Dictionary = EncounterDB.get_reactive_passive(_encounter_id)
 	if not react.is_empty() and String(react.get("trigger", "")) == trigger:
 		_pulse_passive_plaque()
+	# A REACTIVE passive deploys too — `puppeteer` answers every player summon
+	# with a 2/2 — so it is inside the hold-rule window and spends the hold's
+	# hand like any other arrival the fight's own rule makes (see
+	# _spend_hold_hand). Note this dispatcher pulses the plaque ITSELF rather
+	# than through `_passive_speaking`, which is exactly why the budget needs its
+	# own flag instead of borrowing that one.
+	_hold_rule_deploying += 1
 	EncounterEffects.dispatch_reactive(self, trigger, source_card, _lane_idx)
+	_hold_rule_deploying -= 1
 
 
 func _pulse_passive_plaque() -> void:
@@ -18866,12 +20114,26 @@ func _check_escalation() -> void:
 				# floats stay (they carry the per-body number); this adds the
 				# sentence that makes them a decision the General made.
 				var esc_n := 0
+				var esc_topped := false
 				for c in _all_enemy_creatures():
+					# PER BODY, capped — see ESCALATION_ELITE_BUFF_MAX_STACKS.
+					var st: int = int(c.get_meta("elite_press_stacks", 0))
+					if st >= ESCALATION_ELITE_BUFF_MAX_STACKS:
+						esc_topped = true
+						continue
+					c.set_meta("elite_press_stacks", st + 1)
 					c.current_atk += 1
 					c.update_stat_display()
 					esc_n += 1
 				if esc_n > 0:
 					_show_info("The General presses the attack - his line gains +1 attack.")
+				elif esc_topped:
+					# The ceiling has to be spoken or the line simply stops growing
+					# in silence after having announced itself every round — the
+					# silent-refusal class, and it also throws away the only good
+					# thing about a cap, which is that the player can see the clock
+					# run out.
+					_show_info("The General has no more to give - his line presses no further.")
 		"boss":
 			if _siege_active and not _siege_breached:
 				return
@@ -19049,6 +20311,7 @@ func _show_event_banner(msg: String) -> void:
 
 func _dispatch_passive_start_of_round() -> void:
 	_passive_speaking = true
+	_hold_rule_deploying += 1
 	EncounterEffects.dispatch_passive_start_of_round(self)
 	_passive_speaking = false
 	# THE BELLRINGER boss (Act 2). Its doom_bell passive lives here rather than
@@ -19058,13 +20321,19 @@ func _dispatch_passive_start_of_round() -> void:
 	# reuses. Runs AFTER KeywordEffects.dispatch_start_of_round (which ticks the
 	# existing Doomspawn countdowns), so a freshly-tolled bomb starts its clock
 	# clean this round instead of losing a tick the instant it lands.
+	# The Bellringer's toll is the encounter passive deploying as much as anything
+	# EncounterEffects dispatches — it just lives in this file so its whole
+	# signature sits in one place — so it is inside the hold-rule window too.
 	if _encounter_passive == "doom_bell":
 		_doom_bell_start_of_round()
+	_hold_rule_deploying -= 1
 
 
 func _dispatch_passive_end_of_round() -> void:
 	_passive_speaking = true
+	_hold_rule_deploying += 1
 	EncounterEffects.dispatch_passive_end_of_round(self)
+	_hold_rule_deploying -= 1
 	_passive_speaking = false
 
 
@@ -20701,7 +21970,9 @@ func _reveal_cast_card(card_data: Dictionary, caption: String,
 
 func _dispatch_encounter_on_enemy_death(lane_idx: int, dead_card: Control = null, row: int = -1) -> void:
 	_passive_speaking = true
+	_hold_rule_deploying += 1
 	EncounterEffects.dispatch_encounter_on_enemy_death(self, lane_idx, dead_card, row)
+	_hold_rule_deploying -= 1
 	_passive_speaking = false
 	# "All his HP is in the Body — kill it and you win." A creature flagged
 	# `holds_the_fight` IS the enemy's life total, so its death ends the fight
@@ -20738,8 +22009,9 @@ func _has_encounter_passive_keyword(card: Control, keyword: String) -> bool:
 ## `armored` is deliberately absent. Its arm in the lookup is a tautology (true
 ## only for a card that already prints Armored) and no strike path consults the
 ## lookup for it: the passives that really armor a line write the keyword onto the
-## card themselves (sentinel_stone in _place_enemy_card, formation_drill's
-## lockstep, iron_warden_siege), which is why those already show a device.
+## card themselves (formation_drill's lockstep, iron_warden_siege), which is why
+## those already show a device. (sentinel_stone was a third until 2026-09-16 — its
+## blanket grant is gone; the Tooth-Stones' Armored is printed on the cards now.)
 const ENCOUNTER_GRANT_KEYWORDS := ["piercing", "thorns"]
 
 
@@ -20915,6 +22187,75 @@ func _double_martyr_on_death(dead_card: Control, lane_idx: int, row: int = -1) -
 		_martyr_chosen = null
 
 
+## THE HOLD MAY NOT BRING A LID (2026-09-16) — the reinforcement half of the rule
+## `_deal_opening_muster` has enforced since 2026-07-27.
+##
+## `_clash_lane_pass` resolves "opposing front in this column, else opposing back,
+## else face", so the player's win condition — the lord's own health — is
+## reachable ONLY through a column with BOTH rows empty. The opening muster caps
+## itself at `open_lane_cap` for exactly this reason ("The hold may bring a wall;
+## it may not bring a lid"), and **the drip never inherited it**: its slot list
+## ends "Always fall through: any open front slot, then any open back slot". So
+## the invariant held on round 1 and was abandoned every round after.
+##
+## Survivable while the player cleared bodies fast enough to keep a column open.
+## The cost rescale removed that: mean card cost went 1.51 -> 2.40 with **card
+## stats untouched** (mean ATK 1.55, mean HP 2.34, both unchanged), so the player
+## fields materially fewer bodies per round against the same wall. MEASURED on
+## `_probe_encwin`, plain combats: **78% of losses end with 7-8 of 8 enemy slots
+## filled and the enemy face still at 77% HP** — and act-2 `ash_hounds` losing at
+## `ehp=16/16`, i.e. eight rounds without landing a single point of face damage.
+## That is not a hard fight, it is a sealed one.
+##
+## THE RULE IS "DO NOT TAKE THE LAST CLEAR COLUMN", NOT A BODY CAP. It binds only
+## when a clear column still exists — if the board is already sealed (a set-piece's
+## closed ground, a scripted opening) this returns false and placement proceeds
+## exactly as before, so the hold can never be frozen out of a state it did not
+## create. The 8-slot board therefore still fills to 6; the 7th body picks another
+## seat or fizzles where it already would have at 8.
+func _hold_would_seal_board(row: int, lane: int) -> bool:
+	if not HOLD_LEAVES_A_PATH:
+		return false
+	# SET-PIECES ARE EXEMPT, and this is a rule about what the rule is FOR.
+	# The lid exists because in an ordinary hold the player's win condition is the
+	# lord's own health, which is reachable only through a clear column. A
+	# set-piece's win condition is its OBJECTIVE — `_sp_evaluate_objective` has
+	# five kinds and only `break_face` wants a path to the face at all; for
+	# `protect` / `hold_rounds` / `slay_marked` / `clear_board`, a full enemy board
+	# is not a lid on anything. Worse, closed ground already narrows the columns
+	# the hold may use, so the "last clear column" test bites almost immediately
+	# and quietly disarms the scenario: it broke `the_pay_column`, whose whole
+	# point is that an UNSCREENED ward dies and the army withdraws — with the hold
+	# forbidden the seat opposite it, the ward survived and the authored failure
+	# path could no longer happen. An authored scenario prints its own rules; do
+	# not let a general fairness floor overwrite them.
+	if _sp_id != "":
+		return false
+	var clear_cols: Array[int] = []
+	for i in range(LANES_PER_ROW):
+		if _column_is_open_for_face(i):
+			clear_cols.append(i)
+	# Already sealed by something else — this placement is not what did it.
+	if clear_cols.is_empty():
+		return false
+	# Only the LAST clear column is defended, and only against a body that would
+	# actually close it (the other row of that column is already empty by
+	# definition, so seating either row closes it).
+	return clear_cols.size() == 1 and clear_cols[0] == lane
+
+
+## A column the player can strike the face through: both rows empty, or holding
+## only an inert structure — the same exemption `_clash_lane_pass` itself makes
+## ("treat the column as empty for attack resolution").
+func _column_is_open_for_face(lane: int) -> bool:
+	for row in [ROW_FRONT, ROW_BACK]:
+		var c = _row_array(true, row)[lane]
+		if c != null and is_instance_valid(c) and c.current_hp > 0 \
+				and not c.is_inert_structure():
+			return false
+	return true
+
+
 func _find_empty_enemy_slot(allow_salted: bool = false) -> Dictionary:
 	# 4x4: fill front-row first, then back-row. Returns {row, lane} or {}.
 	for row in [ROW_FRONT, ROW_BACK]:
@@ -20926,6 +22267,8 @@ func _find_empty_enemy_slot(allow_salted: bool = false) -> Dictionary:
 			# is the fight's printed rule and binds every path.
 			if _sp_lane_closed(i):
 				continue
+			if _hold_would_seal_board(row, i):
+				continue   # the hold may not take the last clear column
 			if arr[i] == null and (allow_salted or not _lane_is_salted(i)):
 				empties.append(i)
 		if not empties.is_empty():
@@ -20944,6 +22287,11 @@ func _pick_empty_for_summon(is_enemy: bool, preferred_row: int) -> Dictionary:
 			# than blanket — a reroute must not land the foe back on salted
 			# ground, but the player's own summons ignore it entirely.
 			if is_enemy and _lane_is_salted(i):
+				continue
+			# The lid rule binds the HOLD only — the player sealing their own
+			# board denies nothing (the enemy reaches the player's face by the
+			# same column rule, and walling yourself in is a choice they paid for).
+			if is_enemy and _hold_would_seal_board(row, i):
 				continue
 			if arr[i] == null and not _sp_lane_closed(i):
 				empties.append(i)
@@ -21708,6 +23056,24 @@ func _update_presence_hp() -> void:
 		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 
+## WHAT THE FOE SAYS IS PART OF THE SEED (2026-09-15).
+##
+## This rolled on Godot's GLOBAL stream — the same class as the `deck_variants`
+## bug documented under `_combat_seed` — so the same fight, on the same seed,
+## opened with a different line every boot. Two consequences, and the second is
+## why it was found at all: reloading a save changed what the boss said to you,
+## and `_probe_settings_differential` (which proves a SETTING never changes
+## CONTENT) reported four phantom divergences, because it boots each screen twice
+## and the bark simply rolled differently the second time. A gate cannot do that
+## job while any screen holds an unseeded content pick, so the answer is to seed
+## it rather than to exempt it.
+##
+## The index is derived from (combat seed, kind, how many of THIS kind have
+## fired) rather than drawn from one advancing stream. An advancing stream would
+## make every line depend on the call ORDER of every other kind, which is exactly
+## the coupling that would have let a setting shift the sequence again — the
+## defect wearing a seed. Per-kind counting keeps a repeated bark varied within a
+## fight while leaving the opener stable no matter what else happened.
 func _pick_bark(kind: String) -> String:
 	var bset: Dictionary = PRESENCE_BARKS.get(_encounter_id, {})
 	if bset.is_empty():
@@ -21719,7 +23085,10 @@ func _pick_bark(kind: String) -> String:
 	if lines is String:
 		return lines
 	if lines is Array and not lines.is_empty():
-		return String(lines[randi() % lines.size()])
+		var n: int = int(_bark_counts.get(kind, 0))
+		_bark_counts[kind] = n + 1
+		var salt: int = _combat_seed() ^ kind.hash() ^ ((n + 1) * 2654435761)
+		return String(lines[absi(salt) % lines.size()])
 	return ""
 
 
@@ -22039,10 +23408,6 @@ func _place_card_in_slot(card: Control, lane_idx: int, row: int = ROW_FRONT,
 			card.dragging.connect(_on_card_dragging.bind(card))
 		if not card.drag_ended.is_connected(_clear_slot_highlights):
 			card.drag_ended.connect(_clear_slot_highlights)
-		# Field repositioning leaves the same ember ribbon as a hand drag.
-		# Guarded: cards played from hand already carry the connection.
-		if not card.dragging.is_connected(_on_card_drag_trail.bind(card)):
-			card.dragging.connect(_on_card_drag_trail.bind(card))
 	# Friendly damage hook. Used by Stalwart's Anvil, Wormwood, Spike Driver,
 	# and any future relic that reacts to "ally took a hit". The Card2D signal
 	# fires only when amount > 0, so guard logic stays in the handler.
@@ -23753,17 +25118,76 @@ func _refresh_incoming_damage_chip() -> void:
 			_incoming_dmg_icon.texture = want_tex
 
 
-func _portrait_art_for_card(cd: Dictionary) -> Texture2D:
-	# Mirror Card2D._find_card_art's creature resolution (id → name → "e_"name)
-	# so an encounter's lead creature can stand in as the enemy portrait.
-	var cid := String(cd.get("id", ""))
-	var name_id := String(cd.get("name", "")).to_lower().replace(" ", "_").replace("'", "")
-	var art: Texture2D = CardArtAliases.try_load_creature_art(cid)
-	if art == null and name_id != "":
-		art = CardArtAliases.try_load_creature_art(name_id)
-	if art == null and name_id != "":
-		art = CardArtAliases.try_load_creature_art("e_" + name_id)
-	return art
+## How far down the SOURCE painting the crop window is pinned, as CSS
+## `object-position`'s vertical term: 0.0 keeps the top of the image, 0.5 is a
+## centred crop, 1.0 keeps the bottom. Portrait-orientation art in this project
+## is composed head-high — the artist's headroom is already at the top of the
+## canvas and the bottom is torso, fire, gears and skulls — so the whole library
+## wants `top` and the plates pass 0.0. See `_mount_portrait_art`.
+const PORTRAIT_CROP_ANCHOR := 0.0
+
+
+## THE ONE PLACE A HERO PLATE MOUNTS ITS PAINTING — both the player's and the
+## foe's, so the two can never be framed by different rules (2026-09-17).
+##
+## THE BUG THIS EXISTS TO PREVENT: `STRETCH_KEEP_ASPECT_COVERED` is exactly CSS
+## `object-fit: cover`, and Godot ships NO equivalent of `object-position` — the
+## crop is hardwired to CENTRE. A centred cover crop is the single commonest way
+## a portrait loses the top of its head, and it is what both plates were doing.
+## Worked example, the player plate: art window 210x222, source 928x1232, so
+## cover scales by max(210/928, 222/1232) = 0.2263 and draws 210x278.8. The box
+## is 222 tall, so 56.8px of overflow was split EVENLY — 28.4px off the top and
+## 28.4px off the bottom, i.e. 125px of the source's crown lopped off while
+## 125px of chest and background was kept. The hood peak sits at y~30. It was
+## decapitated by arithmetic, not by anyone's judgement.
+##
+## Composition practice says the same thing from the other side: put the eyes on
+## the upper-third line, leave only a SMALL amount of headroom above the crown,
+## and take the loss at the bottom, between mid-chest and the collarbone. That
+## is what a top-pinned crop does here, because these paintings arrive already
+## composed — preserving the top edge preserves the headroom the artist framed,
+## and the pixels it spends are the filler under the collarbone.
+##
+## `anchor` is the source-vertical focal term, so a future painting whose
+## subject genuinely sits low can pass 0.5 and get the old behaviour, per-asset,
+## without this rule changing for everything else.
+##
+## The box is passed in rather than measured: both banners are corner-anchored
+## at CONSTANT offsets, so their rects are fixed logical px at every UI Scale
+## (C32) and no resize handler is needed. Returns the TextureRect so the ★7 burn
+## in `_refresh_portrait_char` still has something to hang a material on.
+func _mount_portrait_art(parent: Control, tex: Texture2D, box: Vector2,
+		anchor: float = PORTRAIT_CROP_ANCHOR) -> TextureRect:
+	# `clip_contents` is a real scissor rect and works on gl_compatibility —
+	# unlike `CanvasItem.clip_children`, which is inert on this renderer.
+	var clip := Control.new()
+	clip.clip_contents = true
+	clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	clip.position = Vector2.ZERO
+	clip.size = box
+	parent.add_child(clip)
+
+	var tw := float(maxi(tex.get_width(), 1))
+	var th := float(maxi(tex.get_height(), 1))
+	# Cover: scale until BOTH axes are filled, then crop the overflowing one.
+	var s: float = maxf(box.x / tw, box.y / th)
+	var drawn := Vector2(tw * s, th * s)
+
+	var img := TextureRect.new()
+	img.texture = tex
+	# STRETCH_SCALE, because the rect below IS the cover geometry — asking the
+	# node to re-fit it would just re-centre the crop this function removes.
+	img.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	img.stretch_mode = TextureRect.STRETCH_SCALE
+	img.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	img.size = drawn
+	# Overflow is NEGATIVE or zero on each axis; `anchor` distributes it. Clamped
+	# so a painting can never be pulled far enough to show plate through the gap.
+	img.position = Vector2(
+		clampf((box.x - drawn.x) * 0.5, minf(box.x - drawn.x, 0.0), 0.0),
+		clampf((box.y - drawn.y) * anchor, minf(box.y - drawn.y, 0.0), 0.0))
+	clip.add_child(img)
+	return img
 
 
 ## The bottom-left plate always shows the hero the player chose. Using the same
@@ -23791,10 +25215,37 @@ func _resolve_enemy_portrait() -> Texture2D:
 	#      specific boss/elite — e.g. boss_iron_warden, boss_collector, etc.)
 	#   2. assets/portraits/boss_act<N>.png  (per-act fallback — used by bosses
 	#      that don't have a bespoke splash painting yet)
-	#   3. lead creature's card art (highest-HP creature in the encounter deck)
-	#   4. enemy_commander.png  (last-ditch generic)
+	#   3. assets/portraits/enemy_general.png  (elites — see the drop-in note
+	#      at that branch; harmlessly absent today)
+	#   4. enemy_commander.png  (the anonymous antagonist — every other fight)
 	# Elites can also opt into step 1 by dropping a boss_<eid>.png file; that's
 	# how the act 2 demon_vanguard elite picks up its painted splash.
+	#
+	# EVERY ARM OF THIS FUNCTION MUST RETURN A PORTRAIT-ORIENTATION PAINTING,
+	# and that is a hard contract rather than a preference (2026-09-17). The
+	# plate's art window is 236x232 — essentially square — and the TextureRect
+	# is STRETCH_KEEP_ASPECT_COVERED, so it crops to fill on whichever axis is
+	# short. `assets/portraits/` is uniformly 928x1232 (ar 0.75): it covers by
+	# WIDTH at scale 0.254 and trims 26% off the height, which is the bust crop
+	# of a standing figure the plate was designed around.
+	#
+	# Step 3 used to be the lead creature's CARD art, and that was the defect.
+	# `assets/creatures/` is uniformly 768x512 (ar 1.50) — landscape, because a
+	# CARD's art window is 203x127 (ar 1.60) and a 3:2 painting drops into that
+	# with ~6% trim. Dropped into THIS window it covers by HEIGHT instead, which
+	# throws away 32% of the painting's WIDTH and renders what is left at scale
+	# 0.453 — exactly 2x the magnification of the player's plate. A painting
+	# composed for a wide frame, cropped to its middle two-thirds and blown up
+	# double, reads as a broken image; that fired on 47 of 66 fights (all 30
+	# plain combats + 17 of 18 elites). Same trap CLAUDE.md records for the
+	# run-opening art strip. Borrow a portrait, never a card.
+	#
+	# `enemy_commander.png` is the borrow BECAUSE IT IS ANONYMOUS — a horned,
+	# visored figure with no face. The other portrait-shaped candidates are all
+	# somebody: boss_act<N> is claimed by the_bellringer / the_devil /
+	# the_black_tide, and boss_rival_<lord> are painted individuals (a crowned
+	# patriarch with a ledger, a named man with a flame-projector). Lending any
+	# of those to a roadside fight would spend a boss reveal on a scarecrow.
 	var enc: Dictionary = EncounterDB.get_encounter(_encounter_id) if _encounter_id != "" else {}
 	var enc_type: String = String(enc.get("type", ""))
 	if _encounter_id != "" and (enc_type == "boss" or enc_type == "elite"):
@@ -23805,20 +25256,20 @@ func _resolve_enemy_portrait() -> Texture2D:
 		var bpath := "res://assets/portraits/boss_act%d.png" % RunState.get_act()
 		if ResourceLoader.exists(bpath):
 			return load(bpath)
-	if _enemy_deck.is_empty() and _encounter_id != "":
-		# Same salt as _setup_fight_state's build: if this presentation-side
-		# fallback ever does fire, it must hand back the SAME lineup the setup
-		# path would have built (it assigns _enemy_deck, so it is not cosmetic).
-		_enemy_deck = EncounterDB.build_enemy_deck(_encounter_id, RunState.get_act(),
-			_encounter_roll_stream(ENC_ROLL_SALT_DECK))
-	if not _enemy_deck.is_empty():
-		var lead: Dictionary = _enemy_deck[0]
-		for cd in _enemy_deck:
-			if int(cd.get("hp", 0)) > int(lead.get("hp", 0)):
-				lead = cd
-		var art := _portrait_art_for_card(lead)
-		if art != null:
-			return art
+	if enc_type == "elite":
+		# DROP-IN SLOT, deliberately pointing at a file that does not exist yet.
+		# Borrowing one anonymous portrait fixes the proportions but costs the
+		# Generals their separation: 17 of 18 elites have no bespoke splash, so
+		# they now wear the same commander a roadside fight does. There is no
+		# second anonymous painting to reach for — `boss_act1` is unclaimed but
+		# act2/act3 belong to the_bellringer and the_devil + the_black_tide, and
+		# every boss_rival_<lord> is a painted individual. So the fix is an
+		# ASSET, not a branch: drop a 928x1232 portrait here as
+		# enemy_general.png and all 17 Generals pick it up with no code change,
+		# the same way boss_<eid>.png auto-wins for one named fight.
+		var gpath := "res://assets/portraits/enemy_general.png"
+		if ResourceLoader.exists(gpath):
+			return load(gpath)
 	return load("res://assets/portraits/enemy_commander.png")
 
 
@@ -23874,17 +25325,9 @@ func _build_enemy_banner_diegetic() -> void:
 	const HP_BOTTOM := -8
 	var demon_tex: Texture2D = _resolve_enemy_portrait()
 	if demon_tex != null:
-		var img := TextureRect.new()
-		img.texture = demon_tex
-		img.anchor_left = 0.0
-		img.anchor_right = 1.0
-		img.anchor_top = 0.0
-		img.anchor_bottom = 1.0
-		img.offset_bottom = HP_TOP
-		img.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		img.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		img.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		banner.add_child(img)
+		# Top-pinned cover crop, same rule as the player plate — see
+		# _mount_portrait_art for why a centred one was cutting the horns off.
+		var img := _mount_portrait_art(banner, demon_tex, Vector2(W, H + HP_TOP))
 		# ★7 — the foe's panel chars as they break, same as yours. Held so
 		# _refresh_portrait_char can drive its burn off their HP.
 		_enemy_portrait_rect = img
@@ -24031,17 +25474,8 @@ func _build_player_banner_diegetic() -> void:
 	const HP_TOP := -68
 	var knight: Texture2D = _resolve_player_portrait()
 	if knight != null:
-		var img := TextureRect.new()
-		img.texture = knight
-		img.anchor_left = 0.0
-		img.anchor_right = 1.0
-		img.anchor_top = 0.0
-		img.anchor_bottom = 1.0
-		img.offset_bottom = HP_TOP
-		img.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		img.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		img.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		banner.add_child(img)
+		# Top-pinned cover crop — a centred one cut the hood off the hero's head.
+		var img := _mount_portrait_art(banner, knight, Vector2(W, H + HP_TOP))
 		# ★7 — your panel takes the war. See _refresh_portrait_char.
 		_player_portrait_rect = img
 
@@ -24822,11 +26256,16 @@ func _build_command_seal_post(is_opp: bool) -> void:
 	seal.size = Vector2(seal_r * 2.0, seal_r * 2.0)
 	press.add_child(seal)
 
-	# Big numeric — the SPENDABLE count, dominant readout, pressed INTO the wax
-	# face: cream numeral + deep-navy outline, same ink as card cost seals.
-	# See _set_seal_readout for why the per-turn base is not printed beside it.
+	# Big numeric — SPENDABLE / THIS ROUND'S COMMAND, dominant readout, pressed
+	# INTO the wax face: cream numeral + deep-navy outline, same ink as card cost
+	# seals. Composed here as well as in _update_hud so the instrument is BORN in
+	# the shape it keeps — built with a bare numeral, it changed form on the first
+	# HUD refresh, which is a flicker on the most-watched number on the screen.
+	# See _set_seal_readout for the fraction's reasoning and its fitter.
 	var cur_val: int = _net_opp_mana if is_opp else player_mana
-	var lbl := _make_text_label(str(cur_val), 37, Color(0.996, 0.941, 0.800))
+	var max_val: int = _net_opp_max_mana if is_opp else player_max_mana
+	var lbl := _make_text_label("%d/%d" % [cur_val, max_val], 37,
+		Color(0.996, 0.941, 0.800))
 	if GameTheme.font_title_black:
 		lbl.add_theme_font_override("font", GameTheme.font_title_black)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -24860,8 +26299,11 @@ func _build_command_seal_post(is_opp: bool) -> void:
 	post.add_child(caption)
 
 	# Carryover pips — small dots on the plinth shelf showing how much unspent
-	# Command will BANK into next turn (up to MAX_BANKED_MANA). Teaches the bank
-	# rule by sight: spend down and the lit dots wink out. Player seal only.
+	# Command will BANK into next turn. Teaches the bank rule by sight: spend down
+	# and the lit dots wink out. Player seal only, and EMPTY unless the run holds
+	# the relic that grants carryover (_bank_cap) — a shelf that is always there
+	# advertises a rule the run does not have. The row rebuilds itself the moment
+	# the relic is picked up, because _update_bank_pips runs on every HUD refresh.
 	if not is_opp:
 		var pips := HBoxContainer.new()
 		pips.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -24981,38 +26423,80 @@ func _spawn_seal_impression(press_ref: WeakRef) -> void:
 ## what it is, that it refills each turn, and that unspent Command banks. Rebuilt
 ## live (max / cap can grow mid-run) so the lesson never goes stale.
 func _command_tooltip_text() -> String:
+	# THE BANK LINE ONLY EXISTS WHEN THE BANK DOES. Carryover is a relic now, and
+	# a tooltip that promises it to a run that cannot do it is worse than silence:
+	# the player plans a turn around holding Command back, and loses it. The
+	# ordinary case gets the rule that IS true, stated plainly, because "spend it
+	# or lose it" is the fact the whole ramp rests on.
+	var cap: int = _bank_cap()
 	var bank_line: String = \
-		"Up to %d unspent Command carries over — the lit dots on the shelf." % MAX_BANKED_MANA
+		("Up to %d unspent Command carries over — the lit dots on the shelf." % cap) \
+		if cap > 0 else \
+		"Unspent Command is lost when your turn ends — spend it."
 	# The wax presses the spendable count alone, so the refill number lives HERE
 	# and this text has to say outright that carryover can push the seal past it.
 	# That surprise is exactly what the old "cur / max" face got wrong: it framed
 	# an income as a ceiling and then routinely printed a count above it.
-	return "COMMAND\nSpend Command to play creatures and spells. It refills to %d at the start of each turn.\n%s" % [player_max_mana, bank_line]
+	# THE RAMP HAS TO BE ON SCREEN SOMEWHERE. This used to read "it refills to N
+	# at the start of each turn", which was true of a flat 3 and is a lie under a
+	# growing resource — it frames a number that changes every round as a
+	# standing fact, and the player's whole cost read depends on knowing it
+	# climbs. Hearthstone draws the empty crystal for this exact reason; the
+	# tooltip is where it lives here, since the wax presses one numeral by design
+	# (see _set_seal_readout for why that is not getting a second one).
+	#
+	# The NEXT figure is projected from the ramp delta rather than recomputed
+	# from scratch, so every relic and mutator already folded into
+	# player_max_mana is carried along and the line stays true for a player
+	# holding the Sash or a Blessed fight.
+	var next_line: String
+	if command_for_round(round_number + 1) > command_for_round(round_number):
+		var step: int = command_for_round(round_number + 1) - command_for_round(round_number)
+		next_line = "Your Command grows each round: %d this round, %d next." \
+			% [player_max_mana, player_max_mana + step]
+	else:
+		next_line = "Your Command has reached its limit of %d a round." % player_max_mana
+	return "COMMAND\nSpend Command to play creatures and spells.\n%s\n%s" \
+		% [next_line, bank_line]
 
 
 ## Set a Command-seal numeral, auto-shrinking the font so the whole string
 ## stays on the ~96px wax blob. Width is measured with the label's actual font;
 ## the floor keeps the worst case legible rather than microscopic.
 ##
-## THE SEAL PRESSES THE SPENDABLE COUNT ONLY. It used to read "cur / max", and
-## a slash asserts containment — "5 of 3" is nonsense on sight, and a player
-## should not have to derive that the left number can legitimately exceed the
-## right one. It can, because unspent Command BANKS: max is an income, not a
-## cap, so the two numbers were never the same kind of thing. Everything the
-## fraction was carrying still has a home — what banks is the lit pips on the
-## plinth, and the refill number is in the hover text, where a fact that changes
-## once a run belongs. The single numeral is also the only form that always
-## renders at the full 37px; "12 / 12" used to shrink to the low twenties.
+## THE SEAL PRESSES "SPENDABLE / THIS ROUND'S COMMAND" (2026-09-16).
 ##
-## Callers may still hand in a composed "cur / max" (CombatNet's foe mirror
-## does); this is the one funnel every seal numeral passes through, so the
-## trimming happens here rather than at each call site.
+## It printed the spendable count alone from 2026-08 until now, and the argument
+## for that was sound while it held: a slash asserts containment, and unspent
+## Command BANKED, so the left number could legitimately exceed the right one —
+## "5 of 3" is nonsense on sight. The premise is what changed, not the taste.
+## Carryover is now a RELIC (see _bank_cap), so on an ordinary run the spendable
+## count is bounded by the round's income by construction and the fraction is
+## exactly the containment it looks like.
+##
+## What the single numeral cost, and why it is worth a font step: the ramp means
+## the denominator MOVES — 1 on round 1, +1 a round to COMMAND_RAMP_CAP — so a
+## lone "3" cannot be read against anything. "3/5" says spent-two-of-five in one
+## glance; "3" says three, and leaves the player to remember which round they are
+## on and derive the rest. That derivation is the whole cost read of this game.
+##
+## The surplus case is not gone, only rare: a gift (Warm Knucklebone, the
+## Initiative Coin, a gain-Command spell) or the relic's carryover can still put
+## the numerator above the denominator. That now reads as what it is — a bonus
+## standing above your income — and _pulse_mana_label already announces it in the
+## moment. The pips and the hover text keep their jobs unchanged.
+##
+## Callers may hand in either form; this is the one funnel every seal numeral
+## passes through, so the SPACING is normalised here rather than at each call
+## site (CombatNet's foe mirror composes "%d / %d"). Compact, because the fitter
+## below pays for every glyph: "12/12" holds ~30px where "12 / 12" fell to 24.
 func _set_seal_readout(lbl: Label, text: String) -> void:
 	if lbl == null or not is_instance_valid(lbl):
 		return
 	var slash: int = text.find("/")
 	if slash >= 0:
-		text = text.substr(0, slash).strip_edges()
+		text = "%s/%s" % [text.substr(0, slash).strip_edges(),
+			text.substr(slash + 1).strip_edges()]
 	# THE FOE'S SEAL IS STRUCK TOO (✦1's parity gap, 2026-08-04). The opponent's
 	# mirror never routed through _pulse_mana_label at all — CombatNet's
 	# _net_set_opp_mana called straight into here and stopped — so the foe's
@@ -25045,13 +26529,37 @@ func _set_seal_readout(lbl: Label, text: String) -> void:
 	lbl.add_theme_font_size_override("font_size", fs)
 
 
+## How much unspent Command carries into the next round. ZERO unless the run
+## holds the relic that grants it — see MAX_BANKED_MANA for why the default
+## moved, and why the AMOUNT stays that constant rather than the relic's `value`.
+##
+## Read live rather than latched at fight start: a relic can arrive mid-run and
+## the pips, the tooltip and the round open must all agree on the same frame.
+func _bank_cap() -> int:
+	if not _has_relic(BANK_RELIC):
+		return 0
+	return MAX_BANKED_MANA
+
+
+## The same rule for a side whose relics are a plain list rather than "the run" —
+## the practice bot, which keeps its own Command outside the player state. STATIC
+## and PURE so there is still exactly ONE statement of "carryover is relic-gated,
+## and this much": a second `clampi(..., MAX_BANKED_MANA)` in the bot's turn
+## machine is precisely the restatement that let the client and the host model
+## the same relic differently once already.
+static func bank_cap_for(held: Array) -> int:
+	return MAX_BANKED_MANA if held.has(BANK_RELIC) else 0
+
+
 ## Repaint the carryover dots: `lit` of `cap` filled, where lit = what you'd bank
 ## right now (current Command, capped). Called on build and on every HUD refresh.
+## With no carryover relic the cap is 0, so the shelf builds empty and the row
+## simply is not there — which is the honest picture of a rule you do not have.
 func _update_bank_pips() -> void:
 	if _bank_pips == null or not is_instance_valid(_bank_pips):
 		return
-	var cap: int = MAX_BANKED_MANA
-	cap = clampi(cap, 0, 6)   # bound the row so a fat Ice Cream bank can't overflow
+	var cap: int = _bank_cap()
+	cap = clampi(cap, 0, 6)   # bound the row so no future grant can overflow the shelf
 	var lit: int = clampi(player_mana, 0, cap)
 	# Most HUD refreshes do not change the bank. Avoid deleting and rebuilding
 	# Controls + StyleBoxes for an identical row dozens of times per turn.
@@ -25684,11 +27192,13 @@ func _refresh_pile_stack(art: Control, count: int) -> void:
 # sorted by cost then name so the player can quickly see what's coming, not
 # the random draw order. Click the backdrop or Close to dismiss.
 var _pile_viewer_layer: CanvasLayer = null
+var _pile_viewer_generation: int = 0
+var _pile_viewer_ready: bool = false
 
 func _show_pile_viewer(kind: int) -> void:
-	if _pile_viewer_layer != null and is_instance_valid(_pile_viewer_layer):
-		_pile_viewer_layer.queue_free()
-		_pile_viewer_layer = null
+	_close_pile_viewer()
+	_pile_viewer_generation += 1
+	var build_generation := _pile_viewer_generation
 	var entries: Array = []
 	var title_text: String
 	if kind == 0:
@@ -25774,6 +27284,7 @@ func _show_pile_viewer(kind: int) -> void:
 		empty_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		empty_lbl.custom_minimum_size = Vector2(1600, 60)
 		scroll.add_child(empty_lbl)
+		_pile_viewer_ready = true
 	else:
 		var grid := GridContainer.new()
 		grid.columns = 6
@@ -25782,17 +27293,21 @@ func _show_pile_viewer(kind: int) -> void:
 		grid.custom_minimum_size = Vector2(1600, 0)
 		scroll.add_child(grid)
 
+		# The complete grid is present immediately. A pile can hold thirty cards;
+		# constructing thirty ornate Card2Ds in this click handler froze the board
+		# for a frame. Exact-size backs reserve the final geometry while cached
+		# faces are hydrated over several frames behind them.
+		var slots: Array[Control] = []
+		var backs: Array[Control] = []
 		for e in sorted_entries:
-			# Mini wrapper sized to the static card so the grid lays them out
-			# at uniform spacing without the cards stretching. 225×300 matches
-			# Card2D's hand size (CARD_SIZE).
-			var wrapper := Control.new()
-			wrapper.custom_minimum_size = Vector2(225, 300)
-			var card = CARD_SCENE.instantiate()
-			card.static_display = true
-			card.card_data = e.data
-			wrapper.add_child(card)
-			grid.add_child(wrapper)
+			var stage := _make_card_loading_stage(grid)
+			var slot: Control = stage["slot"]
+			var back: Control = stage["back"]
+			grid.add_child(slot)
+			slots.append(slot)
+			backs.append(back)
+		_hydrate_pile_viewer(_pile_viewer_layer, grid, sorted_entries,
+			slots, backs, build_generation)
 
 	# Close button at the bottom.
 	var close_btn := Button.new()
@@ -25811,10 +27326,105 @@ func _show_pile_viewer(kind: int) -> void:
 	_pile_viewer_layer.add_child(close_btn)
 
 
+func _make_card_loading_stage(group: CanvasItem) -> Dictionary:
+	var slot := Control.new()
+	slot.custom_minimum_size = Vector2(225, 300)
+	slot.size = Vector2(225, 300)
+	slot.mouse_filter = Control.MOUSE_FILTER_PASS
+	var back := TextureRect.new()
+	back.texture = CARD_BACK_TEXTURE
+	back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	back.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	Motion.arm_loading_writ(back, group)
+	slot.add_child(back)
+	return {"slot": slot, "back": back}
+
+
+func _hydrate_pile_viewer(layer: CanvasLayer, grid: GridContainer,
+		entries: Array, slots: Array[Control], backs: Array[Control],
+		generation: int) -> void:
+	# A rapid close can happen while the shared cache worker is still finishing
+	# a card. Keep only weak references in its validity callback so canceling a
+	# viewer never leaves a callable holding freed scene nodes.
+	var layer_ref: WeakRef = weakref(layer)
+	var grid_ref: WeakRef = weakref(grid)
+	var still_here := func() -> bool:
+		var live_layer := layer_ref.get_ref() as CanvasLayer
+		var live_grid := grid_ref.get_ref() as GridContainer
+		return generation == _pile_viewer_generation \
+			and is_inside_tree() \
+			and live_layer != null \
+			and live_layer == _pile_viewer_layer \
+			and live_layer.is_inside_tree() \
+			and live_grid != null \
+			and live_grid.is_inside_tree()
+
+	# Even a fully warm pile gets one honest frame as a complete face-down set,
+	# so warm and cold opens use the same visual grammar.
+	await get_tree().process_frame
+	if not still_here.call():
+		return
+
+	var datas: Array = []
+	for entry in entries:
+		datas.append((entry as Dictionary)["data"])
+	await CardTextureCache.bake_many(datas, still_here)
+	if not still_here.call():
+		return
+
+	var faces: Array[Control] = []
+	for i in entries.size():
+		var entry: Dictionary = entries[i]
+		var card = CARD_SCENE.instantiate()
+		card.static_display = true
+		card.live_baked_mode = true
+		card.card_data = (entry["data"] as Dictionary).duplicate(true)
+		card.card_id = String(entry["id"])
+		card.modulate.a = 0.0
+		slots[i].add_child(card)
+		faces.append(card)
+		# Rich faces are allowed to construct one per frame only while every final
+		# slot remains covered. No implementation-order stagger reaches the player.
+		await get_tree().process_frame
+		if not still_here.call():
+			return
+
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	for face in faces:
+		if is_instance_valid(face):
+			face.modulate.a = 1.0
+	if snap:
+		for back in backs:
+			if is_instance_valid(back):
+				back.visible = false
+				back.queue_free()
+	else:
+		for i in faces.size():
+			if is_instance_valid(backs[i]) and is_instance_valid(faces[i]):
+				Motion.flip_out(backs[i], 0.13)
+				Motion.flip_in(faces[i], Motion.time(0.13), 0.17)
+	_pile_viewer_ready = true
+
+
+func _pile_viewer_is_ready() -> bool:
+	return _pile_viewer_ready \
+		and _pile_viewer_layer != null \
+		and is_instance_valid(_pile_viewer_layer) \
+		and _pile_viewer_layer.is_inside_tree()
+
+
 func _close_pile_viewer() -> void:
+	_pile_viewer_generation += 1
+	_pile_viewer_ready = false
 	if _pile_viewer_layer != null and is_instance_valid(_pile_viewer_layer):
-		_pile_viewer_layer.queue_free()
+		var outgoing := _pile_viewer_layer
 		_pile_viewer_layer = null
+		if outgoing.get_parent() != null:
+			outgoing.get_parent().remove_child(outgoing)
+		outgoing.queue_free()
 
 
 func _make_text_label(text: String, sz: int, color: Color) -> Label:
@@ -27067,10 +28677,11 @@ func _update_hud() -> void:
 			_enemy_hp_tween = e_fill.create_tween()
 			_enemy_hp_tween.tween_property(e_fill, "size:x", e_target, 0.35) \
 				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	# Always the plain "cur / max" form — a banked surplus reads from cur > max,
-	# the lit shelf pips, and the seal tooltip. The old "(+N)" suffix ran twice
-	# the wax's width and spilled onto the hand fan.
-	_set_seal_readout(_mana_label, str(player_mana))
+	# "spendable / this round's Command". The denominator is the thing the ramp
+	# moves every round, so without it the numerator is a number with nothing to
+	# measure it against — see _set_seal_readout. (The old "(+N)" banked suffix
+	# stays retired: it ran twice the wax's width and spilled onto the hand fan.)
+	_set_seal_readout(_mana_label, "%d / %d" % [player_mana, player_max_mana])
 	_update_bank_pips()
 	_refresh_hand_affordability()
 	_refresh_relic_counters()
@@ -27224,66 +28835,6 @@ func _slot_global_center(is_enemy: bool, row: int, lane: int) -> Vector2:
 	if row == ROW_BACK:
 		y += -86.0 if is_enemy else 86.0
 	return Vector2(x, y)
-
-
-func _on_card_drag_trail(global_pos: Vector2, card: Control) -> void:
-	# Breadcrumb feed for the drag ember trail (see the state block). Connected
-	# to EVERY player card's `dragging` signal — hand plays, spell throws, and
-	# battlefield repositioning all leave the same ribbon. The signal only
-	# fires on cursor motion, so decay lives in _process, not here.
-	if _hud_layer == null or DisplayServer.get_name() == "headless":
-		return
-	if UserSettings != null and UserSettings.reduce_motion:
-		return
-	if _drag_trail == null or not is_instance_valid(_drag_trail):
-		# A RIBBON OFF A CARD IN MOTION IS A TRAIL, so it gets the "trail" beam
-		# profile — the softest of the kit, a broad core with a gentle falloff,
-		# because this follows the cursor continuously and a hard filament
-		# scribbling across the board is the opposite of what it is for.
-		# Previously a flat 13px Line2D: uniform opacity across the width, so the
-		# ribbon had two hard edges the whole way and read as a drawn stroke
-		# rather than as motion.
-		_drag_trail = Motion.beam_line(
-			PackedVector2Array(), Color(1.0, 0.74, 0.30, 0.50), 30.0,
-			"trail", 0.45, "comet")
-		_drag_trail.joint_mode = Line2D.LINE_JOINT_ROUND
-		_drag_trail.begin_cap_mode = Line2D.LINE_CAP_ROUND
-		_drag_trail.end_cap_mode = Line2D.LINE_CAP_ROUND
-		_drag_trail.z_index = 210
-		_hud_layer.add_child(_drag_trail)
-	if _drag_trail_pts.is_empty():
-		# Fresh grab — tint the ribbon to what's being carried. THROUGH THE
-		# SHADER: `default_color` is not read by beam_material, so writing it
-		# here would fail silently and every spell would trail creature-gold.
-		Motion.beam_tint(_drag_trail, Color(1.0, 0.74, 0.30, 0.50) \
-			if card.is_creature() else Color(0.62, 0.82, 1.0, 0.50))
-	# Anchor at the card's lower third, not the cursor: the ribbon reads as
-	# coming off the card's body, and mostly clears the face on the way up.
-	var anchor := global_pos + Vector2(0.0, card.size.y * card.scale.y * 0.30)
-	_drag_trail_pts.append({"p": anchor, "born": Time.get_ticks_msec() / 1000.0})
-	if _drag_trail_pts.size() > 24:
-		_drag_trail_pts.pop_front()
-	set_process(true)
-
-
-func _update_drag_trail() -> void:
-	# Per-frame decay: age out breadcrumbs so the ribbon burns down from the
-	# tail. Runs from _process only while points remain (_combat_process_needed
-	# keeps the loop alive; it turns itself back off once the trail is gone).
-	if _drag_trail_pts.is_empty():
-		return
-	var now := Time.get_ticks_msec() / 1000.0
-	while not _drag_trail_pts.is_empty() \
-			and now - float(_drag_trail_pts[0].born) > DRAG_TRAIL_LIFE:
-		_drag_trail_pts.pop_front()
-	if _drag_trail == null or not is_instance_valid(_drag_trail):
-		_drag_trail_pts.clear()
-		return
-	var pts := PackedVector2Array()
-	for e in _drag_trail_pts:
-		pts.append(e.p)
-	_drag_trail.points = pts
-	_drag_trail.visible = pts.size() >= 2
 
 
 func _spawn_vfx_ring(center: Vector2, color: Color, radius: float,
@@ -28255,15 +29806,36 @@ func _refresh_lane_forecast() -> void:
 	# which is what the player is actually asking ("can this body survive the
 	# round", not "what does each attacker do").
 	var totals := _forecast_group_by_target(reads)
+
+	# ONE MARK PER BODY, NOT ONE PER ATTACKER (2026-09-16). The old loop drew its
+	# reticle inside the per-attacker pass, so a victim facing two blows was
+	# ringed TWICE — and each ring was coloured by its own attacker's `lethal`,
+	# which is false for both halves of a blow that is only fatal when summed. A
+	# body about to be killed by two 3s was drawn in survivable amber, twice.
+	# Aggregating the MARK as well as the number fixes the count and the colour
+	# in one move.
+	var marked: Dictionary = {}          # instance_id -> the read that owns the mark
 	for entry in reads:
 		var r: Dictionary = entry["read"]
-		# Suppress the per-attacker label only where an aggregate will replace it.
 		var tgt = r.get("target")
-		var suppress := tgt != null and is_instance_valid(tgt) \
-			and totals.has(tgt.get_instance_id())
-		_add_lane_forecast(entry["attacker"], r, suppress)
+		if tgt == null or not is_instance_valid(tgt):
+			continue
+		var tid: int = tgt.get_instance_id()
+		if totals.has(tid):
+			continue                     # the aggregate speaks for this body
+		if marked.has(tid):
+			continue
+		marked[tid] = true
+		_mark_struck_body(tgt, int(r.get("damage", 0)),
+			bool(r.get("lethal", false)), entry["attacker"])
 	for tid in totals:
-		_add_lane_forecast_total(totals[tid])
+		var g: Dictionary = totals[tid]
+		_mark_struck_body(g["target"], int(g["damage"]), bool(g["lethal"]), null)
+
+	# Per-ATTACKER furniture: the exceptional clause, and a connector for any
+	# blow that does not simply travel straight across its own column.
+	for entry in reads:
+		_add_lane_forecast(entry["attacker"], entry["read"])
 
 
 func _forecast_attacker_can_strike(attacker: Control) -> bool:
@@ -28336,243 +29908,444 @@ func _forecast_group_by_target(reads: Array) -> Dictionary:
 	return out
 
 
-## The one chip that speaks for every blow landing on a body this round.
+## ── THE LANE FORECAST'S MARKS (rebuilt 2026-09-16) ─────────────────────────
+##
+## THE COMPLAINT WAS "the lines and circles are incredibly ugly", and measuring
+## it (tools/_shot_forecast.gd) turned an aesthetic complaint into arithmetic:
+## SIX of eight chips sat 100% over a creature's painting, and the reticle could
+## not do otherwise — a 100px circle centred on a 200x150 token whose art runs
+## edge to edge has nowhere to be except across the picture.
+##
+## What was on screen per blow: a flat ring, a curved beam, a hard-edged
+## Polygon2D arrowhead, a Label, and a rounded StyleBoxFlat under the Label.
+## FIVE nodes, three of them saying the same word ("here"), and the only piece of
+## web-page chrome left anywhere on the board — sitting directly beside the
+## pressed wax seals that show every other number in this game.
+##
+## THREE RULES CAME OUT OF THE RESEARCH, and each one deletes something.
+##
+##  1. SHOW THE OUTCOME, DO NOT NARRATE IT. Into the Breach's stated rule is to
+##     "sacrifice cool ideas for the sake of clarity every time", and their
+##     postmortem's practical finding is that showing the thing happen beats
+##     describing it. Slay the Spire changes its intent ICON at damage
+##     thresholds rather than leaning on the number. Legends of Runeterra marks
+##     a unit that will reach the nexus with a pointed shape, and ghosts a
+##     blocker that has gone. None of the three writes a sentence. So: the blow
+##     is a NUMBER PRESSED INTO WAX, its severity is how far that wax has
+##     CRACKED, and lethal is the seal BROKEN THROUGH. Ordinary reads print no
+##     words at all now; words are left for the exceptional clause.
+##
+##  2. A MARK GOES WHERE THERE IS GROUND FOR IT. Measured: tokens are 200x150,
+##     the painting runs edge to edge, the two stat seals hang in the bottom
+##     corners, rows are 6px apart and COLUMNS ARE 68px APART. So the only clear
+##     ground on the board is the column gutter, and that is where the wound
+##     seal goes — outboard of the body's own HP seal, level with it, so the two
+##     read as one row: what it has, and what is coming.
+##
+##  3. DO NOT DRAW THE BOARD'S OWN GEOMETRY. The connector was a wire from an
+##     attacker to the body DIRECTLY OPPOSITE IT, in a game whose combat
+##     resolves by column. It was drawing the grid. It is now drawn only for a
+##     blow that does NOT travel straight across — a sniper's order, a redirect,
+##     an interpose — which is the only case where the line carries information.
+##     That one change removes most of the wires from a full board.
+##
+## Nothing here is a glow. The FX rebuild's "made of light, not wire" holds for
+## blows LANDING; a forecast is a plan, and the honest material for a plan on a
+## war table is a struck mark — which is also why every mark carries a dark
+## offset halo instead of a hot core (see reference: value is decided by the
+## local ground).
+
+## The wound seal's box, and the gap between it and the token's edge. 34px sits
+## just under the 38px stat seal it stands beside — a forecast is a claim about
+## the future and should not out-weigh the fact next to it.
+const FORECAST_SEAL_PX := 40.0
+const FORECAST_SEAL_GAP := 9.0
+## The bracket is pushed just outside the token so it frames the border rather
+## than eating into the frame's own gilt rule.
+const FORECAST_BRACKET_OUTSET := 6.0
+## A bracket is the SECOND tier — see _mark_struck_body. Half of what the body
+## still has standing is the line: below it the blow is a scratch the seal can
+## report on its own, at or above it the body is one more blow from gone.
+const FORECAST_BRACKET_SEVERITY := 0.5
+## The wound's wax is DELIBERATELY NOT the HP seal's oxblood. Drawn in the same
+## colour it read as a third stat crammed into the card's furniture row rather
+## than as something about to happen to it — a darker, colder bruise separates
+## the claim from the fact, and the kill runs hotter so a break carries.
+const FORECAST_WOUND_WAX := Color(0.355, 0.092, 0.080)
+const FORECAST_WOUND_WAX_KILL := Color(0.620, 0.150, 0.098)
+
+
+## Everything that is about to happen TO a body, in one place: the bracket that
+## names it and the wound seal that weighs the blow.
+##
+## Called once per VICTIM, never once per attacker. The old loop marked inside
+## the per-attacker pass, so a body facing two blows was ringed twice and each
+## ring took its own attacker's `lethal` — which is false for both halves of a
+## blow that only kills when summed. A body about to die to two 3s was drawn in
+## survivable amber, twice.
+func _mark_struck_body(target: Control, damage: int, lethal: bool,
+		attacker: Control) -> void:
+	if target == null or not is_instance_valid(target) or _hud_layer == null:
+		return
+	var danger := _forecast_danger_color(lethal, false)
+	var standing: int = _forecast_projected_hp(target)
+	var severity: float = float(damage) / maxf(float(standing), 1.0)
+
+	# TWO TIERS, AND THE SECOND ONE IS THE POINT (2026-09-16). Bracketing every
+	# struck body put a mark on seven of eight cards, and a mark that is on
+	# everything is not a mark — it is a texture. Into the Breach's whole method
+	# is cutting marks until the remaining ones mean something.
+	#
+	# So the SEAL says "a blow is coming, this heavy" and is drawn for every
+	# read; the BRACKET says "this body is in trouble" and is drawn only for a
+	# kill or a blow taking at least half of what the body still has standing.
+	# On the staged board that is three cards instead of seven, and the three
+	# are the ones a player would actually stop on.
+	if lethal or severity >= FORECAST_BRACKET_SEVERITY:
+		var struck_edge := -1
+		if attacker != null and is_instance_valid(attacker):
+			struck_edge = 0 if _card_center(attacker).y < _card_center(target).y else 1
+		_add_forecast_bracket(target, danger, lethal, struck_edge)
+	if damage > 0:
+		_add_forecast_wound_seal(_forecast_wound_point(target), damage, lethal,
+			standing, FORECAST_WOUND_WAX_KILL if lethal else FORECAST_WOUND_WAX,
+			false, _forecast_mark_seed("w", target))
+		_add_forecast_tether(target, danger)
+
+
+## Amber for a body that lives, hot red for one that does not. Colour is never
+## the only channel — the bracket changes WEIGHT and DOUBLES its ticks, and the
+## seal changes SHAPE by breaking — but it is the fastest of the three.
+## THE HUE SITS IN THE GAME'S FAMILY, and it had to be pulled back twice.
+## `Color(1.0, 0.31, 0.20)` is #FF4F33 — a UI alert red at full saturation. Beside
+## the HP seal's oxblood (#822319) it reads as neon no matter how well it is lit,
+## and once the marks gained a real outer glow it was the fill's saturation, not
+## the number of passes, that was making them look like vector art. LUMINANCE IS
+## THE GLOW'S JOB NOW; the fill only has to carry the hue.
+func _forecast_danger_color(lethal: bool, face: bool) -> Color:
+	if lethal:
+		return Color(0.86, 0.21, 0.14)
+	if face:
+		return Color(0.90, 0.37, 0.18)
+	return Color(0.91, 0.66, 0.28)
+
+
+## THE PLACEMENT LAW, in one function: outboard of the body's own HP seal, level
+## with it, in the 68px column gutter. Flipped inboard at the board's right edge
+## so the last column's seal cannot walk off the canvas.
+func _forecast_wound_point(card: Control) -> Vector2:
+	var r := Rect2(card.global_position, card.size * card.scale)
+	# 0.845 of the token's height is the middle of the stat-seal row — measured
+	# off the live board, not derived from the layout constants, because the
+	# seals are anchored to the token's BOTTOM and the token's height is the
+	# thing a future layout change would move.
+	var y: float = r.position.y + r.size.y * 0.845
+	var half := FORECAST_SEAL_PX * 0.5
+	var x: float = r.end.x + half + FORECAST_SEAL_GAP
+	var limit: float = get_viewport_rect().size.x - 6.0
+	if x + half > limit:
+		x = r.position.x - half - FORECAST_SEAL_GAP
+	return Vector2(x, y)
+
+
+## A STABLE SEED FOR A FORECAST MARK. Keyed to the card and the slot it stands
+## in rather than to the object, so the same creature is marked with the same
+## hand every time — `WaxSeal.seed_text` has carried this rule since the writ
+## kit was built. The slot is in the key because two copies of one card on the
+## board should not be struck identically.
+func _forecast_mark_seed(prefix: String, target: Control) -> String:
+	var id := "?"
+	var d: Variant = target.get("card_data")
+	if d is Dictionary:
+		id = String((d as Dictionary).get("id", "?"))
+	return "%s%s_%d_%d" % [prefix, id,
+		int(target.get("current_row")), int(target.get("current_lane"))]
+
+
+func _add_forecast_bracket(target: Control, col: Color, lethal: bool,
+		struck_edge: int) -> void:
+	var r := Rect2(target.global_position, target.size * target.scale)
+	var b := StruckBracket.new()
+	b.col = col
+	b.lethal = lethal
+	b.struck_edge = struck_edge
+	# SEEDED OFF THE CARD, NOT THE OBJECT (2026-09-24). `get_instance_id()` is
+	# new every session, so the same creature's mark was struck with a different
+	# hand-wobble on every boot — and `WaxSeal` already states the house rule
+	# this breaks: seed per card "so every bake of the same card matches". It
+	# also made `tools/_shot_forecast.tscn`'s oracles non-deterministic, which
+	# is what cost three wasted sweeps: a geometry fix and a lucky draw were
+	# indistinguishable.
+	b.seed_text = _forecast_mark_seed("b", target)
+	# The painter sizes its arms off the TOKEN, so it has to be told how much of
+	# its own rect is padding. See StruckBracket._draw.
+	b.outset = FORECAST_BRACKET_OUTSET
+	b.position = r.position - Vector2(FORECAST_BRACKET_OUTSET, FORECAST_BRACKET_OUTSET)
+	b.size = r.size + Vector2(FORECAST_BRACKET_OUTSET, FORECAST_BRACKET_OUTSET) * 2.0
+	b.z_index = 175
+	_hud_layer.add_child(b)
+	_lane_forecast_nodes.append(b)
+
+
+func _add_forecast_wound_seal(at: Vector2, damage: int, lethal: bool,
+		hp_before: int, wax: Color, face_hit: bool, seedt: String) -> void:
+	var s := WoundSeal.new()
+	s.amount = damage
+	s.broken = lethal
+	# The fissure's run is the blow against what the body still has standing, so
+	# a 2 into a 9 is a hairline and a 2 into a 3 is nearly a break. That ratio
+	# is the thing the old chip made the player compute.
+	s.severity = clampf(float(damage) / maxf(float(hp_before), 1.0), 0.0, 1.0)
+	s.wax = wax
+	s.face_hit = face_hit
+	s.seed_text = seedt
+	s.size = Vector2(FORECAST_SEAL_PX, FORECAST_SEAL_PX)
+	s.position = at - s.size * 0.5
+	s.z_index = 178
+	_hud_layer.add_child(s)
+	_lane_forecast_nodes.append(s)
+
+
+## A stub binding the wound seal back to the body it belongs to. The seal sits
+## in the column gutter, which is shared ground: without this it is equally close
+## to the NEXT column's card and reads as that card's business. Two pixels of
+## tether settle the question, and it doubles as the "this row" cue that lines
+## the seal up with the HP seal it stands beside.
+func _add_forecast_tether(target: Control, col: Color) -> void:
+	var r := Rect2(target.global_position, target.size * target.scale)
+	var at := _forecast_wound_point(target)
+	var inboard: float = r.end.x if at.x > r.end.x else r.position.x
+	var tick := Line2D.new()
+	tick.points = PackedVector2Array([Vector2(inboard, at.y), Vector2(at.x, at.y)])
+	tick.width = 3.0
+	tick.default_color = Color(col.r, col.g, col.b, 0.55)
+	tick.begin_cap_mode = Line2D.LINE_CAP_NONE
+	tick.end_cap_mode = Line2D.LINE_CAP_NONE
+	tick.z_index = 176
+	_hud_layer.add_child(tick)
+	_lane_forecast_nodes.append(tick)
+
+
+## The one seal that speaks for every blow landing on a body this round. The
+## bracket and seal are raised by the caller (_refresh_lane_forecast) through
+## the same _mark_struck_body every single read uses, so an aggregate cannot
+## drift from a solo read — it is the same object with a bigger number in it.
 func _add_lane_forecast_total(g: Dictionary) -> void:
-	var dmg: int = int(g["damage"])
-	var txt := "SLAIN - TAKES %d" % dmg if bool(g["lethal"]) \
-		else "TAKES %d - %d HP" % [dmg, maxi(int(g["hp_after"]), 0)]
-	_add_lane_forecast_label(g["point"], {
-		"quiet_text": txt, "text": txt,
-		"color": Color(1.0, 0.42, 0.30) if bool(g["lethal"]) \
-			else Color(1.0, 0.82, 0.42),
-	})
+	_mark_struck_body(g["target"], int(g["damage"]), bool(g["lethal"]), null)
 
 
+## The per-ATTACKER furniture: the exceptional clause, the breach mark for a
+## blow that reaches the line, and a connector for any blow that does not simply
+## travel straight across its own column.
 func _add_lane_forecast(attacker: Control, read: Dictionary,
-		suppress_label: bool = false) -> void:
-	var dst: Vector2 = read["point"]
-	# LETHALITY DRIVES THE MARK, NOT JUST THE WORDS (2026-09-10). The read has
-	# carried `lethal` all along and the visual layer ignored it: the ring and
-	# the connector were coloured by face-vs-body only, so a KILLING BLOW looked
-	# identical to a scratch unless the player stopped and read the label.
-	#
-	# That is the exact failure the tactics-UI literature warns about. Into the
-	# Breach's stated rule is to "sacrifice cool ideas for the sake of clarity
-	# every time" — they cut whole weapons because playtesters could not read
-	# them at a glance. "This one dies" is the most important thing on this
-	# overlay and it was the quietest thing on it.
-	#
-	# A lethal read now runs hot red; a survivable one stays quiet amber. The
-	# player sorts the board without reading a word, and the text becomes
-	# confirmation rather than the only channel carrying it.
-	var danger: Color
-	if bool(read.get("lethal", false)):
-		danger = Color(1.0, 0.28, 0.18, 0.80)
-	elif bool(read.get("face", false)):
-		danger = Color(1.0, 0.36, 0.20, 0.62)
-	else:
-		danger = Color(1.0, 0.72, 0.34, 0.40)
-	if bool(read.get("face", false)):
-		_add_lane_forecast_face_marker(dst, read, danger)
-		if not suppress_label:
-			_add_lane_forecast_label(dst, read)
+		_unused: bool = false) -> void:
+	if _hud_layer == null:
+		return
+	var lethal := bool(read.get("lethal", false))
+	var face := bool(read.get("face", false))
+	var danger := _forecast_danger_color(lethal, face)
+
+	if face:
+		_add_lane_forecast_face_marker(read["point"], read, danger)
+		# Hosted on NOTHING, deliberately: a breach happens at the open lane, not
+		# at the body that walks through it, so this note hangs under the breach
+		# seal. Anchoring it to the attacker would print "DEFEAT" under a
+		# creature instead of at the hole in the line it is about to come
+		# through — naming the wrong place for the most important read on the
+		# board.
+		_add_lane_forecast_note(null, read["point"], _forecast_note_text(read),
+			Color(read.get("color", danger)))
 		return
 
-	var src := _card_center(attacker)
-	_add_lane_forecast_target_ring(dst, read, danger)
-	# A TAPERED BEAM, NOT A FLAT WIRE (2026-09-10). This was a constant-width 3px
-	# Line2D with round caps — uniform opacity across its width, hard on both
-	# edges, and giving no clue which END was the target. Together with the
-	# reticle and the crosshair it is what the owner called "a bunch of ugly
-	# lines", and it is the most-looked-at overlay in the game because the lane
-	# forecast is ALWAYS ON.
-	#
-	# The "comet" taper is doing real work here, not decoration: it runs thin at
-	# the attacker and heavy at the victim, so the line states its own DIRECTION.
-	# That is information the flat wire could only convey by adding chevrons on
-	# top of it — fewer elements, and the read is stronger.
-	#
-	# Kept deliberately QUIET: low heat, no erosion, modest width. This is a
-	# standing information overlay, not a blow landing — the same reasoning that
-	# gives ring_static its tight, un-eroded defaults.
-	var mid := (src + dst) * 0.5 + Vector2(0, -22)
+	var target = read.get("target")
+	if target != null and is_instance_valid(target):
+		if not _forecast_blow_is_columnar(attacker, target):
+			_add_forecast_connector(attacker, target, danger, lethal)
+		_add_lane_forecast_note(target, read["point"], _forecast_note_text(read),
+			Color(read.get("color", danger)))
+		return
+
+	# No body and no face: a refusal (HELD / BLOCKED) or a board-wide summary.
+	# Both belong to the ATTACKER, so they are marked on it — a refusal drawn on
+	# a victim would name the wrong card.
+	if bool(read.get("refusal", false)):
+		_add_forecast_bracket(attacker, Color(0.70, 0.74, 0.80), false, -1)
+	_add_lane_forecast_note(attacker, read["point"], _forecast_note_text(read),
+		Color(read.get("color", danger)))
+
+
+## Does this blow simply travel straight across its own column? That is the
+## default in a lane game, and drawing a line along it is drawing the grid.
+func _forecast_blow_is_columnar(attacker: Control, target: Control) -> bool:
+	if attacker == null or not is_instance_valid(attacker):
+		return false
+	return int(target.current_lane) == int(attacker.current_lane) \
+		and bool(target.is_opponent) != bool(attacker.is_opponent)
+
+
+## The connector, for the blows that actually need one — a sniper's standing
+## order, a redirect, an interpose. An INK stroke, not a beam: this is a mark
+## somebody made on the table, and "ink" is the one beam kind in the kit that is
+## not a glow profile. It runs between the two tokens' EDGES rather than their
+## centres, so it can never be drawn across either painting.
+func _add_forecast_connector(attacker: Control, target: Control, col: Color,
+		lethal: bool) -> void:
+	if attacker == null or not is_instance_valid(attacker):
+		return
+	var a := _card_center(attacker)
+	var b := _card_center(target)
+	var span := b - a
+	if span.length() < 8.0:
+		return
+	var dir := span.normalized()
+	var ar: Vector2 = attacker.size * attacker.scale * 0.5
+	var br: Vector2 = target.size * target.scale * 0.5
+	var p0 := a + dir * minf(ar.x, ar.y) * 0.98
+	var p1 := b - dir * minf(br.x, br.y) * 0.98
+	if (p1 - p0).length() < 6.0:
+		return
+	# A hand-drawn route bows; a wire does not. The bow is perpendicular and
+	# scales with the span so a short hop stays nearly straight.
+	var nrm := Vector2(-dir.y, dir.x)
+	var bow: float = clampf(span.length() * 0.13, 8.0, 46.0)
+	var mid := (p0 + p1) * 0.5 + nrm * bow
 	var pts := PackedVector2Array()
 	for i in range(13):
-		pts.append(_bezier_quad(src, mid, dst, float(i) / 12.0))
-	var line := Motion.beam_line(pts, danger, 15.0, "trail", 0.25, "comet")
+		pts.append(_bezier_quad(p0, mid, p1, float(i) / 12.0))
+	# "nib" is the written-stroke taper: a firm entry, a full-pressure belly, and
+	# the widest point at the terminal — where the pen is still sitting, which
+	# here is the body being struck. That is the direction cue the old flat wire
+	# needed a separate Polygon2D arrowhead to deliver.
+	var line := Motion.beam_line(pts, Color(col.r, col.g, col.b, 0.92),
+		13.0 if lethal else 10.0, "ink", 0.34, "nib", col.lightened(0.45))
 	line.z_index = 176
 	_hud_layer.add_child(line)
 	_lane_forecast_nodes.append(line)
 
-	var head := Polygon2D.new()
-	head.polygon = PackedVector2Array([
-		Vector2(0, 0), Vector2(-12, -5), Vector2(-12, 5)
-	])
-	head.color = danger
-	head.z_index = 177
-	head.position = dst
-	if pts.size() >= 2:
-		var tangent: Vector2 = pts[pts.size() - 1] - pts[pts.size() - 2]
-		if tangent.length_squared() > 0.01:
-			head.rotation = tangent.angle()
-	_hud_layer.add_child(head)
-	_lane_forecast_nodes.append(head)
 
-	# The arrow and ring always draw — they say WHO is striking, which the
-	# aggregate cannot. Only the number is suppressed, because a per-attacker
-	# number beside a total is two answers to one question.
-	if not suppress_label:
-		_add_lane_forecast_label(dst, read)
+## A blow that reaches the LINE has no body to crack, so the wound seal is
+## pressed onto the open ground of the lane itself and wears two barbs driven
+## inward — the same "nothing is holding this column" the four stacked chevron
+## hairlines used to make, in one object instead of eight strokes.
+func _add_lane_forecast_face_marker(dst: Vector2, read: Dictionary,
+		_danger: Color) -> void:
+	var dmg: int = int(read.get("damage", 0))
+	if dmg <= 0:
+		return
+	var lethal: bool = int(read.get("hp_after", 1)) <= 0
+	_add_forecast_wound_seal(dst, dmg, lethal, maxi(dmg, 1),
+		GameTheme.HEALTH_RED_DROP, true,
+		"f%d_%d" % [int(read.get("lane", 0)),
+			1 if bool(read.get("target_is_enemy", false)) else 0])
 
 
-func _add_lane_forecast_label(dst: Vector2, read: Dictionary) -> void:
+## WHAT IS LEFT TO SAY once the bracket and the seal have spoken.
+##
+## An ordinary read now prints NOTHING. The seal's numeral is the blow, its
+## fissure is the severity, its break is the death, and the bracket names the
+## body — that is the entire content of "TAKES 5 - 1 HP" and "DIES", said in
+## marks. Eight sentences became eight marks, which is the whole reason this
+## reads at a glance where the old overlay had to be parsed.
+##
+## What a mark CANNOT carry is the exceptional clause — a body that comes back,
+## a shield that eats the blow, a spill that reads on past the corpse, an
+## attacker refused outright. Those are rare, they change the decision, and they
+## still print.
+func _forecast_note_text(read: Dictionary) -> String:
+	if bool(read.get("refusal", false)):
+		return String(read.get("quiet_text", "HELD"))
+	if bool(read.get("summary", false)):
+		return String(read.get("quiet_text", ""))
+	if bool(read.get("face", false)):
+		# The seal carries "-4". Only the verdict and the refusal are words.
+		if int(read.get("damage", 0)) <= 0:
+			return "NO FACE DAMAGE"
+		var t := String(read.get("text", ""))
+		if t.begins_with("PHOENIX"):
+			return "PHOENIX HEART"
+		if int(read.get("hp_after", 1)) <= 0:
+			return t
+		return ""
+	var clauses := PackedStringArray()
+	var followup := String(read.get("death_followup", ""))
+	var rescue := String(read.get("rescue", ""))
+	if followup != "":
+		clauses.append(followup)
+	elif rescue != "":
+		clauses.append(rescue)
+	elif bool(read.get("last_stand", false)):
+		clauses.append("LAST STAND")
+	if bool(read.get("shield_break", false)):
+		clauses.append("SHIELD HOLDS")
+	var spill := String(read.get("spill", ""))
+	if spill != "":
+		clauses.append(spill)
+	return " - ".join(clauses)
+
+
+## A note is written on the token's own SCRIM — the dark band across the bottom
+## of a battlefield token, below the painting and between the two stat seals.
+## That band is the one part of a token with no subject in it, which is why the
+## note needs no plate: the old chip carried a rounded StyleBoxFlat purely
+## because it was sitting on a painting and could not be read otherwise. Remove
+## the collision and the plate stops being necessary.
+func _add_lane_forecast_note(host, point: Vector2, text: String,
+		col: Color) -> void:
+	if text.strip_edges() == "" or _hud_layer == null:
+		return
 	var label := Label.new()
-	label.text = _forecast_chip_text(read)
-	label.add_theme_font_size_override("font_size", 19)
+	label.text = text
+	# 15px is a CAPTION under COPY_STYLE §11 (15-17), which is what this is — a
+	# rider on a mark, never a reading surface. It buys the width that lets the
+	# longest clause in the vocabulary ("OVERKILL 3", "RETURNS TO HAND") sit
+	# between a token's two stat seals instead of spilling over its painting.
+	label.add_theme_font_size_override("font_size", 15)
 	if GameTheme.font_title != null:
 		label.add_theme_font_override("font", GameTheme.font_title)
-	label.add_theme_color_override("font_color", read.get("color", Color(1, 0.7, 0.3)))
-	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
-	label.add_theme_constant_override("outline_size", 5)
+	label.add_theme_color_override("font_color", col)
+	label.add_theme_color_override("font_outline_color", Color(0.02, 0.012, 0.008, 0.96))
+	label.add_theme_constant_override("outline_size", 6)
+	label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.55))
+	label.add_theme_constant_override("shadow_offset_y", 2)
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	label.z_index = 178
+	label.z_index = 179
 	_hud_layer.add_child(label)
 	_lane_forecast_nodes.append(label)
 	label.reset_size()
 	var s: Vector2 = label.size
-	# A BACKING PLATE (2026-09-10). The forecast is the game's most-read overlay
-	# and it was outlined text laid straight onto CARD ART — a busy, warm,
-	# mid-value painting — which is the worst possible ground for warm text at
-	# any outline weight. Six of these on screen at once was most of why the
-	# whole overlay read as noise.
-	#
-	# A quiet dark plate is the standard fix and it costs no attention of its
-	# own: it stays below the text, hugs it, and gives the numerals a constant
-	# ground so a "TAKES 3" over a fire elemental reads the same as one over a
-	# dark corner. Rounded and low-alpha, because this is a label backing, not a
-	# panel — it must not compete with the reticle it belongs to.
-	var plate := Panel.new()
-	var pst := StyleBoxFlat.new()
-	pst.bg_color = Color(0.06, 0.045, 0.035, 0.72)
-	pst.set_corner_radius_all(5)
-	pst.content_margin_left = 7.0
-	pst.content_margin_right = 7.0
-	pst.content_margin_top = 1.0
-	pst.content_margin_bottom = 1.0
-	plate.add_theme_stylebox_override("panel", pst)
-	plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	plate.z_index = 177
-	_hud_layer.add_child(plate)
-	_lane_forecast_nodes.append(plate)
-	# Tracked so the stacking pass below moves the plate with its label.
-	label.set_meta("forecast_plate", plate)
-	# STACK, DON'T BURY (2026-07-29). This loop runs per ATTACKER but anchors per
-	# TARGET, so two bodies striking the same victim produced two labels at
-	# identical positions — and the survivor showed only ITS OWN attacker's damage.
-	# Measured on a real board: 9 labels created, 7 visually distinct, and one of
-	# the hidden pair mattered — a 4 HP Outrider read "TAKES 3 - 1 HP" while true
-	# incoming was 5. It died that clash. A forecast that under-reports incoming
-	# damage is worse than no forecast: it is the "I'd have played differently"
-	# failure, manufactured by the UI.
-	#
-	# Quantised so near-identical anchors collide deliberately; each further read on
-	# the same body steps up by its own height.
-	var key := Vector2i(int(dst.x / 24.0), int(dst.y / 24.0))
+
+	# Clear of a 40px wound seal centred on the same point, which is what an
+	# unhosted note always sits under (a breach of the line).
+	var anchor := point + Vector2(0.0, FORECAST_SEAL_PX * 0.5 + 12.0)
+	if host != null and is_instance_valid(host) and host is Control:
+		var r := Rect2((host as Control).global_position,
+			(host as Control).size * (host as Control).scale)
+		# OFF THE CARD ENTIRELY, on the divider band below it.
+		#
+		# This moved twice, and both earlier positions rested on the same wrong
+		# belief: that a battlefield token carries a dark name scrim across its
+		# bottom third that a note could sit on. It does not — `overlay` is
+		# anchored at 0.70 but it is a gradient laid OVER the painting, and the
+		# art runs to the token's edge with the two stat seals on top of it. So
+		# 0.75 put the note on bright art and 0.865 put it on slightly darker
+		# bright art. There is no band; there is only the table.
+		#
+		# Below the token there is: 41px of divider band under either front row,
+		# and open slot under the player's back row. The one case with a
+		# neighbour close behind is the hold's back row, where this lands on the
+		# front card's top BORDER rather than its subject — which the painting
+		# oracle in tools/_shot_forecast.gd is what settles, not this comment.
+		anchor = Vector2(r.position.x + r.size.x * 0.5,
+			r.end.y + 4.0 + s.y * 0.5)
+	# Stack, don't bury: two notes anchored to the same body step apart instead
+	# of drawing on top of each other. Quantised so near-identical anchors
+	# collide deliberately (the 2026-07-29 rule this layer has always had).
+	var key := Vector2i(int(anchor.x / 24.0), int(anchor.y / 24.0))
 	var stacked: int = int(_lane_forecast_anchors.get(key, 0))
 	_lane_forecast_anchors[key] = stacked + 1
-	label.position = Vector2(dst.x - s.x * 0.5,
-		dst.y - s.y - 10.0 - float(stacked) * (s.y + 3.0))
-	# The plate follows its label, inset so it hugs the text rather than framing
-	# it. Sized from the label's own measured rect, so a long read ("HELD - NO
-	# FACE THIS ROUND") gets a long plate and a short one does not float in a box.
-	var lp: Panel = label.get_meta("forecast_plate", null)
-	if lp != null and is_instance_valid(lp):
-		lp.position = label.position + Vector2(-7.0, 2.0)
-		lp.size = s + Vector2(14.0, -4.0)
-
-
-func _add_lane_forecast_face_marker(dst: Vector2, read: Dictionary, danger: Color) -> void:
-	# Face damage is a lane breakthrough, not a line drawn to the HP widget.
-	# Mark the empty column locally so the board says where the blow comes from.
-	_add_lane_forecast_target_ring(dst, read, danger)
-	var dir := -1.0 if bool(read.get("target_is_enemy", false)) else 1.0
-	for i in range(2):
-		# STACKED HAIRLINES WERE THE DEFECT. Two flat 3px strokes one behind the
-		# other is the same construction that made the map's committed march
-		# read as four ribbons: a stroke has UNIFORM OPACITY across its width,
-		# so stacking them stacks hard edges instead of accumulating a falloff.
-		# Each chevron is a textured beam now, and the pair reads as one mark
-		# with an echo behind it rather than as two wires.
-		#
-		# THE CORE KEEPS THE HUE BUT NOT THE VALUE, and getting that balance
-		# wrong is visible in the A/B. Everywhere else in combat the hot core is
-		# white, because the war table is dark and a warm stroke on warm wood is
-		# camouflage — but this mark's whole job is that LETHAL reads RED, and a
-		# white spine washes out the one channel carrying the meaning.
-		#
-		# The first cut over-corrected: core `lightened(0.55)` at heat 0.45 left
-		# the stroke at a SINGLE VALUE, so it photographed as flat as the plain
-		# Line2D it replaced even while measuring a clean alpha falloff. Value
-		# is what the eye reads as light. `lightened(0.82)` is a pale warm red —
-		# still unmistakably the danger hue, but bright enough to be a core.
-		var chevron := Motion.beam_line(
-			PackedVector2Array(),
-			Color(danger.r, danger.g, danger.b, 0.74 - float(i) * 0.26),
-			13.5 - float(i) * 3.5, "streak", 0.78, "", danger.lightened(0.82))
-		chevron.joint_mode = Line2D.LINE_JOINT_ROUND
-		chevron.begin_cap_mode = Line2D.LINE_CAP_ROUND
-		chevron.end_cap_mode = Line2D.LINE_CAP_ROUND
-		chevron.z_index = 177
-		var step := float(i) * 17.0 * -dir
-		chevron.points = PackedVector2Array([
-			Vector2(-26, -dir * 12 + step),
-			Vector2(0, dir * 16 + step),
-			Vector2(26, -dir * 12 + step),
-		])
-		chevron.position = dst
-		_hud_layer.add_child(chevron)
-		_lane_forecast_nodes.append(chevron)
-
-
-func _add_lane_forecast_target_ring(dst: Vector2, read: Dictionary, danger: Color) -> void:
-	# A quiet target reticle at the impact point makes the always-on lane forecast
-	# readable even when the curved arrow crosses a busy row of cards.
-	if _hud_layer == null:
-		return
-	var radius: float = 34.0 if bool(read.get("face", false)) else 50.0
-	# THE ONE RING ENGINE, held rather than fired (2026-09-09). This used to
-	# hand-roll a 41-point Line2D at a flat 2.5px — and because the lane forecast
-	# is always-on, that hairline was the most-looked-at circle in the game. It is
-	# the same distance-field band as every other ring now, tuned tight by
-	# ring_static's defaults so a standing mark still reads as information.
-	# WEIGHT AS WELL AS HUE. Colour alone fails a colour-blind player outright,
-	# so a lethal reticle is drawn heavier too — two independent channels
-	# carrying the same "this one dies", which is the accessibility floor this
-	# project already applies to damage numbers via GameTheme.cb_color.
-	var kill: bool = bool(read.get("lethal", false))
-	var ring := Motion.ring_static(_hud_layer, dst,
-		Color(danger.r, danger.g, danger.b, minf(danger.a + 0.12, 0.86)),
-		{"radius": radius, "width": 4.2 if kill else 2.2, "z_index": 175})
-	if ring != null:
-		_lane_forecast_nodes.append(ring)
-
-	# THE CROSSHAIR IS DROPPED (2026-09-10). Between the ring, the crosshair and
-	# the connector arriving at the same point, three separate marks were saying
-	# ONE thing — "here" — and six of those on a board is the clutter the owner
-	# called a bunch of ugly lines. The soft ring says "here" perfectly well; the
-	# beam's taper says which direction it came from.
-
-
-func _forecast_chip_text(read: Dictionary) -> String:
-	var text := String(read.get("quiet_text", read.get("text", "")))
-	if bool(read.get("face", false)):
-		return text
-	if text.begins_with("-"):
-		text = "TAKES %s" % text.substr(1)
-	if int(read.get("target_row", ROW_FRONT)) == ROW_BACK:
-		return "BACK %s" % text
-	return text
+	label.position = Vector2(anchor.x - s.x * 0.5,
+		anchor.y - s.y * 0.5 - float(stacked) * (s.y + 2.0))
 
 
 func _refresh_hand_affordability() -> void:
@@ -28670,10 +30443,8 @@ func _hide_targeting_arrow() -> void:
 
 
 func _process(_delta: float) -> void:
-	# Trail decay runs ahead of the targeting early-return so a released card's
-	# ribbon still burns out while a spell is being aimed. Aim threads too —
-	# a sniper's standing order stays anchored to bobbing cards throughout.
-	_update_drag_trail()
+	# Aim threads run ahead of the targeting early-return: a sniper's standing
+	# order stays anchored to bobbing cards throughout.
 	_update_aim_threads()
 	if _targeting_spell != null and _targeting_arrow != null and _targeting_arrow.visible:
 		# Skip the whole rebuild (bezier arc + arrowhead + damage-prediction scan)
@@ -28695,8 +30466,6 @@ func _process(_delta: float) -> void:
 
 
 func _combat_process_needed() -> bool:
-	if not _drag_trail_pts.is_empty():
-		return true   # a drag ribbon is still burning down
 	if not _sniper_marks.is_empty() or not _aim_thread_nodes.is_empty():
 		return true   # a standing aim order needs its thread tracked/retired
 	if _targeting_spell != null and _targeting_arrow != null and _targeting_arrow.visible:
@@ -29504,7 +31273,7 @@ func _predict_lane_strike(attacker: Control) -> Dictionary:
 				var blocker: Control = siege_front if siege_front != null else siege_back
 				return {
 					"point": _card_center(blocker), "text": "BLOCKED - NO STRIKE",
-					"quiet_text": "BLOCKED", "color": Color(0.72, 0.76, 0.82),
+					"quiet_text": "BLOCKED", "color": Color(0.72, 0.76, 0.82), "refusal": true,
 					"face": false, "damage": 0, "target_row": blocker.current_row,
 				}
 			return _forecast_append_repeats(
@@ -29549,15 +31318,15 @@ func _forecast_column_strike(attacker: Control, atk: int, lane: int,
 		target = _redirect_target(opp_back, opp_is_enemy, lane, ROW_BACK, attacker)
 	if target == null or not is_instance_valid(target):
 		# THE RUSH RULE HAS TO BE FORECAST TOO. Without this the lane read for a
-		# Swift body in its arrival round promised real face damage ("FOE HP -4 -
-		# 26 LEFT") that _creature_hits_face then refused — the UI stating a number
+		# Swift body in its arrival round promised real face damage ("ENEMY HP -4
+		# - 26 LEFT") that _creature_hits_face then refused — the UI stating a number
 		# the rules will not honour, which is the textbook "is this broken?".
 		# Worded in the grey refusal voice this layer already owns (see
 		# _predict_lane_strike's Siege Golem read, which was its only user).
 		if not _can_reach_face(attacker):
 			return {
 				"point": _card_center(attacker), "text": "HELD - NO FACE THIS ROUND",
-				"quiet_text": "HELD", "color": Color(0.72, 0.76, 0.82),
+				"quiet_text": "HELD", "color": Color(0.72, 0.76, 0.82), "refusal": true,
 				"face": false, "damage": 0,
 			}
 		var face_read := _forecast_face_strike(attacker, atk, lane, is_enemy, true)
@@ -29596,7 +31365,7 @@ func _forecast_sniper_strike(attacker: Control, atk: int, lane: int,
 		if not _can_reach_face(attacker):
 			return {
 				"point": _card_center(attacker), "text": "HELD - NO FACE THIS ROUND",
-				"quiet_text": "HELD", "color": Color(0.72, 0.76, 0.82),
+				"quiet_text": "HELD", "color": Color(0.72, 0.76, 0.82), "refusal": true,
 				"face": false, "damage": 0,
 			}
 		var face_read := _forecast_face_strike(attacker, atk, lane, is_enemy, false)
@@ -29872,11 +31641,13 @@ func _forecast_creature_impact(attacker: Control, target: Control, base_atk: int
 		quiet_text = death_followup
 	elif death_followup != "":
 		quiet_text += " - " + death_followup
-	# The spill has to reach the ALWAYS-ON chip too, not just the hover. `text` got
-	# the OVERKILL/PIERCES line above, but `quiet_text` is rebuilt from scratch here
-	# and `_forecast_chip_text` reads `quiet_text` FIRST — so the board forecast was
-	# still silent about overkill while the hover explained it. That is exactly half
-	# a fix: the pre-commit read a player actually glances at is the quiet one.
+	# The spill has to reach the ALWAYS-ON read too, not just the hover. `text` got
+	# the OVERKILL/PIERCES line above, but `quiet_text` is rebuilt from scratch
+	# here — so the board forecast was silent about overkill while the hover
+	# explained it. That is exactly half a fix: the pre-commit read a player
+	# actually glances at is the quiet one. (Since 2026-09-16 the board's mark
+	# layer takes the spill off the structured `spill` key below rather than out
+	# of this sentence; `quiet_text` is still what the HOVER prints.)
 	if spill_line != "":
 		quiet_text += " - " + spill_line
 	return {
@@ -29890,6 +31661,11 @@ func _forecast_creature_impact(attacker: Control, target: Control, base_atk: int
 		"last_stand": bool(state.get("last_stand", false)),
 		"shield_break": bool(state.get("shield_break", false)),
 		"overkill": int(state.get("overkill", 0)),
+		# The spill clause STRUCTURED, not just glued into the text (2026-09-16).
+		# The mark layer has to decide whether to print it, and recovering
+		# "PIERCES 3" by searching the sentence it was concatenated into is the
+		# kind of string surgery that breaks the day somebody rewords the chip.
+		"spill": spill_line,
 		"death_followup": death_followup,
 		"attacker_survives": bool(return_outcome.get("survives", true)),
 	}
@@ -34260,7 +36036,7 @@ func _show_battle_verdict(won: bool, gold_won: int = 0, with_scrim: bool = true,
 		auto_fade: bool = false, detail_text: String = "") -> void:
 	if _first_battle_tutorial_stage != FirstBattleTutorialStage.INACTIVE:
 		_finish_first_battle_tutorial()
-	_clear_opening_muster_forecast()
+	_clear_opening_muster_forecast(false)
 	# The fight's decisive beat. Every strike in the game got ceremony, but the
 	# moment the whole fight builds to used to be a 24px caption swap in the top
 	# HUD. This is the payoff: a focusing scrim, then VICTORY struck down onto
@@ -34316,8 +36092,18 @@ func _show_battle_verdict(won: bool, gold_won: int = 0, with_scrim: bool = true,
 		tw.tween_property(word, "modulate:a", 1.0, 0.12)
 		tw.tween_property(word, "scale", Vector2.ONE, 0.28) \
 			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		# WEAKREF, NOT THE NODE. `word` is freed with the scene, and the verdict
+		# is followed 1.0-1.2s later by the march back to the chart — so these
+		# timers routinely resume on a dead capture. The engine reports that
+		# while MARSHALLING the captures, before the body runs, which is why the
+		# `is_instance_valid` that used to be the first line here could never
+		# suppress it: the lambda was already being ABORTED, so the gilt
+		# eruption simply did not happen on those victories.
+		# Measured 2026-09-19: ~1 "Lambda capture at index 0 was freed" per fight
+		# won, 12 in a 900s pilot run. See reference_deferred_lambda_node_capture.
+		var word_ref: WeakRef = weakref(word)
 		get_tree().create_timer(0.18).timeout.connect(func():
-			if not is_instance_valid(word):
+			if word_ref.get_ref() == null:
 				return
 			spawn_spell_burst(center, Color(1.0, 0.84, 0.38, 0.95))
 			_spawn_vfx_ring(center, Color(1.0, 0.86, 0.44, 0.70),
@@ -34332,8 +36118,9 @@ func _show_battle_verdict(won: bool, gold_won: int = 0, with_scrim: bool = true,
 		tw.tween_property(word, "modulate:a", 1.0, 0.20)
 		tw.tween_property(word, "position:y", center.y - 65.0, 0.30) \
 			.set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
+		var fall_ref: WeakRef = weakref(word)
 		get_tree().create_timer(0.30).timeout.connect(func():
-			if is_instance_valid(word):
+			if fall_ref.get_ref() != null:
 				screen_shake(4.0)
 		)
 	if won and gold_won > 0:
@@ -34356,15 +36143,23 @@ func _show_battle_verdict(won: bool, gold_won: int = 0, with_scrim: bool = true,
 		var gt := gold_lbl.create_tween()
 		gt.tween_interval(0.40)
 		gt.tween_property(gold_lbl, "modulate:a", 1.0, 0.16)
+		# Same weakref rule as the stamp above, and this one is the WORST of the
+		# three: the count-up runs 0.40 + 0.16 + 0.5 = 1.06s and an ordinary
+		# hold marches back to the chart at 1.2s, so it is a race the label
+		# frequently loses. When it did, the abort froze the counter part-way —
+		# the player was shown a number smaller than the gold they were paid.
+		var gold_ref: WeakRef = weakref(gold_lbl)
 		if reduced:
 			gt.tween_callback(func():
-				if is_instance_valid(gold_lbl):
-					gold_lbl.text = "+%d gold" % gold_won)
+				var g := gold_ref.get_ref() as Label
+				if g != null:
+					g.text = "+%d gold" % gold_won)
 		else:
 			# Spoils count up — the gold is EARNED in front of you, not stated.
 			gt.tween_method(func(v: float):
-				if is_instance_valid(gold_lbl):
-					gold_lbl.text = "+%d gold" % int(round(v)),
+				var g := gold_ref.get_ref() as Label
+				if g != null:
+					g.text = "+%d gold" % int(round(v)),
 				0.0, float(gold_won), 0.5)
 	if won and detail_text != "":
 		var detail_width := minf(vp.x - 260.0, 980.0)
