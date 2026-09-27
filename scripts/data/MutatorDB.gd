@@ -82,6 +82,15 @@ const MUTATORS: Dictionary = {
 		"gold_bonus": 25,
 		"weight": 8,
 	},
+	# SEVERITY CHANGED UNDER YOU, 2026-09-16, though the wording did not. This
+	# read "refill to 4 instead of 5" in effect — a fifth off the hand. The
+	# economy redesign made the per-turn draw a fixed 2, so the same `value: 1`
+	# now HALVES it, and Combat's `maxi(1, ...)` floor is the only thing between
+	# this and a one-card turn. That makes Famine comfortably the harshest
+	# mutator in the table while still priced at 30 gold beside neighbours at 25.
+	# Deliberately NOT retuned here: ECONOMY_REDESIGN §5.12 sequences the balance
+	# cascade after the rescale is measured, and moving both at once makes
+	# neither attributable. Re-read this when that pass runs.
 	"famine": {
 		"name": "Famine",
 		"desc": "You draw 1 fewer card per turn.",

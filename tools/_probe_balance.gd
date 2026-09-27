@@ -70,6 +70,19 @@ func _run() -> void:
 	if US != null:
 		US.anim_speed = 3.0
 		US.end_turn_warning = false
+		# DISARM THE FIRST-BATTLE TUTORIAL, or this sweep measures nothing on the
+		# encounters it most exists to measure. `Combat._on_end_turn` intercepts
+		# round 1 when `_first_battle_tutorial_pending()` holds and RETURNS without
+		# ending the turn; the next call then parks on the PLAY_CREATURE stage
+		# guard, which this probe's bot never satisfies (it does not drag). The
+		# round never advances, the loop spins to MAX_ROUNDS, and the encounter
+		# reports `win 0/0`. The predicate needs `current_node_type == "combat"`,
+		# so ONLY the plain fights died while elites/bosses resolved — which is
+		# how a gate that measured nothing on most of its slate still exited 0.
+		# Assigned, never mark_first_battle_tutorial_complete(): that helper
+		# calls save() and would stamp the flag into the real profile of whoever
+		# ran the probe. Same in-process-only treatment as the two lines above.
+		US.first_battle_tutorial_complete = true
 	if SS != null:
 		SS.combat_mode = SS.CombatMode.SOLO
 
@@ -157,6 +170,7 @@ func _fight(hero: String, enc_id: String, etype: String) -> Dictionary:
 		return {"ok": false}
 	var rounds := 0
 	while is_instance_valid(combat) and combat.phase != combat.Phase.GAME_OVER and rounds < MAX_ROUNDS:
+		await _settle_hand()
 		await _auto_play_turn()
 		if not is_instance_valid(combat): break
 		combat._end_turn_confirmed = true
@@ -173,15 +187,67 @@ func _fight(hero: String, enc_id: String, etype: String) -> Dictionary:
 	return res
 
 
+## `round_number >= 1` is NOT decoration — the same term `_probe_autorun` carries
+## at its line 411 and nine other combat probes document in their headers.
+## `Phase.PLAYER_TURN` is enum 0 AND the declaration default of `Combat.phase`, so
+## testing the phase alone reports "ready" on the FIRST FRAME, before `_ready` has
+## run `await _build_hud()`. This probe was doing exactly that: it called
+## `_on_end_turn()` while `_end_turn_btn` was still null, the unguarded
+## `_end_turn_btn.disabled = true` raised a runtime error that ABORTED the turn
+## commit before `phase = Phase.RESOLVING`, so the phase never left PLAYER_TURN and
+## the loop span to MAX_ROUNDS without a single clash. Every one of the 123
+## encounters reported `win 0/0  avg_rounds 0.0` — the gate measured nothing at
+## all while still exiting 0.
 func _wait_for_player_turn() -> bool:
 	var waited := 0
 	while waited < TURN_WAIT_TICKS:
 		if not is_instance_valid(combat): return false
 		if combat.phase == combat.Phase.GAME_OVER: return true
-		if combat.phase == combat.Phase.PLAYER_TURN: return true
+		if combat.phase == combat.Phase.PLAYER_TURN \
+				and int(combat.round_number) >= 1: return true
 		await create_timer(TICK).timeout
 		waited += 1
 	return false
+
+
+## Poll until the hand has finished ARRIVING, not just until input is accepted.
+##
+## Combat._start_round STAGGERS the deal: only the first card is drawn inline,
+## and every one after it lands on a `create_timer(0.08 * i)` — no headless
+## branch, no reduce_motion branch, not scaled by `anim_speed` — while `phase`
+## ALREADY reads PLAYER_TURN. A driver that starts there is playing a hand the
+## game has not finished dealing it: on round 1 that is ONE card of five, and at
+## Command 1 a single 2-drop means the whole turn plays nothing.
+##
+## Rounds 2+ hide it, because the hand is PERSISTENT and carries unplayed stock
+## forward — so the fault is worst exactly where round-1 measurements live. It
+## cost `_probe_deploy_curve` a published number before it was found; see
+## CLAUDE.md's settle-until-stable note.
+##
+## Stability polling, NOT a computed deal window: draw_count is the ramp plus
+## four relics plus two mutators, and restating that arithmetic in a probe is
+## the duplicate-rule pathology. Bounded, because an unbounded `while await`
+## spins to the harness timeout and reports NOTHING at all.
+func _settle_hand() -> void:
+	const SETTLE_TICK := 0.03    # poll interval
+	const STABLE_TICKS := 5      # 0.15s unchanged, a 1.9x margin on the 0.08s gap
+	const SETTLE_BUDGET := 40    # ~1.2s ceiling
+	var last := -1
+	var stable := 0
+	var waited := 0
+	while waited < SETTLE_BUDGET:
+		if not is_instance_valid(combat) or combat.phase != combat.Phase.PLAYER_TURN:
+			return
+		var n: int = combat._hand.size()
+		if n == last:
+			stable += 1
+			if stable >= STABLE_TICKS:
+				return
+		else:
+			stable = 0
+			last = n
+		await create_timer(SETTLE_TICK).timeout
+		waited += 1
 
 
 func _auto_play_turn() -> void:

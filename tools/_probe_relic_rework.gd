@@ -128,13 +128,29 @@ func _test_map_spoils() -> void:
 			"act %d has one Reliquary and one Arsenal" % (ai + 1))
 
 
+## THE LADDER MOVED ON 2026-07-30 AND THIS TEST DID NOT (fixed 2026-08-05).
+##
+## The war school used to sit at 10 kills. It was pulled FORWARD onto the
+## epithet's rung because most runs never reached it, and the move was made by
+## turning `veteran_school_kills()` into a literal alias of
+## `veteran_epithet_kills()` — one edit instead of thirteen call sites. The
+## 10 (7 with Drill Book) it vacated went to the new `veteran_doctrine_kills()`.
+##
+## So `veteran_school_kills() == 10` has been false for a week, and both
+## assertions here have been red ever since — testing an old design rather than
+## a broken one. Re-pointed at the live three-rung ladder, and now covering the
+## doctrine rung the rework introduced, which nothing was checking at all.
 func _test_veterancy_thresholds() -> void:
 	print("— Drill Book")
-	_check(RS.veteran_epithet_kills() == 3 and RS.veteran_school_kills() == 10,
-		"base veterancy thresholds remain 3/10")
+	_check(RS.veteran_epithet_kills() == 3 and RS.veteran_school_kills() == 3,
+		"base: epithet and war school share the 3-kill rung")
+	_check(RS.veteran_doctrine_kills() == 10,
+		"base: the tribe doctrine sits at 10 kills")
 	RS.add_relic("drill_book")
-	_check(RS.veteran_epithet_kills() == 2 and RS.veteran_school_kills() == 7,
-		"Drill Book lowers thresholds to 2/7")
+	_check(RS.veteran_epithet_kills() == 2 and RS.veteran_school_kills() == 2,
+		"Drill Book pulls the epithet/school rung to 2")
+	_check(RS.veteran_doctrine_kills() == 7,
+		"Drill Book shortens the WHOLE ladder — doctrine to 7, not just its front half")
 
 
 func _test_damage_spell_contract() -> void:

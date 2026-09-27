@@ -16,6 +16,7 @@ func _initialize() -> void:
 	source.temp_atk_buff = 2
 	source.persistent_atk_buff = 1
 	source.stunned = true
+	source.free_move_used = true
 	source.has_shield = true
 	source.temp_armored = true
 	source.bonus_thorns = 2
@@ -32,7 +33,7 @@ func _initialize() -> void:
 		"base stats round-trip")
 	_check(restored.lane == 3 and restored.row == 1 and restored.is_opponent,
 		"board identity round-trips")
-	_check(restored.stunned and restored.has_shield and restored.temp_armored,
+	_check(restored.stunned and restored.has_shield and restored.temp_armored and restored.free_move_used,
 		"combat flags round-trip")
 	_check(restored.bonus_thorns == 2 and restored.mummified_zero,
 		"typed former-metadata fields round-trip")
@@ -50,7 +51,7 @@ func _initialize() -> void:
 	target.apply_snapshot(replica)
 	_check(target.current_atk == 9 and target.lane == 1 and not target.is_opponent,
 		"replication snapshot preserves locally-owned fields")
-	_check(target.has_shield and target.stunned and target.current_intent == "ENRAGE",
+	_check(target.has_shield and target.stunned and target.free_move_used and target.current_intent == "ENRAGE",
 		"replication snapshot applies authoritative runtime flags")
 
 	print("[creature-instance] %s" % ("FAILED" if _failed else "all checks passed"))

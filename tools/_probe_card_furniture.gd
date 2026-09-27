@@ -16,8 +16,25 @@ extends SceneTree
 # "this keyword has no stamp and no icon on the hand card" — keep it short.
 const ACCEPTED: Dictionary = {
 	"torchbearer:adj_buff": "prose 'Adjacent friendlies +1 ATK'; the Adjacent word gilds+hints",
+	# Same card shape and the same prose pattern as Torchbearer above — it is a
+	# HERO-RETINUE starter (2026-07-28) and simply never got the waiver its twin
+	# already had, so this gate had been red on it since. Forcing the literal
+	# "Adj. Buff" into the desc instead would be the wrong fix twice over: it is
+	# a UI word, not a road word, and COPY_STYLE's whole point is that the
+	# sentence explains the rule. Both descs gild "Adjacent", which carries the
+	# hover glossary.
+	"standard_page:adj_buff": "prose 'Adjacent friendlies have +N HP'; the Adjacent word gilds+hints",
 	"ironclad_veteran:on_enter": "prose 'Enters with...' carries the timing",
 	"gallows_writ:exhaust": "the authored EXHAUST footer carries the keyword; exact rules prose stays uncluttered",
+	# Same shape as gallows_writ above, and here the two gates are in DIRECT
+	# CONFLICT: The Black Contract's desc is EXACTLY 90 characters, which is
+	# copy_lint's per-card budget, so appending " Exhaust." (+9) turns copy_lint
+	# red on both the base and the "+" desc. Tried it, measured it, reverted it.
+	# Every shorter phrasing costs a real rule — "non-token" is what stops tokens
+	# triggering it, and "2nd copy" is what says a SECOND copy draws. The footer
+	# (Card2D._spell_footer_text) prints the EXHAUST contract on the card face, so
+	# the keyword is on screen; only the prose repetition is missing.
+	"unholy_bargain:exhaust": "desc is at copy_lint's 90-char budget; the EXHAUST footer carries the keyword",
 }
 
 var _fails: Array = []

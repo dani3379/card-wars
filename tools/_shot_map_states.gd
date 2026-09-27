@@ -5,6 +5,11 @@ extends Node
 #   Godot.exe --path "D:\Godot" res://tools/_shot_map_states.tscn
 
 const HERO_ID := "raider"
+# PINNED. Without a seed, start_new_run rolls a fresh map every session, so two
+# runs of this harness cannot be diffed — which quietly costs the shot its whole
+# job as evidence (the same failure as the stale zoom below, one level up). With
+# it, an A/B is a pixel subtraction.
+const SHOT_SEED := 20260804
 
 var _map: Node = null
 
@@ -22,14 +27,20 @@ func _ready() -> void:
 	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 	DisplayServer.window_set_size(Vector2i(1600, 900))
 	DisplayServer.window_move_to_foreground()
-	RunState.start_new_run(HERO_ID)
+	RunState.start_new_run(HERO_ID, -1, SHOT_SEED)
 	await get_tree().process_frame
 
 	await _open_map(3.5)
 	_map._set_view(1.0, Vector2.ZERO)
 	await _shoot("_shot_a1_full.png")
-	_map._set_view(1.15, Vector2(1600, 900) * 0.5
-		- (_map._player_pos if _map._has_player else _map._camp_pos) * 1.15)
+	# 1.10, not 1.15 — the zoom MapView._ready actually opens at. 1.15 is the
+	# REJECTED pick (MapView.gd:99-105): it clips the keep plaque mid-word at
+	# the east screen edge whenever the pan clamps west, which _shot_a1_open
+	# duly photographed for months. A harness that shoots a state the game
+	# never enters quietly stops being evidence.
+	const OPEN_ZOOM := 1.10
+	_map._set_view(OPEN_ZOOM, Vector2(1600, 900) * 0.5
+		- (_map._player_pos if _map._has_player else _map._camp_pos) * OPEN_ZOOM)
 	await _shoot("_shot_a1_open.png")
 	_map._set_view(2.2, Vector2(1600, 900) * 0.5
 		- (_map._island_center as Vector2) * 2.2)

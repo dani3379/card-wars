@@ -1,4 +1,4 @@
-extends SceneTree
+﻿extends SceneTree
 ## Text-overflow / off-canvas audit (2026-06-29).
 ##
 ## Boots each player-facing screen headless, lets layout settle, then walks every
@@ -115,25 +115,124 @@ func _audit_main_menu_overlays() -> void:
 	for _i in 6:
 		await process_frame
 
+	node._show_quick_march()
+	for _i in 8:
+		await process_frame
+	_scan(node, "main_menu:quick_hero")
+	_expect_focus(node._hero_cards.get(node._selected_hero),
+		"main_menu:quick_hero:first_hero")
+
+	node._show_quick_company()
+	for _i in 8:
+		await process_frame
+	_scan(node, "main_menu:quick_company")
+	_expect_focus_name("QuickMarchTakeField",
+		"main_menu:quick_company:take_field")
+	node._show_muster_deck_inspector()
+	for _i in 8:
+		await process_frame
+	_scan(node, "main_menu:deck_inspector")
+	_expect_focus_name("DeckInspectorReturn", "main_menu:deck_inspector:return")
+	var cancel := InputEventAction.new()
+	cancel.action = "ui_cancel"
+	cancel.pressed = true
+	node._unhandled_input(cancel)
+	if node._deck_inspect_overlay != null:
+		_hits += 1
+		print("[textfit] HIT main_menu:deck_inspector:ui_cancel did not close")
+	else:
+		print("[textfit] main_menu:deck_inspector:ui_cancel : ok")
+	for _i in 2:
+		await process_frame
+	_expect_focus_name("QuickMarchTakeField",
+		"main_menu:deck_inspector:restores_trigger")
+
+	# THE MUSTER is four steps; Terms and Orders are the two variable-height screens.
+	# Scan all four, not just the step the entry point lands on.
 	node._show_hero_select()
 	for _i in 8:
 		await process_frame
+	_scan(node, "main_menu:muster_host")
+	_expect_focus(node._hero_cards.get(node._selected_hero),
+		"main_menu:muster_host:selected_hero")
+
+	# RUN SETUP is one screen and the bonus is the screen after it (2026-09-16),
+	# so there are two surfaces to scan, not four steps.
+	node._show_muster_step(1)
+	for _i in 8:
+		await process_frame
 	_scan(node, "main_menu:run_setup")
+	_expect_focus_name("MusterTakeField", "main_menu:run_setup:start_run")
+	node._show_starting_bonus()
+	for _i in 8:
+		await process_frame
+	_scan(node, "main_menu:starting_bonus")
+	node._toggle_muster_advanced()
+	for _i in 8:
+		await process_frame
+	_scan(node, "main_menu:muster_advanced")
+	_expect_focus_name("MusterTakeField",
+		"main_menu:muster_advanced:take_field")
+	node._selected_ascension = 5
+	node._update_asc_rules_text()
+	for _i in 8:
+		await process_frame
+	_scan(node, "main_menu:muster_advanced_asc5")
+	_expect_focus_name("MusterTakeField",
+		"main_menu:muster_advanced_asc5:take_field")
+	node._daily_pick = true
+	node._muster_seed_text = "confidence-audit"
+	node._toggle_muster_advanced()
+	for _i in 8:
+		await process_frame
+	_scan(node, "main_menu:muster_orders_active_rules")
+	_expect_focus_name("MusterTakeField",
+		"main_menu:muster_orders_active_rules:take_field")
+
 
 	node._show_how_to_play()
 	for _i in 4:
 		await process_frame
 	var how_to = node.get_node_or_null("HowToPlayOverlay")
 	if how_to != null:
-		_scan(how_to, "main_menu:how_to_play")
+		_scan(how_to, "main_menu:how_to_play:first_battle")
+		var keyword_tab = how_to.find_child("KeywordsTab", true, false)
+		if keyword_tab is Button:
+			keyword_tab.pressed.emit()
+			for _i in 3:
+				await process_frame
+			_scan(how_to, "main_menu:how_to_play:keywords")
 
+	# The writ pickers: the only screens MainMenu still lays out AFTER the run has
+	# started. Replaces the old THE WAR CHEST scan (2026-08-01 — that screen was
+	# deleted; its follow-up card grid is what survived and is what can overflow).
 	_new_run("rich")
-	node._show_blessing_select()
+	node._pick_blessing({"effect": "forge", "value": 1})
 	for _i in 8:
 		await process_frame
-	_scan(node, "main_menu:starting_gift")
+	_scan(node, "main_menu:writ_forge_picker")
 	node.free()
 	await process_frame
+
+
+func _expect_focus(expected, label: String) -> void:
+	var owner := root.gui_get_focus_owner()
+	if expected != null and owner == expected:
+		print("[textfit] %s focus : ok" % label)
+		return
+	_hits += 1
+	print("[textfit] HIT %s : expected focus owner, got %s" % [
+		label, owner.name if owner != null else "NONE"])
+
+
+func _expect_focus_name(expected_name: String, label: String) -> void:
+	var owner := root.gui_get_focus_owner()
+	if owner != null and String(owner.name) == expected_name:
+		print("[textfit] %s focus : ok" % label)
+		return
+	_hits += 1
+	print("[textfit] HIT %s : expected '%s', got %s" % [
+		label, expected_name, String(owner.name) if owner != null else "NONE"])
 
 
 func _new_run(kind: String) -> void:
@@ -156,22 +255,58 @@ func _audit_simple(label: String, path: String) -> void:
 	node.free()
 
 
+## THIS DRIVER SEATED NOTHING FOR AS LONG AS IT HAS EXISTED (found 2026-09-02).
+##
+## `Event._ready` calls `_pick_event()`, which ROLLS one out of the pool. Setting
+## `_event_id` afterwards and calling `_show_event()` / `_build_event()` did not
+## re-seat it, because NEITHER METHOD EXISTS on Event.gd — the `has_method` chain
+## fell through in silence and the screen kept whatever the roll had produced. So
+## this loop asked for 46 distinct events and scanned the same handful of rolled
+## ones over and over: verified by asking for 14 and getting 9 distinct screens,
+## none of them the one requested. The pool's per-event text has never been
+## measured, only its label said so.
+##
+## `_probe_boundary_ui` had the working recipe all along — tear the rolled screen
+## down with `_clear_ui()`, seat the fields, rebuild with `_build_ui()`.
 func _audit_event(ev_id: String) -> void:
+	var EvScript = load("res://scripts/scenes/Event.gd")
+	if not EvScript.EVENTS.has(ev_id):
+		return
 	var ev = load("res://scenes/event.tscn").instantiate()
 	root.add_child(ev)
-	var EvScript = load("res://scripts/scenes/Event.gd")
-	if EvScript.EVENTS.has(ev_id):
-		ev._event_id = ev_id
-		ev._event_data = EvScript.EVENTS[ev_id]
-		ev._current_node = ev._event_data
-		if ev.has_method("_show_event"):
-			ev._show_event()
-		elif ev.has_method("_build_event"):
-			ev._build_event()
+	await process_frame
+	ev._clear_ui()
+	ev._event_id = ev_id
+	ev._event_data = EvScript.EVENTS[ev_id].duplicate(true)
+	ev._current_node = ev._event_data
+	ev._build_ui()
 	for _i in 6:
 		await process_frame
+	# Cheap self-check: if the pool's own name is not on the screen the driver has
+	# stopped seating again, and every "ok" below would be about another room.
+	# EXEMPT the auto_effect rooms — an event with no choices and an `auto_effect`
+	# (strangers_hand → the Wet Cards deal) hands straight off to a modal that
+	# replaces the page, so its own name is legitimately not on screen.
+	var seats: bool = not EvScript.EVENTS[ev_id].has("auto_effect")
+	if seats and not _screen_mentions(ev, String(EvScript.EVENTS[ev_id].get("name", ""))):
+		_hits += 1
+		print("[textfit] HIT event:%s : driver did not seat this event" % ev_id)
 	_scan(ev, "event:%s" % ev_id)
 	ev.free()
+
+
+func _screen_mentions(node: Node, needle: String) -> bool:
+	if needle.strip_edges() == "":
+		return true
+	var want := needle.to_lower()
+	var stack: Array = [node]
+	while not stack.is_empty():
+		var n = stack.pop_back()
+		for ch in n.get_children():
+			stack.push_back(ch)
+		if n is Control and _text_of(n as Control).to_lower().find(want) >= 0:
+			return true
+	return false
 
 
 func _audit_all_combats() -> void:

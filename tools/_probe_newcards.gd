@@ -422,8 +422,15 @@ func _t_salvage() -> void:
 	var data: Dictionary = CDB.get_card_data("recycle")
 	var RS = root.get_node_or_null("RunState")
 	var forged: Dictionary = RS.preview_plus_upgrade(data)
+	# GATE THE CONTRACT, NOT THE TABLE (2026-09-16). This asserted `cost == 1`,
+	# which the cost rescale moved — and the literal was never what the test is
+	# about: Salvage's contract is "it exhausts, and its DRAW is keyed off its own
+	# cost". A cost of at least 1 is the part that has to hold (a free Salvage
+	# would draw nothing and the card would read as broken); the exact number is a
+	# balance decision this gate must not pin, or it gets re-blessed every
+	# rebalance and stops meaning anything.
 	_ck("base Salvage exhausts and names cost-based draw",
-		int(data.get("cost", -1)) == 1 and data.get("keywords", []).has("exhaust") \
+		int(data.get("cost", -1)) >= 1 and data.get("keywords", []).has("exhaust") \
 		and String(data.get("desc", "")).contains("Draw cards equal to its cost"))
 	_ck("Salvage+ carries the one-card draw rider", int(forged.get("extra_draw", 0)) == 1)
 
@@ -573,13 +580,21 @@ func _t_witch() -> void:
 	_seat_id("witch", false, 0)
 	var spell = combat.CARD_SCENE.instantiate()
 	spell.card_id = "smite_spell"
-	spell.card_data = CDB.get_card_data("smite_spell")   # Rain of Blows, base cost 2
+	spell.card_data = CDB.get_card_data("smite_spell")   # Rain of Blows
+	# DERIVED, not hardcoded (2026-09-16). This read "base cost 2" and asserted
+	# 1 / 2 outright; the cost rescale moved the card to 3 and the gate went red
+	# while the Witch was working perfectly (it measured 2 / 3 — still exactly
+	# -1). What the Witch promises is a ONE-COMMAND DISCOUNT on the turn's first
+	# spell, so that is what is asserted, against whatever the card costs today.
+	var base_cost: int = int(spell.card_data.get("cost", 0))
 	combat._first_spell_this_turn = false
 	var c1: int = combat._effective_cost(spell)
 	combat._first_spell_this_turn = true
 	var c2: int = combat._effective_cost(spell)
-	_ck("first spell discounted", c1 == 1, "cost=%d" % c1)
-	_ck("later spells full price", c2 == 2, "cost=%d" % c2)
+	_ck("first spell discounted", c1 == maxi(0, base_cost - 1),
+		"cost=%d (base %d)" % [c1, base_cost])
+	_ck("later spells full price", c2 == base_cost,
+		"cost=%d (base %d)" % [c2, base_cost])
 	spell.free()
 
 
@@ -718,9 +733,19 @@ func _t_condottiere() -> void:
 	print("\n[newcards] === Condottiere: +1/+1 per unspent Command ===")
 	_clear()
 	combat.player_mana = 2
+	# Expected stats are DERIVED from the card's own base, not pinned. Pinned
+	# literals (4/5) went red on 2026-09-19 when duelist was retuned cost 2/2-3 ->
+	# cost 3/3-4: the mechanic was correct and the fixture was stale, which is the
+	# commonest cause of a red gate in this repo. A fixture must state its own
+	# requirement — here "+1/+1 per unspent" — so any future retune moves with it.
+	var base: Dictionary = CDB.CARD_POOL["duelist"]
+	var unspent := 2
+	var want_a := int(base["atk"]) + unspent
+	var want_h := int(base["hp"]) + unspent
 	var c = _seat_id("duelist", false, 0)
 	combat._apply_play_time_passives(c, false)
-	_ck("entered at 4/5 with 2 unspent", c.current_atk == 4 and c.current_hp == 5,
+	_ck("entered at %d/%d with %d unspent" % [want_a, want_h, unspent],
+		c.current_atk == want_a and c.current_hp == want_h,
 		"%d/%d" % [c.current_atk, c.current_hp])
 
 
@@ -847,7 +872,14 @@ func _t_glutton() -> void:
 	_seat_plain(false, 0, 1, 2, ["thorns"])
 	KFX.dispatch_on_enter(g, 1, false, combat)
 	await process_frame
-	_ck("+2/+2 from the meal", g.current_atk == 4 and g.current_hp == 5,
+	# Derived, not pinned — see the note in _t_condottiere. the_glutton was
+	# retuned hp 3 -> 4 on 2026-09-19 and the pinned 4/5 went red against a
+	# devour that was working correctly.
+	var gb: Dictionary = CDB.CARD_POOL["the_glutton"]
+	var g_a := int(gb["atk"]) + 2
+	var g_h := int(gb["hp"]) + 2
+	_ck("+2/+2 from the meal (%d/%d)" % [g_a, g_h],
+		g.current_atk == g_a and g.current_hp == g_h,
 		"%d/%d" % [g.current_atk, g.current_hp])
 	_ck("digested the meal's Thorns", g.has_keyword("thorns"))
 

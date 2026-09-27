@@ -94,7 +94,7 @@ func _static_checks() -> void:
 		},
 		"grave_bell": {
 			"name": "Grave Bell", "cost": 1, "rarity": "uncommon",
-			"desc": "Bearer’s On-Death effects trigger twice.",
+			"desc": "Bearer's On-Death effects trigger twice.",
 			"armament": {"effect": "double_on_death", "icon": "on_death"},
 			"upgrade": "Bearer gets +1/+1. Its On-Death effects trigger twice.",
 		},

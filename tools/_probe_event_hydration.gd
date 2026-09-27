@@ -47,15 +47,29 @@ func _run() -> void:
 	var ev: Node = load("res://scenes/event.tscn").instantiate()
 	root.add_child(ev)
 
-	var choices: Node = ev.get_node_or_null("ChoicesBox")
+	var choices: Node = _choice_root(ev)
 	var fallback: CanvasItem = ev.get_node_or_null("Background") as CanvasItem
 	var overlay: CanvasItem = ev.get_node_or_null("EventOverlayLeft") as CanvasItem
 	_check(choices != null and _wired_button_count(choices) > 0,
 		"title/description/choices are interactive on the ready frame")
 	_check(fallback != null and fallback.visible and not ev.has_node("EventArt"),
 		"fallback painting remains visible for the first interactive frame")
-	_check(overlay != null and overlay.visible and ev._event_art_loading,
-		"readability scrim is live while painting hydration runs")
+	# THE LEFT WASH IS A FOLIO DEVICE (2026-08-05). `_ensure_event_overlay`'s own
+	# header: the wash "pools ink down the LEFT ... a shape cut for the folio
+	# ladder, whose title and choices live exactly there. A presented layout
+	# draws its own ink where ITS copy sits" — and `_build_presented_event`
+	# duly sets `EventOverlayLeft.visible = false`. Asserting that node is
+	# visible therefore fails by design on every presented event, which is what
+	# The Crossing became.
+	#
+	# What this check is FOR is the hydration contract: the copy must be
+	# readable while the painting streams in. So assert hydration is genuinely
+	# running, and that a readability treatment is in force — the left wash on
+	# folio, or the layout's own ink otherwise. Deliberately NOT re-deriving
+	# `_wants_left_scrim()`, which would make the check a tautology.
+	var presented: bool = ev._event_presentation_layout() != "folio"
+	_check(ev._event_art_loading and (presented or (overlay != null and overlay.visible)),
+		"a readability treatment is live while painting hydration runs")
 
 	# Model a modal picker hiding art during the request. The late texture must
 	# honor that state instead of flashing itself over the picker.
@@ -71,14 +85,16 @@ func _run() -> void:
 	var art: TextureRect = ev.get_node_or_null("EventArt") as TextureRect
 	overlay = ev.get_node_or_null("EventOverlayLeft") as CanvasItem
 	_check(art != null and art.texture != null and not art.visible \
-			and overlay != null and not overlay.visible,
+			and ((presented and overlay == null) \
+			or (not presented and overlay != null and not overlay.visible)),
 		"late hydration preserves a modal picker's hidden-art state")
-	_check(is_instance_valid(choices) and choices == ev.get_node_or_null("ChoicesBox") \
+	_check(is_instance_valid(choices) and choices == _choice_root(ev) \
 			and _wired_button_count(choices) > 0,
 		"painting swap leaves the live choice subtree untouched")
 
 	ev._set_event_art_visible(true)
-	_check(art.visible and overlay.visible and fallback != null and not fallback.visible,
+	_check(art.visible and (presented or (overlay != null and overlay.visible)) \
+			and fallback != null and not fallback.visible,
 		"revealing hydrated art replaces the fallback without rebuilding UI")
 
 	var request_serial: int = ev._event_art_request_serial
@@ -115,6 +131,32 @@ func _run() -> void:
 
 	print("[event-hydration] %s" % ("PASS" if _fails == 0 else "FAIL (%d)" % _fails))
 	quit(0 if _fails == 0 else 1)
+
+
+## THE CHOICE COLUMN IS NOT ALWAYS CALLED "ChoicesBox" (2026-08-05).
+##
+## `_build_ui` only builds that node on the FOLIO fallback path: an event with a
+## `presentation.layout` returns through `_build_presented_event` first, and The
+## Crossing — the event this probe deliberately selects, because its 1.4 MB
+## bespoke painting exercises the real first-use path — is `layout: "location"`.
+## So `get_node_or_null("ChoicesBox")` had been returning null, and THREE checks
+## were failing on it: the interactive-frame check, the scrim check, and the
+## "swap leaves the live choice subtree untouched" check. Nothing was wrong with
+## hydration; the probe was pinned to one layout's node name.
+##
+## The contract here is "the player's choices exist and are wired before the
+## painting is requested" — which is about STRUCTURE, not naming. Find the
+## direct child of the scene whose subtree owns the wired buttons: stable
+## identity across the art swap (which is what the third check needs) without
+## caring how the event chose to lay itself out.
+func _choice_root(ev: Node) -> Node:
+	var named := ev.get_node_or_null("ChoicesBox")
+	if named != null and _wired_button_count(named) > 0:
+		return named
+	for child in ev.get_children():
+		if _wired_button_count(child) > 0:
+			return child
+	return null
 
 
 func _wired_button_count(node: Node) -> int:

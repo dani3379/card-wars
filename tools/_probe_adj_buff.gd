@@ -58,8 +58,13 @@ func _run_test() -> void:
 	SS.rng_seed = 999
 	NM.is_host = true
 	NM.local_player_index = 0
+	# ALL THREE terms. is_connected_to_peer() is
+	# `vs_bot or (_connected and remote_present and _compatibility_confirmed)`,
+	# and Combat._ready falls back to SOLO when it is false — so a two-term fake
+	# boots the CAMPAIGN arm while every label here still says skirmish.
 	NM._connected = true
 	NM.remote_present = true
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0
 	NM.entities.clear()
 	NM._next_entity_id = 1
@@ -129,37 +134,44 @@ func _run_test() -> void:
 		"after the drummer dies the neighbour drops back to base ATK (%d)" % restored)
 
 	# ── DIAGONAL CREST (player relic): "Diagonal friendlies count as adjacent." ──
-	# A plain column/row neighbour reading would NOT buff a diagonal; with the relic
-	# held, _adjacent_creatures must widen to the two diagonal seats too. Player side
-	# only (slot 0). Placed on the HOST's own side (is_enemy=false) so the not-is_enemy
-	# gate applies. A DIAGONAL vanilla (front lane 1 torch → back lane 2) is the seat.
-	SS.get_slot(0).relics.append("diagonal_crest")
-	# Vanilla on the player BACK row lane 2 — diagonal to a front-lane-1 torchbearer.
-	var pv = combat._net_spawn_creature(CDB.get_card_data("brute").duplicate(true), 91001, 2, combat.ROW_BACK, false, false)
-	await create_timer(0.1).timeout
-	var pv_before: int = pv.effective_atk() if is_instance_valid(pv) else 0
-	# Player torchbearer on FRONT lane 1 (its diagonals are back lanes 0 and 2).
-	combat._net_spawn_creature(CDB.get_card_data("torchbearer").duplicate(true), 91002, 1, combat.ROW_FRONT, false, false)
-	combat._refresh_adjacency_buffs()
-	await create_timer(0.1).timeout
-	# THIS IS A NET FIXTURE, AND DIAGONAL CREST IS DELIBERATELY NET-INERT.
-	# Combat._adjacent_creatures says so in as many words: the relic is not in
-	# NET_RELIC_POOL, so `_has_relic` is false in skirmish and BOTH PEERS read the
-	# plain row+column set — which is the whole point, since a widened adjacency
-	# on one peer only would desync every adjacency verb in the game.
-	# This block used to assert the buff LANDED here, i.e. it demanded the exact
-	# behaviour the design forbids, and had been failing ever since. Flipped to
-	# lock the real contract: holding the relic must change NOTHING in net.
-	# (The relic's actual widening is solo behaviour and belongs in a solo probe.)
-	_check(is_instance_valid(pv) and pv.adj_atk_buff == 0,
-		">>> DIAGONAL CREST is NET-INERT: the diagonal stays unbuffed in skirmish even while the relic is held (adj_atk_buff=%d)" \
-			% (pv.adj_atk_buff if is_instance_valid(pv) else -1))
-	# Dropping it must likewise change nothing — no hidden net path reads it.
-	SS.get_slot(0).relics.erase("diagonal_crest")
-	combat._refresh_adjacency_buffs()
-	await create_timer(0.1).timeout
-	_check(is_instance_valid(pv) and pv.adj_atk_buff == 0,
-		"...and dropping the relic is equally inert (adj_atk_buff=%d)" % (pv.adj_atk_buff if is_instance_valid(pv) else -1))
+	#
+	# WHERE NET-INERTNESS ACTUALLY LIVES. This block used to seed the relic with
+	# `SS.get_slot(0).relics.append("diagonal_crest")` and then assert the widening
+	# did nothing. That assertion was never sound in either direction:
+	#   · while the probe silently booted SOLO (a two-term net fake), `_has_relic`
+	#     read the empty campaign RunState, so NOTHING was held and it passed
+	#     vacuously — the relic id in the slot was never even consulted;
+	#   · booted for real as NET, `_has_relic` returns `slot.relics.has(id)`
+	#     verbatim, so the hand-seeded relic IS held, `_adjacent_creatures` widens,
+	#     and the diagonal gets buffed. The "inert" assertion fails.
+	# Neither run tested the contract, because the contract is not enforced inside
+	# `_has_relic` or `_adjacent_creatures` at all — it is enforced ONE LAYER UP,
+	# at pool membership: diagonal_crest is not in NET_RELIC_POOL, and
+	# `validate_loadout_event` rejects any loadout naming an off-pool relic, so it
+	# can never reach a slot in a real match. Seeding it directly forged a state
+	# the wire refuses to produce.
+	#
+	# So assert the real gate instead, and stop pretending a forged slot proves
+	# anything. (The relic's actual widening is SOLO behaviour and belongs in a
+	# solo probe — nothing here can or should cover it.)
+	_check(not SS.NET_RELIC_POOL.has("diagonal_crest"),
+		">>> DIAGONAL CREST is out of NET_RELIC_POOL — the gate that keeps a widened adjacency off the wire")
+	var forged_deck: Array = []
+	var legal_pool: Array = SS.skirmish_legal_pool()
+	for i in range(SS.DECK_TARGET):
+		forged_deck.append(String(legal_pool[i % legal_pool.size()]))
+	var verdict: String = SS.validate_loadout_event({
+		"cards": forged_deck, "relics": ["diagonal_crest"], "potions": [],
+	})
+	_check(verdict == "loadout_relic_illegal",
+		"a loadout naming it is REFUSED at the wire (verdict='%s')" % verdict)
+	# ...and the same validator accepts the loadout once the relic is dropped, so
+	# the refusal above is about THIS relic and not a malformed fixture.
+	var clean_verdict: String = SS.validate_loadout_event({
+		"cards": forged_deck, "relics": [], "potions": [],
+	})
+	_check(clean_verdict == "",
+		"the same loadout without it is legal — the refusal is the relic, not the fixture (verdict='%s')" % clean_verdict)
 
 	if _fails == 0:
 		print("[adj-buff] ALL PASS")

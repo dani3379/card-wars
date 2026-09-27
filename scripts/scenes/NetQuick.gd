@@ -35,6 +35,8 @@ var _deck_gen: int = 0
 var _reroll_btn: Button
 var _ready_btn: Button
 var _mirror_btn: Button
+var _mode_ui_ready := false
+var _deck_ui_ready := false
 
 
 func _ready() -> void:
@@ -55,8 +57,6 @@ func _ready() -> void:
 	NetMatch.peer_left.connect(_on_peer_lost)
 	NetMatch.host_closed.connect(_on_peer_lost)
 
-	_build_scaffold()
-
 	if NetMatch.is_host:
 		# Host decides the initial cfg and broadcasts it so the client's first
 		# generation matches. sub_seed 0 → use base rng_seed unchanged.
@@ -64,12 +64,29 @@ func _ready() -> void:
 		_broadcast_cfg()
 	# Host generates immediately (client regenerates when cfg arrives).
 	_regenerate_deck()
+	# Every net game opens with the shared arsenal stage (the host sets how many
+	# relic and potion picks it offers; 0 + 0 raises no stage at all);
+	# present it before constructing the obscured deck preview. The mode UI starts
+	# one frame later and normally finishes during the five Arsenal decisions.
+	_begin_arsenal()
+	_prepare_mode_ui()
+
+
+func _prepare_mode_ui() -> void:
+	# Waiting through a completed draw keeps hidden deck work out of the entry
+	# frame. The extra process boundary also prevents signal-resume order from
+	## charging this work to another frame_post_draw waiter (including benchmarks).
+	if DisplayServer.get_name() != "headless":
+		await RenderingServer.frame_post_draw
+	await get_tree().process_frame
+	if not is_inside_tree() or not NetMatch.is_connected_to_peer():
+		return
+	_build_scaffold()
+	_mode_ui_ready = true
 	_refresh_deck_ui()
 	_update_status()
 	_install_net_chrome()
-	# Every net game opens with the shared arsenal stage (3 relics + 2 potions);
-	# the overlay sits above the quick-battle controls until the picks are made.
-	_begin_arsenal()
+	_flatten_net_chart_styles(self)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -124,7 +141,7 @@ func _build_scaffold() -> void:
 
 	_root.add_child(GameTheme.make_screen_title("QUICK BATTLE", GILT_BRIGHT))
 
-	_header = GameTheme.make_label("Your warband — %d cards, dealt at random." % _target, 18, IVORY)
+	_header = GameTheme.make_label("Your deck — %d cards, dealt at random." % _target, 18, IVORY)
 	_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_root.add_child(_header)
 
@@ -174,13 +191,13 @@ func _build_scaffold() -> void:
 	if NetMatch.is_host:
 		_mirror_btn = GameTheme.make_themed_button("MIRRORED" if _mirror else "RANDOM",
 			Color(0.20, 0.17, 0.13), Vector2(140, 38), 15)
-		_mirror_btn.tooltip_text = "Host's call: MIRRORED deals both sides the same 20 cards; RANDOM deals each side its own."
+		_mirror_btn.tooltip_text = "Host only: Mirrored deals both sides the same 20 cards; Random deals each side its own."
 		_mirror_btn.pressed.connect(_on_toggle_mirror)
 		ctrl_row.add_child(_mirror_btn)
 
 		_reroll_btn = GameTheme.make_themed_button("REROLL",
 			Color(0.28, 0.20, 0.10), Vector2(130, 38), 15)
-		_reroll_btn.tooltip_text = "Host's call: deal both warbands again."
+		_reroll_btn.tooltip_text = "Host only: deal both decks again."
 		_reroll_btn.pressed.connect(_on_reroll)
 		ctrl_row.add_child(_reroll_btn)
 
@@ -197,40 +214,66 @@ func _build_scaffold() -> void:
 func _refresh_deck_ui() -> void:
 	if _deck_box == null:
 		return
+	_deck_ui_ready = false
 	_deck_gen += 1
 	var gen := _deck_gen
 	_clear_hover_preview_under(_deck_box)   # a previewed tile is about to be freed
 	for c in _deck_box.get_children():
+		_deck_box.remove_child(c)
 		c.queue_free()
 
 	# Group the random warband by id and show each as real card art with a ×N
 	# badge, sorted by cost then name. No click: the deck is fixed — you Reroll it,
 	# you don't edit it — so the thumbnails are a read-only preview.
 	var counts: Dictionary = {}
+	var catalog: Dictionary = {}
 	var order: Array[String] = []
 	for id in _local_deck:
 		if not counts.has(id):
 			counts[id] = 0
 			order.append(id)
+			catalog[id] = SkirmishState.skirmish_card_data(id)
 		counts[id] = int(counts[id]) + 1
 	order.sort_custom(func(a: String, b: String) -> bool:
-		var ca := int(CardDB.get_card_data(a).get("cost", 0))
-		var cb := int(CardDB.get_card_data(b).get("cost", 0))
+		var ca := int((catalog[a] as Dictionary).get("cost", 0))
+		var cb := int((catalog[b] as Dictionary).get("cost", 0))
 		if ca != cb:
 			return ca < cb
-		return String(CardDB.get_card_data(a).get("name", a)) < String(CardDB.get_card_data(b).get("name", b)))
+		return String((catalog[a] as Dictionary).get("name", a)) < \
+			String((catalog[b] as Dictionary).get("name", b)))
 
-	# Bake-then-add (Collection pattern): warm each card's texture before its thumb
-	# so the Card2D builds the cheap baked overlay; a warm-cache Reroll fills instantly.
-	# Each thumb deals onto the sheet with a small stagger — a Reroll reads as a
-	# fresh hand hitting the table, not a repaint.
-	var dealt := 0
+	# Reserve the complete final grid before the first await. Rich faces are built
+	# hidden over these backs, then the entire warband turns at once.
+	var slots: Array[Control] = []
+	var sleeves: Array[Control] = []
 	for id in order:
-		if gen != _deck_gen or not is_instance_valid(_deck_box):
+		var data: Dictionary = catalog[id]
+		var loading := _make_loading_card_slot(THUMB_SIZE,
+			GameTheme.rarity_color(String(data.get("rarity", "common"))),
+			_deck_box)
+		var slot: Control = loading["slot"]
+		_deck_box.add_child(slot)
+		slots.append(slot)
+		sleeves.append(loading["sleeve"])
+
+	var build_alive := func() -> bool:
+		return is_inside_tree() and gen == _deck_gen
+	var faces: Array[Control] = []
+	var buttons: Array[Button] = []
+	for idx in order.size():
+		var id: String = order[idx]
+		if not build_alive.call():
 			return
-		var d := SkirmishState.skirmish_card_data(id)
-		await CardTextureCache.bake(d)
-		if gen != _deck_gen or not is_instance_valid(_deck_box):
+		var d: Dictionary = catalog[id]
+		if not CardTextureCache.has(d) and not CardTextureCache.has_gallery(d):
+			await CardArtAliases.prewarm_card_art(d)
+			if not build_alive.call():
+				CardArtAliases.release_card_art(d)
+				return
+			if not CardTextureCache.has(d):
+				await CardTextureCache.bake_gallery(d, build_alive)
+			CardArtAliases.release_card_art(d)
+		if not build_alive.call():
 			return
 		var n := int(counts[id])
 		var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
@@ -240,11 +283,37 @@ func _refresh_deck_ui() -> void:
 		# No add/remove click in Quick — but hovering still pops the full card
 		# beside the tile (the shared builder preview), so the sealed 20 can be
 		# read properly before READY.
-		_attach_hover_preview(thumb["button"] as Button, id)
-		_deck_box.add_child(thumb["root"])
-		GameTheme.deal_in(thumb["root"], 0.02 + float(dealt) * 0.025)
-		dealt += 1
+		var button := thumb["button"] as Button
+		button.disabled = true
+		button.set_meta("card_loading", true)
+		_attach_hover_preview(button, id)
+		var face := thumb["root"] as Control
+		slots[idx].add_child(face)
+		_stage_complete_hand_member(face)
+		faces.append(face)
+		buttons.append(button)
+		if DisplayServer.get_name() == "headless":
+			await get_tree().process_frame
+		else:
+			await RenderingServer.frame_post_draw
+		if not build_alive.call():
+			return
 
+	# One simultaneous flip after every full Card2D face is ready. This keeps the
+	# centered flow immutable during cold loads and rerolls.
+	await _reveal_complete_hand(faces, sleeves)
+	if not build_alive.call():
+		return
+	for button in buttons:
+		if button != null and is_instance_valid(button):
+			button.set_meta("card_loading", false)
+			button.disabled = false
+	_deck_ui_ready = true
+	_update_status()
+
+
+func quick_cards_ready() -> bool:
+	return _deck_ui_ready
 
 func _update_status() -> void:
 	if _status == null:
@@ -260,14 +329,25 @@ func _update_status() -> void:
 		_status.add_theme_color_override("font_color", HOST_BLUE)
 	else:
 		_status.add_theme_color_override("font_color", ASH)
+	var config_locked := _config_locked()
+	if _mirror_btn != null:
+		_mirror_btn.disabled = config_locked or not _deck_ui_ready
+	if _reroll_btn != null:
+		_reroll_btn.disabled = config_locked or not _deck_ui_ready
+	if _ready_btn != null:
+		_ready_btn.disabled = config_locked or not _deck_ui_ready
 
 
 # ─────────────────────────────────────────────────────────────────────────
 #  HOST CONTROLS
 # ─────────────────────────────────────────────────────────────────────────
 
+func _config_locked() -> bool:
+	return _local_ready or _remote_ready or _local_finished or _remote_finished
+
+
 func _on_toggle_mirror() -> void:
-	if not NetMatch.is_host:
+	if not NetMatch.is_host or not _deck_ui_ready or _config_locked():
 		return
 	_mirror = not _mirror
 	if _mirror_btn != null:
@@ -279,7 +359,7 @@ func _on_toggle_mirror() -> void:
 
 
 func _on_reroll() -> void:
-	if not NetMatch.is_host:
+	if not NetMatch.is_host or not _deck_ui_ready or _config_locked():
 		return
 	_sub_seed = NetMatch.fresh_seed()
 	_regenerate_deck()
@@ -289,6 +369,7 @@ func _on_reroll() -> void:
 
 
 func _broadcast_cfg() -> void:
+	NetMatch.set_loadout_source_config(_mirror, _sub_seed)
 	NetMatch.send_draft_event({
 		"t": "cfg",
 		"mirror": _mirror,
@@ -301,7 +382,7 @@ func _broadcast_cfg() -> void:
 # ─────────────────────────────────────────────────────────────────────────
 
 func _on_ready_pressed() -> void:
-	if _local_ready or _local_finished:
+	if not _deck_ui_ready or _local_ready or _local_finished:
 		return
 	_local_ready = true
 	if _ready_btn != null:
@@ -341,14 +422,15 @@ func _on_draft_event(event: Dictionary) -> void:
 	match String(event.get("t", "")):
 		"cfg":
 			# Client applies the host's config (host ignores its own echo).
-			if not NetMatch.is_host:
+			if not NetMatch.is_host and not _config_locked():
 				_mirror = bool(event.get("mirror", true))
 				_sub_seed = int(event.get("seed", 0))
 				if _mirror_btn != null:
 					_mirror_btn.text = "MIRRORED" if _mirror else "RANDOM"
 				_regenerate_deck()
-				_refresh_deck_ui()
-				_update_status()
+				if _mode_ui_ready:
+					_refresh_deck_ui()
+					_update_status()
 		"ready":
 			_remote_ready = true
 			_update_status()
@@ -377,11 +459,11 @@ func _store_opponent_deck(cards: Array) -> void:
 
 ## Mirrors NetDraft — host launches when both decks are committed.
 func _maybe_begin_combat() -> void:
-	if not (_local_finished and _remote_finished):
+	if not _claim_combat_launch():
 		return
 	_show_marching()
 	if NetMatch.is_host:
-		NetMatch.launch_combat()
+		NetMatch.launch_combat(true)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -391,8 +473,9 @@ func _maybe_begin_combat() -> void:
 func _show_marching() -> void:
 	if _header == null:
 		return
-	_header.text = "Both warbands ready — marching to battle…"
+	_header.text = "Both decks ready — starting the match…"
 	_header.add_theme_color_override("font_color", GREEN)
+	Motion.pulse_label(_header, GILT_BRIGHT)
 
 
 ## Mirrors NetDraft — disconnect handler.
@@ -410,7 +493,5 @@ func _on_peer_lost(_id: int = 0) -> void:
 		_ready_btn.disabled = true
 	var back := GameTheme.make_themed_button("BACK TO MENU",
 		Color(0.26, 0.16, 0.14), Vector2(220, 44), 16)
-	back.pressed.connect(func():
-		NetMatch.leave()
-		get_tree().change_scene_to_file(MENU_SCENE))
+	back.pressed.connect(_leave_to_menu.bind(back))
 	_root.add_child(back)

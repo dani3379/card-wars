@@ -3,7 +3,6 @@ extends Node
 ## (windowed, editor closed):
 ##   Godot.exe --path "D:\Godot" res://tools/_shot_verdict_fx.tscn
 ## Shots (tools/screenshot/_verdictfx_*.png):
-##   trail     — drag ember trail mid-sweep (synthetic _on_card_drag_trail feed)
 ##   victory   — VICTORY ceremony ~0.55s in (stamp landed, gold counting)
 ##   defeat    — DEFEAT ceremony ~0.6s in (word dropped, scrim dark)
 ##   shine     — GameTheme.rarity_reveal mid-glint on an uncommon + a rare writ
@@ -38,23 +37,15 @@ func _ready() -> void:
 	# Wait out the fight intro + round-1 turn banner before staging anything.
 	await get_tree().create_timer(6.0).timeout
 
-	# ── 1. Drag ember trail: feed the breadcrumb handler a curved sweep, one
-	# point per frame, and shoot with the ribbon at full length.
-	var hand: Array = _combat.get("_hand")
-	if hand != null and hand.size() > 0:
-		var card: Control = hand[0]
-		var p0 := Vector2(760.0, 800.0)
-		var p1 := Vector2(1010.0, 430.0)
-		for i in range(15):
-			var t := float(i) / 14.0
-			var pos := p0.lerp(p1, t) + Vector2(sin(t * PI) * 120.0, 0.0)
-			_combat.call("_on_card_drag_trail", pos, card)
-			await get_tree().process_frame
-		await _shoot("trail")
-		await get_tree().create_timer(0.5).timeout
+	# ── 1. (RETIRED 2026-09-17.) This was the drag ember ribbon's integration
+	# frame. The ribbon is gone — the drag's juice now lives on Card2D itself
+	# (the lamp-thrown lift shadow and the smear train), so it is photographed
+	# by `_shot_drag_feel.tscn`, which drives a real card instead of feeding a
+	# handler synthetic points. The handler this block called no longer exists.
 
 	# ── 2/3. Verdict ceremonies (auto_fade so each cleans the stage). ──
-	_combat.call("_show_battle_verdict", true, 42, true, true)
+	_combat.call("_show_battle_verdict", true, 42, true, true,
+		"Hold broken 1/3 - 2 more open the keep road.  /  Spoils: Healing Draught")
 	await get_tree().create_timer(0.55).timeout
 	await _shoot("victory")
 	await get_tree().create_timer(2.4).timeout

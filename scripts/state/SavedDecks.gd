@@ -36,7 +36,7 @@ func _load() -> void:
 		if cards.is_empty():
 			continue
 		decks.append({
-			"name": String(d.get("name", "Warband")),
+			"name": String(d.get("name", "Deck")),
 			"cards": cards,
 			"saved_at": String(d.get("saved_at", "")),
 		})
@@ -57,12 +57,12 @@ func count() -> int:
 
 
 ## Save (or replace by name) a deck. `cards` is copied. Returns the stored name.
-## A blank name auto-numbers ("Warband N"). Replacing a same-name deck keeps the
+## A blank name auto-numbers ("Deck N"). Replacing a same-name deck keeps the
 ## list tidy instead of piling up near-duplicates.
 func save_deck(deck_name: String, cards: Array) -> String:
 	var nm := deck_name.strip_edges()
 	if nm == "":
-		nm = "Warband %d" % (decks.size() + 1)
+		nm = "Deck %d" % (decks.size() + 1)
 	var copy: Array = []
 	for c in cards:
 		copy.append(String(c))

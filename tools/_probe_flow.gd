@@ -73,6 +73,20 @@ func _run() -> void:
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
+## Lowest-id draftable card of a rarity. Sorted so the fixture is the same deck
+## every run — a probe that varies its own input cannot localise a regression.
+func _first_draftable(rarity: String) -> String:
+	var ids: Array = CDB.CARD_POOL.keys()
+	ids.sort()
+	for id_v in ids:
+		var id := String(id_v)
+		var d: Dictionary = CDB.get_card_data(id)
+		if String(d.get("rarity", "")) == rarity \
+				and bool(d.get("draftable", true)) and not CDB.is_curse(id):
+			return id
+	return ""
+
+
 func _new_run(kind: String) -> void:
 	_seq += 1
 	var hero: String = HEROES[_seq % HEROES.size()]
@@ -88,6 +102,17 @@ func _new_run(kind: String) -> void:
 			var combat: Array = RDB.roll_relic_reward("combat", RS.relics, RS.current_hero_id)
 			if combat.size() > 0:
 				RS.add_relic(combat[0])
+			# RANGE, not just size. A hero opener is ELEVEN STARTERS, on which
+			# every card ties — so "the pawnbroker named your best" would pass
+			# against a uniform random roll and assert nothing. Give the rich
+			# deck the two things her ranking is actually about: rarity above
+			# starter, and a card the player forged.
+			for want in ["rare", "uncommon"]:
+				var found := _first_draftable(want)
+				if found != "":
+					RS.add_card(found)
+			if RS.deck.size() > 0 and CDB.is_upgradeable(String(RS.deck[0])):
+				RS.upgrade_card(0, "plus")
 		"poor":
 			RS.gold = 0
 			RS.hero_hp = 1
@@ -441,9 +466,41 @@ func _drive_appraisal(fixture: String) -> void:
 	print("[flow] pawn_appraisal [%s] deck=%d" % [fixture, RS.deck.size()])
 	var ev = _event_scene("pawnbrokers_window")
 	ev._start_appraisal_mode()
-	# "Show another" up to the cap, then sell.
+	# SHE ASKS FOR YOUR BEST (owner's rule, 2026-09-16). Asserted against the
+	# deck rather than against a named card, so it survives any retune of the
+	# worth model — the claim is only "nothing eligible outranks what she named",
+	# which a return to the old uniform roll fails immediately on any real deck.
 	if ev._appr_index >= 0:
-		ev._on_appraisal_another()
+		# CDB, not a bare `CardDB` — this probe runs under `--script`, where the
+		# autoloads are not registered at compile time and the bare name is a
+		# hard compile error that takes the whole file down.
+		var best := -1
+		for i in range(RS.deck.size()):
+			if not CDB.is_curse(RS.deck[i]):
+				best = maxi(best, int(ev._appraisal_worth(i)))
+		var named := int(ev._appraisal_worth(ev._appr_index))
+		if named < best:
+			_invariant_fails += 1
+			print("  [INVARIANT] pawn_appraisal/%s: named a card worth %d while %d was on offer"
+				% [fixture, named, best])
+		# Each refusal must step DOWN, never sideways and never back to a card
+		# she already showed — the old roll could re-offer the same index.
+		var seen: Array[int] = [int(ev._appr_index)]
+		var prev := named
+		while ev._appr_shown < ev._appr_shortlist.size():
+			ev._on_appraisal_another()
+			var next_worth := int(ev._appraisal_worth(ev._appr_index))
+			if seen.has(int(ev._appr_index)):
+				_invariant_fails += 1
+				print("  [INVARIANT] pawn_appraisal/%s: re-offered deck slot %d"
+					% [fixture, int(ev._appr_index)])
+				break
+			if next_worth > prev:
+				_invariant_fails += 1
+				print("  [INVARIANT] pawn_appraisal/%s: offer climbed %d -> %d"
+					% [fixture, prev, next_worth])
+			seen.append(int(ev._appr_index))
+			prev = next_worth
 		if ev._appr_index >= 0:
 			ev._on_appraisal_sell()
 	_check_invariants("pawn_appraisal/%s" % fixture)
@@ -625,10 +682,14 @@ func _run_shop() -> void:
 			s._buy_relic(rid, relic_price)
 		# Buy potion.
 		s._buy_potion(s._price(s.POTION_COST))
-		# The sutler's buy-back (replaced the flat removal fee, 2026-07-02).
-		s._start_sell_mode()
+		# The provost's fee — pay to strike a card (replaced the buy-back,
+		# 2026-09-16). Fund the purse first: a driver that has just bought a
+		# relic and a potion may not be able to afford it, and a refused click
+		# would exercise nothing.
+		RS.gold = maxi(RS.gold, int(s.REMOVE_FEE))
+		s._start_removal_mode()
 		if RS.deck.size() > 1:
-			s._confirm_sell(0)
+			s._confirm_removal(0)
 		_check_invariants("shop/%s" % fixture)
 		_free_scene(s); _drivers += 1
 

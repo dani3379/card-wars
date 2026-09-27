@@ -1,0 +1,377 @@
+extends SceneTree
+## Windowed cold-entry trace for MainMenu's War Chest card picker.
+##
+## Tracks the renderer and the presentation separately: hidden Card2D faces may
+## hydrate one at a time, while layout slots must already be final and visible
+## faces must jump from none to the complete group on one coordinated turn.
+
+const DEADLINE_MS := 15000
+const CARD_SCENE_PATH := "/Card2D.gd"
+const SLOT_SIZE := Vector2(225, 300)
+const POSITION_EPSILON := 0.5
+
+var _started := false
+var _done := false
+var _failures := 0
+var _callback_fired := false
+var _callback_value: Variant = null
+
+
+func _process(_delta: float) -> bool:
+	if not _started:
+		_started = true
+		_run()
+	return _done
+
+
+func _run() -> void:
+	if OS.get_cmdline_user_args().has("--check-only"):
+		print("[warchest-picker-trace] CHECK_ONLY_OK")
+		_done = true
+		quit(0)
+		return
+	var settings = root.get_node("UserSettings")
+	var run_state = root.get_node("RunState")
+	var cache = root.get_node("CardTextureCache")
+	var preload_service = root.get_node_or_null("ScenePreload")
+	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	DisplayServer.window_set_size(Vector2i(1600, 900))
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	Engine.max_fps = 0
+	settings.graphics_preset = "medium"
+	settings.render_scale = 1.0
+	settings.adaptive_render_scale = false
+	settings.particles = false
+	# Exercise the authored two-node card turn, not only the Reduce Motion snap.
+	settings.reduce_motion = false
+	await process_frame
+	await _wait_for_warmup(preload_service)
+	run_state.start_new_run("raider", 0, 20260903)
+	run_state.active_slot = -1
+	cache.clear()
+	var menu = load("res://scenes/main_menu.tscn").instantiate()
+	root.add_child(menu)
+	await create_timer(1.0).timeout
+	for _i in 3:
+		await RenderingServer.frame_post_draw
+
+	var indices: Array = range(run_state.deck.size())
+	var call_started := Time.get_ticks_usec()
+	menu._show_blessing_card_picker("TRACE — CHOOSE A CARD", indices,
+		Callable(self, "_record_pick"))
+	var call_ms := float(Time.get_ticks_usec() - call_started) / 1000.0
+	var initial_slots := _coordinated_slots(menu)
+	var initial_shells_ok := initial_slots.size() == indices.size()
+	var initial_hidden := _visible_count(initial_slots) == 0
+	var initial_disabled := _enabled_count(initial_slots) == 0
+	var initial_backs := _all_backs_present(initial_slots)
+	for slot in initial_slots:
+		var wrapper: Control = slot["wrapper"]
+		initial_shells_ok = initial_shells_ok \
+			and wrapper.has_meta("coordinated_card_slot") \
+			and wrapper.custom_minimum_size == SLOT_SIZE
+
+	var previous := Time.get_ticks_usec()
+	var opened_at := previous
+	var gaps: Array[float] = []
+	var slot_counts: Array[int] = []
+	var hydrated_counts: Array[int] = []
+	var visible_counts: Array[int] = []
+	var enabled_counts: Array[int] = []
+	var input_gated := true
+	var centers_locked := false
+	var centers_stable := true
+	var center_candidate: Dictionary = {}
+	var center_streak := 0
+	var baseline_centers: Dictionary = {}
+	var max_slot_drift := 0.0
+	var hydrate_ms := -1.0
+	var face_ms := -1.0
+	var ready_ms := -1.0
+	var complete := false
+
+	while Time.get_ticks_msec() - int(opened_at / 1000) < DEADLINE_MS:
+		await RenderingServer.frame_post_draw
+		var now := Time.get_ticks_usec()
+		gaps.append(float(now - previous) / 1000.0)
+		previous = now
+		var slots := _coordinated_slots(menu)
+		var hydrated := _hydrated_count(slots)
+		var visible := _visible_count(slots)
+		var enabled := _enabled_count(slots)
+		var fully_open := _fully_open_count(slots)
+		_append_changed(slot_counts, slots.size())
+		_append_changed(hydrated_counts, hydrated)
+		_append_changed(visible_counts, visible)
+		_append_changed(enabled_counts, enabled)
+		if hydrated == indices.size() and hydrate_ms < 0.0:
+			hydrate_ms = float(now - opened_at) / 1000.0
+		if visible == indices.size() and face_ms < 0.0:
+			face_ms = float(now - opened_at) / 1000.0
+		if enabled > 0:
+			input_gated = input_gated and enabled == indices.size() \
+				and visible == indices.size() and fully_open == indices.size()
+
+		var centers := _slot_centers(slots)
+		if centers.size() == indices.size():
+			if not centers_locked:
+				if not center_candidate.is_empty() \
+						and _centers_match(center_candidate, centers):
+					center_streak += 1
+				else:
+					center_candidate = centers
+					center_streak = 1
+				if center_streak >= 2:
+					baseline_centers = centers
+					centers_locked = true
+			else:
+				var drift := _maximum_center_drift(baseline_centers, centers)
+				max_slot_drift = maxf(max_slot_drift, drift)
+				centers_stable = centers_stable and drift <= POSITION_EPSILON
+
+		if hydrated == indices.size() and visible == indices.size() \
+				and enabled == indices.size() and fully_open == indices.size():
+			ready_ms = float(now - opened_at) / 1000.0
+			complete = true
+			break
+
+	print("[warchest-picker-trace] cards=%d call=%.2fms hydrate=%.2fms faces=%.2fms ready=%.2fms frames=%d max_gap=%.2fms p95=%.2fms max_slot_drift=%.3f" % [
+		indices.size(), call_ms, hydrate_ms, face_ms, ready_ms, gaps.size(),
+		_maximum(gaps), _percentile(gaps, 0.95), max_slot_drift])
+	print("[warchest-picker-trace] slots=%s hydrated=%s visible=%s enabled=%s" % [
+		str(slot_counts), str(hydrated_counts), str(visible_counts),
+		str(enabled_counts)])
+
+	_check(initial_shells_ok,
+		"all coordinated_card_slot wrappers exist at final size before the first yield")
+	_check(initial_hidden and initial_disabled and initial_backs,
+		"the initial spread is face-down and input-locked")
+	_check(complete, "the animated coordinated reveal completes before the deadline")
+	_check(slot_counts == [indices.size()],
+		"layout-slot progression is constant, got %s" % str(slot_counts))
+	_check(_has_partial_count(hydrated_counts, indices.size()) \
+			and _is_unit_progression(hydrated_counts),
+		"hidden Card2D hydration remains paced one face per presented frame")
+	_check(visible_counts == [0, indices.size()],
+		"visible-face progression is exactly [0, %d], got %s" % [
+			indices.size(), str(visible_counts)])
+	_check(input_gated and enabled_counts == [0, indices.size()],
+		"all pick buttons unlock together only after every face finishes opening")
+	_check(centers_locked and centers_stable,
+		"slot centers remain fixed after the initial Container sort")
+
+	# Exercise a real enabled choice. Emitting a disabled Button signal would
+	# bypass BaseButton's input contract and is explicitly not valid coverage.
+	var ready_slots := _coordinated_slots(menu)
+	var chosen_pos := mini(7, ready_slots.size() - 1)
+	if chosen_pos >= 0:
+		var chosen: Dictionary = ready_slots[chosen_pos]
+		var expected_index := int(indices[chosen_pos])
+		var button: Button = chosen["button"]
+		var card: Node = chosen["card"]
+		_check(not button.disabled, "selection is issued only through an enabled button")
+		_check(String(card.get("card_data").get("id", "")) \
+			== String(run_state.deck[expected_index]),
+			"revealed slot order still maps to its original deck index")
+		if not button.disabled:
+			button.emit_signal("pressed")
+		for _i in 30:
+			if _callback_fired:
+				break
+			await process_frame
+		_check(_callback_fired and typeof(_callback_value) == TYPE_INT \
+				and int(_callback_value) == expected_index,
+			"enabled selection returns the mapped deck index")
+	else:
+		_fail("completed reveal contains a selectable slot")
+
+	menu.queue_free()
+	for _i in 4:
+		await process_frame
+	var deadline := Time.get_ticks_msec() + DEADLINE_MS
+	while bool(cache.get("_bake_busy")) and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_done = true
+	quit(1 if _failures > 0 else 0)
+
+
+func _wait_for_warmup(service) -> void:
+	if service == null:
+		return
+	var deadline := Time.get_ticks_msec() + DEADLINE_MS
+	while Time.get_ticks_msec() < deadline:
+		if (not service.has_method("is_warmup_complete") \
+				or bool(service.is_warmup_complete())) and bool(service.get("_prewarmed")):
+			return
+		await create_timer(0.1).timeout
+
+
+func _picker_group(host: Node) -> Control:
+	var stack: Array[Node] = [host]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		if node is Control and node.has_meta("coordinated_card_group") \
+				and not _has_queued_ancestor(node, host):
+			return node as Control
+		for child: Node in node.get_children():
+			stack.append(child)
+	return null
+
+
+func _coordinated_slots(host: Node) -> Array[Dictionary]:
+	var group := _picker_group(host)
+	var out: Array[Dictionary] = []
+	if group == null:
+		return out
+	for node in group.get_children():
+		if not node is Control or not node.has_meta("coordinated_card_slot"):
+			continue
+		var wrapper := node as Control
+		var card: Control = null
+		var button: Button = null
+		var back: Control = null
+		for child in wrapper.get_children():
+			var script: Script = child.get_script()
+			if script != null and String(script.resource_path).ends_with(CARD_SCENE_PATH):
+				card = child as Control
+			elif child is Button and child.name == "CardPickButton":
+				button = child as Button
+			elif child is Control and child.name == "LoadingBack":
+				back = child as Control
+		out.append({
+			"wrapper": wrapper,
+			"card": card,
+			"button": button,
+			"back": back,
+		})
+	return out
+
+
+func _has_queued_ancestor(node: Node, host: Node) -> bool:
+	var cursor: Node = node
+	while cursor != null and cursor != host:
+		if cursor.is_queued_for_deletion():
+			return true
+		cursor = cursor.get_parent()
+	return false
+
+
+func _hydrated_count(slots: Array[Dictionary]) -> int:
+	var count := 0
+	for slot in slots:
+		if slot["card"] != null:
+			count += 1
+	return count
+
+
+func _visible_count(slots: Array[Dictionary]) -> int:
+	var count := 0
+	for slot in slots:
+		var card: Control = slot["card"]
+		if card != null and card.visible:
+			count += 1
+	return count
+
+
+func _enabled_count(slots: Array[Dictionary]) -> int:
+	var count := 0
+	for slot in slots:
+		var button: Button = slot["button"]
+		if button != null and not button.disabled:
+			count += 1
+	return count
+
+
+func _fully_open_count(slots: Array[Dictionary]) -> int:
+	var count := 0
+	for slot in slots:
+		var card: Control = slot["card"]
+		if card != null and card.visible and absf(card.scale.x - 1.0) <= 0.06:
+			count += 1
+	return count
+
+
+func _all_backs_present(slots: Array[Dictionary]) -> bool:
+	if slots.is_empty():
+		return false
+	for slot in slots:
+		var back: Control = slot["back"]
+		if back == null or not back.visible:
+			return false
+	return true
+
+
+func _slot_centers(slots: Array[Dictionary]) -> Dictionary:
+	var centers: Dictionary = {}
+	for slot in slots:
+		var wrapper: Control = slot["wrapper"]
+		centers[wrapper.get_instance_id()] = wrapper.get_global_rect().get_center()
+	return centers
+
+
+func _centers_match(a: Dictionary, b: Dictionary) -> bool:
+	return _maximum_center_drift(a, b) <= POSITION_EPSILON
+
+
+func _maximum_center_drift(a: Dictionary, b: Dictionary) -> float:
+	if a.size() != b.size():
+		return INF
+	var drift := 0.0
+	for key in a:
+		if not b.has(key):
+			return INF
+		drift = maxf(drift,
+			(a[key] as Vector2).distance_to(b[key] as Vector2))
+	return drift
+
+
+func _append_changed(values: Array[int], value: int) -> void:
+	if values.is_empty() or values.back() != value:
+		values.append(value)
+
+
+func _has_partial_count(values: Array[int], total: int) -> bool:
+	for value in values:
+		if value > 0 and value < total:
+			return true
+	return false
+
+
+func _is_unit_progression(values: Array[int]) -> bool:
+	for i in range(1, values.size()):
+		var delta := values[i] - values[i - 1]
+		if delta < 0 or delta > 1:
+			return false
+	return true
+
+
+func _record_pick(value: Variant) -> void:
+	_callback_fired = true
+	_callback_value = value
+
+
+func _check(condition: bool, label: String) -> void:
+	if condition:
+		print("[warchest-picker-trace] PASS ", label)
+	else:
+		_fail(label)
+
+
+func _fail(label: String) -> void:
+	_failures += 1
+	push_error("[warchest-picker-trace] FAIL %s" % label)
+
+
+func _maximum(values: Array[float]) -> float:
+	var result := 0.0
+	for value in values:
+		result = maxf(result, value)
+	return result
+
+
+func _percentile(values: Array[float], fraction: float) -> float:
+	if values.is_empty():
+		return 0.0
+	var sorted := values.duplicate()
+	sorted.sort()
+	return sorted[clampi(int(ceil(sorted.size() * fraction)) - 1, 0, sorted.size() - 1)]

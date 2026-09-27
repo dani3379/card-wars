@@ -67,14 +67,14 @@ A professional card is 12-18 layered visual elements composited together. Here i
 6. Border ring (1-2px darker outline around the shape)
 
 **Color:** Blue is near-universal for mana cost (Hearthstone blue crystal, LoR blue gem, MtG blue generic). Purple and teal also work.
-**YOUR STATUS:** Procedural PolyBadge (hex shape) with painted `cost_runestone.png` overlay. Blue fill, Cinzel Black numeral.
+**YOUR STATUS:** v9 writ layout — cost is a Cinzel Black numeral on the painted frame's red orb (`_cost_label`). No texture overlay.
 
 ### 1.5 Attack Stat Badge
 **What:** Bottom-left. Creature-only. Shows ATK value.
 **Shape:** Sword/weapon silhouette (Hearthstone), shield shape, circle, angular plate.
 **Color:** Yellow/gold is nearly universal for attack across all AAA card games.
 **Design:** Same layered approach as mana badge (shadow, gradient, highlight, spec, numeral, border).
-**YOUR STATUS:** Shield-shaped PolyBadge, yellow fill, `atk_sword.png` overlay.
+**YOUR STATUS:** v9 writ layout — ATK/HP are painted by the `WaxSeal` painter. No texture overlay.
 
 ### 1.6 Health / HP Stat Badge
 **What:** Bottom-right. Creature-only. Shows HP value.
@@ -474,9 +474,9 @@ Displayed at rest sites during upgrade selection. 48x48 to 64x64.
 
 | Icon | File | Status |
 |------|------|--------|
-| Cost (mana runestone) | `cost_runestone.png` | DONE |
-| ATK (sword) | `atk_sword.png` | DONE |
-| HP (heart) | reuses HUD heart | DONE |
+| Cost (mana runestone) | `cost_runestone.png` | Event body text only — not on cards |
+| ATK (sword) | — | Drawn by the v9 writ layout, no texture |
+| HP (heart) | — | Drawn by the v9 writ layout, no texture |
 
 ### 8.6 Miscellaneous Icons
 

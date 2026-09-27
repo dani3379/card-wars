@@ -126,17 +126,98 @@ var mute_on_focus_loss: bool = true
 var field_style: int = 0
 var resolution: Vector2i = DEFAULT_RES
 # Persistent tutorial flags — once dismissed, never shown again.
+# DEAD, KEPT FOR SAVE COMPATIBILITY: floop_tutorial_seen and
+# sacrifice_tutorial_seen have no _maybe_show_* caller anywhere in the project.
+# Floop was folded into on-play battlecries and there is no free sacrifice
+# action, so neither tip can ever fire. They stay in the save/load dicts so an
+# existing settings file round-trips unchanged — do NOT recycle either name for
+# a new tip, or a returning player's stale `true` would suppress it unseen.
 var floop_tutorial_seen: bool = false
 var sacrifice_tutorial_seen: bool = false
 var banking_tutorial_seen: bool = false
 var intents_tutorial_seen: bool = false
 var pile_tutorial_seen: bool = false
+# Taught once on round 1 of the first fight: the MUSTER round. Since TAKE THE
+# FIELD (2026-07-27) the hold's line does not appear until the END of round 1,
+# and the muster delay means nothing swings on the round it arrives — so the
+# player's first turn ends with no clash and no explanation. This is that
+# explanation. Distinct from combat_model_tutorial_seen, which teaches how the
+# clash resolves once there IS one.
+var muster_tutorial_seen: bool = false
 # Taught once on the first End Turn: the simultaneous-combat model — the single
 # most counter-intuitive rule (both sides strike at once; front rank fights and
 # is struck first; the back rank waits in reserve).
 var combat_model_tutorial_seen: bool = false
 # Taught once on the first turn that holds cards over: right-click dismissal.
 var dismiss_tutorial_seen: bool = false
+# Completed only after the interactive play / commit / read-the-board lesson.
+# Kept separate so resetting tutorials can replay the whole guided first fight.
+var first_battle_tutorial_complete: bool = false
+
+## HOW MUCH COACHING THE PLAYER WANTS — TutorialDB.COACH_FULL / _TIPS / _OFF.
+##
+## THIS IS THE SKIP, and it exists because the old one was not a skip. A player
+## who already knows the genre could dismiss the walkthrough once it had already
+## interrupted them, and the three tips that had not fired yet still arrived on
+## later rounds; the only pre-emptive control was a RESET button that does the
+## opposite thing. Set OFF from Settings — or from the walkthrough's own first
+## panel — and nothing teaches anything ever again.
+var coaching_mode: int = TutorialDB.COACH_FULL
+
+## Per-lesson seen state, keyed by TutorialDB id.
+##
+## The nine pre-registry lessons keep their own named properties above and are
+## reached through TutorialDB's `legacy` key — an existing profile already has
+## those `true`, and a lesson that forgot its mapping would re-teach a rule the
+## player was taught weeks ago. Everything added since lives in here, so a new
+## lesson costs a dictionary key rather than five edits in four places.
+var lessons_seen: Dictionary = {}
+
+
+func set_coaching_mode(v: int) -> void:
+	var mode: int = clampi(v, TutorialDB.COACH_FULL, TutorialDB.COACH_OFF)
+	if coaching_mode == mode:
+		return
+	coaching_mode = mode
+	save()
+
+
+## True when this profile has already been taught `id`.
+##
+## An UNKNOWN id answers TRUE, not false. A caller asking about a lesson that no
+## longer exists has nothing to teach, and the failure mode of the other default
+## is a rule that fires forever because nothing can mark it seen.
+func lesson_seen(id: String) -> bool:
+	if not TutorialDB.has(id):
+		return true
+	var legacy := TutorialDB.legacy_flag(id)
+	if legacy != "":
+		return bool(get(legacy))
+	return bool(lessons_seen.get(id, false))
+
+
+func mark_lesson_seen(id: String) -> void:
+	if not TutorialDB.has(id) or lesson_seen(id):
+		return
+	var legacy := TutorialDB.legacy_flag(id)
+	if legacy != "":
+		set(legacy, true)
+	else:
+		lessons_seen[id] = true
+	save()
+
+
+## Un-spend ONE lesson so it fires again next time the game reaches it. This is
+## the retrieval half of the contract: a rule you were told once, at speed,
+## during your first fight, has to be gettable back without wiping the profile.
+func replay_lesson(id: String) -> void:
+	if not TutorialDB.has(id):
+		return
+	var legacy := TutorialDB.legacy_flag(id)
+	if legacy != "":
+		set(legacy, false)
+	lessons_seen.erase(id)
+	save()
 
 
 func mark_floop_tutorial_seen() -> void:
@@ -181,6 +262,13 @@ func mark_pile_tutorial_seen() -> void:
 	save()
 
 
+func mark_muster_tutorial_seen() -> void:
+	if muster_tutorial_seen:
+		return
+	muster_tutorial_seen = true
+	save()
+
+
 func mark_combat_model_tutorial_seen() -> void:
 	if combat_model_tutorial_seen:
 		return
@@ -188,14 +276,31 @@ func mark_combat_model_tutorial_seen() -> void:
 	save()
 
 
+
+func mark_first_battle_tutorial_complete() -> void:
+	if first_battle_tutorial_complete:
+		return
+	first_battle_tutorial_complete = true
+	save()
+
+
+## Un-spend EVERYTHING, including the guided first fight.
+##
+## It does not touch `coaching_mode`: a player who turned coaching off and then
+## pressed this asked for the lessons back, not for the walkthrough to ambush
+## them — the mode is a separate control right beside it, and silently flipping
+## one from the other is how a settings screen loses a player's trust.
 func reset_tutorials() -> void:
 	floop_tutorial_seen = false
 	sacrifice_tutorial_seen = false
 	banking_tutorial_seen = false
 	intents_tutorial_seen = false
 	pile_tutorial_seen = false
+	muster_tutorial_seen = false
 	combat_model_tutorial_seen = false
 	dismiss_tutorial_seen = false
+	first_battle_tutorial_complete = false
+	lessons_seen.clear()
 	save()
 
 var _bus_music: int = -1
@@ -300,6 +405,40 @@ func _setup_audio_buses() -> void:
 		AudioServer.set_bus_send(AudioServer.bus_count - 1, "Master")
 	_bus_music = AudioServer.get_bus_index("Music")
 	_bus_sfx = AudioServer.get_bus_index("SFX")
+	_install_master_limiter()
+
+
+## THE MASTER HAD NO CEILING (2026-09-14).
+##
+## The buses are built here at runtime and carried NO effects at all, while the
+## mix routinely asks for more than full scale from two directions:
+##
+##   1. Six library tracks are mastered ABOVE 0 dBTP and clip on decode by
+##      themselves — event_b +0.84, combat_act2_c +0.80, shop_c +0.59,
+##      combat_act2_d +0.23, combat_act3_c +0.15, shop +0.14 dBTP (measured with
+##      ffmpeg loudnorm over all 49 tracks, 2026-09-14).
+##   2. Music plus up to SFX_POOL_SIZE (12) concurrent SFX voices sum with
+##      nothing watching the total, and a clash fires 8-13 cues a round.
+##
+## Without a ceiling that overflow hard-clips at the driver, which is audible as
+## a crackle or a brief tearing on exactly the loudest, busiest moments — the
+## ones that are supposed to feel best.
+##
+## AudioEffectHardLimiter (Godot 4.3+) is the right tool rather than a
+## compressor: it is transparent until the signal actually reaches the ceiling,
+## so it changes nothing about the mix on any ordinary frame. This is a safety
+## net, NOT a loudness stage — pre_gain_db stays 0 and the fix for a track that
+## rides it constantly is to re-master that track, not to lean on this.
+func _install_master_limiter() -> void:
+	var master := 0
+	for i in AudioServer.get_bus_effect_count(master):
+		if AudioServer.get_bus_effect(master, i) is AudioEffectHardLimiter:
+			return  # already installed (this can be re-entered on a settings reload)
+	var lim := AudioEffectHardLimiter.new()
+	lim.ceiling_db = -0.5  # leaves room for inter-sample peaks the meter misses
+	lim.pre_gain_db = 0.0
+	lim.release = 0.15
+	AudioServer.add_bus_effect(master, lim)
 
 
 func _apply_all() -> void:
@@ -798,8 +937,12 @@ func save() -> void:
 		"banking_tutorial_seen": banking_tutorial_seen,
 		"intents_tutorial_seen": intents_tutorial_seen,
 		"pile_tutorial_seen": pile_tutorial_seen,
+		"muster_tutorial_seen": muster_tutorial_seen,
 		"combat_model_tutorial_seen": combat_model_tutorial_seen,
 		"dismiss_tutorial_seen": dismiss_tutorial_seen,
+		"first_battle_tutorial_complete": first_battle_tutorial_complete,
+		"coaching_mode": coaching_mode,
+		"lessons_seen": lessons_seen,
 	}
 	SaveIO.write_text(SAVE_PATH, JSON.stringify(data))
 
@@ -851,5 +994,16 @@ func load_settings() -> void:
 		banking_tutorial_seen = parsed.get("banking_tutorial_seen", false)
 		intents_tutorial_seen = parsed.get("intents_tutorial_seen", false)
 		pile_tutorial_seen = parsed.get("pile_tutorial_seen", false)
+		muster_tutorial_seen = parsed.get("muster_tutorial_seen", false)
 		combat_model_tutorial_seen = parsed.get("combat_model_tutorial_seen", false)
 		dismiss_tutorial_seen = parsed.get("dismiss_tutorial_seen", false)
+		first_battle_tutorial_complete = bool(parsed.get(
+			"first_battle_tutorial_complete", false))
+		coaching_mode = clampi(int(parsed.get("coaching_mode", TutorialDB.COACH_FULL)),
+			TutorialDB.COACH_FULL, TutorialDB.COACH_OFF)
+		# TYPE-CHECKED, NOT ASSUMED. `user://settings.save` is a plain JSON file on
+		# a disk the player owns, and C21's chaos pass is the standing reminder
+		# that a save can come back the wrong SHAPE — a String here would abort
+		# every `lessons_seen.get()` call site rather than fail one lookup.
+		var seen = parsed.get("lessons_seen", {})
+		lessons_seen = seen if seen is Dictionary else {}

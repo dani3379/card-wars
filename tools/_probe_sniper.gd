@@ -59,7 +59,18 @@ func _run() -> void:
 
 	_ck("KeywordEffects registers Sniper", KE.KEYWORDS.has("sniper"))
 	_ck("Sniper icon source exists", ResourceLoader.exists("res://assets/icons/keywords/sniper.svg"))
-	_ck("Hexblade carries Sniper keyword", CDB.get_card_data("hexblade").get("keywords", []).has("sniper"))
+	# Hexblade's SNIPER MOVED TO ITS FORGE (and that is the live design): the
+	# base card is `keywords: []` with the desc "+1 ATK per spell cast this
+	# round.", and CardDB.UPGRADES gives the "+" version `add_keywords:
+	# ["sniper"]` with a desc that says "Sniper." out loud. The old assertion
+	# tested the base and had been failing ever since the rework — which is
+	# worse than not testing it, because a red line nobody believes is a gate
+	# nobody reads. Assert the contract that is actually true, and assert BOTH
+	# halves so a silent revert on either side is still caught.
+	_ck("Hexblade's base does NOT carry Sniper (it is the forge payoff)",
+		not CDB.get_card_data("hexblade").get("keywords", []).has("sniper"))
+	_ck("Hexblade's + upgrade grants Sniper",
+		CDB.UPGRADES.get("hexblade", {}).get("add_keywords", []).has("sniper"))
 	_ck("Raven carries Sniper keyword", CDB.get_card_data("raven").get("keywords", []).has("sniper"))
 	var glass: Dictionary = EDB.make_card_data({
 		"name": "Glass Sniper", "atk": 2, "hp": 1, "kw": [], "sniper": true})
@@ -122,6 +133,17 @@ func _seat_data(data: Dictionary, is_enemy: bool, lane: int, row: int = 0):
 	card.destroyed.connect(combat._on_card_destroyed.bind(card))
 	card.will_die.connect(combat._on_card_will_die.bind(card))
 	card.update_stat_display()
+	# FORM THE BODY UP (2026-08-05). `ready_to_swing` defaults FALSE — the MUSTER
+	# DELAY (2026-07-21) — and its gate lives in `Card2D.can_attack()`, which
+	# CLAUDE.md notes "everything reading it (the lane forecast, intents,
+	# sniper/ranged phases) inherits automatically". This probe pre-dates that
+	# rule and seats a sniper straight into the ranged phase, so all four of its
+	# firing assertions had been failing on the muster delay rather than on
+	# anything about Sniper. `_start_round` sweeps every seated body to true;
+	# a probe that seats bodies by hand has to do the same or it is testing the
+	# delay it never meant to test.
+	if card.get("state") != null:
+		card.state.ready_to_swing = true
 	return card
 
 

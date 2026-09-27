@@ -270,3 +270,192 @@ hero × banner × doctrine opener is exactly 11 with ≥5 creatures and ≥2 sou
 drift gate comparing `preview_season_tribes` / `preview_rival_deal` against a committed run — the
 preview duplicates the committing code by design, and a drifted preview is a lie printed on the one
 screen that promises nothing is final yet.
+
+---
+
+## 8. Phase 3 — the screen becomes three steps (2026-07-31)
+
+**BUILT.** §3 specified one screen and that is what shipped; played, the owner's verdict on it was
+that it is overwhelming. It is: the single screen asks for an identity (host), a build modifier
+(banner), an economy pick (terms) and three session settings (ascension / daily / seed), and draws
+all four as equals. Nothing was wrong with any one of them — the density was the defect.
+
+`MainMenu._show_muster_step(step)` now dispatches three screens, ordered by **dependency**, which is
+why they are steps and not tabs: the banner's card joins the host's opener, and the terms are weighed
+against the column those two produced.
+
+| Step | Holds | Commits |
+|---|---|---|
+| **I · THE HOST** | roster + THE COLUMN (opener, signature, doctrine toggles) | nothing |
+| **II · THE BANNER** | 6 banner chips + the same COLUMN, so the added card is visible | nothing |
+| **III · THE TERMS** | the four tiles + season/rival preview + ascension / daily / seed | TAKE THE FIELD |
+
+All step state lives on the object, so stepping is free and `start_new_run` is still called exactly
+once, at the final button. A rail under the title names all three steps and makes the *struck* ones
+live buttons, so BACK is never the only way out.
+
+### What the split paid for, and what it broke
+
+Five defects were found in the rendered frames, four of them pre-existing and invisible in the source:
+
+1. **Every hero tagline was ellipsised.** All five overflowed a ~33-character box by 2–6 characters,
+   and what the clip ate was always the second clause — the differentiating half ("Move first" says
+   nothing; "strike where they are not" is the pitch). The `deck_alt` taglines reach 42 characters,
+   so the roster row is now sized for those (400px), not for the shortest one that happens to fit.
+2. **`_make_muster_section` put the expand flag on the wrong node.** It returns the inner VBox, so
+   every caller writing `section.size_flags_horizontal = EXPAND_FILL` was flagging a child of a
+   PanelContainer, which ignores it. The wide pane never grew past its minimum and **~390px of the
+   screen sat empty**. Fixed with an `expand` parameter that flags the frame.
+3. **The banner's card was behind a scrollbar.** `opening_deck_for` appends it, so the screen printed
+   "The Colours adds Line Marker" directly above a strip in which Line Marker could not be seen —
+   the one claim step II exists to make. The strip now leads with it (display order only).
+4. **The settings row was flung across the full 1540.** `_make_menu_button` hardcodes `EXPAND_FILL`,
+   so the "−" landed against the left screen edge, a hand's width from the number it decrements.
+   Centering needs the children to SHRINK, so each one re-flags itself.
+5. **`_refresh_muster_deals` early-returned when the terms row was absent** — correct when there was
+   one screen, wrong now. `_begin_run_with` resolves the committed term out of `_muster_writ_slate`,
+   which must therefore be dealt as DATA at screen entry and merely *painted* by step III.
+
+The `terms_rule_text` legend was **retired**: a line teaching the player how to read four tiles that
+each already print their own slot rule. With the terms holding a screen alone the tiles have the
+width to say it themselves, and the 3-line clamp that was hiding the Pact's "Lose 6 max HP" is gone
+rather than merely loosened.
+
+### Traps this added
+
+- **The typed seed cannot live in the LineEdit.** The field is built on step III only, but
+  `_pending_run_seed()` is read by every step (the terms deal off it, the campaign line previews it,
+  `_begin_run_with` commits it). It is parked in `_muster_seed_text` on the object; the LineEdit is
+  restored from it on rebuild. Same for `_daily_pick`, which the daily button must READ rather than
+  recompute from the ledger, or a re-entered step III misreports which seed is about to commit.
+- **`_focus_hero` clears the doctrine toggles**, which is right when the player picks a different
+  lord and wrong when they merely step back onto the one they had. Step I carries them over the
+  re-focus.
+- Copy for the new chrome went into `WritDB.MUSTER_COPY` per §6 — and `_probe_muster`'s copy-key list
+  is a literal, so it fails on both an added and a removed key. That is the intended behaviour: it is
+  what caught the retired legend.
+
+Verified from `tools/_shot_runstart.tscn`, extended this pass to shoot all three steps, two banner
+selections and a **return** frame (the rail's back-navigation must restore a whole screen, not a
+half-built one). Gates re-run green: `_probe_parsecheck`, `_probe_muster`, `_probe_copy_lint`,
+`_probe_text_floor`, `_probe_menu`.
+
+### The polish pass on top (same day)
+
+**THE COLUMN prints the signature relic.** Choosing a lord hands you two things; the deck got eleven
+baked cards and the relic got the bare line "SIGNATURE: Marching Spurs" with its rule in a tooltip,
+above ~100px of empty panel. It is now icon (`GameTheme.make_relic_chip`) + name + the rule itself.
+
+**"Forge" is defined on the screen that prices decisions in it.** It appears in six of the seventeen
+terms — including a tile charging 6 max HP for two of them — and was defined nowhere in the game.
+`WritDB.GLOSSARY` + `gloss_for_slate()` print **one** definition under the terms row.
+
+*Scoped to the SCREEN, not the tile, and both halves are load-bearing.* The first build glossed each
+tile, and because the Pact is by construction the escalated twin of a term already on screen, most
+deals printed the same definition twice — and three lines of it overflowed the tile's bottom border.
+Screen-scoped it can neither repeat nor overflow. One line, not a legend, for the same reason the
+four-part legend was retired.
+
+**Sizes below 18 in MainMenu are inert.** `_make_display_label` clamps with
+`maxi(size, GameTheme.MIN_LABEL_SIZE)`, so a slot label at 15, a name at 19 and a description at 16
+all rendered at **18px** and the hierarchy was carried entirely by colour. Hierarchy has to be built
+*above* the floor: hero name 21, term name 22, relic name 20, banner name 20 (+ chip height 56 → 64
+to hold it). Do not "fix" flat-looking menu text by lowering a size — it does nothing.
+
+### The gate hole this pass found
+
+**`_probe_copy_lint` could not see flat dictionaries at all**, so §7's claim that the lint scans
+`MUSTER_COPY` was false — every chrome string on this screen was passing by never being read.
+`_scan_constant_tree` walks the top level as an id→entry map and `_scan_text_tree` descends only
+Dictionaries and Arrays, so a top-level String hit neither branch and was dropped in silence. Caught
+because adding three glossary entries did not move the scanned-string count (2679, unchanged). Fixed;
+the count is now **2698**, and the newly-reachable copy immediately failed on a real rule.
+
+Two corollaries worth keeping:
+
+- **The `_text` suffix is necessary but NOT sufficient.** It decides which keys inside a *scanned*
+  dict are read; `_scan_writs` decides whether the dict is read at all. A new DB dictionary is
+  invisible until it is named there.
+- **A Roman numeral is a number, not a shout.** The shout rule reads a capped run as signage, but the
+  `·` separator breaks the run, so "III · THE TERMS" flagged while "I" and "II" slipped under the
+  3-character threshold — inconsistent treatment of one series. `_is_roman_numeral` exempts them,
+  matched strictly (1–39) rather than by character set, because "CIVIL" is composed entirely of
+  numeral letters and must still be able to trip the rule.
+
+### The gate rebuild that followed (2026-07-31, three-agent sweep)
+
+The numeral exemption above turned out to be **symptomatic**. Three independent sweeps — unscanned
+constants, traversal blind spots, and inline scene copy — converged on the same root cause and on a
+larger hole underneath it. Coverage went **2679 → 2987 strings (+11.5%)**, and the probe stayed green
+at every step except the one that was supposed to turn it red.
+
+**Root cause of the shout false positives.** `_bare()` reduces a separator to `""` and `"%d"` to
+`"d"`, and the loop treated that as a run-BREAK, stranding the capped word beside it as a lone shout.
+It is a whole family — `"+%d GOLD"`, `"-%d COMMAND"`, `"TAKES %d WOUNDS"`, `"WIN - BLOCK - CENTER"` —
+and patching them one at a time is exactly how `CAPS_OK` came to carry `"IV"`. A token with fewer
+than two LETTERS is now run-**neutral**: it neither joins a run nor breaks one.
+
+**The live violation.** `EventDB.leave_text_early` — "You decide not to sing…" — is prose that renders
+on a gamble result screen and had escaped every wording rule for the life of the probe, because the
+key ends `_early` rather than `_text` while its sibling `leave_text` one line above was gated.
+`_is_copy_key` now does a SEGMENT test (`"text" in key.split("_")`), which across every scanned
+constant matches exactly that one new key.
+
+**Two independent ways copy escapes, and conflating them produces a fix that scans nothing:**
+
+1. *The dictionary is not in the scan list.* Four constants inside files the probe already loads were
+   never wired: `CardDB.ENEMY_POOL`, `EncounterDB.BOSS_PHASES` / `ENCOUNTER_SCRIPTS` /
+   `AMALGAM_HISTORY_PHASES` (+170 strings).
+2. *The key is not a copy key.* 163 strings of rendered prose sat under keys the allow-list rejected.
+   The sharpest case: `Combat` assigns `siege.rule` into the **same standing-rule plaque** that
+   `passive_desc` fills, so one slot was wording-gated and 32-word-budgeted while the other was not
+   gated at all.
+
+**`WritDB.SLOT_LABELS` / `SLOT_HINTS` needed a different entry point, not a scan-list line.** They are
+copy *by construction* — keyed `roll` / `arsenal` / `purse` / `pact` — so `_scan_constant_tree` would
+have scanned **zero strings and reported success**. `_scan_copy_map` treats every value as copy and
+ignores the key, which also retires the fragile `_text`-suffix convention for any future copy map.
+
+**The coverage floor was nearly inert.** `_scanned < 1500` sat ~1200 strings below the real count: not
+one of the 19 scanned constants could vanish individually and trip it, and the bug that hid
+`MUSTER_COPY` cost 16 strings — two orders of magnitude under the guard. Two replacements:
+
+- a **per-entry productivity assertion** (every top-level entry must yield ≥1 player-facing string).
+  It asserts a structural invariant rather than a number, so it never churns on a copy edit, and it
+  would have caught the flat-dict bug on its first run;
+- a **coverage ratchet** at `COVERAGE_FLOOR`, raised with coverage (2950 against 3010 today);
+- `_assert_constants_covered()`, which fails on any container constant in a file the probe already
+  opens that is neither scanned nor listed in `CONTAINER_WAIVERS`. This is the guard against the
+  failure that has now occurred **three times** in this repo — a copy dictionary is authored, nobody
+  wires it into a `_scan_*` function, and it stays invisible forever while the probe reports PASS
+  (`MUSTER_COPY`, `SLOT_LABELS`, `SLOT_HINTS`). On its first run it flagged 23 unwired containers, of
+  which **two were real rendered prose**: `RunState.VETERAN_EPITHETS` (the epithet stamped onto a
+  veteran card's name) and `RunState.SEASON_TRIBE_NAMES` (the tribe forms the season announce line is
+  assembled from). The other 21 are id lists, weights, pools and enums, now waived by name. The cost
+  is one waiver line per new non-copy constant, carrying a message that names the exact fix.
+
+Final coverage: **2679 → 3010 strings (+12.4%)**.
+
+**Also fixed:** the `(s)` rule read original casing while every sibling rule read `low` (so `(S)`
+escaped); `CAPS_OK` carried three entries under 3 characters that the length gate made unreachable;
+and the `"+"` card desc was validated against the **base** card's keywords, which would false-positive
+any upgrade that adds `on_enter`/`on_death`.
+
+**Verified the rule can still fail** by injecting a lone shout into a scanned string and watching it
+fail, then reverting — a gate that only ever passes is indistinguishable from one that never runs.
+
+### House convention for naming a control in prose
+
+Settled to the industry standard (Microsoft Writing Style Guide, Apple Style Guide, Google developer
+documentation style guide all agree): **refer to a control by its exact name in title case, and let
+the interface do the visual shouting.** Documentation writes "Save" even where the button renders
+`SAVE`. ALL-CAPS in body text destroys word-shape recognition and some screen readers spell capitalised
+words letter by letter; headings and signage in caps are styling, and stay.
+
+Thirteen sites were corrected — "Press CONTINUE to resume" → "Press Continue to resume", "picks JOIN"
+→ "picks Join", "presses CONNECT" → "presses Connect". This also resolved a live inconsistency: the
+sibling line "Press NEW RUN to begin." was passing the shout rule *only* because it happened to be two
+words. Banners keep their caps but as a full run — `"PRACTICE vs BOT"` → `"PRACTICE VS BOT"`.
+
+Note the standing limitation: all thirteen live in scene scripts, which the lint still cannot read.
+The fix is house-style compliance, not gate-enforced.

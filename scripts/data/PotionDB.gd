@@ -58,7 +58,7 @@ const POTIONS: Dictionary = {
 	# potion-targeting flow; the rest resolve on click.
 	"war_paint": {
 		"id": "war_paint", "name": "War Paint",
-		"desc": "A friendly creature gains Rampage and +1 ATK this fight.",
+		"desc": "A friendly creature gains Rampage 2 and +1 ATK this fight.",
 		"usable_in": "combat", "targeting": "friendly_creature",
 		"effect": "grant_rampage", "color": Color(0.85, 0.30, 0.18)},
 	"vampiric_draught": {

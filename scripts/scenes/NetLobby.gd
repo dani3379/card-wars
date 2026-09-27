@@ -19,10 +19,132 @@ const ASH := Color(0.62, 0.58, 0.52, 1.0)
 # world: VERDIGRIS is the aged-copper "go / open / connected" ink events already
 # use for blue options, and JOIN takes the affirmative gilt every other primary
 # action in the game wears. The crown/sword tile icons still tell them apart.
-const GREEN := Color(0.55, 0.78, 0.70, 1.0)   # verdigris — host / ready / connected
+## "Go / ready / connected" — a real status channel (10 call sites), distinct
+## from ASH (waiting) and the error reds, so it is not decoration and is not
+## being deleted. It WAS `Color(0.55, 0.78, 0.70)`: a light, saturated teal, and
+## on the lobby render the single cold element on an otherwise all-ember screen
+## — the project's #1 recorded art defect, and the exact `b >= r` cyan tell
+## MainMenu's own colour notes name. Warmed to a leaf green: `g` stays high (it
+## has to, or it stops meaning go) while `b` drops well under `r`, so it reads
+## affirmative without reading cyan. Its sibling AZURE was already remapped to
+## gilt for the same reason; this one was missed.
+const GREEN := Color(0.62, 0.82, 0.44, 1.0)   # leaf — host / ready / connected
 const RED := Color(0.90, 0.45, 0.35, 1.0)
 const AZURE := Color(0.86, 0.72, 0.34, 1.0)   # join accent — affirmative gilt
 const EMBER := Color(0.90, 0.62, 0.30, 1.0)   # practice / drill accent
+
+## NetLobby previously retained 194 ChartPanelStyle drawing commands across
+## its plates, tiles, and five hero chips (252 screen draws total). This local
+## style keeps the same chamfered, shaded, metal-rimmed language but emits the
+## whole face as one triangle array, plus one shadow command when requested.
+## It deliberately stays local: document screens that lean on deckled paper
+## keep the richer shared painter, while this dense lobby gets the cheap form.
+class FastChartPanelStyle extends StyleBox:
+	var bg_color := Color(0.06, 0.05, 0.042, 0.96)
+	var border_color := Color(0.60, 0.51, 0.34, 0.90)
+	var rule_width := 1.0
+	var chamfer := 12.0
+	var shadow := true
+	var parchment := false
+	var corner_tacks := true
+	var shadow_color := Color(0, 0, 0, 1.0)
+	var shadow_size := 8.0
+
+	func _get_draw_rect(rect: Rect2) -> Rect2:
+		return rect.grow(3.0 + shadow_size * 0.65) if shadow else rect.grow(2.0)
+
+	static func _oct(rect: Rect2, inset: float, cut: float) -> PackedVector2Array:
+		var left := rect.position.x + inset
+		var top := rect.position.y + inset
+		var right := rect.end.x - inset
+		var bottom := rect.end.y - inset
+		var corner := clampf(cut - inset * 0.45, 2.0,
+			minf(right - left, bottom - top) * 0.26)
+		return PackedVector2Array([
+			Vector2(left + corner, top), Vector2(right - corner, top),
+			Vector2(right, top + corner), Vector2(right, bottom - corner),
+			Vector2(right - corner, bottom), Vector2(left + corner, bottom),
+			Vector2(left, bottom - corner), Vector2(left, top + corner),
+		])
+
+	static func _append_ring(points: Array[Vector2], colors: Array[Color],
+			indices: Array[int], outer: PackedVector2Array,
+			inner: PackedVector2Array, color: Color) -> void:
+		for i in range(outer.size()):
+			var j := (i + 1) % outer.size()
+			var base := points.size()
+			points.append_array([outer[i], outer[j], inner[j], inner[i]])
+			colors.append_array([color, color, color, color])
+			indices.append_array([base, base + 1, base + 2,
+				base, base + 2, base + 3])
+
+	static func _append_fan(points: Array[Vector2], colors: Array[Color],
+			indices: Array[int], poly: PackedVector2Array,
+			top_color: Color, bottom_color: Color, bounds: Rect2) -> void:
+		var center := Vector2.ZERO
+		for point in poly:
+			center += point
+		center /= maxf(float(poly.size()), 1.0)
+		var center_index := points.size()
+		points.append(center)
+		colors.append(top_color.lerp(bottom_color, 0.5))
+		var first := points.size()
+		for point in poly:
+			points.append(point)
+			var mix := clampf((point.y - bounds.position.y) /
+				maxf(bounds.size.y, 1.0), 0.0, 1.0)
+			colors.append(top_color.lerp(bottom_color, mix))
+		for i in range(poly.size()):
+			indices.append_array([center_index, first + i,
+				first + ((i + 1) % poly.size())])
+
+	func _draw(canvas_item: RID, rect: Rect2) -> void:
+		if minf(rect.size.x, rect.size.y) < 3.0:
+			return
+		var cut := clampf(chamfer, 4.0,
+			minf(rect.size.x, rect.size.y) * 0.26)
+		if shadow:
+			var shadow_poly := _oct(rect.grow(shadow_size * 0.32), 0.0,
+				cut + shadow_size * 0.32)
+			for i in range(shadow_poly.size()):
+				shadow_poly[i] += Vector2(0, 3)
+			RenderingServer.canvas_item_add_polygon(canvas_item, shadow_poly,
+				PackedColorArray([Color(shadow_color.r, shadow_color.g,
+					shadow_color.b, shadow_color.a * 0.34)]))
+
+		var seam := 1.4
+		var outer := _oct(rect, 0.0, cut)
+		var metal := _oct(rect, seam, cut)
+		var inner := _oct(rect, seam + maxf(rule_width, 1.4), cut)
+		var base := bg_color
+		if parchment:
+			base = bg_color.lerp(Color(0.16, 0.12, 0.08, bg_color.a), 0.35)
+		var top_color := base.lerp(Color(0.30, 0.24, 0.16, base.a), 0.22)
+		var bottom_color := base.lerp(Color(0.0, 0.0, 0.0, base.a), 0.30)
+		var points: Array[Vector2] = []
+		var colors: Array[Color] = []
+		var indices: Array[int] = []
+		_append_ring(points, colors, indices, outer, metal,
+			Color(0.04, 0.03, 0.02, 0.90))
+		_append_ring(points, colors, indices, metal, inner, border_color)
+		_append_fan(points, colors, indices, inner, top_color, bottom_color, rect)
+
+		if corner_tacks and minf(rect.size.x, rect.size.y) >= 70.0 and cut >= 7.0:
+			var tack_size := clampf(cut * 0.27, 2.5, 4.3)
+			var tack_color := Color(minf(border_color.r * 1.12, 1.0),
+				minf(border_color.g * 1.12, 1.0),
+				minf(border_color.b * 1.12, 1.0), border_color.a)
+			for pair in [[7, 0], [1, 2], [3, 4], [5, 6]]:
+				var at: Vector2 = (outer[pair[0]] + outer[pair[1]]) * 0.5
+				var diamond := PackedVector2Array([
+					at + Vector2(0, -tack_size), at + Vector2(tack_size, 0),
+					at + Vector2(0, tack_size), at + Vector2(-tack_size, 0)])
+				_append_fan(points, colors, indices, diamond,
+					tack_color, tack_color, rect)
+
+		RenderingServer.canvas_item_add_triangle_array(canvas_item,
+			PackedInt32Array(indices), PackedVector2Array(points),
+			PackedColorArray(colors))
 
 # ── UI refs ──
 var _status_label: Label
@@ -43,26 +165,45 @@ var _back_btn: Button               # outer "leave to menu" — hidden while the
 var _connect_panel: VBoxContainer   # host/join controls (hidden once connected)
 var _ready_panel: VBoxContainer     # ready/start controls (shown once connected)
 var _relay_host: String = ""        # resolved relay address (empty = online disabled)
+var _scene_exit_locked: bool = false
+var _match_start_requested: bool = false
 
 # ── Mode / format picker (host picks; client sees the choice) ──
 var _mode_panel: VBoxContainer       # built on connect (host buttons / client label)
 var _mode_buttons: Dictionary = {}   # MatchMode id -> Button (host only)
 var _bo_buttons: Dictionary = {}     # best_of value (1/3) -> Button (host only)
 var _style_buttons: Dictionary = {}  # NetMatch.STYLE_* -> Button (host only)
+var _ars_relic_parts: Array = []     # [HSlider, Label] — the relic scale (host only)
+var _ars_potion_parts: Array = []    # [HSlider, Label] — the potion scale (host only)
 var _mode_info_label: Label          # client: shows the host's chosen mode/format
+var _arsenal_info_label: Label       # host + client: the arsenal terms in words
 var _selected_mode: int = 0          # host's current pick (SkirmishState.MatchMode)
 var _selected_best_of: int = 1       # host's current pick (1 or 3)
 var _selected_style: int = 0         # host's current pick (NetMatch.STYLE_*)
+# The arsenal size the host is offering BOTH players. Seeded from the shared
+# defaults so an untouched picker commits exactly the stage that shipped.
+var _selected_ars_relics: int = SkirmishState.ARSENAL_RELIC_ROUNDS
+var _selected_ars_potions: int = SkirmishState.ARSENAL_POTION_ROUNDS
 
 # ── Practice vs Bot (offline; no peer) ──
 var _vs_bot_btn: Button
+var _vsbot_begin_btn: Button
 var _vs_bot_panel: VBoxContainer
 var _vsbot_mode: int = 0
 var _vsbot_bo: int = 1
 var _vsbot_style: int = 0
+var _vsbot_ars_relics: int = SkirmishState.ARSENAL_RELIC_ROUNDS
+var _vsbot_ars_potions: int = SkirmishState.ARSENAL_POTION_ROUNDS
 var _vsbot_mode_buttons: Dictionary = {}
 var _vsbot_bo_buttons: Dictionary = {}
 var _vsbot_style_buttons: Dictionary = {}
+var _vsbot_ars_relic_parts: Array = []
+var _vsbot_ars_potion_parts: Array = []
+## The drill's own copy of the terms line. Kept separate from _arsenal_info_label
+## rather than shared: both panels can exist at once (the mode panel is built on
+## connect, this one on the practice press), so one field would let whichever was
+## built last silently steal the other's label.
+var _vsbot_arsenal_info: Label = null
 
 # ── Lord pick + the two banner plates (your standard vs the challenger's).
 # The pick is cosmetic identity (portrait + emote voice, both players see it);
@@ -87,6 +228,8 @@ var _code_plate: Control = null           # the watchword docket (shareable room
 var _code_caption: Label = null           # docket caption — flips to COPIED feedback
 var _room_code_raw := ""                  # unspaced code, for the clipboard
 var _code_copy_gen := 0                   # stale-restore guard on the caption flip
+var _opp_portrait_life: Tween = null       # active only while opponent art is visible
+var _opp_glow_life: Tween = null           # ditto: no hidden infinite tweens
 var _lamp_glow_tex: Texture2D = null      # shared radial lamplight texture
 var _lan_default_open: bool = false       # direct-IP panel starts open (no-relay build)
 
@@ -103,6 +246,7 @@ func _ready() -> void:
 	_selected_hero = NetMatch.local_hero if NetMatch.local_hero != "" \
 		else HeroDB.DEFAULT_HERO
 	_build_ui()
+	_flatten_chart_styles(self)
 	_wire_net_signals()
 	_refresh_state()
 	GameTheme.make_settings_gear(self)
@@ -128,15 +272,28 @@ func _build_ui() -> void:
 	var col := VBoxContainer.new()
 	col.name = "Lobby"
 	col.alignment = BoxContainer.ALIGNMENT_CENTER
-	col.add_theme_constant_override("separation", 13)
+	col.add_theme_constant_override("separation", 11)
 	col.anchor_left = 0.5
 	col.anchor_right = 0.5
 	col.anchor_top = 0.5
 	col.anchor_bottom = 0.5
-	col.offset_left = -430
-	col.offset_right = 430
-	col.offset_top = -330
-	col.offset_bottom = 330
+	# THE COLUMN FOLLOWS THE CANVAS (2026-09-19, CLASS C32). These are authored
+	# against 1600×900; UI Scale divides the logical canvas, so pinned offsets made
+	# this the worst-hit shell screen — `_probe_uiscale` measured net_lobby falling
+	# 95%→77% in x and 81%→68% in y at 60%. See GameTheme.canvas_scale's header;
+	# a no-op at 100%, so every number below keeps the meaning it was chosen for.
+	var _k: Vector2 = GameTheme.canvas_scale(self)
+	col.offset_left = -430.0 * _k.x
+	col.offset_right = 430.0 * _k.x
+	# ±390, not ±330 (2026-09-14). A VBox whose content exceeds its rect does not
+	# centre the overflow — it lays out from the TOP and spills off the bottom, so
+	# the rect's top edge is the only thing that decides where a too-tall state
+	# starts. The connected-host column is the tallest state in this scene and it
+	# was already within 20px of the canvas floor; the arsenal picker put BACK 73px
+	# under it. Growing the rect SYMMETRICALLY costs the shorter states nothing —
+	# they centre on 450 either way — and buys the tall one 60px of headroom.
+	col.offset_top = -390.0 * _k.y
+	col.offset_bottom = 390.0 * _k.y
 	add_child(col)
 
 	col.add_child(GameTheme.make_screen_title("SKIRMISH", GILT_BRIGHT))
@@ -169,6 +326,7 @@ func _build_ui() -> void:
 		var host_tile := _build_host_tile(true, "")
 		_host_online_btn = host_tile.get_node("ClickButton")
 		_host_online_btn.pressed.connect(_on_host_online_pressed)
+		GameTheme.arm_ui_press(_host_online_btn, "commit")
 		duel_row.add_child(host_tile)
 		duel_row.add_child(_build_join_tile(true, ""))
 
@@ -181,6 +339,7 @@ func _build_ui() -> void:
 			Vector2(300, 32), 14, ASH)
 		_lan_toggle.tooltip_text = "Play over a LAN or a Tailscale address with no relay — best on the same WiFi."
 		_lan_toggle.pressed.connect(_on_lan_toggle_pressed)
+		GameTheme.arm_ui_press(_lan_toggle, "select")
 		_connect_panel.add_child(_lan_toggle)
 		_lan_panel = _build_lan_panel()
 		_connect_panel.add_child(_lan_panel)
@@ -229,13 +388,22 @@ func _build_ui() -> void:
 	_ready_panel.add_child(_mode_panel)
 	_ready_panel.add_child(GameTheme.make_separator(GILT_BRIGHT, 300.0))
 
-	_ready_btn = GameTheme.make_back_button("READY", Vector2(300, 46), 20, GREEN)
+	# GILT, NOT GREEN — the same affirmative ink every other primary action wears
+	# (see the AZURE note at the top of this file). GREEN is this screen's STATUS
+	# channel, and the opponent plate three hundred pixels to the right prints the
+	# literal word "READY" in it to mean *they have readied up*. This button, while
+	# you have NOT readied, printed the same word in the same colour to mean
+	# *press me* — and did it directly under your own plate reading "not ready".
+	# One word, one colour, two opposite meanings, all on screen at once.
+	_ready_btn = GameTheme.make_back_button("READY", Vector2(300, 46), 20, GILT_BRIGHT)
 	_ready_btn.pressed.connect(_on_ready_pressed)
+	GameTheme.arm_ui_press(_ready_btn, "commit")
 	_ready_panel.add_child(_ready_btn)
 
 	_start_btn = GameTheme.make_back_button("START MATCH", Vector2(300, 46), 20, GILT_BRIGHT)
 	_start_btn.tooltip_text = "Host only — enabled once both players are ready."
 	_start_btn.pressed.connect(_on_start_pressed)
+	GameTheme.arm_ui_press(_start_btn, "commit")
 	_start_btn.disabled = true
 	_ready_panel.add_child(_start_btn)
 
@@ -261,6 +429,7 @@ func _build_ui() -> void:
 	# ── Back ──
 	_back_btn = GameTheme.make_back_button("BACK", Vector2(160, 42), 16)
 	_back_btn.pressed.connect(_on_back_pressed)
+	GameTheme.arm_ui_press(_back_btn, "back")
 	col.add_child(_back_btn)
 
 
@@ -268,11 +437,12 @@ func _build_ui() -> void:
 ## leads, or a taller hero when the relay is unavailable). Wires _vs_bot_btn.
 func _build_practice_banner(min_size: Vector2) -> Control:
 	var banner := GameTheme.make_choice_banner(
-		"PRACTICE vs BOT",
+		"PRACTICE VS BOT",
 		"Play any mode against a local AI opponent — no connection needed.",
-		EMBER, "res://assets/icons/shield.png", min_size)
+		EMBER, "res://assets/icons/game-icons/crossed-swords.svg", min_size)
 	_vs_bot_btn = banner.get_node("ClickButton")
 	_vs_bot_btn.pressed.connect(_on_vs_bot_pressed)
+	GameTheme.arm_ui_press(_vs_bot_btn, "commit")
 	return banner
 
 
@@ -326,10 +496,17 @@ func _make_banner_plate(header_text: String, off_l: float, off_r: float) -> Pane
 	plate.anchor_right = 0.5
 	plate.anchor_top = 0.5
 	plate.anchor_bottom = 0.5
-	plate.offset_left = off_l
-	plate.offset_right = off_r
-	plate.offset_top = -285.0
-	plate.offset_bottom = 285.0
+	# THE PLATES FOLLOW THE CANVAS (2026-09-19, CLASS C32). These flanking plates
+	# span x -745..+745 — 93% of the design canvas — so they, not the centre
+	# column, are what the coverage oracle measures on this screen. Fixing the
+	# column alone moved nothing, which is the ink-bounding-box limit the gate's
+	# own header warns about: it sees the layout pinned WHOLESALE, so every piece
+	# at the extremes has to follow. See GameTheme.canvas_scale; no-op at 100%.
+	var _k: Vector2 = GameTheme.canvas_scale(self)
+	plate.offset_left = off_l * _k.x
+	plate.offset_right = off_r * _k.x
+	plate.offset_top = -285.0 * _k.y
+	plate.offset_bottom = 285.0 * _k.y
 	add_child(plate)
 
 	var vb := VBoxContainer.new()
@@ -381,7 +558,13 @@ func _make_banner_plate(header_text: String, off_l: float, off_r: float) -> Pane
 	var empty_box := Control.new()
 	empty_box.custom_minimum_size = Vector2(96, 96)
 	empty_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_add_engraved_icon(empty_box, "res://assets/icons/sword.png", true)
+	# AN EMPTY HELM ON THE TABLE, not a grey sword. This slot is a large black
+	# well beside a fully painted hero portrait, so whatever sits in it is read
+	# as "the art did not load" unless it is unmistakably heraldry. sword.png is
+	# a flat primitive from the pre-art icon set; the horned helm is from the
+	# engraved game-icons kit and says the seat is waiting for someone.
+	_add_engraved_icon(empty_box,
+		"res://assets/icons/game-icons/horned-helm.svg", true)
 	var empty_center := CenterContainer.new()
 	empty_center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	empty_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -437,11 +620,10 @@ func _start_plate_life() -> void:
 	# Let layout settle so the portraits have a real size to pivot the zoom on.
 	await get_tree().process_frame
 	await get_tree().process_frame
-	for port in [_your_portrait, _opp_portrait]:
-		if port != null and is_instance_valid(port) and port.size.x > 1.0:
-			GameTheme.ken_burns(port, port.size * 0.5, 1.05, 15.0)
-	for glow in [_your_glow, _opp_glow]:
-		_pulse_glow(glow)
+	if _your_portrait != null and is_instance_valid(_your_portrait) \
+			and _your_portrait.size.x > 1.0:
+		GameTheme.ken_burns(_your_portrait, _your_portrait.size * 0.5, 1.05, 15.0)
+	_pulse_glow(_your_glow)
 	# The empty seat breathes: a slow dim/lift on the engraved sword, so an
 	# unclaimed seat reads as waiting rather than dead. Runs on the hidden
 	# wrapper harmlessly once a challenger fills the seat.
@@ -465,6 +647,45 @@ func _pulse_glow(glow: TextureRect) -> void:
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	tw.tween_property(glow, "modulate:a", 0.09, 2.9) \
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+## Start or stop the opponent's two decorative loops with the portrait itself.
+## A fresh lobby spends nearly all its time on the empty-seat state; previously
+## its hidden portrait and hidden glow still owned two infinite SceneTreeTweens.
+func _set_opponent_plate_life(on: bool) -> void:
+	# A deferred start can become stale if the peer leaves in the same frame.
+	if on != _opp_shown:
+		return
+	if not on:
+		if _opp_portrait_life != null and _opp_portrait_life.is_valid():
+			_opp_portrait_life.kill()
+		if _opp_glow_life != null and _opp_glow_life.is_valid():
+			_opp_glow_life.kill()
+		_opp_portrait_life = null
+		_opp_glow_life = null
+		if _opp_portrait != null and is_instance_valid(_opp_portrait):
+			_opp_portrait.scale = Vector2.ONE
+		if _opp_glow != null and is_instance_valid(_opp_glow):
+			_opp_glow.modulate.a = 0.13
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	if _opp_portrait != null and is_instance_valid(_opp_portrait) \
+			and _opp_portrait.size.x > 1.0:
+		_opp_portrait.pivot_offset = _opp_portrait.size * 0.5
+		_opp_portrait_life = _opp_portrait.create_tween().set_loops()
+		_opp_portrait_life.tween_property(
+			_opp_portrait, "scale", Vector2(1.05, 1.05), 15.0) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		_opp_portrait_life.tween_property(
+			_opp_portrait, "scale", Vector2.ONE, 15.0) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	if _opp_glow != null and is_instance_valid(_opp_glow):
+		_opp_glow_life = _opp_glow.create_tween().set_loops()
+		_opp_glow_life.tween_property(_opp_glow, "modulate:a", 0.21, 2.4) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		_opp_glow_life.tween_property(_opp_glow, "modulate:a", 0.09, 2.9) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
 
 
 ## The watchword docket: caption + the big spaced room code on a parchment chit.
@@ -509,6 +730,7 @@ func _on_code_chit_input(ev: InputEvent, chit: Control) -> void:
 	if _room_code_raw == "":
 		return
 	DisplayServer.clipboard_set(_room_code_raw)
+	AudioBank.play_ui("select")
 	GameTheme.punch(chit, 1.05)
 	if _code_caption == null or not is_instance_valid(_code_caption):
 		return
@@ -570,12 +792,13 @@ func _duel_tile_base(title_text: String, accent: Color, icon_path: String,
 
 ## HOST tile — a whole-tile click target (mirrors make_choice_banner's hover lift).
 func _build_host_tile(online_ok: bool, reason: String) -> Control:
-	var base := _duel_tile_base("HOST", GREEN, "res://assets/icons/crown.png", online_ok)
+	var base := _duel_tile_base("HOST", GREEN,
+		"res://assets/icons/game-icons/flying-flag.svg", online_ok)
 	var root: PanelContainer = base.root
 	var vb: VBoxContainer = base.vbox
 
 	var body := GameTheme.make_label(
-		"Open a war-room and get a code to share. Plays anywhere — no IP, no port forwarding." \
+		"Open a room and get a code to share. Works anywhere — no IP, no port forwarding." \
 			if online_ok else reason,
 		15, Color(0.88, 0.84, 0.72) if online_ok else Color(0.82, 0.72, 0.60))
 	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -603,7 +826,8 @@ func _build_host_tile(online_ok: bool, reason: String) -> Control:
 ## JOIN tile — sibling to HOST, but it carries the room-code field + CONNECT
 ## instead of a single click target.
 func _build_join_tile(online_ok: bool, reason: String) -> Control:
-	var base := _duel_tile_base("JOIN", AZURE, "res://assets/icons/sword.png", online_ok)
+	var base := _duel_tile_base("JOIN", AZURE,
+		"res://assets/icons/game-icons/crossed-swords.svg", online_ok)
 	var vb: VBoxContainer = base.vbox
 
 	var hint := GameTheme.make_label(
@@ -628,6 +852,7 @@ func _build_join_tile(online_ok: bool, reason: String) -> Control:
 	_join_online_btn.tooltip_text = "Enter your friend's room code to connect."
 	_join_online_btn.disabled = not online_ok
 	_join_online_btn.pressed.connect(_on_join_online_pressed)
+	GameTheme.arm_ui_press(_join_online_btn, "commit")
 	row.add_child(_join_online_btn)
 
 	return base.root
@@ -650,9 +875,21 @@ func _build_lan_panel() -> Control:
 	note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(note)
 
-	_host_btn = GameTheme.make_back_button("HOST (LAN)", Vector2(320, 40), 17, GREEN)
+	# HOST and JOIN are the same KIND of thing — two halves of one decision — so
+	# they take the same ink AND the same plate. Frameless gilt at size 17,
+	# centred on its own line, is the screen's SECTION-HEADING costume: this sat
+	# directly under "OR PLAY A FRIEND — SAME NETWORK" and above the address row
+	# wearing exactly that, so the one control that starts a LAN game read as a
+	# caption for the fields below it. Its sibling JOIN was replated for this
+	# same reason a few lines down and this one was left behind — which made the
+	# mismatch worse, because now the row had a real button in it and the header
+	# above it did not. GREEN stays reserved for genuine status (ready /
+	# connected); it was the only green on a gilt-and-ember screen.
+	_host_btn = GameTheme.make_themed_button("HOST (LAN)",
+		Color(0.78, 0.58, 0.22), Vector2(320, 40), 17)
 	_host_btn.tooltip_text = "Start a server on this machine; share your LAN / Tailscale IP."
 	_host_btn.pressed.connect(_on_host_pressed)
+	GameTheme.arm_ui_press(_host_btn, "commit")
 	vb.add_child(_host_btn)
 
 	var addr_row := HBoxContainer.new()
@@ -665,8 +902,16 @@ func _build_lan_panel() -> Control:
 	_port_field = _make_field(str(NetMatch.DEFAULT_PORT), 80, "Port")
 	addr_row.add_child(_port_field)
 
-	_join_btn = GameTheme.make_back_button("JOIN", Vector2(100, 40), 17, AZURE)
+	# PLATED, not frameless. `make_back_button` is the house idiom for a retreat
+	# and for light confirms, and it is right in most places — but this one sits
+	# in a row between two filled LineEdits, so it was the only element in the
+	# row without a box and read as a caption printed after the port number
+	# rather than as the button that connects you. Same fault as the settings
+	# overlay's RESUME: frameless is fine until it stands beside a plate.
+	_join_btn = GameTheme.make_themed_button("JOIN", Color(0.78, 0.58, 0.22),
+		Vector2(112, 40), 17)
 	_join_btn.pressed.connect(_on_join_pressed)
+	GameTheme.arm_ui_press(_join_btn, "commit")
 	addr_row.add_child(_join_btn)
 
 	return panel
@@ -684,6 +929,61 @@ func _chart_panel_style(dim: bool) -> StyleBox:
 	s.content_margin_top = 12
 	s.content_margin_bottom = 12
 	return s
+
+## Convert only this screen's explicit ChartPanelStyle overrides. Colors,
+## margins, button states, shadow tint, chamfers, and tacks survive; the costly
+## deckle/age micro-detail is the part intentionally traded for a batched face.
+func _flatten_chart_styles(host: Node) -> void:
+	var converted: Dictionary = {}
+	var stack: Array[Node] = [host]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		if node is Control:
+			var control := node as Control
+			var slots: Array[StringName] = []
+			if control is PanelContainer:
+				slots.append(&"panel")
+			if control is Button:
+				slots.append_array([&"normal", &"focus", &"hover", &"pressed", &"disabled"])
+			for slot in slots:
+				if not control.has_theme_stylebox_override(slot):
+					continue
+				var source := control.get_theme_stylebox(slot)
+				if source is GameTheme.ChartPanelStyle:
+					control.add_theme_stylebox_override(slot,
+						_fast_chart_style(source, converted))
+			for meta_key in [&"style_rest", &"style_sel"]:
+				if not control.has_meta(meta_key):
+					continue
+				var meta_style = control.get_meta(meta_key)
+				if meta_style is GameTheme.ChartPanelStyle:
+					control.set_meta(meta_key,
+						_fast_chart_style(meta_style, converted))
+		for child in node.get_children():
+			stack.append(child)
+
+
+func _fast_chart_style(source: GameTheme.ChartPanelStyle,
+		converted: Dictionary) -> StyleBox:
+	var source_id := source.get_instance_id()
+	if converted.has(source_id):
+		return converted[source_id]
+	var fast := FastChartPanelStyle.new()
+	fast.bg_color = source.bg_color
+	fast.border_color = source.border_color
+	fast.rule_width = source.rule_width
+	fast.chamfer = source.chamfer
+	fast.shadow = source.shadow
+	fast.parchment = source.parchment
+	fast.corner_tacks = source.corner_tacks
+	fast.shadow_color = source.shadow_color
+	fast.shadow_size = source.shadow_size
+	fast.content_margin_left = source.get_content_margin(SIDE_LEFT)
+	fast.content_margin_top = source.get_content_margin(SIDE_TOP)
+	fast.content_margin_right = source.get_content_margin(SIDE_RIGHT)
+	fast.content_margin_bottom = source.get_content_margin(SIDE_BOTTOM)
+	converted[source_id] = fast
+	return fast
 
 
 ## Two-layer engraved sigil (shadow + parchment tint) — the same treatment
@@ -778,6 +1078,97 @@ func _make_pick_chip(text: String, tooltip: String = "") -> Button:
 	b.set_meta("style_rest", normal)
 	b.set_meta("style_sel", sel)
 	return b
+
+
+## One labelled scale: LABEL [====o====] N. Returns [slider, numeral] so the
+## caller can drive both. A SCALE rather than a chip per value (2026-09-14):
+## relics run 0..14, and fifteen 44px chips are 700px of lobby column for what
+## is one number — the control has to stay the same size as its ceiling moves.
+func _build_count_scale(row: HBoxContainer, label_text: String, max_value: int,
+		value: int, on_change: Callable, width: float) -> Array:
+	row.add_child(GameTheme.make_label(label_text, 15, IVORY))
+	var slider := GameTheme.make_count_slider(0, max_value, value, width)
+	slider.value_changed.connect(func(v: float) -> void: on_change.call(int(v)))
+	row.add_child(slider)
+	# The numeral is the readout the slider cannot give: a grabber position is
+	# not a number, and this one has to be exact before START is pressed.
+	var num := GameTheme.make_label(str(value), 18, GILT_BRIGHT)
+	num.custom_minimum_size = Vector2(26, 0)
+	num.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	num.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(num)
+	return [slider, num]
+
+
+## Build the ARSENAL size row into `host_panel`: RELICS and POTIONS scales on ONE
+## line. Both runs are laid out here rather than as two labelled sections because
+## the lobby column is already near its budget with MODE / FORMAT / BATTLE STYLE
+## — a fourth full section would push READY and START off the plate.
+## `relic_parts` / `potion_parts` are filled with [slider, numeral].
+func _build_arsenal_picker(host_panel: VBoxContainer, relics_value: int,
+		potions_value: int, on_relic: Callable, on_potion: Callable,
+		relic_parts: Array, potion_parts: Array) -> void:
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 6)
+	host_panel.add_child(row)
+
+	# ARSENAL rides the row as its leading section label rather than taking the
+	# centred header line MODE / FORMAT / BATTLE STYLE each get. Measured: the
+	# connected-host column already stood at 853px of an 853px budget, so a
+	# fourth full section ran READY, the hint and BACK off the bottom of the
+	# canvas — and this row already carries two labels of its own, so a third
+	# reads as the same kind of thing rather than as a missing heading.
+	row.add_child(GameTheme.make_label("ARSENAL", 16, GILT_BRIGHT))
+	var head_gap := Control.new()
+	head_gap.custom_minimum_size = Vector2(12, 0)
+	head_gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(head_gap)
+
+	relic_parts.clear()
+	relic_parts.append_array(_build_count_scale(row, "RELICS",
+		SkirmishState.arsenal_relic_max(), relics_value, on_relic, 196.0))
+
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(20, 0)
+	gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(gap)
+
+	potion_parts.clear()
+	# The potion scale is narrower because its ceiling is: a 0..4 run given the
+	# same 196px would put five stops 49px apart against the relic scale's 14px,
+	# and two scales at different densities in one row read as different units.
+	potion_parts.append_array(_build_count_scale(row, "POTIONS",
+		SkirmishState.arsenal_potion_max(), potions_value, on_potion, 76.0))
+
+
+## Push a value back onto a scale and its numeral. The slider write is GUARDED:
+## setting `value` emits value_changed, which re-enters the handler that called
+## this — an unguarded write would loop, and `set_value_no_signal` is the whole
+## reason this is a function rather than two lines at each call site.
+func _refresh_count_scale(parts: Array, value: int) -> void:
+	if parts.size() < 2:
+		return
+	var slider := parts[0] as HSlider
+	var num := parts[1] as Label
+	if slider != null and is_instance_valid(slider) \
+			and int(slider.value) != value:
+		slider.set_value_no_signal(float(value))
+	if num != null and is_instance_valid(num):
+		num.text = str(value)
+
+
+## The arsenal terms as a sentence — the numerals alone don't say the thing that
+## matters, which is that BOTH sides draft the same count.
+func _arsenal_terms_text(relics: int, potions: int) -> String:
+	if relics <= 0 and potions <= 0:
+		return "No arsenal — both sides fight on their decks alone."
+	var parts: Array[String] = []
+	if relics > 0:
+		parts.append("%d relic%s" % [relics, "" if relics == 1 else "s"])
+	if potions > 0:
+		parts.append("%d potion%s" % [potions, "" if potions == 1 else "s"])
+	return "Each player drafts %s before the deck." % " and ".join(parts)
 
 
 ## Selected-state swap for a pick chip (mode / format / battle style).
@@ -900,15 +1291,16 @@ func _refresh_challenger_plate() -> void:
 	# Only a live opponent with a chosen lord fills the seat with a portrait; the
 	# bot and the empty/awaiting states keep the engraved sword.
 	var shown := false
+	var was_shown := _opp_shown
 	if _challenger_is_bot:
 		_opp_name_label.text = "THE PRACTICE BOT"
-		_opp_tagline.text = "It fights for free and holds no grudge."
+		_opp_tagline.text = "A local AI opponent."
 	elif not NetMatch.remote_present:
 		_opp_name_label.text = "—"
-		_opp_tagline.text = "The seat stands empty."
+		_opp_tagline.text = "Waiting for an opponent…"
 	elif NetMatch.remote_hero == "":
 		_opp_name_label.text = "…"
-		_opp_tagline.text = "Choosing their lord."
+		_opp_tagline.text = "Choosing a hero…"
 	else:
 		var theirs := HeroDB.get_hero(NetMatch.remote_hero)
 		_set_plate_portrait(_opp_portrait, NetMatch.remote_hero)
@@ -922,12 +1314,18 @@ func _refresh_challenger_plate() -> void:
 		_opp_glow.visible = shown
 
 	# When a challenger's portrait first rises into the empty seat, fade it in.
-	if shown and not _opp_shown \
+	if shown and not was_shown \
 			and not (UserSettings != null and UserSettings.reduce_motion):
 		_opp_portrait.modulate.a = 0.0
 		_opp_portrait.create_tween().tween_property(
 			_opp_portrait, "modulate:a", 1.0, 0.4).set_trans(Tween.TRANS_SINE)
 	_opp_shown = shown
+	if shown != was_shown:
+		if shown:
+			# Defer once so the newly visible well has its final layout size.
+			call_deferred("_set_opponent_plate_life", true)
+		else:
+			_set_opponent_plate_life(false)
 
 
 func _set_plate_portrait(port: TextureRect, hid: String) -> void:
@@ -1048,7 +1446,7 @@ func _host_address_hint(port: int) -> String:
 	if tailscale.is_empty():
 		lines.append("No Tailscale address found — to play across different WiFi, "
 			+ "install Tailscale on both PCs and this line will show the address to send.")
-	lines.append("Your friend picks JOIN and enters the matching address + port.")
+	lines.append("Your friend picks Join and enters the matching address + port.")
 	return "\n".join(lines)
 
 
@@ -1068,16 +1466,65 @@ func _on_join_pressed() -> void:
 
 
 func _on_ready_pressed() -> void:
-	NetMatch.set_local_ready(not NetMatch.local_ready)
+	if not _scene_exit_locked and not _match_start_requested:
+		NetMatch.set_local_ready(not NetMatch.local_ready)
 
 
 func _on_start_pressed() -> void:
+	if _scene_exit_locked or _match_start_requested \
+			or not NetMatch.is_host or not NetMatch.both_ready():
+		return
+	_match_start_requested = true
+	if _start_btn != null:
+		_start_btn.disabled = true
 	NetMatch.start_match()
 
 
 func _on_back_pressed() -> void:
+	# START emits locally and ships remotely in the same commit. Once pressed,
+	# Back must not tear down the peer before the match-start signal is handled.
+	if _match_start_requested or not _claim_lobby_exit(_back_btn):
+		return
 	NetMatch.leave()
-	get_tree().change_scene_to_file(MENU_SCENE)
+	_change_scene_with_ink(MENU_SCENE, _back_btn, Vector2(0.08, 0.10))
+
+
+func _go_to_deck_scene(target: String, source: Control = null) -> void:
+	if not _claim_lobby_exit(source):
+		return
+	_change_scene_with_ink(target, source, Vector2(0.50, 0.54))
+
+
+func _claim_lobby_exit(source: Control = null) -> bool:
+	if _scene_exit_locked:
+		return false
+	_scene_exit_locked = true
+	for button in [_ready_btn, _start_btn, _vsbot_begin_btn, _back_btn, source]:
+		if button != null and is_instance_valid(button) and button is BaseButton:
+			(button as BaseButton).disabled = true
+	return true
+
+
+func _change_scene_with_ink(target: String, source: Control,
+		fallback_origin: Vector2) -> void:
+	var can_animate := DisplayServer.get_name() != "headless" \
+		and (UserSettings == null or not UserSettings.reduce_motion)
+	if can_animate:
+		GameTheme.fade_out_then_change_scene(self, target, 0.30,
+			_lobby_transition_origin(source, fallback_origin))
+	else:
+		get_tree().change_scene_to_file(target)
+
+
+func _lobby_transition_origin(source: Control, fallback: Vector2) -> Vector2:
+	if source == null or not is_instance_valid(source) \
+			or not source.is_visible_in_tree():
+		return fallback
+	var viewport_size := get_viewport_rect().size
+	if viewport_size.x <= 0.0 or viewport_size.y <= 0.0:
+		return fallback
+	var center := source.global_position + source.size * 0.5
+	return Vector2(center.x / viewport_size.x, center.y / viewport_size.y)
 
 
 # ── Net event handlers ──
@@ -1093,7 +1540,7 @@ func _on_room_created(code: String) -> void:
 	_code_plate.visible = true
 	GameTheme.deal_in(_code_plate)
 	_set_status("Room open — share this code with your friend:", GREEN)
-	_hint_label.text = "Your friend picks JOIN, enters this code, and presses CONNECT. Then both ready up and you press START MATCH."
+	_hint_label.text = "Your friend picks Join, enters this code, and presses Connect. Then both press Ready and you press Start Match."
 	_connect_panel.visible = false
 	_show_ready_panel()
 
@@ -1118,14 +1565,14 @@ func _on_protocol_rejected(reason: String) -> void:
 
 
 func _on_peer_joined(_id: int) -> void:
-	_set_status("Your challenger has arrived.", GREEN)
-	_hint_label.text = "Both ready up, then you (host) press START MATCH."
+	_set_status("An opponent joined your room.", GREEN)
+	_hint_label.text = "Both players press Ready, then you (the host) press Start Match."
 	_show_ready_panel()
 
 
 func _on_connected_to_host() -> void:
 	_set_status("Connected — you're in the host's room.", GREEN)
-	_hint_label.text = "Ready up — the host starts the match."
+	_hint_label.text = "Press Ready — the host starts the match."
 	_connect_panel.visible = false
 	_show_ready_panel()
 
@@ -1149,13 +1596,19 @@ func _on_match_starting(_seed: int) -> void:
 	# Route to the chosen mode's deck-acquisition scene (host's pick, synced via
 	# NetMatch.match_mode). Falls back to the draft if that scene isn't in the build.
 	var scene := SkirmishState.mode_scene(NetMatch.match_mode)
-	if ResourceLoader.exists(scene):
-		get_tree().change_scene_to_file(scene)
-	elif ResourceLoader.exists(DRAFT_SCENE):
+	if not ResourceLoader.exists(scene) and ResourceLoader.exists(DRAFT_SCENE):
 		_set_status("That mode is unavailable — starting a Draft instead.", GREEN)
-		get_tree().change_scene_to_file(DRAFT_SCENE)
-	else:
-		_set_status("Ready — but no warband screen could be opened. Press BACK.", RED)
+		scene = DRAFT_SCENE
+	if not ResourceLoader.exists(scene):
+		_match_start_requested = false
+		_set_status("Ready — but no deck screen could be opened. Press Back.", RED)
+		_refresh_ready_labels()
+		return
+	_match_start_requested = true
+	var source: Control = null
+	if _start_btn != null and _start_btn.is_visible_in_tree():
+		source = _start_btn
+	_go_to_deck_scene(scene, source)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -1187,11 +1640,15 @@ func _populate_mode_panel() -> void:
 		c.queue_free()
 	_mode_buttons.clear()
 	_bo_buttons.clear()
+	_ars_relic_parts.clear()
+	_ars_potion_parts.clear()
 	_mode_info_label = null
+	_arsenal_info_label = null
 	if NetMatch.is_host:
 		_build_host_mode_picker()
 		# Broadcast the current selection so a connected client shows it at once.
-		NetMatch.set_match_config(_selected_mode, _selected_best_of, _selected_style)
+		NetMatch.set_match_config(_selected_mode, _selected_best_of, _selected_style,
+			_selected_ars_relics, _selected_ars_potions)
 	else:
 		_build_client_mode_display()
 
@@ -1249,24 +1706,51 @@ func _build_host_mode_picker() -> void:
 		style_row.add_child(b3)
 		_style_buttons[st] = b3
 
+	# ARSENAL — how many relic and potion picks the opening stage offers. The host
+	# sets it for BOTH sides; there is deliberately no per-player number, or the
+	# player who happened to host would be choosing their own item advantage.
+	_build_arsenal_picker(_mode_panel, _selected_ars_relics, _selected_ars_potions,
+		_on_ars_relics_chosen, _on_ars_potions_chosen,
+		_ars_relic_parts, _ars_potion_parts)
+	_arsenal_info_label = GameTheme.make_label("", 14, ASH)
+	_arsenal_info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_mode_panel.add_child(_arsenal_info_label)
+
 	_refresh_host_picker_highlight()
+	_flatten_chart_styles(_mode_panel)
 
 
 func _on_mode_chosen(mode: int) -> void:
 	_selected_mode = mode
-	NetMatch.set_match_config(_selected_mode, _selected_best_of, _selected_style)
-	_refresh_host_picker_highlight()
+	_push_match_config()
 
 
 func _on_best_of_chosen(bo: int) -> void:
 	_selected_best_of = bo
-	NetMatch.set_match_config(_selected_mode, _selected_best_of, _selected_style)
-	_refresh_host_picker_highlight()
+	_push_match_config()
 
 
 func _on_style_chosen(st: int) -> void:
 	_selected_style = st
-	NetMatch.set_match_config(_selected_mode, _selected_best_of, _selected_style)
+	_push_match_config()
+
+
+func _on_ars_relics_chosen(n: int) -> void:
+	_selected_ars_relics = n
+	_push_match_config()
+
+
+func _on_ars_potions_chosen(n: int) -> void:
+	_selected_ars_potions = n
+	_push_match_config()
+
+
+## One funnel for every host pick: commit the whole config (it crosses the wire
+## as one message, so a partial send could leave the client showing terms the
+## host has already changed) and relight the chips.
+func _push_match_config() -> void:
+	NetMatch.set_match_config(_selected_mode, _selected_best_of, _selected_style,
+		_selected_ars_relics, _selected_ars_potions)
 	_refresh_host_picker_highlight()
 
 
@@ -1277,6 +1761,11 @@ func _refresh_host_picker_highlight() -> void:
 		_set_chip_selected(_bo_buttons[bo], bo == _selected_best_of)
 	for st in _style_buttons:
 		_set_chip_selected(_style_buttons[st], st == _selected_style)
+	_refresh_count_scale(_ars_relic_parts, _selected_ars_relics)
+	_refresh_count_scale(_ars_potion_parts, _selected_ars_potions)
+	if _arsenal_info_label != null and is_instance_valid(_arsenal_info_label):
+		_arsenal_info_label.text = _arsenal_terms_text(
+			_selected_ars_relics, _selected_ars_potions)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -1297,7 +1786,7 @@ func _on_vs_bot_pressed() -> void:
 	if _back_btn != null:
 		_back_btn.visible = false
 	_populate_vs_bot_panel()
-	_set_status("Practice match — pick a mode, then BEGIN.", GILT_BRIGHT)
+	_set_status("Practice match — pick a mode, then Begin.", GILT_BRIGHT)
 
 
 func _populate_vs_bot_panel() -> void:
@@ -1305,6 +1794,9 @@ func _populate_vs_bot_panel() -> void:
 		c.queue_free()
 	_vsbot_mode_buttons.clear()
 	_vsbot_bo_buttons.clear()
+	_vsbot_arsenal_info = null   # the panel's children were just queue_freed
+	_vsbot_ars_relic_parts.clear()
+	_vsbot_ars_potion_parts.clear()
 
 	_vs_bot_panel.add_child(GameTheme.make_section_divider(
 		"THE DRILL", GameTheme.GILT, 17, 130.0))
@@ -1353,17 +1845,28 @@ func _populate_vs_bot_panel() -> void:
 		style_row.add_child(b3)
 		_vsbot_style_buttons[st] = b3
 
+	# The drill runs the same arsenal stage as a real match — you are the host of
+	# a one-player room, so the terms are yours to set here too. (The bot drafts
+	# the same number of relics from its own board-only pool and no potions.)
+	_build_arsenal_picker(_vs_bot_panel, _vsbot_ars_relics, _vsbot_ars_potions,
+		_on_vsbot_ars_relics_chosen, _on_vsbot_ars_potions_chosen,
+		_vsbot_ars_relic_parts, _vsbot_ars_potion_parts)
+	_vsbot_arsenal_info = GameTheme.make_label("", 14, ASH)
+	_vsbot_arsenal_info.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_vs_bot_panel.add_child(_vsbot_arsenal_info)
+
 	_vs_bot_panel.add_child(GameTheme.make_separator(GILT_BRIGHT, 300.0))
 
-	var begin := GameTheme.make_back_button("BEGIN", Vector2(220, 46), 18, GILT_BRIGHT)
-	begin.pressed.connect(_on_vs_bot_begin)
-	_vs_bot_panel.add_child(begin)
+	_vsbot_begin_btn = GameTheme.make_back_button("BEGIN", Vector2(220, 46), 18, GILT_BRIGHT)
+	_vsbot_begin_btn.pressed.connect(_on_vs_bot_begin)
+	_vs_bot_panel.add_child(_vsbot_begin_btn)
 
 	var back := GameTheme.make_back_button("BACK", Vector2(160, 38), 15)
 	back.pressed.connect(_on_vs_bot_back)
 	_vs_bot_panel.add_child(back)
 
 	_refresh_vsbot_highlight()
+	_flatten_chart_styles(_vs_bot_panel)
 
 
 func _on_vsbot_mode_chosen(mode: int) -> void:
@@ -1381,6 +1884,16 @@ func _on_vsbot_style_chosen(st: int) -> void:
 	_refresh_vsbot_highlight()
 
 
+func _on_vsbot_ars_relics_chosen(n: int) -> void:
+	_vsbot_ars_relics = n
+	_refresh_vsbot_highlight()
+
+
+func _on_vsbot_ars_potions_chosen(n: int) -> void:
+	_vsbot_ars_potions = n
+	_refresh_vsbot_highlight()
+
+
 func _refresh_vsbot_highlight() -> void:
 	for mode in _vsbot_mode_buttons:
 		_set_chip_selected(_vsbot_mode_buttons[mode], mode == _vsbot_mode)
@@ -1388,6 +1901,14 @@ func _refresh_vsbot_highlight() -> void:
 		_set_chip_selected(_vsbot_bo_buttons[bo], bo == _vsbot_bo)
 	for st in _vsbot_style_buttons:
 		_set_chip_selected(_vsbot_style_buttons[st], st == _vsbot_style)
+	_refresh_count_scale(_vsbot_ars_relic_parts, _vsbot_ars_relics)
+	_refresh_count_scale(_vsbot_ars_potion_parts, _vsbot_ars_potions)
+	if _vsbot_arsenal_info != null and is_instance_valid(_vsbot_arsenal_info):
+		# "Each player" is literally true in a drill: the bot's own arsenal now
+		# follows the same setting (it drafts from BOT_RELIC_POOL and never drinks,
+		# so its potion count is always zero).
+		_vsbot_arsenal_info.text = _arsenal_terms_text(
+			_vsbot_ars_relics, _vsbot_ars_potions)
 
 
 func _on_vs_bot_back() -> void:
@@ -1405,21 +1926,36 @@ func _on_vs_bot_back() -> void:
 
 
 func _on_vs_bot_begin() -> void:
+	if _scene_exit_locked:
+		return
+	var scene := SkirmishState.mode_scene(_vsbot_mode)
+	if not ResourceLoader.exists(scene):
+		scene = DRAFT_SCENE
+	if not ResourceLoader.exists(scene):
+		_set_status("No deck screen could be opened.", RED)
+		return
 	# No peer to sync with — set the style + lord directly before the local start
 	# (start_vs_bot reads local_hero to roll a non-mirror bot lord).
 	NetMatch.battle_style = _vsbot_style
 	NetMatch.local_hero = _selected_hero
-	NetMatch.start_vs_bot(_vsbot_mode, _vsbot_bo)
-	var scene := SkirmishState.mode_scene(_vsbot_mode)
-	if not ResourceLoader.exists(scene):
-		scene = DRAFT_SCENE
-	get_tree().change_scene_to_file(scene)
+	# The arsenal size goes THROUGH start_vs_bot: it calls leave() first, which
+	# restores the defaults, so writing the fields beside battle_style above would
+	# be erased before the drill ever read them.
+	NetMatch.start_vs_bot(_vsbot_mode, _vsbot_bo,
+		_vsbot_ars_relics, _vsbot_ars_potions)
+	_go_to_deck_scene(scene, _vsbot_begin_btn)
 
 
 func _build_client_mode_display() -> void:
 	_mode_info_label = GameTheme.make_label("", 16, IVORY)
 	_mode_info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_mode_panel.add_child(_mode_info_label)
+	# The arsenal terms get their own line: they are the one setting that decides
+	# what the client's NEXT screen asks it to do, so it must not be a fourth
+	# clause running off the end of a sentence.
+	_arsenal_info_label = GameTheme.make_label("", 15, ASH)
+	_arsenal_info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_mode_panel.add_child(_arsenal_info_label)
 	_refresh_client_mode_display()
 
 
@@ -1430,6 +1966,9 @@ func _refresh_client_mode_display() -> void:
 		SkirmishState.mode_name(NetMatch.match_mode),
 		"Best of 3" if NetMatch.best_of == 3 else "Single game",
 		"Sealed Orders" if NetMatch.battle_style == NetMatch.STYLE_SEALED else "Alternating"]
+	if _arsenal_info_label != null and is_instance_valid(_arsenal_info_label):
+		_arsenal_info_label.text = _arsenal_terms_text(
+			NetMatch.arsenal_relics, NetMatch.arsenal_potions)
 
 
 func _on_match_config_changed() -> void:
@@ -1439,6 +1978,8 @@ func _on_match_config_changed() -> void:
 
 
 func _reset_to_connect_panel() -> void:
+	if not _scene_exit_locked:
+		_match_start_requested = false
 	_connect_panel.visible = true
 	_ready_panel.visible = false
 	_code_plate.visible = false
@@ -1454,6 +1995,7 @@ func _reset_to_connect_panel() -> void:
 ## HOST/JOIN in the LAN panel are always present.
 func _set_connect_buttons_enabled(on: bool) -> void:
 	var online_ok := on and _relay_host != ""
+
 	if _host_online_btn != null:
 		_host_online_btn.disabled = not online_ok
 	if _join_online_btn != null:
@@ -1503,7 +2045,8 @@ func _refresh_ready_labels() -> void:
 
 	# Host can start once both sides are ready.
 	if NetMatch.is_host and _start_btn != null:
-		_start_btn.disabled = not NetMatch.both_ready()
+		_start_btn.disabled = not NetMatch.both_ready() \
+			or _match_start_requested or _scene_exit_locked
 
 
 func _set_status(msg: String, color: Color) -> void:

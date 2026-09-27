@@ -94,15 +94,21 @@ func _static_checks() -> void:
 	_assert("static: lookout back mode is the scout (desc)",
 		"Back row" in String(P["lookout"]["desc"])
 		and "arrival" in String(P["lookout"]["desc"]))
-	_assert("static: Warding Stone is the 1-cost Bastion fortifier",
-		int(P["warding_stone"]["cost"]) == 1
-		and int(P["warding_stone"]["atk"]) == 0
+	# COST AND NAME ARE NOT THE CONTRACT (2026-09-16). These pinned exact prices
+	# and old display names; the cost rescale moved every price and a copy pass
+	# renamed the cards ("Warding Stone" -> "Cornerstone", "Oathbound Squire" ->
+	# "Sworn Man"), so five checks went red while every MECHANISM was intact. This
+	# file already made the argument for `lookout` a few lines up — prose is a
+	# tripwire under the copy team — and a price is a balance decision a gate must
+	# not pin, or it gets re-blessed each rebalance and stops meaning anything.
+	# Shape and mechanism are what is asserted now.
+	_assert("static: the Bastion fortifier is a 0-ATK wall that buffs Bastion HP",
+		int(P["warding_stone"]["atk"]) == 0
 		and int(P["warding_stone"]["hp"]) == 3
 		and String(P["warding_stone"]["on_enter"]["type"]) == "buff_ctype_hp"
 		and int(P["warding_stone"]["on_enter"]["value"]) == 2)
-	_assert("static: squire_captain is the Oathbound Squire bodyguard",
-		P["squire_captain"]["name"] == "Oathbound Squire"
-		and String(P["squire_captain"].get("passive", "")) == "bodyguard"
+	_assert("static: squire_captain is the bodyguard",
+		String(P["squire_captain"].get("passive", "")) == "bodyguard"
 		and not P["squire_captain"].has("on_play"))
 	_assert("static: gravedigger swells on ally death",
 		String(P["gravedigger"].get("passive", "")) == "swell_on_ally_death")
@@ -112,24 +118,25 @@ func _static_checks() -> void:
 	_assert("static: heartwood_elder arrives per-Beast",
 		String(P["heartwood_elder"]["on_enter"]["type"]) == "buff_per_ctype"
 		and not P["heartwood_elder"].has("passive"))
-	_assert("static: Tallow Doll is the 2-cost 2/2 betrayal curse",
-		int(P["tallow_doll"]["cost"]) == 2
-		and int(P["tallow_doll"]["atk"]) == 2 and int(P["tallow_doll"]["hp"]) == 2
+	# What this slate owns is the MECHANISM and the band the card plays in, not
+	# its exact stat line — that is the designer's to move, and it did (2/2 ->
+	# 3/3 on 2026-09-19), reddening this check against a card that was fine.
+	# Pinning a balance number in a "static slate" assertion is how a gate
+	# becomes a tax on rebalancing instead of a guard on design intent.
+	_assert("static: the betrayal curse is a modest common that turns the opposing body (%d/%d)"
+		% [int(P["tallow_doll"]["atk"]), int(P["tallow_doll"]["hp"])],
+		String(P["tallow_doll"]["rarity"]) == "common"
+		and int(P["tallow_doll"]["atk"]) == int(P["tallow_doll"]["hp"])
 		and String(P["tallow_doll"]["on_death"]["type"]) == "betray_opposing")
-	_assert("static: the remaining wall cycle has its final costs and bodies",
-		P["ironhide_anvil"]["name"] == "Iron Rampart"
-		and int(P["ironhide_anvil"]["cost"]) == 1
-		and int(P["ironhide_anvil"]["hp"]) == 3
+	_assert("static: the remaining wall cycle keeps its bodies and mechanisms",
+		int(P["ironhide_anvil"]["hp"]) == 3
 		and String(P["ironhide_anvil"]["passive"]) == "reflect_strike"
-		and int(P["bramble_stockade"]["cost"]) == 1 and int(P["bramble_stockade"]["hp"]) == 3
-		and P["siegewright"]["name"] == "War Fortress"
-		and int(P["siegewright"]["cost"]) == 2 and int(P["siegewright"]["hp"]) == 6)
+		and int(P["bramble_stockade"]["hp"]) == 3
+		and int(P["siegewright"]["hp"]) == 6)
 	_assert("static: forged Warding Stone fortifies for +3 HP",
 		int(U["warding_stone"].get("on_enter_value", 0)) == 1)
-	_assert("static: iron_bastion is the Honor Guard rare (c4, column_ward)",
-		P["iron_bastion"]["name"] == "Honor Guard"
-		and P["iron_bastion"]["rarity"] == "rare"
-		and int(P["iron_bastion"]["cost"]) == 4
+	_assert("static: iron_bastion is the column-ward rare",
+		P["iron_bastion"]["rarity"] == "rare"
 		and String(P["iron_bastion"].get("passive", "")) == "column_ward")
 	_assert("static: the_apothecary drinks along",
 		String(P["the_apothecary"].get("passive", "")) == "tonic_vigor")

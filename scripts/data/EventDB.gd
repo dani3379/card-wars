@@ -16,12 +16,12 @@ const EVENTS: Dictionary = {
 	"pawnbrokers_window": {
 		"presentation": {"layout": "bargain", "focal_uv": Vector2(0.30, 0.48), "zoom": 1.070},
 		"name": "The Pawnbroker's Window",
-		"desc": "A pawnbroker buys cards through a slot in smoked glass. She chooses what to inspect, and each refusal lowers her next offer.",
+		"desc": "A pawnbroker buys cards through a slot in smoked glass. She has an eye, and asks for your best. Each refusal cools her next offer.",
 		"mood": "gilt",
 		"choices": [
 			{
-				"label": "Let her choose a card to buy",
-				"desc": "She offers to buy one card at a time. Each refusal lowers the next offer.",
+				"label": "Let her name a card",
+				"desc": "She asks for your best card first. Each refusal shows a lesser one, for less.",
 				"effects": [
 					{"type": "pawn_appraisal"},
 				],
@@ -30,15 +30,24 @@ const EVENTS: Dictionary = {
 				# Campaign memory: the shelf kept what you sold her (recorded by
 				# the appraisal counter). Act 2+, and only when the fee is there —
 				# a blue option that can't pay would be a lie.
+				#
+				# 60 -> 90 on 2026-09-16, when the counter started asking for the
+				# player's BEST card instead of a card at random. A flat 60 was
+				# priced against an average pull (~35-45 gold); against a rare or
+				# a forged card it made the round trip strictly profitable — sell
+				# high, redeem cheap, and pocket the difference AND a free forge.
+				# 90 is the road's own unit (one forge = two potions = ~90 gold),
+				# so redeeming now buys the forge at about sticker and the whole
+				# trade is a real loan against your deck rather than a money pump.
 				"blue": {"type": "all", "gates": [
 					{"type": "pawned_at_least", "value": 1},
 					{"type": "act_at_least", "value": 2},
-					{"type": "gold_at_least", "value": 60},
+					{"type": "gold_at_least", "value": 90},
 				]},
 				"label": "Buy back {pawned}",
-				"desc": "Pay 60 gold. Return {pawned} to your deck with an upgrade.",
+				"desc": "Pay 90 gold. Forge {pawned} and return it to your deck.",
 				"effects": [
-					{"type": "pawn_buyback", "price": 60},
+					{"type": "pawn_buyback", "price": 90},
 				],
 			},
 			{
@@ -137,10 +146,10 @@ const EVENTS: Dictionary = {
 						"open_text": "You step into the open place. Complete each verse to gain its reward, or stop and keep what you have earned.",
 						"action": "Sing the next verse",
 						"action_body": "Continue for the next reward.",
-						"leave": "Bow out of the circle",
+						"leave": "Stop singing",
 						"leave_sub": "Keep your current rewards.",
 						"leave_text": "You step out of the circle and keep your rewards.",
-						"leave_text_early": "You decide not to sing and continue down the road.",
+						"leave_text_early": "The circle closes without you, and the road goes on.",
 						"steps": [
 							{"chance": 1.0, "sub": "Gain 25 gold. This step cannot fail.",
 								"effects": [{"type": "gold", "value": 25}],
@@ -167,8 +176,8 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Upgrade one card",
-				"desc": "Upgrade a chosen card.",
+				"label": "Forge one card",
+				"desc": "Forge a chosen card.",
 				"effects": [
 					{"type": "upgrade_choice"},
 				],
@@ -556,7 +565,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "fallen_at_least", "value": 1},
-				"label": "Give her a name for the list",
+				"label": "Recruit a Standard Bearer",
 				"desc": "She keeps the roll of every column that passed. Gain a Standard Bearer.",
 				"effects": [
 					{"type": "add_card_id", "id": "standard_bearer"},
@@ -688,7 +697,7 @@ const EVENTS: Dictionary = {
 		"art": "gravesong_choir",
 		"choices": [
 			{
-				"label": "Read out the roll",
+				"label": "Remove all copies of one card",
 				"desc": "Choose one card. Every copy of it is struck from your deck.",
 				"effects": [
 					{"type": "remove_choice_all_copies", "filter": ""},
@@ -696,14 +705,14 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "has_curse"},
-				"label": "Plead the charge",
+				"label": "Remove a Curse",
 				"desc": "He strikes a mark from the record instead. Remove a curse.",
 				"effects": [
 					{"type": "remove_choice_filtered", "filter": "curse"},
 				],
 			},
 			{
-				"label": "Ask him to press a man",
+				"label": "Recruit a Pikeman",
 				"desc": "He presses the next body down the road. Gain a Pikeman.",
 				"effects": [
 					{"type": "add_card_id", "id": "pikeman"},
@@ -721,7 +730,7 @@ const EVENTS: Dictionary = {
 		"art": "strangers_hand",
 		"choices": [
 			{
-				"label": "Put a creature through the drill",
+				"label": "Teach a creature Thorns",
 				"desc": "Teach one of your creatures Thorns.",
 				"effects": [
 					{"type": "grant_keyword_pick", "keyword": "thorns"},
@@ -729,14 +738,14 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "starters_at_least", "value": 2},
-				"label": "Send your recruits to the drill",
+				"label": "Trade starters for better cards",
 				"desc": "Choose a starting card. Its copies march off and come back as something better.",
 				"effects": [
 					{"type": "veteran_swap"},
 				],
 			},
 			{
-				"label": "Stand and watch the forms",
+				"label": "Forge one card",
 				"desc": "Forge one card in your deck.",
 				"effects": [
 					{"type": "upgrade_choice"},
@@ -858,7 +867,7 @@ const EVENTS: Dictionary = {
 		"ambience": "wind",
 		"choices": [
 			{
-				"label": "Let them take one thing",
+				"label": "Transform one card",
 				"desc": "Choose a card. It goes with the crows, and something of its worth takes the slot.",
 				"effects": [
 					{"type": "transform_choice", "value": 1},
@@ -866,7 +875,7 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "act_at_least", "value": 2},
-				"label": "Let them take two",
+				"label": "Transform two cards",
 				"desc": "They know the column by now. Transform two cards.",
 				"effects": [
 					{"type": "transform_choice", "value": 2},
@@ -1052,17 +1061,62 @@ const EVENTS: Dictionary = {
 		],
 	},
 
+	# ── The Old Forge (the anvil trade) ──
+	# WIRING A FEATURE THAT WAS ALREADY FINISHED (2026-08-29). Everything this
+	# event needs shipped long ago and none of it could be reached: the
+	# `relic_sacrifice_pick` effect, its picker UI with a "Keep them all" decline
+	# path, its no-target reason ("No non-starting relic to trade."), the
+	# `has_nonstarting_relic` gate, and `assets/events/old_forge.png` — which two
+	# OTHER events had been borrowing as a stand-in for art whose owner did not
+	# exist. `tools/_probe_reachability.gd` found it: dispatched, listed in
+	# MODAL_EFFECTS, emitted by nothing, exactly the shape of the six dead
+	# minigames deleted 2026-08-07 — but with no live replacement, so the fix is
+	# to wire it rather than delete it.
+	#
+	# The key is `old_forge` so the painting resolves by event id and the file is
+	# finally OWNED rather than borrowed twice over.
+	#
+	# Design note carried over from the picker's own comment: the player CHOOSES
+	# which relic goes on the anvil. The random-destruction version of this was
+	# "the worst feel-bad in the event pool".
+	"old_forge": {
+		"name": "The Old Forge",
+		"desc": "A smith works a roadside forge, and the fire is far hotter than horseshoes need. He will take one thing you carry and hand back something better. He will not say what.",
+		"gate": {"type": "has_nonstarting_relic"},
+		"mood": "ember",
+		"choices": [
+			{
+				"label": "Lay a relic on the anvil",
+				"desc": "Choose one relic to give up. Gain a stronger one in its place.",
+				"effects": [
+					{"type": "relic_sacrifice_pick"},
+				],
+			},
+			{
+				"label": "Keep the road",
+				"desc": "Trade nothing and move on.",
+				"effects": [],
+			},
+		],
+	},
+
 	# ── The Dead Man's Deal (high-low card climb vs a dead card-sharp) ──
 	# NOTE: event KEY retained (`the_powder_move`) so the shared-world threads
 	# and map assignments keep resolving; regenerated 2026-07-21 from the old
-	# Tower-of-Hanoi "Powder Move" to the readable high-low climb. Shares the
-	# `old_forge` stand-in until bespoke art lands at assets/events/.
+	# Tower-of-Hanoi "Powder Move" to the readable high-low climb.
+	# ART RE-POINTED 2026-08-29: it had been borrowing `old_forge`, which now has
+	# a real owner (the Old Forge event above, finally wired). The art ledger in
+	# tools/_probe_event_art.gd had already named this event as holding the WEAKER
+	# claim on that plate — "it is now 'The Dead Man's Deal', a card game" — so it
+	# is the one that moves. `three_doors` reads as a choice among unknowns and
+	# already carries Crown & Pike, so the pairing is two roadside games of chance
+	# rather than a forge cart standing in for a card table.
 
 	"the_powder_move": {
 		"name": "The Dead Man's Deal",
 		"desc": "A dead card player offers a game of higher or lower. The remaining numbers are always visible, and each correct call raises the reward.",
 		"mood": "gilt",
-		"art": "old_forge",
+		"art": "three_doors",
 		"choices": [
 			{
 				"label": "Play Higher or Lower",
@@ -1124,14 +1178,14 @@ const EVENTS: Dictionary = {
 		"ambience": "wind",
 		"choices": [
 			{
-				"label": "Light the line",
+				"label": "Recruit a Lookout",
 				"desc": "A watchman comes down off the ridge to march with you. Gain a Lookout.",
 				"effects": [
 					{"type": "add_card_id", "id": "lookout"},
 				],
 			},
 			{
-				"label": "Borrow the signal glass",
+				"label": "Copy a card in your deck",
 				"desc": "Choose a card in your deck. A second copy of it joins the march.",
 				"effects": [
 					{"type": "copy_card"},
@@ -1159,7 +1213,7 @@ const EVENTS: Dictionary = {
 		"art": "tollkeeper_bridge",
 		"choices": [
 			{
-				"label": "Give him a man for the post",
+				"label": "Trade a creature for a relic",
 				"desc": "Choose a creature. It stays behind, and the post's stores are yours.",
 				"effects": [
 					{"type": "sacrifice_pick", "reward": "relic",
@@ -1168,14 +1222,14 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "fallen_at_least", "value": 1},
-				"label": "Name one of your dead to the watch",
+				"label": "Recruit a Revenant",
 				"desc": "He takes a name where a body will not do. Gain a Revenant.",
 				"effects": [
 					{"type": "add_card_id", "id": "revenant"},
 				],
 			},
 			{
-				"label": "Stand the watch until dawn",
+				"label": "Remove a starting card",
 				"desc": "You leave a raw recruit at the post. Remove a starting card.",
 				"effects": [
 					{"type": "remove_choice_filtered", "filter": "starter"},
@@ -1220,8 +1274,8 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "hero_is", "value": "kindler"},
-				"label": "Upgrade one card",
-				"desc": "Upgrade a chosen card for free.",
+				"label": "Forge one card",
+				"desc": "Forge a chosen card for free.",
 				"effects": [
 					{"type": "upgrade_choice"},
 				],
@@ -1249,7 +1303,7 @@ const EVENTS: Dictionary = {
 				"effects": [
 					{"type": "damage", "value": 4},
 					{"type": "grant_keyword_pick", "keyword": "armored",
-						"prompt": "Who takes the lesson? (gains Armored)"},
+						"prompt": "Choose a creature to teach Armored"},
 				],
 			},
 			{
@@ -1258,7 +1312,7 @@ const EVENTS: Dictionary = {
 				"effects": [
 					{"type": "damage", "value": 4},
 					{"type": "grant_keyword_pick", "keyword": "swift",
-						"prompt": "Who takes the lesson? (gains Swift)"},
+						"prompt": "Choose a creature to teach Swift"},
 				],
 			},
 			{
@@ -1267,7 +1321,7 @@ const EVENTS: Dictionary = {
 				"effects": [
 					{"type": "damage", "value": 4},
 					{"type": "grant_keyword_pick", "keyword": "thorns",
-						"prompt": "Who takes the lesson? (gains Thorns)"},
+						"prompt": "Choose a creature to teach Thorns"},
 				],
 			},
 			{
@@ -1276,7 +1330,7 @@ const EVENTS: Dictionary = {
 				"desc": "A chosen creature permanently gains Armored for free.",
 				"effects": [
 					{"type": "grant_keyword_pick", "keyword": "armored",
-						"prompt": "Who takes the lesson? (gains Armored)"},
+						"prompt": "Choose a creature to teach Armored"},
 				],
 			},
 		],
@@ -1392,7 +1446,7 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Pay a soldier's share",
+				"label": "Pay 25 gold",
 				"desc": "Pay 25 gold. Gain 1 max Command in the next fight.",
 				"effects": [
 					{"type": "gold", "value": -25},
@@ -1690,8 +1744,8 @@ const EVENTS: Dictionary = {
 				],
 			},
 			{
-				"label": "Add a Curse and upgrade a card",
-				"desc": "Add a Curse. Upgrade a chosen card.",
+				"label": "Add a Curse and forge a card",
+				"desc": "Add a Curse. Forge a chosen card.",
 				"effects": [
 					{"type": "add_curse"},
 					{"type": "upgrade_choice"},
@@ -1985,13 +2039,13 @@ const EVENTS: Dictionary = {
 	"the_red_tithe": {
 		"presentation": {"layout": "bargain", "focal_uv": Vector2(0.50, 0.52), "zoom": 1.060},
 		"name": "The Blood Tax",
-		"desc": "A red well trades health for upgrades and cards for max HP. It can also fill a potion flask.",
+		"desc": "A red well trades health for forges and cards for max HP. It can also fill a potion flask.",
 		"art": "blood_fountain",
 		"mood": "ember",
 		"choices": [
 			{
-				"label": "Lose 3 max HP and upgrade two cards",
-				"desc": "Lose 3 max HP. Upgrade two chosen cards.",
+				"label": "Lose 3 max HP and forge two cards",
+				"desc": "Lose 3 max HP. Forge two chosen cards.",
 				"effects": [
 					{"type": "lose_max_hp", "value": 3},
 					{"type": "upgrade_choice_multi", "value": 2},
@@ -2015,8 +2069,8 @@ const EVENTS: Dictionary = {
 			},
 			{
 				"blue": {"type": "hero_is", "value": "acolyte"},
-				"label": "Upgrade one card",
-				"desc": "Upgrade a chosen card for free.",
+				"label": "Forge one card",
+				"desc": "Forge a chosen card for free.",
 				"effects": [
 					{"type": "upgrade_choice"},
 				],

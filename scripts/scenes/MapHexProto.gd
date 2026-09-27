@@ -14,9 +14,13 @@ const SQ3 := 1.7320508
 const HEX_R := 46.0
 const TILE_GAP := 1.1
 const ROWS := 18
-const FIGHT_ROWS := [0, 3, 9, 15]
+# Kept in step with CampaignMapGenerator by hand — this is a sandbox proto and
+# deliberately does not depend on the generator. Row 9 became a mid-act camp on
+# 2026-09-19 when the mandatory fight spine went 4 rows to 3.
+const FIGHT_ROWS := [0, 3, 15]
 const ELITE_ROWS := [6, 12]
 const REST_ROW := 16
+const MID_REST_ROW := 9
 const CAMP_LANE := 3
 
 const AMBER := Color(0.93, 0.72, 0.30)
@@ -156,12 +160,14 @@ func _build_run() -> void:
 			var typ := ""
 			if row == ROWS - 1:
 				typ = "boss"
-			elif row == REST_ROW:
+			elif row == REST_ROW or row == MID_REST_ROW:
 				typ = "rest"
 			elif row in FIGHT_ROWS:
 				typ = "combat"
 			elif row in ELITE_ROWS:
-				typ = "elite" if w == 1 else "combat"
+				# One spike, the rest of the band is road — a declinable
+				# General, matching the generator since 2026-09-19.
+				typ = "elite" if w == 1 else "wayside"
 			else:
 				typ = pool[(row * 3 + w + int(_h(row, w) * 3.0)) % pool.size()]
 			var idx := _find_node(row, col)

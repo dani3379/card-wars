@@ -23,6 +23,31 @@ enum MatchMode { DRAFT, CONSTRUCTED, QUICK, SEALED }
 const START_HP: int = 30
 const BASE_MAX_MANA: int = 3
 const DECK_TARGET: int = 20   # cards drafted per player
+## Source-dealing rules used by the host to prove that a submitted loadout was
+## actually attainable in its selected skirmish mode. Keep these in lockstep
+## with the deck-acquisition screens; the pure helpers below are deliberately
+## independent of scene/UI state so they form a real authority boundary.
+const DECK_COPY_CAP: int = 2
+const SEALED_POOL_SIZE: int = 30
+const SEALED_MAX_PER_ID: int = 3
+const DRAFT_REROLL_CAP: int = 2
+## DEFAULT arsenal size — the fixed 3 relics + 2 potions the stage shipped with
+## (2026-07-16). Since the host can now set the size in the lobby these are the
+## resting values, not a rule: the LIVE counts are arsenal_relics /
+## arsenal_potions below. NetMatch mirrors these two literals in its own field
+## initializers (autoload order forbids reading them there) — _probe_draft_relic
+## gates the pair, so a change here must be made there too.
+const ARSENAL_RELIC_ROUNDS: int = 3
+const ARSENAL_POTION_ROUNDS: int = 2
+## Offerings on one Arsenal table — the stage is a 1-of-3 pick.
+const ARSENAL_SLATE_SIZE: int = 3
+## Hard ceiling on potion rounds regardless of pool size: the combat belt draws
+## at most this many bottles (RunState.MAX_POTIONS, and the apothecary shelf the
+## HUD builds under the player banner is laid out for that run). MEASURED, not
+## inherited from RunState.MAX_POTIONS: the skirmish belt draws the drafted count
+## (Combat._ctx_max_potions), and 4 slots end at x248 against the board's left
+## edge at x272 — a fifth would end at 300, through the board.
+const ARSENAL_POTION_BELT_CAP: int = 4
 
 ## The act whose reward ODDS the draft rolls at. Act 3 (30/50/20 common/uncommon/
 ## rare — see CardDB.ACT_REWARD_WEIGHTS) so a drafted warband feels like a
@@ -140,7 +165,7 @@ const NET_RELIC_POOL: Array[String] = [
 	# snapshot to reach the other peer. No port yet.
 	"snecko_eye",
 	"marathoners_sash",
-	"deep_satchel",   # hand refills to 6 instead of 5
+	"deep_satchel",   # +1 card drawn each turn
 	# ice_cream dropped 2026-07-25: reshaped from Miser's Coffer (banking, a pure
 	# NetPlayerState resource tweak) into Iron Rations, a start-of-round BOARD
 	# heal. Board effects need per-side host-authoritative plumbing that this
@@ -305,6 +330,17 @@ class PlayerSlot:
 
 
 var combat_mode: int = CombatMode.SOLO
+## ONE-SHOT: a skirmish launch is in flight. Set by NetMatch._enter_combat_local
+## immediately before its DEFERRED change_scene_to_file, and CONSUMED by the
+## first Combat._ready that follows.
+##
+## It exists because `combat_mode` alone cannot distinguish the two states that
+## reach Combat with a dead connection: a genuine campaign fight carrying a stale
+## `combat_mode` from an earlier skirmish, and a skirmish whose connection was
+## torn down inside the deferred swap. Those want opposite answers, and guessing
+## wrong opens the player's live campaign run by accident — see the note at the
+## mode decision in Combat._ready.
+var launch_armed: bool = false
 ## True when the "opponent" is the local practice bot (no network peer). The host
 ## path runs exactly as in a real match; Combat just drives slot 1 via SkirmishBot
 ## instead of waiting for remote intents, and NetMatch emulates the peer handshake.
@@ -324,6 +360,67 @@ var best_of: int = 1
 var series_wins: Array[int] = [0, 0]
 var series_game: int = 1
 
+## ── Arsenal size (host-chosen, one pair for BOTH players) ───────────────────
+## How many battle-relic / battle-potion picks the shared Arsenal stage offers
+## each side. Set from NetMatch.arsenal_relics / .arsenal_potions in
+## begin_session for the same reason best_of is: this autoload is NOT reset
+## between the games of a series, so the number survives the deck screen →
+## combat → rematch relaunches. Every consumer reads THESE — the stage that
+## deals the slates (NetDeckBuilder._begin_arsenal) and the host's own authority
+## boundary (arsenal_source_offers / validate_loadout_event) — so the offers a
+## peer could have seen and the offers it is allowed to keep cannot drift apart.
+var arsenal_relics: int = ARSENAL_RELIC_ROUNDS
+var arsenal_potions: int = ARSENAL_POTION_ROUNDS
+
+
+## The most rounds the lobby may offer, and the clamp every consumer applies.
+## BOTH ARE DERIVED — nothing here is a number somebody liked the look of, and
+## the limits below are the MEASURED points where something actually breaks.
+##
+## RELICS stop at the pool size because a relic is held or not held: duplicates
+## are refused by validate_loadout_event and `_has_relic` is a membership test,
+## so a round past the pool's last distinct id cannot add anything. (Tables stay
+## full all the way there — see deal_arsenal_slate's lap rule.) Measured against
+## the HUD at the ceiling: Combat's left relic rail lays 14 chips as 5x3 at its
+## own 44px legibility floor, ending at x264 against the board's edge at 272.
+##
+## POTIONS stop at the belt. The combat belt is the drafted count, and its shelf
+## is 16 + n*52 + (n-1)*6 wide against that same x272: n=4 ends at 248, n=5 at
+## 300 — through the board. The pool (13) would allow more; the geometry does not.
+func arsenal_relic_max() -> int:
+	return NET_RELIC_POOL.size()
+
+
+func arsenal_potion_max() -> int:
+	return mini(NET_POTION_POOL.size(), ARSENAL_POTION_BELT_CAP)
+
+
+## Deal one Arsenal table from `pool`, carrying the cross-round block list in
+## `seen` (mutated). THE LAP RULE: an offered id never re-deals — UNTIL the
+## unseen remainder can no longer fill a whole table, at which point the block
+## list is cleared and a new lap begins.
+##
+## Without it the stage is hard-capped at pool/3 rounds: a 5th relic table would
+## be dealt SHORT (2 tiles) and a 6th EMPTY, and an empty table auto-passes a
+## whole category the header just promised. With it, every table is full at any
+## setting the ceilings above allow. At the shipped 3+2 no lap ever triggers, so
+## the default stage deals exactly what it has always dealt.
+##
+## It is deliberately CHOICE-INDEPENDENT — a function of (rng stream, pool) and
+## nothing else. The host must rebuild the identical tables in
+## arsenal_source_offers to validate a peer's picks, and blocking ids the player
+## already HOLDS would make the deal depend on their takes; passes are invisible
+## on the wire, so the host could not reproduce it without enumerating every
+## placement. The stage handles the consequence (a second lap may re-offer
+## something you already took) by marking that tile as held and refusing it.
+func deal_arsenal_slate(pool: Array, rng: RandomNumberGenerator,
+		seen: Array) -> Array[String]:
+	if pool.size() - seen.size() < ARSENAL_SLATE_SIZE:
+		seen.clear()
+	var offered: Array[String] = deal_unique_cards(pool, ARSENAL_SLATE_SIZE, rng, seen)
+	seen.append_array(offered)
+	return offered
+
 ## uid = slot_index * UID_SLOT_STRIDE + draft_position. Deterministic so the host
 ## and the client compute the SAME uid for the same physical card without any
 ## negotiation — both draft each slot in the same pick order. The host keys all
@@ -332,11 +429,22 @@ var series_game: int = 1
 const UID_SLOT_STRIDE: int = 100000
 
 
+## Read the launch latch and clear it in the same breath. Reading is what spends
+## it, so a launch can only ever be claimed by ONE Combat boot.
+func consume_launch_armed() -> bool:
+	var armed := launch_armed
+	launch_armed = false
+	return armed
+
+
 func reset() -> void:
 	combat_mode = CombatMode.SOLO
+	launch_armed = false
 	vs_bot = false
 	rng_seed = 0
 	local_index = -1
+	arsenal_relics = ARSENAL_RELIC_ROUNDS
+	arsenal_potions = ARSENAL_POTION_ROUNDS
 	slots = []
 	for _i in 2:
 		var s := PlayerSlot.new()
@@ -367,6 +475,11 @@ func begin_session() -> void:
 	local_index = NetMatch.local_player_index
 	rng_seed = NetMatch.match_seed
 	best_of = NetMatch.best_of
+	# The host's arsenal size, adopted identically on both machines (it rode the
+	# match-start envelope). Clamped here rather than trusted: this is the number
+	# the host's own loadout authority will later validate the peer against.
+	arsenal_relics = clampi(NetMatch.arsenal_relics, 0, arsenal_relic_max())
+	arsenal_potions = clampi(NetMatch.arsenal_potions, 0, arsenal_potion_max())
 	# Lord identities: both picks were exchanged in the lobby (and the match-start
 	# envelope carried the canonical pair), so each machine seats them by index.
 	if local_index >= 0 and local_index < slots.size():
@@ -507,7 +620,9 @@ func validate_loadout_event(event: Dictionary, mode: int = -1) -> String:
 	var loadout_potions: Array = event.get("potions", [])
 	if cards.size() != DECK_TARGET:
 		return "loadout_deck_size"
-	if loadout_relics.size() > 3 or loadout_potions.size() > 2:
+	# The cap is THIS match's arsenal size, not the old fixed 3+2 — a peer may
+	# never submit more items than the stage it was actually shown could hand out.
+	if loadout_relics.size() > arsenal_relics or loadout_potions.size() > arsenal_potions:
 		return "loadout_arsenal_size"
 
 	var legal: Dictionary = {}
@@ -523,9 +638,9 @@ func validate_loadout_event(event: Dictionary, mode: int = -1) -> String:
 		counts[id] = int(counts.get(id, 0)) + 1
 	var copy_cap := 0
 	if mode in [MatchMode.CONSTRUCTED, MatchMode.QUICK]:
-		copy_cap = 2
+		copy_cap = DECK_COPY_CAP
 	elif mode == MatchMode.SEALED:
-		copy_cap = 3
+		copy_cap = SEALED_MAX_PER_ID
 	if copy_cap > 0:
 		for count in counts.values():
 			if int(count) > copy_cap:
@@ -549,6 +664,230 @@ func validate_loadout_event(event: Dictionary, mode: int = -1) -> String:
 		seen[potion_id] = true
 	return ""
 
+
+## Prove that a structurally valid submitted loadout could actually have been
+## earned from the deterministic sources of the active mode. This runs on the
+## host before it accepts the peer's final handoff; clients never supply the
+## seed, side, or Quick/Sealed configuration used here.
+func validate_loadout_provenance(event: Dictionary, mode: int,
+		match_seed_value: int, slot_index: int,
+		source_config: Dictionary = {}) -> String:
+	if slot_index < 0 or slot_index >= 2:
+		return "loadout_source_side"
+	if typeof(event.get("cards", null)) != TYPE_ARRAY \
+			or typeof(event.get("relics", [])) != TYPE_ARRAY \
+			or typeof(event.get("potions", [])) != TYPE_ARRAY:
+		return "loadout_source_type"
+	var cards: Array = event.get("cards", [])
+	var relics: Array = event.get("relics", [])
+	var potions: Array = event.get("potions", [])
+	var arsenal_reason := _validate_arsenal_source(relics, potions,
+		match_seed_value, slot_index)
+	if arsenal_reason != "":
+		return arsenal_reason
+	match mode:
+		MatchMode.QUICK:
+			if not _source_config_is_valid(source_config):
+				return "loadout_source_config"
+			var expected := quick_source_deck(match_seed_value, slot_index,
+				bool(source_config.get("mirror", false)), int(source_config.get("seed", 0)))
+			if cards != expected:
+				return "loadout_quick_source"
+		MatchMode.SEALED:
+			if not _source_config_is_valid(source_config):
+				return "loadout_source_config"
+			var avail := sealed_source_pool(match_seed_value, slot_index,
+				bool(source_config.get("mirror", false)), int(source_config.get("seed", 0)))
+			var used: Dictionary = {}
+			for raw_id in cards:
+				var id := String(raw_id)
+				used[id] = int(used.get(id, 0)) + 1
+				if int(used[id]) > int(avail.get(id, 0)):
+					return "loadout_sealed_source"
+		MatchMode.DRAFT:
+			if not _draft_cards_attainable(cards, match_seed_value, slot_index):
+				return "loadout_draft_source"
+	return ""
+
+
+func _source_config_is_valid(source_config: Dictionary) -> bool:
+	return typeof(source_config.get("mirror", null)) == TYPE_BOOL \
+		and typeof(source_config.get("seed", null)) == TYPE_INT
+
+
+## Quick and Sealed share the same host-selected source seed formula.
+func _source_effective_seed(match_seed_value: int, slot_index: int,
+		mirror: bool, sub_seed: int) -> int:
+	var base := match_seed_value
+	if sub_seed != 0:
+		base = base ^ (sub_seed * 0x9E3779B9)
+	if not mirror:
+		base = base ^ ((slot_index + 1) * 0x6C62272E)
+	return base
+
+
+## Exact Quick deck, including the order that feeds deterministic card UIDs and
+## draw shuffling. Reproduces NetQuick._regenerate_deck without scene state.
+func quick_source_deck(match_seed_value: int, slot_index: int,
+		mirror: bool, sub_seed: int) -> Array[String]:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = _source_effective_seed(match_seed_value, slot_index, mirror, sub_seed)
+	var source: Array = skirmish_legal_pool()
+	var out: Array[String] = deal_weighted_cards(source, DECK_TARGET, rng,
+		SKIRMISH_DRAFT_WEIGHTS)
+	if out.size() >= DECK_TARGET:
+		return out
+	var counts: Dictionary = {}
+	for existing_id in out:
+		counts[existing_id] = int(counts.get(existing_id, 0)) + 1
+	var guard := 0
+	while out.size() < DECK_TARGET and guard < 4000:
+		guard += 1
+		if source.is_empty():
+			break
+		var pick_id := String(source[rng.randi() % source.size()])
+		var count := int(counts.get(pick_id, 0))
+		if count < DECK_COPY_CAP:
+			out.append(pick_id)
+			counts[pick_id] = count + 1
+	return out
+
+
+## Deterministic Sealed pool, returned as id -> opened copies. Reproduces
+## NetSealed._regenerate_pool without trusting the submitting peer.
+func sealed_source_pool(match_seed_value: int, slot_index: int,
+		mirror: bool, sub_seed: int) -> Dictionary:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = _source_effective_seed(match_seed_value, slot_index, mirror, sub_seed)
+	var source: Array = skirmish_legal_pool()
+	var out: Dictionary = {}
+	var opened: Array[String] = deal_weighted_cards(source,
+		mini(SEALED_POOL_SIZE, source.size()), rng, SKIRMISH_DRAFT_WEIGHTS)
+	for opened_id in opened:
+		out[opened_id] = 1
+	var rolled := opened.size()
+	var guard := 0
+	while rolled < SEALED_POOL_SIZE and guard < 6000 and not source.is_empty():
+		guard += 1
+		var roll_id := String(source[rng.randi() % source.size()])
+		var count := int(out.get(roll_id, 0))
+		if count < SEALED_MAX_PER_ID:
+			out[roll_id] = count + 1
+			rolled += 1
+	return out
+
+
+## Rebuild this match's Arsenal slates for one side (arsenal_relics relic rounds
+## then arsenal_potions potion rounds — the host's lobby pick, which both peers
+## adopted at match start, so the two machines rebuild the SAME offers off the
+## same seed). Final relic/potion lists retain
+## chronological choice order, so they must fit these offers as a subsequence;
+## skipped slates are allowed, forged never-offered items are not.
+func arsenal_source_offers(match_seed_value: int, slot_index: int) -> Dictionary:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = match_seed_value ^ (0xA25E * (slot_index + 1))
+	# ONE BLOCK LIST PER CATEGORY. They used to share one — harmless while the
+	# rule was only "never re-deal" (the pools are disjoint, so a potion id could
+	# never block a relic), but the lap rule reads seen.SIZE against a pool size,
+	# and a shared list counts the other category's ids into that arithmetic.
+	var relic_seen: Array = []
+	var potion_seen: Array = []
+	var relic_rounds: Array = []
+	# Same dealer the live stage runs, lap rule included — this reconstruction is
+	# only an authority boundary if it is the SAME rule, not a second copy of it.
+	for _round in arsenal_relics:
+		relic_rounds.append(deal_arsenal_slate(NET_RELIC_POOL, rng, relic_seen))
+	var potion_rounds: Array = []
+	for _round in arsenal_potions:
+		potion_rounds.append(deal_arsenal_slate(NET_POTION_POOL, rng, potion_seen))
+	return {"relics": relic_rounds, "potions": potion_rounds}
+
+
+func _validate_arsenal_source(relics: Array, potions: Array,
+		match_seed_value: int, slot_index: int) -> String:
+	var offers := arsenal_source_offers(match_seed_value, slot_index)
+	if not _source_choices_fit_rounds(relics, offers.get("relics", [])):
+		return "loadout_relic_source"
+	if not _source_choices_fit_rounds(potions, offers.get("potions", [])):
+		return "loadout_potion_source"
+	return ""
+
+
+func _source_choices_fit_rounds(choices: Array, rounds: Array) -> bool:
+	var round_index := 0
+	for raw_id in choices:
+		var id := String(raw_id)
+		var found := false
+		while round_index < rounds.size():
+			var offered: Array = rounds[round_index]
+			round_index += 1
+			if offered.has(id):
+				found = true
+				break
+		if not found:
+			return false
+	return true
+
+
+## Return all twenty draft slates for one explicit placement of up to two
+## rerolls. The UI never transmits rerolls, so host validation below enumerates
+## every legal placement rather than trusting a client-supplied transcript.
+func draft_offers_for_rerolls(match_seed_value: int, slot_index: int,
+		first_reroll_pick: int = -1, second_reroll_pick: int = -1) -> Array:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = match_seed_value + (slot_index + 1) * 0x9E3779B1
+	var source: Array = skirmish_legal_pool()
+	var buckets := rarity_buckets(source)
+	var bags: Dictionary = {}
+	var out: Array = []
+	for pick_index in DECK_TARGET:
+		var deals := 1
+		if pick_index == first_reroll_pick:
+			deals += 1
+		if pick_index == second_reroll_pick:
+			deals += 1
+		var offered: Array[String] = []
+		for _deal in deals:
+			offered = deal_weighted_triplet(buckets, bags, rng,
+				SKIRMISH_DRAFT_WEIGHTS)
+		out.append(offered)
+	return out
+
+
+func _draft_cards_match_reroll_plan(cards: Array, match_seed_value: int,
+		slot_index: int, first_reroll_pick: int, second_reroll_pick: int) -> bool:
+	var offers := draft_offers_for_rerolls(match_seed_value, slot_index,
+		first_reroll_pick, second_reroll_pick)
+	if offers.size() != cards.size():
+		return false
+	for i in cards.size():
+		var offered: Array = offers[i]
+		if not offered.has(String(cards[i])):
+			return false
+	return true
+
+
+func _draft_cards_attainable(cards: Array, match_seed_value: int,
+		slot_index: int) -> bool:
+	if cards.size() != DECK_TARGET:
+		return false
+	if _draft_cards_match_reroll_plan(cards, match_seed_value, slot_index, -1, -1):
+		return true
+	if DRAFT_REROLL_CAP < 1:
+		return false
+	for first in DECK_TARGET:
+		if _draft_cards_match_reroll_plan(cards, match_seed_value, slot_index, first, -1):
+			return true
+	if DRAFT_REROLL_CAP < 2:
+		return false
+	# With the fixed two-reroll budget this covers the 210 ways to spend both
+	# rerolls (including both on the same slate), for 231 deterministic paths total.
+	for first in DECK_TARGET:
+		for second in range(first, DECK_TARGET):
+			if _draft_cards_match_reroll_plan(cards, match_seed_value, slot_index,
+					first, second):
+				return true
+	return false
 
 ## Deterministic bag helpers for skirmish card generation. The old generated
 ## deck modes sampled from the full pool every time, so a fair seed could still

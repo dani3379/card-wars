@@ -42,8 +42,11 @@ func _ready() -> void:
 	SS.rng_seed = 12345
 	NM.is_host = true
 	NM.local_player_index = 0
+	# ALL THREE terms, or Combat._ready boots SOLO and this shoots the CAMPAIGN
+	# HUD — no foe arsenal at all, which is the one thing the shot is for.
 	NM._connected = true
 	NM.remote_present = true
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0
 	NM.entities.clear()
 	NM._next_entity_id = 1

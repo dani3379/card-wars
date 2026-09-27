@@ -137,23 +137,6 @@ func _ready() -> void:
 	ev.queue_free()
 	await get_tree().process_frame
 
-	# The Widow's Cut: your chit face-up with the open odds and the round tally,
-	# then a cut played so the dead's reveal reads.
-	ev = await _spawn_event("widows_tray")
-	ev._start_cut_game(ev.EVENTS["widows_tray"]["choices"][0]["effects"][0])
-	await _settle(0.6)
-	ev._cut_your_rank = 11
-	ev._cut_your_num.text = "11"
-	ev._cut_refresh_odds()
-	await _settle(0.3)
-	await _capture("cut_open")
-	ev._cut_deck[ev._cut_pos] = 4   # rig the dead to cut low so YOU win the round
-	ev._on_cut_play()
-	await _settle(1.4)
-	await _capture("cut_play")
-	ev.queue_free()
-	await get_tree().process_frame
-
 	# The Courier's Satchel: two draws in (two chits can't bust), the slate
 	# ticked down, the sum standing.
 	ev = await _spawn_event("the_couriers_satchel")
@@ -188,37 +171,6 @@ func _ready() -> void:
 	await _capture("wet_deal")
 	await _settle(1.5)
 	await _capture("wet")
-	ev.queue_free()
-	await get_tree().process_frame
-
-	# The Provost Marshal: the deal settled with his opening bid standing
-	# (your bones open, his helm down, raise/call rows armed), then one
-	# raise in, then the showdown mid-count.
-	ev = await _spawn_event("the_provost_marshal")
-	ev._start_liar_game(
-		ev.EVENTS["the_provost_marshal"]["choices"][0]["effects"][0])
-	await _settle(2.6)
-	await _capture("liar_open")
-	ev._on_liar_raise(ev._liar_q + 1, ev._liar_f)
-	await _settle(1.3)
-	await _capture("liar_mid")
-	ev._on_liar_call()
-	await _settle(2.4)
-	await _capture("liar_reveal")
-	await _settle(4.0)
-	ev.queue_free()
-	await get_tree().process_frame
-
-	# The Old Game: fists and studs at the first throw, then the flash —
-	# both hands open, the count chalked, his spent throw joining the pile.
-	ev = await _spawn_event("the_old_game")
-	ev._start_morra_game(ev.EVENTS["the_old_game"]["choices"][0]["effects"][0])
-	await _settle(1.2)
-	await _capture("morra_open")
-	ev._on_morra_call(3)
-	await _settle(1.0)
-	await _capture("morra_flash")
-	await _settle(2.6)
 	ev.queue_free()
 	await get_tree().process_frame
 
@@ -265,22 +217,6 @@ func _ready() -> void:
 	await _settle(1.2)
 	await _capture("field_bust")
 	await _settle(1.8)
-	ev.queue_free()
-	await get_tree().process_frame
-
-	# The Gibbet Green: the gauge at rest (chain lean = wind), then a throw
-	# that lands and settles a ringer/leaner on the board.
-	RunState.gold = 120
-	ev = await _spawn_event("the_gibbet_green")
-	ev._start_quoits_game(
-		ev.EVENTS["the_gibbet_green"]["choices"][0]["effects"][0])
-	await _settle(1.0)
-	await _capture("gibbet_open")
-	# Aim to null the baked wind — lands the ring on or beside the peg.
-	ev._on_quoits_loose(-ev._quoits_wind if absi(ev._quoits_wind) <= 1 else 0)
-	await _settle(1.4)
-	await _capture("gibbet_throw")
-	await _settle(1.0)
 	ev.queue_free()
 	await get_tree().process_frame
 
@@ -372,63 +308,6 @@ func _ready() -> void:
 	ev._deal_call(true)
 	await _settle(0.8)
 	await _capture("deal_held")
-	ev.queue_free()
-	await get_tree().process_frame
-
-	# The Signal Line: the half-lit beacon wall, then one strike flipping a
-	# cresset and its two neighbours.
-	RunState.gold = 100
-	ev = await _spawn_event("the_signal_line")
-	ev._start_signal_game(
-		ev.EVENTS["the_signal_line"]["choices"][0]["effects"][0])
-	await _settle(0.5)
-	# Hover-telegraph: preview the three cressets a strike on #3 would flip.
-	ev._on_signal_hover(3, true)
-	await _settle(0.2)
-	await _capture("signal_start")
-	ev._on_signal_press(3)
-	await _settle(0.6)
-	await _capture("signal_strike")
-	await _settle(0.5)
-	ev.queue_free()
-	await get_tree().process_frame
-
-	# ── The Sentry's Board (morris_game): placement with the hover ghost,
-	# then the march with a lifted stone's legal posts ringed green. The
-	# drill's replies are deterministic (see _probe_morris_solve.gd), so
-	# the board below is by construction: you 0/2, him 4 then blocking 1.
-	ev = await _spawn_event("the_sentrys_board")
-	ev._start_morris_game(
-		ev.EVENTS["the_sentrys_board"]["choices"][0]["effects"][0])
-	await _settle(0.5)
-	await ev._on_mor_post(0)
-	await _settle(0.3)
-	await ev._on_mor_post(2)
-	await _settle(0.3)
-	ev._on_mor_hover(7)
-	await _settle(0.2)
-	await _capture("morris_place")
-	# From here the shot plays the SOLVED forced line from
-	# _probe_morris_solve.gd: place 7 (he rolls 3), the waiting march
-	# 7->6 leaves his whole drill in zugzwang, the middle post is forced
-	# out, and 0->4 closes the [2,4,6] mill.
-	await ev._on_mor_post(7)
-	await _settle(0.4)
-	# Movement phase: lift the near post; 6 and 8 ring green.
-	await ev._on_mor_post(7)
-	ev._on_mor_hover(6)
-	await _settle(0.2)
-	await _capture("morris_march")
-	await ev._on_mor_post(6)
-	await _settle(0.4)
-	# The kill: 0 -> the vacated middle post. Fired via call_deferred
-	# (a bare unawaited coroutine call is a runtime error) so the chalk
-	# stroke and win caption are caught mid-ceremony.
-	await ev._on_mor_post(0)
-	ev.call_deferred("_on_mor_post", 4)
-	await _settle(0.55)
-	await _capture("morris_mill")
-	await _settle(1.2)
 	ev.queue_free()
 	await get_tree().process_frame
 

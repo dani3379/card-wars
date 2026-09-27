@@ -1,10 +1,17 @@
 extends SceneTree
-## Longer-act map probe (2026-07-07). Verifies the 18-row / 7-combat skeleton
-## generates cleanly across many seeds: the acceptance loop converges into the
-## 24-36 site window, fights land at rows [0,3,9,15], BOTH elite bands (R6,R12)
-## yield exactly one General each, one Reliquary + one Arsenal + two musters
-## are placed, a shop always exists, rest=R16 / boss=R17, and every route still
-## clears the lord gate.
+## Longer-act map probe (2026-07-07; re-pinned 2026-09-19). Verifies the 18-row
+## skeleton generates cleanly across many seeds: the acceptance loop converges
+## into the 24-36 site window, the MANDATORY fights land at rows [0,3,15], BOTH
+## elite bands (R6,R12) yield exactly one General each AND fill every other lane
+## with road so the fight is declinable, one Reliquary + one Arsenal + two
+## musters are placed, a shop always exists, rests sit at R9+R16, boss at R17,
+## and every route still clears the lord gate.
+##
+## The row literals it used to carry are now read off RunState's constants. It
+## pinned [0,3,9,15] in three separate places, and the 2026-09-19 spine change
+## failed all three — correctly, but it is the same duplicate-rule drift this
+## codebase keeps paying for, so the spine is named ONCE here now.
+## The COUNT and its span are `tools/_probe_fight_count.tscn`, not this file.
 ##
 ## Run: Godot_console.exe --headless --path "D:\Godot" --script res://tools/_probe_map_longer.gd
 
@@ -38,14 +45,20 @@ func _run() -> void:
 	_ck("MAP_HEIGHT == 18", RS.MAP_HEIGHT == 18, str(RS.MAP_HEIGHT))
 	_ck("BOSS_ROW == 17", RS.BOSS_ROW == 17, str(RS.BOSS_ROW))
 	_ck("REST_ROW == 16", RS.REST_ROW == 16, str(RS.REST_ROW))
-	_ck("FIGHT_ROWS == [0,3,9,15]", RS.FIGHT_ROWS == [0, 3, 9, 15], str(RS.FIGHT_ROWS))
+	# 2026-09-19: the mandatory spine dropped row 9, which became MID_REST_ROW.
+	_ck("FIGHT_ROWS == [0,3,15]", RS.FIGHT_ROWS == [0, 3, 15], str(RS.FIGHT_ROWS))
 	_ck("ELITE_ROWS == [6,12]", RS.ELITE_ROWS == [6, 12], str(RS.ELITE_ROWS))
+	_ck("MID_REST_ROW == 9", RS.MID_REST_ROW == 9, str(RS.MID_REST_ROW))
+	_ck("the mid camp is not also a fight row",
+		not RS.FIGHT_ROWS.has(RS.MID_REST_ROW) and not RS.ELITE_ROWS.has(RS.MID_REST_ROW),
+		"row %d" % RS.MID_REST_ROW)
 
 	var seeds := 60
 	var out_of_window := 0
 	var min_sites := 999
 	var max_sites := 0
 	var elite_bad := 0
+	var band_shape_bad := 0
 	var warroad_bad := 0
 	var treasure_bad := 0
 	var arsenal_bad := 0
@@ -65,7 +78,11 @@ func _run() -> void:
 			var by_type := {}
 			var max_row := 0
 			var rest_rows := []
-			var fight_row_hits := {0: false, 3: false, 9: false, 15: false}
+			# Derived from the constant, never restated — a second spelling of
+			# the spine is exactly how a probe goes on testing last month's map.
+			var fight_row_hits := {}
+			for _fr in RS.FIGHT_ROWS:
+				fight_row_hits[int(_fr)] = false
 			for row_nodes in flat:
 				for nd in (row_nodes as Array):
 					n += 1
@@ -74,7 +91,7 @@ func _run() -> void:
 					max_row = maxi(max_row, int(nd.row))
 					if t == "rest":
 						rest_rows.append(int(nd.row))
-					if t in ["combat", "elite"] and int(nd.row) in [0, 3, 9, 15]:
+					if t in ["combat", "elite"] and fight_row_hits.has(int(nd.row)):
 						fight_row_hits[int(nd.row)] = true
 			min_sites = mini(min_sites, n)
 			max_sites = maxi(max_sites, n)
@@ -85,18 +102,41 @@ func _run() -> void:
 			if int(by_type.get("elite", 0)) != 3:
 				elite_bad += 1
 			# War-road avoidability: the fight-row General sits on a ≥2-lane
-			# row (dodgeable by routing), and at least one elite band is ≥2
-			# lanes wide so the mid-road spike can be dodged too.
+			# row (dodgeable by routing), and — tightened 2026-09-19 — EVERY
+			# elite band is ≥2 lanes. Was `or`, which was sufficient while a
+			# band's non-spike lanes were plain holds (dodging changed WHICH
+			# fight, not whether one happened). Now those lanes are road, so a
+			# width-1 band is a General that cannot be declined at all.
 			var wr_ok := false
-			for fr2 in [3, 9, 15]:
-				for nd2 in (flat[fr2] as Array):
+			for fr2 in RS.FIGHT_ROWS:
+				if int(fr2) == 0:
+					continue  # never the landing row
+				for nd2 in (flat[int(fr2)] as Array):
 					if String(nd2.type) == "elite" \
-							and (flat[fr2] as Array).size() >= 2:
+							and (flat[int(fr2)] as Array).size() >= 2:
 						wr_ok = true
-			var band_wide: bool = (flat[6] as Array).size() >= 2 \
-				or (flat[12] as Array).size() >= 2
+			var band_wide: bool = true
+			for er in RS.ELITE_ROWS:
+				if (flat[int(er)] as Array).size() < 2:
+					band_wide = false
 			if not (wr_ok and band_wide):
 				warroad_bad += 1
+			# THE BAND CARRIES EXACTLY ONE SPIKE AND THE REST IS ROAD. This is
+			# the property that makes the fight count a decision; without it the
+			# span collapses to zero and nothing else here would notice.
+			for er2 in RS.ELITE_ROWS:
+				var band2: Array = flat[int(er2)] as Array
+				var spikes := 0
+				var holds := 0
+				for nd3 in band2:
+					var t3 := String(nd3.type)
+					if t3 == "elite":
+						spikes += 1
+					elif t3 == "combat":
+						holds += 1
+				if spikes != 1 or holds != 0:
+					band_shape_bad += 1
+					break
 			# Current reward structure: one Reliquary, one Arsenal, two musters.
 			if int(by_type.get("treasure", 0)) < 1:
 				treasure_bad += 1
@@ -106,11 +146,11 @@ func _run() -> void:
 				recruit_bad += 1
 			if int(by_type.get("shop", 0)) < 1:
 				shop_bad += 1
-			# Boss sits at row 17; rest at row 16
+			# Boss sits at row 17; rests at row 16 and the mid-act camp.
 			if int(by_type.get("boss", 0)) != 1 or max_row != 17:
 				bossrow_bad += 1
 			for rr in rest_rows:
-				if rr != 16:
+				if rr != RS.REST_ROW and rr != RS.MID_REST_ROW:
 					bossrow_bad += 1
 					break
 			# All four fight rows populated with a combat/elite
@@ -127,14 +167,16 @@ func _run() -> void:
 		"%d out of window (min=%d max=%d)" % [out_of_window, min_sites, max_sites])
 	_ck("every act has 3 Generals (2 bands + war road)", elite_bad == 0,
 		"%d bad" % elite_bad)
-	_ck("war-road General avoidable + a dodgeable band", warroad_bad == 0,
+	_ck("war-road General avoidable + EVERY band dodgeable", warroad_bad == 0,
 		"%d bad" % warroad_bad)
+	_ck("each elite band is one spike + road (no plain holds)", band_shape_bad == 0,
+		"%d bad" % band_shape_bad)
 	_ck("every act has a Reliquary", treasure_bad == 0, "%d bad" % treasure_bad)
 	_ck("every act has an Arsenal", arsenal_bad == 0, "%d bad" % arsenal_bad)
 	_ck("every act has >=2 musters", recruit_bad == 0, "%d bad" % recruit_bad)
 	_ck("every act has >=1 shop", shop_bad == 0, "%d bad" % shop_bad)
-	_ck("boss at R17 + rest at R16", bossrow_bad == 0, "%d bad" % bossrow_bad)
-	_ck("all four fight rows populated", fightrow_bad == 0, "%d bad" % fightrow_bad)
+	_ck("boss at R17; rests only at R16+R9", bossrow_bad == 0, "%d bad" % bossrow_bad)
+	_ck("every mandatory fight row populated", fightrow_bad == 0, "%d bad" % fightrow_bad)
 	_ck("every route clears the lord gate", gate_bad == 0, "%d bad" % gate_bad)
 
 	print("[map_longer] site window observed: min=%d max=%d over %d acts"

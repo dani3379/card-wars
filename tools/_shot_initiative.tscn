@@ -1,0 +1,4 @@
+[gd_scene load_steps=2 format=3]
+[ext_resource type="Script" path="res://tools/_shot_initiative.gd" id="1"]
+[node name="InitiativeShots" type="Node"]
+script = ExtResource("1")

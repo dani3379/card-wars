@@ -54,6 +54,12 @@ func _run_test() -> void:
 	NM.local_player_index = 1
 	NM._connected = true
 	NM.remote_present = true
+	# All THREE terms of is_connected_to_peer(), or Combat boots SOLO and this
+	# probe silently tests the campaign reposition path instead of the client one
+	# (it did exactly that until 2026-08-04 — _compatibility_confirmed was missing,
+	# so `_is_net()` was false throughout and every assertion below was measuring
+	# `_on_field_move_dropped`'s solo arm). Same trap _probe_net_clash calls out.
+	NM._compatibility_confirmed = true
 	NM.entities.clear()
 	NM._next_entity_id = 1
 	# send_intent no-ops safely with a null multiplayer peer — we observe EFFECTS.
@@ -96,14 +102,26 @@ func _run_test() -> void:
 	await create_timer(0.1).timeout
 	_check(_card_center(card).distance_to(dest_center) < 30.0,
 		"card tracks the cursor mid-drag (not pinned by the idle bob)")
-	card._end_field_grab(dest_center)                     # drop → intent + return home
+	card._end_field_grab(dest_center)                     # drop → intent + local prediction
 	await create_timer(0.2).timeout
 
-	# Client doesn't move locally: it returns home and waits for the host snapshot.
+	# CONTRACT UPDATED 2026-08-04. This used to assert the card SNAPPED BACK HOME and
+	# waited for the host snapshot to perform the move. That is no longer what ships:
+	# _net_field_move_dropped's client arm PREDICTS the approved move locally (see its
+	# comment) so the drag lands where the player dropped it instead of springing back
+	# for a round trip, and the host's snapshot then confirms the same slot. Asserting
+	# the retired behaviour made this probe permanently red — and because it also
+	# booted SOLO (see the _compatibility_confirmed note above), the red was never
+	# about the client path at all.
 	_check(int(combat._moves_used_this_turn) == 1, "client counted the move locally")
-	_check(int(card.current_lane) == 0, "card snapped back home pending host sync")
-	_check(_card_center(card).distance_to(_center(home_slot)) < 80.0,
-		"returned card sits ON its home slot (not off in a random place)")
+	_check(int(card.current_lane) == 2, "client predicted the move to lane 2")
+	_check(_card_center(card).distance_to(_center(dest_slot)) < 80.0,
+		"predicted card sits ON the destination slot (not off in a random place)")
+	_check(combat._row_array(false, combat.ROW_FRONT)[0] == null,
+		"home slot released by the prediction")
+	# home_slot is still the thing the sync must NOT put it back in.
+	_check(combat._row_array(false, combat.ROW_FRONT)[0] != card,
+		"card no longer registered at home (%s)" % str(home_slot != null))
 
 	# ── The host's board_sync arrives and performs the actual move to lane 2. ──
 	combat._net_apply_board_sync({

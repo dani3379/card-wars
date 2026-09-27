@@ -1224,6 +1224,96 @@ void fragment() {
 static var _gilt_shader: Shader = null
 
 
+# ── The waiting writ catches lamplight ───────────────────────────────────────
+# Loading cards are already physical face-down documents. Give the whole set one
+# restrained, SCREEN-SPACE light pass while their ornate faces hydrate: because
+# SCREEN_UV is shared by every sleeve, one band crosses the row/grid instead of
+# each card pulsing like an unrelated widget. TIME keeps the animation on the GPU
+# (no per-card _process/tween), and every sleeve shares one material so the
+# Compatibility renderer sees the fewest possible material state changes.
+#
+# The effect is intentionally quiet: a slow 1.2% breath keeps an off-screen band
+# from reading as a frozen loader, while the narrow core mostly catches the warm
+# ink/gilt already printed in card_back.png. Reduce Motion and headless callers
+# never receive the material; their final state remains byte-for-byte unchanged.
+const LOADING_MUSTER_ROUTE = preload(
+	"res://scripts/ui/painters/LoadingMusterRoute.gd")
+const LOADING_WRIT_CODE := """
+shader_type canvas_item;
+render_mode unshaded;
+
+varying vec4 vertex_tint;
+
+void vertex() {
+	vertex_tint = COLOR;
+}
+
+void fragment() {
+	vec4 base = texture(TEXTURE, UV) * vertex_tint;
+	float axis = SCREEN_UV.x + SCREEN_UV.y * 0.20;
+	// One slowly roaming lamplight. Keeping the head near the viewport means
+	// even a sub-200 ms warm-cache wait catches a visible piece of the effect.
+	// the same head position, so the light travels across the SET, not per-card.
+	float head = 0.60 + 0.72 * sin(TIME * 1.55);
+	float distance_to_light = abs(axis - head);
+	float veil = 1.0 - smoothstep(0.075, 0.19, distance_to_light);
+	float core = 1.0 - smoothstep(0.018, 0.060, distance_to_light);
+
+	float luminance = dot(base.rgb, vec3(0.299, 0.587, 0.114));
+	float warmth = smoothstep(0.05, 0.42, base.r - base.b + 0.10)
+		* (1.0 - smoothstep(0.80, 0.98, luminance));
+	float breath = 0.994 + 0.012 * (0.5 + 0.5 * sin(TIME * 1.45));
+	float light = veil * 0.025 + core * 0.105;
+	vec3 colour = base.rgb * breath;
+	colour += vec3(1.0, 0.72, 0.28) * light * (0.30 + warmth * 0.70) * base.a;
+	COLOR = vec4(min(colour, vec3(1.0)), base.a);
+}
+"""
+static var _loading_writ_shader: Shader = null
+static var _loading_writ_material: ShaderMaterial = null
+
+
+static func loading_writ_material() -> ShaderMaterial:
+	# One immutable, shared TIME-driven material. Callers must not set parameters
+	# on it; sharing is what keeps a 30-card loading grid cheap and coordinated.
+	if _loading_writ_material == null:
+		_loading_writ_shader = Shader.new()
+		_loading_writ_shader.code = LOADING_WRIT_CODE
+		_loading_writ_material = ShaderMaterial.new()
+		_loading_writ_material.shader = _loading_writ_shader
+	return _loading_writ_material
+
+
+static func arm_loading_writ(item: CanvasItem,
+		group: CanvasItem = null) -> void:
+	## Give a reserved face-down card the shared waiting-state lamplight.
+	## Reveal code still owns the flip/free; this helper changes no geometry.
+	if item == null or not is_instance_valid(item):
+		return
+	item.set_meta("loading_writ", true)
+	if DisplayServer.get_name() == "headless" \
+			or (UserSettings != null and UserSettings.reduce_motion):
+		return
+	item.material = loading_writ_material()
+	if group == null or not is_instance_valid(group):
+		return
+	var route = null
+	var route_ref = group.get_meta("loading_muster_route") \
+		if group.has_meta("loading_muster_route") else null
+	if route_ref is WeakRef:
+		route = route_ref.get_ref()
+	if route == null or not is_instance_valid(route) \
+			or route.is_queued_for_deletion() \
+			or not bool(route.call("is_accepting_covers")):
+		# Node2D is invisible to Container sorting: the route gets the group's
+		# transforms/scroll clipping without owning one pixel of layout.
+		route = LOADING_MUSTER_ROUTE.new()
+		route.name = "LoadingMusterRoute"
+		group.add_child(route, false, Node.INTERNAL_MODE_FRONT)
+		group.set_meta("loading_muster_route", weakref(route))
+	route.call("register_cover", item)
+
+
 static func gilt_material(strength: float = 1.0) -> ShaderMaterial:
 	if _gilt_shader == null:
 		_gilt_shader = Shader.new()
@@ -1441,6 +1531,8 @@ static func pulse_label(lbl: Label, flash_color: Color = Color(1.0, 0.85, 0.30))
 	# One-shot color-flash + scale punch on a label. Used by Shop / Rest / Reward
 	# to give gold and HP labels feedback when they change.
 	if lbl == null or not is_instance_valid(lbl):
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
 		return
 	var rest_color: Color = lbl.get_theme_color("font_color")
 	var rest_scale := lbl.scale
@@ -1720,22 +1812,46 @@ static func hover_lift(btn: Control, lift: float = 1.03, target: Control = null,
 	if UserSettings != null and UserSettings.reduce_motion:
 		return
 	var tgt: Control = target if target != null else btn
+	# Recorded so `arm_press` can DERIVE the rest pose instead of sampling
+	# `scale` mid-tween — see the header there for why sampling is wrong.
+	tgt.set_meta("_motion_hover_lift", lift)
+	# And published on the BUTTON so the press lands on the same node the hover
+	# lifts. Without this every offer tile in the game — Recruit's slate, the
+	# Shop's shelf, Reward's cards, all of which are a painted wrapper under an
+	# invisible catcher — would lift on hover and then dip an invisible rect on
+	# press, i.e. nothing, on precisely the controls a player presses most.
+	if tgt != btn:
+		btn.set_meta("_motion_feel_target", tgt)
+	# WEAKREF, BECAUSE `tgt` AND `btn` ARE DIFFERENT NODES AND DIE SEPARATELY.
+	# The connection is owned by `btn`, so capturing `btn` would be safe — but on
+	# every offer tile in the game (Recruit's slate, the Shop's shelf, Reward's
+	# cards) `tgt` is the painted WRAPPER under an invisible catcher, and a
+	# teardown that frees the wrapper first while a queued `mouse_exited` is
+	# still in flight resumes this lambda on a dead capture. The engine reports
+	# that while MARSHALLING captures, before the body runs, so the
+	# `is_instance_valid(tgt)` that opened both of these could never suppress it
+	# — the lambda was already being aborted. See
+	# reference_deferred_lambda_node_capture; measured as a recurring
+	# "Lambda capture at index 0 was freed" through every pilot soak.
+	var tgt_ref: WeakRef = weakref(tgt)
 	btn.mouse_entered.connect(func():
-		if not is_instance_valid(tgt):
+		var t := tgt_ref.get_ref() as Control
+		if t == null:
 			return
 		if raise_z:
-			tgt.z_index = 1
-		tgt.pivot_offset = tgt.size * 0.5
-		var tw := tgt.create_tween()
-		tw.tween_property(tgt, "scale", Vector2(lift, lift), 0.12) \
+			t.z_index = 1
+		t.pivot_offset = t.size * 0.5
+		var tw := t.create_tween()
+		tw.tween_property(t, "scale", Vector2(lift, lift), 0.12) \
 			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
 	btn.mouse_exited.connect(func():
-		if not is_instance_valid(tgt):
+		var t := tgt_ref.get_ref() as Control
+		if t == null:
 			return
 		if raise_z:
-			tgt.z_index = 0
-		var tw := tgt.create_tween()
-		tw.tween_property(tgt, "scale", Vector2.ONE, 0.14) \
+			t.z_index = 0
+		var tw := t.create_tween()
+		tw.tween_property(t, "scale", Vector2.ONE, 0.14) \
 			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT))
 
 
@@ -1754,6 +1870,15 @@ static func punch(ctrl: Control, amount: float = 1.08) -> void:
 		var old = ctrl.get_meta("_motion_punch")
 		if old is Tween and old.is_valid():
 			old.kill()
+	# And any press still springing back. A picked tile runs both — the release
+	# rise (0.11s) overlaps the claim's punch — and they are two tweeners on one
+	# property, which resolves to whichever ran last that frame. Punch wins by
+	# construction here: it is the LATER event and it is the one carrying the
+	# meaning (the pick), where the rise is just the finger coming off.
+	if ctrl.has_meta("_motion_press_tw"):
+		var pressing = ctrl.get_meta("_motion_press_tw")
+		if pressing is Tween and pressing.is_valid():
+			pressing.kill()
 	var tw := ctrl.create_tween()
 	ctrl.set_meta("_motion_punch", tw)
 	tw.tween_property(ctrl, "scale", Vector2(amount, amount), PUNCH) \
@@ -1821,6 +1946,321 @@ static func press(ctrl: Control, spread: float = 1.07, dip: float = 0.88,
 	else:
 		tw.tween_property(ctrl, "scale", rest, time(SETTLE)) \
 			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+# ── THE PRESS ACKNOWLEDGEMENT (2026-09-17) ─────────────────────────────────
+#
+# WHY THIS IS ARMED ON `button_down` AND NOT ON `pressed` — the whole point of
+# the pass. `pressed` fires on RELEASE. Every reaction in the shell was
+# therefore waiting out the player's own finger: 60-120 ms on a brisk click and
+# UNBOUNDED on a deliberate one. NN/g puts 0.1 s as the limit for a system to
+# feel like it is reacting instantaneously and for the user to feel they are
+# directly manipulating the object — so a reaction that begins when the mouse
+# comes back UP is, by that measure, never instantaneous however good it looks.
+# Material specifies its ripple the same way for the same reason: it appears on
+# pointerdown and holds until pointerup.
+#
+# THE HOLD IS FREE AND IT IS DOING REAL WORK. The 2022 impact-feel study
+# (arXiv:2208.06155, which ranked 19 feedback features against player sentiment
+# across Steam's top action games) put HIT STOP first of the three whose absence
+# "may ruin players' impact feel". A held button IS a hit stop the player is
+# performing themselves — the control dips, stays dipped exactly as long as they
+# hold, and springs on release. Nothing has to schedule it, and it is the reason
+# this reads as weight rather than as a blink.
+#
+# SQUASH, NOT SHRINK. A uniform scale-down reads as the control RECEDING — it
+# got further away. Squashing y harder than x reads as pushed INTO the page,
+# which is the thing that actually happened. Same tween, same cost; it is the
+# one Disney principle every juice source names first.
+#
+# THE REST POSE IS DERIVED, NEVER SAMPLED. Reading `ctrl.scale` at press time is
+# the obvious implementation and it is wrong: `hover_lift` may still be tweening,
+# so a fast click samples a mid-tween 1.01, springs back to 1.01, and leaves the
+# control permanently 1% large with no error anywhere and nothing to catch it.
+# The rest is computed from the hover state instead, off the `_motion_hover_lift`
+# meta `hover_lift` writes, so it is exact at every point of that tween.
+#
+# IT MUST ALSO RELEASE ON `mouse_exited`. Press, drag off, release: Godot emits
+# `button_up` but NOT `pressed`, so a press armed on those two alone leaves the
+# control dented for the rest of the screen's life. That path is also the
+# player's CANCEL, which is the reason the commit stays on `pressed` while only
+# the acknowledgement moves to `button_down`.
+#
+# DECORATIVE. The pressed StyleBox already carries the state, so Reduce Motion
+# declines the whole thing and no information is lost — and the check is made at
+# PRESS time rather than at arm time, because the setting is live.
+# THE DIP IS DENOMINATED IN PIXELS, NOT IN A RATIO, and that is a correction
+# made by measurement rather than taste. The first build used a flat scale
+# (0.982, 0.944) for everything, and `_shot_press_feel` printed what that
+# actually buys at each of the four house button sizes:
+#
+#     primary  220x52   edge travel  x 1.98px   y 1.46px
+#     back     189x42                x 1.70px   y 1.18px
+#     themed   200x56                x 1.80px   y 1.57px
+#     close     44x44                x 0.40px   y 1.23px
+#
+# Two things are wrong there and they are the same thing. The close button moves
+# FOUR TENTHS OF A PIXEL horizontally — below the threshold at which anything is
+# happening — and the big plate travels five times further than the small chip,
+# so a proportional squash says the wide button was pressed HARDER, which is
+# backwards: one thumb pushed both. Deriving the scale from a target travel
+# instead makes the gesture the same physical event at every size, which is what
+# it is. Clamped at both ends — a 20px chip would otherwise fold by a quarter,
+# and a full-height banner would get a ratio too small to render.
+const PRESS_DIP: float = 0.055   # QUAD-out, comfortably inside NN/g's 0.1 s
+const PRESS_RISE: float = 0.11   # BACK-out spring back to rest
+const PRESS_TRAVEL_Y: float = 2.6   # px each edge moves in — the surface giving
+const PRESS_TRAVEL_X: float = 1.3   # half that across, so it reads as a squash
+const PRESS_SCALE_FLOOR: float = 0.86
+const PRESS_SCALE_CEIL: float = 0.988
+
+
+static func press_squash_for(size: Vector2) -> Vector2:
+	## The scale that moves each edge in by PRESS_TRAVEL_*, for a control of
+	## this size. Exposed (and pure) so the shot tool can print the travel it
+	## will produce without pressing anything.
+	var sx: float = 1.0 - (PRESS_TRAVEL_X * 2.0) / maxf(size.x, 1.0)
+	var sy: float = 1.0 - (PRESS_TRAVEL_Y * 2.0) / maxf(size.y, 1.0)
+	sx = clampf(sx, PRESS_SCALE_FLOOR, PRESS_SCALE_CEIL)
+	sy = clampf(sy, PRESS_SCALE_FLOOR, PRESS_SCALE_CEIL)
+	# Y NEVER SQUASHES LESS THAN X. Fixed travel inverts on a TALL NARROW control
+	# (a 40x200 rail pinches 1.3px sideways against 2.6px over five times the
+	# span), and a control nipped at the waist is not a control being pushed
+	# into the page — the vertical compression IS the 2D shorthand for depth, so
+	# it has to stay the dominant axis at every aspect. A tall control simply
+	# ends up squashing uniformly, which is the right worst case.
+	return Vector2(maxf(sx, sy), sy)
+
+
+static func _press_rest(btn: BaseButton, tgt: Control) -> Vector2:
+	var lift: float = 1.0
+	# `has_focus` as well as `is_hovered`: a keyboard-focused button is lifted by
+	# the same tween (MainMenu mirrors focus into hover so the column answers the
+	# arrow keys), and Enter fires button_down/up with the cursor nowhere near it.
+	# Reading hover alone springs a focused button back to 1.0 and eats the lift.
+	if is_instance_valid(btn) and (btn.is_hovered() or btn.has_focus()) \
+			and tgt.has_meta("_motion_hover_lift"):
+		lift = float(tgt.get_meta("_motion_hover_lift"))
+	return Vector2(lift, lift)
+
+
+static func _press_tween(tgt: Control, to: Vector2, dur: float, trans: int) -> void:
+	if tgt.has_meta("_motion_press_tw"):
+		var old = tgt.get_meta("_motion_press_tw")
+		if old is Tween and old.is_valid():
+			old.kill()
+	tgt.pivot_offset = tgt.size * 0.5
+	var tw := tgt.create_tween()
+	tgt.set_meta("_motion_press_tw", tw)
+	tw.tween_property(tgt, "scale", to, dur) \
+		.set_trans(trans).set_ease(Tween.EASE_OUT)
+
+
+## Arm a button so it answers the instant it is pushed.
+##
+## opts: `target` (the node that visibly dips — for an invisible click-catcher
+## laid over a card wrapper, mirroring `hover_lift`) · `squash` · `mark` (fire
+## `press_mark` at the cursor, for weighted actions only) · `accent`.
+static func arm_press(btn: BaseButton, opts: Dictionary = {}) -> void:
+	if btn == null or not is_instance_valid(btn):
+		return
+	if btn.has_meta("_motion_press_armed"):
+		return
+	btn.set_meta("_motion_press_armed", true)
+
+	# null, not a default Vector2: the squash is derived from the TARGET's size
+	# at press time, and the target is not known until then (see `resolve`).
+	var squash = opts.get("squash", null)
+	var mark: bool = bool(opts.get("mark", false))
+	var accent: Color = opts.get("accent", Color(1.0, 0.86, 0.52))
+	var explicit_target = opts.get("target", null)
+
+	# THE TARGET IS RESOLVED AT PRESS TIME, NOT HERE. The funnel arms a button on
+	# `node_added`, and a screen's own `hover_lift(btn, lift, wrapper)` normally
+	# runs a few lines LATER — so a target captured at arm time is always the
+	# bare button and the wrapper never moves. Resolving on each press means the
+	# two can be wired in either order.
+	# WEAKREFS, BECAUSE THIS IS ARMED ON EVERY BUTTON IN THE GAME.
+	# `GameTheme._install_press_feedback` hooks `SceneTree.node_added`, so these
+	# four lambdas exist for every BaseButton that has ever been built — and a
+	# screen teardown emits `mouse_exited` on whatever the cursor was over while
+	# that button is being freed. A freed capture is reported by the engine
+	# while it MARSHALS the captures, before the body runs, so the
+	# `is_instance_valid(btn)` opening each arm could never suppress it: the
+	# lambda was already being aborted. Same defect and same fix as `hover_lift`
+	# above; see reference_deferred_lambda_node_capture.
+	var btn_ref: WeakRef = weakref(btn)
+	var target_ref: WeakRef = weakref(explicit_target if explicit_target is Control else null)
+	var resolve := func() -> Control:
+		var et := target_ref.get_ref() as Control
+		if et != null:
+			return et
+		var b := btn_ref.get_ref() as BaseButton
+		if b != null and b.has_meta("_motion_feel_target"):
+			var m = b.get_meta("_motion_feel_target")
+			if m is Control and is_instance_valid(m):
+				return m
+		return b
+
+	# BOTH ARMS ARE IDEMPOTENT, via `_motion_press_down`, and that is not
+	# defensiveness — it is what stops this fighting `hover_lift`. Releasing on
+	# `mouse_exited` is required (below), but `mouse_exited` is also hover's own
+	# trigger, and an unguarded release would put a second tween on `scale` for
+	# every ordinary un-hover: two tweeners writing one property, resolved by
+	# whichever ran last that frame. Only a control that is actually dented
+	# releases.
+	var down := func() -> void:
+		var b := btn_ref.get_ref() as BaseButton
+		if b == null or b.disabled:
+			return
+		if UserSettings != null and UserSettings.reduce_motion:
+			return
+		if bool(b.get_meta("_motion_press_down", false)):
+			return
+		var tgt: Control = resolve.call()
+		if tgt == null or not is_instance_valid(tgt) or not tgt.is_inside_tree():
+			return
+		b.set_meta("_motion_press_down", true)
+		var sq: Vector2 = squash if squash is Vector2 else press_squash_for(tgt.size)
+		_press_tween(tgt, _press_rest(b, tgt) * sq, PRESS_DIP,
+			Tween.TRANS_QUAD)
+		if mark:
+			press_mark(b, press_point_on(b), accent)
+
+	var up := func() -> void:
+		var b := btn_ref.get_ref() as BaseButton
+		if b == null:
+			return
+		if not bool(b.get_meta("_motion_press_down", false)):
+			return
+		b.set_meta("_motion_press_down", false)
+		var tgt: Control = resolve.call()
+		if tgt == null or not is_instance_valid(tgt) or not tgt.is_inside_tree():
+			return
+		_press_tween(tgt, _press_rest(b, tgt), PRESS_RISE, Tween.TRANS_BACK)
+
+	btn.button_down.connect(down)
+	btn.button_up.connect(up)
+	# Held, then dragged off. Godot drops its own pressed StyleBox here and
+	# `button_up` will arrive over some other control entirely, so without this
+	# the dent outlives the gesture. Re-entering while still held re-dips, which
+	# is the engine's own draw-mode behaviour and the reason both arms exist
+	# rather than just the release.
+	btn.mouse_exited.connect(up)
+	btn.mouse_entered.connect(func() -> void:
+		var b := btn_ref.get_ref() as BaseButton
+		if b != null and b.button_pressed:
+			down.call())
+
+
+## The at-cursor impression, for weighted presses only.
+##
+## IT COLLAPSES INWARD, and that is the whole reason it is not just `ring` with
+## the house defaults. Every other ring in this game EXPANDS, because every one
+## of them is an emission — a blow landing, a keystone firing, wax taking a die.
+## A press is the opposite event: the control ABSORBED something. Running the
+## same engine backwards reads as taken rather than given off, and being the only
+## inward mark in the kit it can never be mistaken for one of those beats.
+##
+## It sits at the CURSOR, not at the control's centre, which is the one thing
+## Material's ripple carries that a stylebox swap cannot: WHERE the press landed.
+## That makes a press that caught the wrong control, or the gap between two,
+## visible as such instead of merely ineffective.
+##
+## Deliberately NOT fired by every button. Material needs a ripple everywhere
+## because a flat surface has no other press channel; here the plaque already
+## darkens and the control already dips, so a mark on all 214 of them would be
+## the noise every juice source warns about. It is reserved for the actions that
+## spend something.
+##
+## IT IS A BLOOM, NOT A RING, and the first build got that wrong in the exact way
+## this codebase has already paid for once. Run through `Motion.ring` it
+## photographed as a thin hairline "O" (`_shot_press_feel/mark_open`) — which is
+## the ring rebuild's own verdict on the Line2D circles it replaced: "the shape
+## of a selection indicator rather than force". At a 40px diameter there is no
+## band width available to read as anything else, so the fix is not a fatter
+## stroke but a different object: a FILLED soft falloff has no stroke to be thin.
+## It is also the truer read. A wireframe says "this region is selected"; warmth
+## gathering to a point says the surface took something, which is the event.
+static func press_mark(host: Node, at: Vector2,
+		accent: Color = Color(1.0, 0.86, 0.52)) -> void:
+	if host == null or not is_instance_valid(host) or not host.is_inside_tree():
+		return
+	if DisplayServer.get_name() == "headless":
+		return
+	var body := Sprite2D.new()
+	# ~1.5, not the 2.2 default: at 2.2 the falloff is so peaked that a small
+	# bloom is bright for a few px and faint everywhere else — the note on
+	# `draw_glow` records that same setting deleting an ember from its own frame.
+	body.texture = glow_tex(1.5)
+	body.position = at
+	body.z_index = 40
+	body.modulate = Color(accent.r, accent.g, accent.b, 0.0)
+	host.add_child(body)
+
+	# The hot core is a SECOND sprite for the reason draw_glow uses two passes:
+	# modulate MULTIPLIES, so a white centre baked into one tinted sprite is
+	# multiplied straight back down to the tint. Two passes is also what keeps
+	# the house contrast rule reachable — a lone warm bloom on a warm plaque is
+	# camouflage, and the hot middle is the whole read.
+	var core := Sprite2D.new()
+	core.texture = glow_tex(2.4)
+	core.position = at
+	core.z_index = 41
+	core.modulate = Color(1.0, 0.97, 0.90, 0.0)
+	host.add_child(core)
+
+	# Wide and faint, closing onto the cursor as it brightens — the absorption.
+	# The brightening is what stops the contraction reading as a dying ember.
+	var wide := 2.05
+	var tight := 0.52
+	body.scale = Vector2(wide, wide)
+	core.scale = Vector2(wide * 0.62, wide * 0.62)
+	var tw := body.create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(body, "scale", Vector2(tight, tight), 0.19) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	# PEAKS HELD DOWN BECAUSE THE MARK LANDS ON WORDS. A button is mostly its
+	# label, so the press point is usually ON the text — and at 0.80/0.95 the
+	# bloom washed the "E" out of TAKE THE FIELD (`mark_on_plate_zoom`, first
+	# build). There is no z-order fix available: a Button draws its own text, so
+	# a child sprite is always above it and `show_behind_parent` puts the mark
+	# behind the plaque entirely. The channel has to be turned down instead, and
+	# it can be — what sells this is warmth ARRIVING, not how bright it gets.
+	tw.tween_property(body, "modulate:a", 0.50, 0.09) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(core, "scale", Vector2(tight * 0.42, tight * 0.42), 0.19) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(core, "modulate:a", 0.52, 0.09) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.chain().tween_property(body, "modulate:a", 0.0, 0.17) \
+		.set_ease(Tween.EASE_IN)
+	tw.parallel().tween_property(core, "modulate:a", 0.0, 0.13) \
+		.set_ease(Tween.EASE_IN)
+	tw.chain().tween_callback(body.queue_free)
+	tw.chain().tween_callback(core.queue_free)
+
+
+## Where on a control a press mark belongs.
+##
+## `get_local_mouse_position()` is the obvious answer and it is only sometimes
+## right: a button fired from the KEYBOARD (Enter on the focused control, which
+## is the whole point of this game's focus mirroring) reports wherever the cursor
+## happens to be parked, which can be the other side of the screen — caught in
+## `_shot_press_feel`, where a synthetic press put the mark 500px off the button
+## in open space. Outside the rect, the mark belongs at the centre; inside, it is
+## inset from the edges so a press on the rim does not hang the bloom half off.
+static func press_point_on(ctrl: Control) -> Vector2:
+	if ctrl == null or not is_instance_valid(ctrl):
+		return Vector2.ZERO
+	var mid: Vector2 = ctrl.size * 0.5
+	var p: Vector2 = ctrl.get_local_mouse_position()
+	if not Rect2(Vector2.ZERO, ctrl.size).has_point(p):
+		return mid
+	var pad: Vector2 = ctrl.size * 0.22
+	return Vector2(
+		clampf(p.x, pad.x, maxf(ctrl.size.x - pad.x, pad.x)),
+		clampf(p.y, pad.y, maxf(ctrl.size.y - pad.y, pad.y)))
 
 
 static func fade_exit(ctrl: Control, dur: float = EXIT) -> void:
@@ -2065,6 +2505,8 @@ uniform float warp = 0.0;     // domain warping — see the note in fragment()
 uniform float ramp = 0.0;     // gradient-map strength (0 = plain brightness)
 uniform vec4 ramp_hot : source_color = vec4(1.0, 0.93, 0.62, 1.0);
 uniform float rim = 0.0;      // how hard the erosion frays the SILHOUETTE
+uniform float base_fade = 0.0; // fades the SEAT — for a BAND, not a form
+uniform float grain_aspect = 0.72; // noise cell shape; see the note in fragment()
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
@@ -2083,7 +2525,19 @@ float fbm(vec2 p) {
 }
 
 void fragment() {
-	vec2 np = vec2(UV.x * grain + seed, UV.y * grain * 0.72 - t * scroll);
+	// GRAIN IS IN UV, AND UV KNOWS NOTHING ABOUT THE SHAPE OF THE QUAD. Every
+	// original caller here is a roughly square form, where one `grain` for both
+	// axes is right and the 0.72 was a slight vertical stretch for taste. Hand
+	// the same material a 1028x150 band and that constant is catastrophic: the
+	// cells come out nearly SEVEN TIMES wider than they are tall, and with grain
+	// at a form-sized 2.4 there are barely two of them across the whole run — so
+	// the "noise" renders as one smooth horizontal smear with no structure in it
+	// at all. Measured on the first render of MusterHaze: a domain-warped
+	// three-octave fbm that photographed as a flat grey wash.
+	//
+	// Exposed, defaulting to the old literal, so every existing call site is
+	// byte-identical and a caller drawing a wide band can ask for square cells.
+	vec2 np = vec2(UV.x * grain + seed, UV.y * grain * grain_aspect - t * scroll);
 	// DOMAIN WARPING — the step that separates procedural noise that looks like
 	// NOISE from noise that looks like a fluid. Plain fbm is isotropic blobs:
 	// evenly sized, evenly spaced, and the eye reads the regularity instantly.
@@ -2171,6 +2625,17 @@ void fragment() {
 	float burn = pow(4.0 * ero * (1.0 - ero), 3.0) * ramp;
 	col = mix(col, ramp_hot.rgb, burn * 0.85);
 	float a = COLOR.a * clamp(ero + burn * 0.30, 0.0, 1.0);
+	// A BAND HAS A BOTTOM EDGE AND A FORM DOES NOT. Every other caller here is a
+	// shape ROOTED at its seat — a flame, a rot margin — where the erosion above
+	// is deliberately biased so the far end frays and the base holds solid. Draw
+	// the same material into a wide RECTANGLE and that solid base becomes a dead
+	// straight line ruled across the board, which is the one mark that says
+	// "rectangle" no matter how good the noise inside it is. Fades the last
+	// `base_fade` of the run. Defaults to 0, so every existing call site is
+	// byte-identical.
+	if (base_fade > 0.001) {
+		a *= smoothstep(1.0, 1.0 - base_fade, UV.y);
+	}
 	COLOR = vec4(col, a);
 }
 """
@@ -2186,6 +2651,14 @@ void fragment() {
 	mat.set_shader_parameter("rim", rim)
 	mat.set_shader_parameter("t", 0.0)
 	mat.set_shader_parameter("erode", 0.0)
+	# `base_fade` and `grain_aspect` are deliberately NOT in this signature —
+	# eight positional parameters is already past the point where a call site
+	# reads as a row of unlabelled numbers, and both exist for one caller
+	# (MusterHaze, which draws a BAND rather than a form). Set them with
+	# `set_shader_parameter`; both default to the behaviour every other caller
+	# already had.
+	mat.set_shader_parameter("base_fade", 0.0)
+	mat.set_shader_parameter("grain_aspect", 0.72)
 	return mat
 
 
@@ -2730,6 +3203,9 @@ static func reroll_sweep(host: Control, cards: Array,
 	# Returns the seconds the caller should wait before dealing the fresh
 	# slate in. `accent` colours the rings (gold horn-blast vs. arcane pulse).
 	if host == null or not is_instance_valid(host):
+		return 0.0
+	if DisplayServer.get_name() == "headless" \
+			or (UserSettings != null and UserSettings.reduce_motion):
 		return 0.0
 	var center: Vector2 = host.get_viewport_rect().size * 0.5
 	var overlay := Control.new()

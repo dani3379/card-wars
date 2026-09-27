@@ -1,13 +1,15 @@
 extends Control
-## Reward.gd — the post-victory SPOILS screen (Successor Wars): elites pick
-## a relic, bosses pick a boss relic. Cards no longer drop from fights —
-## deck growth lives at recruit stops (Recruit.gd) — so normal combats skip
-## this screen entirely and march straight back to the map.
-## Fully programmatic UI.
+## Reward.gd — the post-victory SPOILS screen. EVERY fight comes here: the slate
+## offers a card (restored 2026-09-20, see `_card_choices`), elites add a relic
+## pick and the General's Forge, bosses add a boss relic and the act transition.
+## Recruit stops still exist and still draft — this is additive to them.
+## Fully programmatic UI, and it does NOT scroll: anything added here has to fit
+## 900px, or it pushes Continue off the bottom of the canvas.
 
 const MAP_SCENE = "res://scenes/map.tscn"
 const COMBAT_SCENE = "res://scenes/combat.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+const CARD_BACK_TEXTURE = preload("res://assets/ui/card_back.png")
 const CAMPAIGN_STANDARD = preload("res://scripts/ui/painters/CampaignStandard.gd")
 const ACT_VICTORY_STRIP = preload("res://scripts/ui/painters/ActVictoryStrip.gd")
 
@@ -22,6 +24,33 @@ const SPOIL_EMBER := Color(1.0, 0.56, 0.20)
 # in: a General's death pays better than a hole in the ground.
 const SPOIL_ICON_PX := 160
 const SPOIL_TILE_W := 340.0
+## How large a card is drawn on the spoils slate. Below Recruit's full-size face
+## because this screen also carries a title, sometimes a relic row, and a
+## Continue — and it does not scroll.
+const CARD_OFFER_SCALE := 0.78
+
+## THE CARD REWARD, RESTORED 2026-09-20 (owner: "it was supposed to give you a
+## card... just put it in").
+##
+## It was removed on 2026-06-10 by `2e53313` — "Successor Wars slice: recruit
+## camps + fights pay ground, not cards" — which moved deck growth onto the new
+## `recruit` nodes and had ordinary holds "pay gold inline and return straight to
+## the map — no card pick, no interstitial. Pace is the point."
+##
+## MEASURED CONSEQUENCE (2026-09-20, 77 map stops over 8 pilot runs): a muster is
+## offered at 14% of stops and a wagon at 4%, so deck growth ran **+1 to +2 cards
+## per run** against a 10-card hero opener, and two runs finished SMALLER than
+## they started because Event.gd's card-removal paths outpaced the trickle. The
+## ceiling for a complete three-act run, taking every offer, was about 18 cards;
+## Slay the Spire offers one after each of ~16 combats and finishes at 25-35.
+##
+## The recruit camps stay — this is additive. Gold is NOT reduced to pay for it
+## (owner: "no compensation"), so fights are worth strictly more than they were.
+var _card_choices: Array[String] = []
+var _card_taken: bool = false
+## Collector's Tome enlists a second card. Ported back with the rest of the
+## card-offer relic table, which `2e53313` had moved onto the muster.
+var _collectors_tome_picks: int = 0
 
 var _relic_choices: Array[String] = []
 var _is_elite_reward: bool = false
@@ -35,7 +64,14 @@ var _forge_card_nodes: Array[Control] = []
 var _forge_picking: bool = false
 var _march_picking: bool = false
 var _spoil_claiming: bool = false
+# The screen may remain visible while the ink wipe runs. Keep its exit path
+# one-shot so a rapid Continue/Enter cannot advance the campaign twice.
+var _leaving: bool = false
+var _transition_started: bool = false
 var _company_standard_anchor: Control = null
+var _ui_generation: int = 0
+var _forge_warm_busy: bool = false
+var _forge_halo_texture: GradientTexture2D = null
 
 
 func _ready() -> void:
@@ -54,6 +90,28 @@ func _ready() -> void:
 	var node_type = RunState.current_node_type
 	_is_elite_reward = (node_type == "elite" or node_type == "boss")
 	var is_boss = (node_type == "boss")
+
+	# THE CARD OFFER. Rolled for every fight type — a plain hold pays a card too,
+	# which is the whole point of putting this back. The relic table below is the
+	# one `2e53313` carried over to the muster; both screens can read it, and
+	# RelicDB is the authority for what each one is worth.
+	var reward_count := 3
+	if RunState.has_downside("fewer_rewards"):
+		reward_count = 1                      # Busted Crown
+	elif RunState.has_relic("scouts_emblem"):
+		reward_count = 4
+	_card_choices = CardDB.roll_card_reward(
+		RunState.get_act(), node_type == "elite", is_boss, reward_count)
+	if _card_choices.size() > reward_count:
+		_card_choices = _card_choices.slice(0, reward_count)
+	# Stardust Vial: one extra rare on a non-boss screen (a boss already rolls
+	# rares, so adding one there would be paying the relic twice).
+	if not is_boss and RunState.has_relic("stardust_vial"):
+		var rare_pool: Array[String] = CardDB.get_pool_by_rarity("rare")
+		if rare_pool.size() > 0:
+			var picked: String = rare_pool[randi() % rare_pool.size()]
+			if not _card_choices.has(picked):
+				_card_choices.append(picked)
 
 	if is_boss:
 		_relic_choices = RelicDB.roll_boss_relics(RunState.relics, RunState.current_hero_id)
@@ -83,13 +141,15 @@ func _ready() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	# Esc opens the pause/Settings overlay instead of skipping the reward on a
-	# stray keypress — the "Skip" button is the deliberate way past it.
+	# stray keypress — the "Continue" button is the deliberate way past it.
 	if event.is_action_pressed("ui_cancel"):
 		GameTheme.open_settings_overlay()
 		get_viewport().set_input_as_handled()
 
 
 func _build_ui() -> void:
+	_ui_generation += 1
+	var ui_generation := _ui_generation
 	_forge_card_nodes.clear()
 	_forge_picking = false
 	_spoil_claiming = false
@@ -146,7 +206,7 @@ func _build_ui() -> void:
 	title_stack.add_theme_constant_override("separation", 5)
 	ceremony_row.add_child(title_stack)
 	var march_names := ["FIRST", "SECOND", "LAST"]
-	var title_text := "GENERAL BROKEN  /  PROVINCE %d" % RunState.current_floor
+	var title_text := "GENERAL DEFEATED  /  PROVINCE %d" % RunState.current_floor
 	if is_boss:
 		title_text = "THE %s MARCH  /  KEEP TAKEN" % \
 			march_names[clampi(RunState.current_act_idx, 0, 2)]
@@ -168,6 +228,21 @@ func _build_ui() -> void:
 	title_stack.add_child(subtitle)
 	GameTheme.deal_in(subtitle, 0.08)
 
+	# ── BALANCE THE STANDARD (2026-09-03) ──
+	# `ceremony_row` is centred and holds [standard][title_stack], so centring the
+	# ROW pushes the TEXT right by the standard's whole width plus the separation.
+	# Measured off the render: the divider, both relic tiles and Continue all
+	# centre on 800, while this screen's headline and its subtitle centred on
+	# 897.5 — the one line the player reads first was the only thing on the
+	# screen off its axis.
+	# A mirroring spacer puts the stack back on the true centre and leaves the
+	# standard where it is. Its width is READ FROM THE STANDARD rather than typed,
+	# so the two cannot drift apart if the painter is ever resized.
+	var standard_mirror := Control.new()
+	standard_mirror.custom_minimum_size = Vector2(standard.custom_minimum_size.x, 0)
+	standard_mirror.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ceremony_row.add_child(standard_mirror)
+
 	# Boss rewards retain the conquered route long enough to read it. The line
 	# inks itself from camp to the lord's seal before the next map is dealt.
 	if is_boss:
@@ -177,8 +252,99 @@ func _build_ui() -> void:
 		route.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		outer.add_child(route)
 
+	# THE CARD OFFER — first, because it is the reward every fight now pays and
+	# the relic/forge rows below belong to Generals only.
+	if _card_choices.size() > 0 and not _card_taken:
+		var card_header := _make_section_header("Add a Card to Your Deck")
+		outer.add_child(card_header)
+		GameTheme.deal_in(card_header, 0.06)
+
+		var card_row := HBoxContainer.new()
+		card_row.add_theme_constant_override("separation", 30)
+		card_row.alignment = BoxContainer.ALIGNMENT_CENTER
+		outer.add_child(card_row)
+
+		var card_i := 0
+		for id in _card_choices:
+			var slot := VBoxContainer.new()
+			slot.add_theme_constant_override("separation", 8)
+			slot.alignment = BoxContainer.ALIGNMENT_CENTER
+			# Shrink-center for the same reason the relic tiles carry it: an
+			# HBox child stretches by default, which renders a card as a
+			# full-height column with the face floating in the middle of it.
+			slot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			card_row.add_child(slot)
+
+			# A SCALED CONTROL STILL RESERVES ITS FULL SIZE, so the card goes in
+			# a wrapper whose minimum size is the SCALED footprint. Without the
+			# wrapper the row claims 300px of column for a card drawn at 225,
+			# and the screen does not scroll — measured: Continue at y=996 on a
+			# 900-tall canvas. `Recruit` can afford the full 225x300 because its
+			# whole screen is the slate; this one also carries a title, a relic
+			# row and a Continue.
+			var wrap := Control.new()
+			wrap.custom_minimum_size = Vector2(
+				Card2D.CARD_W * CARD_OFFER_SCALE, Card2D.CARD_H * CARD_OFFER_SCALE)
+			wrap.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+			wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			slot.add_child(wrap)
+
+			var card := CARD_SCENE.instantiate()
+			card.scale = Vector2(CARD_OFFER_SCALE, CARD_OFFER_SCALE)
+			card.card_data = CardDB.get_card_data(id).duplicate(true)
+			card.card_id = id
+			# THE COMPACT TOKEN, NOT THE FULL WRIT, and this is load-bearing.
+			# `Reward`'s `outer` is a plain VBox in a margin — there is NO scroll
+			# — so anything that overflows goes off the bottom of the canvas.
+			# Built with the full face first, and the pilot measured the result
+			# immediately: the Continue button landed at y=1158 on a 900-tall
+			# canvas and was reported unreachable 46 times in one run. Both the
+			# pre-2026-06-10 code here and `Recruit._build_slate` use the compact
+			# face for exactly this reason; the hover lift below is how the house
+			# lets a player look closer.
+			card.is_on_battlefield = true
+			wrap.add_child(card)
+
+			# "PICK" / "SKIP", NOT "TAKE" / "TAKE NONE". Labelled the obvious way
+			# first and the pilot immediately mis-sorted the screen: "TAKE" is in
+			# its ADVANCE vocabulary, so the offer AND the decline both read as
+			# "leave this screen" and it pressed whichever won tree order. That
+			# is the same trap Treasure's "Take 3 Gold instead" is documented
+			# for. The pre-2026-06-10 code used these two words; they are also
+			# what Recruit uses, so the shell stays consistent.
+			var pick_btn := GameTheme.make_back_button("Pick", Vector2(130, 38),
+				16, GameTheme.KEYWORD_GOLD)
+			pick_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+			pick_btn.pressed.connect(_pick_card.bind(id, slot))
+			slot.add_child(pick_btn)
+
+			# Same entrance grammar as the spoil tiles beside it: cards are
+			# DEALT (they travel and turn over), relics are SET DOWN.
+			GameTheme.deal_in(slot, 0.10 + card_i * 0.07)
+			GameTheme.rarity_reveal(card,
+				String(CardDB.get_card_data(id).get("rarity", "common")),
+				0.10 + card_i * 0.07 + 0.30)
+			GameTheme.hover_lift(pick_btn, 1.04, slot)
+			card_i += 1
+
+		# Declining is free. The pre-2026-06-10 screen paid 20 gold to skip;
+		# that is a separate lever and re-adding it here would be the
+		# compensation this change was explicitly told not to make.
+		var skip_btn := GameTheme.make_back_button("Skip", Vector2(170, 40))
+		skip_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		skip_btn.pressed.connect(_skip_card)
+		outer.add_child(skip_btn)
+		GameTheme.deal_in(skip_btn, 0.34)
+
+	# ONE OFFER AT A TIME. A General's screen carries a card slate, two relic
+	# tiles (304px each) AND the forge; all three at once does not fit 900px —
+	# measured, it pushed Continue to y=1158. The screen already rebuilds after
+	# every pick (`_after_spoil_taken`), so the rows queue behind the card
+	# instead of stacking with it.
+	var card_pending_now: bool = _card_choices.size() > 0 and not _card_taken
 	# Relic choices
-	if _is_elite_reward and _relic_choices.size() > 0 and not _relic_taken:
+	if not card_pending_now and _is_elite_reward \
+			and _relic_choices.size() > 0 and not _relic_taken:
 		# Ruled cartouche subheader (matches Treasure / Event / Recruit).
 		var relic_header := _make_section_header("Choose a Relic")
 		outer.add_child(relic_header)
@@ -201,29 +367,33 @@ func _build_ui() -> void:
 			relic_row.add_child(btn)
 			spoil_tiles.append(btn)
 			var deal_at := 0.10 + relic_i * 0.08
-			GameTheme.deal_in(btn, deal_at)
+			# SET DOWN, NOT FADED IN (2026-09-10). Spoils are objects: they drop
+			# onto the table in front of you and land with weight. `deal_in` grew
+			# them from 92% while fading up, which is the motion of a dialog box —
+			# and alpha and scale are the two properties an object never changes.
+			Motion.drop_item(btn, deal_at)
 			# The shine is the pull's own announcement (commons no-op by design).
-			# It waits out deal_in rather than racing it — both verbs drive
-			# `modulate` on the same node, and overlapping them makes the rare
-			# kiss fight the entrance fade.
+			# It waits out the drop rather than racing it — it drives `modulate`,
+			# and overlapping the two made the rare kiss fight the old entrance
+			# fade. The drop no longer touches alpha, but the shine still wants to
+			# land on a tile that has stopped moving.
 			GameTheme.rarity_reveal(btn, RelicDB.get_relic_rarity(id),
-				deal_at + 0.36)
+				deal_at + 0.34)
 			GameTheme.hover_lift(btn)
 			relic_i += 1
-		# One offer, one baseline: the tiles close onto their own content, so a
-		# two-line rule beside a one-line rule would otherwise leave the pair
-		# hanging at different heights.
-		var tallest := 0.0
-		for t in spoil_tiles:
-			tallest = maxf(tallest, t.custom_minimum_size.y)
-		for t in spoil_tiles:
-			t.custom_minimum_size.y = tallest
+		# One offer, one baseline. This used to level the box HEIGHTS only, which
+		# is half the rule and left the visible half unfixed: `make_tile_skeleton`
+		# centres its inner column, so two equal boxes still centred a two-line
+		# rule and a four-line rule separately and put the icons 23px apart.
+		# `level_tile_row` levels the heights AND top-aligns the columns.
+		GameTheme.level_tile_row(spoil_tiles)
 
 	# The General's Forge — Generals only (bosses hand out the boss tier and
 	# an act transition; the forge is the elite ladder's own rung).
-	if RunState.current_node_type == "elite" \
+	var forge_candidates := _forge_candidates()
+	if not card_pending_now and RunState.current_node_type == "elite" \
 			and (_relic_taken or _relic_choices.is_empty()) and not _forge_done \
-			and _forge_candidates().size() > 0:
+			and forge_candidates.size() > 0:
 		var forge_header := _make_section_header(
 			"The General's Forge — pick a card to forge")
 		outer.add_child(forge_header)
@@ -236,43 +406,17 @@ func _build_ui() -> void:
 		grid.alignment = BoxContainer.ALIGNMENT_CENTER
 		grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		scroll.add_child(grid)
-		for i in _forge_candidates():
-			var data: Dictionary = RunState.get_upgraded_card_data(i)
-			var wrapper := Control.new()
-			# 0.72-scale writ: full 225×300 cards overflow the reward column.
-			wrapper.custom_minimum_size = Vector2(162, 216)
-			wrapper.pivot_offset = wrapper.custom_minimum_size * 0.5
-			wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			_add_forge_candidate_halo(wrapper)
-			var card_node = CARD_SCENE.instantiate()
-			card_node.static_display = true
-			card_node.card_data = data
-			card_node.live_baked_mode = true
-			CardTextureCache.bake(data)
-			card_node.scale = Vector2(0.72, 0.72)
-			wrapper.add_child(card_node)
-			var click_btn := Button.new()
-			click_btn.flat = true
-			click_btn.focus_mode = Control.FOCUS_NONE
-			click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
-			click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
-			click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
-			click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
-			click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-			click_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-			click_btn.mouse_entered.connect(_on_forge_card_hover.bind(wrapper, true))
-			click_btn.mouse_exited.connect(_on_forge_card_hover.bind(wrapper, false))
-			click_btn.button_down.connect(_on_forge_card_pressed.bind(wrapper, true))
-			click_btn.button_up.connect(_on_forge_card_pressed.bind(wrapper, false))
-			click_btn.pressed.connect(_pick_forge_candidate.bind(i, wrapper))
-			wrapper.add_child(click_btn)
-			grid.add_child(wrapper)
-			_forge_card_nodes.append(wrapper)
-			GameTheme.deal_in(wrapper, 0.22 + grid.get_child_count() * 0.035)
+		_populate_forge_grid(grid, forge_candidates, ui_generation)
 
-	var skip_btn = GameTheme.make_back_button("Continue", Vector2(200, 52), 20)
+	# THE MOST-REPEATED PRESS IN THE GAME OUTSIDE COMBAT (2026-08-05). A run
+	# passes through this screen after every fight — ~21 times — and "Continue"
+	# was a frameless `make_back_button`, i.e. the way ON rendered as a caption
+	# floating under the reward it concludes. It is the forward move, so it takes
+	# the house forward-move plate.
+	var skip_btn = GameTheme.make_primary_button("Continue", Vector2(220, 52), 20)
 	skip_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	skip_btn.pressed.connect(_skip)
+	GameTheme.arm_ui_press(skip_btn, "commit")
 	outer.add_child(skip_btn)
 	GameTheme.deal_in(skip_btn, 0.40)
 	GameTheme.hover_lift(skip_btn, 1.04)
@@ -339,7 +483,204 @@ func _make_spoil_tile(rid: String) -> Button:
 	return btn
 
 
-func _add_forge_candidate_halo(wrapper: Control) -> void:
+## Yield to a frame that can actually be presented. `frame_post_draw` keeps the
+## visible Compatibility-renderer path honest; it never fires under headless,
+## where `process_frame` is the safe equivalent used by probes.
+func _present_frame() -> void:
+	if DisplayServer.get_name() == "headless":
+		await get_tree().process_frame
+	else:
+		await RenderingServer.frame_post_draw
+
+
+## Collapse duplicate deck entries before warming. The forge still shows every
+## physical card, but two identical writs share one immutable face texture.
+func _forge_datas(candidates: Array[int]) -> Array:
+	var datas: Array = []
+	var seen := {}
+	for deck_index in candidates:
+		if deck_index < 0 or deck_index >= RunState.deck.size():
+			continue
+		var data: Dictionary = RunState.get_upgraded_card_data(deck_index)
+		if data.is_empty():
+			continue
+		var key: String = CardTextureCache.cache_key(data)
+		if seen.has(key):
+			continue
+		seen[key] = true
+		datas.append(data)
+	return datas
+
+
+## The relic-claim ceremony already owns about half a second of screen time.
+## Warm the soon-to-open forge during that motion instead of beginning eleven
+## independent one-card jobs after `_build_ui` has blocked the click handler.
+func _warm_forge_candidates() -> void:
+	if RunState.current_node_type != "elite" or _forge_warm_busy \
+			or _forge_done or not is_inside_tree():
+		return
+	var datas: Array = _forge_datas(_forge_candidates())
+	if datas.is_empty():
+		return
+	_forge_warm_busy = true
+	var still_wanted := func() -> bool:
+		return is_inside_tree() and not _forge_done
+	await CardTextureCache.bake_many(datas, still_wanted)
+	_forge_warm_busy = false
+
+
+## Populate the General's Forge without making one giant UI frame. The final
+## tree and pixels match the old synchronous loop: same wrappers, detailed
+## Card2D faces, halos, click layer, scale, ordering, and reveal cadence.
+func _populate_forge_grid(grid: HBoxContainer, candidates: Array[int],
+		generation: int) -> void:
+	# Even a fully warm cache used to construct the first ornate card inside the
+	# `_build_ui` call. Let the newly rebuilt parchment present first.
+	await _present_frame()
+	var still_here := func() -> bool:
+		return is_inside_tree() and _ui_generation == generation \
+			and is_instance_valid(grid) and grid.is_inside_tree() \
+			and not _forge_done
+	if not still_here.call():
+		return
+
+	# Seat the whole row before any cache wait. These are real, final-size card
+	# backs, not zero-alpha holes, so the General's offer reads as one facedown
+	# hand while the ornate faces hydrate and the centered HBox never reflows.
+	var wrappers: Array[Control] = []
+	var loading_backs: Array[Control] = []
+	for _deck_index in candidates:
+		var wrapper := Control.new()
+		wrapper.custom_minimum_size = Vector2(162, 216)
+		wrapper.pivot_offset = wrapper.custom_minimum_size * 0.5
+		wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_add_forge_candidate_halo(wrapper)
+		var loading_back := _make_forge_loading_back(wrapper, grid)
+		grid.add_child(wrapper)
+		wrappers.append(wrapper)
+		loading_backs.append(loading_back)
+		_forge_card_nodes.append(wrapper)
+
+	# A relic click may already be warming this exact slate during its pocket
+	# animation. Wait for that owner rather than enqueueing duplicate batch jobs.
+	while _forge_warm_busy:
+		await _present_frame()
+		if not still_here.call():
+			return
+
+	await CardTextureCache.bake_many(_forge_datas(candidates), still_here)
+	if not still_here.call():
+		return
+	# Cold batches resume on their texture-publish frame; warm batches resume
+	# synchronously. One common boundary keeps the first live card off both.
+	await _present_frame()
+	if not still_here.call():
+		return
+
+	# One StyleBoxEmpty is immutable here and can back every transparent hit
+	# layer. The old loop allocated three resources for every deck card.
+	var empty_style := StyleBoxEmpty.new()
+	var card_nodes: Array[Control] = []
+	var click_buttons: Array[Button] = []
+	for candidate_index in range(candidates.size()):
+		if not still_here.call():
+			return
+		var deck_index: int = candidates[candidate_index]
+		if deck_index < 0 or deck_index >= RunState.deck.size():
+			continue
+		var wrapper: Control = wrappers[candidate_index]
+		var data: Dictionary = RunState.get_upgraded_card_data(deck_index)
+		var card_node = CARD_SCENE.instantiate()
+		card_node.static_display = true
+		card_node.card_data = data
+		card_node.live_baked_mode = true
+		# Split RichText shaping from the rest of Card2D construction. The wrapper
+		# remains at alpha zero until both stages are complete, so this is exactly
+		# the same detailed face when it is finally dealt.
+		card_node.defer_baked_rules_text = true
+		card_node.scale = Vector2(0.72, 0.72)
+		card_node.visible = false
+		wrapper.add_child(card_node)
+		wrapper.move_child(card_node, 1)
+		card_nodes.append(card_node)
+
+		var click_btn := Button.new()
+		click_btn.flat = true
+		click_btn.focus_mode = Control.FOCUS_NONE
+		click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
+		click_btn.disabled = true
+		click_btn.add_theme_stylebox_override("normal", empty_style)
+		click_btn.add_theme_stylebox_override("hover", empty_style)
+		click_btn.add_theme_stylebox_override("pressed", empty_style)
+		click_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		click_btn.mouse_entered.connect(_on_forge_card_hover.bind(wrapper, true))
+		click_btn.mouse_exited.connect(_on_forge_card_hover.bind(wrapper, false))
+		click_btn.button_down.connect(_on_forge_card_pressed.bind(wrapper, true))
+		click_btn.button_up.connect(_on_forge_card_pressed.bind(wrapper, false))
+		click_btn.pressed.connect(_pick_forge_candidate.bind(deck_index, wrapper))
+		wrapper.add_child(click_btn)
+		click_buttons.append(click_btn)
+
+		await _present_frame()
+		if not still_here.call():
+			return
+		card_node.complete_deferred_baked_rules()
+		await _present_frame()
+		if not still_here.call():
+			return
+
+	# Rendering may be sequential; presentation is not. Close every back on the
+	# same frame, then open every completed face on the same frame. No card enters
+	# the centered row late and no implementation-order stagger leaks to players.
+	var reduced_motion := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	if not reduced_motion:
+		AudioBank.play_sfx("card_draw", 0.04, -6.0)
+		for loading_back in loading_backs:
+			Motion.flip_out(loading_back, 0.13)
+		await get_tree().create_timer(Motion.time(0.13)).timeout
+		if not still_here.call():
+			return
+	for candidate_index in range(wrappers.size()):
+		var card_node: Control = card_nodes[candidate_index]
+		var click_btn: Button = click_buttons[candidate_index]
+		if reduced_motion:
+			var loading_back = loading_backs[candidate_index]
+			if is_instance_valid(loading_back):
+				loading_back.queue_free()
+		card_node.visible = true
+		if not reduced_motion:
+			Motion.flip_in(card_node, 0.0, 0.16)
+		click_btn.disabled = false
+
+
+func _make_forge_loading_back(parent: Control,
+		group: CanvasItem = null) -> TextureRect:
+	var back := TextureRect.new()
+	back.name = "LoadingWrit"
+	back.texture = CARD_BACK_TEXTURE
+	back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	back.set_anchors_preset(Control.PRESET_FULL_RECT)
+	back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	Motion.arm_loading_writ(back, group)
+	parent.add_child(back)
+	return back
+
+
+func _enable_forge_button_after(button: Button, delay: float,
+		generation: int) -> void:
+	await get_tree().create_timer(delay).timeout
+	if is_inside_tree() and _ui_generation == generation \
+			and is_instance_valid(button) and button.is_inside_tree() \
+			and not _forge_done:
+		button.disabled = false
+
+
+func _forge_candidate_halo_texture() -> GradientTexture2D:
+	if _forge_halo_texture != null:
+		return _forge_halo_texture
 	var grad := Gradient.new()
 	grad.set_color(0, Color(1.0, 0.77, 0.30, 0.20))
 	grad.set_color(1, Color(1.0, 0.54, 0.12, 0.0))
@@ -350,8 +691,13 @@ func _add_forge_candidate_halo(wrapper: Control) -> void:
 	grad_tex.fill_to = Vector2(1.0, 0.56)
 	grad_tex.width = 220
 	grad_tex.height = 260
+	_forge_halo_texture = grad_tex
+	return _forge_halo_texture
+
+
+func _add_forge_candidate_halo(wrapper: Control) -> void:
 	var halo := TextureRect.new()
-	halo.texture = grad_tex
+	halo.texture = _forge_candidate_halo_texture()
 	halo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	halo.stretch_mode = TextureRect.STRETCH_SCALE
 	halo.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -388,8 +734,12 @@ func _pick_forge_candidate(deck_index: int, wrapper: Control = null) -> void:
 	if _forge_picking:
 		return
 	_forge_picking = true
+	# Was a bare `button_click` — the generic dry click that is also standing in
+	# for six unrelated gameplay cues (doom tick, bone settle, candle out...).
+	# Choosing which card to forge is a shell PICK, so it takes the shell's own
+	# select voice; `button_click` goes back to being one sound with one job.
 	if AudioBank != null:
-		AudioBank.play_sfx("button_click")
+		AudioBank.play_ui("select")
 	if wrapper != null and is_instance_valid(wrapper) \
 			and not (UserSettings != null and UserSettings.reduce_motion):
 		GameTheme.claim_pop(wrapper)
@@ -397,7 +747,7 @@ func _pick_forge_candidate(deck_index: int, wrapper: Control = null) -> void:
 			if other != wrapper and other is Control and is_instance_valid(other):
 				GameTheme.fade_exit(other, 0.18)
 		await get_tree().create_timer(0.20).timeout
-	_show_forge_confirm(deck_index)
+	await _show_forge_confirm(deck_index)
 	_forge_picking = false
 
 
@@ -437,6 +787,18 @@ func _forge_candidates() -> Array[int]:
 func _show_forge_confirm(deck_index: int) -> void:
 	var base_data: Dictionary = RunState.get_upgraded_card_data(deck_index)
 	var upgraded_data: Dictionary = RunState.preview_plus_upgrade(base_data)
+	var generation := _ui_generation
+	var still_here := func() -> bool:
+		return is_inside_tree() and _ui_generation == generation and not _forge_done
+	# The forged face owns a new cache key. Finish that one immutable background
+	# before constructing either live overlay, then keep the two ornate Card2D
+	# trees on separate presented frames below.
+	await CardTextureCache.bake_many([base_data, upgraded_data], still_here)
+	if not still_here.call():
+		return
+	await _present_frame()
+	if not still_here.call():
+		return
 
 	var dim := ColorRect.new()
 	dim.name = "ForgeDim"
@@ -444,12 +806,9 @@ func _show_forge_confirm(deck_index: int) -> void:
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(dim)
-	# The confirm sheet fades up instead of snapping into existence; the whole
-	# modal rides dim.modulate so one tween covers scrim + cards + buttons.
-	if not (UserSettings != null and UserSettings.reduce_motion):
-		dim.modulate.a = 0.0
-		dim.create_tween().tween_property(dim, "modulate:a", 1.0, 0.16) \
-			.set_ease(Tween.EASE_OUT)
+	# Keep the whole sheet hidden while its two full card trees hydrate. It still
+	# blocks input, but no half-built card or rules box can flash on screen.
+	dim.modulate.a = 0.0
 
 	var col := VBoxContainer.new()
 	col.set_anchors_preset(Control.PRESET_CENTER)
@@ -465,6 +824,10 @@ func _show_forge_confirm(deck_index: int) -> void:
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 40)
 	col.add_child(row)
+	var preview_wrappers: Array[Control] = []
+	var preview_cards: Array[Control] = []
+	var preview_backs: Array[Control] = []
+	var preview_arrow: Control = null
 	for pair in [[base_data, false], [upgraded_data, true]]:
 		var wrapper := Control.new()
 		wrapper.custom_minimum_size = Vector2(225, 300)
@@ -472,21 +835,42 @@ func _show_forge_confirm(deck_index: int) -> void:
 			# Named so the forge-strike set-piece can aim at the "+" card.
 			wrapper.name = "ForgedPreview"
 			_add_forge_preview_halo(wrapper)
-		var card_node = CARD_SCENE.instantiate()
-		card_node.static_display = true
-		card_node.card_data = pair[0]
-		card_node.live_baked_mode = true
-		CardTextureCache.bake(pair[0])
-		if pair[1]:
-			card_node.modulate = Color(1.06, 1.03, 0.94)
-		wrapper.add_child(card_node)
+		var loading_back := _make_forge_loading_back(wrapper, row)
 		row.add_child(wrapper)
-		GameTheme.deal_in(wrapper, 0.08 if not pair[1] else 0.18)
+		preview_wrappers.append(wrapper)
+		preview_backs.append(loading_back)
 		if not pair[1]:
 			var arrow = GameTheme.make_label("→", 44, GameTheme.GILT_BRIGHT)
 			arrow.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 			row.add_child(arrow)
-			GameTheme.deal_in(arrow, 0.13)
+			preview_arrow = arrow
+
+	# Hydrate behind the two already-seated backs. The arrow and both final
+	# footprints exist before the first await, so the comparison cannot recenter.
+	for pair_index in range(2):
+		var pair: Array = [[base_data, false], [upgraded_data, true]][pair_index]
+		var wrapper: Control = preview_wrappers[pair_index]
+		var loading_back: Control = preview_backs[pair_index]
+		var card_node = CARD_SCENE.instantiate()
+		card_node.static_display = true
+		card_node.card_data = pair[0]
+		card_node.live_baked_mode = true
+		card_node.defer_baked_rules_text = true
+		if pair[1]:
+			card_node.modulate = Color(1.06, 1.03, 0.94)
+		card_node.visible = false
+		wrapper.add_child(card_node)
+		wrapper.move_child(card_node, loading_back.get_index())
+		preview_cards.append(card_node)
+		await _present_frame()
+		if not still_here.call():
+			dim.queue_free()
+			return
+		card_node.complete_deferred_baked_rules()
+		await _present_frame()
+		if not still_here.call():
+			dim.queue_free()
+			return
 
 	var diff = GameTheme.make_label(
 		_forge_change_summary(base_data, upgraded_data), 17, GameTheme.IVORY)
@@ -497,9 +881,19 @@ func _show_forge_confirm(deck_index: int) -> void:
 	btns.alignment = BoxContainer.ALIGNMENT_CENTER
 	btns.add_theme_constant_override("separation", 24)
 	col.add_child(btns)
+	# ONE-SHOT LATCH for the whole sheet. Forge + holds the frame for the length of
+	# forge_strike (~0.6s) with the button still live, so a double-click used to
+	# stack TWO "plus" entries on one uid — get_upgraded_card_data folds the delta
+	# twice (a 0/4 body came out 0/8) — and then hit a freed-instance error on the
+	# second pass. Back had the same shape (double _restore_forge_slate). Lambdas
+	# capture primitives by VALUE, so the flag rides in an array to stay shared.
+	var acted := [false]
 	var go = GameTheme.make_themed_button("⚒ Forge +", Color(0.14, 0.10, 0.05),
 		Vector2(180, 48), 19)
 	go.pressed.connect(func():
+		if acted[0]:
+			return
+		acted[0] = true
 		RunState.upgrade_card(deck_index, "plus")
 		AudioBank.play_sfx("upgrade_confirm")
 		_forge_done = true
@@ -511,10 +905,54 @@ func _show_forge_confirm(deck_index: int) -> void:
 	btns.add_child(go)
 	var back = GameTheme.make_back_button("Back", Vector2(140, 48), 18)
 	back.pressed.connect(func():
+		if acted[0]:
+			return
+		acted[0] = true
 		dim.queue_free()
 		_restore_forge_slate()
 	)
 	btns.add_child(back)
+
+	# Reveal the common scrim first, then turn both comparison cards together.
+	# Their content was built on separate frames, but that renderer detail never
+	# becomes a fake left-to-right narrative beat.
+	if preview_arrow != null:
+		GameTheme.deal_in(preview_arrow, 0.08)
+	if UserSettings != null and UserSettings.reduce_motion:
+		dim.modulate.a = 1.0
+	else:
+		dim.create_tween().tween_property(dim, "modulate:a", 1.0, 0.16) \
+			.set_ease(Tween.EASE_OUT)
+	_reveal_reward_preview_group(preview_cards, preview_backs, generation, dim)
+
+
+func _reveal_reward_preview_group(cards: Array[Control], backs: Array[Control],
+		generation: int, owner: Control) -> void:
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	if snap:
+		for i in range(cards.size()):
+			if is_instance_valid(backs[i]):
+				backs[i].queue_free()
+			if is_instance_valid(cards[i]):
+				cards[i].visible = true
+		return
+	await get_tree().create_timer(Motion.time(0.08)).timeout
+	if not is_inside_tree() or _ui_generation != generation \
+			or not is_instance_valid(owner) or not owner.is_inside_tree():
+		return
+	AudioBank.play_sfx("card_draw", 0.04, -6.0)
+	for loading_back in backs:
+		if is_instance_valid(loading_back):
+			Motion.flip_out(loading_back, 0.13)
+	await get_tree().create_timer(Motion.time(0.13)).timeout
+	if not is_inside_tree() or _ui_generation != generation \
+			or not is_instance_valid(owner) or not owner.is_inside_tree():
+		return
+	for card in cards:
+		if is_instance_valid(card):
+			card.visible = true
+			Motion.flip_in(card, 0.0, 0.16)
 
 
 func _add_forge_preview_halo(wrapper: Control) -> void:
@@ -556,14 +994,67 @@ func _forge_change_summary(base: Dictionary, upgraded: Dictionary) -> String:
 ## After a spoil (relic or forge) is consumed: leave if nothing actionable
 ## remains, otherwise rebuild with the remaining offers.
 func _after_spoil_taken() -> void:
+	# The card offer counts as pending too, or taking a relic would walk off the
+	# screen with the card still unclaimed — the defect the old screen avoided
+	# by having only one offer on it.
+	var card_pending: bool = _card_choices.size() > 0 and not _card_taken
 	var relic_pending: bool = _is_elite_reward \
 		and _relic_choices.size() > 0 and not _relic_taken
 	var forge_pending: bool = RunState.current_node_type == "elite" \
 		and not _forge_done and _forge_candidates().size() > 0
-	if relic_pending or forge_pending:
+	if card_pending or relic_pending or forge_pending:
 		_build_ui()
 	else:
 		_proceed()
+
+
+## Take one of the offered cards.
+func _pick_card(id: String, tile: Control = null) -> void:
+	if _spoil_claiming or _card_taken:
+		return
+	_spoil_claiming = true
+	RunState.add_card(id)
+	if AudioBank != null:
+		AudioBank.play_sfx("card_play")
+	if tile != null and is_instance_valid(tile):
+		# A card joins the same company the relics do. The old beat popped the
+		# choice, then erased the whole slate during the rebuild; carrying it to
+		# the standard makes the state change spatially legible.
+		GameTheme.claim_pop(tile)
+		if tile.get_parent() != null:
+			for sib in tile.get_parent().get_children():
+				if sib != tile and sib is Control:
+					GameTheme.fade_exit(sib, 0.22)
+		await get_tree().create_timer(0.10).timeout
+		if _company_standard_anchor != null \
+				and is_instance_valid(_company_standard_anchor):
+			var target := _company_standard_anchor.global_position \
+				+ _company_standard_anchor.size * 0.5
+			await GameTheme.pocket_away(tile, target, 0.34)
+			GameTheme.punch(_company_standard_anchor, 1.12)
+	# COLLECTOR'S TOME enlists a second card. Bosses are exempt — their slate is
+	# already the richest in the game, which is the rule the relic shipped with.
+	if RunState.has_relic("collectors_tome") and _collectors_tome_picks < 1 \
+			and RunState.current_node_type != "boss":
+		_collectors_tome_picks += 1
+		_card_choices.erase(id)
+		_spoil_claiming = false
+		if not _card_choices.is_empty():
+			_build_ui()
+			return
+	_card_taken = true
+	_spoil_claiming = false
+	_after_spoil_taken()
+
+
+## Decline the whole slate. Free — see the note in `_build_ui`.
+func _skip_card() -> void:
+	if _spoil_claiming or _card_taken:
+		return
+	_card_taken = true
+	if AudioBank != null:
+		AudioBank.play_sfx("ui_back")
+	_after_spoil_taken()
 
 
 func _pick_relic(id: String, tile: Control = null) -> void:
@@ -572,6 +1063,9 @@ func _pick_relic(id: String, tile: Control = null) -> void:
 	_spoil_claiming = true
 	RunState.add_relic(id)
 	_relic_taken = true
+	# Use the existing claim/pocket ceremony as cover for the next screen state.
+	# Fire-and-forget: `_populate_forge_grid` waits on the ownership flag above.
+	_warm_forge_candidates()
 	if AudioBank != null:
 		AudioBank.play_sfx("coin")
 	# The chosen spoil is physically taken: rivals bow out, then the relic dives
@@ -608,6 +1102,9 @@ func _skip() -> void:
 ## asks the player where the war goes next (Successor Wars player-chosen
 ## rival order). Everything else marches straight out.
 func _proceed() -> void:
+	if _leaving:
+		return
+	_leaving = true
 	if RunState.current_node_type == "boss" and not RunState.should_enter_finale():
 		var candidates: Array[String] = RunState.get_next_march_candidates()
 		if candidates.size() >= 2:
@@ -639,7 +1136,7 @@ func _show_march_choice(candidates: Array[String]) -> void:
 	outer.add_child(title)
 	GameTheme.deal_in(title, 0.04)
 
-	var march_header := _make_section_header("Choose whose kingdom burns next.")
+	var march_header := _make_section_header("Choose which kingdom to invade next.")
 	outer.add_child(march_header)
 	GameTheme.deal_in(march_header, 0.10)
 
@@ -800,8 +1297,10 @@ func _pick_march(lord: String, tile: Control = null) -> void:
 	if _march_picking:
 		return
 	_march_picking = true
+	# Choosing the next lord to march on sets the route for the rest of the act —
+	# a commit, not a browse, so it seals rather than clicks.
 	if AudioBank != null:
-		AudioBank.play_sfx("button_click")
+		AudioBank.play_ui("commit")
 	if tile != null and is_instance_valid(tile) \
 			and not (UserSettings != null and UserSettings.reduce_motion):
 		GameTheme.claim_pop(tile)
@@ -815,6 +1314,10 @@ func _pick_march(lord: String, tile: Control = null) -> void:
 
 
 func _go_to_map() -> void:
+	if _transition_started:
+		return
+	_leaving = true
+	_transition_started = true
 	# Boss rewards advance the act on their way out. Combat used to do this
 	# before queuing the Reward transition, but that wiped current_node_type
 	# and made Reward render as a normal fight. Holding the advance until

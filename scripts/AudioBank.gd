@@ -13,8 +13,13 @@ extends Node
 const SFX_DIR := "res://assets/audio/sfx/"
 const MUSIC_DIR := "res://assets/audio/music/"
 const SFX_POOL_SIZE := 12  # how many overlapping SFX can play at once
-const FADE_QUIET_DB := -40.0  # "silent" level for crossfade ends
+const FADE_QUIET_DB := -40.0  # "silent" level for ambience fade ends
 const MAX_MUSIC_STREAM_ENTRIES := 6
+# Floor for the music crossfade. Deeper than FADE_QUIET_DB because the
+# equal-power law (see _crossfade_step) only reaches the floor at the very ends
+# of the fade, where the other track is at full level and masks it completely —
+# so there is no reason to stop 40 dB short of silence and hear the tail.
+const FADE_FLOOR_DB := -60.0
 
 # Interim cue aliases: when a cue's own event dir is missing or empty, play_sfx
 # falls back to the mapped event so the moment is never silent (five wired cues
@@ -54,7 +59,52 @@ const SFX_FALLBACKS := {
 	# failing on it. A dry click stands in until a real short scrape lands; it must
 	# never be a sting, because a refusal is not an impact.
 	"refused": "button_click",
+	# THE SHELL'S FOUR CUES (2026-08-05). Until this pass the entire shell —
+	# title screen, THE MUSTER, settings, collection, credits — played NOTHING on
+	# interaction: MainMenu/SettingsOverlay/Collection/Credits held zero play_sfx
+	# call sites between them, and not one of the 40 `mouse_entered` handlers in
+	# scripts/ made a sound. Meanwhile the clash has hitstop and a shuffle bag.
+	#
+	# Four cues cover every shell button, voiced as the game's own materials
+	# rather than as UI beeps:
+	#   ui_hover  — a dry paper tick under the cursor. The one cue that must
+	#               never fatigue: it fires hundreds of times a session, so it
+	#               plays quiet and wide-jittered (see UI_CUE_MIX).
+	#   ui_select — a card set down on wood. A pick that does NOT advance.
+	#   ui_back   — the same paper drawn back, pitched DOWN, so retreat and
+	#               advance are distinguishable with the screen unread.
+	#   ui_commit — a wax seal pressed. NEW MARCH and TAKE THE FIELD are the two
+	#               moments a player commits 40 minutes; they sounded like
+	#               nothing at all.
+	# Real clips auto-win the moment assets/audio/sfx/<name>/ lands.
+	"ui_hover": "card_draw",
+	"ui_select": "card_play",
+	"ui_back": "card_discard",
+	"ui_commit": "upgrade_confirm",
 }
+
+## THE SHELL AUDIO FUNNEL (2026-08-05).
+##
+## Every shell interaction goes through play_ui() rather than calling play_sfx
+## with hand-picked numbers, so the four cues keep ONE voice across MainMenu, the
+## muster, SettingsOverlay, Collection, NetLobby and Credits. Levels and jitter
+## are set once, here. The hover cue's level is load-bearing: it is the only
+## sound in the game that fires on mouse MOVEMENT, so it sits far enough down
+## that sweeping a column reads as texture rather than as a stutter of clicks.
+const UI_CUE_MIX := {
+	"hover": {"db": -17.0, "jitter": 0.10, "pitch": 1.20},
+	"select": {"db": -7.0, "jitter": 0.07, "pitch": 1.06},
+	"back": {"db": -9.0, "jitter": 0.07, "pitch": 0.88},
+	"commit": {"db": -3.0, "jitter": 0.05, "pitch": 1.0},
+}
+
+# The frame the last UI cue sounded on, and which cue won it — see play_ui's
+# one-press-one-sound note. The kind is recorded so the collapse is OBSERVABLE:
+# without it a gate can tell that only one cue played but not that the right one
+# survived, which is the half that actually breaks (a screen's "commit" losing
+# to the funnel's default "select" is silent and sounds almost correct).
+var _ui_cue_frame: int = -1
+var _ui_cue_kind: String = ""
 
 # event_name -> Array[AudioStream]
 var _sfx_streams: Dictionary = {}
@@ -138,11 +188,11 @@ func _build_sfx_pool() -> void:
 func _build_music_players() -> void:
 	_music_a = AudioStreamPlayer.new()
 	_music_a.bus = "Music"
-	_music_a.volume_db = FADE_QUIET_DB
+	_music_a.volume_db = FADE_FLOOR_DB
 	add_child(_music_a)
 	_music_b = AudioStreamPlayer.new()
 	_music_b.bus = "Music"
-	_music_b.volume_db = FADE_QUIET_DB
+	_music_b.volume_db = FADE_FLOOR_DB
 	add_child(_music_b)
 
 
@@ -181,6 +231,51 @@ func play_sfx(event_name: String, pitch_jitter: float = 0.06, volume_db: float =
 	player.pitch_scale = pitch_base * (1.0 + randf_range(-pitch_jitter, pitch_jitter))
 	player.volume_db = volume_db
 	player.play()
+
+
+func play_ui(kind: String) -> void:
+	## The shell's interaction voice. kind: "hover" | "select" | "back" | "commit".
+	##
+	## ONE PRESS IS ONE SOUND (2026-09-17). Since the press funnel gives every
+	## button a default cue, a screen that already plays its own would layer two
+	## clicks a few milliseconds apart — the stutter UI_CUE_MIX's hover level
+	## exists to avoid, arriving by a different route. A cue is therefore dropped
+	## if one already sounded THIS FRAME.
+	##
+	## The frame, not a time window. A window has to be guessed against how long
+	## a player holds a button, which is unbounded; every pair this needs to
+	## collapse is emitted from one `pressed` signal and is exact on the frame
+	## counter. Deliberately across KINDS as well as within one: the pair being
+	## collapsed is usually a screen's "commit" against the funnel's "select",
+	## and dropping the quieter default is the entire intent. First one wins,
+	## which is why the funnel connects deferred — see GameTheme's press funnel.
+	##
+	## Written as four LITERAL play_sfx calls rather than the obvious
+	## `play_sfx("ui_" + kind, ...)`. The one-liner is prettier and it is wrong
+	## here for two reasons: `tools/_probe_audio_cues.gd` scans for
+	## `play_sfx("<literal>")` and reported the whole funnel as one silent cue
+	## named `ui_` (caught on the first run of this gate), and a grep for
+	## "ui_commit" would have found no call site at all. Same house lesson as the
+	## relic `effect` strings — a name assembled at runtime is a name nothing can
+	## verify. The numbers come from UI_CUE_MIX so the levels stay in one place.
+	var frame: int = Engine.get_process_frames()
+	if frame == _ui_cue_frame:
+		return
+	_ui_cue_frame = frame
+	_ui_cue_kind = kind
+	match kind:
+		"hover":
+			play_sfx("ui_hover", UI_CUE_MIX.hover.jitter,
+				UI_CUE_MIX.hover.db, UI_CUE_MIX.hover.pitch)
+		"select":
+			play_sfx("ui_select", UI_CUE_MIX.select.jitter,
+				UI_CUE_MIX.select.db, UI_CUE_MIX.select.pitch)
+		"back":
+			play_sfx("ui_back", UI_CUE_MIX.back.jitter,
+				UI_CUE_MIX.back.db, UI_CUE_MIX.back.pitch)
+		"commit":
+			play_sfx("ui_commit", UI_CUE_MIX.commit.jitter,
+				UI_CUE_MIX.commit.db, UI_CUE_MIX.commit.pitch)
 
 
 ## Shuffle-bag variant selection (2026-07-30) — the cheapest audio win in the repo.
@@ -302,6 +397,8 @@ var _pending_music_fade: float = 1.0
 # for the same track don't double-request (load_threaded_get consumes the
 # request — a second getter would read an invalid handle).
 var _music_inflight: Dictionary = {}
+# The in-flight crossfade. One at a time, always — see _start_music_stream.
+var _music_tween: Tween = null
 
 
 func _touch_music_stream(track_name: String) -> void:
@@ -404,14 +501,34 @@ func _start_music_stream(stream: AudioStream, track_name: String,
 		fade_seconds: float) -> void:
 	# AudioStreamOggVorbis / WAV both support loop, but defaults vary. Force it
 	# on so menu music doesn't silently end after one play.
-	if "loop" in stream:
+	#
+	# AudioStreamSynchronized has NO `loop` property of its own — read the engine
+	# source, not the class docs, for why this matters: its mix() ends with
+	# `if (!any_active) active = false;`, so the moment every sub-stream runs out
+	# the whole layered cue stops dead. Looping has to be set on each LAYER.
+	if stream is AudioStreamSynchronized:
+		# Explicit local: an `is` check does not narrow the type for `:=`
+		# inference, so `var sub := stream.get_sync_stream(i)` is a hard parse
+		# error ("cannot infer the type") rather than a warning.
+		var sync_stream: AudioStreamSynchronized = stream
+		for i in sync_stream.stream_count:
+			var sub: AudioStream = sync_stream.get_sync_stream(i)
+			if sub != null and "loop" in sub:
+				sub.loop = true
+	elif "loop" in stream:
 		stream.loop = true
+		# Leaving a layered cue: drop its tweens, or they go on writing volumes
+		# into a cached resource that is no longer the thing playing.
+		if not _layer_targets.is_empty():
+			_kill_layer_tweens()
+			_layer_targets.clear()
 	var incoming := _music_b if _music_active == _music_a else _music_a
 	var outgoing := _music_active
 	if _current_music_track != "" and outgoing != null and outgoing.playing:
 		_music_positions[_current_music_track] = outgoing.get_playback_position()
 	incoming.stream = stream
-	incoming.volume_db = FADE_QUIET_DB
+	# Silent for the one frame between play() and the tween's first step.
+	incoming.volume_db = FADE_FLOOR_DB
 	var resume_at: float = float(_music_positions.get(track_name, 0.0))
 	var track_len: float = stream.get_length()
 	if track_len > 0.0:
@@ -419,12 +536,62 @@ func _start_music_stream(stream: AudioStream, track_name: String,
 	incoming.play(resume_at)
 	_music_active = incoming
 	_current_music_track = track_name
-	var tw := create_tween()
-	tw.set_parallel(true)
-	tw.tween_property(incoming, "volume_db", 0.0, fade_seconds)
-	if outgoing != null and outgoing.playing:
-		tw.tween_property(outgoing, "volume_db", FADE_QUIET_DB, fade_seconds)
-		tw.chain().tween_callback(outgoing.stop)
+	# A second crossfade arriving mid-fade must not leave two tweens writing the
+	# same two volume_db properties — the loser would go on driving a player the
+	# winner had just started, and the old tween's trailing stop() callback would
+	# kill it outright. Only two players exist, so killing the previous fade and
+	# re-deriving both roles from _music_active is the whole fix.
+	if _music_tween != null and _music_tween.is_valid():
+		_music_tween.kill()
+	_music_tween = create_tween()
+	_music_tween.tween_method(_crossfade_step.bind(incoming, outgoing),
+		0.0, 1.0, maxf(fade_seconds, 0.01))
+	_music_tween.tween_callback(_end_crossfade.bind(incoming, outgoing))
+
+
+## THE CROSSFADE HAS TO BE EQUAL-POWER (2026-09-14).
+##
+## This used to be two parallel `tween_property(player, "volume_db", ...)` calls
+## — incoming −40→0, outgoing 0→−40. That interpolates LINEARLY IN DECIBELS,
+## which is exponential in amplitude, so at the midpoint both tracks sit at
+## −20 dB, i.e. a tenth of their amplitude EACH. Two tenths do not make a whole:
+## the sum lands ~17 dB below either endpoint, and the music audibly drops out
+## in the middle of the transition and climbs back.
+##
+## MEASURED on the real assets (map.mp3 crossfading to combat.mp3 over the
+## shipped 1.0 s, rendered and RMS-metered per 100 ms): steady state −13 dBFS,
+## and the old law fell to −34 dBFS mid-fade. A 21 dB hole, on every transition,
+## roughly a hundred times a run. It is most of why the score "sounds weird" —
+## the tracks are fine, the seam between them was a dropout.
+##
+## The fix is the standard constant-power law: amplitude in = sin(t·π/2),
+## out = cos(t·π/2), so in² + out² = 1 at every t and two uncorrelated sources
+## sum to a flat level. Same measurement with this law: −19.6 dBFS at its
+## deepest, and that residue is the material (combat.mp3 is genuinely 3 dB
+## quieter than map.mp3 here), not the fade.
+##
+## NOTE the conversion order. The law is defined on AMPLITUDE and the player
+## takes DECIBELS, so the sin/cos must be computed first and converted after —
+## running the curve on volume_db directly is the bug this replaces.
+func _crossfade_step(t: float, incoming: AudioStreamPlayer,
+		outgoing: AudioStreamPlayer) -> void:
+	if incoming != null:
+		incoming.volume_db = _fade_gain_db(sin(t * PI * 0.5))
+	if outgoing != null and outgoing != incoming and outgoing.playing:
+		outgoing.volume_db = _fade_gain_db(cos(t * PI * 0.5))
+
+
+func _end_crossfade(incoming: AudioStreamPlayer, outgoing: AudioStreamPlayer) -> void:
+	if incoming != null:
+		incoming.volume_db = 0.0
+	if outgoing != null and outgoing != incoming and outgoing.playing:
+		outgoing.stop()
+		outgoing.volume_db = FADE_FLOOR_DB
+
+
+func _fade_gain_db(amp: float) -> float:
+	# linear_to_db(0.0) is -inf, which a volume_db write will not accept.
+	return FADE_FLOOR_DB if amp <= 0.001 else maxf(linear_to_db(amp), FADE_FLOOR_DB)
 
 
 func play_music_random(candidates: Array, fade_seconds: float = 1.0) -> void:
@@ -443,14 +610,345 @@ func play_music_random(candidates: Array, fade_seconds: float = 1.0) -> void:
 	play_music(pick, fade_seconds)
 
 
+## THEMES — THE ANTI-REPETITION FEATURE WAS CAUSING THE REPETITION (2026-09-14).
+##
+## play_music_random EXCLUDES the currently-playing track, so any screen that
+## re-rolls its pool on entry is GUARANTEED to change track every single time.
+## MapView did exactly that, and the act skeleton returns the player to the chart
+## after every one of its ~18 stops — so no road theme was ever heard twice
+## running, in any run, ever. Nobody could hum a tune from this game because no
+## tune was ever established, and every forced change also paid a crossfade.
+##
+## The fix is the opposite of the instinct that produced the bug: a THEME is
+## chosen ONCE and then HELD. Recognition is what repetition buys; fatigue comes
+## from literal UNVARIED repetition, which is a different thing (Margulis, *On
+## Repeat* — the exposure effect raises liking and then reverses, and it is the
+## literal repeat that reverses it, not the familiarity).
+##
+## Variety is kept on the axis where it costs nothing: the pick is re-rolled per
+## RUN, never per visit. Inside a run the act's road theme is the thing you march
+## to; across runs — and a roguelike is played fifty times — you get another one.
+##
+## KEY NAMESPACES ARE LOAD-BEARING. Only "run:*" keys are dropped by
+## clear_music_themes() (called from RunState.start_new_run). Anything else
+## survives, which is how the menu keeps one voice for a whole session while the
+## road re-rolls every march.
+var _themes: Dictionary = {}
+
+
+func play_music_theme(key: String, candidates: Array, fade_seconds: float = 1.0) -> void:
+	if candidates.is_empty():
+		return
+	var pick: String = String(_themes.get(key, ""))
+	# Re-roll when unset, or when the remembered pick is no longer IN the pool —
+	# a book edited between sessions must not strand a theme on a dead name,
+	# which would silently no-op play_music and leave the screen quiet.
+	if pick == "" or not candidates.has(pick):
+		pick = String(candidates[randi() % candidates.size()])
+		_themes[key] = pick
+	play_music(pick, fade_seconds)
+
+
+func clear_music_themes() -> void:
+	## Drops run-scoped themes so the next march draws fresh ones. keys() returns
+	## a copy, so erasing while walking it is safe.
+	for k in _themes.keys():
+		if String(k).begins_with("run:"):
+			_themes.erase(k)
+
+
+func current_music_theme(key: String) -> String:
+	## For probes and for any caller that needs to know what a theme resolved to
+	## without starting it. "" means the theme has not been drawn yet.
+	return String(_themes.get(key, ""))
+
+
+## THE ROAD'S BOOKS, keyed by act.
+##
+## Every other music pool in this game lives at its call site, and that is still
+## the convention. This one is here because TWO screens must reach the SAME
+## answer: MapView paints the chart, and Wayside is a stop ON that chart which
+## deliberately does NOT change the music. Two copies of this table would drift,
+## and the symptom of drift is subtle — a crossfade appearing on the one screen
+## whose whole point is that it doesn't get one.
+const ROAD_BOOKS := {
+	1: ["map", "map_b", "map_e"],
+	2: ["map_act2", "map_c", "map_d"],
+	3: ["map_act3", "map", "map_d"],
+}
+
+
+func play_road_theme(act: int, fade_seconds: float = 1.0) -> void:
+	## The march's own voice for this act, held for the whole run. Calling it
+	## when it is already playing is a no-op by way of play_music, which is what
+	## lets a wayside sit inside the road music instead of interrupting it.
+	var a: int = clampi(act, 1, 3)
+	play_music_theme("run:road:%d" % a, ROAD_BOOKS[a], fade_seconds)
+
+
+# ---------------------------------------------------------------------------
+# VERTICAL LAYERING (2026-09-14)
+# ---------------------------------------------------------------------------
+##
+## A LAYERED CUE is one piece of music whose ARRANGEMENT responds to the game:
+## the same bars throughout, with instrument layers faded in and out. Because
+## every layer is the same bar of the same recording there is no transition to
+## get wrong — which is the whole reason this is the technique that beats
+## fatigue. A theme heard fifty times but never twice in the same clothes does
+## not wear out the way a literal repeat does.
+##
+## Built on AudioStreamSynchronized. THE CONTRACT, READ OUT OF THE ENGINE SOURCE
+## (modules/interactive_music/audio_stream_synchronized.cpp) because the class
+## docs do not state it:
+##
+##   * mix() re-reads `stream->audio_stream_volume_db[i]` on EVERY mix call, so
+##     set_sync_stream_volume DOES take effect live. This is the load-bearing
+##     fact for the whole feature and it is not documented anywhere.
+##   * …but it applies per MIX_BUFFER_SIZE (128 frames, ~2.7 ms) as a STEP. A
+##     snapped volume change is a discontinuity, i.e. a click. Layers must be
+##     TWEENED, never assigned. set_music_layer is the only writer, and it
+##     tweens.
+##   * start(pos) starts every sub-playback at the same position, which is what
+##     keeps the layers sample-locked. Never drive layers with N separate
+##     AudioStreamPlayers — they drift.
+##   * MAX_STREAMS is 32.
+##
+## The layered stream is just an AudioStream, so it rides the ordinary
+## play_music path and inherits the equal-power crossfade, the resume position
+## and the async load for free.
+const MAX_MUSIC_LAYERS := 8
+## Silence for a layer that is off. Low enough to be inaudible under the bed,
+## high enough that db_to_linear stays well away from denormals.
+const LAYER_OFF_DB := -60.0
+## A layer move is a mix decision, not an effect — it should be felt and not
+## noticed. Fast enough to answer the board, slow enough to hide the 2.7 ms
+## stepping described above.
+const LAYER_FADE_SECS := 1.2
+
+var _layer_tweens: Array[Tween] = []
+var _layer_targets: Array[float] = []
+
+
+## THE LAYERED CUE REGISTRY.
+##
+## Layer ORDER is the contract every caller depends on — index 0 is the bed and
+## must be the layer that can stand alone. The stems were separated from the
+## original master with Demucs (see docs/MUSIC_SYSTEM_AUDIT_20260914.md §Step 6);
+## the pop-trained model's four stems do NOT map cleanly onto orchestral music,
+## so what ships is a three-layer arrangement rather than the textbook
+## drums/bass/other: on this track the bass stem measured -49 LUFS, 31 dB under
+## the mix, because there is no bass-guitar-shaped source for it to find. It is
+## folded into the bed rather than wasted on a layer that does nothing.
+## KEYS ARE THE ACT'S ANCHOR TRACK NAME — Combat derives the key from pool[0],
+## so the layered cue and the flat fallback are always the same piece of music
+## and a missing stem set is inaudible as a change of plan.
+const LAYERED_CUES := {
+	# act 1 — Nakarada, "The Great Battle"
+	"combat": [
+		"res://assets/audio/music/layers/combat_bed.ogg",    # 0 strings/brass — stands alone
+		"res://assets/audio/music/layers/combat_perc.ogg",   # 1 percussion — the drive
+		"res://assets/audio/music/layers/combat_choir.ogg",  # 2 voices — the stakes
+	],
+	# act 2 — Buckley, "Monomyth: The Endurance"
+	"combat_act2": [
+		"res://assets/audio/music/layers/combat_act2_bed.ogg",
+		"res://assets/audio/music/layers/combat_act2_perc.ogg",
+		"res://assets/audio/music/layers/combat_act2_choir.ogg",
+	],
+	# act 3 — Buckley, "Monomyth: The Fury"
+	"combat_act3": [
+		"res://assets/audio/music/layers/combat_act3_bed.ogg",
+		"res://assets/audio/music/layers/combat_act3_perc.ogg",
+		"res://assets/audio/music/layers/combat_act3_choir.ogg",
+	],
+	# Generals — Buckley, "March of Midnight"
+	"combat_elite": [
+		"res://assets/audio/music/layers/combat_elite_bed.ogg",
+		"res://assets/audio/music/layers/combat_elite_perc.ogg",
+		"res://assets/audio/music/layers/combat_elite_choir.ogg",
+	],
+	# THE KEEPS. One leitmotif per rival lord, so each gets its own arrangement.
+	"combat_boss": [        # the Everflame (Kindler) — "Juggernaut"
+		"res://assets/audio/music/layers/combat_boss_bed.ogg",
+		"res://assets/audio/music/layers/combat_boss_perc.ogg",
+		"res://assets/audio/music/layers/combat_boss_choir.ogg",
+	],
+	"combat_boss_b": [      # the Last Wall (Stalwart) — "Song of the Forge"
+		"res://assets/audio/music/layers/combat_boss_b_bed.ogg",
+		"res://assets/audio/music/layers/combat_boss_b_perc.ogg",
+		"res://assets/audio/music/layers/combat_boss_b_choir.ogg",
+	],
+	"combat_boss_c": [      # the Grasswake (Raider) — "Vanguard"
+		"res://assets/audio/music/layers/combat_boss_c_bed.ogg",
+		"res://assets/audio/music/layers/combat_boss_c_perc.ogg",
+		"res://assets/audio/music/layers/combat_boss_c_choir.ogg",
+	],
+	"combat_boss_d": [      # the Lanternhall (Pyromancer) — "Hour of the Witch"
+		"res://assets/audio/music/layers/combat_boss_d_bed.ogg",
+		"res://assets/audio/music/layers/combat_boss_d_perc.ogg",
+		"res://assets/audio/music/layers/combat_boss_d_choir.ogg",
+	],
+	"combat_boss_e": [      # the Owed (Acolyte) — "The Summoning"
+		"res://assets/audio/music/layers/combat_boss_e_bed.ogg",
+		"res://assets/audio/music/layers/combat_boss_e_perc.ogg",
+		"res://assets/audio/music/layers/combat_boss_e_choir.ogg",
+	],
+	"combat_boss_act3": [   # the act 3 heavyweight — "Terminus"
+		"res://assets/audio/music/layers/combat_boss_act3_bed.ogg",
+		"res://assets/audio/music/layers/combat_boss_act3_perc.ogg",
+		"res://assets/audio/music/layers/combat_boss_act3_choir.ogg",
+	],
+}
+
+
+func layered_cue_available(key: String) -> bool:
+	## A PARTIAL ARRANGEMENT IS WORSE THAN THE FLAT TRACK — a missing percussion
+	## stem would not error, it would just quietly play a battle theme with no
+	## drums. Callers use this to fall back to the ordinary cue, which is what
+	## keeps the prototype safe to ship before every track has stems.
+	if not LAYERED_CUES.has(key):
+		return false
+	for p in LAYERED_CUES[key]:
+		if not ResourceLoader.exists(String(p)):
+			return false
+	return true
+
+
+func play_layered_cue(key: String, fade_seconds: float = 1.0) -> void:
+	if not layered_cue_available(key):
+		return
+	play_music_layered("layered:" + key, LAYERED_CUES[key], fade_seconds)
+
+
+func play_music_layered(track_name: String, stem_paths: Array,
+		fade_seconds: float = 1.0) -> void:
+	## stem_paths[0] is the BED and comes up with the cue; every other layer
+	## starts silent and is raised by set_music_layer.
+	if stem_paths.is_empty():
+		return
+	if _current_music_track == track_name:
+		return
+	var sync := AudioStreamSynchronized.new()
+	var streams: Array[AudioStream] = []
+	for p in stem_paths:
+		var path := String(p)
+		if not ResourceLoader.exists(path):
+			push_warning("[AudioBank] layered cue '%s' missing stem %s" % [track_name, path])
+			return  # a partial arrangement is worse than the flat track
+		var st = load(path)
+		if not (st is AudioStream):
+			return
+		streams.append(st)
+	sync.stream_count = mini(streams.size(), MAX_MUSIC_LAYERS)
+	for i in sync.stream_count:
+		sync.set_sync_stream(i, streams[i])
+		sync.set_sync_stream_volume(i, 0.0 if i == 0 else LAYER_OFF_DB)
+	_layer_targets.clear()
+	for i in sync.stream_count:
+		_layer_targets.append(0.0 if i == 0 else LAYER_OFF_DB)
+	_kill_layer_tweens()
+	_pending_music_track = track_name
+	_pending_music_fade = fade_seconds
+	_remember_music_stream(track_name, sync)
+	_start_music_stream(sync, track_name, fade_seconds)
+
+
+func set_music_layer(index: int, on: bool, fade_seconds: float = -1.0) -> void:
+	## Raise or drop one layer. Safe to call every round — a call that asks for
+	## the level a layer is already heading to is dropped, so a per-round
+	## re-assertion does not restart the fade and stutter it.
+	var target: float = 0.0 if on else LAYER_OFF_DB
+	if index < 0 or index >= _layer_targets.size():
+		return
+	if is_equal_approx(_layer_targets[index], target):
+		return
+	var sync := _active_layered_stream()
+	if sync == null:
+		return
+	_layer_targets[index] = target
+	var secs: float = LAYER_FADE_SECS if fade_seconds < 0.0 else fade_seconds
+	while _layer_tweens.size() <= index:
+		_layer_tweens.append(null)
+	if _layer_tweens[index] != null and _layer_tweens[index].is_valid():
+		_layer_tweens[index].kill()
+	var from_db: float = sync.get_sync_stream_volume(index)
+	var tw := create_tween()
+	# tween_method, not tween_property: the value lives on a RESOURCE behind a
+	# setter, and the step has to go through set_sync_stream_volume.
+	tw.tween_method(_layer_step.bind(index), from_db, target, maxf(secs, 0.01))
+	_layer_tweens[index] = tw
+
+
+func music_layer_is_on(index: int) -> bool:
+	return index >= 0 and index < _layer_targets.size() \
+		and not is_equal_approx(_layer_targets[index], LAYER_OFF_DB)
+
+
+func music_layer_count() -> int:
+	var sync := _active_layered_stream()
+	return 0 if sync == null else sync.stream_count
+
+
+func _layer_step(db: float, index: int) -> void:
+	var sync := _active_layered_stream()
+	if sync == null:
+		return
+	sync.set_sync_stream_volume(index, db)
+
+
+func _active_layered_stream() -> AudioStreamSynchronized:
+	# _layer_targets is the authority on whether layering is LIVE, not the
+	# player's stream: AudioStreamPlayer.stop() does not clear `stream`, so after
+	# stop_music the player still holds the synchronized resource and a
+	# stream-based check would go on reporting three drivable layers over silence.
+	# Combat guards on music_layer_count(), so that lie would have it driving a
+	# cue that is not playing.
+	if _music_active == null or _layer_targets.is_empty():
+		return null
+	return _music_active.stream as AudioStreamSynchronized
+
+
+func _kill_layer_tweens() -> void:
+	for tw in _layer_tweens:
+		if tw != null and tw.is_valid():
+			tw.kill()
+	_layer_tweens.clear()
+
+
 func stop_music(fade_seconds: float = 0.6) -> void:
 	_pending_music_track = ""  # cancel any in-flight async play
 	_current_music_track = ""
+	# Layer tweens write into a RESOURCE that outlives this playback (streams are
+	# cached in _music_streams), so one left running would keep mutating the next
+	# cue's arrangement after the music it belonged to had stopped.
+	_kill_layer_tweens()
+	_layer_targets.clear()
+	# Kill any crossfade first: it owns both players' volume_db, and left running
+	# it would fade one of them back UP underneath this fade-out.
+	if _music_tween != null and _music_tween.is_valid():
+		_music_tween.kill()
+	if not (_music_a != null and _music_a.playing) \
+			and not (_music_b != null and _music_b.playing):
+		return
+	_music_tween = create_tween()
+	_music_tween.tween_method(_fadeout_step, 0.0, 1.0, maxf(fade_seconds, 0.01))
+	_music_tween.tween_callback(_end_fadeout)
+
+
+func _fadeout_step(t: float) -> void:
+	# Same cosine leg as the crossfade, so a stop sounds like the back half of a
+	# transition rather than a different gesture.
+	var db := _fade_gain_db(cos(t * PI * 0.5))
 	for p in [_music_a, _music_b]:
 		if p != null and p.playing:
-			var tw := create_tween()
-			tw.tween_property(p, "volume_db", FADE_QUIET_DB, fade_seconds)
-			tw.tween_callback(p.stop)
+			p.volume_db = db
+
+
+func _end_fadeout() -> void:
+	for p in [_music_a, _music_b]:
+		if p != null and p.playing:
+			p.stop()
+			p.volume_db = FADE_FLOOR_DB
 
 
 func _resolve_music_path(track_name: String) -> String:

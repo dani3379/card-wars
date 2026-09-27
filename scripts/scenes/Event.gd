@@ -30,6 +30,7 @@ extends Control
 
 const MAP_SCENE = "res://scenes/map.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+const CARD_BACK_TEXTURE = preload("res://assets/ui/card_back.png")
 # The gamble stage's painters (2026-07-18 "the screen plays the scene" pass —
 # see docs/EVENT_PLAY_PITCH_20260718.md). Same-name consts, painter-extraction
 # convention.
@@ -122,6 +123,7 @@ var _current_node: Dictionary = {}
 static var _horizontal_gradient_shader_cache: Shader = null
 
 var _selected_choice_for_result: Dictionary = {}
+var _choice_commit_busy: bool = false
 var _art_reaction_tween: Tween = null
 
 
@@ -525,6 +527,7 @@ func _refresh_ledger(animate: bool = true) -> void:
 
 func _clear_ui() -> void:
 	_ui_build_gen += 1
+	_choice_commit_busy = false
 	for child in get_children():
 		if not (child.name in PRESERVE_NODES):
 			# queue_free() retires at frame end. Hide and disarm the outgoing tree
@@ -536,9 +539,22 @@ func _clear_ui() -> void:
 			child.queue_free()
 
 
-func _event_ui_build_is_current(gen: int, owner: Node) -> bool:
+## `owner` IS DELIBERATELY UNTYPED, and the body explains why: it asks
+## `is_instance_valid(owner)`, i.e. it EXPECTS to be handed a node that may
+## already be gone. A typed `owner: Node` defeats that check before the body can
+## run — GDScript validates the argument's class at the call, a freed object has
+## no class to report, and the call errors with "argument 2 (previously freed)
+## is not a subclass of the expected argument class".
+##
+## It matters because every caller reaches here across a suspension: the picker
+## drain is entered by `call_deferred` and then loops over `await`s, so the grid
+## can be freed by `_clear_ui` between the call being queued and the guard being
+## asked. That is the whole question this function exists to answer. Seen live as
+## an intermittent error on the event picker's teardown — intermittent because it
+## is a race, which is also why one clean run is not evidence it is gone.
+func _event_ui_build_is_current(gen: int, owner) -> bool:
 	return _ui_build_gen == gen and is_inside_tree() and owner != null \
-		and is_instance_valid(owner) and owner.is_inside_tree()
+		and is_instance_valid(owner) and (owner as Node).is_inside_tree()
 
 
 
@@ -684,7 +700,7 @@ func _build_ui() -> void:
 	# frameless like everything else on the page (the old parchment-box LEAVE
 	# was the last rectangle on the screen).
 	var skip_btn := _make_walk_on_button()
-	skip_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
+	skip_btn.pressed.connect(_walk_on_event)
 	add_child(skip_btn)
 
 	_refresh_ledger()
@@ -805,7 +821,7 @@ func _build_presented_event(layout: String) -> void:
 			_build_template_choice_row(layout, choices)
 
 	var skip_btn := _make_walk_on_button()
-	skip_btn.pressed.connect(func(): GameTheme.fade_out_then_change_scene(self, MAP_SCENE))
+	skip_btn.pressed.connect(_walk_on_event)
 	add_child(skip_btn)
 	_refresh_ledger()
 
@@ -902,7 +918,7 @@ func _make_presented_choice(choice: Dictionary, layout: String, ordinal: int = -
 		headline = "%s.  %s" % [romans[mini(ordinal, romans.size()) - 1], headline]
 	var device = EVENT_CHOICE_DEVICE.new()
 	device.configure(layout, headline, effect_text,
-		String(parts.body), choice.has("blue"), _resolve_choice.bind(choice),
+		String(parts.body), choice.has("blue"), _resolve_choice.bind(choice, device),
 		_on_presented_choice_hover, _mood_title_ink())
 	_mark_choice_unavailable(device, unavailable)
 	return device
@@ -1353,7 +1369,8 @@ func _make_event_choice(choice: Dictionary, height: int, ordinal: int = -1) -> B
 	var unavailable := _choice_unavailable_reason(choice)
 	effect_text = _availability_effect_text(effect_text, unavailable)
 	var button := _make_frameless_choice(headline_text, effect_text, body_text, height,
-			_resolve_choice.bind(choice), choice.has("blue"), ordinal)
+			Callable(), choice.has("blue"), ordinal)
+	button.pressed.connect(_resolve_choice.bind(choice, button))
 	_mark_choice_unavailable(button, unavailable)
 	return button
 
@@ -1654,6 +1671,11 @@ func _veteran_display_name() -> String:
 	return String(RunState.get_upgraded_card_data(best_i).get("name", "your best soldier"))
 
 
+const CHOICE_CONTENT_META := &"_event_choice_content"
+const CHOICE_SETTLE_BUSY_META := &"_event_choice_settle_busy"
+const CHOICE_READY_META := &"_event_choice_ready"
+
+
 func _make_frameless_choice(headline_text: String, effect_text: String,
 		body_text: String, height: int, on_press: Callable,
 		is_blue: bool = false, ordinal: int = -1) -> Button:
@@ -1764,6 +1786,7 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 	vbox.add_theme_constant_override("separation", 4)
 	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(vbox)
+	btn.set_meta(CHOICE_CONTENT_META, vbox)
 
 	var headline := Label.new()
 	headline.text = headline_text
@@ -1882,12 +1905,18 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 	# ready) and grow the button's minimum to fit; the auto-growing ladder
 	# VBox then re-lays out around it.
 	btn.ready.connect(func() -> void:
-		await btn.get_tree().process_frame
-		if not (is_instance_valid(btn) and is_instance_valid(vbox)):
+		if not is_instance_valid(btn):
 			return
-		var need: float = vbox.get_combined_minimum_size().y + 22.0
-		if need > btn.custom_minimum_size.y:
-			btn.custom_minimum_size = Vector2(btn.custom_minimum_size.x, need)
+		var ladder := btn.get_parent()
+		if not (ladder is VBoxContainer):
+			return
+		btn.modulate.a = 0.0
+		btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		btn.set_meta(CHOICE_READY_META, false)
+		ladder.set_meta(CHOICE_READY_META, false)
+		if not bool(ladder.get_meta(CHOICE_SETTLE_BUSY_META, false)):
+			ladder.set_meta(CHOICE_SETTLE_BUSY_META, true)
+			call_deferred("_settle_choice_ladder", ladder)
 	)
 
 	# Deal the ladder in: entries fade in top-to-bottom with a small stagger
@@ -1895,17 +1924,74 @@ func _make_frameless_choice(headline_text: String, effect_text: String,
 	# the engine screens both). Result-screen buttons parented straight to the
 	# root appear instantly. Fade only — position stays container-owned, so
 	# the entrance can never fight the hover slide.
-	btn.ready.connect(func() -> void:
-		if UserSettings.reduce_motion or not (btn.get_parent() is VBoxContainer):
-			return
-		btn.modulate.a = 0.0
-		var tw := btn.create_tween()
-		tw.tween_interval(0.05 + btn.get_index() * 0.07)
-		tw.tween_property(btn, "modulate:a", 1.0, 0.24)
-	)
 
 	return btn
 
+
+
+
+func _settle_choice_ladder(ladder) -> void:
+	# Wrapped outcome text only knows its real height after the container gives
+	# it a width. Settle the complete sibling set while it is invisible, then
+	# publish ink and input without any container-owned geometry still moving.
+	if not is_instance_valid(ladder) or not (ladder is VBoxContainer):
+		return
+	var live_ladder := ladder as VBoxContainer
+	await get_tree().process_frame
+	if not is_instance_valid(live_ladder) or not live_ladder.is_inside_tree():
+		return
+
+	var buttons: Array[Button] = []
+	for child in live_ladder.get_children():
+		if child is Button and child.has_meta(CHOICE_CONTENT_META) \
+				and not child.is_queued_for_deletion():
+			var button := child as Button
+			button.modulate.a = 0.0
+			button.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			buttons.append(button)
+	if buttons.is_empty():
+		live_ladder.set_meta(CHOICE_SETTLE_BUSY_META, false)
+		return
+
+	for _pass in range(3):
+		var grew := false
+		for button in buttons:
+			if not is_instance_valid(button):
+				continue
+			var content = button.get_meta(CHOICE_CONTENT_META, null)
+			if not is_instance_valid(content) or not (content is Control):
+				continue
+			var need: float = (content as Control).get_combined_minimum_size().y + 22.0
+			if need > button.custom_minimum_size.y + 0.5:
+				button.custom_minimum_size.y = need
+				grew = true
+		if not grew:
+			break
+		await get_tree().process_frame
+		if not is_instance_valid(live_ladder) or not live_ladder.is_inside_tree():
+			return
+
+	live_ladder.set_meta(CHOICE_READY_META, true)
+	for button in buttons:
+		if is_instance_valid(button):
+			button.set_meta(CHOICE_READY_META, true)
+			button.mouse_filter = Control.MOUSE_FILTER_STOP
+	live_ladder.set_meta(CHOICE_SETTLE_BUSY_META, false)
+
+	# Fade only: the VBox keeps sole ownership of position and size. Reduced
+	# motion and headless probes publish the complete settled ladder at once.
+	if UserSettings.reduce_motion or DisplayServer.get_name() == "headless":
+		for button in buttons:
+			if is_instance_valid(button):
+				button.modulate.a = 1.0
+		return
+	var tw := live_ladder.create_tween()
+	tw.set_parallel(true)
+	for i in range(buttons.size()):
+		var button := buttons[i]
+		if is_instance_valid(button):
+			tw.tween_property(button, "modulate:a", 1.0, 0.24) \
+				.set_delay(0.05 + float(i) * 0.07)
 
 func _begin_event_art_hydration() -> void:
 	if _event_image != null or _event_art_loading:
@@ -2149,11 +2235,47 @@ func _record_effect_outcome(effect: Dictionary, key: String) -> void:
 		RunState.record_event_choice(flag)
 
 
-func _resolve_choice(choice: Dictionary) -> void:
+func _walk_on_event() -> void:
+	if _choice_commit_busy:
+		return
+	_choice_commit_busy = true
+	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
+
+
+## The decision stays legible for one short beat: the chosen docket answers,
+## its alternatives recede in place, and only then does the result/picker own
+## the page. Alpha/scale only — no container geometry changes during commit.
+func _play_choice_commit(source: Control) -> void:
+	if source == null or not is_instance_valid(source):
+		return
+	if source is BaseButton:
+		(source as BaseButton).disabled = true
+	GameTheme.claim_pop(source)
+	var group := source.get_parent()
+	if group != null:
+		for sibling in group.get_children():
+			if sibling == source or not (sibling is BaseButton):
+				continue
+			(sibling as BaseButton).disabled = true
+			GameTheme.fade_exit(sibling as Control, 0.12)
+	await get_tree().create_timer(0.12).timeout
+
+
+func _resolve_choice(choice: Dictionary, source: Control = null) -> void:
 	var unavailable := _choice_unavailable_reason(choice)
 	if not unavailable.is_empty():
 		_refresh_ledger(false)
 		return
+	if _choice_commit_busy:
+		return
+	_choice_commit_busy = true
+	var animate_commit := source != null and is_instance_valid(source) \
+		and DisplayServer.get_name() != "headless" \
+		and not (UserSettings != null and UserSettings.reduce_motion)
+	if animate_commit:
+		await _play_choice_commit(source)
+		if not is_inside_tree():
+			return
 	# Keep the physical decision so the result page can stamp the same writ,
 	# road marker, contract, or vow instead of replacing it with generic copy.
 	_selected_choice_for_result = choice.duplicate(true)
@@ -2865,6 +2987,11 @@ var _picker_busy: bool = false
 var _ui_build_gen: int = 0
 const PICKER_JOBS_META := &"_event_picker_jobs"
 const PICKER_DRAIN_META := &"_event_picker_drain_busy"
+const RESULT_CARD_JOBS_META := &"_event_result_card_jobs"
+const RESULT_AUX_META := &"_event_result_aux"
+const RESULT_STARTED_META := &"_event_result_started_usec"
+const RESULT_HYDRATED_META := &"_event_result_hydrated"
+const RESULT_READY_META := &"_event_result_ready"
 
 
 # Set by gamble effects (roll_table, coin calls): the result page holds blank
@@ -3154,16 +3281,38 @@ func _seal_card_change(before: Dictionary, deck_index: int) -> void:
 	})
 
 
+func _begin_result_card_timeline() -> Control:
+	## One stable full-page host owns every physical payoff object. Card backs and
+	## final positions exist before the loader yields; cache completion only arms
+	## one authored reveal and can never decide which sibling appears first.
+	var timeline := Control.new()
+	timeline.name = "ResultCardTimeline"
+	timeline.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	timeline.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	timeline.set_meta(RESULT_CARD_JOBS_META, [])
+	timeline.set_meta(RESULT_AUX_META, [])
+	timeline.set_meta(RESULT_STARTED_META, Time.get_ticks_usec())
+	timeline.set_meta(RESULT_HYDRATED_META, false)
+	timeline.set_meta(RESULT_READY_META, false)
+	add_child(timeline)
+	# Staging below is synchronous; the deferred drain sees the complete group.
+	call_deferred("_drain_result_card_timeline", timeline, _ui_build_gen)
+	return timeline
+
+
+
+
 ## Stand the staged payoffs on the art half of the result page: gained cards as
 ## real Card2Ds (dealt in with a small stagger), CHANGED cards as a before→after
 ## pair, removed cards struck through, relic writs beneath.
 func _show_result_objects(delay: float = 0.0) -> void:
-	_show_result_change_pairs(delay)
+	var timeline := _begin_result_card_timeline()
+	_show_result_change_pairs(delay, timeline)
 	# A change pair (or a casualty list) owns the stage on its own — it is the
 	# whole story of the beat, and no event both forges a card and hands you three
 	# others. Falling through would stack the gained-card row on top of it.
 	if not _result_pairs.is_empty() or not _result_lost.is_empty():
-		_show_result_relic_writs(560.0, delay)
+		_show_result_relic_writs(560.0, delay, timeline)
 		_result_cards = []
 		_result_relics = []
 		_result_pairs = []
@@ -3185,7 +3334,7 @@ func _show_result_objects(delay: float = 0.0) -> void:
 		var start_x: float = art_center_x - total_w / 2.0
 		for i in range(n):
 			_stage_card(shown[i], Vector2(start_x + i * (card_w + sep), 170),
-				delay + 0.16 + i * 0.10, 1.0)
+				delay + 0.16 + i * 0.10, 1.0, timeline)
 		if extra > 0:
 			var more := Label.new()
 			more.text = "…and %d more march behind." % extra
@@ -3197,8 +3346,9 @@ func _show_result_objects(delay: float = 0.0) -> void:
 			more.size = Vector2(total_w, 28)
 			more.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			more.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			add_child(more)
-	_show_result_relic_writs(520.0 if n > 0 else 260.0, delay)
+			timeline.add_child(more)
+			_queue_result_aux(timeline, more, delay + 0.42)
+	_show_result_relic_writs(520.0 if n > 0 else 260.0, delay, timeline)
 	_result_cards = []
 	_result_relics = []
 	_result_pairs = []
@@ -3208,7 +3358,8 @@ func _show_result_objects(delay: float = 0.0) -> void:
 ## Relic writs — name in gold over the rules line, printed on the page below (or
 ## in place of) the cards. Split out of _show_result_objects so the change-pair
 ## stage can reuse it.
-func _show_result_relic_writs(start_y: float, delay: float) -> void:
+func _show_result_relic_writs(start_y: float, delay: float,
+		timeline: Control) -> void:
 	var character_stage := _event_presentation_layout() == "character"
 	var relic_x := 250.0 if character_stage else 940.0
 	var ry: float = start_y
@@ -3243,8 +3394,8 @@ func _show_result_relic_writs(start_y: float, delay: float) -> void:
 		if GameTheme.font_body:
 			dl.add_theme_font_override("font", GameTheme.font_body)
 		v.add_child(dl)
-		add_child(v)
-		GameTheme.deal_in(v, delay + 0.3)
+		timeline.add_child(v)
+		_queue_result_aux(timeline, v, delay + 0.30)
 		ry += 96.0
 
 
@@ -3255,7 +3406,7 @@ func _show_result_relic_writs(start_y: float, delay: float) -> void:
 ## stage, greyed and struck, because "which card did I just lose?" is the same
 ## question. Lifted wholesale from the camp forge (Rest._add_preview_card /
 ## _add_arrow_glyph / _build_change_summary) so both screens say it the same way.
-func _show_result_change_pairs(delay: float) -> void:
+func _show_result_change_pairs(delay: float, timeline: Control) -> void:
 	if _result_pairs.is_empty() and _result_lost.is_empty():
 		return
 	var character_stage := _event_presentation_layout() == "character"
@@ -3269,88 +3420,256 @@ func _show_result_change_pairs(delay: float) -> void:
 		var after: Dictionary = pair.get("after", {})
 		if before.is_empty() or after.is_empty():
 			continue
-		_stage_card(before, Vector2(center_x - 268.0, y), delay + 0.16, 0.82)
-		_stage_arrow(Vector2(center_x - 26.0, y + 128.0), delay + 0.30)
-		_stage_card(after, Vector2(center_x + 58.0, y), delay + 0.42, 1.0)
+		_stage_card(before, Vector2(center_x - 268.0, y), delay + 0.16, 0.82, timeline)
+		_stage_arrow(Vector2(center_x - 26.0, y + 128.0), delay + 0.30, timeline)
+		_stage_card(after, Vector2(center_x + 58.0, y), delay + 0.42, 1.0, timeline)
 		var summary := _change_summary_text(before, after)
 		if summary != "":
 			# +312, not +268: the "after" card renders at full scale from y and is
 			# 300 tall, so a caption at +268 sat on top of its own subject.
 			_stage_caption(summary, Vector2(center_x - 268.0, y + 312.0), 496.0,
-				GameTheme.KEYWORD_GOLD, delay + 0.52)
+				GameTheme.KEYWORD_GOLD, delay + 0.52, timeline)
 		y += 372.0
 	for lost in _result_lost.slice(0, mini(2, _result_lost.size())):
 		if typeof(lost) != TYPE_DICTIONARY or lost.is_empty():
 			continue
-		var node := _stage_card(lost, Vector2(center_x - 112.0, y), delay + 0.16, 0.82)
+		var node := _stage_card(lost, Vector2(center_x - 112.0, y),
+			delay + 0.16, 0.82, timeline)
 		if node != null:
 			node.modulate = Color(0.62, 0.58, 0.54, 0.92)
 		_stage_caption("REMOVED FROM YOUR DECK",
-			Vector2(center_x - 210.0, y + 258.0), 420.0, GameTheme.DESC_DIM, delay + 0.30)
+			Vector2(center_x - 210.0, y + 258.0), 420.0, GameTheme.DESC_DIM, delay + 0.30, timeline)
 		y += 330.0
 
 
 func _stage_card(data: Dictionary, pos: Vector2, delay: float,
-		card_scale: float) -> Control:
+		card_scale: float, timeline: Control) -> Control:
 	var wrapper := Control.new()
 	wrapper.custom_minimum_size = Vector2(225, 300)
+	wrapper.size = Vector2(225, 300)
 	wrapper.position = pos
 	wrapper.scale = Vector2(card_scale, card_scale)
 	wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(wrapper)
-	GameTheme.deal_in(wrapper, delay)
-	_hydrate_staged_card(wrapper, data, delay, _ui_build_gen)
+	timeline.add_child(wrapper)
+	var back := _make_picker_card_back(wrapper, timeline)
+	var jobs: Array = timeline.get_meta(RESULT_CARD_JOBS_META, [])
+	jobs.append({
+		"data": data.duplicate(true),
+		"wrapper": wrapper,
+		"back": back,
+		"delay": delay,
+	})
+	timeline.set_meta(RESULT_CARD_JOBS_META, jobs)
 	return wrapper
+
+
+func _queue_result_aux(timeline: Control, ctrl: Control, delay: float) -> void:
+	if timeline == null or ctrl == null:
+		return
+	# Layout is final but ink stays withheld until every dependent card is ready.
+	ctrl.modulate.a = 0.0
+	var aux: Array = timeline.get_meta(RESULT_AUX_META, [])
+	aux.append({"control": ctrl, "delay": delay})
+	timeline.set_meta(RESULT_AUX_META, aux)
+
+
+## Hydrate the complete result composition behind its already-seated backs, then
+## hand presentation to one timeline. Cache completion never publishes a face.
+func _drain_result_card_timeline(timeline, build_gen: int) -> void:
+	if not _event_ui_build_is_current(build_gen, timeline):
+		return
+	var timeline_ref: WeakRef = weakref(timeline)
+	var still_here := func() -> bool:
+		var live := timeline_ref.get_ref() as Control
+		return _event_ui_build_is_current(build_gen, live)
+
+	# One honest painted frame: every final slot/back exists before any rich face.
+	await get_tree().process_frame
+	if not still_here.call():
+		return
+	var live_timeline := timeline_ref.get_ref() as Control
+	var jobs: Array = live_timeline.get_meta(RESULT_CARD_JOBS_META, [])
+	var datas: Array = []
+	for job in jobs:
+		datas.append((job as Dictionary).get("data", {}))
+	var windowed := DisplayServer.get_name() != "headless"
+	if windowed and not datas.is_empty():
+		await CardTextureCache.bake_many(datas, still_here)
+		if not still_here.call():
+			return
+
+	# Cached result faces are light enough to construct as one atomic publication
+	# batch (at most four). They remain hidden under the full back set while their
+	# live name/rules text receives its rendered-frame completion pass.
+	var cards: Array[Control] = []
+	for i in jobs.size():
+		var job: Dictionary = jobs[i]
+		var wrapper: Control = job.get("wrapper") as Control
+		var data: Dictionary = job.get("data", {})
+		if wrapper == null or not is_instance_valid(wrapper):
+			continue
+		var card_node = CARD_SCENE.instantiate()
+		card_node.card_id = String(data.get("id", ""))
+		card_node.static_display = true
+		card_node.card_data = data.duplicate(true)
+		card_node.live_baked_mode = true
+		card_node.defer_baked_rules_text = windowed
+		card_node.visible = false
+		wrapper.add_child(card_node)
+		wrapper.move_child(card_node, 0)
+		cards.append(card_node)
+		job["card"] = card_node
+		jobs[i] = job
+	live_timeline.set_meta(RESULT_CARD_JOBS_META, jobs)
+	if windowed and not cards.is_empty():
+		await RenderingServer.frame_post_draw
+		if not still_here.call():
+			return
+		for card in cards:
+			if is_instance_valid(card):
+				card.complete_deferred_baked_rules()
+		await RenderingServer.frame_post_draw
+		if not still_here.call():
+			return
+	live_timeline = timeline_ref.get_ref() as Control
+	live_timeline.set_meta(RESULT_HYDRATED_META, true)
+	_release_result_card_timeline(live_timeline, jobs,
+		live_timeline.get_meta(RESULT_AUX_META, []), build_gen)
+
+
+func _release_result_card_timeline(timeline: Control, jobs: Array,
+		aux: Array, build_gen: int) -> void:
+	if not _event_ui_build_is_current(build_gen, timeline):
+		return
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	var base_delay := INF
+	for job in jobs:
+		base_delay = minf(base_delay, float((job as Dictionary).get("delay", 0.0)))
+	for item in aux:
+		base_delay = minf(base_delay, float((item as Dictionary).get("delay", 0.0)))
+	if base_delay == INF:
+		base_delay = 0.0
+	var started_usec := int(timeline.get_meta(
+		RESULT_STARTED_META, Time.get_ticks_usec()))
+	var elapsed := float(Time.get_ticks_usec() - started_usec) / 1000000.0
+	# Suspense time doubles as useful preload time. If cold work overruns it, begin
+	# immediately but retain the authored offsets for arrows/captions/relic ink.
+	var gate := maxf(0.0, base_delay - elapsed)
+
+	if snap:
+		for job in jobs:
+			var back := (job as Dictionary).get("back") as Control
+			var card := (job as Dictionary).get("card") as Control
+			if back != null and is_instance_valid(back):
+				back.queue_free()
+			if card != null and is_instance_valid(card):
+				card.visible = true
+				card.modulate.a = 1.0
+				card.scale = Vector2.ONE
+		for item in aux:
+			var ctrl := (item as Dictionary).get("control") as Control
+			if ctrl != null and is_instance_valid(ctrl):
+				ctrl.modulate.a = 1.0
+				ctrl.scale = Vector2.ONE
+		timeline.set_meta(RESULT_READY_META, true)
+		return
+
+	# One coordinated turn: the whole logical card group publishes together. The
+	# fixed backs make readiness visible without revealing cache completion order.
+	if not jobs.is_empty():
+		var sound_tw := timeline.create_tween()
+		if gate > 0.0:
+			sound_tw.tween_interval(gate)
+		sound_tw.tween_callback(func():
+			AudioBank.play_sfx("card_draw", 0.04, -6.0))
+	for job in jobs:
+		var back := (job as Dictionary).get("back") as Control
+		var card := (job as Dictionary).get("card") as Control
+		if card != null and is_instance_valid(card):
+			card.visible = true
+			card.modulate.a = 1.0
+			Motion.flip_in(card, gate + Motion.time(0.13), 0.17)
+		if back != null and is_instance_valid(back):
+			var back_ref: WeakRef = weakref(back)
+			var back_tw := timeline.create_tween()
+			if gate > 0.0:
+				back_tw.tween_interval(gate)
+			back_tw.tween_callback(func():
+				var live_back := back_ref.get_ref() as Control
+				if live_back != null:
+					Motion.flip_out(live_back, 0.13))
+
+	var finish_at := gate + Motion.time(0.34)
+	for item in aux:
+		var ctrl := (item as Dictionary).get("control") as Control
+		if ctrl == null or not is_instance_valid(ctrl):
+			continue
+		var at := gate + maxf(0.0,
+			float((item as Dictionary).get("delay", base_delay)) - base_delay)
+		GameTheme.deal_in(ctrl, at)
+		finish_at = maxf(finish_at, at + 0.40)
+	var timeline_ref: WeakRef = weakref(timeline)
+	var ready_tw := timeline.create_tween()
+	ready_tw.tween_interval(maxf(finish_at, 0.001))
+	ready_tw.tween_callback(func():
+		var live := timeline_ref.get_ref() as Control
+		if live != null:
+			live.set_meta(RESULT_READY_META, true))
 
 
 ## Result cards are already authored to deal in at staggered times. Use that
 ## hidden interval to bake and assemble each complete face, so the result text
 ## appears immediately and no click pays for two or three ornate trees at once.
-func _hydrate_staged_card(wrapper: Control, data: Dictionary,
-		deal_delay: float, build_gen: int) -> void:
-	var started_usec := Time.get_ticks_usec()
+func _hydrate_appraisal_card(wrapper: Control, data: Dictionary,
+		back: Control, build_gen: int) -> void:
 	var windowed := DisplayServer.get_name() != "headless"
 	if windowed and not CardTextureCache.has(data):
 		await CardTextureCache.bake(data)
 		if not _event_ui_build_is_current(build_gen, wrapper):
 			return
-	if windowed and not UserSettings.reduce_motion:
-		# Finish the face just before its existing deal-in wakes. Distinct authored
-		# delays naturally keep warm-cache overlays on separate frames as well.
-		var target_usec := int(maxf(0.0, deal_delay - 0.08) * 1000000.0)
-		var remaining_usec := target_usec - (Time.get_ticks_usec() - started_usec)
-		if remaining_usec > 0:
-			await get_tree().create_timer(float(remaining_usec) / 1000000.0).timeout
-			if not _event_ui_build_is_current(build_gen, wrapper):
-				return
 	if not _event_ui_build_is_current(build_gen, wrapper):
 		return
 	var card_node = CARD_SCENE.instantiate()
+	card_node.card_id = String(data.get("id", ""))
 	card_node.static_display = true
-	card_node.card_data = data
+	card_node.card_data = data.duplicate(true)
 	card_node.live_baked_mode = true
 	card_node.defer_baked_rules_text = windowed
+	card_node.visible = false
 	wrapper.add_child(card_node)
+	wrapper.move_child(card_node, 0)
 	if windowed:
 		await RenderingServer.frame_post_draw
 		if not _event_ui_build_is_current(build_gen, wrapper):
 			return
 		card_node.complete_deferred_baked_rules()
 		await RenderingServer.frame_post_draw
+		if not _event_ui_build_is_current(build_gen, wrapper):
+			return
+	card_node.visible = true
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	if snap:
+		if back != null and is_instance_valid(back):
+			back.queue_free()
+	else:
+		Motion.flip_out(back, 0.13)
+		Motion.flip_in(card_node, Motion.time(0.13), 0.17)
 
 
-func _stage_arrow(pos: Vector2, delay: float) -> void:
+func _stage_arrow(pos: Vector2, delay: float, timeline: Control) -> void:
 	var arrow := GameTheme.make_label("→", 46, GameTheme.KEYWORD_GOLD)
 	arrow.position = pos
 	arrow.size = Vector2(56, 56)
 	arrow.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	arrow.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(arrow)
-	GameTheme.deal_in(arrow, delay)
+	timeline.add_child(arrow)
+	_queue_result_aux(timeline, arrow, delay)
 
 
 func _stage_caption(text: String, pos: Vector2, width: float, col: Color,
-		delay: float) -> void:
+		delay: float, timeline: Control) -> void:
 	var lab := GameTheme.make_label(text, GameTheme.MIN_LABEL_SIZE, col)
 	lab.position = pos
 	lab.size = Vector2(width, 30)
@@ -3360,8 +3679,8 @@ func _stage_caption(text: String, pos: Vector2, width: float, col: Color,
 	lab.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
 	lab.add_theme_constant_override("outline_size", 3)
 	lab.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(lab)
-	GameTheme.deal_in(lab, delay)
+	timeline.add_child(lab)
+	_queue_result_aux(timeline, lab, delay)
 
 
 ## One plain line naming what changed between two folded card datas. Deliberately
@@ -3390,7 +3709,7 @@ func _change_summary_text(before: Dictionary, after: Dictionary) -> String:
 	return "%s — %s" % [a_name, ", ".join(bits)]
 
 
-func _make_card_picker_grid(title_text: String, title_color: Color) -> GridContainer:
+func _make_card_picker_grid(title_text: String, title_color: Color) -> Container:
 	# Shared helper for card-picker screens (remove, copy, butcher).
 	# Returns the GridContainer so callers can add card wrappers to it.
 	# The event's painting stays under the picker (2026-07-04) — a deep scrim
@@ -3417,10 +3736,11 @@ func _make_card_picker_grid(title_text: String, title_color: Color) -> GridConta
 	scroll.size = Vector2(1440, 680)
 	add_child(scroll)
 
-	var grid = GridContainer.new()
-	grid.columns = 6
-	grid.add_theme_constant_override("h_separation", 16)
-	grid.add_theme_constant_override("v_separation", 16)
+	# `_add_card_to_grid` reserves 210x280 per tile, so six of them plus five
+	# 16px gutters is 1340 — which also re-centres the block inside the 1440
+	# viewport it used to sit left-flush in.
+	var grid = GameTheme.make_picker_rank(6, 210.0, 16, 16)
+	grid.name = "EventCardGrid"
 	scroll.add_child(grid)
 	_refresh_ledger()
 	return grid
@@ -3438,22 +3758,55 @@ func _make_picker_scrim() -> ColorRect:
 	return scrim
 
 
-func _add_card_to_grid(grid: GridContainer, data: Dictionary, callback: Callable) -> void:
-	# Callers stay synchronous and simply enqueue their slate. One coroutine per
-	# grid drains it in order, so cold texture work and ornate live overlays never
-	# collapse the whole deck into one input-blocking frame.
+func _add_card_to_grid(grid: Container, data: Dictionary, callback: Callable) -> void:
+	# Reserve the final footprint synchronously. Callers enqueue an entire slate
+	# in one stack frame, so every face-down writ is already seated before the
+	# asynchronous texture/card work begins and the GridContainer never grows
+	# underneath a visible face.
 	if grid == null or not is_instance_valid(grid):
 		return
+	var wrapper := Control.new()
+	wrapper.custom_minimum_size = Vector2(210, 280)
+	wrapper.pivot_offset = Vector2(105, 140)
+	grid.add_child(wrapper)
+	var back := _make_picker_card_back(wrapper, grid)
 	var jobs: Array = grid.get_meta(PICKER_JOBS_META, [])
-	jobs.append({"data": data, "callback": callback})
+	jobs.append({
+		"data": data,
+		"callback": callback,
+		"wrapper": wrapper,
+		"back": back,
+	})
 	grid.set_meta(PICKER_JOBS_META, jobs)
 	if bool(grid.get_meta(PICKER_DRAIN_META, false)):
 		return
 	grid.set_meta(PICKER_DRAIN_META, true)
-	_drain_card_grid(grid, _ui_build_gen)
+	# Deferred, not immediate: every picker caller fills its loop synchronously.
+	# This lets the drain see the whole offer and turn every completed face on the
+	# same beat, even when all cache entries are already warm.
+	call_deferred("_drain_card_grid", grid, _ui_build_gen)
 
 
-func _drain_card_grid(grid: GridContainer, build_gen: int) -> void:
+func _make_picker_card_back(parent: Control,
+		group: CanvasItem = null) -> TextureRect:
+	var back := TextureRect.new()
+	back.name = "LoadingWrit"
+	back.texture = CARD_BACK_TEXTURE
+	back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	back.set_anchors_preset(Control.PRESET_FULL_RECT)
+	back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	Motion.arm_loading_writ(back, group)
+	parent.add_child(back)
+	return back
+
+
+## `grid` untyped for the same reason the guard's `owner` is: this is entered by
+## `call_deferred`, so the grid can be freed between the call being queued and
+## the frame it runs on, and a typed parameter would error on the way IN instead
+## of letting the first line of the loop decline the work.
+func _drain_card_grid(grid, build_gen: int) -> void:
+	var reveals: Array = []
 	while _event_ui_build_is_current(build_gen, grid):
 		var jobs: Array = grid.get_meta(PICKER_JOBS_META, [])
 		if jobs.is_empty():
@@ -3466,21 +3819,23 @@ func _drain_card_grid(grid: GridContainer, build_gen: int) -> void:
 			if not _event_ui_build_is_current(build_gen, grid):
 				return
 
-		var wrapper := Control.new()
-		wrapper.custom_minimum_size = Vector2(210, 280)
-		wrapper.pivot_offset = Vector2(105, 140)
+		var wrapper: Control = job.wrapper
+		var back: Control = job.back
 		var card_node = CARD_SCENE.instantiate()
 		card_node.static_display = true
 		card_node.card_data = data
 		card_node.live_baked_mode = true
 		card_node.defer_baked_rules_text = DisplayServer.get_name() != "headless"
+		# Snap mode changes the reveal animation, never the group-ready contract.
+		card_node.visible = false
 		wrapper.add_child(card_node)
+		wrapper.move_child(card_node, 0)
 		var click_btn := Button.new()
 		click_btn.flat = true
 		click_btn.focus_mode = Control.FOCUS_NONE
 		click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
 		click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
-		click_btn.disabled = DisplayServer.get_name() != "headless"
+		click_btn.disabled = true
 		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
@@ -3490,17 +3845,45 @@ func _drain_card_grid(grid: GridContainer, build_gen: int) -> void:
 		# lifts and pops above its overlapping grid neighbors.
 		GameTheme.hover_lift(click_btn, 1.05, wrapper, true)
 		wrapper.add_child(click_btn)
-		grid.add_child(wrapper)
+		reveals.append({"card": card_node, "back": back, "button": click_btn})
 
 		if DisplayServer.get_name() != "headless":
 			await RenderingServer.frame_post_draw
 			if not _event_ui_build_is_current(build_gen, grid):
 				return
 			card_node.complete_deferred_baked_rules()
-			click_btn.disabled = false
 			await RenderingServer.frame_post_draw
+	if _event_ui_build_is_current(build_gen, grid):
+		await _reveal_picker_card_group(reveals, build_gen, grid)
 	if is_instance_valid(grid):
 		grid.set_meta(PICKER_DRAIN_META, false)
+
+
+func _reveal_picker_card_group(reveals: Array, build_gen: int,
+		grid: Container) -> void:
+	if reveals.is_empty():
+		return
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	if not snap:
+		AudioBank.play_sfx("card_draw", 0.04, -6.0)
+		for reveal in reveals:
+			Motion.flip_out(reveal.back as Control, 0.13)
+		await get_tree().create_timer(Motion.time(0.13)).timeout
+		if not _event_ui_build_is_current(build_gen, grid):
+			return
+	for reveal in reveals:
+		var back: Control = reveal.back
+		var card: Control = reveal.card
+		var button: Button = reveal.button
+		if snap and is_instance_valid(back):
+			back.queue_free()
+		if is_instance_valid(card):
+			card.visible = true
+			if not snap:
+				Motion.flip_in(card, 0.0, 0.16)
+		if is_instance_valid(button):
+			button.disabled = false
 
 
 ## Every picker tile goes through here so a handler can play a beat ON the card
@@ -3967,6 +4350,7 @@ func _forge_stamp_text(before: Dictionary, after: Dictionary) -> String:
 # afford to spend?" Modeled on StS's Designer In-Spire and the Mind Bloom
 # branches, but each card is the choice (not each effect).
 func _start_stranger_hand_mode() -> void:
+	_picker_busy = false
 	var rares: Array = CardDB.cards_of_rarity("rare")
 	# Prefer rares the player doesn't already own so the deal feels novel.
 	# If filtering drops us below 3, fall back to the full pool — better to
@@ -4016,6 +4400,7 @@ func _start_stranger_hand_mode() -> void:
 	var total_w: int = n * card_w + (n - 1) * sep
 	var card_rows: Array = []
 	var hbox := HBoxContainer.new()
+	hbox.name = "StrangerHandGroup"
 	hbox.set_anchors_preset(Control.PRESET_CENTER)
 	hbox.offset_left = -total_w / 2
 	hbox.offset_right = total_w / 2
@@ -4046,22 +4431,19 @@ func _start_stranger_hand_mode() -> void:
 		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-		click_btn.pressed.connect(_on_stranger_hand_pick.bind(card_id, cost))
+		click_btn.pressed.connect(_on_stranger_hand_pick.bind(card_id, cost, v))
+		click_btn.disabled = true
 		wrapper.add_child(click_btn)
 		v.add_child(wrapper)
-		var back: TextureRect = null
-		# L4 (docs/EVENT_PLAY_PITCH_20260718.md): the wet cards land
-		# face-DOWN and flip up one at a time — a dealing beat, not a
-		# different offer. Reduce Motion deals them face-up as before.
-		if not UserSettings.reduce_motion:
-			back = TextureRect.new()
-			back.name = "WetBack"
-			back.texture = load("res://assets/ui/card_back.png")
-			back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			back.set_anchors_preset(Control.PRESET_FULL_RECT)
-			back.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			wrapper.add_child(back)
+		var back := TextureRect.new()
+		back.name = "WetBack"
+		back.texture = CARD_BACK_TEXTURE
+		back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		back.set_anchors_preset(Control.PRESET_FULL_RECT)
+		back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		Motion.arm_loading_writ(back, hbox)
+		wrapper.add_child(back)
 
 		var cost_label := Label.new()
 		cost_label.text = cost.label
@@ -4073,7 +4455,8 @@ func _start_stranger_hand_mode() -> void:
 		if GameTheme.font_display:
 			cost_label.add_theme_font_override("font", GameTheme.font_display)
 		v.add_child(cost_label)
-		card_rows.append({"wrapper": wrapper, "data": data, "back": back})
+		card_rows.append({"wrapper": wrapper, "data": data, "back": back,
+			"button": click_btn})
 
 	# Leave button below the row — the player can step into the picker,
 	# inspect the cards, and back out without paying. Cleaner than forcing
@@ -4098,11 +4481,17 @@ func _start_stranger_hand_mode() -> void:
 ## order behind them. The authored flip waits until all three complete, so the
 ## player never sees a partial face and the settled offer is pixel-identical.
 func _hydrate_stranger_hand_cards(rows: Array, build_gen: int) -> void:
+	# Present the complete three-back hand once even on a warm cache. Hydration
+	# remains implementation detail, and Reduce Motion still snaps on reveal.
+	await get_tree().process_frame
+	if not _event_ui_build_is_current(build_gen, self):
+		return
 	var flip_rows: Array = []
 	for row in rows:
 		var wrapper: Control = row.wrapper
 		var data: Dictionary = row.data
 		var back = row.back
+		var click_btn: Button = row.button
 		if not _event_ui_build_is_current(build_gen, wrapper):
 			return
 		if DisplayServer.get_name() != "headless" and not CardTextureCache.has(data):
@@ -4114,11 +4503,10 @@ func _hydrate_stranger_hand_cards(rows: Array, build_gen: int) -> void:
 		card_node.card_data = data
 		card_node.live_baked_mode = true
 		card_node.defer_baked_rules_text = DisplayServer.get_name() != "headless"
-		card_node.visible = back == null
+		card_node.visible = false
 		wrapper.add_child(card_node)
 		wrapper.move_child(card_node, 0)
-		if back != null:
-			flip_rows.append([wrapper, card_node, back])
+		flip_rows.append([wrapper, card_node, back, click_btn])
 		if DisplayServer.get_name() != "headless":
 			await RenderingServer.frame_post_draw
 			if not _event_ui_build_is_current(build_gen, wrapper):
@@ -4131,38 +4519,55 @@ func _hydrate_stranger_hand_cards(rows: Array, build_gen: int) -> void:
 		_play_wet_deal(flip_rows)
 
 
-## L4's dealing beat: each wet card flips up off the stone in turn — the
-## wrapper thins to its edge, the back swaps for the face at the edge-on
-## moment, and the face springs open. Fire-and-forget; clicks during the
-## deal still work (the offer is already live underneath).
+## L4's dealing beat: the whole hand turns together. Sequential hydration is a
+## renderer concern, not authored drama; showing that work as three separate
+## flips made the centered offer look like it was still assembling itself.
 func _play_wet_deal(rows: Array) -> void:
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	if snap:
+		for row in rows:
+			if not is_instance_valid(row[0]):
+				return
+			_wet_flip_show(row[1], row[2], row[3])
+		return
 	await get_tree().create_timer(0.35).timeout
-	for i in range(rows.size()):
-		# Untyped on purpose: assigning a freed node into a TYPED var errors
-		# before any validity guard can run (the deal may be in flight when
-		# the screen rebuilds under it).
-		var wrapper = rows[i][0]
+	AudioBank.play_sfx("card_draw", 0.05, -6.0)
+	for row in rows:
+		var wrapper = row[0]
 		if not is_instance_valid(wrapper):
 			return
 		wrapper.pivot_offset = wrapper.size * 0.5
-		AudioBank.play_sfx("card_draw", 0.05, -6.0)
 		var tw: Tween = wrapper.create_tween()
 		tw.tween_property(wrapper, "scale:x", 0.06, 0.16) \
 			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-		tw.tween_callback(_wet_flip_show.bind(rows[i][1], rows[i][2]))
+	await get_tree().create_timer(0.16).timeout
+	for row in rows:
+		var wrapper = row[0]
+		if not is_instance_valid(wrapper):
+			return
+		_wet_flip_show(row[1], row[2], row[3])
+		wrapper.scale.x = 0.06
+		var tw: Tween = wrapper.create_tween()
 		tw.tween_property(wrapper, "scale:x", 1.0, 0.20) \
 			.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-		await get_tree().create_timer(0.22).timeout
 
 
-func _wet_flip_show(card: Control, back: Control) -> void:
+func _wet_flip_show(card: Control, back: Control, button: Button) -> void:
 	if is_instance_valid(back):
 		back.visible = false
+		back.queue_free()
 	if is_instance_valid(card):
 		card.visible = true
+	if is_instance_valid(button):
+		button.disabled = false
 
 
-func _on_stranger_hand_pick(card_id: String, cost: Dictionary) -> void:
+func _on_stranger_hand_pick(card_id: String, cost: Dictionary,
+		source: Control = null) -> void:
+	if _picker_busy:
+		return
+	_picker_busy = true
 	var data = CardDB.get_card_data(card_id)
 	var msg := ""
 	match cost.kind:
@@ -4186,6 +4591,27 @@ func _on_stranger_hand_pick(card_id: String, cost: Dictionary) -> void:
 	RunState.add_card(card_id)
 	_result_cards.append(data)
 	_sting("card_play")
+	# The chosen rare now has a destination: the persistent deck ledger. Costs
+	# and deck size update when it lands, tying the physical take to its receipt.
+	if source != null and is_instance_valid(source):
+		GameTheme.claim_pop(source)
+		if source.get_parent() != null:
+			for sibling in source.get_parent().get_children():
+				if sibling != source and sibling is Control:
+					GameTheme.fade_exit(sibling, 0.22)
+		if UserSettings == null or not UserSettings.reduce_motion:
+			await get_tree().create_timer(0.10).timeout
+		if not is_inside_tree():
+			return
+		var vp := get_viewport_rect().size
+		var target := Vector2(vp.x * 0.5, vp.y + 30.0)
+		var deck_label: Control = _ledger_values.get("deck") as Control
+		if deck_label != null and is_instance_valid(deck_label):
+			target = deck_label.global_position + deck_label.size * 0.5
+		await GameTheme.pocket_away(source, target, 0.34)
+		_refresh_ledger()
+		if deck_label != null and is_instance_valid(deck_label):
+			GameTheme.punch(deck_label, 1.12)
 	msg += "Gained %s." % data.name
 	_show_result(msg)
 
@@ -8545,43 +8971,82 @@ func _on_risk_leave() -> void:
 
 
 # ── Appraisal (pawn_appraisal) — the haggling counter ────────────────────
-# She pulls a random card from YOUR deck and names a price. Take it, or
-# ask her to pull another — her interest (and the multiplier) cools 15%
-# each time, three cards shown at most. The pressure is the format: the
-# first offer is the best one, and it's never for the card you'd have
-# chosen to sell. Curses are never appraised ("she has standards").
+# She names a card out of YOUR deck and offers a price. Take it, or ask her to
+# look again — her interest (and the multiplier) cools 15% each time, three
+# cards shown at most. Curses are never appraised ("she has standards").
+#
+# SHE ASKS FOR YOUR BEST (owner's rule, 2026-09-16). She used to pull a card at
+# UNIFORM RANDOM, and on a deck that is mostly starters that meant she almost
+# always offered to buy your chaff — so the counter was a deck-thinning service
+# that also paid you, which is the same defect the shop's buy-back had and was
+# removed for on the same day. A pawnbroker with an eye does not want your
+# Strike; she wants the rare and she wants the thing you forged.
+#
+# That inverts the whole decision. Before: "will I take free gold for a card I
+# did not want anyway?" — which is not a decision. Now: "what is my best card
+# worth to me, in gold, right now?" — which is the trade the shelf behind the
+# glass exists to offer, and it is what makes the act-2 buy-back worth wanting.
+const APPR_RARITY_WORTH: Dictionary = {
+	"starter": 0, "common": 10, "uncommon": 20, "rare": 30,
+}
+## A forge is worth MORE than one rarity step, deliberately: the owner's rule
+## names rarity and forging as equal claims on her interest ("highest rarity or
+## one you have updated"), and a card you chose to forge is a card you committed
+## to, so a forged common (22) outranking a plain uncommon (20) is the right
+## reading of "your best" — it is best BY YOUR OWN REVEALED PREFERENCE.
+const APPR_FORGED_WORTH := 12
+## What the forge adds to her offer. She is buying the improvement too, so a
+## worth model that ranked forged cards up while the PRICE ignored forging would
+## have her hunting your best work and paying base-card money for it.
+const APPR_FORGED_PRICE := 20
+const APPR_MAX_SHOWN := 3
 
 var _appr_index: int = -1
 var _appr_mult: float = 1.0
 var _appr_shown: int = 0
+## Her shortlist: deck indices, best first, computed ONCE on entry. Held rather
+## than re-rolled per look because a sale ends the screen, so the deck cannot
+## shift underneath it — and because re-ranking each time would keep handing
+## back the same top card she was just refused.
+var _appr_shortlist: Array[int] = []
 
 func _start_appraisal_mode() -> void:
 	_appr_mult = 1.0
 	_appr_shown = 1
-	_appr_index = _appraisal_roll(-1)
-	if _appr_index < 0:
+	_appr_shortlist = _appraisal_shortlist()
+	if _appr_shortlist.is_empty():
 		_show_result("You have no card she will buy.")
 		return
+	_appr_index = _appr_shortlist[0]
 	_build_appraisal_screen()
 
 
-func _appraisal_roll(exclude: int) -> int:
-	var pool: Array = []
+## Rank the deck by what she is looking for and keep the top few. Curses are
+## excluded outright — she has standards.
+func _appraisal_shortlist() -> Array[int]:
+	var ranked: Array[int] = []
 	for i in range(RunState.deck.size()):
-		if i == exclude:
-			continue
-		if CardDB.is_curse(RunState.deck[i]):
-			continue
-		pool.append(i)
-	if pool.is_empty():
-		return exclude
-	return pool[randi() % pool.size()]
+		if not CardDB.is_curse(RunState.deck[i]):
+			ranked.append(i)
+	# Shuffle BEFORE sorting. `sort_custom` is not stable, and more to the point
+	# a deck holds duplicates — two copies of one card tie exactly, so without
+	# this she would name the same three deck slots on every visit of every run.
+	ranked.shuffle()
+	ranked.sort_custom(func(a: int, b: int) -> bool:
+		return _appraisal_worth(a) > _appraisal_worth(b))
+	return ranked.slice(0, mini(APPR_MAX_SHOWN, ranked.size()))
 
-func _appraisal_has_alternate(exclude: int) -> bool:
-	for i in range(RunState.deck.size()):
-		if i != exclude and not CardDB.is_curse(RunState.deck[i]):
-			return true
-	return false
+
+func _appraisal_worth(deck_index: int) -> int:
+	var data: Dictionary = RunState.get_upgraded_card_data(deck_index)
+	var worth: int = int(APPR_RARITY_WORTH.get(
+		String(data.get("rarity", "common")), 10))
+	if RunState.is_card_upgraded(deck_index):
+		worth += APPR_FORGED_WORTH
+	# Cost only breaks ties inside a band — it must never outrank a whole
+	# rarity step, which is why the bands are spaced 10 and cost tops out at 6.
+	return worth + int(data.get("cost", 0))
+
 
 func _appraisal_price(deck_index: int) -> int:
 	var data = RunState.get_upgraded_card_data(deck_index)
@@ -8591,6 +9056,8 @@ func _appraisal_price(deck_index: int) -> int:
 		"common": base = 30
 		"uncommon": base = 50
 		"rare": base = 85
+	if RunState.is_card_upgraded(deck_index):
+		base += APPR_FORGED_PRICE
 	return int(round((base + int(data.get("cost", 0)) * 5) * _appr_mult))
 
 
@@ -8598,25 +9065,29 @@ func _build_appraisal_screen() -> void:
 	var data = RunState.get_upgraded_card_data(_appr_index)
 	var price := _appraisal_price(_appr_index)
 
-	var can_another: bool = _appr_shown < 3 and _appraisal_has_alternate(_appr_index)
+	# The shortlist IS the alternate test now — it was built from the whole deck
+	# on entry, so "is there another" is just "has she shown them all".
+	var can_another: bool = _appr_shown < _appr_shortlist.size()
 	var n_choices: int = 3 if can_another else 2
 	# Choices sit right of the appraised card (96–321), so widen the left inset.
 	var choices_vbox := _build_event_screen(
 		"She holds up [color=#e8b547]%s[/color]" % String(data.get("name", "a card")),
-		"She offers a price for this card.",
+		"She asks for your best, and names a price.",
 		n_choices, 360, 980)
 	var build_gen := _ui_build_gen
 
 	# The card itself, stood on the scrim left of the choices.
 	var wrapper := Control.new()
 	wrapper.custom_minimum_size = Vector2(225, 300)
+	wrapper.size = Vector2(225, 300)
 	wrapper.set_anchors_preset(Control.PRESET_CENTER_LEFT)
 	wrapper.offset_left = 96
 	wrapper.offset_right = 321
 	wrapper.offset_top = -40
 	wrapper.offset_bottom = 260
 	add_child(wrapper)
-	_hydrate_staged_card(wrapper, data, 0.0, build_gen)
+	var back := _make_picker_card_back(wrapper, wrapper)
+	_hydrate_appraisal_card(wrapper, data, back, build_gen)
 
 	choices_vbox.add_child(_make_frameless_choice("Sell it",
 		"Trade %s for %d gold." % [String(data.get("name", "the card")), price],
@@ -8649,12 +9120,14 @@ func _on_appraisal_sell() -> void:
 
 
 func _on_appraisal_another() -> void:
-	var next_index := _appraisal_roll(_appr_index)
-	if next_index < 0 or next_index == _appr_index:
+	# Walk DOWN the shortlist — she offered her best first, so each refusal
+	# costs twice: a lesser card, and 15% off the figure. The old version rolled
+	# a fresh random index, which could hand back a card she had already shown.
+	if _appr_shown >= _appr_shortlist.size():
 		return
+	_appr_index = _appr_shortlist[_appr_shown]
 	_appr_shown += 1
 	_appr_mult *= 0.85
-	_appr_index = next_index
 	AudioBank.play_sfx("button_click")
 	_build_appraisal_screen()
 

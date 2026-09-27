@@ -118,6 +118,12 @@ const MAX_ROUNDS := 40          # a fight that runs past this is treated as a so
 const TURN_WAIT_TICKS := 80     # ~8s of 0.1s polls waiting for the next player turn
 const CAST_WAIT_TICKS := 60     # ~6s budget for ONE targeted cast to finish resolving
 const TICK := 0.1
+# Hand-settle poll (see _settle_hand). SETTLE_TICK * HAND_STABLE_TICKS must exceed
+# Combat._start_round's 0.08s stagger between draws, or "stable" just means "I
+# polled inside one gap". 0.15s is a 1.9x margin; the budget is ~1.2s.
+const SETTLE_TICK := 0.03
+const HAND_STABLE_TICKS := 5
+const HAND_SETTLE_TICKS := 40
 # Cards whose on-enter/on-play opens a modal picker (Discover / Choose / Copy) or
 # casts into one — playing these headless would stall waiting for a click, so the
 # auto-pilot draws them (exercising the deck path) but never plays them.
@@ -358,6 +364,10 @@ func _fight(n: int, total: int, hero: String, enc_id: String) -> void:
 
 	var rounds := 0
 	while is_instance_valid(combat) and combat.phase != combat.Phase.GAME_OVER and rounds < MAX_ROUNDS:
+		# The hand is staggered in; play only once it has all arrived (_settle_hand).
+		await _settle_hand()
+		if not is_instance_valid(combat):
+			break
 		await _auto_play_turn()
 		if not is_instance_valid(combat):
 			break
@@ -415,13 +425,75 @@ func _wait_for_player_turn() -> bool:
 	return false
 
 
+## Poll until the hand has finished ARRIVING, not just until input is accepted.
+##
+## Combat._start_round staggers the deal: only the first card is drawn inline,
+## and every one after it lands on a `create_timer(0.08 * i)` (Combat.gd ~4374).
+## That stagger has no headless branch, no reduce_motion branch, and is NOT
+## scaled by anim_speed — so `phase == PLAYER_TURN` is true while the hand is
+## still one card, and a driver that starts there is playing a hand the game
+## never dealt it.
+##
+## On ROUND 1 that was the entire measurement. draw_count is 5 and Command is 1,
+## so if the one card that arrived in time cost 2+, the pass played nothing and
+## returned. Later rounds hid it: the hand is PERSISTENT, so from round 2 on it
+## carries unplayed stock forward and is never down to the single inline draw.
+## See _probe_deploy_curve, whose deployment sample is where this surfaced.
+##
+## Stability polling, not a computed deal window: draw_count is decided by the
+## ramp plus four relics plus two mutators, and restating that arithmetic here
+## is the duplicate-rule pathology this codebase has already paid for twice.
+## Bounded on purpose — an unbounded `while await` that never settles spins to
+## the harness timeout and reports NOTHING, which is worse than a wrong number
+## because it deletes the evidence.
+func _settle_hand() -> void:
+	var last := -1
+	var stable := 0
+	var waited := 0
+	while waited < HAND_SETTLE_TICKS:
+		if not is_instance_valid(combat) or combat.phase != combat.Phase.PLAYER_TURN:
+			return
+		var n: int = combat._hand.size()
+		if n == last:
+			stable += 1
+			if stable >= HAND_STABLE_TICKS:
+				return
+		else:
+			stable = 0
+			last = n
+		await create_timer(SETTLE_TICK).timeout
+		waited += 1
+
+
 func _auto_play_turn() -> void:
 	# Several passes, since playing a card can grant Command (ramp) and open more plays.
 	for _pass in 4:
 		if not is_instance_valid(combat) or combat.phase != combat.Phase.PLAYER_TURN:
 			return
 		var played_any := false
-		for card in combat._hand.duplicate():
+		# DESCENDING COST, not deal order (2026-09-16). Under the old curve, where
+		# 86% of the pool cost <= 2, scan order barely mattered — almost everything
+		# in hand was affordable. Under the rescaled 1-6 curve it decides the turn:
+		# a deal-order scan spends 2 Command on the first card it meets and then
+		# cannot afford the 4-drop behind it, so the pilot STRANDS Command and the
+		# probe reports a tempo deficit it manufactured itself.
+		#
+		# Biggest-affordable-first, then top up with whatever still fits, is the
+		# greedy that maximises Command SPENT. That target is chosen deliberately:
+		# this probe measures BODY COUNT, and cheapest-first would maximise exactly
+		# that — a thumb on the scale of its own metric. Spending well is neutral
+		# between one 4-drop and two 2-drops; deploying many bodies is not.
+		#
+		# The outer 4-pass loop already re-scans, so this needs no second pass.
+		var by_cost: Array = combat._hand.duplicate()
+		var cost_desc := func(a, b) -> bool:
+			var ca := -1
+			var cb := -1
+			if is_instance_valid(a): ca = int(a.card_data.get("cost", 0))
+			if is_instance_valid(b): cb = int(b.card_data.get("cost", 0))
+			return ca > cb
+		by_cost.sort_custom(cost_desc)
+		for card in by_cost:
 			if not is_instance_valid(card) or not (card in combat._hand):
 				continue
 			var cd: Dictionary = card.card_data

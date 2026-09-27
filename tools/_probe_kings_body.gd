@@ -77,11 +77,25 @@ func _run() -> void:
 
 	var body := _find_body(combat)
 	if body == null:
-		# Give the intro more room before declaring failure — then dump enough
-		# state to tell "never dealt" apart from "dealt somewhere unexpected".
-		for i in range(400):
+		# THE ENEMY DEPLOYS AT THE ENEMY-PLACEMENT BEAT, NOT AT ROUND 1 PHASE 0
+		# (probe fixed 2026-08-05). The OPENING MUSTER (2026-07-25) took over
+		# from `_place_starting_board`, and it is consumed inside the reserve
+		# dealer — i.e. after the player's turn ends. Round 1 is a MUSTER round:
+		# the player's line goes down during their phase, the hold's answers at
+		# the close, and neither swings. At a General the INITIATIVE (2026-07-30)
+		# reinforces that: taking the field means the hold ANSWERS what you set
+		# down.
+		#
+		# So an empty enemy board here is correct, and waiting longer will never
+		# fix it — this probe waited 540 frames and then ABORTED, skipping the
+		# twelve immunity assertions that are its entire point. End the turn
+		# once and let the hold muster.
+		combat._on_end_turn()
+		for i in range(240):
 			await process_frame
-		body = _find_body(combat)
+			body = _find_body(combat)
+			if body != null:
+				break
 	_ok(body != null, "the Body is on the board")
 	if body == null:
 		print("[kings_body]   enc_id=%s passive=%s deck_left=%d round=%d phase=%d"

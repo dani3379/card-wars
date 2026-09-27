@@ -12,7 +12,7 @@ extends Control
 ##   4. Hero silhouette (decorative, near the fire — falls back gracefully
 ##                      if the per-hero silhouette art isn't in assets/ yet)
 ##   5. Parchment banners (REST / FORGE — swapped for FORGE TWO while the
-##                      Whetstone is live — plus HOLD A WAKE with fallen)
+##                      Whetstone is live — plus RAISE THE DEAD with fallen)
 ##   6. Title + HP subtitle
 ##   7. Settings gear + (in pick-card mode only) cancel button
 ##
@@ -34,6 +34,7 @@ extends Control
 
 const MAP_SCENE = "res://scenes/map.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+const CARD_BACK_TEXTURE = preload("res://assets/ui/card_back.png")
 
 # Per-act background lookup. Act 2 and Act 3 are placeholders — the loader
 # falls back to act 1 when they don't exist on disk, so missing assets degrade
@@ -53,7 +54,11 @@ const HERO_SILHOUETTE_FALLBACK := "res://assets/portraits/player_knight.png"
 # Banner icons (use existing assets/icons/ entries). Each banner picks one.
 const ICON_REST := "res://assets/icons/game-icons/campfire.svg"
 const ICON_UPGRADE := "res://assets/icons/sword.png"
-const ICON_REFORGE := "res://assets/icons/diamond.png"
+# The Whetstone's OWN sigil. This was assets/icons/diamond.png — a generic
+# primitive from the pre-art icon set, on a banner whose text literally names
+# the relic that grants it. The silhouette SVG is what make_choice_banner wants
+# (it tints the glyph to parchment; a painted PNG comes out muddy brown).
+const ICON_REFORGE := "res://assets/icons/relics/whetstone.svg"
 const ICON_WAKE := "res://assets/icons/game-icons/scroll-unfurled.svg"
 
 # Banner accent colors. Pulled from GameTheme palette where possible so the
@@ -70,38 +75,38 @@ const HERO_FLAVOR := {
 	"raider": {
 		"rest":    "Rest now. The next fight comes soon.",
 		"upgrade": "Improve one card for the road ahead.",
-		"reforge": "Improve two cards with the Whetstone.",
+		"reforge": "Forge two cards instead of one.",
 		"wake":    "Choose one fallen soldier for the next fight.",
 	},
 	"stalwart": {
-		"rest":    "Lower your shield and tend your wounds.",
+		"rest":    "Stop and tend your wounds.",
 		"upgrade": "Improve one card for the road ahead.",
-		"reforge": "Improve two cards with the Whetstone.",
+		"reforge": "Forge two cards instead of one.",
 		"wake":    "Choose one fallen soldier for the next fight.",
 	},
 	"acolyte": {
 		"rest":    "Rest beside the fire and recover.",
 		"upgrade": "Improve one card for the road ahead.",
-		"reforge": "Improve two cards with the Whetstone.",
+		"reforge": "Forge two cards instead of one.",
 		"wake":    "Choose one fallen soldier for the next fight.",
 	},
 	"pyromancer": {
-		"rest":    "Let the fire settle while you recover.",
+		"rest":    "Stop for the night and recover.",
 		"upgrade": "Improve one card for the road ahead.",
-		"reforge": "Improve two cards with the Whetstone.",
+		"reforge": "Forge two cards instead of one.",
 		"wake":    "Choose one fallen soldier for the next fight.",
 	},
 	"kindler": {
-		"rest":    "Bank the coals and recover.",
+		"rest":    "Rest at the fire and recover.",
 		"upgrade": "Improve one card for the road ahead.",
-		"reforge": "Improve two cards with the Whetstone.",
+		"reforge": "Forge two cards instead of one.",
 		"wake":    "Choose one fallen soldier for the next fight.",
 	},
 }
 const FLAVOR_FALLBACK := {
 	"rest":    "Rest by the fire and heal.",
 	"upgrade": "Improve one card.",
-	"reforge": "Improve two cards with the Whetstone.",
+	"reforge": "Forge two cards instead of one.",
 	"wake":    "Choose one fallen soldier for the next fight.",
 }
 
@@ -113,6 +118,28 @@ var _selected_card_index: int = -1
 # player still gets to apply. 0 = single upgrade (the normal Upgrade path);
 # 2 = two upgrades (Whetstone Reforge). Decrements after each pick.
 var _reforge_remaining: int = 0
+# Set the moment a forge COMMITS. The camp gives one action, and a landed forge
+# is that action — so backing out afterwards leaves for the map instead of
+# returning to the banner picker (see _back_out_of_upgrade).
+var _forged_this_visit: bool = false
+# Latched once the camp is on its way out, so a second click during the fade
+# cannot re-run register_rest_visit() (which counts and saves).
+var _leaving: bool = false
+# True while _do_upgrade is awaiting its forge-strike. The confirm screen's Back
+# button and Esc both stay LIVE across that await, and the forge has already been
+# written to the deck by then — so backing out mid-strike has to be refused
+# rather than allowed to race the resolver to the exit.
+var _forge_resolving: bool = false
+# Async forge-grid/preview builders yield between cards. Every UI rebuild bumps
+# this token so a builder parked on a cache bake or frame boundary cannot add
+# stale cards after the player has backed out or opened the confirm screen.
+var _ui_build_gen: int = 0
+
+# These resources are immutable. Keep one copy for every Rest visit instead of
+# recompiling the same silhouette shader and regenerating one radial texture per
+# choice banner on every open.
+static var _silhouette_feather_shader_cache: Shader = null
+static var _hotspot_glow_texture_cache: Texture2D = null
 
 
 func _ready() -> void:
@@ -121,7 +148,10 @@ func _ready() -> void:
 		return
 	_accent_rest = GameTheme.HEALTH_GREEN
 	_accent_upgrade = GameTheme.KEYWORD_GOLD
-	_accent_reforge = GameTheme.FLOOP_BLUE
+	# FORGE TWO is the same VERB as FORGE, so it belongs in the same colour
+	# family — brighter gilt for "more of it". FLOOP_BLUE put a cold spell-school
+	# accent on the one screen made of firelight and parchment.
+	_accent_reforge = GameTheme.GILT_BRIGHT
 	_accent_wake = Color(0.64, 0.72, 0.88)   # spectral bone-blue
 	_swap_background_for_act()
 	GameTheme.add_atmosphere(self, "rest", true, _time_of_day_mood_override())
@@ -133,18 +163,46 @@ func _ready() -> void:
 	_build_campfire_life()
 	_build_choice_ui()
 	GameTheme.make_settings_gear(self)
+	_maybe_coach_the_camp()
+
+
+## THE BANNERS ARE STILL MOVING WHEN `_ready` RETURNS. `_build_choice_ui`'s last
+## line calls `_center_camp_column` WITHOUT awaiting it, and that coroutine spends
+## two frames before it rewrites the column's offsets — so a spotlight measured
+## here would open over the pre-centred rects and then sit there while the banners
+## slid out from under it. Three frames clears the shift with one to spare.
+func _maybe_coach_the_camp() -> void:
+	if not TutorialCoach.should_teach("camp_choice"):
+		return
+	for _i in 3:
+		await get_tree().process_frame
+		if not is_inside_tree() or _leaving:
+			return
+	var row := get_node_or_null("CampChoices")
+	var targets: Array = []
+	if row != null:
+		for banner in row.get_children():
+			if banner is Control:
+				targets.append(banner)
+	# REFUSE TO TEACH WITH NOTHING TO POINT AT. `teach()` stamps a lesson seen the
+	# moment it shows a panel, whether or not any target resolved — so if the
+	# "CampChoices" lookup above ever goes stale, this would put a panel over an
+	# unlit screen and spend the lesson FOREVER on that profile. Caught by
+	# mutation (renaming the row left the lesson seen with zero spotlight, and the
+	# probe still passed). `Event._maybe_coach_the_page` already guards this way;
+	# this is the sibling that was missing it.
+	if targets.is_empty():
+		return
+	TutorialCoach.teach(self, "camp_choice", targets)
 
 
 func _unhandled_input(event: InputEvent) -> void:
 	if not event.is_action_pressed("ui_cancel"):
 		return
-	# In the upgrade sub-flow (PICK_CARD / CONFIRM_UPGRADE) Esc backs out one
-	# level to the banner picker — same as the Cancel button, Whetstone-safe.
-	# From the top (CHOOSE) it opens the pause/Settings overlay.
+	# In the upgrade sub-flow (PICK_CARD / CONFIRM_UPGRADE) Esc backs out the same
+	# way the Cancel button does. From the top (CHOOSE) it opens pause/Settings.
 	if _mode != Mode.CHOOSE:
-		_reforge_remaining = 0
-		_selected_card_index = -1
-		_build_choice_ui()
+		_back_out_of_upgrade()
 	else:
 		GameTheme.open_settings_overlay()
 	get_viewport().set_input_as_handled()
@@ -230,6 +288,11 @@ func _build_choice_ui() -> void:
 	# FORGE + disabled FORGE TWO + WAKE) — 4×145 + 3×12 = 616px from y 262,
 	# which still clears the bottom of the 900px canvas.
 	var row := VBoxContainer.new()
+	# NAMED so the coach can find the banners. `make_choice_banner` returns an
+	# unnamed PanelContainer into a local, and `_clear_ui` rebuilds the column on
+	# every mode switch, so a reference captured at build time would be stale by
+	# the time anything wanted one — the column is looked up by name instead.
+	row.name = "CampChoices"
 	row.anchor_left = 0.0
 	row.anchor_right = 0.0
 	row.offset_left = 64
@@ -314,6 +377,8 @@ func _add_hero_silhouette() -> void:
 
 
 func _silhouette_feather_shader() -> Shader:
+	if _silhouette_feather_shader_cache != null:
+		return _silhouette_feather_shader_cache
 	var sh := Shader.new()
 	sh.code = """
 shader_type canvas_item;
@@ -328,7 +393,8 @@ void fragment() {
 	COLOR = c;
 }
 """
-	return sh
+	_silhouette_feather_shader_cache = sh
+	return _silhouette_feather_shader_cache
 
 
 func _add_choice_rest(row: BoxContainer) -> void:
@@ -424,9 +490,9 @@ func _add_choice_wake_if_available(row: BoxContainer) -> void:
 		return
 	var disabled_reason := ""
 	if not RunState.next_combat_gift_creature.is_empty():
-		disabled_reason = "The next fight is already spoken for."
+		disabled_reason = "Another creature already joins the next fight."
 	var desc := "%s\n◈ A fallen soldier joins your front row in the next fight." % _flavor_for("wake", "")
-	var banner = GameTheme.make_choice_banner("HOLD A WAKE", desc, _accent_wake,
+	var banner = GameTheme.make_choice_banner("RAISE THE DEAD", desc, _accent_wake,
 		ICON_WAKE, Vector2(400, 145), disabled_reason)
 	_wire_banner(banner, row, _accent_wake, _start_wake_mode)
 
@@ -540,7 +606,7 @@ func _make_wake_tile(cand: Dictionary) -> Button:
 	where_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vbox.add_child(where_lbl)
 
-	var rise_lbl := GameTheme.make_label("Rises at %d/%d" % [int(cand.atk), int(cand.hp)],
+	var rise_lbl := GameTheme.make_label("Joins at %d/%d" % [int(cand.atk), int(cand.hp)],
 		15, GameTheme.KEYWORD_GOLD)
 	rise_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vbox.add_child(rise_lbl)
@@ -549,8 +615,15 @@ func _make_wake_tile(cand: Dictionary) -> Button:
 
 
 func _on_wake_tile_pressed(btn: Button, cand: Dictionary) -> void:
-	if btn == null or not is_instance_valid(btn):
+	if btn == null or not is_instance_valid(btn) or _leaving:
 		return
+	# ONE-SHOT LATCH. The claim hold below is live input: every OTHER name on the
+	# Roll stayed clickable through it, and so did Cancel. A second tile inside
+	# the window ran _do_wake twice — the second gift overwrote the first and
+	# register_rest_visit() was counted twice — while Cancel handed back the
+	# banner screen and _do_wake then left for the map anyway. _leaving is never
+	# cleared, which is correct: raising a name ends the camp.
+	_leaving = true
 	btn.disabled = true
 	GameTheme.claim_pop(btn)
 	await get_tree().create_timer(_claim_hold()).timeout
@@ -610,6 +683,18 @@ func _wire_banner(banner: Control, row: BoxContainer, accent: Color, on_click: C
 
 
 func _on_choice_banner_pressed(banner: Control, click_btn: Button, on_click: Callable) -> void:
+	# THE CAMP GIVES ONE ACTION, so the claim seals the WHOLE row, not just the
+	# banner under the cursor. Disabling only `click_btn` left every sibling live
+	# through the claim hold below — and REST holds a further 0.6s inside
+	# _do_heal before the fade — so a click on FORGE inside that window ran a
+	# second camp action over the top of the first (heal applied, then the forge
+	# picker built, then _do_heal's fade yanked the player to the map with the
+	# forge lost). One camp, one banner: kill them all at the first press.
+	if banner != null and is_instance_valid(banner) and banner.get_parent() != null:
+		for sib in banner.get_parent().get_children():
+			var sib_btn := sib.get_node_or_null("ClickButton") as Button
+			if sib_btn != null:
+				sib_btn.disabled = true
 	if click_btn != null and is_instance_valid(click_btn):
 		click_btn.disabled = true
 	if banner != null and is_instance_valid(banner):
@@ -632,21 +717,25 @@ func _make_hotspot_glow(accent: Color) -> TextureRect:
 	# Center alpha kept low: this sits behind the tile's body text, so a strong
 	# amber center washed the warm-white copy into poor contrast. A faint halo
 	# reads as firelight without fighting legibility.
-	var grad := Gradient.new()
-	grad.set_color(0, Color(accent.r, accent.g, accent.b, 0.26))
-	grad.set_color(1, Color(accent.r, accent.g, accent.b, 0.0))
-	var grad_tex := GradientTexture2D.new()
-	grad_tex.gradient = grad
-	grad_tex.fill = GradientTexture2D.FILL_RADIAL
-	grad_tex.fill_from = Vector2(0.5, 0.5)
-	grad_tex.fill_to = Vector2(1.0, 0.5)
-	grad_tex.width = 320
-	grad_tex.height = 200
+	if _hotspot_glow_texture_cache == null:
+		var grad := Gradient.new()
+		grad.set_color(0, Color(1.0, 1.0, 1.0, 0.26))
+		grad.set_color(1, Color(1.0, 1.0, 1.0, 0.0))
+		var grad_tex := GradientTexture2D.new()
+		grad_tex.gradient = grad
+		grad_tex.fill = GradientTexture2D.FILL_RADIAL
+		grad_tex.fill_from = Vector2(0.5, 0.5)
+		grad_tex.fill_to = Vector2(1.0, 0.5)
+		grad_tex.width = 320
+		grad_tex.height = 200
+		_hotspot_glow_texture_cache = grad_tex
 	var tr := TextureRect.new()
-	tr.texture = grad_tex
+	tr.texture = _hotspot_glow_texture_cache
 	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	tr.stretch_mode = TextureRect.STRETCH_SCALE
-	tr.modulate = Color(1, 1, 1, 0.85)
+	# Tinting one white radial mask is pixel-equivalent and lets every banner
+	# share a single generated texture.
+	tr.modulate = Color(accent.r, accent.g, accent.b, 0.85)
 	return tr
 
 
@@ -806,6 +895,7 @@ func _begin_pick_card_for_upgrade() -> void:
 	_clear_ui()
 
 	var header_text: String = "Choose a card to forge"
+	var build_gen := _ui_build_gen
 	if _reforge_remaining > 0:
 		header_text = "FORGE TWO — pick %d more card%s" % [
 			_reforge_remaining, "" if _reforge_remaining == 1 else "s"]
@@ -825,18 +915,22 @@ func _begin_pick_card_for_upgrade() -> void:
 	GameTheme.deal_in(sub, 0.08)
 
 	var scroll = ScrollContainer.new()
-	scroll.position = Vector2(100, 110)
-	scroll.size = Vector2(1400, 680)
+	scroll.position = Vector2(95, 110)
+	scroll.size = Vector2(1410, 680)
 	add_child(scroll)
 	GameTheme.deal_in(scroll, 0.12)
 
-	var grid = GridContainer.new()
-	grid.columns = 6
-	grid.add_theme_constant_override("h_separation", 16)
-	grid.add_theme_constant_override("v_separation", 16)
+	# 225px tiles, six to a rank. Pinned rather than sized to the viewport: this
+	# grid clears its 1410px scroll by only 10px, so a vertical scrollbar on a
+	# long deck would otherwise drop the rank to five.
+	var grid = GameTheme.make_picker_rank(6, 225.0, 10, 16)
+	grid.name = "ForgeCardGrid"
 	scroll.add_child(grid)
 
-	var pick_idx := 0
+	# Seat the whole final grid in one stack frame. Rich Card2D faces hydrate
+	# behind these real backs, so neither a cold cache nor a long deck can make
+	# the centered rows grow underneath the player.
+	var entries: Array[Dictionary] = []
 	for i in range(RunState.deck.size()):
 		# Forge "+" stays once per card; other mods (drill, banners) don't
 		# block the forge — Inscryption stacking.
@@ -846,46 +940,156 @@ func _begin_pick_card_for_upgrade() -> void:
 		# offered as upgrade targets, even though they're in the deck.
 		if not CardDB.is_upgradeable(RunState.deck[i]):
 			continue
-		var data = RunState.get_upgraded_card_data(i)
+		var data: Dictionary = RunState.get_upgraded_card_data(i)
 		var wrapper := Control.new()
+		wrapper.name = "ForgeCardSlot"
 		wrapper.custom_minimum_size = Vector2(225, 300)
+		wrapper.pivot_offset = wrapper.custom_minimum_size * 0.5
+		wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		grid.add_child(wrapper)
+		var back := _make_forge_loading_back(wrapper, grid)
+		entries.append({
+			"deck_index": i,
+			"data": data,
+			"wrapper": wrapper,
+			"back": back,
+		})
+
+	_hydrate_forge_card_group(grid, entries, build_gen)
+	_add_cancel_btn()
+
+
+func _hydrate_forge_card_group(grid: Container, entries: Array[Dictionary],
+		build_gen: int) -> void:
+	if entries.is_empty():
+		return
+	var grid_ref: WeakRef = weakref(grid)
+	var picker_alive := func() -> bool:
+		var live_grid: Node = grid_ref.get_ref()
+		return _ui_build_is_current(build_gen, Mode.PICK_CARD, live_grid)
+	# Always present the complete sleeve grid once before doing any expensive
+	# work. Warm-cache and cold-cache openings therefore share the same contract.
+	await get_tree().process_frame
+	if not picker_alive.call():
+		return
+
+	var datas: Array = []
+	for entry in entries:
+		datas.append(entry.data)
+	if DisplayServer.get_name() != "headless":
+		await CardTextureCache.bake_many(datas, picker_alive)
+		if not picker_alive.call():
+			return
+
+	var windowed := DisplayServer.get_name() != "headless"
+	var cards: Array[Control] = []
+	var backs: Array[Control] = []
+	var buttons: Array[Button] = []
+	var empty_style := StyleBoxEmpty.new()
+	for entry in entries:
+		if not picker_alive.call():
+			return
+		var wrapper: Control = entry.wrapper
+		var data: Dictionary = entry.data
+		var deck_index: int = entry.deck_index
 		var card_node = CARD_SCENE.instantiate()
 		card_node.static_display = true
 		card_node.card_data = data
 		card_node.live_baked_mode = true
-		CardTextureCache.bake(data)
+		card_node.defer_baked_rules_text = windowed
+		card_node.visible = false
+		card_node.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		wrapper.add_child(card_node)
+		wrapper.move_child(card_node, 0)
 		var click_btn := Button.new()
 		click_btn.flat = true
 		click_btn.focus_mode = Control.FOCUS_NONE
 		click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
 		click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
-		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
-		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
-		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-		click_btn.pressed.connect(_on_upgrade_card_pressed.bind(wrapper, click_btn, i))
+		click_btn.disabled = true
+		click_btn.add_theme_stylebox_override("normal", empty_style)
+		click_btn.add_theme_stylebox_override("hover", empty_style)
+		click_btn.add_theme_stylebox_override("pressed", empty_style)
+		click_btn.pressed.connect(_on_upgrade_card_pressed.bind(
+			wrapper, click_btn, deck_index))
 		GameTheme.hover_lift(click_btn, 1.025, wrapper)
 		wrapper.add_child(click_btn)
-		grid.add_child(wrapper)
-		GameTheme.deal_in(wrapper, 0.16 + float(pick_idx) * 0.025)
-		pick_idx += 1
+		cards.append(card_node)
+		backs.append(entry.back)
+		buttons.append(click_btn)
+		if windowed:
+			await RenderingServer.frame_post_draw
+			if not picker_alive.call():
+				return
+			card_node.complete_deferred_baked_rules()
+			await RenderingServer.frame_post_draw
+			if not picker_alive.call():
+				return
 
-	_add_cancel_btn()
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	if not snap:
+		AudioBank.play_sfx("card_draw", 0.04, -6.0)
+		for back in backs:
+			Motion.flip_out(back, 0.13)
+		await get_tree().create_timer(Motion.time(0.13)).timeout
+		if not picker_alive.call():
+			return
+	for index in range(cards.size()):
+		var card: Control = cards[index]
+		var back: Control = backs[index]
+		var button: Button = buttons[index]
+		if snap and is_instance_valid(back):
+			back.queue_free()
+		card.visible = true
+		if not snap:
+			Motion.flip_in(card, 0.0, 0.16)
+		button.disabled = false
+
+
+func _make_forge_loading_back(parent: Control,
+		group: CanvasItem = null) -> TextureRect:
+	var back := TextureRect.new()
+	back.name = "LoadingWrit"
+	back.texture = CARD_BACK_TEXTURE
+	back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	back.set_anchors_preset(Control.PRESET_FULL_RECT)
+	back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	Motion.arm_loading_writ(back, group)
+	parent.add_child(back)
+	return back
 
 
 func _on_upgrade_card_pressed(wrapper: Control, click_btn: Button, deck_index: int) -> void:
+	if _mode != Mode.PICK_CARD:
+		return
 	if click_btn != null and is_instance_valid(click_btn):
 		click_btn.disabled = true
 	if wrapper != null and is_instance_valid(wrapper):
 		GameTheme.claim_pop(wrapper)
 	await get_tree().create_timer(_claim_hold()).timeout
-	if not is_inside_tree():
+	if not is_inside_tree() or _mode != Mode.PICK_CARD:
 		return
 	_select_card_for_upgrade(deck_index)
 
 
 func _select_card_for_upgrade(deck_index: int) -> void:
+	if _mode != Mode.PICK_CARD:
+		return
 	_selected_card_index = deck_index
+	_mode = Mode.CONFIRM_UPGRADE
+	var build_gen := _ui_build_gen
+	# The '+' variant has a distinct cache key and normally has never appeared.
+	# Warm it behind the claimed picker so both confirm cards use cached overlays.
+	if DisplayServer.get_name() != "headless":
+		var upgraded_data: Dictionary = RunState.preview_plus_upgrade(
+			RunState.get_upgraded_card_data(deck_index))
+		if not CardTextureCache.has(upgraded_data):
+			await CardTextureCache.bake(upgraded_data)
+		if not _ui_build_is_current(build_gen, Mode.CONFIRM_UPGRADE, self) \
+				or _selected_card_index != deck_index:
+			return
 	_show_confirm_upgrade(deck_index)
 
 
@@ -898,6 +1102,7 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	_mode = Mode.CONFIRM_UPGRADE
 	_clear_ui()
 
+	var build_gen := _ui_build_gen
 	# Dim everything behind the modal so the comparison reads cleanly against
 	# the painted background.
 	var dim := ColorRect.new()
@@ -944,6 +1149,7 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	# Card comparison row: base | arrow | upgraded. Card2D natural size is
 	# 300x400; we render at a comfortable scale so both fit at center.
 	var compare_row := HBoxContainer.new()
+	compare_row.name = "ForgeCompareRow"
 	compare_row.set_anchors_preset(Control.PRESET_CENTER_TOP)
 	compare_row.add_theme_constant_override("separation", 30)
 	compare_row.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -957,9 +1163,11 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	compare_row.offset_bottom = 570
 	GameTheme.deal_in(compare_row, 0.12)
 
-	_add_preview_card(compare_row, base_data, false)
+	# The whole comparison occupies its final geometry immediately. Both ornate
+	# faces hydrate behind these shells, then turn together as one proposition.
+	var base_preview := _make_preview_card_shell(compare_row, false)
 	_add_arrow_glyph(compare_row)
-	_add_preview_card(compare_row, upgraded_data, true)
+	var upgraded_preview := _make_preview_card_shell(compare_row, true)
 
 	# Change summary below the cards — text bullets of what shifted. Cheap
 	# but informative; players who don't read the desc still see at a glance.
@@ -988,6 +1196,9 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	GameTheme.deal_in(btn_row, 0.22)
 
 	var upgrade_btn = GameTheme.make_themed_button("⚒ Forge +", GameTheme.GILT, Vector2(240, 60), 22)
+	upgrade_btn.name = "ForgeConfirmButton"
+	upgrade_btn.disabled = true
+	upgrade_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	upgrade_btn.pressed.connect(_do_upgrade.bind("plus", ""))
 	btn_row.add_child(upgrade_btn)
 	GameTheme.hover_lift(upgrade_btn, 1.03)
@@ -996,13 +1207,18 @@ func _show_confirm_upgrade(deck_index: int) -> void:
 	back_btn.pressed.connect(_back_to_pick_card)
 	btn_row.add_child(back_btn)
 	GameTheme.hover_lift(back_btn, 1.03)
+	_hydrate_forge_preview_pair([
+		{"shell": base_preview, "data": base_data},
+		{"shell": upgraded_preview, "data": upgraded_data},
+	], upgrade_btn, build_gen, compare_row)
 
 
-# Builds a preview Card2D into the comparison row. `is_upgraded_preview`
-# adds a green glow behind the card so the upgraded version reads as "the
-# good one" without having to label it.
-func _add_preview_card(parent: Container, data: Dictionary, is_upgraded_preview: bool) -> void:
+# Reserves one exact preview footprint and its loading back. The upgraded shell
+# also owns the gilt halo and stable ForgedPreview name used by the strike beat.
+func _make_preview_card_shell(parent: Container,
+		is_upgraded_preview: bool) -> Dictionary:
 	var wrap := Control.new()
+	wrap.name = "ForgedPreview" if is_upgraded_preview else "BasePreview"
 	wrap.custom_minimum_size = Vector2(300, 400)
 	if is_upgraded_preview:
 		# Named so _do_upgrade can aim the forge-strike set-piece at it.
@@ -1037,13 +1253,84 @@ func _add_preview_card(parent: Container, data: Dictionary, is_upgraded_preview:
 		halo.offset_bottom = 50
 		wrap.add_child(halo)
 
-	var card_node = CARD_SCENE.instantiate()
-	card_node.static_display = true
-	card_node.card_data = data
-	card_node.live_baked_mode = true
-	CardTextureCache.bake(data)
-	wrap.add_child(card_node)
+	var back := TextureRect.new()
+	back.name = "LoadingWrit"
+	back.texture = CARD_BACK_TEXTURE
+	back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	back.set_anchors_preset(Control.PRESET_FULL_RECT)
+	back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	Motion.arm_loading_writ(back, parent)
+	wrap.add_child(back)
 	parent.add_child(wrap)
+	return {"wrapper": wrap, "back": back}
+
+
+func _hydrate_forge_preview_pair(entries: Array, upgrade_btn: Button,
+		build_gen: int, compare_row: HBoxContainer) -> void:
+	var row_ref: WeakRef = weakref(compare_row)
+	var still_here := func() -> bool:
+		var live_row: Node = row_ref.get_ref()
+		return _ui_build_is_current(build_gen, Mode.CONFIRM_UPGRADE, live_row) \
+			and _selected_card_index >= 0
+	# Present the complete base/back/arrow/back comparison before shaping either
+	# face. This is also the warm-cache boundary, so every entry looks identical.
+	await get_tree().process_frame
+	if not still_here.call():
+		return
+	var datas: Array = []
+	for entry in entries:
+		datas.append(entry.data)
+	if DisplayServer.get_name() != "headless":
+		await CardTextureCache.bake_many(datas, still_here)
+		if not still_here.call():
+			return
+
+	var windowed := DisplayServer.get_name() != "headless"
+	var cards: Array[Control] = []
+	for entry in entries:
+		if not still_here.call():
+			return
+		var shell: Dictionary = entry.shell
+		var wrapper: Control = shell.wrapper
+		var back: Control = shell.back
+		var card_node = CARD_SCENE.instantiate()
+		card_node.static_display = true
+		card_node.card_data = entry.data
+		card_node.live_baked_mode = true
+		card_node.defer_baked_rules_text = windowed
+		card_node.visible = false
+		card_node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wrapper.add_child(card_node)
+		wrapper.move_child(card_node, back.get_index())
+		cards.append(card_node)
+		if windowed:
+			await RenderingServer.frame_post_draw
+			if not still_here.call():
+				return
+			card_node.complete_deferred_baked_rules()
+			await RenderingServer.frame_post_draw
+			if not still_here.call():
+				return
+
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	if not snap:
+		AudioBank.play_sfx("card_draw", 0.04, -6.0)
+		for entry in entries:
+			Motion.flip_out((entry.shell as Dictionary).back, 0.13)
+		await get_tree().create_timer(Motion.time(0.13)).timeout
+		if not still_here.call():
+			return
+	for i in range(cards.size()):
+		var back: Control = (entries[i].shell as Dictionary).back
+		if snap and is_instance_valid(back):
+			back.queue_free()
+		cards[i].visible = true
+		if not snap:
+			Motion.flip_in(cards[i], 0.0, 0.16)
+	upgrade_btn.disabled = false
+	upgrade_btn.mouse_filter = Control.MOUSE_FILTER_STOP
 
 
 # Big gold "→" arrow between the two cards.
@@ -1106,6 +1393,11 @@ func _build_change_summary(base: Dictionary, upgraded: Dictionary) -> String:
 # to CHOOSE). _reforge_remaining is preserved so the player doesn't lose
 # their Whetstone pick by backing out of the preview.
 func _back_to_pick_card() -> void:
+	# Live across _do_upgrade's forge-strike await, and by then the forge is
+	# already written to the deck — rebuilding the picker under it would leave
+	# the resolver to change scenes out from under a screen the player is using.
+	if _leaving or _forge_resolving:
+		return
 	_selected_card_index = -1
 	_begin_pick_card_for_upgrade()
 
@@ -1116,43 +1408,79 @@ func _do_upgrade(path: String, keyword: String = "") -> void:
 	RunState.upgrade_card(_selected_card_index, path, keyword)
 	AudioBank.play_sfx("upgrade_confirm")  # silently no-ops if asset missing
 	_selected_card_index = -1
+	_forged_this_visit = true
+	# THE WHETSTONE IS SPENT ON ITS FIRST STRIKE, NOT ITS SECOND. Marking it only
+	# when the SECOND pick landed meant Cancel/Esc after the first left the relic
+	# unspent with _reforge_is_live() true again — FORGE TWO could be re-armed
+	# without limit, forging the whole deck at one camp. The second pick is driven
+	# by _reforge_remaining, not by _reforge_is_live(), so claiming the relic here
+	# does not cut the pair short.
+	if _reforge_remaining > 0:
+		RunState.whetstone_used_this_act = true
 	# The strike: the forged card flashes white-hot and anvil sparks fall
 	# before the screen moves on — the game's most permanent decision now
 	# lands with the hammer instead of an instant scene change.
+	_forge_resolving = true
 	await GameTheme.forge_strike(self, find_child("ForgedPreview", true, false))
+	_forge_resolving = false
+	# Something may have left the camp while the hammer was falling (see _leaving)
+	# — resuming here would count the visit a second time and fire a second scene
+	# change on top of the one already in flight.
+	if _leaving:
+		return
 	# Reforge: loop back to pick-card for the remaining upgrade(s). Decrement
 	# BEFORE the check — the upgrade that just resolved counted against the
-	# starting "2 picks." When the last pick lands, the relic is consumed.
+	# starting "2 picks."
 	if _reforge_remaining > 0:
 		_reforge_remaining -= 1
 		if _reforge_remaining > 0:
 			_begin_pick_card_for_upgrade()
 			return
-		else:
-			RunState.whetstone_used_this_act = true
+	_leaving = true
 	RunState.register_rest_visit()
 	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 
 
+# The one back-out for the upgrade sub-flow (Cancel button and Esc both land
+# here). Before any forge has landed this is a free "changed my mind" — back to
+# the banner picker, Whetstone untouched. AFTER a forge has landed the camp's
+# action is spent, so it leaves for the map: returning to CHOOSE there would
+# hand out a second camp action (forge one card, then take the heal too).
+func _back_out_of_upgrade() -> void:
+	if _leaving or _forge_resolving:
+		return
+	_reforge_remaining = 0
+	_selected_card_index = -1
+	if _forged_this_visit:
+		# register_rest_visit() increments counters and saves, so it must not run
+		# twice — the scene lives on through the fade, and Cancel stays clickable.
+		_leaving = true
+		RunState.register_rest_visit()
+		GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
+		return
+	_build_choice_ui()
+
+
 # Cancel button — only shown in the deeper modes (PICK_CARD, CONFIRM_UPGRADE).
-# Returns the player to the choose-screen without consuming Whetstone. If a
-# Reforge was in flight, the in-flight counter is reset so cancelling truly
-# backs out instead of leaving 1 upgrade dangling.
 func _add_cancel_btn() -> void:
 	var btn = GameTheme.make_back_button("Cancel", Vector2(140, 40))
 	btn.position = Vector2(740, 810)
-	btn.pressed.connect(func():
-		_reforge_remaining = 0
-		_selected_card_index = -1
-		_build_choice_ui()
-	)
+	btn.pressed.connect(_back_out_of_upgrade)
 	add_child(btn)
 	GameTheme.deal_in(btn, 0.24)
 	GameTheme.hover_lift(btn, 1.03)
 
 
 func _clear_ui() -> void:
+	_ui_build_gen += 1
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere" \
 				and child.name != "CampfireGlow" and child.name != "CampfireSparks":
+			# Avoid one frame rendering both outgoing and incoming mode trees.
+			remove_child(child)
 			child.queue_free()
+
+
+func _ui_build_is_current(gen: int, wanted_mode: int, owner: Node) -> bool:
+	return _ui_build_gen == gen and _mode == wanted_mode and is_inside_tree() \
+		and owner != null and is_instance_valid(owner) and owner.is_inside_tree()

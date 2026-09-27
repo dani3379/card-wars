@@ -11,7 +11,29 @@ const MAP_HEIGHT: int = 18
 const BOSS_ROW: int = 17
 const REST_ROW: int = 16
 const NUM_PATHS: int = 3
-const FIGHT_ROWS: Array[int] = [0, 3, 9, 15]
+## THE MANDATORY SPINE (2026-09-19). Three plain fight rows, not four, and the
+## row they gave up (9) became MID_REST_ROW. Measured before the change by
+## `tools/_probe_fight_count.tscn`: every route in every generated act walked
+## EXACTLY 7 fights — min 7, max 7, span 0, in 180 of 180 acts. That is 21 a run
+## against Slay the Spire's ~16 and Monster Train's 8, and the span is the
+## damning half: the chart offered no decision whatsoever about how much combat
+## a run contained. The cause was structural rather than a tuning choice — a
+## fight row is a ROW, the player walks one column of every row, so a row that
+## is combat in every lane is a fight nobody can decline. The war-road fork was
+## real but changes WHICH fight, never HOW MANY.
+const FIGHT_ROWS: Array[int] = [0, 3, 15]
+## The mid-act camp. `docs/PLAYTEST_MEASUREMENT_20260919.md` §10: StS runs ~2.6
+## rest sites an act (12% of floors plus a guaranteed pre-boss one) AND full-heals
+## at every act boundary; we shipped the guaranteed pre-boss rest alone, so the
+## measured recovery was +1.0 HP against a 6.1 HP bill a fight and runs ended at
+## 5.4 fights. Row 9 sits after two-to-three fights and before the second half.
+const MID_REST_ROW: int = 9
+## THE ELITE BANDS ARE BYPASSABLE (2026-09-19). They used to be ordinary fight
+## rows carrying one General: `for node in band: node["type"] = "combat"` then a
+## single lane promoted. So "dodging the General" got you a PLAIN HOLD, not a
+## quiet road — the fight happened either way. Now the General takes one lane and
+## every other lane in the band is road, which is what makes the count a choice:
+## take the spike for a relic and a forge, or walk past it and keep the HP.
 const ELITE_ROWS: Array[int] = [6, 12]
 const MAX_MUSTERS_PER_ACT: int = 3
 const FIRST_RUN_OPENER_ENCOUNTER: String = "goblin_scouts"
@@ -95,12 +117,16 @@ func generate_act(act: int, rng: RandomNumberGenerator) -> Array:
 	return flat
 
 
-## The route-variance guarantee (2026-07-07): the optional third General
-## landed on a wide fight row (the war-road fork), AND at least one elite
-## band is ≥2 lanes so the mid-road spike can be dodged too. Lattices where
-## every route walks the same fights are rejected — that sameness is exactly
-## what this kills. Landing rules in _assign_node_types keep the extra spike
-## avoidable by construction (only rows with ≥2 lanes are eligible).
+## The route-variance guarantee (2026-07-07, tightened 2026-09-19): the optional
+## third General landed on a wide fight row (the war-road fork), AND **EVERY**
+## elite band is ≥2 lanes.
+##
+## That second term used to read `wide_band` — ANY one band was enough — and it
+## was sufficient while the bands were ordinary fight rows, because dodging the
+## spike only ever changed WHICH fight you took. Now a bypass lane is road, so a
+## width-1 band is a General nobody can decline, and the whole point of the
+## 2026-09-19 pass is that the fight COUNT is a decision. One narrow band halves
+## the span; `tools/_probe_fight_count.tscn` is the gate that would notice.
 func _war_road_ok(flat: Array) -> bool:
 	var extra := false
 	for r in FIGHT_ROWS:
@@ -109,11 +135,11 @@ func _war_road_ok(flat: Array) -> bool:
 		for nd in (flat[r] as Array):
 			if String(nd.type) == "elite":
 				extra = true
-	var wide_band := false
+	var every_band_wide := true
 	for r in ELITE_ROWS:
-		if r < flat.size() and (flat[r] as Array).size() >= 2:
-			wide_band = true
-	return extra and wide_band
+		if r >= flat.size() or (flat[r] as Array).size() < 2:
+			every_band_wide = false
+	return extra and every_band_wide
 
 
 ## Minimum number of combat/elite nodes along ANY root→rest-row route — the
@@ -248,7 +274,7 @@ func _assign_node_types(grid: Array, rng: RandomNumberGenerator) -> void:
 	#   R6 fight: the FIRST elite band (mid-road spike)
 	#   R7 wayside: the spoils band — treasure guaranteed after the spike
 	#   R8 wayside: outfitting — shop leads the pool
-	#   R9 fight (the mid hold)
+	#   R9 REST (the mid-act camp — 2026-09-19, was the mid hold)
 	#   R10 wayside: the second muster band — recruit guaranteed
 	#   R11 wayside: events and verbs
 	#   R12 fight: the SECOND elite band (the escalation before the keep)
@@ -259,18 +285,29 @@ func _assign_node_types(grid: Array, rng: RandomNumberGenerator) -> void:
 	for c in range(MAP_WIDTH):
 		if grid[REST_ROW][c] != null:
 			grid[REST_ROW][c]["type"] = "rest"
+		if grid[MID_REST_ROW][c] != null:
+			grid[MID_REST_ROW][c]["type"] = "rest"
 	for r in FIGHT_ROWS:
 		for node in _row_nodes(grid, r):
 			node["type"] = "combat"
-	# Each elite band is a fight row where exactly one node becomes the General;
-	# the rest of the band stays a plain hold (avoidable when the row is wider
-	# than the single spike).
+	# THE ELITE BAND IS ONE SPIKE ON A ROAD, not a row of holds with a spike in
+	# it. Exactly one lane is the General; every other lane in the band is dealt
+	# from the wayside pool, so a route either takes the fight or does not.
+	# The bypass is ROAD, never another combat — that was the old shape and it
+	# is why the fight count could not vary (see ELITE_ROWS' header).
 	for elite_row in ELITE_ROWS:
 		var band: Array = _row_nodes(grid, elite_row)
-		for node in band:
-			node["type"] = "combat"
-		if not band.is_empty():
-			band[rng.randi() % band.size()]["type"] = "elite"
+		if band.is_empty():
+			continue
+		var spike: int = rng.randi() % band.size()
+		for i in range(band.size()):
+			if i == spike:
+				band[i]["type"] = "elite"
+			else:
+				# Quiet lanes: the same verbs a wayside row deals, so walking
+				# past a General still costs the run a stop rather than being
+				# a free skip.
+				band[i]["type"] = ["event", "wayside"][rng.randi() % 2]
 	# THE WAR ROAD (2026-07-07): one plain fight row per act hides a THIRD,
 	# optional General — the StS elite-hunt trade the flat skeleton lacked
 	# (every route used to walk the same fights, so the fork never mattered).
@@ -280,7 +317,9 @@ func _assign_node_types(grid: Array, rng: RandomNumberGenerator) -> void:
 	# extra spike must always be a CHOICE read off the chart, not an ambush.
 	# The acceptance loop re-rolls lattices where it couldn't land (see
 	# _war_road_ok), so the fork is a guarantee, not a prayer.
-	var war_rows: Array = [3, 9, 15]
+	# Row 9 left this list on 2026-09-19 — it is MID_REST_ROW now, and a General
+	# stamped onto a camp would delete the mid-act heal it was added to provide.
+	var war_rows: Array = [3, 15]
 	shuffle_array(war_rows, rng)
 	for wr in war_rows:
 		var wband: Array = _row_nodes(grid, wr)
@@ -319,7 +358,17 @@ func _assign_node_types(grid: Array, rng: RandomNumberGenerator) -> void:
 	var verbs: Array = ["drill_yard", "standard_bearer", "supply_cache"]
 	shuffle_array(verbs, rng)
 	var vi: int = 0
-	for r in wayside_rows:
+	# THE ELITE BANDS ARE IN THIS LIST AND MUST BE (2026-09-19). Their bypass
+	# lanes are dealt from the same event/wayside pool the wayside rows use, and
+	# this loop is the ONLY place a halt gets its verb — so walking `wayside_rows`
+	# alone left every bypass a wayside with no `wayside_id`, i.e. a stop the
+	# Wayside scene opens with nothing to run. Caught by `_probe_wayside`'s
+	# "every wayside halt carries a verb", which is the whole reason that check
+	# is phrased over the act rather than over the rows it expected.
+	var verb_rows: Array = wayside_rows.duplicate()
+	for er in ELITE_ROWS:
+		verb_rows.append(er)
+	for r in verb_rows:
 		for node in _row_nodes(grid, r):
 			if String(node["type"]) == "wayside":
 				node["wayside_id"] = verbs[vi % verbs.size()]
@@ -472,6 +521,62 @@ func _place_set_piece(grid: Array, act: int, rng: RandomNumberGenerator,
 		return
 
 
+## THE LANDING — row 0, the act's opening hold(s). ONE OWNER, ON PURPOSE.
+##
+## Row 0 used to be claimed by two systems that could not see each other.
+## This one dealt it (with a first-run guard pinning the hand-picked opener),
+## and then RunState.apply_terrain_redeal's Stage 0 — which runs off
+## MapTerrain._derive_terrain_tags before the player can click a single node,
+## and which knew nothing about the guard — overwrote it with the lightest
+## kits in the deal. Measured over 200 seeds x 5 heroes: 22.4% of BRAND-NEW
+## profiles never saw the on-ramp at all, and 39.9% of veteran first fights
+## were borrowed act-2 lineups carrying act-2 passives (passives are
+## hardcoded handlers — nothing rescales them across bands the way
+## get_face_hp and _act_scale_creature rescale HP and statlines).
+##
+## So the landing is stamped here, from EncounterDB's curated LANDING_POOL,
+## and Stage 0 now leaves row 0 alone entirely.
+##
+## THE BAND IS SHUFFLED, NOT SORTED. Stage 0 laid the lightest kit down
+## strictly by ascending column, so in every act of every run the leftmost
+## row-0 hold was the easiest fight on the board — 100% of scoreable bands.
+## A parallel choice with a permanently correct answer is not a choice.
+##
+## Returns false only if the pool came back empty (a stripped DB), in which
+## case the caller's ordinary encounter walk deals row 0 as before.
+func _deal_landing(band: Array, act: int, rng: RandomNumberGenerator,
+		first_run_opener: bool) -> bool:
+	var nodes: Array = []
+	for node in band:
+		if String(node["type"]) == "combat" \
+				and String(node.get("setpiece_id", "")) == "":
+			nodes.append(node)
+	if nodes.is_empty():
+		return false
+	# The very first campaign opens on the one hand-picked hold, every lane.
+	if first_run_opener:
+		for node in nodes:
+			node["encounter_id"] = FIRST_RUN_OPENER_ENCOUNTER
+		return true
+	var faction: String = _run_state.act_faction[act - 1] \
+		if act - 1 < _run_state.act_faction.size() else ""
+	var candidates: Array = _encounter_db.landing_pool(act, faction)
+	if candidates.is_empty():
+		return false
+	# The kingdom's own landing kit leads; the remaining lanes of the band are
+	# drawn from a shuffled remainder so the beachhead varies run to run.
+	var deal: Array = [candidates[0]]
+	var rest: Array = candidates.slice(1)
+	shuffle_array(rest, rng)
+	deal.append_array(rest)
+	# Shuffle the NODES, not the deal — otherwise the faction's kit would just
+	# become the new permanent answer in the leftmost lane.
+	shuffle_array(nodes, rng)
+	for i in range(nodes.size()):
+		nodes[i]["encounter_id"] = String(deal[i % deal.size()])
+	return true
+
+
 func _assign_encounters(grid: Array, act: int,
 		rng: RandomNumberGenerator) -> void:
 	# Successor Wars: every hold in the kingdom belongs to the act's faction
@@ -493,6 +598,10 @@ func _assign_encounters(grid: Array, act: int,
 	# The act's named action goes down BEFORE the encounter walk, so the walk
 	# can see the setpiece_id and skip dealing that node a pool fight / mutator.
 	_place_set_piece(grid, act, rng, first_run_opener)
+	# THE LANDING IS DEALT HERE AND NOWHERE ELSE (2026-08-01) — see the
+	# doc comment on _deal_landing.
+	var landing_dealt: bool = _deal_landing(
+		_row_nodes(grid, FIGHT_ROWS[0]), act, rng, first_run_opener)
 	var combat_idx: int = 0
 	var elite_idx: int = 0
 	for r in range(MAP_HEIGHT):
@@ -511,9 +620,11 @@ func _assign_encounters(grid: Array, act: int,
 						node["encounter_id"] = ""
 						node["mutator_id"] = ""
 						continue
-					if first_run_opener and r == FIGHT_ROWS[0]:
-						node["encounter_id"] = FIRST_RUN_OPENER_ENCOUNTER
-						node["mutator_id"] = ""
+					if r == FIGHT_ROWS[0] and landing_dealt:
+						# Identity already stamped. The first campaign also
+						# walks the landing free of any parallel rule.
+						node["mutator_id"] = "" if first_run_opener \
+							else _mutator_db.roll(0.35, rng)
 						continue
 					if combat_ids.size() > 0:
 						node["encounter_id"] = combat_ids[combat_idx % combat_ids.size()]
@@ -547,6 +658,14 @@ func redeal_encounters(flat: Array, act: int,
 	shuffle_array(elite_ids, rng)
 	var combat_idx := 0
 	var elite_idx := 0
+	# The new ruler's kingdom re-deals its landing too, from HIS landing pool
+	# — otherwise THE NEXT MARCH would hand the act a beachhead belonging to
+	# the lord the player just walked away from. first_run_opener is false by
+	# construction: this only ever runs on acts the player has not entered,
+	# and a fresh profile's act 1 is entered before any next-march choice.
+	var landing_dealt: bool = false
+	if not flat.is_empty():
+		landing_dealt = _deal_landing(flat[FIGHT_ROWS[0]], act, rng, false)
 	for row in flat:
 		for raw_node in row:
 			var node: Dictionary = raw_node
@@ -557,6 +676,8 @@ func redeal_encounters(flat: Array, act: int,
 				continue
 			match String(node.get("type", "")):
 				"combat":
+					if landing_dealt and int(node.get("row", -1)) == FIGHT_ROWS[0]:
+						continue
 					node["encounter_id"] = ""
 					if not combat_ids.is_empty():
 						node["encounter_id"] = \

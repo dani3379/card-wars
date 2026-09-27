@@ -66,6 +66,8 @@ var battle_order_second_strike: bool = false
 var enrage_vulnerable: bool = false
 var marked: bool = false
 var will_retreat: bool = false
+# Roving Sellsword may take one free reposition per owning turn.
+var free_move_used: bool = false
 var war_cry_swift: bool = false
 var drummer_swift: bool = false
 var shield_wall_thorns: bool = false
@@ -156,11 +158,18 @@ func to_snapshot() -> Dictionary:
 		"redirecting": redirecting, "challenge": challenge_any_lane,
 		"charges": charges_this_turn, "second_strike": battle_order_second_strike,
 		"vulnerable": enrage_vulnerable, "marked": marked,
-		"retreat": will_retreat, "war_cry_swift": war_cry_swift,
+		"retreat": will_retreat, "free_move_used": free_move_used,
+		"war_cry_swift": war_cry_swift,
 		"drummer_swift": drummer_swift,
 		"wall_thorns": shield_wall_thorns, "square_thorns": square_thorns,
 		"inspire_piercing": inspire_piercing,
 		"counter_spent": counter_spent_this_clash, "hp_floor": hp_floor,
+		# effect_immune rides beside hp_floor: both are "this body ignores a
+		# class of harm" flags, and both must survive a board reconcile. It was
+		# the ONE declared field missing from this dict (audited against all 60),
+		# so a snapshot silently cleared it and The Old King's Body would take
+		# spell/keyword/potion damage on the receiving peer.
+		"effect_immune": effect_immune,
 		"mummified_zero": mummified_zero,
 		"pact_zero": pact_of_embers_zero, "sealed_pending": sealed_pending,
 		"reborn_used": reborn_used, "snatcher_used": body_snatcher_used,
@@ -235,6 +244,7 @@ func apply_snapshot(data: Dictionary) -> void:
 	enrage_vulnerable = bool(data.get("vulnerable", false))
 	marked = bool(data.get("marked", false))
 	will_retreat = bool(data.get("retreat", false))
+	free_move_used = bool(data.get("free_move_used", false))
 	war_cry_swift = bool(data.get("war_cry_swift", false))
 	drummer_swift = bool(data.get("drummer_swift", false))
 	shield_wall_thorns = bool(data.get("wall_thorns", false))
@@ -245,6 +255,8 @@ func apply_snapshot(data: Dictionary) -> void:
 	pact_of_embers_zero = bool(data.get("pact_zero", false))
 	sealed_pending = bool(data.get("sealed_pending", false))
 	hp_floor = bool(data.get("hp_floor", false))
+	# Defaults false, so an older snapshot that predates the key still applies.
+	effect_immune = bool(data.get("effect_immune", false))
 	reborn_used = bool(data.get("reborn_used", false))
 	body_snatcher_used = bool(data.get("snatcher_used", false))
 	linked_banner_buffed = bool(data.get("banner_buffed", false))

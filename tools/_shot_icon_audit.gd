@@ -196,7 +196,6 @@ class IconSheet extends Control:
 		y += 34.0
 		var stats := [
 			["cost_runestone", "res://assets/icons/stats/cost_runestone.png"],
-			["atk_sword", "res://assets/icons/stats/atk_sword.png"],
 			["hp_heart", "res://assets/icons/stats/hp_heart.png"],
 			["sword.png (token ATK)", "res://assets/icons/sword.png"],
 			["heart.png (token HP)", "res://assets/icons/heart.png"],

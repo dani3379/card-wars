@@ -29,8 +29,19 @@ const FOAM := Color(0.55, 0.62, 0.60)
 # atmosphere light pool has clean paper to fall on. Was muddy mid-tones per cell
 # (the "kid drew it" tell); the figure/ground now comes from light, not hue.
 const CHART_PAPER := Color(0.760, 0.638, 0.430)
+# THE BURN'S TWO TONES (see _assign_moisture_biomes for the whole argument).
+# This is a sheet of paper pinned to a table, not a landscape — so there is no
+# fire, no glow and no ember anywhere in the burn. What heat does to a chart is
+# make it go WARM and SATURATED first (SINGE, the frontier) and then take it
+# away (CHAR, pitched into the same near-black brown family as the coast ink,
+# so the engraving simply stops existing inside it).
+const BURN_SINGE := Color(0.700, 0.455, 0.180)
+const BURN_CHAR := Color(0.115, 0.082, 0.062)
+# The company's dye — see _draw_claimed_glow. Deliberately far in chroma from
+# BOTH grounds it has to mark: clean parchment AND charred country.
+const CLAIM_DYE := Color(0.60, 0.38, 0.09)
 
-const CELL := 20.0            # mesh spacing (px) — fine mesh for chart detail
+const CELL := 24.0            # mesh spacing (px) — fine mesh for chart detail
 const MARGIN_L := 300.0
 const MARGIN_R := 380.0
 const MARGIN_T := 225.0
@@ -103,12 +114,22 @@ var _region: PackedInt32Array = PackedInt32Array()  # 0 sea, 1 sicily, 2 mainlan
 var _elev: PackedFloat32Array = PackedFloat32Array()
 var _moist: PackedFloat32Array = PackedFloat32Array()
 var _biome: PackedInt32Array = PackedInt32Array()   # see B_* enum below
+var _scorch: PackedFloat32Array = PackedFloat32Array()  # 0 clean .. 1 charred
 var _prov: PackedInt32Array = PackedInt32Array()    # node index, -1 = none
 var _zone: PackedInt32Array = PackedInt32Array()    # rival realm 0-2, -1 = none
 var _shade: PackedFloat32Array = PackedFloat32Array()
 var _grad: PackedVector2Array = PackedVector2Array()   # uphill gradient (hachures)
 var _road_d: PackedFloat32Array = PackedFloat32Array() # px to nearest road
 var _wdepth: PackedInt32Array = PackedInt32Array()     # water hops from land
+# SIMPLE_BACKDROP draw eligibility. Point-in-polygon tests against the
+# 100-160 point deckled coast/sheet used to run repeatedly while the bake
+# clone recorded ~2,760 cells, accounting for most of an 83-90 ms frame.
+# Compute them once in the live map's phased generation, then carry them with
+# the mesh cache so clone recording is only draw-command submission.
+var _simple_sheet_17: PackedByteArray = PackedByteArray()
+var _simple_land_13: PackedByteArray = PackedByteArray()
+var _simple_land_30: PackedByteArray = PackedByteArray()
+var _simple_graticule: PackedVector4Array = PackedVector4Array()
 var _gx := 0
 var _gy := 0
 
@@ -188,10 +209,11 @@ var _last_dress_mix := -1.0
 # pixel-identical plates.
 # A 2x plate is already 3200x1800 at the project's 1600x900 design canvas.
 # Ultra keeps that target; lower tiers reduce readback/upload pixels and
-# transient memory without changing layout. Medium/High's 1.5x bake remains
-# comfortably above the native canvas for the map's normal zoom range.
+# transient memory without changing layout. Medium's 1.25x and High's 1.5x
+# bakes remain above the native canvas through the map's opening zoom.
 const PLATE_BAKE_SCALE_LOW := 1.0
-const PLATE_BAKE_SCALE_MID := 1.5
+const PLATE_BAKE_SCALE_MID := 1.25
+const PLATE_BAKE_SCALE_HIGH := 1.5
 const PLATE_BAKE_SCALE_ULTRA := 2.0
 var _plate_bake_scale := PLATE_BAKE_SCALE_ULTRA
 var _plate_item = null   # untyped: typed Control fails on script-only members
@@ -202,6 +224,11 @@ var _march_tex: ImageTexture = null   # per open — the clean march dress
 var _plate_tex: ImageTexture = null   # campaign dress; stale copy cache-seeded
 var _plate_bake_pending := false
 var _bake_gen := 0
+# False while a cold live map is generating its terrain fields. PlateItem uses
+# this to draw a cheap physical-chart placeholder instead of replaying the
+# several-thousand-command vector geography on every generation/bake frame.
+var _map_data_ready := false
+var _map_build_gen := 0
 # "" = the live map · "geo" = clone baking geography only · "plate" = clone
 # baking the complete plate (geo quad + ink). Clones never bake or draw UI.
 var bake_mode := ""
@@ -259,7 +286,7 @@ var _kingdoms: Array = []
 
 func _ready() -> void:
 	await get_tree().process_frame
-	build_map()
+	await build_map()
 
 
 func _gui_input(event: InputEvent) -> void:
@@ -336,6 +363,8 @@ func _on_view_changed() -> void:
 
 
 func build_map() -> void:
+	_map_build_gen += 1
+	var build_gen := _map_build_gen
 	# Shared by the render sandbox (map_proto.tscn) and the live map screen.
 	# Draws once into a static plate; dynamic UI lives in child controls.
 	if bake_mode == "":
@@ -359,6 +388,7 @@ func build_map() -> void:
 	# by _mesh_restore, so they don't need this.
 	_nodes.clear()
 	_edges.clear()
+	_map_data_ready = false
 	# A live instance can be rebuilt after a quality change by tooling/settings.
 	# Never let its prior-resolution quads survive into the new cache decision.
 	_geo_tex = null
@@ -416,7 +446,12 @@ void fragment() {
 		_mesh_restore(cache.mesh)
 		_read_run_map()
 		_resolve_kingdoms()
+		# Tolerate a tooling-created cache from before these derived masks
+		# existed. Normal act caches already restore them and skip this work.
+		if SIMPLE_BACKDROP and _simple_sheet_17.size() != _seed_pts.size():
+			_build_simple_draw_cache()
 		_derive_terrain_tags()
+		_map_data_ready = true
 		# Mesh geometry is resolution-independent and remains reusable across
 		# quality changes. Baked textures are not: accepting a 1x plate after
 		# switching to Ultra would make the map soft, while retaining a 2x plate
@@ -441,18 +476,71 @@ void fragment() {
 			_ensure_plate_bake()
 		return
 	_read_run_map()
-	_build_mesh()
+	# The first map of an act used to monopolize the main thread for roughly
+	# 170 ms here, before the first useful frame could be presented. Only the
+	# live cold path is phased; detached probes and offscreen bake clones remain
+	# deterministic and synchronous. The placeholder can already show the
+	# parchment/coast because _read_run_map built the generated simple coast.
+	var phase_live := bake_mode == "" and is_inside_tree()
+	if phase_live:
+		_redraw_plate()
+		await get_tree().process_frame
+		if not is_inside_tree() or build_gen != _map_build_gen:
+			return
+		await _build_mesh(true, build_gen)
+		if not is_inside_tree() or build_gen != _map_build_gen:
+			return
+		await get_tree().process_frame
+		if not is_inside_tree() or build_gen != _map_build_gen:
+			return
+	else:
+		_build_mesh()
 	_assign_land()
-	_assign_elevation()
+	if phase_live:
+		await get_tree().process_frame
+		if not is_inside_tree() or build_gen != _map_build_gen:
+			return
+		await _assign_elevation(true, build_gen)
+		if not is_inside_tree() or build_gen != _map_build_gen:
+			return
+		await get_tree().process_frame
+		if not is_inside_tree() or build_gen != _map_build_gen:
+			return
+	else:
+		_assign_elevation()
 	_carve_rivers()
+	if phase_live:
+		await get_tree().process_frame
+		if not is_inside_tree() or build_gen != _map_build_gen:
+			return
 	_assign_moisture_biomes()
+	if phase_live:
+		await get_tree().process_frame
+		if not is_inside_tree() or build_gen != _map_build_gen:
+			return
 	_assign_provinces()
+	if phase_live:
+		await get_tree().process_frame
+		if not is_inside_tree() or build_gen != _map_build_gen:
+			return
 	_assign_zones()
 	_compute_hillshade()
+	if phase_live:
+		await get_tree().process_frame
+		if not is_inside_tree() or build_gen != _map_build_gen:
+			return
 	_build_roads()
 	_place_labels()
 	_resolve_kingdoms()
+	if SIMPLE_BACKDROP:
+		if phase_live:
+			await _build_simple_draw_cache(true, build_gen)
+			if not is_inside_tree() or build_gen != _map_build_gen:
+				return
+		else:
+			_build_simple_draw_cache()
 	_derive_terrain_tags()
+	_map_data_ready = true
 	_redraw_plate()
 	if bake_mode != "":
 		return
@@ -496,6 +584,8 @@ func _resolve_plate_bake_scale() -> float:
 	match tier:
 		"low":
 			return PLATE_BAKE_SCALE_LOW
+		"high":
+			return PLATE_BAKE_SCALE_HIGH
 		"ultra":
 			return PLATE_BAKE_SCALE_ULTRA
 		_:
@@ -532,10 +622,15 @@ func _redraw_plate() -> void:
 func _mesh_snapshot() -> Dictionary:
 	return {"seed_pts": _seed_pts, "polys": _polys, "nbrs": _nbrs,
 		"land": _land, "region": _region, "elev": _elev, "moist": _moist,
-		"biome": _biome, "prov": _prov, "zone": _zone, "shade": _shade,
+		"biome": _biome, "scorch": _scorch, "prov": _prov, "zone": _zone,
+		"shade": _shade,
 		"grad": _grad, "road_d": _road_d, "wdepth": _wdepth, "gx": _gx,
 		"gy": _gy, "rivers": _rivers, "edge_curves": _edge_curves,
-		"bridges": _bridges, "labels": _labels}
+		"bridges": _bridges, "labels": _labels,
+		"simple_sheet_17": _simple_sheet_17,
+		"simple_land_13": _simple_land_13,
+		"simple_land_30": _simple_land_30,
+		"simple_graticule": _simple_graticule}
 
 
 func _mesh_restore(m: Dictionary) -> void:
@@ -547,6 +642,13 @@ func _mesh_restore(m: Dictionary) -> void:
 	_elev = m.elev
 	_moist = m.moist
 	_biome = m.biome
+	# Tolerant read: map_plate_cache is in-memory only, but a cache dict built
+	# by an older instance in the same session (tooling rebuilds a live map)
+	# must not take the whole chart down over one missing field.
+	_scorch = m.get("scorch", PackedFloat32Array())
+	if _scorch.size() != _seed_pts.size():
+		_scorch.resize(_seed_pts.size())
+		_scorch.fill(0.0)
 	_prov = m.prov
 	_zone = m.zone
 	_shade = m.shade
@@ -559,6 +661,72 @@ func _mesh_restore(m: Dictionary) -> void:
 	_edge_curves.assign(m.edge_curves)
 	_bridges = m.bridges
 	_labels = m.labels
+	_simple_sheet_17 = m.get("simple_sheet_17", PackedByteArray())
+	_simple_land_13 = m.get("simple_land_13", PackedByteArray())
+	_simple_land_30 = m.get("simple_land_30", PackedByteArray())
+	_simple_graticule = m.get("simple_graticule", PackedVector4Array())
+
+
+## Precompute the expensive geometry predicates used only to paint the static
+## simple chart. The cold live path yields on elapsed time, so the same work
+## that used to form one bake-recording spike is spread behind the useful
+## placeholder; bake clones restore the finished arrays from the act cache.
+func _build_simple_draw_cache(phased := false, build_gen := -1) -> void:
+	_simple_sheet_17 = PackedByteArray()
+	_simple_land_13 = PackedByteArray()
+	_simple_land_30 = PackedByteArray()
+	_simple_graticule = PackedVector4Array()
+	if not SIMPLE_BACKDROP:
+		return
+	var count := _seed_pts.size()
+	_simple_sheet_17.resize(count)
+	_simple_land_13.resize(count)
+	_simple_land_30.resize(count)
+	var slice_started_us := Time.get_ticks_usec()
+	for i in range(count):
+		if _polys[i].size() >= 3:
+			if _land[i]:
+				_simple_land_13[i] = int(_inside_island(_seed_pts[i], 13.0))
+				_simple_land_30[i] = int(_inside_island(_seed_pts[i], 30.0))
+			else:
+				_simple_sheet_17[i] = int(_inside_sheet(_seed_pts[i], 17.0))
+		# Check in small batches: polygon tests vary with early rejection, and
+		# elapsed-time slicing stays bounded across CPUs without a magic count.
+		if phased and i % 24 == 23 \
+				and Time.get_ticks_usec() - slice_started_us >= 6500:
+			await get_tree().process_frame
+			if not is_inside_tree() or build_gen != _map_build_gen:
+				return
+			slice_started_us = Time.get_ticks_usec()
+	# Pre-clip the ruled-sea dashes too. _cell_at plus a 5-probe sheet test
+	# ran for every dash on every geo recording; Vector4 stores x0/y0/x1/y1
+	# compactly and preserves the original draw order exactly.
+	var rules := PackedVector4Array()
+	var gx := 90.0
+	while gx < size.x:
+		rules.append(Vector4(gx, 0.0, gx, size.y))
+		gx += 176.0
+	var gy := 70.0
+	while gy < size.y:
+		rules.append(Vector4(0.0, gy, size.x, gy))
+		gy += 176.0
+	for rule in rules:
+		var a := Vector2(rule.x, rule.y)
+		var b := Vector2(rule.z, rule.w)
+		var n := maxi(int(a.distance_to(b) / 22.0), 1)
+		for k in range(n):
+			var p0 := a.lerp(b, float(k) / float(n))
+			var p1 := a.lerp(b, (float(k) + 0.8) / float(n))
+			var mid := (p0 + p1) * 0.5
+			var ci := _cell_at(mid)
+			if ci >= 0 and not _land[ci] and _inside_sheet(mid, 12.0):
+				_simple_graticule.append(Vector4(p0.x, p0.y, p1.x, p1.y))
+			if phased and k % 12 == 11 \
+					and Time.get_ticks_usec() - slice_started_us >= 6500:
+				await get_tree().process_frame
+				if not is_inside_tree() or build_gen != _map_build_gen:
+					return
+				slice_started_us = Time.get_ticks_usec()
 
 
 ## The per-open bake chain (live map only). Ensures the act's geography
@@ -583,7 +751,6 @@ func _ensure_plate_bake() -> void:
 		if gen == _bake_gen and g != null:
 			_geo_tex = g
 			_cache_baked_texture("geo", g)
-			_redraw_plate()
 	if gen == _bake_gen:
 		var m: ImageTexture = await _bake_via_clone("march")
 		if not is_inside_tree():
@@ -599,6 +766,11 @@ func _ensure_plate_bake() -> void:
 			_redraw_plate()
 	if gen == _bake_gen:
 		_plate_bake_pending = false
+		# A successful march landing already redrew the real plate. If its
+		# readback failed, release the live placeholder into the exact vector
+		# fallback now that waiting_for_plate is false.
+		if _march_tex == null:
+			_redraw_plate()
 	plate_baked.emit()
 	if gen == _bake_gen and not SIMPLE_BACKDROP:
 		var p: ImageTexture = await _bake_via_clone("plate")
@@ -620,6 +792,19 @@ func _bake_via_clone(mode: String) -> ImageTexture:
 	# target readback is undefined — skip the bake and let the vector path
 	# paint until we have a real rect.
 	if size.x < 4.0 or size.y < 4.0:
+		return null
+	# The `frame_post_draw` await below NEVER FIRES under the headless/dummy
+	# display server: no window can draw, so the main loop skips
+	# `RenderingServer::draw()` and no frame is ever posted. Parking here also
+	# strands _ensure_plate_bake short of its `plate_baked.emit()`, which hangs
+	# MapView's opening gate (MapView.gd:94) on a signal that can no longer come —
+	# breaking the "fires in every outcome" contract that gate is built on. The
+	# guard belongs HERE, with the await, not at the callers: a hazard that has to
+	# be remembered by everyone who calls it is one somebody will forget (see
+	# CardTextureCache._can_bake for the same fact and how it got missed).
+	# Nothing is presented headless anyway, and a null return is the documented
+	# failure path — the vector plate keeps painting.
+	if DisplayServer.get_name() == "headless":
 		return null
 	var sub := SubViewport.new()
 	sub.size = Vector2i(
@@ -649,8 +834,9 @@ func _bake_via_clone(mode: String) -> ImageTexture:
 	sub.canvas_transform = Transform2D().scaled(
 		Vector2(_plate_bake_scale, _plate_bake_scale))
 	# Clone _ready waits a frame, builds, paints the frame after — wait those
-	# out (plus margin), then read the render target back.
-	for _i in 4:
+	# two exact stages out, then read the render target back. The former two
+	# margin frames were measured idle for both geo and march clones.
+	for _i in 2:
 		await get_tree().process_frame
 		# If the scene changed mid-bake we (and our child SubViewport) are
 		# freed — stop before the next get_tree() errors on a freed node.
@@ -1172,7 +1358,7 @@ func _build_simple_coast() -> void:
 
 # ═══════════════════ MESH ═══════════════════
 
-func _build_mesh() -> void:
+func _build_mesh(phased := false, build_gen := -1) -> void:
 	# Rebuild from empty: these are append-built, and a second cold build on
 	# a live instance (nothing does this today, but probes have) would double
 	# the mesh and desync every index-paired array after it.
@@ -1183,6 +1369,7 @@ func _build_mesh() -> void:
 	var h: float = size.y
 	_gx = int(ceil(w / CELL)) + 2
 	_gy = int(ceil(h / CELL)) + 2
+	var slice_started_us := Time.get_ticks_usec()
 	for gy in range(_gy):
 		for gx in range(_gx):
 			var base := Vector2((float(gx) - 0.5) * CELL,
@@ -1190,6 +1377,11 @@ func _build_mesh() -> void:
 			_seed_pts.append(base + Vector2(
 				_rng.randf_range(-0.38, 0.38) * CELL,
 				_rng.randf_range(-0.38, 0.38) * CELL))
+		if phased and Time.get_ticks_usec() - slice_started_us >= 6500:
+			await get_tree().process_frame
+			if not is_inside_tree() or build_gen != _map_build_gen:
+				return
+			slice_started_us = Time.get_ticks_usec()
 	var count := _seed_pts.size()
 	_polys.resize(count)
 	_nbrs.resize(count)
@@ -1219,6 +1411,14 @@ func _build_mesh() -> void:
 		_polys[i] = poly
 
 
+		# Checking once per row keeps timer overhead out of the inner clipping
+		# loop while still bounding a generation slice on slower machines.
+		if phased and i % _gx == _gx - 1 \
+				and Time.get_ticks_usec() - slice_started_us >= 6500:
+			await get_tree().process_frame
+			if not is_inside_tree() or build_gen != _map_build_gen:
+				return
+			slice_started_us = Time.get_ticks_usec()
 func _clip_halfplane(poly: PackedVector2Array, a: Vector2,
 		b: Vector2) -> PackedVector2Array:
 	var n := b - a
@@ -1314,7 +1514,7 @@ func _cell_at(p: Vector2) -> int:
 	return best
 
 
-func _assign_elevation() -> void:
+func _assign_elevation(phased := false, build_gen := -1) -> void:
 	# BFS hop-distance from the sea; normalise; noise-modulate.
 	var count := _seed_pts.size()
 	_elev.resize(count)
@@ -1324,6 +1524,7 @@ func _assign_elevation() -> void:
 	dist.resize(count)
 	dist.fill(-1)
 	var queue: Array[int] = []
+	var slice_started_us := Time.get_ticks_usec()
 	for i in range(count):
 		if not _land[i]:
 			dist[i] = 0
@@ -1338,6 +1539,12 @@ func _assign_elevation() -> void:
 				dist[j] = dist[c] + 1
 				maxd = maxi(maxd, dist[j])
 				queue.append(j)
+		if phased and head % 128 == 0 \
+				and Time.get_ticks_usec() - slice_started_us >= 6500:
+			await get_tree().process_frame
+			if not is_inside_tree() or build_gen != _map_build_gen:
+				return
+			slice_started_us = Time.get_ticks_usec()
 	var noise := FastNoiseLite.new()
 	noise.seed = 5512 + _act * 77   # per-act relief variation
 	noise.frequency = 0.007
@@ -1352,6 +1559,12 @@ func _assign_elevation() -> void:
 			_elev[i2] = 0.0
 			continue
 		var base := pow(float(dist[i2]) / float(maxd), 1.05)
+		if phased and i2 % 64 == 0 \
+				and Time.get_ticks_usec() - slice_started_us >= 6500:
+			await get_tree().process_frame
+			if not is_inside_tree() or build_gen != _map_build_gen:
+				return
+			slice_started_us = Time.get_ticks_usec()
 		var nz := (noise.get_noise_2dv(_seed_pts[i2]) + 1.0) * 0.5
 		var mz := (macro.get_noise_2dv(_seed_pts[i2]) + 1.0) * 0.5
 		# Macro range kept moderate — fully binary highlands produce one
@@ -1404,6 +1617,12 @@ func _assign_elevation() -> void:
 			if not _land[jw2] and _wdepth[jw2] > _wdepth[wc] + 1:
 				_wdepth[jw2] = _wdepth[wc] + 1
 				wq.append(jw2)
+		if phased and whead % 128 == 0 \
+				and Time.get_ticks_usec() - slice_started_us >= 6500:
+			await get_tree().process_frame
+			if not is_inside_tree() or build_gen != _map_build_gen:
+				return
+			slice_started_us = Time.get_ticks_usec()
 	# Offshore islets are one BFS hop from the sea everywhere, which leaves
 	# them near-black — floor their elevation so they render as real ground.
 	for ii in range(count):
@@ -1557,6 +1776,7 @@ func _assign_moisture_biomes() -> void:
 					m = minf(m + 0.28, 1.0)
 					break
 		_moist[i] = clampf(m, 0.0, 1.0)
+	_assign_burn(count)
 	for i2 in range(count):
 		if not _land[i2]:
 			var coastal := false
@@ -1568,13 +1788,11 @@ func _assign_moisture_biomes() -> void:
 			continue
 		var e := _elev[i2]
 		var m2 := _moist[i2]
-		# Scorch = the volcano's lava country, centered on Etna itself (NOT
-		# whichever keep this act besieges — acts 1–2 fight far from the
-		# mountain; act 3 marches into it). It grows by act: the deeper the
-		# run, the more of the land has burned.
-		var scorch_r: float = [0.0, 175.0, 205.0, 235.0][_act]
-		var scorched := _seed_pts[i2].distance_to(_etna_peak) < scorch_r
-		if scorched:
+		# The burn is a graded field now (_assign_burn); B_SCORCH is the tag
+		# for country that has genuinely gone, not for the frontier singe —
+		# _classify_site turns it into the "ash" terrain read, and a hold on
+		# lightly-browned ground is not an ash hold.
+		if _scorch[i2] >= 0.62:
 			_biome[i2] = B_SCORCH
 		elif e < 0.06:
 			_biome[i2] = B_BEACH
@@ -1586,6 +1804,81 @@ func _assign_moisture_biomes() -> void:
 			_biome[i2] = B_HILLS if m2 < 0.62 else B_FOREST
 		else:
 			_biome[i2] = B_FOREST if m2 > 0.60 else B_GRASS
+
+
+## THE BURN — the game's title, on the game's second-most-viewed screen.
+##
+## What was here until 2026-08-04, and why it could not work. The scorch was a
+## DISC: `[0, 175, 205, 235][_act]` px around `_etna_peak`, which in war-table
+## mode is a fixed `(0.905w, 0.315h)` = (1448.0, 283.5) on the 1600×900 canvas.
+## The keep every act marches to is a fixed `(0.80w, 0.535h)` = (1280.0, 481.5).
+## **|Etna − keep| = 259.7 px, and the LAST act's radius is 235** — in Act III
+## the burn stopped 24.7 px short of its own gate, and no point on the march
+## spine fell inside it in any act. The system worked; it was aimed at a wedge
+## of coast past the keep that the road never enters. Meanwhile TablePlate — the
+## COPY of this chart inked on the war table in Combat — burns properly and by
+## act (`range(7 + act * 3)`). The reproduction burned; the original didn't.
+##
+## THE SHAPE: a FRONT, not a blast radius. A bigger disc creeping out of one
+## corner is a vignette, and the eye reads a vignette as lighting. What the
+## fiction actually claims is that the war is eating the island, so the burn
+## gets the shape war has: a line, which advances, and which advances furthest
+## where the fighting is. The front here is a north–south line that has walked
+## WEST from the mountain — roughly three map rows per act — and it LAGS toward
+## the south of the sheet, so it crosses the node field on a diagonal. That
+## diagonal is doing real work: it keeps half the chart clean (so the burn reads
+## as a boundary rather than as a filter over everything), and it means the
+## player's lane choice visibly runs through more or less burnt country.
+##
+## Frontier noise is not decoration. A clean line is a gradient and a gradient
+## is not a burn; ±96 px of simplex on the distance-to-front is what makes the
+## edge ragged enough to read as damage.
+##
+## Reach and band, in map rows (rows sit 59.3 px apart, keep = row 17):
+##   Act I   char to ~row 17+ (the gate stands at the edge of the burn)
+##   Act II  char to ~row 15, singe to ~row 12
+##   Act III char to ~row 12, singe to ~row 9 — half the march is in it
+##
+## KEYED OFF `_act` ALONE, deliberately. `_biome`/`_scorch` ride the per-act
+## mesh in `RunState.map_plate_cache` and the geography is baked once per act,
+## so an act-keyed burn invalidates by construction. Keying it to mid-act
+## progress (holds broken, nodes visited) would have to bust that bake on every
+## map open — a real feature, but a different one, and it belongs on the LIVE
+## MapPulseOverlay rather than on the frozen plate.
+func _assign_burn(count: int) -> void:
+	_scorch.resize(count)
+	var reach: float = [0.0, 150.0, 315.0, 555.0][_act]
+	# The frontier is deliberately NARROW. The first cut ran 200-360 px and the
+	# photograph called it: a burn spread over that much distance stops reading
+	# as damage and starts reading as a shadow falling across the sheet, which
+	# is the vignette failure this whole item exists to avoid. Real scorched
+	# paper turns over a hand's width. Narrowing the band does not shrink the
+	# burn — `reach` alone decides where the char line lands — it only sharpens
+	# the edge.
+	var band: float = [1.0, 140.0, 190.0, 250.0][_act]
+	var bn := FastNoiseLite.new()
+	bn.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	bn.seed = 4409 + _act * 53
+	bn.frequency = 0.0034
+	bn.fractal_octaves = 3
+	var lag_span: float = maxf(size.y * 0.62, 1.0)
+	for i in range(count):
+		var p := _seed_pts[i]
+		# The front is furthest advanced on the mountain's own latitude and
+		# trails away toward the foot of the sheet.
+		var ny := clampf((p.y - _etna_peak.y) / lag_span, 0.0, 1.0)
+		var front_x := _etna_peak.x - reach * lerpf(1.0, 0.42, ny)
+		# Positive = still west of the fire.
+		var dd := front_x - p.x + bn.get_noise_2dv(p) * 96.0
+		_scorch[i] = 1.0 - smoothstep(0.0, band, dd)
+
+
+## Burn strength at an arbitrary point (foxing, furniture) via the biome mesh.
+func _scorch_at(p: Vector2) -> float:
+	var ci := _cell_at(p)
+	if ci < 0 or ci >= _scorch.size():
+		return 0.0
+	return _scorch[ci]
 
 
 func _assign_provinces() -> void:
@@ -2054,7 +2347,19 @@ class PlateItem extends Control:
 	var map = null
 
 	func _draw() -> void:
-		if map == null or map._nodes.is_empty() or map._polys.is_empty():
+		if map == null:
+			return
+		# A cold live map has enough authored/run geometry for a useful low-cost
+		# chart before its Voronoi fields and baked texture are ready. Avoid the
+		# old fallback that replayed 5,000+ geography draws every frame while
+		# generation/readback were already competing for the same frame budget.
+		var waiting_for_plate: bool = map._march_tex == null \
+			and map._plate_tex == null and map._plate_bake_pending
+		if map.bake_mode == "" and map.SIMPLE_BACKDROP \
+				and (not map._map_data_ready or waiting_for_plate):
+			map._paint_simple_placeholder(self, map._map_data_ready)
+			return
+		if map._nodes.is_empty() or map._polys.is_empty():
 			return
 		if map.bake_mode == "":
 			if map.SIMPLE_BACKDROP and map._march_tex != null:
@@ -2117,10 +2422,100 @@ class PlateItem extends Control:
 		map._draw_furniture(self)
 
 
+## Cheap first-present plate for a cold act. It preserves the screen's physical
+## object/readability hierarchy while omitting per-cell mottle, terrain marks,
+## graticule, and furniture until the real baked plate replaces it.
+func _paint_simple_placeholder(tgt: CanvasItem, with_ink: bool) -> void:
+	var wood := Color(0.118, 0.088, 0.062)
+	var paper_sea := Color(0.560, 0.482, 0.352)
+	var land := Color(0.752, 0.642, 0.452)
+	var coast_ink := Color(0.19, 0.14, 0.09, 0.72)
+	tgt.draw_rect(Rect2(Vector2.ZERO, size), wood)
+	if _sheet_poly.size() >= 3:
+		var shadow := PackedVector2Array()
+		for v in _sheet_poly:
+			shadow.append(v + Vector2(7.0, 9.0))
+		tgt.draw_colored_polygon(shadow, Color(0, 0, 0, 0.28))
+		tgt.draw_colored_polygon(_sheet_poly, paper_sea)
+	else:
+		tgt.draw_rect(Rect2(Vector2.ZERO, size), paper_sea)
+	if _poly_sicily.size() >= 3:
+		var island_shadow := PackedVector2Array()
+		for p in _poly_sicily:
+			island_shadow.append(p + Vector2(5.0, 7.0))
+		tgt.draw_colored_polygon(island_shadow, Color(0, 0, 0, 0.22))
+		tgt.draw_colored_polygon(_poly_sicily, land)
+		var coast := _poly_sicily.duplicate()
+		coast.append(_poly_sicily[0])
+		tgt.draw_polyline(coast, coast_ink, 2.0, true)
+	if not with_ink:
+		return
+	# Decision-readable preview ink, deliberately one command per road and a
+	# couple per stop. The ornate route casing, medallions, labels, keep, and
+	# camp account for more than a thousand commands and belong in the bake.
+	for edge in _edges:
+		var road_col := Color(0.18, 0.13, 0.085, 0.58)
+		var road_w := 2.0
+		if bool(edge.get("to_avail", false)):
+			road_col = Color(PLAYER_AMBER.r, PLAYER_AMBER.g,
+				PLAYER_AMBER.b, 0.92)
+			road_w = 3.4
+		elif bool(edge.get("from_vis", false)) \
+				and bool(edge.get("to_vis", false)):
+			road_col = Color(0.80, 0.24, 0.16, 0.90)
+			road_w = 3.0
+		tgt.draw_line(edge.a, edge.b, road_col, road_w, true)
+	for nd in _nodes:
+		if String(nd.type) == "boss":
+			continue
+		var p: Vector2 = nd.pos
+		var open_now: bool = bool(nd.avail)
+		var visited: bool = bool(nd.vis)
+		var r := 12.0 if not open_now else 15.0
+		var fill := Color(0.71, 0.61, 0.43, 0.76)
+		if visited:
+			fill = Color(0.36, 0.29, 0.20, 0.72)
+		elif open_now:
+			fill = Color(0.91, 0.80, 0.57, 0.96)
+		tgt.draw_circle(p + Vector2(2.0, 3.0), r + 1.0,
+			Color(0, 0, 0, 0.20))
+		tgt.draw_circle(p, r, fill)
+		if open_now:
+			tgt.draw_arc(p, r + 1.0, 0.0, TAU, 20, PLAYER_AMBER, 2.0, true)
+	var keep_p := _boss_pos if _boss_pos != Vector2.ZERO \
+		else Vector2(size.x - MARGIN_R, size.y * 0.5)
+	_draw_preview_landmark(tgt, keep_p, false)
+	_draw_preview_landmark(tgt, _camp_pos, true)
+
+
+func _draw_preview_landmark(tgt: CanvasItem, p: Vector2,
+		is_camp: bool) -> void:
+	var ink := Color(0.09, 0.065, 0.045, 0.92)
+	tgt.draw_circle(p + Vector2(3.0, 5.0), 23.0, Color(0, 0, 0, 0.19))
+	if is_camp:
+		var tent := PackedVector2Array([
+			p + Vector2(0, -18), p + Vector2(-21, 13),
+			p + Vector2(21, 13)])
+		tgt.draw_colored_polygon(tent, Color(0.40, 0.32, 0.22, 0.96))
+		var tent_line := tent.duplicate()
+		tent_line.append(tent[0])
+		tgt.draw_polyline(tent_line, ink, 1.8, true)
+		return
+	var wall := Rect2(p - Vector2(25, 12), Vector2(50, 29))
+	tgt.draw_rect(wall, Color(0.32, 0.27, 0.22, 0.98))
+	tgt.draw_rect(wall, ink, false, 1.8)
+	for xoff in [-18.0, 18.0]:
+		var tower := Rect2(p + Vector2(xoff - 7.0, -25.0), Vector2(14, 22))
+		tgt.draw_rect(tower, Color(0.36, 0.30, 0.24, 0.98))
+		tgt.draw_rect(tower, ink, false, 1.5)
+
+
 ## SIMPLE_BACKDROP geography — the war-table sheet as a LIT PHYSICAL OBJECT,
 ## not a flat fill: a dark sea frame falling off to the corners, the island a
 ## warm parchment plate floating on it (cast shadow + waterline rings, the
 ## antique-chart cut-paper read), per-cell tonal mottle + a lamplight pool at
+
+
 ## the heart of the chart, and quiet engraved terrain marks (pines, peaks,
 ## furrows) keyed to the SAME biome mesh the terrain tooltips read — the
 ## country the intel names is the country the eye sees. Baked into _geo_tex
@@ -2172,12 +2567,16 @@ func _paint_simple_backdrop(tgt: CanvasItem, count: int) -> void:
 	mottle.frequency = 0.010
 	mottle.fractal_octaves = 3
 	mottle.seed = 1771 + _act
+	var simple_cache_ready := _simple_sheet_17.size() == count \
+		and _simple_land_13.size() == count and _simple_land_30.size() == count
 	# 3 — sea-wash cells: gentle mottle + vignette on the paper water, kept
 	# clear of the sheet edge so no ragged cell ever pokes onto the wood.
 	for i in range(count):
 		if _land[i] or _polys[i].size() < 3:
 			continue
-		if not _inside_sheet(_seed_pts[i], 17.0):
+		if (simple_cache_ready and _simple_sheet_17[i] == 0) \
+				or (not simple_cache_ready \
+				and not _inside_sheet(_seed_pts[i], 17.0)):
 			continue
 		var uv := _seed_pts[i] / size
 		# Anisotropic pool: x compressed / y stretched — the light is a BAND
@@ -2191,19 +2590,36 @@ func _paint_simple_backdrop(tgt: CanvasItem, count: int) -> void:
 		var lift := (1.0 - smoothstep(0.0, 0.44, d)) * 0.06
 		if lift > 0.0:
 			sc = sc.lerp(Color(0.97, 0.88, 0.66), lift)
+		# Ash on the water. The burn is on the SHEET, so it crosses the
+		# coastline — a wildfire stops at the surf and scorched paper does
+		# not, and that one difference is what makes this read as a document
+		# burning rather than as a biome someone widened. Held to the first
+		# few cells off the shore (_wdepth is water HOPS from land, ~20 px a
+		# hop) so the open sea, and the compass and fleet standing in it,
+		# can never be touched.
+		var ss0: float = _scorch[i] if i < _scorch.size() else 0.0
+		if ss0 > 0.02 and i < _wdepth.size():
+			var fringe := 1.0 - smoothstep(1.0, 4.0, float(_wdepth[i]))
+			if fringe > 0.0:
+				sc = sc.lerp(BURN_CHAR, ss0 * fringe * 0.72)
 		tgt.draw_colored_polygon(_polys[i], sc)
 	if _poly_sicily.size() < 3:
 		return
 	# 4 — graticule ruled over open water (charts rule the sea, not the land).
 	var grat := Color(ink_wash.r, ink_wash.g, ink_wash.b, 0.14)
-	var gx := 90.0
-	while gx < size.x:
-		_draw_sea_segments(tgt, Vector2(gx, 0), Vector2(gx, size.y), grat)
-		gx += 176.0
-	var gy := 70.0
-	while gy < size.y:
-		_draw_sea_segments(tgt, Vector2(0, gy), Vector2(size.x, gy), grat)
-		gy += 176.0
+	if simple_cache_ready:
+		for seg in _simple_graticule:
+			tgt.draw_line(Vector2(seg.x, seg.y), Vector2(seg.z, seg.w),
+				grat, 1.0, true)
+	else:
+		var gx := 90.0
+		while gx < size.x:
+			_draw_sea_segments(tgt, Vector2(gx, 0), Vector2(gx, size.y), grat)
+			gx += 176.0
+		var gy := 70.0
+		while gy < size.y:
+			_draw_sea_segments(tgt, Vector2(0, gy), Vector2(size.x, gy), grat)
+			gy += 176.0
 	# 5 — a tight pigment pool at the coast (paint settling at the line), not
 	# an object shadow — the island is INK ON the sheet, not a separate cut.
 	var csp := PackedVector2Array()
@@ -2238,14 +2654,14 @@ func _paint_simple_backdrop(tgt: CanvasItem, count: int) -> void:
 	for i2 in range(count):
 		if not _land[i2] or _polys[i2].size() < 3:
 			continue
-		if not _inside_island(_seed_pts[i2], 13.0):
+		if (simple_cache_ready and _simple_land_13[i2] == 0) \
+				or (not simple_cache_ready \
+				and not _inside_island(_seed_pts[i2], 13.0)):
 			continue
 		var col := land
 		match _biome[i2]:
 			B_FOREST:
 				col = col.lerp(Color(0.560, 0.565, 0.360), 0.16)
-			B_SCORCH:
-				col = col.lerp(Color(0.340, 0.235, 0.165), 0.34)
 			B_ROCK, B_SNOW:
 				col = col.lerp(Color(0.585, 0.545, 0.470), 0.16)
 			B_HILLS:
@@ -2253,20 +2669,77 @@ func _paint_simple_backdrop(tgt: CanvasItem, count: int) -> void:
 		var mf2 := 1.0 + mottle.get_noise_2d(_seed_pts[i2].x,
 			_seed_pts[i2].y) * 0.075
 		col = Color(col.r * mf2, col.g * mf2, col.b * mf2)
+		# BURNT PAPER, NOT BURNING LAND — the whole material call, in two
+		# lerps. There is no fire on this sheet and there must not be: the
+		# caldera is the only warm light on the plate and that is precisely
+		# what makes Etna read as the source. What a chart does under heat is
+		# go WARM and SATURATED and THEN go dark — paper browns at the
+		# frontier before it chars — so the tonal TURN is the tell, and a
+		# single dark lerp (which is what shipped) is a stain, not a burn.
+		# The singe deliberately OUTRUNS the char (full ochre by 0.42, char not
+		# biting until 0.38) so there is a real band where the sheet has gone
+		# warm and saturated but not yet dark. Measured across the frontier,
+		# that band drops luminance ~18% while it lifts saturation ~38% — heat,
+		# not shade. The first cut had the char starting at 0.30 and the two
+		# stages cancelled: saturation barely moved and the whole edge read as
+		# a wash.
+		var sc0: float = _scorch[i2] if i2 < _scorch.size() else 0.0
+		if sc0 > 0.01:
+			col = col.lerp(BURN_SINGE, minf(sc0 / 0.42, 1.0) * 0.46)
+			if sc0 > 0.38:
+				col = col.lerp(BURN_CHAR,
+					pow((sc0 - 0.38) / 0.62, 0.80) * 0.88)
+			# Burnt paper is never evenly burnt. The sheet's own mottle is
+			# applied ABOVE, before the burn, so 88% of it is lerped away
+			# inside the char — re-assert it afterwards at burn strength or
+			# the core goes to a flat brown slab (which is what the first
+			# photograph showed).
+			if sc0 > 0.20:
+				var chm := 1.0 + mottle.get_noise_2d(
+					_seed_pts[i2].x * 1.7,
+					_seed_pts[i2].y * 1.7 + 411.0) * 0.30 * sc0
+				col = Color(col.r * chm, col.g * chm, col.b * chm)
 		# Settled road-country: the corridor lifts a touch toward pale packed
-		# earth, so the campaign's band reads warmer than the wilds.
+		# earth, so the campaign's band reads warmer than the wilds. DAMPED by
+		# the burn rather than exempted from it: the two would otherwise
+		# cancel exactly where the player is looking (the hunt's §✱2 warning),
+		# and there is no settled country left inside the char.
 		if i2 < _road_d.size() and _road_d[i2] < 110.0:
 			col = col.lerp(Color(0.790, 0.690, 0.500),
-				(1.0 - _road_d[i2] / 110.0) * 0.30)
+				(1.0 - _road_d[i2] / 110.0) * 0.30 * (1.0 - sc0 * 0.88))
 		var uv2 := _seed_pts[i2] / size
 		var dv2 := uv2 - pool_c
 		var d2 := Vector2(dv2.x * 0.80, dv2.y * 1.18).length()
 		var vg2 := 1.0 - smoothstep(0.34, 0.80, d2) * 0.18
 		col = Color(col.r * vg2, col.g * vg2, col.b * vg2)
-		var lift2 := (1.0 - smoothstep(0.0, 0.50, d2)) * 0.15
+		# Same for the lamplight pool — the lamp still falls on the sheet, but
+		# lerping char 15% toward near-white washes it to grey.
+		var lift2 := (1.0 - smoothstep(0.0, 0.50, d2)) * 0.15 \
+			* (1.0 - sc0 * 0.80)
 		if lift2 > 0.0:
 			col = col.lerp(Color(1.0, 0.94, 0.74), lift2)
 		tgt.draw_colored_polygon(_polys[i2], col)
+	# 5.4 — THE SHORE, BURNT. The pale sand shelf is a flat polygon laid down
+	# before the per-cell pass, and the per-cell pass skips the outer 13 px of
+	# land (ragged cell edges at the coast). Without this, charred country
+	# would keep a bright pale ribbon all the way round it — the single thing
+	# that would have made the burn read as a filter instead of as damage.
+	# Translucent, so a cell poking a few px past the outline reads as scorch
+	# crossing the shore, which is what it is. The coast ink needs no help:
+	# BURN_CHAR is the coast ink's own colour family, so the engraved coastline
+	# simply stops existing where the sheet has gone.
+	for i4 in range(count):
+		if not _land[i4] or _polys[i4].size() < 3:
+			continue
+		if (simple_cache_ready and _simple_land_13[i4] != 0) \
+				or (not simple_cache_ready \
+				and _inside_island(_seed_pts[i4], 13.0)):
+			continue
+		var sr: float = _scorch[i4] if i4 < _scorch.size() else 0.0
+		if sr <= 0.03:
+			continue
+		tgt.draw_colored_polygon(_polys[i4],
+			Color(BURN_CHAR.r, BURN_CHAR.g, BURN_CHAR.b, sr * 0.80))
 	# 5.5 — foxing: a few broad, faint age-stains soaked into the sheet.
 	# Rejection-sampled well inside the coast with a seeded rng, so every
 	# bake lays the same stains. Stacked discs keep the edges soft.
@@ -2282,11 +2755,16 @@ func _paint_simple_backdrop(tgt: CanvasItem, count: int) -> void:
 			continue
 		placed += 1
 		var fr := frng.randf_range(34.0, 78.0)
+		# Foxing pushed toward char: an age-stain is where the sheet is
+		# already weak, so inside the burn it is the first thing to go black.
+		var fs := _scorch_at(fp)
+		var fcol := Color(0.42, 0.30, 0.16, 0.028)
+		if fs > 0.05:
+			fcol = Color(0.20, 0.125, 0.070, 0.028 + fs * 0.085)
 		for fk in range(3):
 			tgt.draw_circle(fp + Vector2(frng.randf_range(-9.0, 9.0),
 				frng.randf_range(-7.0, 7.0)),
-				fr * (1.0 - float(fk) * 0.28),
-				Color(0.42, 0.30, 0.16, 0.028))
+				fr * (1.0 - float(fk) * 0.28), fcol)
 	# 6 — rivers: thin engraved threads, widening downstream.
 	var rcol := Color(0.235, 0.350, 0.360, 0.72)
 	for rv in _rivers:
@@ -2350,11 +2828,38 @@ func _draw_simple_marks(tgt: CanvasItem, count: int) -> void:
 	var drng := RandomNumberGenerator.new()
 	drng.seed = 909 + _act * 17
 	var ink := Color(0.30, 0.235, 0.155, 0.55)
+	var simple_cache_ready := _simple_land_30.size() == count
 	for i in range(count):
 		if not _land[i]:
 			continue
 		var p := _seed_pts[i]
-		if _road_d[i] < 46.0 or not _inside_island(p, 30.0):
+		if _road_d[i] < 46.0:
+			continue
+		if (simple_cache_ready and _simple_land_30[i] == 0) \
+				or (not simple_cache_ready and not _inside_island(p, 30.0)):
+			continue
+		# BURNT PAPER CARRIES NO ENGRAVING. The ABSENCE of the engraver's
+		# marks is what reads as "consumed" at chart zoom — more, honestly,
+		# than the tint does — so the char core is deliberately bare of
+		# everything but ash, and the flecks themselves PEAK AT THE FRONTIER
+		# and thin out in the dead middle. That density curve is the burn's
+		# only texture, and without it a large char field goes flat.
+		var sm0: float = _scorch[i] if i < _scorch.size() else 0.0
+		if sm0 > 0.28:
+			# Ash density is a HUMP centred on the burn line, not a ramp: the
+			# crumbling is at the edge, and the middle — where the sheet is
+			# simply gone — is the barest part of the chart. That curve is the
+			# burn's only texture at chart zoom and it is what stops a large
+			# char field reading as a spill.
+			if drng.randf() < 0.05 + 0.55 * exp(-pow((sm0 - 0.52) / 0.26, 2.0)):
+				var ca0 := drng.randf_range(0.0, TAU)
+				var cv0 := Vector2(cos(ca0), sin(ca0))
+				var cp0 := p + Vector2(drng.randf_range(-7.0, 7.0),
+					drng.randf_range(-7.0, 7.0))
+				tgt.draw_line(cp0 - cv0 * drng.randf_range(2.5, 5.5),
+					cp0 + cv0 * drng.randf_range(2.5, 5.5),
+					Color(0.055, 0.030, 0.020, 0.55), 1.2, true)
+		if sm0 > 0.45:
 			continue
 		match _biome[i]:
 			B_FOREST:
@@ -2388,15 +2893,8 @@ func _draw_simple_marks(tgt: CanvasItem, count: int) -> void:
 				if drng.randf() < 0.13:
 					tgt.draw_arc(p, drng.randf_range(3.8, 5.6), PI + 0.15,
 						TAU - 0.15, 10, ink, 1.2, true)
-			B_SCORCH:
-				if drng.randf() < 0.16:
-					var ca := drng.randf_range(0.0, TAU)
-					var cv := Vector2(cos(ca), sin(ca))
-					var cp2 := p + Vector2(drng.randf_range(-6.0, 6.0),
-						drng.randf_range(-6.0, 6.0))
-					tgt.draw_line(cp2 - cv * drng.randf_range(2.5, 5.0),
-						cp2 + cv * drng.randf_range(2.5, 5.0),
-						Color(0.10, 0.055, 0.035, 0.50), 1.2, true)
+			# No B_SCORCH arm: the tag needs _scorch >= 0.62, and everything
+			# past 0.42 was taken by the ash branch above.
 			B_GRASS:
 				if _road_d[i] > 60.0 and _road_d[i] < 185.0 \
 						and drng.randf() < 0.15:
@@ -3125,7 +3623,7 @@ func _site_label_text(typ: String, nd: Dictionary) -> String:
 	# so the token says what kind of thing it is and the tooltip carries the
 	# name, the ground, the order and the toll.
 	if String(nd.get("setpiece_id", "")) != "":
-		return "NAMED ACTION"
+		return "SPECIAL BATTLE"
 	return String(SITE_LABEL.get(typ, ""))
 
 
@@ -3154,6 +3652,15 @@ func _draw_sites(tgt: CanvasItem) -> void:
 	# Discs are pale parchment with DARK ink glyphs — the value flip off the
 	# olive terrain is what makes site types readable at chart zoom (the old
 	# dark-coin chips with dark-gold glyphs all read as identical dots).
+	# Rects of the site names already engraved this pass. The `crowd` test below
+	# only ever caught VERTICAL stacking (a stop in the lane beneath); two stops
+	# side by side in the SAME lane overprinted, because each name is centred on
+	# its own token and "RELIC CACHE" is wider than the gap to its neighbour —
+	# the chart shipped reading "GENERAŘLIC CACHE". Nothing about the label's own
+	# node can detect that, so collisions are resolved against what is already
+	# down. Deterministic: `_nodes` is in generation order, so the same map
+	# always staggers the same names and the plate still bakes identically.
+	var placed_labels: Array[Rect2] = []
 	for nd in _nodes:
 		var p: Vector2 = nd.pos
 		var typ: String = nd.type
@@ -3297,6 +3804,25 @@ func _draw_sites(tgt: CanvasItem) -> void:
 			var lw := GameTheme.font_display.get_string_size(ltxt,
 				HORIZONTAL_ALIGNMENT_LEFT, -1, lsz).x
 			var lpos := Vector2(lbase.x - lw * 0.5, lbase.y)
+			# Nudge off anything already engraved. `lpos.y` is a BASELINE, so the
+			# rect is lifted by the size to cover the glyph body. Steps go the way
+			# the label was already headed (down when it sits under its token, up
+			# when `crowd` put it above) so a nudged name never crosses its own
+			# medallion. Capped at 3 tries — past that the lane is genuinely full
+			# and a 4th step would collide with the NEXT lane's tokens instead.
+			var step := -13.0 if crowd else 13.0
+			for _try in 3:
+				var lrect := Rect2(lpos.x - 2.0, lpos.y - lsz, lw + 4.0,
+					float(lsz) + 3.0)
+				var hit := false
+				for pr in placed_labels:
+					if pr.intersects(lrect):
+						hit = true
+						break
+				if not hit:
+					placed_labels.append(lrect)
+					break
+				lpos.y += step
 			tgt.draw_string_outline(GameTheme.font_display, lpos, ltxt,
 				HORIZONTAL_ALIGNMENT_LEFT, -1, lsz, 4,
 				Color(0.03, 0.025, 0.02, 0.88))
@@ -3506,20 +4032,68 @@ func _draw_event_glyph(tgt: CanvasItem, c: Vector2, s: float, ink: Color) -> voi
 		HORIZONTAL_ALIGNMENT_LEFT, -1, fsz, ink)
 
 
-## The conquest, visible as light: every claimed stop (and the landing camp)
-## holds a soft pool of your amber on the parchment, so the marched road
-## reads as country brought into the lamplight — territory without a single
-## political border. Ink-layer (per open): it follows the run, not the act.
+## THE CLAIM, INKED — not lit.
+##
+## What was here until 2026-08-04: "the conquest, visible as light" —
+## PLAYER_AMBER (0.85, 0.64, 0.26) at α 0.055 (r 36) and 0.045 (r 64) over
+## land (0.752, 0.642, 0.452). Composited, the inner disc moves the paper by
+## **(+1, 0, −3) of 255**, and both together at the centre by (+2, 0, −5) —
+## under the JND, and that is BEFORE the live blend_mul paper-fibre pass and
+## the screen-fixed vignette land on top of it. Three claimed stops and thirty
+## looked identical. Verified against the shipped constants.
+##
+## The failure was never the alpha, and raising it was never the fix: **amber
+## over warm parchment is nearly hue-neutral**, so almost the whole (already
+## negligible) delta fell in blue. A colour that close to its ground goes muddy
+## long before it goes visible, at any alpha.
+##
+## So take the material answer instead. Paper does not glow, and "lit" is
+## already spoken for on this plate — the lamplight pool in
+## _paint_simple_backdrop owns it. What a chart does to record a holding is
+## take a DYE: a pigment soaked into the sheet, which is DARKER and MORE
+## SATURATED than the paper, never brighter. CLAIM_DYE at an effective α 0.32
+## moves clean parchment by **(−13, −22, −30)** — value down, chroma up, and
+## that figure is MEASURED off `_shot_a1_mid` against `_shot_a1_full` (same
+## pinned seed), i.e. after the blend_mul fibre pass and the vignette, with
+## unclaimed control pixels reading exactly (0, 0, 0). Roughly ten times the
+## old delta and in the direction ink actually goes. And because the dye is
+## chosen far in chroma from BOTH grounds it has to mark, it still separates
+## on Act III's charred country, where it reads instead as pigment lying on
+## top: about (+26, +15, −4). One colour, both ends of the act arc.
+##
+## Drawn along the MARCHED ROAD as well as under the stops, so the conquest
+## reads as one held swathe trailing the army rather than as beads on a
+## string — the record accumulating, which is the point of a record.
+## Ink-layer (per open): it follows the run, not the act.
 func _draw_claimed_glow(tgt: CanvasItem) -> void:
+	# The corridor first: broad, soft, under everything. _edge_curves is
+	# index-paired with _edges, and a leg is HELD only when both its ends are.
+	for ei in range(mini(_edge_curves.size(), _edges.size())):
+		var e: Dictionary = _edges[ei]
+		if not (bool(e.from_vis) and bool(e.get("to_vis", false))):
+			continue
+		for bandw in [[88.0, 0.044], [62.0, 0.050], [38.0, 0.056]]:
+			tgt.draw_polyline(_edge_curves[ei],
+				Color(CLAIM_DYE.r, CLAIM_DYE.g, CLAIM_DYE.b, float(bandw[1])),
+				float(bandw[0]), true)
 	var pts: Array[Vector2] = [_camp_pos]
 	for nd in _nodes:
 		if bool(nd.vis):
 			pts.append(nd.pos as Vector2)
+	# Six thin steps rather than two fat ones: at a delta this size a two-disc
+	# stack shows its own edges as rings, and a ringed blob reads as a UI
+	# artefact instead of as a stain soaked into the sheet. Effective α at a
+	# stop centre ≈ 0.32; photographed at 2× the first pass at 0.042/step was
+	# measurable (−9, −12, −12) but still read thin against the crimson march
+	# dashes, and a mark quieter than the ink beside it is not a mark.
+	# Deliberately kept an order of magnitude under the burn: both are warm
+	# darkenings of the same sheet, and "held" must never be confused with
+	# "burnt".
 	for p in pts:
-		tgt.draw_circle(p, 64.0, Color(PLAYER_AMBER.r, PLAYER_AMBER.g,
-			PLAYER_AMBER.b, 0.045))
-		tgt.draw_circle(p, 36.0, Color(PLAYER_AMBER.r, PLAYER_AMBER.g,
-			PLAYER_AMBER.b, 0.055))
+		for k in range(6):
+			tgt.draw_circle(p, lerpf(74.0, 18.0, float(k) / 5.0),
+				Color(CLAIM_DYE.r, CLAIM_DYE.g, CLAIM_DYE.b, 0.062),
+				true, -1.0, true)
 
 
 ## Quiet chart furniture for the war-table mode — a compass rose and a tiny
@@ -3650,16 +4224,20 @@ func _draw_etna(tgt: CanvasItem) -> void:
 		var la := 0.80 - float(k) * 0.12
 		tgt.draw_polyline(run, Color(0.06, 0.03, 0.02, la * 0.8), 2.8, true)
 		tgt.draw_polyline(run, Color(0.98, 0.40, 0.11, la), 1.4, true)
-	# Smoke: outlined puffs drifting NE — drawn objects, not soft sprites.
-	var puffs := [[10.0, -18.0, 6.0, 0.50], [22.0, -34.0, 9.0, 0.42],
-		[37.0, -52.0, 12.5, 0.32], [55.0, -71.0, 16.5, 0.20]]
-	for pf in puffs:
-		var pc := apex + Vector2(float(pf[0]), float(pf[1]))
-		var pr := float(pf[2])
-		var pa := float(pf[3])
-		tgt.draw_circle(pc, pr, Color(0.62, 0.58, 0.55, pa))
-		tgt.draw_arc(pc, pr, PI * 0.55, PI * 2.35, 18,
-			Color(ink.r, ink.g, ink.b, pa * 0.55), 1.2, true)
+	# SMOKE IS NOT BAKED HERE ANY MORE (2026-09-10). This used to lay down four
+	# static `draw_circle` puffs with an arc over each, and they were the loudest
+	# thing anywhere near the mountain: four hard discs, frozen, on the plate —
+	# which by design never animates.
+	#
+	# The live plume on MapPulseOverlay now owns the whole column, vent upward
+	# (see `_draw_etna_plume`), so keeping these meant a moving plume passing
+	# behind a painted one that would not move with it. What stays here is the
+	# geology, which is genuinely static and belongs on a chart: the caldera, the
+	# ember mouth, and the lava threads above.
+	#
+	# COST, STATED: `scenes/map_proto.tscn` renders MapTerrain with no overlay, so
+	# the sandbox now shows Etna without smoke. That is a dev harness, and the
+	# alternative was a defect on the screen players actually use.
 
 
 func _draw_keep(tgt: CanvasItem) -> void:
@@ -3903,6 +4481,22 @@ func _draw_ui() -> void:
 	if _faction_name != "":
 		var bn := _banner_color()
 		sub_col = Color(bn.r, bn.g, bn.b, 1.0).lerp(sub_col, 0.40)
+	# YOUR STANDARD — the chart's title box named the enemy and never once named
+	# the army reading it. A real chart carries the arms of whoever commissioned
+	# it, so the sub row states BOTH sides — your lord in the army's amber,
+	# theirs in the kingdom's dye — with the "AGAINST" half unchanged.
+	#
+	# It shares the existing row rather than taking a new one ON PURPOSE. A
+	# fourth row was built first and pushed the box 21px down into the chart's
+	# TOP LANE, where the army standard stands — the "YOU ARE HERE" pennant came
+	# down on top of the standing-order text (caught in _shot_a1_mid, not in the
+	# source). The lane grid is tuned to clear this box at its current height;
+	# growing the box is the one thing this corner cannot afford.
+	var standard_txt := _own_standard_text()
+	var standard_col := PLAYER_AMBER.lerp(Color(0.96, 0.90, 0.76), 0.35)
+	if standard_txt != "":
+		var own := _own_banner_color()
+		standard_col = own.lerp(Color(0.96, 0.90, 0.76), 0.45)
 	# Standing order + tally, one line, urgency-tinted like the old chip.
 	var holds_left: int = maxi(
 		RunState.HOLDS_TO_OPEN_LORD - RunState.holds_broken_in_act, 0)
@@ -3913,7 +4507,7 @@ func _draw_ui() -> void:
 	var order_txt: String
 	var order_col: Color
 	if RunState.is_lord_gate_open():
-		order_txt = "Keep road open - lord now, or hardened holds"
+		order_txt = "Keep road open - challenge the lord now"
 		order_col = Color(0.96, 0.84, 0.46)
 	else:
 		order_txt = "Break %d more %s to open the keep road" % [holds_left,
@@ -3922,16 +4516,29 @@ func _draw_ui() -> void:
 	order_txt += "  ·  %d / %d provinces" % [owned, _nodes.size()]
 	var title_txt := "ACT %s  ·  THE BURNING ISLE" % act_n
 	var title_sz := 22
-	var sub_sz := 13
+	# 15, the caption band's floor (COPY_STYLE §11) — this line was 13, below
+	# the "nothing worded renders below 14px" rule, and it is the one place the
+	# chart names the kingdom being invaded.
+	var sub_sz := 15
 	var order_sz := 15
-	var sub_txt := _letterspace(sub)
-	if GameTheme.font_display.get_string_size(sub_txt,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, sub_sz).x > 452.0:
-		sub_txt = sub   # longest kingdom names drop the letterspacing
+	# The sub row keeps the chart's letterspaced small-caps ONLY when it is the
+	# rival alone (the sandbox, a legacy save). With both arms on it the row is a
+	# compound already carrying its own separator, and letterspacing it would
+	# either overrun the sea corner or — worse — spread for a short lord and sit
+	# plain for a long one, typesetting the same row two ways per hero pick.
+	var sep := "  ·  "
+	var sub_txt := sub if standard_txt != "" else _fit_letterspaced(sub, sub_sz)
+	var w_std: float = 0.0
+	var w_sep: float = 0.0
+	if standard_txt != "":
+		w_std = GameTheme.font_display.get_string_size(standard_txt,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, sub_sz).x
+		w_sep = GameTheme.font_display.get_string_size(sep,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, sub_sz).x
 	var line_ws := [
 		title_font.get_string_size(title_txt,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, title_sz).x,
-		GameTheme.font_display.get_string_size(sub_txt,
+		w_std + w_sep + GameTheme.font_display.get_string_size(sub_txt,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, sub_sz).x,
 		GameTheme.font_display.get_string_size(order_txt,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, order_sz).x]
@@ -3941,7 +4548,9 @@ func _draw_ui() -> void:
 	# x=118 docks the cartouche to the same left rail as MapView's resource
 	# band above it (one aligned column in the corner); y=73 leaves the same
 	# 8px breath under the band (bottom y=65) that spaces the row's elements.
-	var band := Rect2(118.0, 73.0, clampf(inner_w + 32.0, 300.0, 520.0), 96.0)
+	# 560 (was 520) is the widest the box may run before it reaches the top
+	# lane's first stop; the arms row is the only line that ever needs it.
+	var band := Rect2(118.0, 73.0, clampf(inner_w + 32.0, 300.0, 560.0), 96.0)
 	draw_rect(band, Color(0.045, 0.04, 0.035, 0.86))
 	draw_rect(band, Color(PLAYER_AMBER.r, PLAYER_AMBER.g, PLAYER_AMBER.b,
 		0.55), false, 1.5)
@@ -3951,8 +4560,18 @@ func _draw_ui() -> void:
 	draw_string(title_font, Vector2(tx, band.position.y + 30), title_txt,
 		HORIZONTAL_ALIGNMENT_LEFT, band.size.x - 32.0, title_sz,
 		Color(0.90, 0.80, 0.60))
-	draw_string(GameTheme.font_display, Vector2(tx, band.position.y + 51),
-		sub_txt, HORIZONTAL_ALIGNMENT_LEFT, band.size.x - 32.0, sub_sz, sub_col)
+	var sx := tx
+	if standard_txt != "":
+		draw_string(GameTheme.font_display, Vector2(sx, band.position.y + 51),
+			standard_txt, HORIZONTAL_ALIGNMENT_LEFT, w_std, sub_sz, standard_col)
+		sx += w_std
+		draw_string(GameTheme.font_display, Vector2(sx, band.position.y + 51),
+			sep, HORIZONTAL_ALIGNMENT_LEFT, w_sep, sub_sz,
+			Color(0.60, 0.51, 0.34, 0.90))
+		sx += w_sep
+	draw_string(GameTheme.font_display, Vector2(sx, band.position.y + 51),
+		sub_txt, HORIZONTAL_ALIGNMENT_LEFT,
+		band.position.x + band.size.x - 16.0 - sx, sub_sz, sub_col)
 	# Hairline rule between the title block and the standing order.
 	draw_line(Vector2(tx, band.position.y + 63),
 		Vector2(band.position.x + band.size.x - 16.0, band.position.y + 63),
@@ -3964,6 +4583,71 @@ func _draw_ui() -> void:
 	# prints its own engraved name (SITE_LABEL in _draw_sites), hover carries
 	# the deep intel, and the full key lives behind the "?" primer. One less
 	# HUD band competing with the chart.
+
+
+## THE RUN'S OWN ARMS, for the cartouche: which lord you are. "" whenever there
+## is no live run identity (the map_proto sandbox, a legacy save with no hero)
+## so the caller can fall back to the old rival-only row rather than print a
+## fabricated one.
+##
+## It used to carry "UNDER <banner>" as well. The banner system was cut
+## 2026-09-16; the lord is the whole of the run's declared identity now.
+##
+## Your KINGDOM is deliberately absent here — the row shares its width with
+## "AGAINST <kingdom>", and two kingdom names on one line read as a riddle about
+## which one you are. It is spelled out in MapView's company ledger and its
+## hover, where the sentence has room.
+func _own_standard_text() -> String:
+	var arms := _own_arms()
+	if arms.is_empty():
+		return ""
+	return String(arms.lord).to_upper()
+
+
+## The run's arms as PARTS, so the chart's caps furniture and MapView's prose
+## ledger compose the same three facts without either owning the wording.
+## Empty dict = no live run identity.
+##
+## `has_hero` is checked rather than trusting HeroDB's fallback: get_hero("")
+## push_warning()s and hands back Stalwart, which would make the chart claim an
+## identity the player never picked.
+func _own_arms() -> Dictionary:
+	var hid: String = RunState.current_hero_id
+	if hid == "" or not HeroDB.has_hero(hid):
+		return {}
+	var lord := String(HeroDB.get_hero(hid).get("name", ""))
+	if lord == "":
+		return {}
+	# `banner` and `tribe_line` were the muster's other declaration and are gone
+	# with it (2026-09-16). The keys stay OUT rather than empty: a consumer that
+	# reads one should fail loudly here, not print a blank clause.
+	return {
+		"lord": lord,
+		"realm": String(HeroDB.faction_info(
+			HeroDB.get_faction(hid)).get("name", "")),
+	}
+
+
+## The army's own dye for the cartouche — the counterpart of _banner_color's
+## rival treatment, so the two arms read as the same kind of object. It used to
+## be tinted by the declared banner; with that gone it is simply the army's
+## amber, and the function stays because the call site's intent (OUR colour,
+## not theirs) is worth naming.
+func _own_banner_color() -> Color:
+	return PLAYER_AMBER
+
+
+## Letterspace a cartouche line, but only while it still fits the box — the
+## longest kingdom/lord names blow past the 452px measure and drop back to
+## plain caps rather than clipping. "" passes through untouched.
+func _fit_letterspaced(s: String, size_px: int) -> String:
+	if s == "" or GameTheme.font_display == null:
+		return s
+	var spaced := _letterspace(s)
+	if GameTheme.font_display.get_string_size(spaced,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, size_px).x > 452.0:
+		return s
+	return spaced
 
 
 ## "THE FIRST MARCH" → "T H E   F I R S T   M A R C H" — the chart's

@@ -1232,7 +1232,7 @@ func _bot_sealed_orders() -> void:
 			"uid": _wire_int(intent.get("uid", -1), -1), "lane": lane, "row": row})
 		_sealed_show_ghost(lane, row)
 		await combat._short_pause(0.25)
-	combat._bot_banked_mana = clampi(mana - spent, 0, combat.MAX_BANKED_MANA)
+	combat._bot_banked_mana = clampi(mana - spent, 0, _bot_bank_cap())
 	combat._bot_turns_taken += 1
 	await combat._short_pause(0.5)
 	_sealed_store_bundle(1, list, mana - spent)
@@ -2064,6 +2064,13 @@ func _net_show_result(winner_index: int) -> void:
 	if combat._net_match_over:
 		return   # one result per game — guards the Best-of-N tally against double-count
 	combat._net_match_over = true
+	# THE BOT GOES BACK OVER THE GAME IT JUST PLAYED (2026-09-15). Here rather
+	# than in the Bo1 arm below, because every game of a series is a game to learn
+	# from and the series arm returns early. `on_match_over` is bounded work
+	# (a few hundred rollouts, and a trial only every fifth game under a
+	# wall-clock budget) — it is never allowed to be the reason this frame is late.
+	if SkirmishState.vs_bot:
+		SkirmishBot.on_match_over(winner_index)
 	combat.phase = combat.Phase.GAME_OVER
 	Card2D.board_interactive = false
 	if combat._end_turn_btn != null:
@@ -3663,6 +3670,21 @@ func _bot_refill_hand() -> void:
 
 
 
+## How much Command the practice bot may carry between its turns.
+##
+## 2026-09-16: zero for everybody without the carryover relic, and the bot's
+## drafted arsenal comes off BOT_RELIC_POOL, which does not contain it — so this
+## is 0 today and will follow the pool if that ever changes, instead of being a
+## flat literal somebody has to remember to revisit. Reads the SLOT (what it
+## actually drafted) rather than the pool (what it could have), because a cap
+## derived from what a side might hold is not a cap on what it does hold.
+func _bot_bank_cap() -> int:
+	var slot = SkirmishState.get_slot(SkirmishState.opponent_index())
+	if slot == null:
+		return 0
+	return combat.bank_cap_for(slot.relics)
+
+
 func _bot_take_turn() -> void:
 	await combat._short_pause(combat.COMBAT_PAUSE_SHORT)
 	if combat._net_match_over or combat._net_active_index != 1:
@@ -3686,7 +3708,7 @@ func _bot_take_turn() -> void:
 		# reads as that card leaving the hand (not a phantom extra).
 		_bot_sync_hand_display(mana - spent)
 		await _bot_apply_intent(intent)
-	combat._bot_banked_mana = clampi(mana - spent, 0, combat.MAX_BANKED_MANA)
+	combat._bot_banked_mana = clampi(mana - spent, 0, _bot_bank_cap())
 	combat._bot_turns_taken += 1
 	await combat._short_pause(combat.COMBAT_PAUSE_SHORT)
 	if not combat._net_match_over and combat._net_active_index == 1:
@@ -4573,14 +4595,44 @@ func _net_build_foe_arsenal() -> void:
 	if rids.is_empty() and pids.is_empty():
 		return   # the foe declined both drafts — no rail, no orphan caption
 	# Right rail, directly under the foe's Command seal (which ends at y 556),
-	# spanning the enemy column's full plate width. The glossary "?" orb
-	# (bottom-anchored, x -72..-24, y ~598 at 900px) stays clear of the
-	# centered chip row. With the 2026-07-16 arsenal stage the rail can carry
-	# up to 5 chips (3 relics + 2 potions) — chips shrink so the full row
-	# stays inside the 236px column (5×38 + 4×6 = 214 ≤ 236).
+	# spanning the enemy column's full plate width.
+	#
+	# THE RAIL IS ONE ROW AND CANNOT GROW. Measured on a real board: the glossary
+	# "?" orb sits at (1532, 598) 48x48 and the primary action button at
+	# (1390, 656) 190x52, so there are ~70px between the caption and the next
+	# thing — one row of chips, with no second row available above (the Command
+	# seal) or below (those two). Meanwhile the arsenal size is the host's
+	# setting and can be dialled to the pool, so "just shrink to fit" has a floor
+	# it will blow through: at 14 relics + 4 potions the old sizing put chips out
+	# to x1814 on a 1600 canvas — off the screen entirely.
+	#
+	# So the rail shows WHAT FITS at a readable size and counts the rest. A "+N"
+	# tally is the honest failure mode for a fixed rail holding an unbounded
+	# list; a 10px icon is not. 22px is the floor — below it a relic silhouette
+	# stops resolving, and the rich hover is the reading copy anyway.
+	const RAIL_W := 236.0
+	const CHIP_FLOOR := 22
+	# HALO_PAD is not slack: make_relic_chip draws a tier glow overhanging its own
+	# rect by ~3px a side, so a run packed to the nominal 236 measured 6px past
+	# the rail's right edge. Fit the INK, not the boxes — and BOTH the chip size
+	# and the fit count must be computed against this one budget. Sizing chips to
+	# 236 and then counting them against 228 disagrees by exactly one chip, which
+	# put a "+2" tally on the DEFAULT five-item rail that has always fit.
+	const HALO_PAD := 8.0
+	var budget: float = RAIL_W - HALO_PAD
 	var total_chips: int = rids.size() + pids.size()
-	var CHIP: int = 44 if total_chips <= 4 else 38
-	var GAP: int = 8 if total_chips <= 4 else 6
+	var GAP: int = 8 if total_chips <= 4 else (6 if total_chips <= 5 else 4)
+	var CHIP: int = clampi(
+		int((budget - float(total_chips - 1) * float(GAP)) / float(total_chips)),
+		CHIP_FLOOR, 44)
+	# How many chips actually fit at that size? Anything past this is tallied.
+	var fits: int = maxi(1, int((budget + float(GAP)) / float(CHIP + GAP)))
+	var overflow: int = maxi(0, total_chips - fits)
+	if overflow > 0:
+		fits -= 1          # the last cell becomes the tally
+		overflow += 1
+	var shown_relics: int = mini(rids.size(), fits)
+	var shown_potions: int = mini(pids.size(), maxi(0, fits - shown_relics))
 	var root := Control.new()
 	root.name = "NetFoeArsenal"
 	root.anchor_left = 1.0
@@ -4601,25 +4653,45 @@ func _net_build_foe_arsenal() -> void:
 	caption.offset_top = 0
 	caption.offset_bottom = 20
 	root.add_child(caption)
-	var n: int = rids.size() + pids.size()
+	var n: int = shown_relics + shown_potions + (1 if overflow > 0 else 0)
 	var total_w: float = float(n * CHIP + (n - 1) * GAP)
-	var x: float = (236.0 - total_w) * 0.5
+	var x: float = maxf(0.0, (RAIL_W - total_w) * 0.5)
 	# Plain-Control parent: chip sizes must be set by hand (custom_minimum_size
 	# only binds inside containers — an unsized Panel renders as nothing).
-	for rid in rids:
+	for i in shown_relics:
+		var rid: String = String(rids[i])
 		var chip := GameTheme.make_relic_chip(rid, CHIP)
 		chip.size = Vector2(CHIP, CHIP)
 		chip.position = Vector2(x, 26.0)
 		root.add_child(chip)
 		combat._net_foe_relic_chips[rid] = chip
 		x += CHIP + GAP
-	for pid in pids:
+	for i in shown_potions:
+		var pid: String = String(pids[i])
 		var chip := GameTheme.make_potion_chip(pid, CHIP)
 		chip.size = Vector2(CHIP, CHIP)
 		chip.position = Vector2(x, 26.0)
 		root.add_child(chip)
 		combat._net_foe_potion_slots_ui.append({"pid": pid, "chip": chip, "used": false})
 		x += CHIP + GAP
+	if overflow > 0:
+		# The tally. It is a LABEL, not a chip: a "+4" that looked like an item
+		# would read as a fifth relic nobody can name. Its tooltip lists them, so
+		# nothing about the foe's arsenal becomes unknowable — only unglanceable.
+		var more := GameTheme.make_label("+%d" % overflow, maxi(14, CHIP / 2),
+			GameTheme.GILT)
+		more.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		more.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		more.size = Vector2(CHIP, CHIP)
+		more.position = Vector2(x, 26.0)
+		more.mouse_filter = Control.MOUSE_FILTER_STOP
+		var hidden_names: Array[String] = []
+		for i in range(shown_relics, rids.size()):
+			hidden_names.append(String(RelicDB.get_relic(String(rids[i])).get("name", rids[i])))
+		for i in range(shown_potions, pids.size()):
+			hidden_names.append(String(PotionDB.get_potion(String(pids[i])).get("name", pids[i])))
+		more.tooltip_text = "Also carrying: " + ", ".join(hidden_names)
+		root.add_child(more)
 
 
 

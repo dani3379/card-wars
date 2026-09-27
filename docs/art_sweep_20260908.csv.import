@@ -1,0 +1,19 @@
+[remap]
+
+importer="csv_translation"
+type="Translation"
+uid="uid://00i5f38ono33"
+
+[deps]
+
+files=["res://docs/art_sweep_20260908.family.translation", "res://docs/art_sweep_20260908.verdict.translation", "res://docs/art_sweep_20260908.reason.translation", "res://docs/art_sweep_20260908.live.translation", "res://docs/art_sweep_20260908.cyan%.translation", "res://docs/art_sweep_20260908.outlier.translation", "res://docs/art_sweep_20260908.dup.translation", "res://docs/art_sweep_20260908.blocky%.translation", "res://docs/art_sweep_20260908.en.translation"]
+
+source_file="res://docs/art_sweep_20260908.csv"
+dest_files=["res://docs/art_sweep_20260908.family.translation", "res://docs/art_sweep_20260908.verdict.translation", "res://docs/art_sweep_20260908.reason.translation", "res://docs/art_sweep_20260908.live.translation", "res://docs/art_sweep_20260908.cyan%.translation", "res://docs/art_sweep_20260908.outlier.translation", "res://docs/art_sweep_20260908.dup.translation", "res://docs/art_sweep_20260908.blocky%.translation", "res://docs/art_sweep_20260908.en.translation"]
+
+[params]
+
+compress=1
+delimiter=0
+unescape_keys=false
+unescape_translations=true

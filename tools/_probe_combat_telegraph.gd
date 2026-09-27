@@ -110,14 +110,39 @@ func _test_normal_targeting() -> void:
 		read.get("target") == back and int(read.get("target_row", -1)) == combat.ROW_BACK \
 		and int(read.get("hp_after", -1)) == 1, str(read))
 
+	# THE WORD FOR THE FAR SIDE WAS NEVER THIS PROBE'S CONTRACT. This asserted
+	# `contains("FOE HP -3")` and failed on vocabulary alone: the plain-language
+	# pass retired "FOE" from UI chrome — a road-register noun in a label costs the
+	# player information (docs/COPY_STYLE.md §12) — and the chip has read
+	# "ENEMY HP -3 - 17 LEFT" since. The LIVE WORDING IS THE CORRECT SIDE of that
+	# disagreement. §12 settles the split as one term per concept: a board-side
+	# face is the ENEMY (the HUD around it already says ENEMY DEPLOYMENT / ENEMY
+	# REINFORCES / ENEMY COMMAND, KeywordEffects says ENEMY HEALS, and §3 names the
+	# concept `enemy face`), while OPPONENT means the human across the wire and is
+	# spoken by CombatNet's captions, not here. No live player-facing string in
+	# scripts/ says FOE any more; this assertion was the last holdout.
+	#
+	# So it moved off the vocabulary and onto what the forecast actually promises:
+	# that it strikes a FACE, WHOSE face, for how much, and what stands after. All
+	# four are structured fields no wording pass can reach — and `target_is_enemy`
+	# is the honest way to ask the question "FOE HP" was really asking, which is
+	# whether the chip named the right side's bar.
+	#
+	# The text is still read, but only for the two NUMBERS it must speak aloud:
+	# delete the "%s -%d - %d LEFT" line entirely and the fields alone would still
+	# pass while the chip said nothing. Digits and a stat abbreviation are the one
+	# part of a label COPY_STYLE fixes in place (§2: numbers are digits, the stat
+	# is caps), so they are what a probe may safely hold.
 	await _reset_board()
 	combat.enemy_hp = 20
 	attacker = _seat_plain(false, 3, 3, 5)
 	read = combat._predict_lane_strike(attacker)
+	var face_text := String(read.get("text", ""))
 	_check("empty column forecasts enemy face damage",
-		bool(read.get("face", false)) and int(read.get("damage", -1)) == 3 \
+		bool(read.get("face", false)) and bool(read.get("target_is_enemy", false)) \
+		and int(read.get("damage", -1)) == 3 \
 		and int(read.get("hp_after", -1)) == 17 \
-		and String(read.get("text", "")).contains("FOE HP -3"), str(read))
+		and face_text.contains("HP -3") and face_text.contains("17"), str(read))
 
 
 func _test_mitigation_and_survival() -> void:

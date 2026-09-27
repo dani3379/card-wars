@@ -17,11 +17,15 @@ extends Control
 const MENU_SCENE := "res://scenes/main_menu.tscn"
 const MAX_COPIES: int = 2           # per-id deck cap (Quick/Constructed; Sealed uses its own)
 const THUMB_SCALE: float = 0.46     # pool/deck card-thumbnail scale
+const THUMB_SIZE := Vector2(225.0, 300.0) * THUMB_SCALE
+const HAND_BACK_CLOSE_SECONDS := 0.13
+const HAND_FACE_OPEN_SECONDS := 0.17
 
 # Hover-to-enlarge preview: pool/deck thumbnails are small, so hovering one pops
 # the full card beside it (the "window showing the card you hover"). Native card
 # size; named _hover_* so it doesn't collide with NetDraft's own bespoke preview.
 const HOVER_CARD_SCENE := preload("res://scenes/card_2d.tscn")
+const NET_BATCHED_CHART_STYLE := preload("res://scripts/ui/BatchedChartPanelStyle.gd")
 const HOVER_PREVIEW_W := 225.0
 const HOVER_PREVIEW_H := 300.0
 
@@ -44,6 +48,8 @@ var _target: int = 20               # SkirmishState.DECK_TARGET (set in each _re
 var _rng := RandomNumberGenerator.new()
 var _local_finished: bool = false
 var _remote_finished: bool = false
+var _combat_launch_started: bool = false
+var _menu_exit_started: bool = false
 
 var _root: VBoxContainer
 var _header: Label
@@ -58,11 +64,60 @@ var _hover_preview: Control = null    # the live enlarged Card2D, or null
 var _hover_anchor: Control = null     # the tile it's pinned beside
 var _hover_id: String = ""            # card id currently previewed
 
+## Dense net builders repeat the rich chart plate across columns, controls and
+## every three-choice Arsenal slate. Preserve its silhouette, colors, margins
+## and interaction states while collapsing each face/rim/tack stack into one
+## indexed draw submission. This stays local to Skirmish screens; hero panels
+## and campaign set pieces keep the full hand-cut detail.
+func _flatten_net_chart_styles(host: Node) -> void:
+	if host == null or not is_instance_valid(host):
+		return
+	var converted: Dictionary = {}
+	var stack: Array[Node] = [host]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		if node is Control:
+			var control := node as Control
+			var slots: Array[StringName] = []
+			if control is PanelContainer:
+				slots.append(&"panel")
+			if control is Button:
+				slots.append_array([
+					&"normal", &"focus", &"hover", &"pressed", &"disabled"])
+			for slot in slots:
+				if not control.has_theme_stylebox_override(slot):
+					continue
+				var source: StyleBox = control.get_theme_stylebox(slot)
+				if source is GameTheme.ChartPanelStyle:
+					control.add_theme_stylebox_override(
+						slot, _net_batched_chart_style(source, converted))
+			for meta_key in [&"style_rest", &"style_sel"]:
+				if not control.has_meta(meta_key):
+					continue
+				var meta_style = control.get_meta(meta_key)
+				if meta_style is GameTheme.ChartPanelStyle:
+					control.set_meta(meta_key,
+						_net_batched_chart_style(meta_style, converted))
+		for child in node.get_children():
+			stack.append(child)
+
+
+func _net_batched_chart_style(source: StyleBox,
+		converted: Dictionary) -> StyleBox:
+	var source_id := source.get_instance_id()
+	if converted.has(source_id):
+		return converted[source_id]
+	var batched: StyleBox = NET_BATCHED_CHART_STYLE.from_chart(source)
+	converted[source_id] = batched
+	return batched
+
 
 # Builds one clickable pool tile from a card id and registers it in _pool_rows.
 # Identical across the pool-based modes; clicking routes to the subclass _on_add.
-func _build_pool_thumb(id: String) -> Control:
-	var d := SkirmishState.skirmish_card_data(id)
+func _build_pool_thumb(id: String,
+		cached_data: Dictionary = {}) -> Control:
+	var d: Dictionary = cached_data if not cached_data.is_empty() \
+		else SkirmishState.skirmish_card_data(id)
 	var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
 	var btn := thumb["button"] as Button
 	btn.pressed.connect(_on_add.bind(id))
@@ -127,6 +182,31 @@ func _make_builder_column(header_text: String, ratio: float) -> Dictionary:
 
 	return {"panel": panel, "header": header, "col": col, "scroll": scroll,
 		"flow": flow}
+
+
+## A fixed vacant card footprint for editable warbands. Real cards replace these
+## one-for-one, so adding a duplicate never shortens the flow or recentres every
+## card around it.
+func _make_deck_ghost_slot() -> Control:
+	var slot := Panel.new()
+	slot.custom_minimum_size = THUMB_SIZE
+	slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.055, 0.045, 0.035, 0.55)
+	sb.border_color = Color(0.52, 0.42, 0.22, 0.30)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(3)
+	slot.add_theme_stylebox_override("panel", sb)
+	return slot
+
+
+## Draft-finished messages can make the readiness predicate true more than once.
+## Claim it once so two ink covers (or two scene changes) can never race.
+func _claim_combat_launch() -> bool:
+	if _combat_launch_started or not (_local_finished and _remote_finished):
+		return false
+	_combat_launch_started = true
+	return true
 
 
 # ── Command-curve strip (Constructed / Sealed) ───────────────────────────────
@@ -299,9 +379,37 @@ func _install_net_chrome() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel"):
-		NetMatch.leave()
-		get_tree().change_scene_to_file(MENU_SCENE)
+		_leave_to_menu()
 		get_viewport().set_input_as_handled()
+
+
+## One exit for Esc and every disconnect-state BACK button. Once combat has
+## armed its deferred scene swap, leaving is no longer a valid competing route.
+func _leave_to_menu(source: Control = null) -> void:
+	if _menu_exit_started or _combat_launch_started \
+			or SkirmishState.launch_armed:
+		return
+	_menu_exit_started = true
+	if source != null and is_instance_valid(source) and source is BaseButton:
+		(source as BaseButton).disabled = true
+	NetMatch.leave()
+	var can_animate := DisplayServer.get_name() != "headless" \
+		and (UserSettings == null or not UserSettings.reduce_motion)
+	if can_animate:
+		GameTheme.fade_out_then_change_scene(self, MENU_SCENE, 0.30,
+			_transition_origin(source, Vector2(0.08, 0.10)))
+	else:
+		get_tree().change_scene_to_file(MENU_SCENE)
+
+
+func _transition_origin(source: Control, fallback: Vector2) -> Vector2:
+	if source == null or not is_instance_valid(source):
+		return fallback
+	var viewport_size := get_viewport_rect().size
+	if viewport_size.x <= 0.0 or viewport_size.y <= 0.0:
+		return fallback
+	var center := source.global_position + source.size * 0.5
+	return Vector2(center.x / viewport_size.x, center.y / viewport_size.y)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -319,6 +427,10 @@ func _attach_hover_preview(anchor: Control, id: String) -> void:
 
 
 func _show_hover_preview(id: String, anchor: Control) -> void:
+	# Disabled buttons still emit mouse_entered in Godot. A loading tile must not
+	# leak its expensive full face before the rest of its hand turns with it.
+	if anchor == null or bool(anchor.get_meta("card_loading", false)):
+		return
 	if id == _hover_id and is_instance_valid(_hover_preview):
 		return
 	_clear_hover_preview()
@@ -378,9 +490,12 @@ func _place_hover_preview() -> void:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  THE ARSENAL STAGE (2026-07-16) — every net game opens with 3 battle-relic
-#  picks and 2 battle-potion picks (1-of-3 each; PASS skips a slate; an offered
-#  id never reappears in a later slate). Shared here so all four mode scenes
+#  THE ARSENAL STAGE (2026-07-16) — every net game opens with a run of
+#  battle-relic picks and a run of battle-potion picks (1-of-3 each; PASS skips a
+#  slate; an offered id never reappears in a later slate). HOW MANY of each is
+#  the HOST'S LOBBY PICK (2026-09-14), carried on SkirmishState.arsenal_relics /
+#  .arsenal_potions and identical for both players — so the stage is read from
+#  there at _begin_arsenal, never from a constant. Shared here so all four mode scenes
 #  present the identical stage — a self-contained modal overlay, so each mode's
 #  own scaffold/flow runs untouched beneath it. Picks land in the LOCAL slot
 #  (SkirmishState.local_slot().relics / .potions) and ride each mode's existing
@@ -389,37 +504,171 @@ func _place_hover_preview() -> void:
 #  Rolls use a dedicated RNG (match_seed salted by player index) so the stage
 #  never perturbs a mode's own _rng stream.
 # ─────────────────────────────────────────────────────────────────────────────
-const ARSENAL_RELIC_PICKS := 3
-const ARSENAL_POTION_PICKS := 2
+const ARSENAL_TILE_SIZE := Vector2(252, 325)
+
+
+## A one-node face-down document shown while a rich Arsenal tile is assembled.
+## It reserves the exact final footprint, so progressive construction never
+## shifts the row. There is deliberately no spinner: these waits are a handful
+## of frames, and the document itself communicates what is about to arrive.
+class ArsenalSleeve extends Control:
+	var accent := Color(0.74, 0.61, 0.34, 0.48)
+
+	func configure(color: Color) -> void:
+		accent = color
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		queue_redraw()
+
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_RESIZED:
+			queue_redraw()
+
+	func _draw() -> void:
+		if size.x <= 0.0 or size.y <= 0.0:
+			return
+		var outer := Rect2(Vector2(1, 1), size - Vector2(2, 2))
+		var inner := outer.grow(-7.0)
+		draw_rect(outer, Color(0.115, 0.092, 0.063, 0.98))
+		draw_rect(outer, accent, false, 1.5)
+		draw_rect(inner, Color(0.055, 0.044, 0.034, 0.72), false, 1.0)
+		var center := size * 0.5
+		var diamond := PackedVector2Array([
+			center + Vector2(0, -19), center + Vector2(19, 0),
+			center + Vector2(0, 19), center + Vector2(-19, 0)])
+		draw_colored_polygon(diamond, Color(accent.r, accent.g, accent.b, 0.16))
+		for i in 4:
+			draw_line(diamond[i], diamond[(i + 1) % 4], accent, 1.5)
+		var ink := Color(accent.r, accent.g, accent.b, 0.18)
+		draw_rect(Rect2(30, size.y * 0.72, size.x - 60, 2), ink)
+		draw_rect(Rect2(52, size.y * 0.78, size.x - 104, 2), ink)
+
+
+## Reserve final geometry before expensive card construction. Every caller puts
+## these slots into its Container immediately, then mounts rich cards invisibly
+## over the sleeves. The Container therefore lays out its final row/grid once.
+func _make_loading_card_slot(slot_size: Vector2 = THUMB_SIZE,
+		accent: Color = GameTheme.GILT, group: CanvasItem = null) -> Dictionary:
+	var slot := Control.new()
+	slot.custom_minimum_size = slot_size
+	slot.size = slot_size
+	slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sleeve := ArsenalSleeve.new()
+	sleeve.configure(Color(accent.r, accent.g, accent.b, 0.48))
+	Motion.arm_loading_writ(sleeve, group)
+	slot.add_child(sleeve)
+	sleeve.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	return {"slot": slot, "sleeve": sleeve}
+
+
+## Rich controls finish layout and texture work behind the sleeve, but never
+## become visible individually as their awaits complete.
+func _stage_complete_hand_member(ctrl: Control) -> void:
+	if ctrl == null or not is_instance_valid(ctrl):
+		return
+	ctrl.visible = false
+
+
+## Reveal a fully hydrated set as one hand. Every back closes in the same frame;
+## every full face then opens from that shared edge in the same frame. This is
+## the native two-node card turn (Motion.flip_out + flip_in), never a fade and
+## never a load-order stagger. Parent Containers retain their final geometry.
+func _reveal_complete_hand(controls: Array, covers: Array = []) -> void:
+	var reduced := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	for raw_ctrl in controls:
+		var ctrl: Control = raw_ctrl
+		if ctrl != null and is_instance_valid(ctrl):
+			ctrl.visible = true
+	if reduced:
+		_discard_reveal_covers(covers)
+		return
+	for raw_cover in covers:
+		var cover: Control = raw_cover
+		if cover != null and is_instance_valid(cover):
+			Motion.flip_out(cover, 0.13)
+	for raw_ctrl in controls:
+		var ctrl: Control = raw_ctrl
+		if ctrl != null and is_instance_valid(ctrl):
+			Motion.flip_in(ctrl, HAND_BACK_CLOSE_SECONDS, HAND_FACE_OPEN_SECONDS)
+	# Keep the hit targets locked through the complete two-half turn. Motion's
+	# shell verbs scale each moving half with the animation-speed clock, while the
+	# face delay is deliberately literal, so wait for whichever half settles last.
+	var settle_seconds := maxf(Motion.time(HAND_BACK_CLOSE_SECONDS),
+		HAND_BACK_CLOSE_SECONDS + Motion.time(HAND_FACE_OPEN_SECONDS)) + 0.01
+	if get_tree() != null:
+		await get_tree().create_timer(settle_seconds).timeout
+
+
+func _discard_reveal_covers(covers: Array) -> void:
+	for raw_cover in covers:
+		var cover: Control = raw_cover
+		if cover != null and is_instance_valid(cover):
+			cover.visible = false
+			cover.queue_free()
 
 var _ars_layer: CanvasLayer = null
+var _ars_scrim: Panel = null
+var _ars_col: VBoxContainer = null
 var _ars_header: Label = null
 var _ars_row: HBoxContainer = null
-var _ars_pips: Array = []           # 5 progress diamonds — 3 relic + 2 potion
+var _ars_pips: Array = []           # one progress diamond per pick, relics then potions
 var _ars_pass_btn: Button = null
 var _ars_rng := RandomNumberGenerator.new()
+## This match's arsenal size, frozen at _begin_arsenal from the host's pick.
+var _ars_relic_rounds: int = 0
+var _ars_potion_rounds: int = 0
 var _ars_relics_left: int = 0
 var _ars_potions_left: int = 0
-var _ars_seen: Array = []           # every id ever offered — never re-dealt
+## Ids already offered, PER CATEGORY — never re-dealt until the lap turns over
+## (SkirmishState.deal_arsenal_slate). One list per pool, not one shared: the lap
+## rule reads this SIZE against a pool size, so a shared list would count the
+## other category's ids into that arithmetic.
+var _ars_seen_relic: Array = []
+var _ars_seen_potion: Array = []
 var _ars_done: Callable = Callable()
+var _ars_slate_generation := 0
+var _ars_slate_ready := false
 
 
 func arsenal_active() -> bool:
 	return _ars_layer != null
 
 
+func arsenal_slate_ready() -> bool:
+	return _ars_layer != null and _ars_slate_ready
+
+
 func _begin_arsenal(on_done: Callable = Callable()) -> void:
 	_ars_done = on_done
-	_ars_relics_left = ARSENAL_RELIC_PICKS
-	_ars_potions_left = ARSENAL_POTION_PICKS
-	_ars_seen.clear()
+	# The host's pick, already adopted by both machines at match start. Clamped
+	# against the same ceilings the host's loadout authority validates with, so a
+	# stage can never deal an item the peer would then be rejected for holding.
+	_ars_relic_rounds = clampi(SkirmishState.arsenal_relics, 0,
+		SkirmishState.arsenal_relic_max())
+	_ars_potion_rounds = clampi(SkirmishState.arsenal_potions, 0,
+		SkirmishState.arsenal_potion_max())
+	_ars_relics_left = _ars_relic_rounds
+	_ars_potions_left = _ars_potion_rounds
+	_ars_seen_relic.clear()
+	_ars_seen_potion.clear()
 	_ars_rng.seed = int(NetMatch.match_seed) ^ (0xA25E * (NetMatch.local_player_index + 1))
+
+	# A host who set BOTH to zero wants a bare-steel duel: build no stage at all,
+	# rather than raise a scrim with nothing to ask. The callback is DEFERRED —
+	# every caller fires this partway through its own _ready (the draft installs
+	# its chrome on the line after), and a synchronous re-entry would run the
+	# finish handler over a half-built screen.
+	if _ars_relic_rounds <= 0 and _ars_potion_rounds <= 0:
+		if _ars_done.is_valid():
+			_ars_done.call_deferred()
+		return
 
 	_ars_layer = CanvasLayer.new()
 	_ars_layer.layer = 40
 	add_child(_ars_layer)
 
-	var scrim := Panel.new()
+	_ars_scrim = Panel.new()
+	var scrim := _ars_scrim
 	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	var st := StyleBoxFlat.new()
 	st.bg_color = Color(0.05, 0.04, 0.03, 0.93)
@@ -428,6 +677,7 @@ func _begin_arsenal(on_done: Callable = Callable()) -> void:
 	_ars_layer.add_child(scrim)
 
 	var col := VBoxContainer.new()
+	_ars_col = col
 	col.set_anchors_preset(Control.PRESET_FULL_RECT)
 	col.offset_top = 60
 	col.offset_bottom = -60
@@ -435,20 +685,24 @@ func _begin_arsenal(on_done: Callable = Callable()) -> void:
 	col.add_theme_constant_override("separation", 18)
 	_ars_layer.add_child(col)
 
-	col.add_child(GameTheme.make_screen_title("ARM YOUR WARBAND", GILT_BRIGHT))
+	col.add_child(GameTheme.make_screen_title("RELICS & POTIONS", GILT_BRIGHT))
 	_ars_header = GameTheme.make_label("", 20, IVORY)
 	_ars_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(_ars_header)
 
-	# Progress rail: five diamonds — three relic picks, a breath, two draughts.
-	# Filled = taken, bright = the pick on the table, dim = still to come.
+	# Progress rail: one diamond per pick — the relic run, a breath, the draughts.
+	# Filled = taken, bright = the pick on the table, dim = still to come. The rail
+	# is built from THIS match's counts, so it reads as the honest length of the
+	# stage the host set rather than a fixed five.
 	var pip_row := HBoxContainer.new()
 	pip_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	pip_row.add_theme_constant_override("separation", 10)
 	col.add_child(pip_row)
 	_ars_pips.clear()
-	for i in range(ARSENAL_RELIC_PICKS + ARSENAL_POTION_PICKS):
-		if i == ARSENAL_RELIC_PICKS:
+	for i in range(_ars_relic_rounds + _ars_potion_rounds):
+		# The breath only belongs BETWEEN two runs; with either category at zero a
+		# leading/trailing gap would push the whole rail off its own centre line.
+		if i == _ars_relic_rounds and _ars_relic_rounds > 0 and _ars_potion_rounds > 0:
 			var gap := Control.new()
 			gap.custom_minimum_size = Vector2(16, 0)
 			gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -490,28 +744,29 @@ func _begin_arsenal(on_done: Callable = Callable()) -> void:
 
 func _ars_present_round() -> void:
 	for c in _ars_row.get_children():
+		_ars_row.remove_child(c)
 		c.queue_free()
 	_ars_refresh_pips()
 	if _ars_relics_left > 0:
 		_ars_header.text = "Choose a battle relic — %d of %d" % [
-			ARSENAL_RELIC_PICKS - _ars_relics_left + 1, ARSENAL_RELIC_PICKS]
+			_ars_relic_rounds - _ars_relics_left + 1, _ars_relic_rounds]
 		_ars_fill_slate(SkirmishState.NET_RELIC_POOL, true)
 	elif _ars_potions_left > 0:
 		_ars_header.text = "Choose a battle potion — %d of %d" % [
-			ARSENAL_POTION_PICKS - _ars_potions_left + 1, ARSENAL_POTION_PICKS]
+			_ars_potion_rounds - _ars_potions_left + 1, _ars_potion_rounds]
 		_ars_fill_slate(SkirmishState.NET_POTION_POOL, false)
 	else:
 		_end_arsenal()
 
 
 func _ars_refresh_pips() -> void:
-	var done := (ARSENAL_RELIC_PICKS - _ars_relics_left) \
-		+ (ARSENAL_POTION_PICKS - _ars_potions_left)
+	var done := (_ars_relic_rounds - _ars_relics_left) \
+		+ (_ars_potion_rounds - _ars_potions_left)
 	for i in _ars_pips.size():
 		var pip: Control = _ars_pips[i]
 		if not is_instance_valid(pip):
 			continue
-		var base := GILT_BRIGHT if i < ARSENAL_RELIC_PICKS \
+		var base := GILT_BRIGHT if i < _ars_relic_rounds \
 			else Color(0.95, 0.62, 0.35)
 		if i < done:
 			pip.modulate = base
@@ -525,7 +780,16 @@ func _ars_refresh_pips() -> void:
 ## PARCHMENT, chamfered gilt rule, chip → name → effect → footer) — the whole
 ## tile is the hit target.
 func _ars_fill_slate(pool: Array, is_relic: bool) -> void:
-	var offered: Array[String] = SkirmishState.deal_unique_cards(pool, 3, _ars_rng, _ars_seen)
+	_ars_slate_generation += 1
+	_ars_slate_ready = false
+	if _ars_pass_btn != null:
+		_ars_pass_btn.disabled = true
+	var generation := _ars_slate_generation
+	# The shared dealer, lap rule and all — the host rebuilds these very tables
+	# from the same function to validate the picks, so the stage must not deal by
+	# any other rule. It also appends to the block list, so nothing below does.
+	var offered: Array[String] = SkirmishState.deal_arsenal_slate(pool, _ars_rng,
+		_ars_seen_relic if is_relic else _ars_seen_potion)
 	if offered.is_empty():
 		# Pool exhausted (tiny custom pools only) — auto-pass the whole category.
 		if is_relic:
@@ -534,10 +798,30 @@ func _ars_fill_slate(pool: Array, is_relic: bool) -> void:
 			_ars_potions_left = 0
 		_ars_present_round()
 		return
+	# Reserve all three destinations immediately. The sleeves match the measured
+	# 252x325 final slate, so each rich tile can arrive without reflowing the row.
+	var slots: Array[Control] = []
+	var sleeves: Array[Control] = []
+	var sleeve_accent := GameTheme.GILT if is_relic else Color(0.95, 0.62, 0.35)
+	for id in offered:
+		var loading := _make_loading_card_slot(ARSENAL_TILE_SIZE, sleeve_accent, _ars_row)
+		var slot: Control = loading["slot"]
+		_ars_row.add_child(slot)
+		slots.append(slot)
+		sleeves.append(loading["sleeve"])
+	# Present stable sleeves first. Rich tiles hydrate behind them and the complete
+	# hand is revealed atomically after every tile is ready.
+	if DisplayServer.get_name() == "headless":
+		await get_tree().process_frame
+	else:
+		await RenderingServer.frame_post_draw
 	var idx := 0
 	var tiles: Array[Button] = []
 	for id in offered:
-		_ars_seen.append(id)
+		if generation != _ars_slate_generation or _ars_layer == null \
+				or idx >= slots.size() or not is_instance_valid(slots[idx]):
+			return
+		var slot: Control = slots[idx]
 		var entry: Dictionary = RelicDB.get_relic(id) if is_relic else PotionDB.get_potion(id)
 		var skel := GameTheme.make_tile_skeleton(Vector2(252, 0), 7)
 		var btn: Button = skel.button
@@ -570,27 +854,71 @@ func _ars_fill_slate(pool: Array, is_relic: bool) -> void:
 		desc_lbl.custom_minimum_size = Vector2(0, 64)
 		tcol.add_child(desc_lbl)
 
-		var foot := GameTheme.make_label("— TAKE IT —", 16, GameTheme.GILT)
+		# ALREADY HELD. Reachable only past the first lap (see
+		# SkirmishState.deal_arsenal_slate): once a pool has been dealt through,
+		# a later table can re-offer something you already took. Taking it twice
+		# would be a duplicate, which validate_loadout_event refuses outright —
+		# so the tile SAYS so and is not takeable, rather than spending your pick
+		# on nothing. The tile still appears in the dealt table, which is what
+		# keeps the host's reconstruction of these offers valid.
+		var held: bool = _ars_already_held(id, is_relic)
+		var foot := GameTheme.make_label(
+			"— ALREADY YOURS —" if held else "— CHOOSE —", 16,
+			ASH if held else GameTheme.GILT)
 		foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		tcol.add_child(foot)
 
 		GameTheme.fit_tile_height(btn, tcol)
+		btn.custom_minimum_size = ARSENAL_TILE_SIZE
+		btn.disabled = true
 		btn.set_meta("ars_id", id)
 		btn.set_meta("ars_chip", chip)
-		btn.pressed.connect(_on_ars_pick.bind(id, is_relic))
-		_ars_row.add_child(btn)
+		btn.set_meta("ars_held", held)
+		if held:
+			btn.modulate = Color(1, 1, 1, 0.45)
+			btn.mouse_default_cursor_shape = Control.CURSOR_ARROW
+		else:
+			btn.pressed.connect(_on_ars_pick.bind(id, is_relic))
+		slot.set_meta("ars_id", id)
+		slot.set_meta("ars_chip", chip)
+		slot.set_meta("ars_button", btn)
+		slot.add_child(btn)
+		btn.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		_stage_complete_hand_member(btn)
 		tiles.append(btn)
-		GameTheme.deal_in(btn, 0.05 + float(idx) * 0.08)
+		_flatten_net_chart_styles(btn)
 		idx += 1
+		if idx < offered.size():
+			if DisplayServer.get_name() == "headless":
+				await get_tree().process_frame
+			else:
+				await RenderingServer.frame_post_draw
 
-	# Three offerings of different text lengths left a ragged row of mismatched
-	# tiles. fit_tile_height is synchronous, so the measured heights are already
-	# final here — level them to the tallest so the slate reads as a matched set.
-	var tallest := 0.0
+	# The slot footprint was final before the first await. Turn all three backs
+	# and faces in one render beat, then unlock the choice controls together.
+	if generation != _ars_slate_generation or _ars_layer == null:
+		return
+	_flatten_net_chart_styles(_ars_row)
+	await _reveal_complete_hand(tiles, sleeves)
+	if generation != _ars_slate_generation or _ars_layer == null:
+		return
 	for t in tiles:
-		tallest = maxf(tallest, t.custom_minimum_size.y)
-	for t in tiles:
-		t.custom_minimum_size.y = tallest
+		# An ALREADY YOURS tile stays disabled — it was never wired to a handler,
+		# and a live-looking button that does nothing is the silent-refusal class.
+		if t != null and is_instance_valid(t) and not bool(t.get_meta("ars_held", false)):
+			t.disabled = false
+	_ars_slate_ready = true
+	if _ars_pass_btn != null:
+		_ars_pass_btn.disabled = false
+
+
+## Does the local player already hold this offering? Only ever true past the
+## first lap of a pool (SkirmishState.deal_arsenal_slate).
+func _ars_already_held(id: String, is_relic: bool) -> bool:
+	var slot := SkirmishState.local_slot()
+	if slot == null:
+		return false
+	return slot.relics.has(id) if is_relic else slot.potions.has(id)
 
 
 ## The chips ship with their own rich-hover tooltips — inside a whole-tile
@@ -603,14 +931,25 @@ func _ars_mute_mouse(n: Node) -> void:
 
 
 func _on_ars_pass() -> void:
-	if _ars_layer == null:
+	if _ars_layer == null or not _ars_slate_ready:
 		return
 	_on_ars_pick("", _ars_relics_left > 0)
 
 
 func _on_ars_pick(id: String, is_relic: bool) -> void:
-	if _ars_layer == null:
+	if _ars_layer == null or not _ars_slate_ready:
 		return
+	# Lock the whole slate on the first accepted press. The final pick can remain
+	# on screen for its chip flight, so relying on the next slate build alone left
+	# a double-click window that could spend the same choice twice.
+	_ars_slate_ready = false
+	if _ars_pass_btn != null:
+		_ars_pass_btn.disabled = true
+	for child in _ars_row.get_children():
+		var tile: Button = child.get_meta("ars_button", null) as Button \
+				if child is Control else null
+		if tile != null and is_instance_valid(tile):
+			tile.disabled = true
 	if is_relic:
 		if _ars_relics_left <= 0:
 			return
@@ -622,7 +961,12 @@ func _on_ars_pick(id: String, is_relic: bool) -> void:
 	var flew := false
 	if id != "":
 		var slot := SkirmishState.local_slot()
-		if slot != null:
+		# Backstop against a DUPLICATE. The held tile is already unclickable, but
+		# this path is also reached from _on_ars_pass and from probes/shot tools
+		# that call it directly, and a repeated id is refused wholesale by
+		# validate_loadout_event — losing the player their entire loadout over a
+		# cosmetic slip. The round is still spent: the pick was made.
+		if slot != null and not _ars_already_held(id, is_relic):
 			if is_relic:
 				slot.relics.append(id)
 			else:
@@ -651,8 +995,8 @@ func _ars_fly_pick(id: String) -> bool:
 				and not c.is_queued_for_deletion():
 			chip = c.get_meta("ars_chip", null)
 			break
-	var done := (ARSENAL_RELIC_PICKS - _ars_relics_left) \
-		+ (ARSENAL_POTION_PICKS - _ars_potions_left)
+	var done := (_ars_relic_rounds - _ars_relics_left) \
+		+ (_ars_potion_rounds - _ars_potions_left)
 	var pip: Control = _ars_pips[done - 1] \
 		if done >= 1 and done <= _ars_pips.size() else null
 	if chip == null or not is_instance_valid(chip) \
@@ -681,8 +1025,31 @@ func _ars_close_after_flight() -> void:
 
 
 func _end_arsenal() -> void:
-	if _ars_layer != null:
-		_ars_layer.queue_free()
-		_ars_layer = null
+	_ars_slate_generation += 1
+	_ars_slate_ready = false
+	var closing_layer := _ars_layer
+	var closing_scrim := _ars_scrim
+	var closing_col := _ars_col
+	_ars_layer = null
+	_ars_scrim = null
+	_ars_col = null
 	if _ars_done.is_valid():
 		_ars_done.call()
+	if closing_layer == null or not is_instance_valid(closing_layer):
+		return
+	if DisplayServer.get_name() == "headless" \
+			or (UserSettings != null and UserSettings.reduce_motion):
+		closing_layer.queue_free()
+		return
+	# The picked chip already flies into the progress rail. Complete that motion
+	# grammar by drying the document copy first, then lifting the dark scrim to
+	# reveal the fully laid-out mode underneath it.
+	if closing_col != null and is_instance_valid(closing_col):
+		GameTheme.fade_exit(closing_col, 0.16)
+	if closing_scrim != null and is_instance_valid(closing_scrim):
+		var tw := closing_scrim.create_tween()
+		tw.tween_property(closing_scrim, "modulate:a", 0.0, 0.22) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		tw.finished.connect(closing_layer.queue_free)
+	else:
+		closing_layer.queue_free()

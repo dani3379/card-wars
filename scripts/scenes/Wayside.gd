@@ -17,6 +17,7 @@ extends Control
 ## DRILL_MAX_STACKS and the forge's one "+" per card.
 
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+const CARD_BACK_TEXTURE = preload("res://assets/ui/card_back.png")
 const BATCHED_CHART_STYLE = preload("res://scripts/ui/BatchedChartPanelStyle.gd")
 const MAP_SCENE = "res://scenes/map.tscn"
 
@@ -62,7 +63,19 @@ var _grid_pick_taken: bool = false
 var _grid_pick_pending: bool = false
 # Set synchronously when the player walks on, blocking every remaining choice.
 var _leaving: bool = false
+# One cache spoil, once. Held through any async card bake/reveal.
+var _cache_taken: bool = false
 var _ui_build_generation := 0
+# Every card-grid destination is installed before the first texture await. These
+# arrays belong to the one live picker and are cleared with the screen; the rich
+# faces hydrate invisibly behind the already-laid-out card backs.
+var _grid_stage_slots: Array[VBoxContainer] = []
+var _grid_stage_wrappers: Array[Control] = []
+var _grid_stage_sleeves: Array[Control] = []
+var _grid_stage_footers: Array[Label] = []
+var _grid_stage_faces: Array[Control] = []
+var _grid_stage_buttons: Array[Button] = []
+var _grid_stage_next: int = 0
 
 
 func _ready() -> void:
@@ -82,7 +95,15 @@ func _ready() -> void:
 		"grad_inner": Color(0.08, 0.05, 0.12, 0.16),
 		"grad_outer": Color(0.02, 0.01, 0.05, 0.46),
 	})
-	AudioBank.play_music_random(["event", "event_b", "event_c"])
+	# A WAYSIDE IS A STOP ON THE ROAD, NOT A DEPARTURE FROM IT (2026-09-14).
+	# This used to crossfade into the EVENT book for a ~20-second decision and
+	# then crossfade back to the chart — two transitions, on the most common
+	# non-combat stop there is, for a screen the fiction says you never left the
+	# march to reach. Asking for the road theme resolves to what is ALREADY
+	# playing when you arrive from the chart, so play_music no-ops and the music
+	# simply continues; arriving cold (a direct scene open) still starts it.
+	# Events keep their own book precisely so that they, by contrast, land.
+	AudioBank.play_road_theme(RunState.get_act())
 	_verb = RunState.current_wayside_id
 	if _verb == "":
 		# Legacy node or direct scene open — the cache is the verb that always
@@ -119,6 +140,13 @@ func _build() -> void:
 
 func _clear_ui() -> void:
 	_ui_build_generation += 1
+	_grid_stage_slots.clear()
+	_grid_stage_wrappers.clear()
+	_grid_stage_sleeves.clear()
+	_grid_stage_footers.clear()
+	_grid_stage_faces.clear()
+	_grid_stage_buttons.clear()
+	_grid_stage_next = 0
 	for child in get_children():
 		# The drill yard's recruit is the one screen element that persists across
 		# a rebuild — it is the thing being changed, so it must not blink out and
@@ -126,6 +154,7 @@ func _clear_ui() -> void:
 		if child == _drill_card and is_instance_valid(_drill_card):
 			continue
 		if child.name != "Background" and child.name != "Atmosphere":
+			remove_child(child)
 			child.queue_free()
 
 
@@ -185,6 +214,7 @@ func _make_tile(headline: String, payload: String, on_press: Callable,
 	if enabled:
 		btn.pressed.connect(func() -> void:
 			if not _leaving:
+				_last_pick_slot = btn
 				on_press.call())
 	else:
 		btn.disabled = true
@@ -357,7 +387,7 @@ func _seat_leave_button(btn: Control) -> void:
 
 
 func _go_to_map() -> void:
-	if _leaving or _grid_pick_pending:
+	if _leaving or _grid_pick_pending or _cache_taken:
 		return
 	_leaving = true
 	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
@@ -371,8 +401,16 @@ func _leave() -> void:
 
 ## Closing beat: what happened, then Continue. Same shape as Event's result
 ## screen so the road's stops all end on the same breath.
-func _show_result(text: String) -> void:
+func _show_result(text: String, gained_card: Dictionary = {}) -> void:
+	# Capture the chosen docket before _clear_ui detaches it. A gained card can
+	# then travel out of the physical choice the player just opened.
+	var source_center := Vector2.ZERO
+	var has_source := not gained_card.is_empty() and _last_pick_slot != null \
+		and is_instance_valid(_last_pick_slot)
+	if has_source:
+		source_center = _last_pick_slot.global_position + _last_pick_slot.size * 0.5
 	_clear_ui()
+	_last_pick_slot = null
 	var accent := _result_accent(text)
 	var title = GameTheme.make_screen_title(_result_title(), accent,
 		GameTheme.FONT_HEADER)
@@ -383,14 +421,46 @@ func _show_result(text: String) -> void:
 	GameTheme.deal_in(title, 0.02)
 	_spawn_result_seal(accent, _result_is_bad(text))
 
+	# A card reward is an object, not a sentence. Stage the actual ornate card on
+	# the result page; when the cache choice is still known, deal it from that
+	# docket's screen position into the fixed centre berth.
+	if not gained_card.is_empty():
+		var wrapper := Control.new()
+		wrapper.custom_minimum_size = Vector2(225, 300)
+		wrapper.set_anchors_preset(Control.PRESET_CENTER)
+		wrapper.offset_left = -112.5
+		wrapper.offset_right = 112.5
+		wrapper.offset_top = -250
+		wrapper.offset_bottom = 50
+		wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(wrapper)
+		var card_node = CARD_SCENE.instantiate()
+		card_node.static_display = true
+		card_node.card_data = gained_card.duplicate(true)
+		card_node.card_id = String(gained_card.get("id", ""))
+		card_node.live_baked_mode = true
+		card_node.gallery_baked_mode = not CardTextureCache.has(gained_card) \
+			and CardTextureCache.has_gallery(gained_card)
+		wrapper.add_child(card_node)
+		var from := Vector2(-180.0, 120.0)
+		if has_source:
+			var dest_center := wrapper.global_position + wrapper.size * 0.5
+			from = source_center - dest_center
+		Motion.deal_card(wrapper, 0.04, {"face": card_node, "from": from,
+			"spin": -0.16, "dur": 0.40, "bow": 0.13})
+
 	var lbl := GameTheme.make_label(text, 24, GameTheme.IVORY)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	lbl.set_anchors_preset(Control.PRESET_CENTER)
 	lbl.offset_left = -420
 	lbl.offset_right = 420
-	lbl.offset_top = -96
-	lbl.offset_bottom = 72
+	if gained_card.is_empty():
+		lbl.offset_top = -96
+		lbl.offset_bottom = 72
+	else:
+		lbl.offset_top = 78
+		lbl.offset_bottom = 154
 	add_child(lbl)
 	if not (UserSettings != null and UserSettings.reduce_motion):
 		lbl.visible_ratio = 0.0
@@ -491,7 +561,8 @@ func _spawn_result_seal(accent: Color, bad: bool = false) -> void:
 
 # ── Card picker grid (Event.gd's picker, compacted) ─────────────────────
 
-func _make_card_grid(title_text: String, count: int = 6) -> GridContainer:
+func _make_card_grid(title_text: String, count: int = 6,
+		with_footer: bool = false) -> Container:
 	_clear_ui()
 	_grid_pick_taken = false  # a fresh picker re-arms the one-pick latch
 	# Proper header (the verb's name over the instruction), matching every other
@@ -510,27 +581,63 @@ func _make_card_grid(title_text: String, count: int = 6) -> GridContainer:
 	scroll.size = Vector2(grid_w + 24, 600)  # +24 leaves room for the v-scrollbar
 	scroll.position = Vector2((1600.0 - float(grid_w + 24)) * 0.5, 188)
 	add_child(scroll)
-	var grid = GridContainer.new()
-	grid.columns = cols
-	grid.add_theme_constant_override("h_separation", h_sep)
-	grid.add_theme_constant_override("v_separation", 18)
+	# Centring the BLOCK was only half of it: the drill yard offers nine cards, so
+	# the rank ran six over three and left half the second row empty. A picker
+	# rank centres its short last row too (GameTheme.make_picker_rank).
+	var grid = GameTheme.make_picker_rank(cols, float(cell_w), h_sep, 18)
 	scroll.add_child(grid)
+	# Reserve the whole final layout before any card art or Card2D tree is built.
+	# A Container ignores hidden children, so the placeholders stay visible and
+	# are later replaced in place; no existing card can be recentered by a sibling.
+	for _i in count:
+		var slot := VBoxContainer.new()
+		slot.add_theme_constant_override("separation", 4)
+		slot.alignment = BoxContainer.ALIGNMENT_CENTER
+		var wrapper := Control.new()
+		wrapper.custom_minimum_size = Vector2(180, 240)
+		wrapper.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wrapper.pivot_offset = wrapper.custom_minimum_size * 0.5
+		var sleeve := TextureRect.new()
+		sleeve.texture = CARD_BACK_TEXTURE
+		sleeve.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		sleeve.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		sleeve.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		sleeve.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		Motion.arm_loading_writ(sleeve, grid)
+		wrapper.add_child(sleeve)
+		slot.add_child(wrapper)
+		if with_footer:
+			var footer_label := GameTheme.make_label("", 16, GameTheme.KEYWORD_GOLD)
+			footer_label.custom_minimum_size = Vector2(0, 20)
+			footer_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			footer_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			slot.add_child(footer_label)
+			_grid_stage_footers.append(footer_label)
+		grid.add_child(slot)
+		_grid_stage_slots.append(slot)
+		_grid_stage_wrappers.append(wrapper)
+		_grid_stage_sleeves.append(sleeve)
 	return grid
 
 
 ## Card tile with click overlay; optional footer line under the card (the
 ## scales print each card's selling price there).
-func _add_card_to_grid(grid: GridContainer, data: Dictionary,
+func _add_card_to_grid(grid: Container, data: Dictionary,
 		callback: Callable, footer: String = "",
 		build_generation: int = -1) -> bool:
 	if build_generation < 0:
 		build_generation = _ui_build_generation
+	var stage_index := _grid_stage_next
+	_grid_stage_next += 1
+	if stage_index < 0 or stage_index >= _grid_stage_slots.size():
+		return false
 	var grid_ref: WeakRef = weakref(grid)
 	var picker_alive := func() -> bool:
 		if not is_inside_tree() or _leaving or _grid_pick_taken \
 				or build_generation != _ui_build_generation:
 			return false
-		var live: GridContainer = grid_ref.get_ref() as GridContainer
+		var live: Container = grid_ref.get_ref() as Container
 		return live != null and is_instance_valid(live) \
 			and not live.is_queued_for_deletion()
 	if not CardTextureCache.has(data) \
@@ -546,16 +653,10 @@ func _add_card_to_grid(grid: GridContainer, data: Dictionary,
 		return false
 	var use_gallery := not CardTextureCache.has(data) \
 		and CardTextureCache.has_gallery(data)
-	var live_grid: GridContainer = grid_ref.get_ref() as GridContainer
-	var slot := VBoxContainer.new()
-	slot.add_theme_constant_override("separation", 4)
-	slot.alignment = BoxContainer.ALIGNMENT_CENTER
-	# 0.8-scale writ fits its cell exactly (225·0.8=180, 300·0.8=240) — full-size
-	# cards overflowed the old 210×280 cell and touched their neighbours.
-	var wrapper := Control.new()
-	wrapper.custom_minimum_size = Vector2(180, 240)
-	wrapper.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	wrapper.pivot_offset = wrapper.custom_minimum_size * 0.5
+	var slot: VBoxContainer = _grid_stage_slots[stage_index]
+	var wrapper: Control = _grid_stage_wrappers[stage_index]
+	# The full ornate Card2D is built behind its sleeve. At 0.8 scale it exactly
+	# fills the reserved 180×240 wrapper without changing the GridContainer's size.
 	var card_node = CARD_SCENE.instantiate()
 	card_node.static_display = true
 	card_node.card_data = data
@@ -563,32 +664,69 @@ func _add_card_to_grid(grid: GridContainer, data: Dictionary,
 	card_node.live_baked_mode = true
 	card_node.gallery_baked_mode = use_gallery
 	card_node.scale = Vector2(0.8, 0.8)
+	card_node.modulate.a = 0.0
 	wrapper.add_child(card_node)
 	var click_btn := Button.new()
 	click_btn.flat = true
 	click_btn.focus_mode = Control.FOCUS_NONE
 	click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
-	click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
+	click_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	click_btn.disabled = true
 	click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
 	click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
 	click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
 	click_btn.pressed.connect(_on_grid_card_pressed.bind(slot, callback))
 	wrapper.add_child(click_btn)
-	slot.add_child(wrapper)
-	if footer != "":
-		var f := GameTheme.make_label(footer, 16, GameTheme.KEYWORD_GOLD)
-		f.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		f.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		slot.add_child(f)
-	live_grid.add_child(slot)
-	var idx := live_grid.get_child_count() - 1
-	GameTheme.deal_in(slot, 0.04 + minf(float(idx), 12.0) * 0.025)
-	GameTheme.hover_lift(slot, 1.025)
+	if footer != "" and stage_index < _grid_stage_footers.size():
+		_grid_stage_footers[stage_index].text = footer
+	_grid_stage_faces.append(card_node)
+	_grid_stage_buttons.append(click_btn)
+	# Preserve the old one-face-per-presented-frame performance pacing, but keep
+	# that build order entirely behind the already-complete row of sleeves.
 	if DisplayServer.get_name() == "headless":
 		await get_tree().process_frame
 	else:
 		await RenderingServer.frame_post_draw
 	return picker_alive.call()
+
+
+## One logical picker is one reveal. Backs and ornate faces turn on the same
+## frame; only child scale changes, so the GridContainer geometry stays frozen.
+## Choices become interactive after the turn has settled, never while a subset
+## of the deck is still being constructed.
+func _reveal_card_grid(build_generation: int) -> bool:
+	if not is_inside_tree() or _leaving or _grid_pick_taken \
+			or build_generation != _ui_build_generation \
+			or _grid_stage_faces.size() != _grid_stage_slots.size():
+		return false
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	for face in _grid_stage_faces:
+		if is_instance_valid(face):
+			face.modulate.a = 1.0
+	if snap:
+		for sleeve in _grid_stage_sleeves:
+			if is_instance_valid(sleeve):
+				sleeve.queue_free()
+	else:
+		for i in _grid_stage_faces.size():
+			var sleeve: Control = _grid_stage_sleeves[i]
+			var face: Control = _grid_stage_faces[i]
+			if is_instance_valid(sleeve) and is_instance_valid(face):
+				Motion.flip_out(sleeve, 0.13)
+				Motion.flip_in(face, Motion.time(0.13), 0.17)
+		await get_tree().create_timer(maxf(Motion.time(0.34), 0.01)).timeout
+		if not is_inside_tree() or _leaving or _grid_pick_taken \
+				or build_generation != _ui_build_generation:
+			return false
+	for button in _grid_stage_buttons:
+		if is_instance_valid(button):
+			button.disabled = false
+			button.mouse_filter = Control.MOUSE_FILTER_STOP
+	for slot in _grid_stage_slots:
+		if is_instance_valid(slot):
+			GameTheme.hover_lift(slot, 1.025)
+	return true
 
 
 
@@ -654,6 +792,9 @@ func _build_drill_intro() -> void:
 			_on_drill_pick.bind(i), "", build_generation)
 		if not built:
 			return
+	var revealed: bool = await _reveal_card_grid(build_generation)
+	if not revealed:
+		return
 
 
 func _show_drill_consolation() -> void:
@@ -856,7 +997,7 @@ func _build_scales() -> void:
 
 func _build_scales_sell() -> void:
 	var grid = _make_card_grid("Choose one card to sell.",
-		RunState.deck.size())
+		RunState.deck.size(), true)
 	var build_generation := _ui_build_generation
 	var back = GameTheme.make_back_button("Cancel", Vector2(180, 42))
 	back.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
@@ -873,6 +1014,9 @@ func _build_scales_sell() -> void:
 			"%d gold" % _sell_price(RunState.deck[i]), build_generation)
 		if not built:
 			return
+	var revealed: bool = await _reveal_card_grid(build_generation)
+	if not revealed:
+		return
 
 
 func _on_scales_sell_pick(deck_index: int) -> void:
@@ -986,6 +1130,9 @@ func _build_banner_donor() -> void:
 			_on_banner_donor_pick.bind(i), "", build_generation)
 		if not built:
 			return
+	var revealed: bool = await _reveal_card_grid(build_generation)
+	if not revealed:
+		return
 
 
 func _on_banner_donor_pick(deck_index: int) -> void:
@@ -1039,6 +1186,9 @@ func _build_banner_receiver() -> void:
 			_on_banner_receiver_pick.bind(i), "", build_generation)
 		if not built:
 			return
+	var revealed: bool = await _reveal_card_grid(build_generation)
+	if not revealed:
+		return
 
 
 func _on_banner_receiver_pick(deck_index: int) -> void:
@@ -1074,6 +1224,7 @@ func _on_banner_receiver_pick(deck_index: int) -> void:
 
 func _build_cache() -> void:
 	_clear_ui()
+	_cache_taken = false
 	_add_header("THE SUPPLY CACHE",
 		"Choose one supply from the abandoned strongpoint.")
 	var pool: Array = [
@@ -1099,36 +1250,96 @@ func _build_cache() -> void:
 
 
 func _on_cache_take(id: String) -> void:
+	if _leaving or _cache_taken:
+		return
+	_cache_taken = true
 	AudioBank.play_sfx("button_click")
+
+	# Bank the spoil before the first await. The wayside node is already spent;
+	# closing the scene during its motion must never lose the reward.
+	var result_text := "The cache yields nothing."
+	var gained_card_id := ""
 	match id:
 		"free_lance":
 			RunState.next_combat_gift_creature = {
 				"name": "Free Lance", "atk": 3, "hp": 2, "kw": [],
 			}
-			_show_result("A Free Lance joins your front row in the next fight.")
+			result_text = "A Free Lance joins your front row in the next fight."
 		"commission":
 			var pool_u = CardDB.cards_of_rarity("uncommon")
 			if pool_u.is_empty():
-				_show_result("The commission is blank. No card was added.")
-				return
-			pool_u.shuffle()
-			RunState.add_card(pool_u[0])
-			_show_result("Added %s to your deck." \
-				% CardDB.get_card_data(pool_u[0]).name)
+				result_text = "The commission is blank. No card was added."
+			else:
+				pool_u.shuffle()
+				gained_card_id = String(pool_u[0])
+				RunState.add_card(gained_card_id)
+				result_text = "Added %s to your deck." \
+					% CardDB.get_card_data(gained_card_id).get("name", gained_card_id)
 		"levy":
 			RunState.next_combat_gift_creature = {
 				"name": "Militia Spearman", "atk": 2, "hp": 4, "kw": [],
 			}
-			_show_result("A Militia Spearman joins your front row in the next fight.")
+			result_text = "A Militia Spearman joins your front row in the next fight."
 		"dispatches":
 			RunState.next_combat_mana_bonus += 1
-			_show_result("A captain's orders. +1 max Command next fight.")
+			result_text = "A captain's orders. +1 max Command next fight."
 		"banner_case":
 			var pool_c = CardDB.cards_of_rarity("common")
 			if pool_c.is_empty():
-				_show_result("The case is empty. The moths apologize.")
+				result_text = "The case is empty. The moths apologize."
+			else:
+				pool_c.shuffle()
+				gained_card_id = String(pool_c[0])
+				RunState.add_card(gained_card_id)
+				result_text = "Inside, wrapped in oilcloth: %s joins your deck." \
+					% CardDB.get_card_data(gained_card_id).get("name", gained_card_id)
+
+	var animate_source := _last_pick_slot != null \
+		and is_instance_valid(_last_pick_slot) \
+		and DisplayServer.get_name() != "headless" \
+		and not (UserSettings != null and UserSettings.reduce_motion)
+	if animate_source:
+		# One shared commit: chosen docket answers, siblings stand down. Card
+		# rewards reveal from the docket; other war material is packed away.
+		GameTheme.claim_pop(_last_pick_slot)
+		if _tile_stack != null and is_instance_valid(_tile_stack):
+			for sibling in _tile_stack.get_children():
+				if sibling != _last_pick_slot and sibling is Control:
+					GameTheme.fade_exit(sibling as Control, 0.12)
+		await get_tree().create_timer(0.12).timeout
+		if _leaving or not is_inside_tree():
+			return
+		if gained_card_id.is_empty():
+			await GameTheme.pocket_away(_last_pick_slot, _pack_point(), 0.28)
+			if _leaving or not is_inside_tree():
 				return
-			pool_c.shuffle()
-			RunState.add_card(pool_c[0])
-			_show_result("Inside, wrapped in oilcloth: %s joins your deck." \
-				% CardDB.get_card_data(pool_c[0]).name)
+
+	if not gained_card_id.is_empty():
+		await _show_cache_card_gain(gained_card_id, result_text)
+	else:
+		_cache_taken = false
+		_show_result(result_text)
+
+
+func _pack_point() -> Vector2:
+	var vp := get_viewport_rect().size
+	return Vector2(vp.x * 0.5, vp.y + 30.0)
+
+
+func _show_cache_card_gain(card_id: String, result_text: String) -> void:
+	var data: Dictionary = CardDB.get_card_data(card_id)
+	var reveal_alive := func() -> bool:
+		return is_inside_tree() and not _leaving and _cache_taken
+	# A windowed reveal gets its 1x face ready behind the still-visible docket.
+	# Headless/direct probe calls remain synchronous and preserve their API.
+	if DisplayServer.get_name() != "headless" \
+			and not CardTextureCache.has(data) \
+			and not CardTextureCache.has_gallery(data):
+		await CardArtAliases.prewarm_card_art(data)
+		if reveal_alive.call() and not CardTextureCache.has(data):
+			await CardTextureCache.bake_gallery(data, reveal_alive)
+		CardArtAliases.release_card_art(data)
+	if not reveal_alive.call():
+		return
+	_cache_taken = false
+	_show_result(result_text, data)

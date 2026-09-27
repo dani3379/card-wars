@@ -59,14 +59,27 @@ func _run() -> void:
 func _test_sentinel_stone() -> void:
 	_clear()
 	combat._encounter_passive = "sentinel_stone"
-	var e = _place_enemy(2, 4, 0, combat.ROW_FRONT)   # placed via _place_enemy_card → injects armored
-	_assert("sentinel_stone: a placed enemy gains the Armored keyword",
-		e.has_keyword("armored"))
-	# Behavioural: a 3-damage hit lands as 2 on the stone (Armored −1).
+	# THE BLANKET ARMORED GRANT WAS REMOVED (2026-09-16) and this asserts it STAYS
+	# removed, rather than simply dropping the coverage. A bare body placed under
+	# this passive must come up bare: the Tooth-Stones' Armored now lives only on
+	# the cards that PRINT it. Re-adding a blanket grant is a balance decision
+	# (see the encounter header in EncounterDB) and should fail a gate, not pass
+	# quietly — a flat -1 nullifies 62% of the act-1 draftable pool outright.
+	var e = _place_enemy(2, 4, 0, combat.ROW_FRONT)
+	_assert("sentinel_stone: a bare enemy is NOT blanket-Armored by the passive",
+		not e.has_keyword("armored"))
+	# Behavioural: an unarmored stone takes the full blow.
 	var hp0: int = e.current_hp
 	e.take_damage(3)
-	_assert("sentinel_stone: Armored soaks 1 (3 dmg → 2 lost)",
-		e.current_hp == hp0 - 2)
+	_assert("sentinel_stone: a bare body takes full damage (3 dmg → 3 lost)",
+		e.current_hp == hp0 - 3)
+	# ...and Armored still works for the bodies that print it — the keyword itself
+	# is untouched, only the free grant is gone.
+	var armored = _place_enemy(2, 4, 1, combat.ROW_FRONT, ["armored"])
+	var ahp0: int = armored.current_hp
+	armored.take_damage(3)
+	_assert("sentinel_stone: a PRINTED-Armored stone still soaks 1 (3 dmg → 2 lost)",
+		armored.current_hp == ahp0 - 2)
 	# Escalation: from round 2 the front rank digs in (+1 ATK permanent).
 	var atk0: int = e.current_atk
 	combat.round_number = 2
@@ -122,9 +135,9 @@ func _test_bandit_reinforce() -> void:
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
-func _place_enemy(atk: int, hp: int, lane: int, row: int) -> Control:
+func _place_enemy(atk: int, hp: int, lane: int, row: int, kw: Array = []) -> Control:
 	var data := {"id": "e_test", "name": "Stone", "type": "creature", "cost": 1,
-		"atk": atk, "hp": hp, "rarity": "enemy", "keywords": []}
+		"atk": atk, "hp": hp, "rarity": "enemy", "keywords": kw.duplicate()}
 	combat._place_enemy_card(data.duplicate(true), lane, row)
 	return combat._row_array(true, row)[lane]
 

@@ -15,7 +15,23 @@ const SPOIL_EMBER := Color(1.0, 0.56, 0.20)
 const SPOIL_ICON_PX := 148
 const SPOIL_TILE_W := 330.0
 
+## The strongbox the find comes out of (2026-08-05). Cut wider and taller than
+## the 330px tile on purpose: the box has to be visible either side of the relic
+## and hang below it, or it reads as a frame rather than as a container.
+const CacheChest := preload("res://scripts/ui/painters/CacheChest.gd")
+## Measured off the first render, not guessed. At 560x300 behind a ~390px-wide
+## tile the box showed ~85px either side and nothing above — it read as two tan
+## slivers, not a container. A prop that something sits IN has to be plainly
+## bigger than the thing: 860 leaves ~235px of box either side of the tile, and
+## the stage is cut taller than the chest so the thrown-back lid clears the
+## tile's top edge instead of hiding behind it.
+const CHEST_W := 860.0
+const CHEST_H := 440.0
+const CHEST_STAGE_H := 520.0
+const CHEST_TILE_DROP := 150.0
+
 var _gold_reward: int = 40
+var _chest: Control = null
 # Latches on the first pick/leave so a same-frame double-click can't pay the
 # gold reward (and add the relic) twice before the fade-out swaps scenes.
 var _resolved: bool = false
@@ -58,7 +74,7 @@ func _run_arsenal() -> void:
 			"color": Color(0.42, 0.23, 0.12)})
 		actions.append("forge")
 	if RunState.can_add_potion():
-		options.append({"label": "Take Provisions", "desc": "Gain up to 2 random potions.",
+		options.append({"label": "Take Potions", "desc": "Gain up to 2 random potions.",
 			"color": Color(0.20, 0.38, 0.24)})
 		actions.append("potions")
 	var arsenal_gold: int = ARSENAL_GOLD_BY_ACT[clampi(RunState.get_act() - 1, 0, 2)]
@@ -72,9 +88,10 @@ func _run_arsenal() -> void:
 	match actions[pick]:
 		"forge":
 			var deck_index: int = await GameTheme.show_deck_picker(self,
-				"Supply Cache — choose a card to upgrade", "upgradeable", false)
+				"Supply Cache — choose a card to forge", "upgradeable", false)
 			if deck_index >= 0:
 				RunState.upgrade_card(deck_index, "plus")
+				await _show_forged_card(deck_index)
 		"potions":
 			for _i in 2:
 				if not RunState.can_add_potion():
@@ -83,6 +100,58 @@ func _run_arsenal() -> void:
 		"gold":
 			RunState.gain_gold(arsenal_gold)
 	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
+
+
+## THE ARSENAL'S FORGE HAD NO BEAT. show_deck_picker tears its modal down on the
+## click, so this stop mutated the card and changed scene in the same frame —
+## the one halt on the road whose entire payoff is a card getting better, and the
+## card was never on screen when it did. Camp and the General's Forge both show
+## the "+" writ and strike it; this now does the same, in one coordinate space
+## (a plain dim Control on the scene, not a CanvasLayer) so forge_strike's ring
+## and sparks land where the card actually is.
+func _show_forged_card(deck_index: int) -> void:
+	if deck_index < 0 or deck_index >= RunState.deck.size():
+		return
+	var data: Dictionary = RunState.get_upgraded_card_data(deck_index)
+	var dim := ColorRect.new()
+	dim.color = Color(0.03, 0.02, 0.05, 0.88)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	dim.z_index = 120
+	add_child(dim)
+
+	var wrapper := Control.new()
+	wrapper.custom_minimum_size = Vector2(225, 300)
+	wrapper.set_anchors_preset(Control.PRESET_CENTER)
+	wrapper.offset_left = -112
+	wrapper.offset_right = 113
+	wrapper.offset_top = -150
+	wrapper.offset_bottom = 150
+	wrapper.pivot_offset = Vector2(112.5, 150.0)
+	dim.add_child(wrapper)
+	var preview_alive := func() -> bool:
+		return is_inside_tree() and is_instance_valid(dim)
+	await CardTextureCache.bake_gallery(data, preview_alive)
+	if not preview_alive.call():
+		return
+
+	var card = load("res://scenes/card_2d.tscn").instantiate()
+	card.card_data = data.duplicate(true)
+	card.card_id = data.get("id", "")
+	card.static_display = true
+	card.live_baked_mode = true
+	card.gallery_baked_mode = true
+	wrapper.add_child(card)
+	GameTheme.deal_in(wrapper, 0.02)
+	AudioBank.play_sfx("upgrade_confirm")
+
+	await get_tree().create_timer(0.36).timeout
+	if not is_instance_valid(wrapper) or not is_inside_tree():
+		return
+	await GameTheme.forge_strike(self, wrapper)
+	if not is_inside_tree():
+		return
+	await get_tree().create_timer(0.40).timeout
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -138,15 +207,64 @@ func _build_ui() -> void:
 	# all, stranding five implemented relics. The campaign tier is small and the
 	# war chest spends four of it, so fall through to the field pool once it
 	# runs dry rather than showing an empty plinth.
+	#
+	# The gate reads "treasure", not "reliquary": there IS no node type spelled
+	# reliquary. `CampaignMapGenerator._force_one(grid, 7, "treasure", rng)` is the
+	# Reliquary — the one treasure stop an act deals — and row 13's Arsenal wears
+	# "arsenal" and returned at the top of _ready. Written against the display
+	# name, the branch could never fire and the five campaign relics stayed
+	# stranded, which is the exact bug the paragraph above says it fixed.
+	# "reliquary" is kept as an alias so a legacy save that stored it still lands
+	# on the campaign tier (MainMenu's resume router already accepts the spelling).
 	var relics: Array[String] = []
-	if RunState.current_node_type == "reliquary":
+	if RunState.current_node_type in ["treasure", "reliquary"]:
 		relics = RelicDB.roll_campaign_relics(1, RunState.relics, RunState.current_hero_id)
 	if relics.is_empty():
 		relics = RelicDB.roll_field_relics(1, RunState.relics, RunState.current_hero_id)
+	# ── THE STOP GETS A PROP (2026-08-05) ──
+	# This was the one roadside verb with nothing physical on it: every sibling
+	# stages something (the knucklebone patch, the sappers' kegs, the
+	# quartermaster's scale, the Fourth's strongbox), and the stop whose entire
+	# copy is "Relic Uncovered" showed a dialog tile on a painted forest. Both
+	# 2026-08 hunts logged it.
+	#
+	# The chest is drawn BEHIND the relic tile and reaches up past it, so the
+	# find sits in the box's mouth — the tile is what you click, the box is what
+	# it came out of. The lid throws back on entry, which is the beat the coin
+	# fountain was already firing for without anything to fire from.
+	# One stage holds both, chest added FIRST so it draws behind. The box is cut
+	# deliberately wider and taller than the tile, and hangs below it, so what
+	# reads is a relic being lifted out of a strongbox rather than a tile with a
+	# decoration stuck on.
+	var stage := Control.new()
+	stage.custom_minimum_size = Vector2(0, CHEST_STAGE_H)
+	stage.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	stage.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	outer.add_child(stage)
+
+	var chest := CacheChest.new()
+	chest.name = "CacheChest"
+	chest.seed_text = "cache-%d-%d" % [RunState.current_act_idx, RunState.current_floor]
+	chest.open_t = 0.0
+	chest.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+	chest.offset_left = -CHEST_W * 0.5
+	chest.offset_right = CHEST_W * 0.5
+	chest.anchor_left = 0.5
+	chest.anchor_right = 0.5
+	chest.offset_top = -CHEST_H
+	chest.offset_bottom = 0
+	stage.add_child(chest)
+	_chest = chest
+
 	var relic_row = HBoxContainer.new()
 	relic_row.add_theme_constant_override("separation", 40)
 	relic_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	outer.add_child(relic_row)
+	# Pinned to the TOP of the stage: the tile hangs from there and the box
+	# rises behind its lower half, which puts the find at the mouth without
+	# either control needing to know the other's measured height.
+	relic_row.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	relic_row.offset_top = CHEST_TILE_DROP
+	stage.add_child(relic_row)
 
 	var relic_tile: Control = null
 	var relic_i := 0
@@ -156,8 +274,17 @@ func _build_ui() -> void:
 		btn.pressed.connect(_pick_relic.bind(id, btn))
 		relic_row.add_child(btn)
 		var deal_at := 0.10 + relic_i * 0.08
-		GameTheme.deal_in(btn, deal_at)
-		# Waits out deal_in — both verbs drive `modulate` on the same node.
+		# IT COMES OUT OF THE CHEST, so it RISES (2026-09-10). The spoils row on
+		# the Reward screen drops its tiles onto the table because that is what
+		# happens there; here the box is open directly below the tile (see the
+		# anchor note above) and the find is being lifted out of it. Same verb,
+		# inverted throw — a relic falling from the sky onto an open chest is the
+		# one reading the staging makes impossible.
+		Motion.drop_item(btn, deal_at, {
+			"from": Vector2(0.0, 86.0), "spin": -0.07, "dur": 0.34,
+		})
+		# Waits out the rise — `rarity_reveal` drives `modulate` and wants to land
+		# on a tile that has stopped moving.
 		GameTheme.rarity_reveal(btn, RelicDB.get_relic_rarity(id), deal_at + 0.36)
 		GameTheme.hover_lift(btn)
 		if relic_tile == null:
@@ -178,8 +305,29 @@ func _build_ui() -> void:
 	GameTheme.deal_in(skip_btn, 0.40)
 	GameTheme.hover_lift(skip_btn, 1.04)
 
-	# The opening flourish bursts from the relic itself — coins fountaining
-	# around the find with a warm bloom behind it, the chest-lid reveal beat.
+	# THE LID THROWS BACK, and the coin fountain finally has something to come
+	# out of. This beat has been firing since the 2026-07-19 pass — its own
+	# comment already called it "the chest-lid reveal" — against a screen with no
+	# chest on it. `open_t` drives the whole prop (lift, foreshortening, the
+	# mouth's depth and the find's glow), so one property tween is the entire
+	# animation. DECORATIVE by the Motion contract: Reduce Motion gets the box
+	# already open rather than a shut one, because the state has to land.
+	if _chest != null and is_instance_valid(_chest):
+		if UserSettings != null and UserSettings.reduce_motion:
+			_chest.open_t = 1.0
+			_chest.queue_redraw()
+			_chest.call_deferred("freeze_current_pose")
+		else:
+			var tw := _chest.create_tween()
+			tw.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			tw.tween_method(func(v: float) -> void:
+				if is_instance_valid(_chest):
+					_chest.open_t = v
+					_chest.queue_redraw(),
+				0.0, 1.0, Motion.time(0.42)).set_delay(0.10)
+			tw.tween_callback(func() -> void:
+				if is_instance_valid(_chest):
+					_chest.call("freeze_current_pose"))
 	_spawn_coin_fountain(relic_tile if relic_tile != null else title)
 
 
@@ -317,22 +465,27 @@ func _pick_relic(id: String, tile: Control = null) -> void:
 		return
 	_resolved = true
 	RunState.add_relic(id)
-	# Claim beat: the chosen prize flares while the unpicked pair bows out,
-	# then the fade takes it — same grab language as the Reward spoils.
-	if tile != null and is_instance_valid(tile) \
-			and not (UserSettings != null and UserSettings.reduce_motion):
+	# The uncovered object leaves the strongbox and travels into the player's
+	# pack. Its socket remains in layout while pocket_away renders it top-level,
+	# so the chest and page never jump under the moving relic.
+	var animate := tile != null and is_instance_valid(tile) \
+		and DisplayServer.get_name() != "headless" \
+		and not (UserSettings != null and UserSettings.reduce_motion)
+	if animate:
 		GameTheme.claim_pop(tile)
-		if tile.get_parent() != null:
-			for sib in tile.get_parent().get_children():
-				if sib != tile and sib is Control:
-					var stw := (sib as Control).create_tween()
-					stw.tween_property(sib, "modulate:a", 0.0, 0.22) \
-						.set_ease(Tween.EASE_IN)
-		await get_tree().create_timer(0.38).timeout
+		await get_tree().create_timer(0.12).timeout
+		if not is_inside_tree() or not is_instance_valid(tile):
+			return
+		await GameTheme.pocket_away(tile, _pack_point(), 0.34)
 	if id == "bottled_talisman":
 		await GameTheme.bind_bottled_talisman(self)
 	GameTheme.fade_out_then_change_scene(self, MAP_SCENE)
 
+
+
+func _pack_point() -> Vector2:
+	var viewport_size := get_viewport_rect().size
+	return Vector2(viewport_size.x * 0.5, viewport_size.y + 30.0)
 
 func _leave(tile: Control = null) -> void:
 	if _resolved:

@@ -1,4 +1,4 @@
-extends Node
+﻿extends Node
 ## _shot_menus_audit.gd — renders the SECONDARY menus (settings overlay in both
 ## contexts, the confirm dialog, how to play, load game, skirmish lobby,
 ## credits) to PNG for a visual audit (windowed, editor closed):
@@ -66,6 +66,13 @@ func _ready() -> void:
 		_scene.call("_show_how_to_play")
 		await get_tree().create_timer(0.9).timeout
 		await _snap("how_to_play")
+		var how_to := _scene.get_node_or_null("HowToPlayOverlay")
+		if how_to != null:
+			var keyword_tab = how_to.find_child("KeywordsTab", true, false)
+			if keyword_tab is Button:
+				keyword_tab.pressed.emit()
+				await get_tree().create_timer(0.5).timeout
+				await _snap("how_to_play_keywords")
 
 	_scene.queue_free()
 	await get_tree().process_frame

@@ -77,8 +77,10 @@ const BATCH_MAX_PIXELS := 8_400_000   # ~34 MB transient RGBA8 render target
 # as a frame rather than a hitch, and the extra passes are free (they overlap
 # animation the player is watching anyway).
 const BATCH_MAX_CARDS := 8
-const BATCH_BUILD_PER_FRAME := 4      # Card2D constructions per frame while the
-                                      # viewport is still asleep
+# Full ornate Card2D construction is CPU-heavy even while the viewport sleeps.
+# Four in one frame measured 110-161 ms on the target AMD iGPU; two cut that
+# peak materially, for about 6% extra wall time on a synthetic 30-card warm.
+const BATCH_BUILD_PER_FRAME := 2
 const BATCH_SLICE_PER_FRAME := 2      # get_region + mipmaps + upload per frame
 
 signal battlefield_texture_ready(key: String)
@@ -95,6 +97,11 @@ var _active_cache_limit := -1
 # possible since the idle deck warm (ScenePreload.warm_run_deck, running behind
 # the map) can still be in flight when Combat's _prebake_hand_textures starts.
 var _bake_busy := false
+# Upper bound on the `while _bake_busy` queue wait, in frames. A legitimate queue
+# is short: a batch pass is a handful of frames, and even a pathological serial
+# run of a full LRU's worth of single bakes lands around 200. Anything past this
+# is not a queue, it is a wedge — see _wait_for_bake_slot.
+const BAKE_QUEUE_MAX_FRAMES := 600
 
 
 func _ready() -> void:
@@ -301,7 +308,7 @@ func _bake_scaled(card_data: Dictionary, bake_scale: int,
 	# viewport, waits 2 frames for layout + render, and snapshots the result
 	# into a standalone ImageTexture (so the viewport can be reused for the
 	# next bake without affecting this texture).
-	if not _bake_valid(validity):
+	if not _can_bake() or not _bake_valid(validity):
 		return null
 	var key := key_prefix + cache_key(card_data)
 	if _cache.has(key):
@@ -309,7 +316,11 @@ func _bake_scaled(card_data: Dictionary, bake_scale: int,
 		return _cache[key]
 	# One card in the viewport at a time. While waiting, the other baker may
 	# finish this very key — re-check before claiming the viewport.
+	var waited := 0
 	while _bake_busy:
+		if waited >= BAKE_QUEUE_MAX_FRAMES:
+			return _abandon_bake_wait(key)
+		waited += 1
 		await get_tree().process_frame
 		if not _bake_valid(validity):
 			return null
@@ -382,14 +393,66 @@ func _bake_valid(validity: Callable) -> bool:
 	return validity.is_null() or (validity.is_valid() and bool(validity.call()))
 
 
+## Every bake path parks on `RenderingServer.frame_post_draw`, and under the
+## headless/dummy display server that signal NEVER FIRES: `can_any_window_draw()`
+## is false, so the main loop skips `RenderingServer::draw()` entirely and no
+## frame is ever posted. A bake started here does not fail — it suspends forever.
+##
+## That is worse than it sounds, because the first one to park holds `_bake_busy`
+## for the rest of the process, so every later caller parks too, in the queue
+## loop below. On 2026-09-03 that was the cause of the UI gates' exit crash:
+## _probe_input_reach drove 91 screen states, leaked 141 suspended
+## GDScriptFunctionStates (140 queued + 1 mid-bake), and Godot segfaulted
+## dereferencing them during `cleanup` after the probe had printed a correct
+## verdict.
+##
+## THIS IS THE ONLY PLACE THAT DECIDES IT. The fact was previously re-derived at
+## three call sites (Combat._prebake_hand_textures, Collection.
+## _hydrate_visible_card_tiles, _bake_batch) and the single-card paths — bake(),
+## bake_gallery(), bake_battlefield() — were simply missed, which is how a
+## per-call-site guard fails. Nothing downstream breaks on a cold cache: an
+## unbaked card falls back to Card2D's live layout path, which is what the
+## texture is a snapshot of.
+func _can_bake() -> bool:
+	return DisplayServer.get_name() != "headless"
+
+
+## The escape hatch for the `while _bake_busy` queue.
+##
+## `_bake_busy` is a plain bool with no owner and no deadline, so any bake that
+## dies between claiming it and clearing it wedges the cache for the whole
+## session: card art quietly stops updating everywhere, and each new request adds
+## another permanently suspended coroutine. That is what turned one parked
+## headless bake into 140 leaked function states above.
+##
+## Giving up is the only safe response. Stealing the lock instead would let two
+## bakers parent cards into the shared viewport at once and snapshot each other's
+## overlap, which is the exact corruption `_bake_busy` exists to prevent — and
+## the abandoned baker may still be mid-await, holding a card in there. A null
+## return is already a supported outcome at every call site: the card renders
+## through Card2D's live layout instead of its snapshot, which looks the same.
+func _abandon_bake_wait(key: String) -> Texture2D:
+	push_warning(("CardTextureCache: gave up waiting for the bake viewport after "
+		+ "%d frames (key=%s). A previous bake never released _bake_busy; "
+		+ "cards render through the live layout path until one does.")
+		% [BAKE_QUEUE_MAX_FRAMES, key])
+	return null
+
+
 func bake_battlefield(card_data: Dictionary) -> Texture2D:
+	if not _can_bake():
+		return null
 	if String(card_data.get("type", "creature")) != "creature":
 		return null
 	var key := battlefield_cache_key(card_data)
 	if _battlefield_cache.has(key):
 		_touch_battlefield_key(key)
 		return _battlefield_cache[key]
+	var waited := 0
 	while _bake_busy:
+		if waited >= BAKE_QUEUE_MAX_FRAMES:
+			return _abandon_bake_wait(key)
+		waited += 1
 		await get_tree().process_frame
 		if _battlefield_cache.has(key):
 			_touch_battlefield_key(key)
@@ -488,7 +551,7 @@ func _batch_grid(cell_w: int, cell_h: int) -> Vector2i:
 func _bake_batch(card_datas: Array, battlefield: bool,
 		validity: Callable = Callable()) -> void:
 	# See the BATCH_* constants for why this is a grid and not a loop over bake().
-	if DisplayServer.get_name() == "headless":
+	if not _can_bake():
 		return
 	var scale := BATTLEFIELD_SUPERSAMPLE
 	var pad := BATTLEFIELD_PAD

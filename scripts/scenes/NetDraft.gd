@@ -40,10 +40,17 @@ var _remote_picks: int = 0
 # over the wire (the opponent only ever receives pick counts + the sealed deck,
 # so it can't observe or be desynced by a reroll). Equal budgets keep it fair.
 const DRAFT_REROLLS: int = 2
+
+## The deck ledger owns the right-hand strip of the canvas, and `_root` must be
+## kept out of it — see `_build_ui` and `_build_ledger`, the only two readers.
+const LEDGER_W := 306.0
+const DRAFT_SLOT_SIZE := Vector2(Card2D.CARD_W, Card2D.CARD_H + 46.0)
 var _rerolls_left: int = DRAFT_REROLLS
 # Guards the reroll while its sweep animation plays (blocks a double-spend from a
 # fast double-click before the fresh triplet is dealt).
 var _rerolling: bool = false
+var _triplet_build_generation := 0
+var _triplet_ready := false
 
 # ── UI refs ──
 var _progress: Label
@@ -103,6 +110,7 @@ func _ready() -> void:
 	_build_ledger()
 	_begin_arsenal(_arsenal_finished)
 	_install_net_chrome()
+	_flatten_net_chart_styles(self)
 
 
 ## The arsenal overlay closed — surface the picks on the ledger, then open the
@@ -140,9 +148,16 @@ func _build_scaffold() -> void:
 	_root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_root.offset_top = 40
 	_root.offset_bottom = -40
+	# ── CENTRE IN THE SPACE THAT IS ACTUALLY FREE (2026-09-03) ──
+	# `_root` was FULL_RECT while the deck ledger sits on top of the rightmost
+	# 306px, so every centred child centred on the canvas (800) instead of on the
+	# column it actually has. Measured off the render: 426px of dead space to the
+	# left of the card triplet and 84px between its selection ring and the
+	# ledger's edge — a 5:1 lean that reads as the cards crowding the panel.
+	_root.offset_right = -LEDGER_W
 	add_child(_root)
 
-	_root.add_child(GameTheme.make_screen_title("DRAFT YOUR WARBAND", GILT_BRIGHT))
+	_root.add_child(GameTheme.make_screen_title("DRAFT YOUR DECK", GILT_BRIGHT))
 
 	_header = GameTheme.make_label("", 20, IVORY)
 	_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -173,16 +188,70 @@ func _build_scaffold() -> void:
 
 func _present_triplet() -> void:
 	_clear_card_row()
+	_triplet_ready = false
+	var build_generation := _triplet_build_generation
 	_header.text = "Pick a card  ·  %d / %d" % [_picks_made + 1, _target]
 	_update_progress()
 
-	var idx := 0
-	for id in _roll_triplet():
-		var data := SkirmishState.skirmish_card_data(id)
-		var slot := VBoxContainer.new()
-		slot.add_theme_constant_override("separation", 8)
-		slot.alignment = BoxContainer.ALIGNMENT_CENTER
+	# Keep reroll usable while a cold slate is still being flattened.
+	_refresh_reroll_btn()
+	var picker_alive := func() -> bool:
+		return is_inside_tree() and not _local_finished \
+			and build_generation == _triplet_build_generation
+	var triplet: Array[String] = _roll_triplet()
+	var data_list: Array[Dictionary] = []
+	var slots: Array[Control] = []
+	var sleeves: Array[Control] = []
+	# Establish the complete three-card geometry before the first await. A cold
+	# card can take several render frames to flatten, but no earlier card is ever
+	# recentered as a later sibling arrives.
+	for id in triplet:
+		var data: Dictionary = SkirmishState.skirmish_card_data(id)
+		data_list.append(data)
+		var loading := _make_loading_card_slot(DRAFT_SLOT_SIZE,
+			GameTheme.rarity_color(String(data.get("rarity", "common"))),
+			_card_row)
+		var slot: Control = loading["slot"]
+		slot.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		_card_row.add_child(slot)
+		slots.append(slot)
+		sleeves.append(loading["sleeve"])
+	if DisplayServer.get_name() == "headless":
+		await get_tree().process_frame
+	else:
+		await RenderingServer.frame_post_draw
+	if not picker_alive.call():
+		return
+
+	var faces: Array[Control] = []
+	var buttons: Array[Button] = []
+	var card_wraps: Array[Control] = []
+	for idx in range(triplet.size()):
+		var id: String = triplet[idx]
+		var data: Dictionary = data_list[idx]
+		if not CardTextureCache.has(data) \
+				and not CardTextureCache.has_gallery(data):
+			await CardArtAliases.prewarm_card_art(data)
+			if not picker_alive.call():
+				CardArtAliases.release_card_art(data)
+				return
+			if not CardTextureCache.has(data):
+				await CardTextureCache.bake_gallery(data, picker_alive)
+			CardArtAliases.release_card_art(data)
+		if not picker_alive.call():
+			return
+		var use_gallery := not CardTextureCache.has(data) \
+			and CardTextureCache.has_gallery(data)
+		var slot: Control = slots[idx]
+		var face := VBoxContainer.new()
+		face.add_theme_constant_override("separation", 8)
+		face.alignment = BoxContainer.ALIGNMENT_CENTER
+		slot.add_child(face)
+		face.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		_stage_complete_hand_member(face)
+		slot.set_meta("draft_face", face)
+		slot.set_meta("draft_id", id)
+		faces.append(face)
 
 		# Plain-Control wrapper, exactly as the campaign muster slate builds it
 		# (Recruit._present_choices): the rarity shine parents itself to the node
@@ -194,28 +263,53 @@ func _present_triplet() -> void:
 		card_wrap.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		card_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		card_wrap.pivot_offset = card_wrap.custom_minimum_size * 0.5
-		slot.add_child(card_wrap)
+		# Contact shadow, height-aware — it reads what `Motion.deal_card` writes,
+		# so it spreads and pales while the card is in flight and tightens on
+		# landing. Same helper the campaign slates use.
+		card_wrap.draw.connect(_draw_draft_shadow.bind(card_wrap))
+		face.add_child(card_wrap)
 
 		var card = CARD_SCENE.instantiate()
 		card.card_data = data.duplicate(true)
 		card.card_id = id
 		card.is_on_battlefield = true
+		card.static_display = true
 		card.live_baked_mode = true
-		CardTextureCache.bake(data)
+		card.gallery_baked_mode = use_gallery
 		card_wrap.add_child(card)
+		slot.set_meta("draft_card", card)
+		card_wraps.append(card_wrap)
 
 		# Ember, not the old olive green — the commit action wears the same
 		# warm tile as every other commit in the game. (Audit 2026-07-21.)
 		var pick_btn := GameTheme.make_themed_button("CHOOSE",
 			Color(0.34, 0.22, 0.08), Vector2(140, 38), 16)
 		pick_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		pick_btn.pressed.connect(_on_pick.bind(id))
-		slot.add_child(pick_btn)
+		pick_btn.disabled = true
+		pick_btn.pressed.connect(_on_pick.bind(id, build_generation))
+		slot.set_meta("draft_pick_button", pick_btn)
+		face.add_child(pick_btn)
+		buttons.append(pick_btn)
+		_flatten_net_chart_styles(pick_btn)
+		if DisplayServer.get_name() == "headless":
+			await get_tree().process_frame
+		else:
+			await RenderingServer.frame_post_draw
+		if not picker_alive.call():
+			return
 
-		_animate_card_reveal(card_wrap, pick_btn, idx,
-			String(data.get("rarity", "")))
-		idx += 1
-
+	# One hand, one turn: all three backs close together and all three ornate
+	# faces open together. Interaction unlocks only after the whole hand exists.
+	await _reveal_complete_hand(faces, sleeves)
+	if not picker_alive.call():
+		return
+	for button in buttons:
+		if button != null and is_instance_valid(button):
+			button.disabled = false
+	for idx in card_wraps.size():
+		GameTheme.rarity_reveal(card_wraps[idx],
+			String(data_list[idx].get("rarity", "")), 0.31)
+	_triplet_ready = true
 	_refresh_reroll_btn()
 
 
@@ -228,30 +322,33 @@ func _refresh_reroll_btn() -> void:
 		and _rerolls_left > 0
 	_reroll_btn.visible = can
 	if can:
-		_reroll_btn.disabled = false
+		_reroll_btn.disabled = not _triplet_ready or _rerolling
 		_reroll_btn.text = "REROLL THESE THREE  (%d left)" % _rerolls_left
 
 
-## The three live Card2D nodes in the current triplet (one per slot column).
-func _current_triplet_cards() -> Array:
-	# The card sits inside a plain-Control wrapper (which the rarity shine
-	# parents to), so the search descends one level past the slot.
+## The three complete choice faces in the current triplet. The fixed slots stay
+## seated during a reroll while each card and CHOOSE plaque leave as one object.
+func _current_triplet_faces() -> Array:
 	var out: Array = []
 	for slot in _card_row.get_children():
-		var found: Node = null
-		for c in slot.get_children():
-			if "card_id" in c:
-				found = c
-				break
-			for gc in c.get_children():
-				if "card_id" in gc:
-					found = gc
-					break
-			if found != null:
-				break
-		if found != null:
-			out.append(found)
+		var face = slot.get_meta("draft_face", null)
+		if face is Control and is_instance_valid(face):
+			out.append(face)
 	return out
+
+
+func _set_triplet_choices_disabled(disabled: bool) -> void:
+	for slot in _card_row.get_children():
+		var button: Button = slot.get_meta("draft_pick_button", null) as Button
+		if button != null and is_instance_valid(button):
+			button.disabled = disabled
+
+
+func _triplet_face_for(id: String) -> Control:
+	for slot in _card_row.get_children():
+		if String(slot.get_meta("draft_id", "")) == id:
+			return slot.get_meta("draft_face", null) as Control
+	return null
 
 
 ## Spend one reroll: sweep the current three off the table and re-deal from the
@@ -259,33 +356,31 @@ func _current_triplet_cards() -> Array:
 ## or resolves it. Guarded so a double-click or a click landed after finishing
 ## can't over-draw the budget; _rerolling blocks re-entry during the sweep.
 func _on_reroll_triplet() -> void:
-	if _rerolling or _local_finished or arsenal_active() \
+	if _rerolling or not _triplet_ready or _local_finished or arsenal_active() \
 			or _rerolls_left <= 0:
 		return
 	_rerolling = true
+	_triplet_build_generation += 1
 	_rerolls_left -= 1
+	_triplet_ready = false
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play")
 	if _reroll_btn != null:
 		_reroll_btn.disabled = true
-	# Arcane reshuffle: a cool-blue pulse scatters the current three.
-	GameTheme.reroll_sweep(self, _current_triplet_cards(), SPELL_BLUE)
-	await get_tree().create_timer(0.18).timeout
-	_present_triplet()
+	_set_triplet_choices_disabled(true)
+	# Arcane reshuffle: the complete choice leaves while its fixed slot remains.
+	var sweep_duration := GameTheme.reroll_sweep(
+		self, _current_triplet_faces(), SPELL_BLUE)
+	await get_tree().create_timer(sweep_duration).timeout
 	_rerolling = false
-
-
-func _animate_card_reveal(card: Control, pick_btn: Control, idx: int,
-		rarity: String = "") -> void:
-	# The kit's shared card_reveal verb; the PICK button rides in as the
-	# companion, fading up just after the card lands. The rarity shine rides it
-	# too — a drafted rare should announce itself here exactly as it does on the
-	# campaign muster slate (uncommons glint silver, rares erupt in gilt).
-	GameTheme.card_reveal(card, 0.10 + float(idx) * 0.10, rarity, pick_btn)
+	_present_triplet()
 
 
 func _clear_card_row() -> void:
+	_triplet_build_generation += 1
+	_triplet_ready = false
 	for c in _card_row.get_children():
+		_card_row.remove_child(c)
 		c.queue_free()
 
 
@@ -305,7 +400,7 @@ func _build_ledger() -> void:
 	_ledger_panel.anchor_right = 1.0
 	_ledger_panel.anchor_top = 0.0
 	_ledger_panel.anchor_bottom = 1.0
-	_ledger_panel.offset_left = -306.0
+	_ledger_panel.offset_left = -LEDGER_W
 	_ledger_panel.offset_right = -16.0
 	_ledger_panel.offset_top = 78.0
 	_ledger_panel.offset_bottom = -20.0
@@ -320,7 +415,7 @@ func _build_ledger() -> void:
 	col.add_theme_constant_override("separation", 8)
 	margin.add_child(col)
 
-	var title := GameTheme.make_label("YOUR WARBAND", 18, GILT_BRIGHT)
+	var title := GameTheme.make_label("YOUR DECK", 18, GILT_BRIGHT)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(title)
 
@@ -351,6 +446,7 @@ func _rebuild_ledger() -> void:
 		return
 	_hide_preview()                     # a hovered row may be about to be freed
 	for c in _ledger_list.get_children():
+		_ledger_list.remove_child(c)
 		c.queue_free()
 
 	var slot := SkirmishState.local_slot()
@@ -358,7 +454,19 @@ func _rebuild_ledger() -> void:
 
 	# The drafted arsenal leads the roll — one chip + name line per relic, then
 	# per potion (up to 3 + 2 from the arsenal stage).
-	if slot != null:
+	#
+	# SAY WHAT THEY ARE, AND RULE THEM OFF. These rows used to run straight into
+	# the card list with no heading and no divider, inside a panel titled YOUR
+	# DECK whose count line read "5 / 20" — so five relics and potions sat above
+	# five cards and the panel insisted there were five things in it. Every one of
+	# them reads as a card at a glance (a chip, a gilt name, a row), and the count
+	# openly contradicting the rows is the sort of thing a player reports as the
+	# deck counter being broken. They are not cards and they are not part of the
+	# twenty; the caption and the rule below say so.
+	if slot != null and not (slot.relics.is_empty() and slot.potions.is_empty()):
+		var ars_cap := GameTheme.make_label("ARSENAL", 13, ASH)
+		ars_cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_ledger_list.add_child(ars_cap)
 		for rid_v in slot.relics:
 			var rid := String(rid_v)
 			var rrow := HBoxContainer.new()
@@ -387,6 +495,12 @@ func _rebuild_ledger() -> void:
 			pname.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 			prow.add_child(pname)
 			_ledger_list.add_child(prow)
+		# The rule that separates "what you carry" from "the twenty".
+		_ledger_list.add_child(GameTheme.make_separator(
+			Color(GILT_BRIGHT.r, GILT_BRIGHT.g, GILT_BRIGHT.b, 0.20), 200.0))
+		var cards_cap := GameTheme.make_label("CARDS", 13, ASH)
+		cards_cap.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_ledger_list.add_child(cards_cap)
 
 	var counts: Dictionary = {}
 	var order: Array[String] = []
@@ -599,8 +713,10 @@ func _show_preview(id: String) -> void:
 	card.card_data = SkirmishState.skirmish_card_data(id)
 	card.card_id = id
 	card.is_on_battlefield = true
+	card.static_display = true
 	card.live_baked_mode = true
-	CardTextureCache.bake(card.card_data)
+	card.gallery_baked_mode = not CardTextureCache.has(card.card_data) \
+		and CardTextureCache.has_gallery(card.card_data)
 	add_child(card)
 	card.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_preview = card
@@ -622,15 +738,45 @@ func _hide_preview() -> void:
 #  PICK / FINISH FLOW
 # ─────────────────────────────────────────────────────────────────────────
 
-func _on_pick(id: String) -> void:
-	if _local_finished:
+func _on_pick(id: String, source_generation: int = -1) -> void:
+	if _rerolling or not _triplet_ready or _local_finished:
 		return
+	if source_generation >= 0 and source_generation != _triplet_build_generation:
+		return
+	_triplet_ready = false
+	_set_triplet_choices_disabled(true)
+	if _reroll_btn != null:
+		_reroll_btn.disabled = true
+	# Invalidate the suspended slate builder and every old bound button at once.
+	_triplet_build_generation += 1
 	SkirmishState.add_card_to(SkirmishState.local_index, id)
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play")
-	_rebuild_ledger()
 	_picks_made += 1
 	NetMatch.send_draft_event({"t": "pick", "n": _picks_made, "id": id})
+
+	# Keep cause and effect connected: the chosen writ joins the warband ledger
+	# while the two passed-over choices retire together. State/network mutation
+	# above remains immediate; this short beat is presentation only.
+	var chosen := _triplet_face_for(id)
+	if chosen != null and is_instance_valid(chosen) \
+			and not (UserSettings != null and UserSettings.reduce_motion) \
+			and DisplayServer.get_name() != "headless":
+		GameTheme.claim_pop(chosen)
+		for other in _current_triplet_faces():
+			if other != chosen and other is Control and is_instance_valid(other):
+				GameTheme.fade_exit(other, 0.18)
+		await get_tree().create_timer(0.09).timeout
+		if is_inside_tree() and is_instance_valid(chosen) \
+				and _ledger_panel != null and is_instance_valid(_ledger_panel):
+			var target := _ledger_panel.global_position \
+				+ Vector2(_ledger_panel.size.x * 0.5, 66.0)
+			await GameTheme.pocket_away(chosen, target, 0.28)
+	if not is_inside_tree():
+		return
+	_rebuild_ledger()
+	if _ledger_panel != null and is_instance_valid(_ledger_panel):
+		GameTheme.punch(_ledger_panel, 1.015)
 	if _picks_made >= _target:
 		_finish_draft()
 	else:
@@ -646,8 +792,9 @@ func _finish_draft() -> void:
 	# Auto-keep the drafted warband so it can be replayed later via Constructed →
 	# LOAD without drafting again (the player asked for exactly this). Timestamped
 	# name keeps each draft distinct; SavedDecks caps the list and drops the oldest.
-	var stamp := Time.get_datetime_string_from_system().substr(5, 11).replace("T", " ")
-	SavedDecks.save_deck("Draft %s" % stamp, my_deck)
+	var stamp := Time.get_datetime_string_from_system().replace("T", " ")
+	var unique_suffix := Time.get_ticks_msec() % 1000
+	SavedDecks.save_deck("Draft %s.%03d" % [stamp, unique_suffix], my_deck)
 	# The battle relic AND potion ride the deck handoff so the host's slot table
 	# knows both sides' picks (each peer's combat only READS its own, but the
 	# record is whole — and the host resolves the client's heal potion for it).
@@ -687,7 +834,7 @@ func _store_opponent_deck(cards: Array) -> void:
 
 
 func _maybe_begin_combat() -> void:
-	if not (_local_finished and _remote_finished):
+	if not _claim_combat_launch():
 		return
 	# Both decks are committed to SkirmishState (local picks via _on_pick, the
 	# opponent's via _store_opponent_deck). The host is authoritative for the
@@ -696,15 +843,15 @@ func _maybe_begin_combat() -> void:
 	# its own — it waits for the host's launch RPC (handled inside NetMatch).
 	_show_marching_status()
 	if NetMatch.is_host:
-		NetMatch.launch_combat()
+		NetMatch.launch_combat(true)
 
 
 func _show_marching_status() -> void:
-	_clear_card_row()
 	if _reroll_btn != null:
 		_reroll_btn.visible = false
-	_header.text = "Both warbands drafted — marching to battle…"
+	_header.text = "Both decks drafted — starting the match…"
 	_header.add_theme_color_override("font_color", GREEN)
+	Motion.pulse_label(_header, GILT_BRIGHT)
 	_update_progress()
 
 
@@ -716,7 +863,7 @@ func _build_waiting_ui() -> void:
 	_clear_card_row()
 	if _reroll_btn != null:
 		_reroll_btn.visible = false
-	_header.text = "Warband sealed — %d cards." % _target
+	_header.text = "Deck complete — %d cards." % _target
 	_update_progress()
 	var note := GameTheme.make_label("Waiting for your opponent to finish drafting…",
 		16, ASH)
@@ -748,7 +895,14 @@ func _on_peer_lost(_id: int = 0) -> void:
 	_progress.text = ""
 	var back := GameTheme.make_themed_button("BACK TO MENU",
 		Color(0.26, 0.16, 0.14), Vector2(220, 44), 16)
-	back.pressed.connect(func():
-		NetMatch.leave()
-		get_tree().change_scene_to_file(MENU_SCENE))
+	back.pressed.connect(_leave_to_menu.bind(back))
 	_root.add_child(back)
+
+
+## Contact shadow under a drafted card — the shared kit helper, reading the
+## height `Motion.deal_card` writes to the wrapper.
+func _draw_draft_shadow(card_wrap: Control) -> void:
+	Motion.card_shadow(card_wrap,
+		Vector2(Card2D.CARD_W * 0.5, Card2D.CARD_H + 8.0),
+		float(card_wrap.get_meta("deal_lift", 0.0)), 96.0,
+		card_wrap.get_meta("deal_off", Vector2.ZERO))

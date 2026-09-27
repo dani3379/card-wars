@@ -46,7 +46,7 @@ func _run() -> void:
 	}
 	var expected_maps := {
 		"low": 1.0,
-		"medium": 1.5,
+		"medium": 1.25,
 		"high": 1.5,
 		"ultra": 2.0,
 	}

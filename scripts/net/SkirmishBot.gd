@@ -15,6 +15,32 @@ const ROW_FRONT := 0
 const ROW_BACK := 1
 const LANES := 4
 
+## THE SCORING LIVES IN `BoardEval` (2026-09-15), shared with the input pilot.
+## What moved out was not just weights — the scoring here had four defects, all
+## of them rules the game has had for a long time and none of them visible from
+## inside a branch that only compares against its own siblings:
+##   · NO CONCEPT OF LETHAL. `damage_face` scored `value * 1.0`, identically at
+##     30 foe HP and at 3, so the bot could hold exact lethal and play a 2/2.
+##   · OVERKILL WAS FREE. A 6-damage spell on a 2/1 scored the same as on a 2/6,
+##     so removal went to the cheapest body on the board.
+##   · IT PREDATED THE MUSTER DELAY (2026-07-21). It credited `atk * 0.8` of
+##     "unblocked pressure" and `+2.0` for "we can kill it" to a body that does
+##     not swing in the clash ending the round it arrived in.
+##   · `score -= 2.0  # back row: no immediate combat` — not this game. BOTH rows
+##     strike every round; front merely goes first. The flat penalty punished
+##     exactly the play the back row is for (shielding something fragile).
+## Weights were also unitless across branches (1.0 / 0.6 / 1.2 / 1.3 / 0.9 / 0.6),
+## so they ordered plays within a branch and meant nothing between them. BoardEval
+## denominates everything in one unit. See its header.
+const BoardEval = preload("res://scripts/combat/BoardEval.gd")
+## AND THE BOT LEARNS FROM WHAT IT DID WITH IT (2026-09-15). `BotBrain` records
+## every decision below — the board, the whole slate of plays that were legal,
+## and the one taken — then re-examines them after the match with a deeper look
+## and tunes BoardEval's weights toward what that deeper look says. `decide_turn`
+## is still the single seam; what changed is that the seam now reports.
+const BotBrain = preload("res://scripts/combat/BotBrain.gd")
+const BoardSim = preload("res://scripts/combat/BoardSim.gd")
+
 var rng := RandomNumberGenerator.new()
 
 
@@ -22,9 +48,19 @@ var rng := RandomNumberGenerator.new()
 #  DECK BUILDING
 # ─────────────────────────────────────────────────────────────────────────
 
-## A 20-card deck biased to cheap cards (skirmish Command is a flat 3 + bank 2, so
-## anything over cost 4 is near-unplayable), creatures-heavy with a few spells,
+## A 20-card deck biased to cheap cards, creatures-heavy with a few spells,
 ## max 2 copies. Returned in shuffled draw order. seed_val 0 → random each match.
+##
+## 2026-09-16: the ceiling was 4, and its reason was "skirmish Command is a flat
+## 3 + bank 2, so anything over cost 4 is near-unplayable". Both halves of that
+## are now false — Command ramps to COMMAND_RAMP_CAP, and the cost rescale moved
+## the pool onto a 1-6 curve where 34 draftable cards sit at 5 or 6. Left at 4,
+## the bot would simply never field the top two tiers of the game's content, and
+## nothing would have reported it: a deck filter that silently empties is
+## invisible to every gate that only asks whether the bot played SOMETHING.
+##
+## The cheap BIAS is still right and still there — `_cheaper_of` samples two and
+## keeps the cheaper — but that shapes a curve rather than truncating it.
 func build_deck(seed_val: int = 0) -> Array:
 	rng.seed = seed_val if seed_val != 0 else (int(Time.get_unix_time_from_system()) ^ randi())
 	var creatures: Array = []
@@ -37,7 +73,7 @@ func build_deck(seed_val: int = 0) -> Array:
 		source_pool = legal_pool
 	for id in source_pool:
 		var d := CardDB.get_card_data(id)
-		if int(d.get("cost", 99)) > 4:
+		if int(d.get("cost", 99)) > BoardEval.RAMP_CAP_ASSUMED:
 			continue
 		match String(d.get("type", "")):
 			"creature": creatures.append(id)
@@ -83,6 +119,15 @@ func build_deck(seed_val: int = 0) -> Array:
 		counts[pad_id] = int(counts.get(pad_id, 0)) + 1
 		deck.append(pad_id)
 	_shuffle(deck)
+	# THE BRAIN'S SELF-PLAY NEEDS REAL CARDS. Its acceptance test plays the
+	# challenger against the champion on simulated boards, and a pool invented
+	# inside `BotBrain` would train it on a game this one does not contain — so
+	# the bot hands over the deck it is about to play with. This is also the
+	# only place in the flow that names `CardDB`, which `BotBrain` may not.
+	var pool: Array = []
+	for id in deck:
+		pool.append(SkirmishState.skirmish_card_data(id))
+	BotBrain.begin_game(pool)
 	return deck
 
 
@@ -112,216 +157,83 @@ func decide_turn(ctx, hand: Array, mana: int) -> Array:
 	var intents: Array = []
 	var budget := mana
 	var avail: Array = hand.duplicate()
-	var occ := _bot_occupancy(ctx)   # 2×4 bool grid of the bot's filled slots
+	# THE TURN IS SCORED AGAINST A WORKING SNAPSHOT, NOT THE LIVE BOARD (2026-09-15).
+	# It used to score against `ctx` with a hand-kept 2×4 occupancy grid patched
+	# over it, because the plays chosen earlier in the same turn are still only
+	# INTENTS and the board does not show them yet. That grid knew a slot was
+	# TAKEN but not by WHAT — so every play after the first was reasoning about a
+	# board with holes in it: the back-row shelter test could not see the wall the
+	# bot had just committed in front, and the block arithmetic could not see its
+	# own new front line. A snapshot with the committed plays applied answers both,
+	# and it is the same object the recorder stores, so the board the decision was
+	# made on is exactly the board the post-game analysis replays.
+	var snap: BoardSim.SimCtx = BoardSim.capture(ctx)
 	var guard := 0
 	while guard < 30 and budget > 0 and not avail.is_empty():
 		guard += 1
-		var best := _best_play(ctx, avail, budget, occ)
+		var best := _best_play(snap, avail, budget)
 		if best.is_empty():
 			break
 		intents.append(best["intent"])
 		budget -= int(best["cost"])
 		avail.erase(best["card"])
-		var slot = best.get("slot", null)
-		if slot != null:
-			occ[slot.y][slot.x] = true
+		snap = BoardSim.apply_play(snap, BoardSim.SIDE_ENEMY, best["play"])
 	return intents
 
 
 ## Evaluate every affordable card and return the single highest-scoring play, or {}.
-func _best_play(ctx, avail: Array, budget: int, occ: Array) -> Dictionary:
-	var best: Dictionary = {}
-	var best_score := -1.0e9
+##
+## It also hands the WHOLE SLATE to `BotBrain` — every play that was legal here,
+## not just the winner. A counterfactual needs the road not taken: without the
+## alternatives there is nothing to compare the choice against, and "learn from
+## your mistakes" degenerates into "do more of whatever you did while winning".
+func _best_play(snap: BoardSim.SimCtx, avail: Array, budget: int) -> Dictionary:
+	var datas: Array = []
 	for card in avail:
-		var data: Dictionary = card.get("data", {})
-		var cost := int(data.get("cost", 0))
-		if cost > budget:
-			continue
-		var ctype := String(data.get("type", "creature"))
-		if ctype == "creature":
-			var cand := _best_creature_slot(ctx, data, occ)
-			if cand.is_empty():
-				continue
-			# Mild cheap-first nudge so a 1-drop edges out an equal-scored 3-drop.
-			var score: float = cand["score"] - cost * 0.15
-			if score > best_score:
-				best_score = score
-				best = {
-					"intent": {"t": NetMatch.IN_PLAY_CREATURE, "id": String(card["id"]),
-						"uid": int(card["uid"]), "lane": cand["lane"], "row": cand["row"]},
-					"cost": cost, "card": card, "slot": Vector2i(cand["lane"], cand["row"]),
-				}
-		elif ctype == "spell":
-			var sp := _best_spell(ctx, data)
-			if sp.is_empty():
-				continue
-			var sscore: float = sp["score"] - cost * 0.15
-			if sscore > best_score:
-				best_score = sscore
-				best = {
-					"intent": {"t": NetMatch.IN_PLAY_SPELL, "id": String(card["id"]),
-						"uid": int(card["uid"]), "target": int(sp["target"])},
-					"cost": cost, "card": card,
-				}
-	# Only act on a play with positive expected value (avoids dumping a spell with
-	# no good target just because it is affordable).
-	if best.is_empty() or best_score <= 0.0:
-		return {}
-	return best
+		datas.append(card.get("data", {}))
+	# The bot plays the `is_enemy` side of the board — that is the ONE thing that
+	# differs from the pilot's call, and it is a parameter rather than a second
+	# copy of the scorer. See BoardEval's header.
+	var slate: Dictionary = BotBrain.enumerate_slate(snap, true, datas, budget)
+	var cands: Array = slate["cands"]
+	var chosen := int(slate["chosen"])
+	BotBrain.record_decision(snap, true, cands, chosen)
+
+	var play: Dictionary = cands[chosen]
+	var idx := int(play.get("idx", -1))
+	if idx < 0:
+		return {}    # the slate chose to hold — nothing to seat this step
+	var card: Dictionary = avail[idx]
+	var cost := int(play.get("cost", 0))
+	if String(play["kind"]) == "creature":
+		return {
+			"intent": {"t": NetMatch.IN_PLAY_CREATURE, "id": String(card["id"]),
+				"uid": int(card["uid"]), "lane": play["lane"], "row": play["row"]},
+			"cost": cost, "card": card, "play": play,
+		}
+	var tgt: Variant = play.get("target")
+	var tid := -1
+	# The target is a body on the WORKING SNAPSHOT, so it answers `entity_id`
+	# only when it was captured off a live Card2D. A snapshot-only body (one the
+	# bot itself seated earlier this turn) has none, and -1 is the game's own
+	# "no specific target" value.
+	if tgt != null and is_instance_valid(tgt) and tgt.get("entity_id") != null:
+		tid = int(tgt.entity_id)
+	return {
+		"intent": {"t": NetMatch.IN_PLAY_SPELL, "id": String(card["id"]),
+			"uid": int(card["uid"]), "target": tid},
+		"cost": cost, "card": card, "play": play,
+	}
 
 
-## Best lane/row for a creature, with a score. Front row contests the human's
-## attackers and applies pressure; the back row is a weaker fallback.
-func _best_creature_slot(ctx, data: Dictionary, occ: Array) -> Dictionary:
-	var atk := int(data.get("atk", 0))
-	var hp := int(data.get("hp", 0))
-	var kws: Array = data.get("keywords", [])
-	var best_lane := -1
-	var best_row := -1
-	var best_score := -1.0e9
-	for lane in LANES:
-		for row in [ROW_FRONT, ROW_BACK]:
-			if occ[row][lane]:
-				continue
-			var score := atk * 1.0 + hp * 0.6
-			if "swift" in kws: score += 1.5
-			if "piercing" in kws: score += 1.0
-			if "armored" in kws: score += 1.0
-			if "thorns" in kws: score += 0.8
-			var foe = _node_at(ctx, false, ROW_FRONT, lane)   # human front creature
-			if row == ROW_FRONT:
-				if foe != null:
-					var fa := int(foe.effective_atk())
-					var fh := int(foe.current_hp)
-					score += fa * 1.2                          # neutralise their attacker
-					if atk >= fh: score += 2.0 + fh * 0.3      # we can kill it
-					if hp > fa: score += 1.5                    # we survive their swing
-					if atk < fh and hp <= fa: score -= 1.5      # chump block
-				else:
-					score += atk * 0.8                          # unblocked pressure
-			else:
-				score -= 2.0                                    # back row: no immediate combat
-				if foe == null:
-					score -= 0.5
-			if score > best_score:
-				best_score = score
-				best_lane = lane
-				best_row = row
-	if best_lane < 0:
-		return {}
-	return {"score": best_score, "lane": best_lane, "row": best_row}
+# ── THE MATCH IS OVER: go back over it and learn ─────────────────────────────
+#    Called from `CombatNet._net_show_result`, which is the one place that knows
+#    a draw from a win. The bot is slot 1 → its board is the "enemy" side; the
+#    human host is slot 0 → the "player" side, so a win for slot 1 is a win here.
+
+func on_match_over(winner_index: int) -> Dictionary:
+	return BotBrain.on_game_over(winner_index == 1)
 
 
-## Best target + score for a spell the bot understands (damage / AoE / buff / heal).
-## Unknown or untargetable-right-now spells return {} so they stay in hand.
-func _best_spell(ctx, data: Dictionary) -> Dictionary:
-	var spell: Dictionary = data.get("spell", {})
-	var stype := String(spell.get("type", ""))
-	var val := int(spell.get("value", 0))
-	match stype:
-		"damage":
-			# Single-target removal: prefer a kill on the highest-ATK human creature.
-			var target = _pick_enemy_creature(ctx, val)
-			if target == null:
-				return {}
-			var ta := int(target.effective_atk())
-			var th := int(target.current_hp)
-			var score := ta * 1.3 + (3.0 if val >= th else 0.0)
-			return {"score": score, "target": int(target.entity_id)}
-		"damage_face":
-			return {"score": val * 1.0, "target": -1}
-		"damage_all_enemies", "damage_all":
-			var n := _enemy_creature_count(ctx)
-			if n == 0:
-				return {}
-			return {"score": val * n * 0.9, "target": -1}
-		"buff_atk", "buff_hp":
-			var ally = _pick_ally_creature(ctx)
-			if ally == null:
-				return {}
-			return {"score": val * 1.0, "target": int(ally.entity_id)}
-		"buff_all_atk":
-			var m := _ally_creature_count(ctx)
-			if m == 0:
-				return {}
-			return {"score": val * m * 0.9, "target": -1}
-		"heal":
-			# Face heal — only worth it when the bot hero is actually hurt.
-			if ctx.enemy_hp < ctx.enemy_max_hp - val:
-				return {"score": val * 0.6, "target": -1}
-			return {}
-		_:
-			return {}
-
-
-# ── Board-read helpers (the bot is slot 1 → its board is the "enemy" side; the
-#    human host is slot 0 → the "player" side). ───────────────────────────────
-
-func _bot_occupancy(ctx) -> Array:
-	var grid: Array = [[false, false, false, false], [false, false, false, false]]
-	for row in [ROW_FRONT, ROW_BACK]:
-		for lane in LANES:
-			if _node_at(ctx, true, row, lane) != null:
-				grid[row][lane] = true
-	return grid
-
-
-func _node_at(ctx, is_enemy: bool, row: int, lane: int):
-	var arr = ctx._row_array(is_enemy, row)
-	if lane < 0 or lane >= arr.size():
-		return null
-	var n = arr[lane]
-	if n != null and is_instance_valid(n):
-		return n
-	return null
-
-
-## Highest-ATK human creature, preferring one this much damage would kill.
-func _pick_enemy_creature(ctx, dmg: int):
-	var best = null
-	var best_key := -1.0
-	for row in [ROW_FRONT, ROW_BACK]:
-		for lane in LANES:
-			var n = _node_at(ctx, false, row, lane)
-			if n == null or int(n.entity_id) < 0:
-				continue
-			var a := int(n.effective_atk())
-			var key := a + (100.0 if int(n.current_hp) <= dmg else 0.0)
-			if key > best_key:
-				best_key = key
-				best = n
-	return best
-
-
-## The bot's own strongest front creature (best buff target).
-func _pick_ally_creature(ctx):
-	var best = null
-	var best_atk := -1
-	for row in [ROW_FRONT, ROW_BACK]:
-		for lane in LANES:
-			var n = _node_at(ctx, true, row, lane)
-			if n == null or int(n.entity_id) < 0:
-				continue
-			var a := int(n.effective_atk())
-			if a > best_atk:
-				best_atk = a
-				best = n
-	return best
-
-
-func _enemy_creature_count(ctx) -> int:
-	var c := 0
-	for row in [ROW_FRONT, ROW_BACK]:
-		for lane in LANES:
-			if _node_at(ctx, false, row, lane) != null:
-				c += 1
-	return c
-
-
-func _ally_creature_count(ctx) -> int:
-	var c := 0
-	for row in [ROW_FRONT, ROW_BACK]:
-		for lane in LANES:
-			if _node_at(ctx, true, row, lane) != null:
-				c += 1
-	return c
+func brain_summary() -> String:
+	return BotBrain.summary()

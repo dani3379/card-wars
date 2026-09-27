@@ -16,6 +16,23 @@ extends Node
 ##     after a victory at Ascension 4+ (MetaState best_asc >= 4). Both are
 ##     consumed by RunState.start_new_run via pending_signature_relic /
 ##     pending_deck_variant.
+##
+## THE PITCH CONTRACT (re-broken 2026-08-01, second time — see
+## docs/RUN_OPENING_REDESIGN_20260728.md §5). `desc` is printed IN FULL in THE
+## COLUMN pane of the run opening and is among the first sentences a new player
+## reads, so every clause in it must map to something a DAY-ONE player holds:
+## a card in the DEFAULT `deck`, or the DEFAULT `relic` (handed over at run
+## start and printed directly under the pitch). It may NEVER describe
+## `relic_alt` or `deck_alt` — both are unlock-gated, so a pitch that leans on
+## one sells a doctrine the reader cannot have. `tagline` carries the same bar
+## and is capped by the 430px roster box at ~42 characters.
+##
+## Three pitches drifted back across that line and were rewritten 2026-08-01:
+## the Kindler's third clause was Chain Censer (relic_alt) verbatim; the
+## Stalwart's attributed a survival engine to Formation, which is adjacency;
+## and the Acolyte's promised a Shade, which was true only while the Funeral
+## Lantern was still Soul Lantern's twin (reshaped 2026-07-28). Gate:
+## tools/_probe_hero_pitch.tscn.
 
 const HEROES: Dictionary = {
 	"raider": {
@@ -23,7 +40,13 @@ const HEROES: Dictionary = {
 		"name": "Raider",
 		"tagline": "Move first. Strike where they are not.",
 		"lore": "The Grasswake wins by never holding the same ground twice.",
-		"desc": "Relocate the line, turn fresh angles into Swift attacks, and punish enemies driven out of position.",
+		# Clause 3 was "punish enemies driven out of position" — nothing in the
+		# opener moves an ENEMY. Enemy displacement exists only on the pool's
+		# removal slate (Sapper's Charge / Shove / Scatter the Line). Cut Them Off
+		# reads _player_moved_a_friendly_this_round instead, and its own resolver
+		# comment says why ("enemy movement is far too rare to carry a card in the
+		# Raider's opening ten"). The payoff is YOUR mobility; the pitch says so.
+		"desc": "Relocate the line, turn fresh angles into Swift attacks, and strike harder once you have moved a friendly.",
 		"deck": ["levy_rider", "levy_rider", "goblin", "ratling", "sprite", "brute", "grasswake_lancer", "trail_scout", "spur_forward", "cut_them_off"],
 		"relic": "marching_spurs",
 		"relic_alt": "rearward_horn",
@@ -34,9 +57,16 @@ const HEROES: Dictionary = {
 	"stalwart": {
 		"id": "stalwart",
 		"name": "Stalwart",
-		"tagline": "Stand together. Survive the answer.",
+		"tagline": "Hold the line. Heal what takes the hit.",
 		"lore": "The Last Wall is made from the soldier beside you.",
-		"desc": "Build an adjacent line, repair the bodies that take the blow, and let Formation turn survival into strength.",
+		# "let Formation turn survival into strength" was two errors in one clause.
+		# Formation is ADJACENCY, not endurance (KeywordEffects start-of-round arm:
+		# +1/+1 while a friendly stands beside it), and the survival->strength
+		# engine it described is Centurion's Rule, the relic — which IS the default
+		# signature, so the mechanic was real and only its owner was wrong. One
+		# opener card carries Formation (Rank Spearman); the pitch now scopes it to
+		# one body, and the repair clause keeps Wall Tender's heal.
+		"desc": "Build an adjacent line, heal the bodies that take the blow, and let Formation grow a soldier who never stands alone.",
 		"deck": ["palisade", "palisade", "troll", "sprite", "brute", "rank_spearman", "wall_tender", "standard_page", "close_ranks_order", "strike"],
 		"relic": "centurions_rule",
 		"relic_alt": "reserve_standard",
@@ -49,7 +79,22 @@ const HEROES: Dictionary = {
 		"name": "Acolyte",
 		"tagline": "Choose the death. Collect what follows.",
 		"lore": "The Owed keep accounts even for the nameless dead.",
-		"desc": "Arrange different death bequests, call one due on command, and leave a Shade or an inheritance in the opened lane.",
+		# The Shade was a FOSSIL. Funeral Lantern shipped as Soul Lantern's twin
+		# ("a Shade rises in its lane") and was reshaped 2026-07-28 to double the
+		# bequest instead; the pitch was not. The only two Shade sources left in the
+		# game are Apocalypse and Raise the Fallen, both rare pool spells. Also
+		# retired: "on command" — lowercase, one letter from the resource's name.
+		#
+		# CLAUSE 3 CUT 2026-08-01 ("and let the first death each round pay twice").
+		# It was Funeral Lantern's rule in other words, and when it was written the
+		# relic's own text lived in a tooltip, so the pitch was the only place a
+		# player could read it. THE COLUMN now prints the signature with its icon,
+		# its name and its rule in full five lines below — and prints whichever
+		# relic is actually equipped, while this line cannot: a player who toggles
+		# ALT RELIC to Ledger Seal was reading a pane that pitched the Lantern above
+		# a signature block showing the Seal. Two clauses, both about the DECK the
+		# ten card faces underneath are showing.
+		"desc": "Arrange different On-Death bequests and call one due early.",
 		"deck": ["ratling", "ratling", "mourner", "brute", "troll", "grave_goods_levy", "debt_guard", "read_the_will", "strike", "last_due"],
 		"relic": "funeral_lantern",
 		"relic_alt": "ledger_seal",
@@ -60,9 +105,15 @@ const HEROES: Dictionary = {
 	"pyromancer": {
 		"id": "pyromancer",
 		"name": "Pyromancer",
-		"tagline": "Read the line. Cast the second answer.",
+		"tagline": "Cast in sequence. Each arms a creature.",
 		"lore": "Lanternhall measures a battle before it commits to one.",
-		"desc": "Sequence differently named spells, reveal the next arrival, and let the creatures behind the glass answer each cast.",
+		# Every clause here was already backed (Glass Savant + Mirror Primer on the
+		# distinct-name sequence, Star Chart on the reveal, three spell-reading
+		# bodies). Tightened only: "the next arrival" now matches Star Chart's
+		# printed "the next enemy arrival", and "answer each cast" over-promised —
+		# the passives fire on the first cast and the second DIFFERENT one, so
+		# "each cast in turn" is what actually happens.
+		"desc": "Sequence differently named spells, reveal the next enemy arrival, and let each cast in turn arm another creature.",
 		"deck": ["lens_apprentice", "lens_apprentice", "troll", "sprite", "mirror_guard", "glass_savant", "strike", "spark", "star_chart", "countermarch_levy"],
 		"relic": "mirror_primer",
 		"relic_alt": "cinder_crown",
@@ -75,7 +126,17 @@ const HEROES: Dictionary = {
 		"name": "The Kindler",
 		"tagline": "Set the fuse. Choose when it catches.",
 		"lore": "The Everflame measures time in bodies still burning.",
-		"desc": "Delay one fuse, shorten another, and place Doom creatures so the first detonation pulls the next one forward.",
+		# "the first detonation pulls the next one forward" was Chain Censer's rule
+		# word for word — and Chain Censer is relic_alt, gated on a win WITH this
+		# hero. The 2026-07-28 swap below moved War Bellows into the signature slot
+		# precisely so run one had a doctrine that fires; the pitch kept selling the
+		# locked one. Nothing in the opener chains a fuse: Fuse Tender ADDS a round
+		# of fuse and Touchpaper shortens one by hand. Clause 3 WAS War Bellows —
+		# cut 2026-08-01 for the same reason as the Acolyte's: the signature block
+		# below now prints the equipped relic's own rule, this line always printed
+		# the DEFAULT one, and the two disagreed the moment ALT RELIC was toggled to
+		# Chain Censer.
+		"desc": "Delay one fuse and shorten another.",
 		"deck": ["cinder_pup", "cinder_pup", "kindling", "burning_martyr", "ash_hound", "troll", "fuse_tender", "cinderward", "strike", "touchpaper"],
 		# SWAPPED 2026-07-28. It shipped the other way round and that was a
 		# deadlock: relic_alt is gated on WINNING with the hero, so the doctrine

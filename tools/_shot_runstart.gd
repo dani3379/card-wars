@@ -1,12 +1,14 @@
 ﻿extends Node
 ## _shot_runstart.gd — renders the RUN-OPENING FLOW (menu column → RUN SETUP,
-## per lord / per banner / per term / per run option → a writ's card picker) to
+## per lord → the starting bonus → a writ's card picker) to
 ## PNG for a design audit (windowed, editor closed):
 ##
-## RUN SETUP is ONE screen (2026-09-14), so the frames are named for the STATE
-## they capture, not for a step number. The old step2_banner / step3_terms /
-## step4_orders frames were dropped with the walk: every one of them re-entered
-## the same screen and so was a byte-duplicate of the frame before it.
+## RUN SETUP is ONE screen (2026-09-14) and asks ONE question (2026-09-16), so
+## the frames are named for the STATE they capture, not for a step number. The
+## old step2_banner / step3_terms / step4_orders frames were dropped with the
+## walk: every one of them re-entered the same screen and so was a byte-duplicate
+## of the frame before it. The banner frames went with the banner system, and the
+## terms moved to their own `bonus_*` pair.
 ##   Godot.exe --path "D:\Godot" res://tools/_shot_runstart.tscn
 ## Outputs tools/screenshot/_runstart_<state>.png
 
@@ -62,27 +64,35 @@ func _ready() -> void:
 		await get_tree().create_timer(1.0).timeout
 		await _snap("setup_hero_" + hid)
 
-	# Raising a banner rebuilds THE COLUMN in place — the banner's card takes the
-	# head of the opener strip. That swap is the whole reason the banner chips sit
-	# beside the column instead of on a page of their own, so it is worth a frame
-	# per tribe.
-	for bid in ["dead", "bastion"]:
-		_scene.call("_select_muster_banner", bid)
-		await get_tree().create_timer(1.0).timeout
-		await _snap("setup_banner_" + bid)
+	# (Two banner frames stood here until 2026-09-16. The banner system is gone.)
 
-	# A slate that needs the house-word gloss. The terms are dealt off the run
-	# seed, so most seeds show none — seed 1 deals a Forge term, and the gloss is
-	# the one element on this step that a random deal will not reliably render.
+	# THE STARTING BONUS, its own screen since 2026-09-16. Seed 1 deals a Forge
+	# term, which is the one slate that needs the house-word gloss — most seeds
+	# render none, so a random deal would shoot the gloss's absence.
 	_scene.set("_muster_random_seed", 1)
 	_scene.set("_muster_seed_text", "")
 	_scene.call("_refresh_muster_deals")
-	await get_tree().create_timer(0.8).timeout
-	await _snap("setup_terms_gloss")
+	_scene.call("_show_starting_bonus")
+	await get_tree().create_timer(1.2).timeout
+	await _snap("bonus_gloss")
 
-	# Ascension pushed up the ladder — does the rules text stay legible?
-	# (_toggle_muster_advanced rebuilds the screen itself, which doubles as the
-	# check that a rebuild lands a COMPLETE screen and not a half-built one.)
+	# A tile under the cursor: the hover state is the only affordance saying a
+	# tile IS the commit, so it is worth its own frame.
+	var tiles: Dictionary = _scene.get("_muster_writ_buttons")
+	for tid in tiles:
+		var tile: Control = tiles[tid]
+		if is_instance_valid(tile):
+			tile.grab_focus()
+			break
+	await get_tree().create_timer(0.7).timeout
+	await _snap("bonus_focus")
+	_scene.call("_leave_starting_bonus")
+	await get_tree().create_timer(1.0).timeout
+	await _snap("setup_return_from_bonus")
+
+	# Ascension pushed up the ladder — does the rules text stay legible? The
+	# run options are a DIALOG now (2026-09-16), so these frames also check that
+	# it lands centred over the screen it modifies rather than growing it.
 	_scene.call("_toggle_muster_advanced")
 	await get_tree().create_timer(0.7).timeout
 	await _snap("setup_options_open")
@@ -106,7 +116,7 @@ func _ready() -> void:
 	# Re-entry. `_show_muster_step` keeps its argument only so the probes and
 	# tools that still pass one resolve; it ignores the value and rebuilds the one
 	# screen. Shooting it proves that shim lands a complete screen — and that the
-	# run options just toggled above did not leak into the rebuilt state.
+	# run options dialog closed with the rebuild instead of surviving it.
 	_scene.call("_show_muster_step", 1)
 	await get_tree().create_timer(1.2).timeout
 	await _snap("setup_return")

@@ -57,8 +57,10 @@ func _run_test() -> void:
 	SS.rng_seed = 999
 	NM.is_host = true
 	NM.local_player_index = 0
+	# ALL THREE terms, or Combat._ready boots SOLO — see _probe_adj_buff.
 	NM._connected = true
 	NM.remote_present = true
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0
 	NM.entities.clear()
 	NM._next_entity_id = 1

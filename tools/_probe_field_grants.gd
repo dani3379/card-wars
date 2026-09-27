@@ -5,8 +5,10 @@ extends Node
 ## looting a keyword that an ENCOUNTER PASSIVE had lent an enemy for the fight.
 ## It compiled, every gate stayed green, and it was completely INERT — it checked
 ## only `_has_encounter_passive_keyword`, which matches on `_encounter_passive`
-## and has arms for the six *conditional* grants only, so `sentinel_stone`,
-## `formation_lockstep` and `iron_warden_siege` fell through to `return false`.
+## and has arms for the six *conditional* grants only, so `formation_lockstep`
+## and `iron_warden_siege` fell through to `return false`. (`sentinel_stone` was
+## a third until 2026-09-16, when its blanket Armored grant was removed — this
+## probe never used it as a fixture, so nothing here changed.)
 ##
 ## So this probe does not test that the guard COMPILES. It tests that it FIRES,
 ## and — just as importantly — that it does NOT fire on a keyword the victim
@@ -63,6 +65,16 @@ func _ready() -> void:
 
 
 func _boot_combat() -> void:
+	# HAND THE FRAME BACK BEFORE ATTACHING (2026-09-19). This ran straight out of
+	# `_ready`, while the root is still setting up ITS children — so
+	# `root.add_child(combat)` failed outright ("Parent node is busy setting up
+	# children"), Combat never entered the tree, and every `get_tree()` inside it
+	# returned null. The probe then reported **ALL PASS on 18 checks** while
+	# Combat threw from `_play_landing_pop` and `_check_game_over`, because a
+	# GDScript error aborts its function silently and changes no exit code.
+	# A gate that cannot boot its subject but still prints PASS is the fake-green
+	# class — worse than a red one, because it reads as coverage.
+	await get_tree().process_frame
 	var packed: PackedScene = load(COMBAT_SCENE)
 	combat = packed.instantiate()
 	get_tree().root.add_child(combat)

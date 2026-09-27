@@ -1,15 +1,17 @@
 extends Control
 ## Shop.gd — THE TRADER'S WAGON, the market that follows the army. Buy cards,
-## a relic, potions; sell ONE card per visit (the sutler's buy-back — he pays
-## by weight, and lowballs). Prices: common 50g, uncommon 75g, rare 120g.
-## Relics use rarity pricing. Potion 40g. Merchant's License gives 25% off buys.
+## a relic, potions; strike ONE card out of the deck per visit, for a flat fee
+## you PAY. Prices: common 50g, uncommon 75g, rare 120g. Relics use rarity
+## pricing. Potion 40g. Merchant's License gives 25% off buys.
 ##
-## 2026-07-02 rework: the anonymous "SHOP" grew a persona (name + barks) and
-## the flat "pay 50g to remove" service became the buy-back — same bounded
-## paid-thinning knob, but it no longer contradicts the road's other prices
-## (the retired Quartermaster's Scales PAID for removal while the shop
-## charged). The colored-slab Buy rectangles under the cards are gone too —
-## frameless gem-buttons in the menu/event language.
+## 2026-07-02 rework: the anonymous "SHOP" grew a persona (name + barks), and
+## the colored-slab Buy rectangles under the cards are gone — frameless
+## gem-buttons in the menu/event language.
+##
+## 2026-09-16: the buy-back is GONE and the fee is back. Thinning is the
+## strongest thing you can do to a deck in this genre; the wagon was paying you
+## to do it. See the REMOVE_FEE block for the full reasoning and for the faucet
+## that was opened to pay for it.
 
 const MAP_SCENE = "res://scenes/map.tscn"
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
@@ -20,16 +22,44 @@ const BASE_PRICES: Dictionary = {
 }
 const RELIC_PRICES: Dictionary = {"common": 90, "uncommon": 120, "rare": 160}
 const POTION_COST := 40
+const CARD_STOCK_SLOTS := 4
 const POTION_HEAL := 8
-# The sutler's buy-back: one card per visit, paid by Command weight. He pays
-# less than the old Quartermaster did — the wagon runs on margin. Curses are
-# scrap-rate.
-const SELL_BASE := 10
-const SELL_PER_COST := 8
-const SELL_CURSE_PRICE := 5
+# THE PROVOST'S FEE — you PAY to strike a card out of the deck. One per visit.
+#
+# This replaced the sutler's buy-back on 2026-09-16, which paid the player
+# 10 gold + 4 per Command cost for a card (curses 5). Two reasons, and the
+# second is the one that decided it:
+#
+#   1. Thinning is the strongest thing you can do to a deck in this genre, and
+#      here it was not merely free — it was INCOME. Nothing else on the road
+#      pays you for improving.
+#   2. THE OLD RATE WAS BACKWARDS. It was keyed to Command cost, so it paid
+#      LEAST for exactly the cards a player wants gone (cost-1 starter chaff,
+#      14 gold) and MOST for the cost-6 bombs nobody dumps (34 gold). The card
+#      you most want to strike was the one he valued least. That inversion is
+#      not tunable — it is what pricing removal by card power does.
+#
+# A FLAT fee has no inversion to fix: every card costs the same to strike, so
+# the only question left is "is this deck slot worth 60 gold", which is the
+# question the mechanic exists to ask.
+#
+# 60, against a 50-gold common and a ~50-gold fight: priced a little above the
+# cheapest thing on the shelf, so thinning COMPETES with buying instead of
+# being strictly additive. NOT escalating (Slay the Spire's 75/+25) — the
+# one-per-visit cap and a route's ~4 shops already bound it at 4 strikes a run,
+# and an escalator would need a new persisted counter to do what the cap does
+# for free.
+#
+# THE FAUCET THAT PAYS FOR IT lives in Combat.gd's victory block: the three
+# fight bases went 40/60/55 -> 50/70/65 in the same pass, ~+210 gold over a
+# full 21-fight route against the ~84 gold of sale income removed here. Net
+# +126 to a player who never strikes; roughly break-even for one who strikes
+# twice. Deliberately NOT full compensation — a fee the run always affords is
+# a fee that decides nothing.
+const REMOVE_FEE := 60
 
 # The "Relics & Services" shelf is ONE set of tiles — relic cards, the potion,
-# and the sutler's buy-back all share the same dark-parchment document tile
+# and the provost's fee all share the same dark-parchment document tile
 # (uniform size, gilt name → icon → body → price). The row used to mix a warm-
 # brown relic card (make_btn_style, no tacks) against dark inked service tiles
 # (make_panel_style, tacks) at two different widths; it read as three
@@ -58,10 +88,33 @@ const BARKS: Array = [
 ]
 
 var _card_stock: Array[String] = []
+var _sold_card_ids: Dictionary = {}
 var _relic_stock: Array[String] = []
+var _relic_sold: bool = false
 var _shop_potion_id: String = ""
 var _discount: float = 1.0
-var _sold_this_visit: bool = false
+## STRIKES TAKEN THIS VISIT, not a one-shot latch (2026-09-24).
+##
+## `REMOVE_FEE`'s own reasoning says the cap is safe because "a route's ~4 shops
+## already bound it at 4 strikes a run". The route census measures **0.85 shops
+## per act on route - about 2.5 a run** - so the real bound was ~2.5 strikes,
+## not 4, and thinning quietly became about 40% scarcer than the price was set
+## against. The 09-19 map pass also cut runs from a fixed 21 fights to 12-17, so
+## the gold faucet sized as "+210 over a full 21-fight route" now pays about two
+## thirds of that. Both numbers were right when written and were invalidated by
+## a change in another file.
+##
+## MEASURED CONSEQUENCE: the starter deck never leaves. Across 100 finished runs
+## the 10-card opener was still **50-62% of the finished deck**, and runs that
+## died in act 1 ended only 28% new cards.
+##
+## Raising the CAP rather than dropping the fee keeps the pricing argument the
+## comment makes - 60g sits just above the cheapest ware, so thinning still
+## COMPETES with buying instead of being strictly additive - while restoring the
+## strikes-per-run the cap was reasoned against. Two strikes is 120 gold at one
+## counter, so the purse is the real limit.
+const STRIKES_PER_VISIT := 2
+var _strikes_this_visit: int = 0
 var _bark: String = ""
 # Entrance choreography plays once per visit; purchase rebuilds re-lay the
 # shelves without re-dealing them. Gold label rolls between builds.
@@ -69,8 +122,8 @@ var _entered: bool = false
 var _gold_shown: int = -1
 var _gold_label: Label = null
 var _transaction_busy: bool = false
-var _sell_card_nodes: Array[Control] = []
-var _sell_build_generation := 0
+var _removal_card_nodes: Array[Control] = []
+var _removal_build_generation := 0
 
 
 func _ready() -> void:
@@ -115,10 +168,12 @@ func _unhandled_input(event: InputEvent) -> void:
 func _roll_stock() -> void:
 	var act = RunState.get_act()
 	_card_stock = []
+	_sold_card_ids.clear()
+	_relic_sold = false
 	# Retry duplicate rolls instead of dropping the slot — the old loop rolled
 	# exactly 4 times and silently stocked 3 cards whenever two rolls collided.
 	var guard := 0
-	while _card_stock.size() < 4 and guard < 40:
+	while _card_stock.size() < CARD_STOCK_SLOTS and guard < 40:
 		guard += 1
 		var rarity = _roll_shop_rarity(act)
 		var pool = CardDB.cards_of_rarity(rarity)
@@ -151,13 +206,14 @@ func _price(base: int) -> int:
 
 
 func _build_ui(stagger_initial_cards: bool = false) -> void:
-	_sell_build_generation += 1
-	var build_generation := _sell_build_generation
+	_removal_build_generation += 1
+	var build_generation := _removal_build_generation
 	var builder_alive := func() -> bool:
-		return is_inside_tree() and build_generation == _sell_build_generation
+		return is_inside_tree() and build_generation == _removal_build_generation
 	_transaction_busy = false
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere":
+			remove_child(child)
 			child.queue_free()
 
 	var title = GameTheme.make_screen_title("THE TRADER'S WAGON", GameTheme.GILT_BRIGHT, GameTheme.FONT_TITLE)
@@ -205,68 +261,75 @@ func _build_ui(stagger_initial_cards: bool = false) -> void:
 	card_row.add_theme_constant_override("separation", 28)
 	add_child(card_row)
 
-	# Reserve the entire centred shelf before the first await. Rich faces will be
-	# built inside these exact footprints behind card backs, so completion order
-	# can never change the row width or shove an existing card sideways.
+	# Reserve the complete shelf before the first await. Each ornate face is
+	# hydrated inside its final-size slot behind a sleeve, so completion order can
+	# never change the centred HBox width or shove an earlier card sideways.
+	card_row.name = "ShopCardGroup"
+	card_row.set_meta("coordinated_card_group", true)
 	var stock_staged: Array[Dictionary] = []
+	var cold_art_paths: Array[String] = []
 	for id in _card_stock:
 		var data: Dictionary = CardDB.get_card_data(id)
+		if not CardTextureCache.has(data) and not CardTextureCache.has_gallery(data):
+			var art_path := String(CardArtAliases.card_art_path(data))
+			if art_path != "" and not cold_art_paths.has(art_path):
+				cold_art_paths.append(art_path)
+
+		var price := _price(int(BASE_PRICES.get(String(data.get("rarity", "")), 50)))
 		var slot := VBoxContainer.new()
 		slot.custom_minimum_size = Vector2(Card2D.CARD_W, Card2D.CARD_H + 52.0)
 		slot.add_theme_constant_override("separation", 8)
 		slot.alignment = BoxContainer.ALIGNMENT_CENTER
 		card_row.add_child(slot)
+		if _sold_card_ids.has(id):
+			_fill_sold_card_slot(slot)
+			continue
+
 
 		var card_wrap := Control.new()
+		card_wrap.name = "ShopCardSlot"
 		card_wrap.custom_minimum_size = Vector2(Card2D.CARD_W, Card2D.CARD_H)
 		card_wrap.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		card_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		card_wrap.pivot_offset = card_wrap.custom_minimum_size * 0.5
+		card_wrap.set_meta("coordinated_card_slot", true)
 		card_wrap.draw.connect(_draw_shelf_shadow.bind(card_wrap))
 		slot.add_child(card_wrap)
 		var face_host := Control.new()
 		face_host.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		card_wrap.add_child(face_host)
 		face_host.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-		var back := _make_loading_card_back()
+		var back := _make_loading_card_back(card_row)
 		card_wrap.add_child(back)
 		back.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+
+		var buy_btn := _make_buy_button("Buy — %dg" % price,
+			RunState.gold >= price, _buy_card.bind(id, price, slot),
+			"Need %d gold" % price)
+		buy_btn.tooltip_text = String(data.get("desc", ""))
+		buy_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		buy_btn.disabled = true
+		buy_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.add_child(buy_btn)
 		stock_staged.append({
-			"slot": slot, "wrap": card_wrap, "host": face_host, "back": back,
+			"id": id, "data": data, "wrap": card_wrap, "host": face_host,
+			"back": back, "button": buy_btn,
 		})
 
-	# Cards/buttons are accumulated invisibly, then the whole logical offer flips
-	# face-up and becomes interactive in one coordinated beat.
-	var staged_cards: Array[Control] = []
-	var staged_backs: Array[Control] = []
-	var staged_buttons: Array[Button] = []
-	var staged_wraps: Array[Control] = []
-	var staged_rarities: Array[String] = []
-
-	# Start every cold art request before joining any of them. The old per-card
-	# prewarm serialized four image decodes even though ResourceLoader can do them
-	# concurrently; prewarm_card_art below then only installs the resolved alias.
-	var stock_datas: Array[Dictionary] = []
-	var cold_art_paths: Array[String] = []
-	for id in _card_stock:
-		var stock_data: Dictionary = CardDB.get_card_data(id)
-		stock_datas.append(stock_data)
-		if CardTextureCache.has(stock_data) or CardTextureCache.has_gallery(stock_data):
-			continue
-		var art_path := String(CardArtAliases.card_art_path(stock_data))
-		if art_path != "" and not cold_art_paths.has(art_path):
-			cold_art_paths.append(art_path)
+	# Start all cold art requests together, then retain the established one-face-
+	# per-frame construction cadence behind the covers.
 	if not cold_art_paths.is_empty():
 		await CardArtAliases.prewarm_texture_paths(cold_art_paths)
 		if not builder_alive.call():
 			return
 
-	for stock_i in range(_card_stock.size()):
-		var id: String = _card_stock[stock_i]
-		var data: Dictionary = stock_datas[stock_i]
-		# These cards never enter a hand and are shown at their native 225x300
-		# size. A native gallery snapshot is pixel-exact here and avoids the
-		# 3x+mipmap gameplay bake that owned the remaining Shop entry hitch.
+	var staged_cards: Array[Control] = []
+	var staged_backs: Array[Control] = []
+	var staged_buttons: Array[Button] = []
+	var staged_wraps: Array[Control] = []
+	var staged_rarities: Array[String] = []
+	for entry in stock_staged:
+		var data: Dictionary = entry["data"]
 		if not CardTextureCache.has(data) and not CardTextureCache.has_gallery(data):
 			await CardArtAliases.prewarm_card_art(data)
 			if not builder_alive.call():
@@ -280,70 +343,33 @@ func _build_ui(stagger_initial_cards: bool = false) -> void:
 			if not builder_alive.call():
 				return
 			if baked_gallery:
-				# Do not stack the synchronous readback/upload with construction of
-				# the visible baked-overlay Card2D in the same presented frame.
 				await get_tree().process_frame
 		if not builder_alive.call():
 			return
-		var price = _price(BASE_PRICES.get(data.rarity, 50))
-		var slot := VBoxContainer.new()
-		slot.add_theme_constant_override("separation", 8)
-		slot.alignment = BoxContainer.ALIGNMENT_CENTER
-		card_row.add_child(slot)
-
-		# Plain-Control wrapper so the rarity shine has something to centre on:
-		# it parents itself to the node it decorates, and a Container re-fits its
-		# children every layout pass, which would drag the sunburst to the corner.
-		var card_wrap := Control.new()
-		card_wrap.custom_minimum_size = Vector2(Card2D.CARD_W, Card2D.CARD_H)
-		card_wrap.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		card_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		card_wrap.pivot_offset = card_wrap.custom_minimum_size * 0.5
-		# The shelf's stock stands on the counter — a contact shadow that spreads
-		# and pales while the card is in the air (see `_draw_shelf_shadow`).
-		card_wrap.draw.connect(_draw_shelf_shadow.bind(card_wrap))
-		slot.add_child(card_wrap)
 
 		var card = CARD_SCENE.instantiate()
 		card.card_data = data.duplicate(true)
-		card.card_id = id
-		card.is_on_battlefield = true  # no drag / hover-scale; static gallery card
+		card.card_id = String(entry["id"])
+		card.is_on_battlefield = true
 		card.static_display = true
 		card.live_baked_mode = true
-		card.gallery_baked_mode = not CardTextureCache.has(data) and CardTextureCache.has_gallery(data)
-		card_wrap.add_child(card)
-
-		var buy_btn = _make_buy_button("Buy — %dg" % price,
-			RunState.gold >= price, _buy_card.bind(id, price, slot),
-			"Need %d gold" % price)
-		buy_btn.tooltip_text = data.desc
-		buy_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		slot.add_child(buy_btn)
-		if not _entered:
-			var deal_at: float = 0.08 + card_row.get_child_count() * 0.06
-			# THE STOCK IS DEALT; THE PRICE TAG IS UI (2026-09-10). `deal_in` on
-			# the whole slot faded card and buy-button together, which made the
-			# card behave like a panel. They are not the same kind of thing: a
-			# card is an OBJECT and gets thrown onto the counter, a price is a
-			# LABEL and may honestly fade in behind it. Splitting the two is most
-			# of what makes the shelf read as stock rather than as a form.
-			Motion.deal_card(card_wrap, deal_at, {
-				"from": Vector2(-70.0, 300.0), "spin": 0.30, "dur": 0.40,
-			})
-			GameTheme.deal_in(buy_btn, deal_at + 0.34)
-			# The shelf is a ROLLED offer, exactly like the muster slate and the
-			# reliquary — so a good roll announces itself here too (uncommons
-			# glint silver, rares erupt in gilt). Only on arrival: `_entered`
-			# keeps a re-shelf after a purchase from re-shining the leftovers.
-			GameTheme.rarity_reveal(card_wrap, String(data.get("rarity", "")),
-				deal_at + 0.36)
+		card.gallery_baked_mode = not CardTextureCache.has(data) \
+			and CardTextureCache.has_gallery(data)
+		card.visible = false
+		card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		(entry["host"] as Control).add_child(card)
+		staged_cards.append(card)
+		staged_backs.append(entry["back"] as Control)
+		staged_buttons.append(entry["button"] as Button)
+		staged_wraps.append(entry["wrap"] as Control)
+		staged_rarities.append(String(data.get("rarity", "")))
 		if stagger_initial_cards:
-			# Upload/present one baked face per frame. Four entering together was
-			# a single 469 ms Compatibility frame even though every cache hit was
-			# complete; sequential presentation keeps the scene responsive.
 			await get_tree().process_frame
 			if not builder_alive.call():
 				return
+
+	await _reveal_shop_card_group(staged_cards, staged_backs, staged_buttons,
+		staged_wraps, staged_rarities, not _entered, builder_alive)
 
 	# Relic + Services — one centered row below the cards.
 	var svc_label = GameTheme.make_section_divider("Relics & Services", GameTheme.DESC_DIM, 22)
@@ -375,10 +401,11 @@ func _build_ui(stagger_initial_cards: bool = false) -> void:
 	svc_row.offset_top = 559
 	svc_row.offset_bottom = 755
 	svc_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	svc_row.name = "ShopServiceGroup"
 	svc_row.add_theme_constant_override("separation", 20)
 	add_child(svc_row)
 
-	if _relic_stock.size() > 0:
+	if _relic_stock.size() > 0 and not _relic_sold:
 		var relic_i := 0
 		for id in _relic_stock:
 			var rarity: String = RelicDB.get_relic_rarity(id)
@@ -409,6 +436,14 @@ func _build_ui(stagger_initial_cards: bool = false) -> void:
 				GameTheme.rarity_reveal(relic.slot, rarity, relic_at + 0.36)
 			relic_i += 1
 			# No hover_lift — _make_service_slot's rich hover already owns scale.
+
+	else:
+		# Keep the relic hook in the row after purchase. Its SOLD docket is the
+		# same size as a live service tile, so potion and removal never recenter.
+		var sold_relic := _make_sold_relic_slot()
+		svc_row.add_child(sold_relic.slot)
+		if _entered:
+			GameTheme.stamp_in(sold_relic.mark, 0.02, Color(0.92, 0.52, 0.30))
 
 	# Potion service: shop sells a single random potion type (rolled at
 	# _roll_stock).
@@ -441,34 +476,37 @@ func _build_ui(stagger_initial_cards: bool = false) -> void:
 		GameTheme.deal_in(potion.slot, 0.42)
 	# No hover_lift — _make_service_slot's rich hover already owns scale.
 
-	# The sutler's buy-back — sell ONE card per visit, paid by weight. This is
-	# the deck-thinning verb now (replaced "pay 50g to remove"): still bounded
-	# per shop, but it's a trade with a person instead of a fee to a menu.
-	# The rates belong in the hover body, where the relic rules also live — the
-	# tile itself carries a price-shaped line so the shelf keeps one baseline.
-	var sell_body := "Sell one card per visit. He pays %d gold + %d per Command cost. Curses fetch %d gold. Gone for good." \
-		% [SELL_BASE, SELL_PER_COST, SELL_CURSE_PRICE]
+	# The provost's fee — strike ONE card out of the deck per visit, flat rate.
+	# One figure for every card in the pack, so the tile can post its price the
+	# same way the potion beside it does. The rule text belongs in the hover
+	# body, where the relic rules also live.
+	var strike_fee := _removal_fee()
+	var strike_body := "Remove one card from your deck for %d gold. One per visit. Gone for good." \
+		% strike_fee
 	if RunState.has_relic("scavengers_pouch"):
-		sell_body += " Your Trader's Marker doubles these prices."
-	var sell = _make_service_slot(
-		# The sutler's purse — he PAYS you. This chip was
+		strike_body += " Your Trader's Marker has already halved the fee."
+	var strike = _make_service_slot(
+		# A purse changing hands — now the PLAYER'S. This chip was
 		# assets/icons/downloaded/cards1.png: a raw icon ATLAS, eight unrelated
 		# coloured glyphs in a grid, sitting in a gilt chip between a painted relic
 		# and a painted potion. It is the only thing in the game still loaded out of
 		# `icons/downloaded/`.
 		_make_icon_chip("res://assets/icons/relics/coin_purse.png", SVC_ICON_PX),
-		"Sell a Card", sell_body, "— by card cost —", Color(0.45, 0.15, 0.15))
-	if _sold_this_visit:
-		_set_tile_status(sell, "Already sold this visit")
-		_make_unavailable_tile(sell.button, "Already sold this visit")
+		"Remove a Card", strike_body, "— %dg —" % strike_fee, Color(0.45, 0.15, 0.15))
+	if _strikes_this_visit >= STRIKES_PER_VISIT:
+		_set_tile_status(strike, "No more removals this visit")
+		_make_unavailable_tile(strike.button, "No more removals this visit")
 	elif RunState.deck.size() <= 1:
-		_set_tile_status(sell, "Can't sell your last card")
-		_make_unavailable_tile(sell.button, "Can't sell your last card")
+		_set_tile_status(strike, "Can't remove your last card")
+		_make_unavailable_tile(strike.button, "Can't remove your last card")
+	elif RunState.gold < strike_fee:
+		_set_tile_status(strike, "Need %d gold" % strike_fee)
+		_make_unavailable_tile(strike.button, "Need %d gold" % strike_fee)
 	else:
-		sell.button.pressed.connect(_start_sell_mode)
-	svc_row.add_child(sell.slot)
+		strike.button.pressed.connect(_start_removal_mode)
+	svc_row.add_child(strike.slot)
 	if not _entered:
-		GameTheme.deal_in(sell.slot, 0.50)
+		GameTheme.deal_in(strike.slot, 0.50)
 	# No hover_lift — _make_service_slot's rich hover already owns scale.
 
 	# The sutler's patter — bottom-left, out of the wares' way.
@@ -514,13 +552,107 @@ func _build_ui(stagger_initial_cards: bool = false) -> void:
 ## screen already had the CARD_BACK_TEXTURE const and the call site; only the
 ## function itself was missing, which took Shop.gd (and with it the whole game)
 ## out of compilation.
-func _make_loading_card_back() -> TextureRect:
+func _make_loading_card_back(group: CanvasItem = null) -> TextureRect:
 	var back := TextureRect.new()
+	back.name = "LoadingBack"
 	back.texture = CARD_BACK_TEXTURE
 	back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	Motion.arm_loading_writ(back, group)
 	return back
+
+
+## Renderer work may finish one face at a time; presentation never does. All
+## backs close together, all ornate faces open together, then and only then do
+
+## A purchased card leaves a physical vacancy on the shelf instead of removing
+## a child from the centred row. The socket exactly matches a live card + buy
+## line, so every untouched offer keeps its screen position for the whole visit.
+func _fill_sold_card_slot(slot: VBoxContainer) -> void:
+	slot.name = "ShopSoldCardSlot"
+	slot.set_meta("fixed_shop_socket", true)
+	var recess := Panel.new()
+	recess.custom_minimum_size = Vector2(Card2D.CARD_W, Card2D.CARD_H)
+	recess.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	recess.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	recess.add_theme_stylebox_override("panel", GameTheme.make_panel_style(
+		Color(0.025, 0.020, 0.016, 0.82), Color(0.40, 0.25, 0.14, 0.70),
+		2, 8, true, true))
+
+	# Leave the ghost of the card back in the empty berth: the player can see
+	# that this was a stocked socket, while the ink stamp makes its state final.
+	var ghost := TextureRect.new()
+	ghost.texture = CARD_BACK_TEXTURE
+	ghost.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	ghost.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	ghost.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ghost.offset_left = 9
+	ghost.offset_top = 9
+	ghost.offset_right = -9
+	ghost.offset_bottom = -9
+	ghost.modulate = Color(0.36, 0.29, 0.22, 0.22)
+	ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	recess.add_child(ghost)
+
+	var stamp := GameTheme.make_label("SOLD", 36, Color(0.88, 0.43, 0.27))
+	stamp.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	stamp.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	stamp.set_anchors_preset(Control.PRESET_CENTER)
+	stamp.offset_left = -95
+	stamp.offset_right = 95
+	stamp.offset_top = -30
+	stamp.offset_bottom = 30
+	stamp.rotation = -0.08
+	stamp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	recess.add_child(stamp)
+	slot.add_child(recess)
+
+	var footer := GameTheme.make_label("PACKED", 18, GameTheme.DESC_DIM)
+	footer.custom_minimum_size = Vector2(200, 44)
+	footer.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	footer.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	footer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	slot.add_child(footer)
+	if _entered:
+		GameTheme.stamp_in(stamp, 0.02, Color(1.0, 0.68, 0.36))
+## the associated buttons accept input. Container geometry is never animated.
+func _reveal_shop_card_group(cards: Array[Control], backs: Array[Control],
+		buttons: Array[Button], wraps: Array[Control], rarities: Array[String],
+		announce_rarity: bool, validity: Callable) -> void:
+	if not validity.call():
+		return
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	var animate_reveal := not snap and announce_rarity
+	if animate_reveal:
+		if AudioBank != null:
+			AudioBank.play_sfx("card_draw", 0.04, -6.0)
+		for back in backs:
+			Motion.flip_out(back, 0.13)
+		await get_tree().create_timer(maxf(Motion.time(0.13), 0.01)).timeout
+		if not validity.call():
+			return
+	for i in range(cards.size()):
+		var card: Control = cards[i]
+		var back: Control = backs[i] if i < backs.size() else null
+		if not animate_reveal and is_instance_valid(back):
+			back.queue_free()
+		if is_instance_valid(card):
+			card.visible = true
+			if animate_reveal:
+				Motion.flip_in(card, 0.0, 0.17)
+		if announce_rarity and i < wraps.size() and i < rarities.size():
+			GameTheme.rarity_reveal(wraps[i], rarities[i],
+				0.0 if snap else Motion.time(0.12))
+	if animate_reveal:
+		await get_tree().create_timer(maxf(Motion.time(0.17), 0.01)).timeout
+		if not validity.call():
+			return
+	for button in buttons:
+		if is_instance_valid(button):
+			button.disabled = false
+			button.mouse_filter = Control.MOUSE_FILTER_STOP
 
 
 func _make_stage_panel(rect: Rect2, accent: Color) -> Panel:
@@ -661,7 +793,7 @@ func _make_icon_chip(icon_path: String, px: int) -> Panel:
 
 func _make_service_slot(chip: Control, title: String, body: String,
 		footer: String, color: Color) -> Dictionary:
-	# The one shelf recipe — relics, the potion and the buy-back are all built
+	# The one shelf recipe — relics, the potion and the removal fee are all built
 	# here, so a ware differs from its neighbour by what's painted on it rather
 	# than by how it's mounted: shared dark PARCHMENT fill, the shared
 	# make_btn_style chamfer (no corner tacks), and the same stack — framed chip
@@ -724,6 +856,31 @@ func _make_service_slot(chip: Control, title: String, body: String,
 		"status": status_lbl, "footer": footer_lbl}
 
 
+## Empty relic hook with the exact shared service footprint. The marker stamps
+## in after the bought relic has dived toward the pack.
+func _make_sold_relic_slot() -> Dictionary:
+	var chip := Panel.new()
+	chip.custom_minimum_size = Vector2(SVC_ICON_PX, SVC_ICON_PX)
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_theme_stylebox_override("panel", GameTheme.make_btn_style(
+		Color(0.025, 0.020, 0.016, 0.88), Color(0.38, 0.24, 0.14, 0.62), 4))
+	var mark := GameTheme.make_label("SOLD", 23, Color(0.88, 0.43, 0.27))
+	mark.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	mark.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	mark.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	mark.rotation = -0.08
+	mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_child(mark)
+	var sold := _make_service_slot(chip, "Relic Sold",
+		"The hook is empty.", "— SOLD —", Color(0.45, 0.18, 0.12))
+	var button: Button = sold.button
+	button.disabled = true
+	button.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	button.self_modulate = Color(0.72, 0.64, 0.55, 0.86)
+	sold["mark"] = mark
+	return sold
+
+
 ## Show why a ware can't be bought, in the slot the eye already uses for price.
 func _set_tile_status(tile: Dictionary, message: String) -> void:
 	var status: Label = tile.get("status")
@@ -736,7 +893,8 @@ func _set_tile_status(tile: Dictionary, message: String) -> void:
 
 
 func _buy_card(id: String, price: int, slot: Control = null) -> void:
-	if _transaction_busy or RunState.gold < price:
+	if _transaction_busy or RunState.gold < price \
+			or _sold_card_ids.has(id):
 		return
 	_transaction_busy = true
 	var old_gold := RunState.gold
@@ -744,7 +902,7 @@ func _buy_card(id: String, price: int, slot: Control = null) -> void:
 	_update_gold_display(old_gold, RunState.gold)
 	_spawn_gold_spend(price)
 	RunState.add_card(id)
-	_card_stock.erase(id)
+	_sold_card_ids[id] = true
 	# The bought ware dives into the player's pack (bottom-centre) before the
 	# shelves re-lay — the purchase reads as taking a thing, not a menu refresh.
 	if slot != null and is_instance_valid(slot):
@@ -755,7 +913,7 @@ func _buy_card(id: String, price: int, slot: Control = null) -> void:
 
 
 func _buy_relic(id: String, price: int, tile: Control = null) -> void:
-	if _transaction_busy or RunState.gold < price:
+	if _transaction_busy or RunState.gold < price or _relic_sold:
 		return
 	_transaction_busy = true
 	var old_gold := RunState.gold
@@ -765,7 +923,7 @@ func _buy_relic(id: String, price: int, tile: Control = null) -> void:
 	RunState.add_relic(id)
 	if id == "bottled_talisman":
 		await GameTheme.bind_bottled_talisman(self)
-	_relic_stock.erase(id)
+	_relic_sold = true
 	if tile != null and is_instance_valid(tile):
 		GameTheme.claim_pop(tile)
 		await get_tree().create_timer(0.10).timeout
@@ -851,36 +1009,40 @@ func _spawn_coin_sparks(pos: Vector2, gain: bool) -> void:
 	})
 
 
-## The sutler weighs a card by its Command cost. Curses fetch scrap-rate —
-## he'll haul anything, but he's not paying for bad luck.
-func _sell_price(card_id: String) -> int:
-	var price: int = SELL_CURSE_PRICE
-	if not CardDB.is_curse(card_id):
-		var data = CardDB.get_card_data(card_id)
-		price = SELL_BASE + SELL_PER_COST * int(data.get("cost", 0))
-	# Sutler's Marker relic: the buy-back pays double (curses included — he
-	# honors the marker even on bad luck).
+## The provost's fee. ONE figure, the same for every card in the pack — it does
+## not read the card at all, which is the whole point of the flat rate (see
+## REMOVE_FEE). The Trader's Marker takes a percentage off, the same shape the
+## Merchant's License uses on the shelf prices.
+func _removal_fee() -> int:
+	var fee := REMOVE_FEE
 	if RunState.has_relic("scavengers_pouch"):
-		price *= int(RelicDB.get_relic("scavengers_pouch").get("value", 2))
-	return price
+		var pct: int = int(RelicDB.get_relic("scavengers_pouch").get("value", 50))
+		fee = int(round(fee * float(100 - pct) / 100.0))
+	return maxi(fee, 0)
 
 
-func _start_sell_mode() -> void:
+func _start_removal_mode() -> void:
 	if _transaction_busy:
 		return
-	_sell_build_generation += 1
-	var build_generation := _sell_build_generation
+	_removal_build_generation += 1
+	var build_generation := _removal_build_generation
 	_transaction_busy = false
-	_sell_card_nodes.clear()
+	_removal_card_nodes.clear()
 	for child in get_children():
 		if child.name != "Background" and child.name != "Atmosphere":
 			child.queue_free()
 
-	var title := GameTheme.make_label("Choose a card to sell",
+	# The header stack has 80px before the scroll starts, and the two labels used
+	# to be laid out as if it had more: a 48-tall FONT_TITLE box at y26 runs to
+	# y74 and the 28-tall purse sat at y62, so the purse overlapped the title by
+	# 12px AND its own bottom 10px fell under the ScrollContainer (added later,
+	# so it draws on top). Both are packed against the 80px ceiling now: title
+	# 14..54, purse 54..80, nothing overlapping and nothing under the grid.
+	var title := GameTheme.make_label("Choose a card to remove",
 		GameTheme.FONT_TITLE, GameTheme.KEYWORD_GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.position = Vector2(300, 26)
-	title.size = Vector2(1000, 48)
+	title.position = Vector2(300, 14)
+	title.size = Vector2(1000, 40)
 	add_child(title)
 	GameTheme.deal_in(title, 0.02)
 
@@ -888,8 +1050,8 @@ func _start_sell_mode() -> void:
 		GameTheme.KEYWORD_GOLD, true)
 	_gold_label = purse
 	purse.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	purse.position = Vector2(680, 62)
-	purse.size = Vector2(240, 28)
+	purse.position = Vector2(680, 54)
+	purse.size = Vector2(240, 26)
 	add_child(purse)
 	GameTheme.deal_in(purse, 0.06)
 
@@ -906,6 +1068,8 @@ func _start_sell_mode() -> void:
 	add_child(scroll)
 
 	var grid := GridContainer.new()
+	grid.name = "ShopRemovalCardGroup"
+	grid.set_meta("coordinated_card_group", true)
 	grid.columns = 6
 	grid.add_theme_constant_override("h_separation", 10)
 	grid.add_theme_constant_override("v_separation", 16)
@@ -924,109 +1088,163 @@ func _start_sell_mode() -> void:
 
 	var grid_ref: WeakRef = weakref(grid)
 	var picker_alive := func() -> bool:
-		if not is_inside_tree() or build_generation != _sell_build_generation \
+		if not is_inside_tree() or build_generation != _removal_build_generation \
 				or _transaction_busy:
 			return false
 		var live_grid: GridContainer = grid_ref.get_ref() as GridContainer
 		return live_grid != null and is_instance_valid(live_grid) \
 			and not live_grid.is_queued_for_deletion()
 
+	# Build the complete final grid synchronously out of cheap sleeves. The grid
+	# reaches its final row/column geometry before any art/cache await, so a cold
+	# late-run deck cannot visibly grow one card at a time.
+	var staged: Array[Dictionary] = []
+	var cold_art_paths: Array[String] = []
+	var fee := _removal_fee()
 	for i in range(RunState.deck.size()):
 		var data: Dictionary = RunState.get_upgraded_card_data(i)
-		# Reuse a gameplay face if combat/map warming already paid for it. Only
-		# create the native-resolution gallery class on a genuine cold miss.
-		if not CardTextureCache.has(data) \
-				and not CardTextureCache.has_gallery(data):
-			await CardArtAliases.prewarm_card_art(data)
-			if not picker_alive.call():
-				CardArtAliases.release_card_art(data)
-				return
-			# A concurrent deck warmer may finish during the threaded art load.
-			if not CardTextureCache.has(data):
-				await CardTextureCache.bake_gallery(data, picker_alive)
-			CardArtAliases.release_card_art(data)
-		if not picker_alive.call():
-			return
-		var use_gallery := not CardTextureCache.has(data) \
-			and CardTextureCache.has_gallery(data)
+		if not CardTextureCache.has(data) and not CardTextureCache.has_gallery(data):
+			var art_path := String(CardArtAliases.card_art_path(data))
+			if art_path != "" and not cold_art_paths.has(art_path):
+				cold_art_paths.append(art_path)
 
 		var slot := VBoxContainer.new()
 		slot.add_theme_constant_override("separation", 4)
 		var wrapper := Control.new()
 		wrapper.custom_minimum_size = Vector2(225, 300)
+		wrapper.name = "ShopRemovalCardSlot"
+		wrapper.set_meta("coordinated_card_slot", true)
+		var face_host := Control.new()
+		face_host.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		wrapper.add_child(face_host)
+		face_host.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		var back := _make_loading_card_back(grid)
+		wrapper.add_child(back)
+		back.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		var click_btn := Button.new()
+		click_btn.flat = true
+		click_btn.focus_mode = Control.FOCUS_NONE
+		click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		click_btn.disabled = true
+		click_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
+		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
+		click_btn.pressed.connect(_confirm_removal.bind(i, slot))
+		wrapper.add_child(click_btn)
+		slot.add_child(wrapper)
+		# The fee under each card. It is the same figure on all of them — that is
+		# the flat rate being honest — but it belongs on the thing you click, and
+		# it is painted in the SPEND colour so it cannot be misread as a payout
+		# the way the buy-back's gold figure was.
+		var footer = GameTheme.make_label("-%dg" % fee, 16, Color(1.0, 0.55, 0.18))
+		footer.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		footer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.add_child(footer)
+		grid.add_child(slot)
+		_removal_card_nodes.append(slot)
+		staged.append({
+			"data": data, "slot": slot, "wrapper": wrapper,
+			"host": face_host, "back": back, "button": click_btn,
+		})
+
+	preparing.text = "PREPARING THE DECK...  0 / %d" % RunState.deck.size()
+	if not cold_art_paths.is_empty():
+		await CardArtAliases.prewarm_texture_paths(cold_art_paths)
+		if not picker_alive.call():
+			return
+
+	# Full ornate faces still hydrate one per presented frame to retain the old
+	# hitch cap. They stay hidden behind the complete sleeve grid until all are
+	# ready, so this internal cadence is no longer presentation order.
+	var staged_cards: Array[Control] = []
+	var staged_backs: Array[Control] = []
+	var staged_buttons: Array[Button] = []
+	var staged_wraps: Array[Control] = []
+	var staged_rarities: Array[String] = []
+	for i in range(staged.size()):
+		var entry: Dictionary = staged[i]
+		var data: Dictionary = entry["data"]
+		if not CardTextureCache.has(data) and not CardTextureCache.has_gallery(data):
+			await CardArtAliases.prewarm_card_art(data)
+			if not picker_alive.call():
+				CardArtAliases.release_card_art(data)
+				return
+			if not CardTextureCache.has(data):
+				await CardTextureCache.bake_gallery(data, picker_alive)
+			CardArtAliases.release_card_art(data)
+		if not picker_alive.call():
+			return
 		var card_node = CARD_SCENE.instantiate()
 		card_node.static_display = true
 		card_node.card_data = data
 		card_node.card_id = String(data.get("id", ""))
 		card_node.live_baked_mode = true
-		card_node.gallery_baked_mode = use_gallery
-		wrapper.add_child(card_node)
-		var click_btn := Button.new()
-		click_btn.flat = true
-		click_btn.focus_mode = Control.FOCUS_NONE
-		click_btn.set_anchors_preset(Control.PRESET_FULL_RECT)
-		click_btn.mouse_filter = Control.MOUSE_FILTER_STOP
-		click_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
-		click_btn.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
-		click_btn.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
-		click_btn.pressed.connect(_confirm_sell.bind(i, slot))
-		wrapper.add_child(click_btn)
-		slot.add_child(wrapper)
-		# Price footer under each card — his figure, up front, like the scales.
-		var footer = GameTheme.make_label("%d gold" % _sell_price(RunState.deck[i]),
-			16, GameTheme.KEYWORD_GOLD)
-		footer.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		footer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		slot.add_child(footer)
-		grid.add_child(slot)
-		_sell_card_nodes.append(slot)
-		# Quick ripple across the laid-out pack — capped so a 30-card deck
-		# doesn't take seconds to appear.
-		GameTheme.deal_in(slot, 0.04 + minf(float(i), 12.0) * 0.025)
-		GameTheme.hover_lift(slot, 1.025)
-
-		preparing.text = "LAYING OUT THE DECK...  %d / %d" % [
-			i + 1, RunState.deck.size()]
+		card_node.gallery_baked_mode = not CardTextureCache.has(data) \
+			and CardTextureCache.has_gallery(data)
+		card_node.visible = false
+		card_node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		(entry["host"] as Control).add_child(card_node)
+		staged_cards.append(card_node)
+		staged_backs.append(entry["back"] as Control)
+		staged_buttons.append(entry["button"] as Button)
+		staged_wraps.append(entry["wrapper"] as Control)
+		staged_rarities.append(String(data.get("rarity", "")))
+		preparing.text = "PREPARING THE DECK...  %d / %d" % [
+			i + 1, staged.size()]
 		if DisplayServer.get_name() == "headless":
 			await get_tree().process_frame
 		else:
 			await RenderingServer.frame_post_draw
 		if not picker_alive.call():
 			return
+
+	preparing.text = "UNSEALING THE DECK..."
+	await _reveal_shop_card_group(staged_cards, staged_backs, staged_buttons,
+		staged_wraps, staged_rarities, false, picker_alive)
+	if not picker_alive.call():
+		return
+	for slot in _removal_card_nodes:
+		if is_instance_valid(slot):
+			GameTheme.hover_lift(slot, 1.025)
 	if is_instance_valid(preparing):
 		preparing.queue_free()
 
 
-func _confirm_sell(deck_index: int, slot: Control = null) -> void:
-	# One a visit; never the last card. Both are also enforced on the tile,
-	# but guard the commit against a stale grid.
+func _confirm_removal(deck_index: int, slot: Control = null) -> void:
+	# One a visit; never the last card; never on credit. All three are also
+	# enforced on the tile, but guard the commit against a stale grid — the
+	# purse check especially, since a picker opened while affordable outlives
+	# nothing else that could spend gold, but the grid does survive a rebuild.
 	if _transaction_busy:
 		return
-	if _sold_this_visit or RunState.deck.size() <= 1 \
-			or deck_index < 0 or deck_index >= RunState.deck.size():
+	var fee := _removal_fee()
+	if _strikes_this_visit >= STRIKES_PER_VISIT or RunState.deck.size() <= 1 \
+			or deck_index < 0 or deck_index >= RunState.deck.size() \
+			or RunState.gold < fee:
 		_build_ui()
 		return
 	_transaction_busy = true
-	_sell_build_generation += 1
-	var price := _sell_price(RunState.deck[deck_index])
-	_sold_this_visit = true
+	_removal_build_generation += 1
+	_strikes_this_visit += 1
 	var old_gold := RunState.gold
+	RunState.gold -= fee
 	RunState.remove_card_at(deck_index)
-	RunState.gain_gold(price)
 	_update_gold_display(old_gold, RunState.gold)
-	_spawn_gold_gain(price)
+	_spawn_gold_spend(fee)
 	if slot != null and is_instance_valid(slot) \
 			and not (UserSettings != null and UserSettings.reduce_motion):
 		GameTheme.claim_pop(slot)
-		for other in _sell_card_nodes:
+		for other in _removal_card_nodes:
 			if other != slot and other is Control and is_instance_valid(other):
 				var tw := (other as Control).create_tween()
 				tw.tween_property(other, "modulate:a", 0.0, 0.18) \
 					.set_ease(Tween.EASE_IN)
 		await get_tree().create_timer(0.16).timeout
 	var vp := get_viewport_rect().size
-	# The sold card slides up onto the sutler's counter and out of the pack —
-	# the trade has a direction (buys dive down to you, sales rise to him).
+	# The struck card slides up over the counter and out of the pack — the
+	# trade keeps its direction (bought wares dive down to you, cards you give
+	# up rise away from you).
 	await GameTheme.pocket_away(slot, Vector2(vp.x * 0.5, 40.0))
 	_build_ui()
 

@@ -44,7 +44,44 @@ $specs = @(
         Name = 'event_art'
         Scene = 'res://tools/_probe_event_art.tscn'
         Sentinel = 'PROBE PASS: event_art'
+    },
+    # Cheap enough for the pre-commit loop (~2s, pure data + settings) and it
+    # guards a failure mode nothing else can see: a lesson id quoted at a call
+    # site but absent from TutorialDB does not error, does not warn, and reads as
+    # "this player has already been taught it" forever. Its slower sibling,
+    # _probe_tutorial_live, boots a real fight and belongs with the UI gates.
+    [pscustomobject]@{
+        Name = 'tutorial'
+        Scene = 'res://tools/_probe_tutorial.tscn'
+        Sentinel = 'PROBE PASS: tutorial'
+    },
+    # C34 (2026-09-19). Static, seconds, and it guards the failure mode that has
+    # produced almost every red line in this suite's history: a probe pinning a
+    # balance number as a literal. The 2026-09-19 sweep found 8 failing checks
+    # across 4 gates and ALL 8 were this -- a rebalance moved five cards and the
+    # mechanics were all correct. Cheap enough for the pre-commit loop, and the
+    # thing it prevents is a red line nobody believes, which is what trains people
+    # to stop running the suite at all.
+    #
+    # Runs with --script (it extends SceneTree, so it cannot be a scene root).
+    [pscustomobject]@{
+        Name = 'fixture_pins'
+        Scene = 'res://tools/_probe_fixture_pins.gd'
+        Script = $true
+        Sentinel = '[pins] PASS'
     }
+    # NOTE: `_probe_resolver_sweep` is deliberately NOT here, for a reason worth
+    # stating. Its oracle is stderr, scored by tools/_score_resolver_sweep.sh --
+    # the probe itself prints PASS even when the game is broken (proven by its
+    # mutant run). Adding it to a SENTINEL-based runner would install exactly the
+    # fake-green gate this session just removed from _probe_field_grants. It also
+    # boots a real Combat scene 161 times, which is minutes, not seconds.
+    # NOTE: `_probe_transition` is deliberately NOT here. It boots a real scene
+    # and so emits Godot's usual exit-time noise ("resources still in use",
+    # "ObjectDB instances leaked"), which this runner treats as a failure by
+    # design — that strictness is what makes the pre-commit set trustworthy. It
+    # lives in run_ui_gates.ps1, which tolerates exactly that named list for
+    # exactly this reason: every gate there builds scenes.
 )
 
 $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
@@ -64,7 +101,14 @@ try {
     foreach ($spec in $specs) {
         $stdoutPath = Join-Path $probeRoot ($spec.Name + '.stdout.log')
         $stderrPath = Join-Path $probeRoot ($spec.Name + '.stderr.log')
-        $argumentString = '--headless --path "{0}" "{1}"' -f $projectRoot, $spec.Scene
+        # A .tscn runs as a SCENE (so autoload names resolve); a SceneTree-derived
+        # .gd must be handed to --script, where it cannot be a scene root at all.
+        $isScript = ($spec.PSObject.Properties.Name -contains 'Script') -and $spec.Script
+        if ($isScript) {
+            $argumentString = '--headless --path "{0}" --script "{1}"' -f $projectRoot, $spec.Scene
+        } else {
+            $argumentString = '--headless --path "{0}" "{1}"' -f $projectRoot, $spec.Scene
+        }
         Write-Host ('[probe-runner] START {0}' -f $spec.Name)
         $process = Start-Process -FilePath $godot -ArgumentList $argumentString -NoNewWindow -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
         # Touching .Handle caches the process handle while the process is still

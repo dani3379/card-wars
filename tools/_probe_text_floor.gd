@@ -23,6 +23,21 @@ extends SceneTree
 
 const HARD_FLOOR := 14
 const WAIVER := "textfloor: fitted"
+## Label builders that DO NOT clamp to GameTheme.MIN_LABEL_SIZE. A literal size
+## passed to one of these renders at exactly that size, so a sub-floor argument
+## is a real violation — but it arrives at add_theme_font_size_override as a
+## VARIABLE, which the literal-only regex below can never see.
+##
+## Found 2026-07-31: Combat.gd makes ZERO GameTheme.make_label calls (it uses the
+## private clone below), and GameOver.gd does the same. Both shipped 13px worded
+## text past this gate. The clamped helpers are deliberately NOT listed — a
+## sub-floor argument to MainMenu._make_display_label is inert, not a violation.
+const UNCLAMPED_LABEL_HELPERS := {
+	"res://scripts/scenes/Combat.gd": ["_make_text_label"],
+	"res://scripts/scenes/GameOver.gd": ["_make_summary_label"],
+	"res://scripts/scenes/Collection.gd": ["_ghost_label"],
+}
+
 const EXEMPT_FILES := [
 	"res://scripts/Card2D.gd",
 	"res://scripts/state/PerformanceOverlay.gd",
@@ -80,6 +95,7 @@ func _scan_file(path: String, re: RegEx) -> void:
 	while not f.eof_reached():
 		var line := f.get_line()
 		line_no += 1
+		_scan_helper_call(path, line, line_no)
 		var m := re.search(line)
 		if m == null:
 			continue
@@ -122,3 +138,51 @@ func _require_source_count(path: String, needle: String, expected: int,
 	_fails += 1
 	print("[text_floor] FAIL  %s — %s (expected %d, found %d)"
 		% [path, message, expected, actual])
+
+## Scan of unclamped-helper call sites. Arguments are split at paren DEPTH 1, not
+## by regex: a regex for ", <int>," also matches integers inside nested calls, and
+## `_make_summary_label(_roman(maxi(MetaState.total_runs, 1)), 30, ...)` duly
+## reported "size 1" when the real size is 30. Depth-aware splitting is barely
+## more code and has no such failure.
+func _scan_helper_call(path: String, line: String, line_no: int) -> void:
+	var helpers: Array = UNCLAMPED_LABEL_HELPERS.get(path, [])
+	if helpers.is_empty() or line.contains("func ") or line.contains(WAIVER):
+		return
+	for helper in helpers:
+		for arg in _top_level_args(line, String(helper)):
+			var trimmed: String = String(arg).strip_edges()
+			if not trimmed.is_valid_int():
+				continue
+			var size := int(trimmed)
+			if size >= HARD_FLOOR:
+				continue
+			_fails += 1
+			print("[text_floor] FAIL  %s:%d  size %d (unclamped helper)  — %s"
+				% [path, line_no, size, line.strip_edges()])
+
+
+## Arguments of `helper(...)` that sit at the call's own paren depth. A call that
+## continues onto the next line simply yields the arguments present so far.
+func _top_level_args(line: String, helper: String) -> Array:
+	var out: Array = []
+	var idx := line.find(helper + "(")
+	if idx < 0:
+		return out
+	var depth := 1
+	var arg := ""
+	for i in range(idx + helper.length() + 1, line.length()):
+		var ch := line[i]
+		if ch == "(" or ch == "[":
+			depth += 1
+		elif ch == ")" or ch == "]":
+			depth -= 1
+			if depth == 0:
+				out.append(arg)
+				return out
+		if depth == 1 and ch == ",":
+			out.append(arg)
+			arg = ""
+		else:
+			arg += ch
+	out.append(arg)
+	return out

@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://bonusshot1"]
+
+[ext_resource type="Script" path="res://tools/_shot_bonus.gd" id="1"]
+
+[node name="BonusShot" type="Node"]
+script = ExtResource("1")

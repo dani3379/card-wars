@@ -72,12 +72,21 @@ const SHARED_ART_DEBT: Array = [
 	# for the ferry; a lit cresset reads for the beacon line.
 	["the_drowned_ferry", "the_signal_line"],
 
-	# BORROWER-BORROWER on old_forge.png. The forge cart was chosen for
-	# the_ladder_merchant's arms-dealer rig (see its inline note) and still
-	# fits. the_powder_move only inherited it from the retired powder-keg
-	# game — it is now "The Dead Man's Deal", a card game, so it holds the
-	# WEAKER claim and should get the bespoke plate first.
-	["the_ladder_merchant", "the_powder_move"],
+	# old_forge.png FINALLY HAS ITS OWNER (2026-08-29). It was borrower-borrower
+	# for as long as this ledger has existed, because the event the painting was
+	# made for had never been wired — `tools/_probe_reachability.gd` found the
+	# whole feature orphaned (effect, picker, gate and plate, emitted by nothing)
+	# and the Old Forge event now exists. So this is owner + one borrower:
+	# the_ladder_merchant's arms-dealer rig was chosen for the forge cart and
+	# still fits. Clears with: a bespoke rig for the ladder merchant.
+	["old_forge", "the_ladder_merchant"],
+
+	# the_powder_move ("The Dead Man's Deal") moved OFF old_forge.png in the same
+	# pass — this ledger had already named it as holding the weaker claim there,
+	# being a card game wearing a forge cart. It now rides three_doors.png beside
+	# Crown & Pike: a choice among unknowns, carrying the two roadside games of
+	# chance. Clears with: a dead card-sharp over a spread hand.
+	["the_drummers_tattoo", "the_powder_move"],
 
 	# widows_tray (renamed "The Widow's Cut") rides pawnbrokers_window.png.
 	# Shared read: a woman trading across a counter after dark. Clears with:

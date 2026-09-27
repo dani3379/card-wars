@@ -1529,6 +1529,142 @@ func _encounter_roll_stream(salt: int) -> RandomNumberGenerator:
 var _trace_open := false
 var _trace_t0 := 0
 
+## The opening keeps its performance-friendly frame yields, but none of those
+## partial stages are player-facing. This scene-owned layer also sits above the
+## HUD and hand CanvasLayers, which a default-canvas transition rect cannot.
+var _combat_opening_active := false
+var _opening_cover_layer: CanvasLayer = null
+var _opening_cover_root: Control = null
+var _opening_cover_mark: Control = null
+var _opening_cover_wait_tween: Tween = null
+
+
+func _build_combat_opening_cover() -> void:
+	if _opening_cover_layer != null and is_instance_valid(_opening_cover_layer):
+		return
+	var layer := CanvasLayer.new()
+	layer.name = "CombatOpeningCover"
+	layer.layer = 220
+	add_child(layer)
+	_opening_cover_layer = layer
+
+	var cover := Control.new()
+	cover.name = "OpeningCoverRoot"
+	cover.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	cover.mouse_filter = Control.MOUSE_FILTER_STOP
+	layer.add_child(cover)
+	_opening_cover_root = cover
+
+	var ink := ColorRect.new()
+	ink.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ink.color = Color(0.026, 0.019, 0.015, 1.0)
+	ink.mouse_filter = Control.MOUSE_FILTER_STOP
+	cover.add_child(ink)
+
+	# A cheap lamplit centre, built from one gradient texture rather than a
+	# particle/process effect. The expensive board can assemble underneath it.
+	var glow_grad := Gradient.new()
+	glow_grad.set_color(0, Color(0.32, 0.20, 0.075, 0.20))
+	glow_grad.set_color(1, Color(0.02, 0.014, 0.012, 0.0))
+	var glow_tex := GradientTexture2D.new()
+	glow_tex.gradient = glow_grad
+	glow_tex.fill = GradientTexture2D.FILL_RADIAL
+	glow_tex.fill_from = Vector2(0.5, 0.5)
+	glow_tex.fill_to = Vector2(0.98, 0.5)
+	var glow := TextureRect.new()
+	glow.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	glow.texture = glow_tex
+	glow.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	glow.stretch_mode = TextureRect.STRETCH_SCALE
+	glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cover.add_child(glow)
+
+	var mark := VBoxContainer.new()
+	mark.name = "MusterMark"
+	mark.anchor_left = 0.5
+	mark.anchor_right = 0.5
+	mark.anchor_top = 0.5
+	mark.anchor_bottom = 0.5
+	mark.offset_left = -330
+	mark.offset_right = 330
+	mark.offset_top = -100
+	mark.offset_bottom = 100
+	mark.alignment = BoxContainer.ALIGNMENT_CENTER
+	mark.add_theme_constant_override("separation", 9)
+	mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cover.add_child(mark)
+	_opening_cover_mark = mark
+
+	for _i in 2:
+		var rule := ColorRect.new()
+		rule.color = Color(GILT.r, GILT.g, GILT.b, 0.48)
+		rule.custom_minimum_size = Vector2(390, 2)
+		rule.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		mark.add_child(rule)
+		if _i == 0:
+			var title := _make_text_label("MUSTERING THE FIELD", 30, GameTheme.GILT_BRIGHT)
+			title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			mark.add_child(title)
+			var encounter := _make_text_label(
+				(_encounter_name if _encounter_name != "" else "THE WAR TABLE").to_upper(),
+				18, Color(0.91, 0.84, 0.68))
+			encounter.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			encounter.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			mark.add_child(encounter)
+			var status := _make_text_label("The war table is being set.", 16,
+				Color(0.68, 0.59, 0.45))
+			status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			mark.add_child(status)
+
+	mark.modulate.a = 1.0
+	if DisplayServer.get_name() != "headless" \
+			and not (UserSettings != null and UserSettings.reduce_motion):
+		mark.modulate.a = 0.72
+		var wait_tw := mark.create_tween()
+		_opening_cover_wait_tween = wait_tw
+		wait_tw.set_loops()
+		wait_tw.tween_property(mark, "modulate:a", 1.0, UserSettings.anim_time(0.58)) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		wait_tw.tween_property(mark, "modulate:a", 0.72, UserSettings.anim_time(0.58)) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	set_meta("_combat_opening_cover_active", true)
+
+
+func _release_combat_opening_cover() -> void:
+	if _opening_cover_wait_tween != null and _opening_cover_wait_tween.is_valid():
+		_opening_cover_wait_tween.kill()
+	_opening_cover_wait_tween = null
+	if _opening_cover_layer == null or not is_instance_valid(_opening_cover_layer):
+		_combat_opening_active = false
+		set_meta("_combat_opening_cover_active", false)
+		return
+	var live_layer := _opening_cover_layer
+	var live_cover := _opening_cover_root
+	var live_mark := _opening_cover_mark
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	if not snap and live_cover != null and is_instance_valid(live_cover):
+		if live_mark != null and is_instance_valid(live_mark):
+			live_mark.pivot_offset = live_mark.size * 0.5
+		var reveal := live_cover.create_tween()
+		reveal.set_parallel(true)
+		reveal.tween_property(live_cover, "modulate:a", 0.0, UserSettings.anim_time(0.18)) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+		if live_mark != null and is_instance_valid(live_mark):
+			reveal.tween_property(live_mark, "scale", Vector2(1.025, 1.025), UserSettings.anim_time(0.18)) \
+				.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		await reveal.finished
+	if live_layer != null and is_instance_valid(live_layer):
+		live_layer.queue_free()
+	_opening_cover_layer = null
+	_opening_cover_root = null
+	_opening_cover_mark = null
+	_combat_opening_active = false
+	set_meta("_combat_opening_cover_active", false)
+
 
 func _trace(label: String) -> void:
 	if not _trace_open:
@@ -1550,6 +1686,10 @@ func _abandoned_skirmish_to_menu() -> void:
 
 
 func _ready() -> void:
+	_combat_opening_active = true
+	set_meta("_combat_opening_cover_active", true)
+	Card2D.board_interactive = false
+
 	_trace_open = OS.get_cmdline_user_args().has("--combat_trace")
 	_trace_t0 = Time.get_ticks_usec()
 	set_process(false)
@@ -1593,6 +1733,7 @@ func _ready() -> void:
 	_swap_background_for_act()
 	_trace("background swapped")
 	_setup_fight_state()
+	_build_combat_opening_cover()
 	_trace("fight state set up")
 	# Stand the map's idle deck warm down before we ask for the bake viewport.
 	# CardTextureCache serializes bakers through _bake_busy, so committing to a
@@ -1634,9 +1775,9 @@ func _ready() -> void:
 	# HUD + decks is ~340 ms of contiguous main-thread work, and run in one block
 	# it renders NO frame for that whole time: the player stares at a bare arena,
 	# frozen, then everything pops in at once. Handing the frame back between the
-	# stages turns that single stall into a fast, live build-up. The order is
+	# stages keeps each stall short behind one stable loading composition. The order is
 	# unchanged (each stage still reads what the previous one made) — only the
-	# frames in between are new, and nothing here is interactive yet.
+	# frames in between are new, and the cover owns input until publication.
 	_build_board()
 	_trace("board built")
 	await get_tree().process_frame
@@ -1676,6 +1817,9 @@ func _ready() -> void:
 	# intro, no solo round loop. The host drives the turn sequence; the client
 	# waits for events. Everything below is campaign-only.
 	if _is_net():
+		_sync_pile_hud()
+		await get_tree().process_frame
+		await _release_combat_opening_cover()
 		_net_begin_combat()
 		return
 	# Gambler's Coin: once at fight start, coin flip — draw 1 extra OR deal 3
@@ -1692,6 +1836,11 @@ func _ready() -> void:
 	# stays a single entry point for "stuff that fires once when the fight
 	# begins, after enemies are placed but before round 1 draws".
 	_apply_combat_start_relics()
+	_sync_pile_hud()
+	# Paint one complete, correct frame under the cover before its ink lifts.
+	await get_tree().process_frame
+	await _release_combat_opening_cover()
+	_trace("settled combat screen revealed; intro banner begins")
 	_trace("combat-start relics applied — intro banner begins")
 	# Boss / General encounters get a dramatic intro banner (name + passive)
 	# before the first round begins. EVERY other fight gets the quick variant.
@@ -1773,6 +1922,12 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	_combat_opening_active = false
+	if _opening_cover_wait_tween != null and _opening_cover_wait_tween.is_valid():
+		_opening_cover_wait_tween.kill()
+	_opening_cover_wait_tween = null
+	set_meta("_combat_opening_cover_active", false)
+
 	var supersample := get_node_or_null("/root/Supersample")
 	if supersample != null:
 		supersample.end_adaptive_scope(self)
@@ -4724,6 +4879,10 @@ func _start_round() -> void:
 
 
 func _on_end_turn() -> void:
+	if _combat_opening_active:
+		return
+	if _end_turn_btn != null and is_instance_valid(_end_turn_btn) and _end_turn_btn.disabled:
+		return
 	if phase != Phase.PLAYER_TURN:
 		return
 	if _targeting_spell != null:
@@ -11251,6 +11410,10 @@ func _on_end_turn_confirmed() -> void:
 
 
 func _request_space_end_turn() -> void:
+	if _combat_opening_active:
+		return
+	if _end_turn_btn != null and is_instance_valid(_end_turn_btn) and _end_turn_btn.disabled:
+		return
 	if phase != Phase.PLAYER_TURN or _space_end_turn_confirm_open:
 		return
 	# Do not turn an attempted targeting confirm into an end-turn request.
@@ -14652,6 +14815,10 @@ func _apply_frenzy(target: Control, is_plus: bool) -> void:
 # =====================================================================
 
 func _input(event: InputEvent) -> void:
+	if _combat_opening_active:
+		get_viewport().set_input_as_handled()
+		return
+
 	# Glossary hotkeys are handled here (before UI focus traversal) so Tab and
 	# ? are not consumed by button focus navigation.
 	if event is InputEventKey and event.pressed:
@@ -27187,6 +27354,22 @@ func _refresh_pile_stack(art: Control, count: int) -> void:
 		shadow.modulate.a = ghost
 
 
+func _sync_pile_hud() -> void:
+	# Side-effect-free opening/state sync. `_update_hud` does much more (gold
+	# punches, forecasts, process toggles), so it is the wrong tool under a cover.
+	if _deck_count_label != null:
+		_deck_count_label.text = str(_player_draw_pile.size())
+	if _discard_count_label != null:
+		_discard_count_label.text = str(_player_discard_pile.size())
+	if _exhaust_count_label != null:
+		_exhaust_count_label.text = str(_exhaust_pile.size())
+	_refresh_pile_stack(_deck_pile_art, _player_draw_pile.size())
+	_refresh_pile_stack(_discard_pile_art, _player_discard_pile.size())
+	_refresh_pile_stack(_exhaust_pile_art, _exhaust_pile.size())
+	if _exhaust_box != null:
+		_exhaust_box.visible = not _exhaust_pile.is_empty()
+
+
 # ── Pile viewer overlay ──
 # Modal that lists the contents of a pile (0 = draw, 1 = discard). Cards are
 # sorted by cost then name so the player can quickly see what's coming, not
@@ -27884,6 +28067,7 @@ func _build_end_turn_button() -> void:
 		Color(0.21, 0.125, 0.066, 0.98), Color(0.97, 0.83, 0.46), 3, 4, true))
 	btn.set_meta("style_normal", et_normal)
 	btn.set_meta("style_ready", et_ready)
+	btn.disabled = true
 	_end_turn_btn = btn
 	_hud_layer.add_child(btn)
 

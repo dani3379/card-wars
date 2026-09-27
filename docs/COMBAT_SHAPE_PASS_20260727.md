@@ -133,6 +133,28 @@ Refill is NOT the throttle: 5→4 costs only −4% plays; 5→3 empties the hand
 
 ### 3.4 Turn order — the player already goes second
 
+> **⚠ STALE AS OF 2026-07-27 — THIS SECTION DESCRIBES THE PRE-"TAKE THE FIELD"
+> ENGINE. DO NOT IMPLEMENT IT.** The change proposed below was BUILT the same day
+> this document was written, and the section was never updated. `Combat.gd:1628`
+> now carries the TAKE THE FIELD note: `_opening_muster_pending` is deliberately
+> left standing so `_post_combat_sequence` → `_enemy_place_creatures` consumes it,
+> and **the hold forms up at the END of round 1 — the player moves first.**
+> `ROADMAP_TO_1.0.md`'s 2026-07-30 entry states it outright: *"Moving first had
+> been free since 2026-07-27, and free is not interesting"*, which is why THE
+> INITIATIVE was then added to make it a priced choice at Generals and keeps.
+>
+> Measured 2026-09-19 by `tools/_probe_turn_order.tscn`: enemy bodies standing at
+> the instant the player may first act, over ordinary act-1 combats. The figure is
+> in that probe's output; a value of 0 is the player moving first.
+>
+> The summary line in the table above ("give the player a coin for going second" →
+> *the player already goes second in every fight, uncompensated*) and the identical
+> claim in **CLAUDE.md's description of this file** are both stale for the same
+> reason. A session trusting either would "fix" a thing already fixed, and the
+> obvious way to do that is to restore the pre-2026-07-27 behaviour that this
+> document's own measured trace (`_probe_fighttrace`, orc_warband: the player
+> opening against FOUR bodies totalling 14 ATK on 3 Command) rejected.
+
 - `Combat._ready` **awaits `_run_opening_muster()` at `Combat.gd:1186`, before the player
   may act.** The comment at `:1182-1184` states the intent: *"BEFORE the player can act, so
   round 1 is planned against a real board."* `_run_opening_muster`'s own docstring

@@ -128,7 +128,8 @@ func _ready() -> void:
 	NetMatch.peer_left.connect(_on_peer_lost)
 	NetMatch.host_closed.connect(_on_peer_lost)
 
-	# Every net game opens with the shared arsenal stage (3 relics + 2 potions);
+	# Every net game opens with the shared arsenal stage (the host sets how many
+	# relic and potion picks it offers; 0 + 0 raises no stage at all);
 	# present it before constructing the obscured 100+ card catalogue.
 	_begin_arsenal()
 	_prepare_mode_ui()
@@ -623,10 +624,24 @@ func _hydrate_visible_pool_cards(generation: int) -> void:
 			job["state"] = "card"
 			job["busy"] = false
 			_pool_jobs[job_index] = job
-			_set_pool_row_visual(String(job.get("id", "")), face, true)
+			# The ornate face exists, but the permanent hit target stays locked until
+			# the entire viewport batch has completed its shared turn.
+			_set_pool_row_visual(String(job.get("id", "")), face, false)
 			faces.append(face)
 			covers.append(cover)
-		_reveal_complete_hand(faces, covers)
+		await _reveal_complete_hand(faces, covers)
+		if not _pool_hydration_valid(generation):
+			break
+		for job_index in staged:
+			if job_index < 0 or job_index >= _pool_jobs.size():
+				continue
+			var revealed_job: Dictionary = _pool_jobs[job_index]
+			var revealed_face: Control = revealed_job.get("visual", null)
+			if String(revealed_job.get("state", "")) != "card" \
+					or revealed_face == null or not is_instance_valid(revealed_face):
+				continue
+			_set_pool_row_visual(String(revealed_job.get("id", "")),
+				revealed_face, true)
 	_pool_hydration_generation = -1 \
 		if _pool_hydration_generation == generation \
 		else _pool_hydration_generation
@@ -657,17 +672,22 @@ func _set_pool_row_visual(id: String, visual: Control,
 # ─────────────────────────────────────────────────────────────────────────
 
 func _on_add(id: String) -> void:
-	if _local_finished:
+	if _local_finished or not _pool_rows.has(id) \
+			or not bool((_pool_rows[id] as Dictionary).get("hydrated", false)):
 		return
 	if _deck.size() >= _target:
 		return
 	if int(_counts.get(id, 0)) >= MAX_COPIES:
 		return
+	var pool_refs: Dictionary = _pool_rows.get(id, {})
+	var source_button: Button = pool_refs.get("button", null)
+	if source_button != null and is_instance_valid(source_button):
+		GameTheme.claim_pop(source_button)
 	_deck.append(id)
 	_counts[id] = int(_counts.get(id, 0)) + 1
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play")
-	_refresh_all()
+	_refresh_all(id, 1)
 
 
 func _on_remove(id: String) -> void:
@@ -680,7 +700,7 @@ func _on_remove(id: String) -> void:
 	_counts[id] = max(0, int(_counts.get(id, 0)) - 1)
 	if int(_counts[id]) == 0:
 		_counts.erase(id)
-	_refresh_all()
+	_refresh_all(id, -1)
 
 
 func _on_clear() -> void:
@@ -800,10 +820,12 @@ func _flash_status(msg: String, col: Color) -> void:
 #  REFRESH
 # ─────────────────────────────────────────────────────────────────────────
 
-func _refresh_all() -> void:
+func _refresh_all(changed_id: String = "", change: int = 0) -> void:
 	_refresh_pool_counts()
-	_refresh_deck_panel()
+	_refresh_deck_panel(changed_id, change)
 	_update_ready()
+	if change != 0 and _deck_count_lbl != null:
+		Motion.pulse_label(_deck_count_lbl, GILT_BRIGHT if change > 0 else RED_WARN)
 	_update_status()
 
 
@@ -827,44 +849,48 @@ func _apply_pool_row_state(id: String, full: bool) -> void:
 		badge.visible = n > 0
 	var copies_maxed := n >= MAX_COPIES
 	if button != null and is_instance_valid(button):
+		button.set_meta("card_loading", not hydrated)
 		button.disabled = not hydrated or _local_finished or full or copies_maxed
 	if visual != null and is_instance_valid(visual):
 		visual.modulate = Color(0.45, 0.45, 0.45, 0.8) \
 			if copies_maxed else Color.WHITE
 
 
-func _refresh_deck_panel() -> void:
+func _refresh_deck_panel(changed_id: String = "", change: int = 0) -> void:
 	_clear_hover_preview_under(_deck_box)   # a previewed deck tile may be freed below
 	for c in _deck_box.get_children():
+		_deck_box.remove_child(c)
 		c.queue_free()
-	# Group the deck by id and list it sorted by cost then name.
+	# Keep cost/name order, but render each physical copy. Together with the
+	# vacant slots this holds the HFlow at exactly twenty footprints throughout.
 	var ids := _counts.keys()
 	ids.sort_custom(func(a: String, b: String) -> bool:
 		return _pool_sort_before(a, b))
-	if ids.is_empty():
-		var hint := GameTheme.make_label(
-			"Click cards in the pool to add them to your deck.", 14, ASH)
-		hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		_deck_box.add_child(hint)
 	for raw_id in ids:
 		var id := String(raw_id)
 		var n := int(_counts[id])
 		if n <= 0:
 			continue
-		var d: Dictionary = _pool_data.get(id, {})
-		var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
-		var badge := thumb["badge"] as Label
-		badge.text = "×%d" % n
-		badge.visible = n > 1
-		var btn := thumb["button"] as Button
-		btn.tooltip_text = "%s — click to remove" % String(d.get("name", id))
-		_attach_hover_preview(btn, id)
-		if _local_finished:
-			btn.disabled = true
-		else:
-			btn.pressed.connect(_on_remove.bind(id))
-		_deck_box.add_child(thumb["root"])
+		for copy_idx in n:
+			var d: Dictionary = _pool_data.get(id, {})
+			var thumb := GameTheme.make_card_thumb(d, THUMB_SCALE)
+			(thumb["badge"] as Label).visible = false
+			var btn := thumb["button"] as Button
+			btn.tooltip_text = "%s — click to remove" % String(d.get("name", id))
+			_attach_hover_preview(btn, id)
+			if _local_finished:
+				btn.disabled = true
+			else:
+				btn.pressed.connect(_on_remove.bind(id))
+			var root := thumb["root"] as Control
+			_deck_box.add_child(root)
+			if change > 0 and id == changed_id and copy_idx == n - 1:
+				Motion.deal_card(root, 0.0, {"face": thumb["card"],
+					"from": Vector2(-54.0, 20.0), "spin": -0.08,
+					"dur": 0.24, "bow": 0.10})
+	var missing: int = maxi(_target - _deck.size(), 0)
+	for _i in missing:
+		_deck_box.add_child(_make_deck_ghost_slot())
 
 
 func _update_ready() -> void:
@@ -937,11 +963,11 @@ func _store_opponent_deck(cards: Array) -> void:
 
 
 func _maybe_begin_combat() -> void:
-	if not (_local_finished and _remote_finished):
+	if not _claim_combat_launch():
 		return
 	_show_marching()
 	if NetMatch.is_host:
-		NetMatch.launch_combat()
+		NetMatch.launch_combat(true)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -958,6 +984,7 @@ func _show_marching() -> void:
 	if _header != null:
 		_header.text = "Both decks ready — starting the match…"
 		_header.add_theme_color_override("font_color", GREEN)
+		Motion.pulse_label(_header, GILT_BRIGHT)
 
 
 func _on_peer_lost(_id: int = 0) -> void:
@@ -972,7 +999,5 @@ func _on_peer_lost(_id: int = 0) -> void:
 		_ready_btn.disabled = true
 	var back := GameTheme.make_themed_button("BACK TO MENU",
 		Color(0.26, 0.16, 0.14), Vector2(220, 44), 16)
-	back.pressed.connect(func():
-		NetMatch.leave()
-		get_tree().change_scene_to_file(MENU_SCENE))
+	back.pressed.connect(_leave_to_menu.bind(back))
 	_root.add_child(back)

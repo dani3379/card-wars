@@ -46,7 +46,7 @@ layout_mode = 2
 theme_override_colors/font_color = Color(0.7, 0.6, 0.5, 1)
 theme_override_font_sizes/font_size = 18
 horizontal_alignment = 1
-text = "a grimoire-deck roguelike"
+text = "A lane combat roguelike deckbuilder"
 
 [node name="Spacer" type="Control" parent="VBox"]
 custom_minimum_size = Vector2(0, 30)
@@ -69,4 +69,4 @@ layout_mode = 2
 theme_override_colors/font_color = Color(0.5, 0.5, 0.55, 1)
 theme_override_font_sizes/font_size = 14
 horizontal_alignment = 1
-text = "Runs: 0   Victories: 0   Defeats: 0"
+text = "Runs: 0   Wins: 0   Losses: 0"

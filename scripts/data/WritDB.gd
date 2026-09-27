@@ -122,8 +122,17 @@ const WRITS: Dictionary = {
 	#
 	# And every entry is about MONEY OR THE BODY — never about cards. Four road
 	# verbs, deliberately one each, so the slot cannot repeat itself and cannot
-	# repeat THE ROLL: BUY · SELL · EARN · MEND. Two of the four used to grant
+	# repeat THE ROLL: BUY · STRIKE · EARN · MEND. Two of the four used to grant
 	# deck-power relics; see the audit block at the top of this file.
+	#
+	# SELL became STRIKE on 2026-09-16, when the shop stopped paying for cards
+	# and started charging to remove them. Worth stating why that is still a
+	# ROAD verb and not a second ROLL: `provosts_broom` over in THE ROLL strikes
+	# two cards at the muster, free, before the march — a one-shot deck action
+	# on a deck the player is looking at. This tile changes the PRICE of a stop
+	# the player has to reach and choose to spend at, and is worth nothing at
+	# all to a route that skips the wagon. Different axis, same as a shop
+	# discount is not "free cards".
 	#
 	# On tiers: the test a purse relic has to pass is WHEN ITS RULE FIRES (on the
 	# road, between fights, at a stop), not which bucket RelicDB files it under.
@@ -137,10 +146,12 @@ const WRITS: Dictionary = {
 		"desc": "Shop goods cost a quarter less, all run.",
 		"effect": "purse", "relic": "merchants_license",
 	},
+	# The name got MORE apt on 2026-09-16, not less: a paymaster's ledger is the
+	# roll you are struck off, which is exactly what the shop's removal now does.
 	"paymasters_ledger": {
 		"id": "paymasters_ledger", "slot": "purse", "verb": "coin",
 		"name": "The Paymaster's Ledger",
-		"desc": "The shop pays double for cards you sell.",
+		"desc": "Removing a card at the shop costs half as much.",
 		"effect": "purse", "relic": "scavengers_pouch",
 	},
 	# Replaces `recruiting_warrant` (The Second Look → collectors_tome). Ids are
@@ -248,12 +259,12 @@ const PACTS: Dictionary = {
 	},
 	"sutlers_bond": {
 		"name": "Pact of the Bond", "verb": "coin",
-		"desc": "Shop goods cost a quarter less; sales pay double. Lose 6 max HP.",
+		"desc": "Shop goods cost a quarter less; removals cost half. Lose 6 max HP.",
 		"effect": "purse2", "relic": "merchants_license", "relic2": "scavengers_pouch",
 	},
 	"paymasters_ledger": {
 		"name": "Pact of the Ledger", "verb": "coin",
-		"desc": "Sales pay double; each win pays 10 more gold. Lose 6 max HP.",
+		"desc": "Removals cost half; each win pays 10 more gold. Lose 6 max HP.",
 		"effect": "purse2", "relic": "scavengers_pouch", "relic2": "coin_purse",
 	},
 	"campaign_chest": {
@@ -329,8 +340,16 @@ static func road_rule_worth(relic_id: String) -> float:
 		# back: one forge.
 		"merchants_license":
 			return 1.00
-		# The buy-back is one card a visit at 10 + 8 per Command; doubling it
-		# adds roughly 25 gold a visit across about four visits. One forge.
+		# Removal is one card a visit at a flat 60 (Shop.REMOVE_FEE); halving it
+		# saves 30 a visit. A route reaches ~4 shops but a player does not strike
+		# at every one — call it three, so ~90 gold saved: one forge.
+		#
+		# This is the relic that used to DOUBLE the buy-back's payout, and the
+		# 2026-09-16 flip re-derived it rather than inheriting the old 1.00 by
+		# coincidence. Worth keeping the sensitivity in view: at four strikes it
+		# is 1.33, which is still inside PACT_WORTH_MAX — the Bond pact's delta
+		# IS this number, so a fee rise or a deeper discount pushes that pact
+		# toward the ceiling before it shows up anywhere else.
 		"scavengers_pouch":
 			return 1.00
 		# 10 gold a won fight across 21 fights on a full route is 210 gold —
@@ -480,62 +499,40 @@ const SLOT_HINTS: Dictionary = {
 ## Every key is either in the lint's COPY_KEYS or ends in `_text`, which is how
 ## _is_copy_key decides what to read. A key it does not recognise is silently
 ## skipped — an unscanned string here looks exactly like a scanned one.
-## Split into three steps 2026-07-31. The one-screen version asked six questions
-## at once — an identity, a build modifier, an economy pick and three session
-## settings, all drawn as equals — and the owner's verdict on the rendered frame
-## was that it reads as overwhelming. The steps are ordered by DEPENDENCY, which
-## is why they are steps and not just three tabs: the banner's card joins the
-## host's opener, and the terms are weighed against the column both of them
-## build. Each step's heading is signage, so a run of capped words is intended.
+## RUN SETUP asks ONE question (2026-09-16): who leads. It was six at once,
+## then four walked as a wizard, then four on one page — the owner's verdict
+## on the merged page was that it is still way too much for one screen. THE
+## BANNERS were cut from the game, THE STARTING BONUS became its own beat after
+## the commit (Slay the Spire's Neow is the model), and the session settings
+## moved into a dialog. What is left on this screen is a roster and the lord it
+## chooses.
 ##
-## `subtitle` is now the standing promise printed under the rail on every step
-## rather than a one-line summary of the whole screen — it is the sentence that
-## makes BACK legible, so it belongs everywhere BACK does.
+## `subtitle` is the standing promise printed beside BACK — the sentence that
+## makes backing out legible, so it belongs everywhere BACK does.
 const MUSTER_COPY: Dictionary = {
 	"title": "RUN SETUP",
 	"subtitle": "Nothing is final until you press Start Run.",
+	# THE BONUS PAGE NEEDS ITS OWN (2026-09-17). `subtitle` is printed beside BACK
+	# on every screen that has one — and once the starting bonus moved off run
+	# setup onto its own page, that page was still promising "nothing is final
+	# until you press Start Run" to a player who had ALREADY pressed it to get
+	# there, on a screen carrying no such button. The reassurance is the point, so
+	# it is kept and re-aimed at the control that actually commits: the tiles all
+	# read SIGN TO BEGIN, and signing one is what starts the march.
+	"bonus_subtitle_text": "Nothing is spent until you sign one.",
 	"host_head_text": "THE HEROES",
 	# Named for what the pane LEADS with, not for its tail. It said "YOUR STARTING
 	# DECK" while holding a 216x287 portrait, the lord's name at 30px, his record,
 	# his pitch and his signature relic above the cards — the heading named the
 	# bottom third of its own pane. The roll line under the name already labels
-	# the deck inline ("11 cards · The Colours adds Line Marker").
+	# the deck inline ("10 cards · 30 max HP").
 	"column_head_text": "YOUR HERO",
-	"banner_head_text": "THE BANNERS",
 	"terms_head_text": "STARTING BONUS",
-	"step_host_text": "I · THE HERO",
-	"step_banner_text": "II · THE BANNER",
-	"step_terms_text": "III · THE BONUS",
-	# STEPS I AND II NO LONGER CARRY A DESC LINE, and the two that lived here are
-	# retired rather than left unread (2026-08-01). Step I's ("Who leads the march,
-	# and the company that marches with them") glossed the two panel headings
-	# printed directly beneath it; step II's ("Declare your colours. One of them
-	# falls in with you now, and more of them will find you on the road") said what
-	# banner_rule_text says forty words lower on the same screen. Four stacked
-	# centred lines opened every step — and since _make_display_label floors at
-	# GameTheme.MIN_LABEL_SIZE, the two written small rendered as loud as the two
-	# written large. See MainMenu._show_muster_step.
-	# Printed ONCE under the six chips. Every banner does exactly this, so saying
-	# it on each chip would be six copies of a sentence that cannot vary — and it
-	# would crowd out the one line where the six actually differ. Same
-	# screen-scoped rule the terms glossary follows.
-	"banner_rule_text": "Whichever banner you choose: one of its cards joins"
-		+ " your starting deck now, and its kind is offered more often at every"
-		+ " Recruit Camp.",
-	# The one desc line the split kept: "accept ONE" is the rule of the row and no
-	# tile states it. Second sentence cut 2026-08-01 — "each names the part of the
-	# run it moves" taught the reader to read a suffix the four tiles print for
-	# themselves ("— your deck", "— your gear", "— the road", "— the price").
-	# A CAPTION NOW, NOT A SENTENCE. This was a centred line of prose under three
-	# left-aligned small-caps captions, so the fourth decision on the screen wore
-	# a different uniform from the other three and read as an aside. Same shape as
-	# THE HEROES / YOUR HERO / THE BANNERS, with the pick-ONE rule carried inside
-	# it — no tile states that rule, so it cannot simply be dropped.
-	"terms_step_desc_text": "STARTING BONUS — CHOOSE ONE",
-	"next_banner_text": "NEXT: BANNER",
-	"next_terms_text": "NEXT: BONUS",
+	# The bonus screen's own instruction. "Choose one" is the rule of the row and
+	# no tile states it; each tile states only its own slot.
+	"terms_step_desc_text": "CHOOSE ONE",
+	"terms_screen_desc_text": "One favour before the march. It lasts the whole run.",
 	"seed_tooltip_text": "Same seed, same map and same offers.",
-	"banner_card_fallback_text": "a banner card",
 }
 
 

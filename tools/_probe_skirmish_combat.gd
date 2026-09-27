@@ -316,9 +316,30 @@ func _test_first_player_fairness() -> void:
 	combat._net_first_player_override = 0
 
 
+## An AFFORDABLE creature from hand, topping Command up if the deal gave none.
+##
+## It used to return the first creature at any price, which was safe while
+## Command was a flat 3 and 86% of the pool cost <=2. Under the Command ramp
+## (2026-09-16) round 1 grants ONE — `NetPlayerState.begin_turn` mirrors the same
+## curve, so skirmish is not exempt — against a rescaled pool whose median cost
+## is 3. `_on_card_played` then refuses the card, nothing seats, and every
+## downstream assertion about seating, entity ids, repositioning and spell
+## targeting fails against a board that was never populated. That was SIX of this
+## probe's failures, all one cause.
+##
+## The top-up is announced rather than silent: a fixture that quietly cannot run
+## its own scenario is the vacuous-gate class, and it is worse than a red one.
 func _first_hand_creature():
 	for c in combat._hand:
+		if is_instance_valid(c) and c.is_creature() \
+				and combat._effective_cost(c) <= int(combat.player_mana):
+			return c
+	for c in combat._hand:
 		if is_instance_valid(c) and c.is_creature():
+			combat.player_mana = maxi(int(combat.player_mana),
+				combat._effective_cost(c))
+			print("  (no affordable creature dealt; Command topped to %d)"
+				% int(combat.player_mana))
 			return c
 	return null
 
@@ -380,12 +401,32 @@ func _host_finishes_placing() -> void:
 func _client_places_a_creature() -> void:
 	print("— client places a creature via a play intent")
 	var enemy_before: int = combat._all_enemy_creatures().size()
+	# AFFORDABLE, for the same reason `_first_hand_creature` is — the host
+	# validates this intent against `NetPlayerState.mana`, which mirrors
+	# `Combat.command_for_round` exactly, so the client is on the ramp too and a
+	# round-1 intent for a median-cost-3 card is correctly REFUSED. Picking blind
+	# left the enemy side empty and failed four downstream assertions that were
+	# really all "the card never got played".
 	var entry: Dictionary = {}
+	var fallback: Dictionary = {}
+	var fallback_cost: int = 0
 	for candidate in combat.net._remote_state.hand:
 		var data: Dictionary = SS.skirmish_card_data(String(candidate.get("id", "")))
-		if String(data.get("type", "")) == "creature":
+		if String(data.get("type", "")) != "creature":
+			continue
+		var cost: int = int(data.get("cost", 0))
+		if fallback.is_empty():
+			fallback = candidate
+			fallback_cost = cost
+		if cost <= int(combat.net._remote_state.mana):
 			entry = candidate
 			break
+	if entry.is_empty() and not fallback.is_empty():
+		entry = fallback
+		combat.net._remote_state.mana = maxi(
+			int(combat.net._remote_state.mana), fallback_cost)
+		print("  (no affordable client creature dealt; client Command topped to %d)"
+			% int(combat.net._remote_state.mana))
 	if entry.is_empty():
 		_check(false, "authoritative client hand contained a creature")
 		return
@@ -698,7 +739,7 @@ func _test_net_battle_log() -> void:
 	var mine_c = combat._net_spawn_creature(CDB.get_card_data("brute"), 95001, 0, combat.ROW_FRONT, false, false)
 	_check(_log_has("You field"), "client logs its OWN placement (You field)")
 	var foe_c = combat._net_spawn_creature(CDB.get_card_data("goblin"), 95002, 1, combat.ROW_FRONT, true, false)
-	_check(_log_has("The foe fields"), "client logs the FOE placement (The foe fields)")
+	_check(_log_has("The enemy fields"), "client logs the enemy placement (The enemy fields)")
 
 	# A summoned token (eid ≥ the token base) must NOT log a fields line (matches solo).
 	_clear_log()
@@ -729,7 +770,7 @@ func _test_net_battle_log() -> void:
 	_clear_log()
 	combat._net_replay_face_hit(1 - int(NM.local_player_index), int(combat.enemy_hp) - 2, 2)
 	await create_timer(0.2).timeout
-	_check(_log_has("The foe takes"), "client logs the foe's face damage (clash)")
+	_check(_log_has("The enemy takes"), "client logs the enemy's face damage (clash)")
 
 	# ── STATUS — keyword callouts replayed via the fx channel ──
 	_clear_log()
@@ -739,7 +780,7 @@ func _test_net_battle_log() -> void:
 	# ── SPELLS — foe cast (telegraph) + the local-cast funnel ──
 	_clear_log()
 	combat._net_spell_telegraph(CDB.get_card_data("strike"), Vector2.ZERO, false, null)
-	_check(_log_has("The foe casts"), "client logs the foe's spell cast (telegraph)")
+	_check(_log_has("The enemy casts"), "client logs the enemy's spell cast (telegraph)")
 	_clear_log()
 	combat._net_log_local_cast(CDB.get_card_data("strike"), null)
 	_check(_log_has("You cast"), "the local-cast funnel logs 'You cast'")
@@ -995,6 +1036,15 @@ func _client_casts_a_spell() -> void:
 	fake_target.queue_free()
 
 	# Control: the same remote path still resolves a legal CardDB target.
+	#
+	# Fund the cast first. The two checks above are REJECTION tests and pass
+	# whatever the client can afford, but this one is the POSITIVE control — and
+	# under the Command ramp the client's round-1 Command has already gone on the
+	# creature it placed earlier, so the host refuses this spell for cost and the
+	# control silently stops proving that a legal target still resolves. Topping
+	# up here keeps the rejection tests honest (they ran on their own terms) while
+	# letting the control actually exercise the resolver.
+	combat.net._remote_state.mana = maxi(int(combat.net._remote_state.mana), 6)
 	var hp_before: int = int(target.current_hp)
 	combat._on_net_intent(2, {
 		"t": NM.IN_PLAY_SPELL, "uid": SS.UID_SLOT_STRIDE + 4,

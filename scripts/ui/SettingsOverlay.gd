@@ -293,6 +293,7 @@ func _build_overlay() -> void:
 		UserSettings.combat_telegraph,
 		func(v: bool): UserSettings.set_combat_telegraph(v))
 	_add_field_style_row(left_col)
+	_add_coaching_row(left_col)
 	_add_reset_tutorials_row(left_col)
 
 	# ── RIGHT COLUMN: Display ──
@@ -342,18 +343,37 @@ func _build_overlay() -> void:
 	btn_row.add_theme_constant_override("separation", 16)
 	btn_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-	var apply_btn := GameTheme.make_themed_button("APPLY", Color(0.58, 0.44, 0.16),
-		Vector2(140, 40), 16)
+	# THE FOOTER'S HIERARCHY WAS INVERTED (2026-08-05). APPLY came first, wearing
+	# a full plaque, and RESUME followed it as a FRAMELESS back-button label — so
+	# the control taken every single time this overlay is opened was the only
+	# unstyled thing on the screen, and it read as a caption that had come
+	# unstuck from something. (`make_back_button` is frameless BY DESIGN and is
+	# right everywhere else; what breaks here is standing it immediately beside a
+	# plaque of the same size.) Most settings on this screen apply live — APPLY
+	# only carries the handful that cannot — so RESUME is both the commonest and
+	# the more important of the two.
+	#
+	# Fixed by ordering it the way this game orders every other pair: the
+	# subordinate move first, the forward move last and warmest — the same
+	# grammar as _build_muster_nav's BACK / TAKE THE FIELD.
+	var apply_btn := GameTheme.make_themed_button("APPLY", Color(0.34, 0.28, 0.16),
+		Vector2(150, 42), 16)
 	apply_btn.pressed.connect(_apply_and_close)
+	GameTheme.arm_ui_press(apply_btn, "commit")
 	btn_row.add_child(apply_btn)
 
-	# "Resume" / Close — pill back button, primary way out.
-	var close_btn := GameTheme.make_back_button("RESUME", Vector2(150, 40))
+	var close_btn := GameTheme.make_themed_button("RESUME", Color(0.78, 0.58, 0.22),
+		Vector2(180, 42), 17)
+	close_btn.add_theme_color_override("font_color", Color(1.0, 0.93, 0.74))
 	close_btn.pressed.connect(_close)
+	GameTheme.arm_ui_press(close_btn, "back")
 	btn_row.add_child(close_btn)
 
 	vbox.add_child(btn_row)
-	_add_spacer(vbox, 6)
+	# The two rows used to sit 6px apart, which read as one four-button cluster
+	# with an accidental line break in it. The destructive row is a DIFFERENT
+	# class of action and wants the gap to say so.
+	_add_spacer(vbox, 14)
 
 	# Second row: destructive / system actions, visually separated so they're
 	# never the first thing the player's hand reaches for. Rebuilt on every
@@ -389,6 +409,7 @@ func _rebuild_system_row() -> void:
 			Color(0.36, 0.12, 0.10), Vector2(170, 38), 14)
 		leave_match_btn.add_theme_color_override("font_color", Color(1.0, 0.85, 0.75))
 		leave_match_btn.pressed.connect(_leave_match)
+		GameTheme.arm_ui_press(leave_match_btn, "back")
 		_system_row.add_child(leave_match_btn)
 	elif RunState.run_active:
 		# Save & exit path: preserves the run so it can be resumed from the
@@ -396,12 +417,14 @@ func _rebuild_system_row() -> void:
 		var menu_btn := GameTheme.make_themed_button("MAIN MENU",
 			Color(0.18, 0.14, 0.10), Vector2(150, 38), 14)
 		menu_btn.pressed.connect(_to_main_menu_save_run)
+		GameTheme.arm_ui_press(menu_btn, "back")
 		_system_row.add_child(menu_btn)
 
 		var abandon_btn := GameTheme.make_themed_button("ABANDON RUN",
 			Color(0.36, 0.12, 0.10), Vector2(170, 38), 14)
 		abandon_btn.add_theme_color_override("font_color", Color(1.0, 0.85, 0.75))
 		abandon_btn.pressed.connect(_abandon_run)
+		GameTheme.arm_ui_press(abandon_btn, "back")
 		_system_row.add_child(abandon_btn)
 	else:
 		# Out of a run/match: a "MAIN MENU" path makes sense from any scene except
@@ -412,12 +435,14 @@ func _rebuild_system_row() -> void:
 			var menu_btn := GameTheme.make_themed_button("MAIN MENU",
 				Color(0.18, 0.14, 0.10), Vector2(150, 38), 14)
 			menu_btn.pressed.connect(_to_main_menu)
+			GameTheme.arm_ui_press(menu_btn, "back")
 			_system_row.add_child(menu_btn)
 
 	# "Quit Game" — exit to OS. Always present so Esc → Quit Game is one path.
 	var quit_btn := GameTheme.make_themed_button("QUIT GAME",
 		Color(0.18, 0.14, 0.10), Vector2(150, 38), 14)
 	quit_btn.pressed.connect(_quit_game)
+	GameTheme.arm_ui_press(quit_btn, "back")
 	_system_row.add_child(quit_btn)
 
 
@@ -548,7 +573,7 @@ func _add_slider_row(parent: VBoxContainer, label_text: String, initial: float) 
 
 	_add_row_pad(row)
 
-	var lbl := _make_row_label(label_text, 100)
+	var lbl := _make_row_label(label_text, ROW_LABEL_W)
 	row.add_child(lbl)
 
 	var slider := HSlider.new()
@@ -578,38 +603,11 @@ func _add_slider_row(parent: VBoxContainer, label_text: String, initial: float) 
 	return [slider, pct]
 
 
+## The slider face moved into GameTheme on 2026-09-14 so the skirmish lobby's
+## arsenal scale could wear it too. Kept as a same-name delegator (the house
+## pattern) so every call site here is untouched.
 func _style_slider(slider: HSlider) -> void:
-	var track := StyleBoxFlat.new()
-	track.bg_color = Color(0.08, 0.06, 0.05, 0.9)
-	track.border_color = Color(0.3, 0.22, 0.12, 0.5)
-	for prop in ["border_width_top", "border_width_bottom",
-			"border_width_left", "border_width_right"]:
-		track.set(prop, 1)
-	for prop in ["corner_radius_top_left", "corner_radius_top_right",
-			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
-		track.set(prop, 4)
-	track.content_margin_top = 4
-	track.content_margin_bottom = 4
-	slider.add_theme_stylebox_override("slider", track)
-
-	var filled := StyleBoxFlat.new()
-	filled.bg_color = Color(0.65, 0.50, 0.18, 0.9)
-	for prop in ["corner_radius_top_left", "corner_radius_top_right",
-			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
-		filled.set(prop, 4)
-	filled.content_margin_top = 4
-	filled.content_margin_bottom = 4
-	slider.add_theme_stylebox_override("grabber_area", filled)
-
-	var filled_hl := filled.duplicate() as StyleBoxFlat
-	filled_hl.bg_color = Color(0.82, 0.66, 0.30, 1.0)
-	slider.add_theme_stylebox_override("grabber_area_highlight", filled_hl)
-
-	# Diamond grabber — the house ornament, matching the InkSwitch thumb and
-	# the dropdown arrows (was a plain circle).
-	slider.add_theme_icon_override("grabber", _make_diamond_texture(9, GameTheme.GILT_BRIGHT))
-	slider.add_theme_icon_override("grabber_highlight", _make_diamond_texture(11, Color(1.0, 0.92, 0.55)))
-	slider.add_theme_icon_override("grabber_disabled", _make_diamond_texture(9, GameTheme.DIMMED))
+	GameTheme.style_slider(slider)
 
 
 # ═══════════════════════════════════════════════════
@@ -621,7 +619,7 @@ func _add_resolution_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("Resolution", 160)
+	var lbl := _make_row_label("Resolution", ROW_LABEL_W)
 	row.add_child(lbl)
 
 	_res_option = OptionButton.new()
@@ -817,7 +815,7 @@ func _add_display_mode_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("Display Mode", 160)
+	var lbl := _make_row_label("Display Mode", ROW_LABEL_W)
 	row.add_child(lbl)
 
 	_display_mode_option = OptionButton.new()
@@ -844,7 +842,7 @@ func _add_fps_cap_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("FPS Cap", 160)
+	var lbl := _make_row_label("FPS Cap", ROW_LABEL_W)
 	row.add_child(lbl)
 
 	_fps_cap_option = OptionButton.new()
@@ -868,7 +866,7 @@ func _add_ui_scale_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("UI Scale", 160)
+	var lbl := _make_row_label("UI Scale", ROW_LABEL_W)
 	row.add_child(lbl)
 
 	# Dropdown, not a slider: a live slider re-applied content_scale_factor on every
@@ -909,7 +907,7 @@ func _add_render_scale_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("Supersampling", 160)
+	var lbl := _make_row_label("Supersampling", ROW_LABEL_W)
 	row.add_child(lbl)
 
 	# Renders the whole game at scale× the window, then downsamples = true 2D SSAA
@@ -979,9 +977,22 @@ func _add_graphics_quality_block(parent: VBoxContainer) -> void:
 	_gpu_info_label = Label.new()
 	if GameTheme.font_body:
 		_gpu_info_label.add_theme_font_override("font", GameTheme.font_body)
-	_gpu_info_label.add_theme_font_size_override("font_size", 15)
+	# 16 BY HAND, not 15 through _make_text_legible (2026-08-04). This is a
+	# subordinate read-out belonging to the Graphics Quality dropdown above it —
+	# but _make_text_legible floors everything at GameTheme.MIN_LABEL_SIZE (18),
+	# so a line written as 15 shipped at 18: the same size as the row labels and
+	# LOUDER than nothing on the panel, a hardware read-out printing at full
+	# reading size beneath the section headers it is subordinate to. This is the
+	# identical defect _add_row_hint documents at length two hundred lines below,
+	# and it takes the identical answer — 16 is the COPY_STYLE §11 caption band
+	# (15-17), clears the 14px hard floor, and the outline that _make_text_legible
+	# would have applied is set by hand so the text still reads on the mottled
+	# panel. Do not route this back through the helper.
+	_gpu_info_label.add_theme_font_size_override("font_size", 16)
 	_gpu_info_label.add_theme_color_override("font_color", GameTheme.DESC_DIM)
-	_make_text_legible(_gpu_info_label)
+	_gpu_info_label.add_theme_color_override("font_outline_color",
+		Color(0.04, 0.02, 0.01, 0.85))
+	_gpu_info_label.add_theme_constant_override("outline_size", 4)
 	_gpu_info_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	info_center.add_child(_gpu_info_label)
 	parent.add_child(info_center)
@@ -1046,7 +1057,7 @@ func _add_brightness_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("Brightness", 100)
+	var lbl := _make_row_label("Brightness", ROW_LABEL_W)
 	row.add_child(lbl)
 
 	_brightness_slider = HSlider.new()
@@ -1075,7 +1086,7 @@ func _add_anim_speed_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("Animation Speed", 160)
+	var lbl := _make_row_label("Animation Speed", ROW_LABEL_W)
 	row.add_child(lbl)
 
 	_anim_speed_option = OptionButton.new()
@@ -1115,7 +1126,7 @@ func _add_clash_dwell_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("Clash Pause", 160)
+	var lbl := _make_row_label("Clash Pause", ROW_LABEL_W)
 	row.add_child(lbl)
 
 	_clash_dwell_option = OptionButton.new()
@@ -1143,7 +1154,7 @@ func _add_tooltip_delay_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("Tooltip Delay", 100)
+	var lbl := _make_row_label("Tooltip Delay", ROW_LABEL_W)
 	row.add_child(lbl)
 
 	_tooltip_delay_slider = HSlider.new()
@@ -1167,17 +1178,67 @@ func _add_tooltip_delay_row(parent: VBoxContainer) -> void:
 	parent.add_child(row)
 
 
+## THE PRE-EMPTIVE SKIP. Until this row existed, the only control here was a
+## RESET button — which is the OPPOSITE operation — so a player who already knew
+## the genre had no way to decline coaching, only to dismiss each piece of it
+## after it had already interrupted them, and the pieces that had not fired yet
+## still arrived rounds later.
+##
+## THREE SETTINGS, NOT A CHECKBOX, because the commonest state a returning player
+## is in is "I know deckbuilders, I do not know THIS one" and a boolean cannot say
+## that. TIPS ONLY drops the guided walkthrough and keeps the one-line rules that
+## are particular to Burning Meadow — the muster, banking, overkill — which are
+## exactly the rules a genre veteran will otherwise mistake for bugs.
+func _add_coaching_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_add_row_pad(row)
+
+	var lbl := _make_row_label("Coaching", ROW_LABEL_W)
+	row.add_child(lbl)
+
+	var opt := OptionButton.new()
+	# 170×30 and NO expand flag — the same box Animation Speed, Clash Pause and
+	# Battlefield take. Shot-caught: EXPAND_FILL made this the one control in a
+	# column of four dropdowns whose right edge did not line up with the others,
+	# which is exactly the odd-one-out `_probe_alignment` (C30) exists to name.
+	opt.custom_minimum_size = Vector2(170, 30)
+	opt.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	opt.tooltip_text = "Full: the guided first fight, then tips as they apply." \
+		+ "  Tips Only: no walkthrough, but the rules this game does differently" \
+		+ " are still explained.  Off: nothing is taught."
+	for mode in [TutorialDB.COACH_FULL, TutorialDB.COACH_TIPS, TutorialDB.COACH_OFF]:
+		opt.add_item(String(TutorialDB.COACH_MODE_LABELS[mode]), mode)
+	opt.selected = clampi(UserSettings.coaching_mode,
+		TutorialDB.COACH_FULL, TutorialDB.COACH_OFF)
+	_style_option_button(opt)
+	# `get_item_id`, not the index: the two agree today and would stop agreeing
+	# the moment a mode is inserted anywhere but the end.
+	opt.item_selected.connect(func(idx: int):
+		UserSettings.set_coaching_mode(opt.get_item_id(idx)))
+	row.add_child(opt)
+
+	_add_row_pad(row)
+	parent.add_child(row)
+	_add_row_hint(parent, "How much the game explains itself as you play.")
+
+
 func _add_reset_tutorials_row(parent: VBoxContainer) -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("Tutorial Tips", 160)
+	var lbl := _make_row_label("Replay Lessons", ROW_LABEL_W)
 	row.add_child(lbl)
 
-	var btn := GameTheme.make_themed_button("RESET",
-		Color(0.34, 0.22, 0.10), Vector2(120, 30), 14,
-		"Show first-time combat tips again.")
+	# It does NOT touch `coaching_mode` — see UserSettings.reset_tutorials. The
+	# per-lesson version of this button lives in HOW TO PLAY › COACHING, which is
+	# where a player who wants ONE rule back should be sent; this is the blunt
+	# instrument, and it says so.
+	var btn := GameTheme.make_themed_button("REPLAY ALL",
+		Color(0.34, 0.22, 0.10), Vector2(140, 30), 14,
+		"Offer every lesson again, starting with the guided first fight." \
+		+ "  Single lessons can be replayed from HOW TO PLAY.")
 	btn.pressed.connect(func():
 		UserSettings.reset_tutorials()
 		GameTheme.claim_pop(btn))
@@ -1192,7 +1253,7 @@ func _add_colorblind_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("Color Blind Mode", 160)
+	var lbl := _make_row_label("Color Blind Mode", ROW_LABEL_W)
 	row.add_child(lbl)
 
 	_colorblind_option = OptionButton.new()
@@ -1219,7 +1280,7 @@ func _add_field_style_row(parent: VBoxContainer) -> void:
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label("Battlefield", 160)
+	var lbl := _make_row_label("Battlefield", ROW_LABEL_W)
 	row.add_child(lbl)
 
 	var opt := OptionButton.new()
@@ -1261,13 +1322,19 @@ func _add_toggle_row(parent: VBoxContainer, label_text: String, initial: bool,
 	row.add_theme_constant_override("separation", 12)
 	_add_row_pad(row)
 
-	var lbl := _make_row_label(label_text, 160)
+	var lbl := _make_row_label(label_text, ROW_LABEL_W)
 	row.add_child(lbl)
 
 	var toggle_btn := InkSwitch.new()
 	toggle_btn.button_pressed = initial
 	toggle_btn.toggled.connect(func(pressed: bool):
 		callback.call(pressed))
+	# A switch that throws should sound like one, and ON/OFF should not sound
+	# alike — the pitch carries the direction, so a player setting up audio can
+	# hear which way a row went without looking back at it.
+	toggle_btn.toggled.connect(func(pressed: bool):
+		AudioBank.play_ui("select" if pressed else "back"))
+	GameTheme.arm_ui_hover(toggle_btn)
 
 	row.add_child(toggle_btn)
 	parent.add_child(row)
@@ -1329,6 +1396,22 @@ func _make_text_legible(node: Control) -> void:
 		node.add_theme_constant_override("shadow_offset_y", 1)
 
 
+## ONE COLUMN, ONE LEFT EDGE (2026-08-04). Every settings row is pad + label +
+## control, and the label's minimum width is what sets where the control starts.
+## That number was passed per call site and came in two values, 100 and 160, so a
+## single column of controls started at FOUR different x positions. Measured with
+## a geometry probe, left column: sliders at 450, Tooltip Delay at 461, most rows
+## at 510, Mute on Focus Loss at 521. Right column: Brightness at 970 against 1030
+## for everything else.
+##
+## The two odd ones are the tell — 461 and 521 are labels OVERRUNNING their box
+## (Tooltip Delay renders 111 wide in a 100 slot, Mute on Focus Loss 171 in a
+## 160), which pushes their control further right again. So the constant is 176:
+## the widest label the screen can currently print is 171, and 176 clears it with
+## a little headroom for a longer string later. Every row now hands the same
+## number, so the column is straight by construction rather than by coincidence.
+const ROW_LABEL_W := 176.0
+
 func _make_row_label(text: String, min_w: float) -> Label:
 	var lbl := Label.new()
 	lbl.text = text
@@ -1384,24 +1467,10 @@ func _add_row_hint(parent: VBoxContainer, text: String) -> void:
 	parent.add_child(row)
 
 
+## Moved to GameTheme.make_diamond_texture on 2026-09-14 (the slider kit went
+## with it); this stays as the same-name delegator for the call sites here.
 func _make_diamond_texture(radius: int, color: Color) -> ImageTexture:
-	# A filled diamond with a 1px dark keyline so the grabber reads as a set
-	# stone, not a floating blob. Antialiased by manhattan-distance falloff.
-	var size := radius * 2 + 2
-	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
-	var c := (size - 1) / 2.0
-	var edge := Color(0.10, 0.07, 0.03, color.a)
-	for x in range(size):
-		for y in range(size):
-			var d := absf(x - c) + absf(y - c)
-			if d <= radius - 1.6:
-				img.set_pixel(x, y, color)
-			elif d <= radius - 0.6:
-				img.set_pixel(x, y, edge.lerp(color, clampf(radius - 0.6 - d, 0.0, 1.0)))
-			elif d <= radius + 0.4:
-				var a := clampf(radius + 0.4 - d, 0.0, 1.0)
-				img.set_pixel(x, y, Color(edge.r, edge.g, edge.b, edge.a * a))
-	return ImageTexture.create_from_image(img)
+	return GameTheme.make_diamond_texture(radius, color)
 
 
 # ═══════════════════════════════════════════════════

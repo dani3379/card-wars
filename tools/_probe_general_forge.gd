@@ -28,11 +28,23 @@ func _process(_delta: float) -> bool:
 	return _done
 
 
+## SUBSTRING, CASE-INSENSITIVE — not an exact-label match (2026-08-05).
+##
+## This was `text == text`, and it had been failing on "FORGE IT button present"
+## ever since the confirm button was reworded to "⚒ Forge +". Nothing was wrong
+## with the forge; the probe was pinned to a string the UI is entitled to change,
+## and it took the whole check down with it (`go == null` skips the four
+## assertions below — the ones that actually verify the upgrade LANDS). A gate
+## that a copy edit can silently disarm is worse than no gate.
+##
+## Matching on a distinctive word keeps the check meaningful while leaving the
+## wording free. The glyph and the case are stripped from both sides.
 func _find_button(node: Node, text: String) -> Button:
-	if node is Button and (node as Button).text == text:
+	var needle := text.to_lower()
+	if node is Button and (node as Button).text.to_lower().contains(needle):
 		return node
 	for c in node.get_children():
-		var hit := _find_button(c, text)
+		var hit := _find_button(c, needle)
 		if hit != null:
 			return hit
 	return null
@@ -68,8 +80,9 @@ func _run_test() -> void:
 	await create_timer(0.3).timeout
 	var dim = reward.get_node_or_null("ForgeDim")
 	_check(dim != null, "confirm modal (before/after) opened")
-	var go := _find_button(reward, "FORGE IT")
-	_check(go != null, "FORGE IT button present")
+	# "forge" not "FORGE IT": the confirm button is currently "⚒ Forge +".
+	var go := _find_button(reward, "forge")
+	_check(go != null, "forge-confirm button present")
 	if go != null:
 		go.emit_signal("pressed")
 		await create_timer(0.4).timeout

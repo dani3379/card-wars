@@ -22,8 +22,14 @@ const CUT_IDS := ["fortress_stone", "pyromaniac_ring", "stone_skin",
 const RESHAPED := {
 	"briar_amulet": ["Man-Trap", "man_trap"],
 	"piercing_crown": ["Bodkin Points", "always_overflow"],
-	"hexagonal_shield": ["Pavise", "pavise"],
-	"scavengers_pouch": ["Sutler's Marker", "sell_double"],
+	# Both were renamed by the plain-language pass (COPY_STYLE §12): "Pavise" and
+	# "Sutler" are unglossed archaic vocabulary, which §10 bans. The EFFECT ids are
+	# asserted alongside the names, so a silent revert on either half is still
+	# caught — the point of this table is the reshape, not the wording.
+	"hexagonal_shield": ["Sniper Shield", "pavise"],
+	# Effect id moved sell_double -> removal_discount on 2026-09-16, when the
+	# shop stopped buying cards and started charging to strike them.
+	"scavengers_pouch": ["Trader's Marker", "removal_discount"],
 	"the_family": ["Sharpened Pitchforks", "token_pitchforks"],
 }
 const NEW_IDS := ["letters_patent", "deserters_toll", "drovers_whip",
@@ -80,14 +86,31 @@ func _run() -> void:
 		var e: Dictionary = RDB.RELICS.get(id, {})
 		_ck("new relic present: %s" % id,
 			not e.is_empty() and String(e.get("desc", "")) != "" and e.get("tier", "") == "combat")
-	# Every relic id has an icon on disk (png painting or svg silhouette).
+	# Every relic RESOLVES an icon. This used to guess a filename from the relic
+	# id, which ignored both the entry's own `"icon"` alias and RelicDB's
+	# ICON_FALLBACKS stand-ins — so it reported relics as art-less that in fact
+	# render fine, and it could never have noticed a stand-in pointing at art that
+	# does not exist. Ask the loader the same question the UI asks (the live
+	# contract), and assert the stand-in table itself resolves too, so a typo'd
+	# fallback id is caught here rather than as a blank chip in the shop.
 	var icons_ok := true
 	for id in RDB.RELICS.keys():
-		if not (ResourceLoader.exists("res://assets/icons/relics/%s.png" % id)
-				or ResourceLoader.exists("res://assets/icons/relics/%s.svg" % id)):
-			print("  missing icon: ", id)
+		if RDB.get_relic_icon(id) == null:
+			print("  unresolved icon: ", id)
 			icons_ok = false
-	_ck("every relic has an icon file (%d relics)" % RDB.RELICS.size(), icons_ok)
+	_ck("every relic resolves an icon (%d relics)" % RDB.RELICS.size(), icons_ok)
+	var fallbacks_ok := true
+	for src in RDB.ICON_FALLBACKS:
+		var dst: String = String(RDB.ICON_FALLBACKS[src])
+		if not RDB.RELICS.has(src):
+			print("  stand-in for a relic that no longer exists: ", src)
+			fallbacks_ok = false
+		if not (ResourceLoader.exists("res://assets/icons/relics/%s.png" % dst)
+				or ResourceLoader.exists("res://assets/icons/relics/%s.svg" % dst)):
+			print("  stand-in points at missing art: ", src, " -> ", dst)
+			fallbacks_ok = false
+	_ck("every ICON_FALLBACKS stand-in resolves (%d)" % RDB.ICON_FALLBACKS.size(),
+		fallbacks_ok)
 
 	# ── 2. Letters Patent fold (RunState.get_upgraded_card_data) ───────────
 	RS.start_new_run("raider", 0, 777)
@@ -105,14 +128,22 @@ func _run() -> void:
 	RS.creature_kills.erase(uid)
 	RS.relics.erase("letters_patent")
 
-	# ── 3. Sutler's Marker doubles the buy-back ────────────────────────────
+	# ── 3. Trader's Marker halves the removal fee ──────────────────────────
+	# The fee is FLAT (Shop.REMOVE_FEE) — it does not read the card at all, and
+	# that is the property under test as much as the discount is: the buy-back
+	# this replaced priced by Command cost, which paid least for exactly the
+	# chaff a player wants gone.
 	var shop = load("res://scripts/scenes/Shop.gd").new()
-	var plain_curse: int = shop._sell_price("curse")
-	var plain_card: int = shop._sell_price(RS.deck[0])
+	var plain_fee: int = shop._removal_fee()
+	_ck("removal fee is the flat posted figure", plain_fee == int(shop.REMOVE_FEE),
+		"fee %d vs REMOVE_FEE %d" % [plain_fee, int(shop.REMOVE_FEE)])
 	RS.relics.append("scavengers_pouch")
-	_ck("Sutler's Marker doubles a card", shop._sell_price(RS.deck[0]) == plain_card * 2)
-	_ck("Sutler's Marker doubles a curse", shop._sell_price("curse") == plain_curse * 2)
+	var marked_fee: int = shop._removal_fee()
+	_ck("Trader's Marker halves the fee", marked_fee == int(round(plain_fee / 2.0)),
+		"fee %d vs plain %d" % [marked_fee, plain_fee])
 	RS.relics.erase("scavengers_pouch")
+	_ck("fee returns to full once the Marker is gone",
+		shop._removal_fee() == plain_fee)
 	shop.free()
 
 	# ── 4. Combat-scene behaviors ───────────────────────────────────────────
@@ -187,7 +218,13 @@ func _run() -> void:
 	var wall = combat._player_field[3]
 	if striker != null and neighbor != null and wall != null \
 			and striker.current_atk == 1 and neighbor.current_hp == 3:
-		combat._apply_thorns(wall, striker, true)
+		# THIRD ARG IS `defender_is_enemy`, NOT "defender_is_friendly" (verified at
+		# Combat.gd:7246, which derives `defender_is_friendly = not defender_is_enemy`).
+		# The Thornwall here is OURS, so this must be false. Passing true made
+		# defender_is_friendly false, and the Man-Trap branch at Combat.gd:7287 is
+		# gated on it — so the trap could never fire and this probe reported a
+		# correctly-wired relic as broken. The relic was never the problem.
+		combat._apply_thorns(wall, striker, false)
 		_ck("Man-Trap: thorns kill splashes the neighbor for 2",
 			is_instance_valid(neighbor) and neighbor.current_hp == 1,
 			"neighbor hp %s" % ("dead" if not is_instance_valid(neighbor) else str(neighbor.current_hp)))

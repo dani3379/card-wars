@@ -46,6 +46,17 @@ const ALIASES: Dictionary = {
 	"siege_bastion":        "iron_bastion", # Bastion keystone — the fortified works
 	"the_magister":         "archmage",     # Warlock keystone — the coven's ledger-keeper
 	"dire_alpha":           "wolf_c",       # Beast keystone — the pack's biggest wolf
+	# THE BANNER's six levy cards (2026-07-31). These were the ONLY cards in any
+	# hero's opener with no painting, which put all six blank sigils on the one
+	# screen whose entire claim is "your colours add THIS card" — the card the
+	# step exists to show was the only one that could not be seen. Each borrows
+	# from inside its own tribe so the stand-in never crosses a tribe line.
+	"line_marker":          "bannerman",    # Soldier — the man carrying the colours
+	"loose_horse":          "hound",        # Beast — loosed and already running
+	"ash_marker":           "gravedigger",  # Dead — the one who sets the markers
+	"hedge_caster":         "witch",        # Warlock — the hedge-witch off the road
+	"marker_stone":         "stone_wall",   # Bastion — a face cut into the works
+	"free_lance":           "duelist",      # Stray — a lance nobody has paid for
 	# COUNTERORDERS (2026-07-30) — both bodies are Strays who read the enemy's post.
 	"order_breaker":        "skirmisher",   # the runner who breaks a committed line
 	"the_interpreter":      "sellsword",    # the one who reads the foe's orders
@@ -265,6 +276,10 @@ const ALIASES: Dictionary = {
 	"fledgling":            "e_wind_harpy",
 	"storm_harpy":          "e_wind_harpy",
 	"wind_harpy":           "e_wind_harpy",
+	# Renamed 2026-08-06 (the painting was always an owl, never a harpy). These
+	# are NAME-derived keys, so the authored EncounterDB body that now reads
+	# "Storm Owl" keeps its portrait; the old key stays for legacy saves.
+	"storm_owl":            "e_wind_harpy",
 	"sky_stalker":          "griffin",
 	"crow":                 "raven",
 	"smoldering_crow":      "raven",
@@ -308,6 +323,10 @@ const ALIASES: Dictionary = {
 	"pyre_acolyte":         "e_dark_priest",
 	"cinder_acolyte":       "e_dark_priest",
 	"dark_priest":          "e_dark_priest",
+	# Renamed 2026-08-06. name_id lowercases and swaps spaces only, so the key
+	# for "Candle-Priest" keeps its hyphen — do not "tidy" it to an underscore
+	# or the authored EncounterDB bodies fall back to the fire placeholder.
+	"candle-priest":        "e_dark_priest",
 	"cantor":               "e_dark_priest",
 	"burning_martyr":       "torchbearer",
 	"kindler":              "torchbearer",
@@ -456,6 +475,21 @@ const ALIASES: Dictionary = {
 	"siphon_imp":           "chaos_imp",
 	"pitch_hulk":           "e_golem",
 	"pyre_tender":          "torchbearer",
+
+	# ── 2026-08-28 placeholder sweep ─────────────────────────────────────
+	# tools/_probe_card_art.tscn found 16 PLAYABLE cards resolving to the
+	# line-art stand-in — a blank writ with a thin gold glyph on it, which in a
+	# shop row beside four paintings reads as unfinished art rather than as a
+	# card. Stand-ins until bespoke paintings land; each is chosen for what the
+	# card IS, not just for its tribe, so none of them reads as a wrong picture.
+	"bastion_lord":         "scholar",          # the Tally Man keeps the count
+	"bramble_stockade":     "thornguard",       # a wall made of thorns
+	"grave_goods":          "gravedigger",      # what is buried with them
+	"heartwood_elder":      "troll",            # the Herd Bull — the big body
+	"ironhide_anvil":       "iron_bastion",     # Iron Rampart, a great wall
+	"last_levy":            "militia",          # the Last Recruit is a levy
+	"pike_square":          "pikeman",          # the formation, from its man
+	"the_sexton":           "warden_of_graves", # a sexton IS the grave's warden
 }
 
 ## These are strong-reference caches, so an entry keeps the decoded texture in
@@ -801,6 +835,10 @@ static func try_load_creature_art(card_id: String) -> Texture2D:
 # with no bespoke painting borrows a cousin's until its own art lands. The
 # bespoke file auto-wins once it exists (direct path is tried first).
 const SPELL_ALIASES: Dictionary = {
+	# 2026-09-17 cost-5 payoff slate (randomness tier).
+	"powder_store":        "cataclysm",
+	"case_shot":           "petard",
+	"press_gang":          "war_chant",
 	"craven": "curse",
 	"deserters_mark": "curse",
 	"war_debt": "curse",
@@ -847,6 +885,15 @@ const SPELL_ALIASES: Dictionary = {
 	"witchbrand": "hex",
 	"forked_spear": "cataclysm",
 	"repeating_arbalest": "reposition",
+
+	# ── 2026-08-28 placeholder sweep (see the ALIASES twin) ──────────────
+	# Only two: every ARMAMENT already had an entry a few lines up. The first
+	# sweep reported six of them as artless because its probe ran the spell
+	# loader for type "spell" only — _find_card_art runs it for `is_spell() OR
+	# is_armament()`. Re-adding them here was a DUPLICATE KEY, which is a parse
+	# error, which is how the mistake surfaced.
+	"close_ranks":          "charge_spell",     # The Pincer — both flanks in
+	"counterorders":        "kings_command",    # countermanding an order
 }
 
 

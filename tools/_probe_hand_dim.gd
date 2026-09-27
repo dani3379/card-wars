@@ -33,8 +33,12 @@ func _ready() -> void:
 	SS.rng_seed = 12345
 	NM.is_host = true
 	NM.local_player_index = 0
+	# ALL THREE net terms, or Combat._ready boots SOLO and this probe silently
+	# measures the campaign hand instead of the skirmish one (is_connected_to_peer
+	# is `vs_bot or (_connected and remote_present and _compatibility_confirmed)`).
 	NM._connected = true
 	NM.remote_present = true
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0
 	NM.entities.clear()
 	NM._next_entity_id = 1
@@ -48,6 +52,7 @@ func _ready() -> void:
 	await get_tree().create_timer(3.0).timeout
 
 	print("=== HAND DIM PROBE ===")
+	print("is_net=", _combat._is_net(), "  hand_size=", _combat._hand.size())
 	print("hand_interactive=", Card2D.hand_interactive,
 		"  board_interactive=", Card2D.board_interactive)
 	print("player_mana=", _combat.player_mana, "/", _combat.player_max_mana)
@@ -74,7 +79,13 @@ func _ready() -> void:
 	# The regression this probe guards: a hand relayout during the deal window
 	# kills the deal-in alpha tween (Card2D.set_hand_target) and the card
 	# strands translucent. All hand cards must be fully opaque once settled.
-	if stranded > 0:
+	# An empty hand cannot strand anything, so "no translucent cards" would be a
+	# vacuous PASS. Boot mode and a dealt hand are preconditions, not results.
+	if not _combat._is_net():
+		print("HAND_DIM_PROBE_FAIL — combat booted SOLO; the skirmish hand never ran")
+	elif _combat._hand.is_empty():
+		print("HAND_DIM_PROBE_FAIL — no hand was dealt; nothing was measured")
+	elif stranded > 0:
 		print("HAND_DIM_PROBE_FAIL — %d hand card(s) stranded translucent" % stranded)
 	else:
 		print("HAND_DIM_PROBE_PASS — all hand cards fully opaque")

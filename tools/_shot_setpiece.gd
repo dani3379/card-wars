@@ -84,21 +84,26 @@ func _shoot_scenario(sp_id: String) -> void:
 	await get_tree().create_timer(0.4).timeout
 
 
-## Find and press the despatch's TAKE THE FIELD button. Walks the HUD layer
-## rather than caching a reference, so this harness never needs the brief to
-## expose one just for testing.
+## Find and press the despatch's start button. Walks the HUD layer rather than
+## caching a reference, so this harness never needs the brief to expose one just
+## for testing. Matches the NODE NAME, not the label: this used to hunt for text
+## beginning "TAKE", the copy became "START THE FIGHT", and the harness then
+## pressed nothing at all while still reporting success.
 func _press_take_the_field() -> void:
 	var layer = _combat.get("_hud_layer")
 	if layer == null or not is_instance_valid(layer):
 		return
 	var btn := _find_button(layer)
-	if btn != null:
-		btn.emit_signal("pressed")
+	if btn == null:
+		push_warning("_shot_setpiece: despatch start button not found — "
+			+ "did SetPieceStartBtn get renamed?")
+		return
+	btn.emit_signal("pressed")
 
 
 func _find_button(node: Node) -> Button:
 	for child in node.get_children():
-		if child is Button and String((child as Button).text).begins_with("TAKE"):
+		if child is Button and String(child.name) == "SetPieceStartBtn":
 			return child
 		var found := _find_button(child)
 		if found != null:

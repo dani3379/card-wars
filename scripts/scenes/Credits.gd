@@ -19,6 +19,7 @@ const INK_BRONZE := Color(0.42, 0.28, 0.10, 1.0)
 const PAGE_W := 820.0
 const ROLL_SPEED := 34.0          # px/s auto-drift
 const ROLL_RESUME_DELAY := 3.5    # s of stillness after the player wheels
+const ROLL_BUILD_LINES_PER_FRAME := 5
 
 const SECTIONS: Array = [
 	{
@@ -91,8 +92,18 @@ const SECTIONS: Array = [
 
 var _scroll: ScrollContainer = null
 var _scroll_pos := 0.0
+var _firelight: ShaderMaterial = null
+var _fire_t := 0.0
+var _rolled_out := false
 var _roll_hold := 1.2   # settle beat before the drift starts
 var _rolling := true
+## One-way latch on the way out. fade_out_then_change_scene parents its ink
+## overlay to the TREE ROOT and only changes the scene when its 0.30s tween
+## lands, so the exit stays clickable for the whole wipe: a second Esc (or Esc
+## while BACK is already fading) queued a SECOND transition, and the menu it had
+## just loaded was torn down and rebuilt 0.3s later — music restarting, intro
+## replaying. Every other screen in the shell already carries this latch.
+var _exit_committing := false
 
 
 func _ready() -> void:
@@ -103,32 +114,68 @@ func _ready() -> void:
 	})
 	AudioBank.play_music("credits")
 	_build_roll()
+	_build_firelight()
 	_build_chrome()
 	GameTheme.fade_in(self, 0.30)
 	# Reduce Motion: the roll holds still — the wheel is the only mover.
 	if UserSettings != null and UserSettings.reduce_motion:
 		_rolling = false
-	set_process(_rolling)
+	# ALWAYS PROCESS NOW. This used to be `set_process(_rolling)` and to switch
+	# itself off at the foot of the roll, on the reasoning that there was then
+	# "no animation left to drive". The fire is animation left to drive, and it
+	# burns whether or not the page is moving — a hearth that goes out the moment
+	# the credits finish scrolling is worse than never lighting it.
+	set_process(true)
 
 
 func _unhandled_input(event: InputEvent) -> void:
 	# Esc = the BACK button: return to the main menu.
 	if event.is_action_pressed("ui_cancel"):
-		GameTheme.fade_out_then_change_scene(self, MENU_SCENE, 0.30)
+		if not _exit_committing:
+			_exit_committing = true
+			GameTheme.fade_out_then_change_scene(self, MENU_SCENE, 0.30)
 		get_viewport().set_input_as_handled()
 
 
 func _process(delta: float) -> void:
+	_drive_firelight(delta)
 	# The slow drift up the page. Player wheel input holds it for a beat
 	# (see _on_scroll_input); reaching the foot of the roll parks it.
-	if _scroll == null:
+	if _scroll == null or _rolled_out or not _rolling:
 		return
 	if _roll_hold > 0.0:
 		_roll_hold -= delta
 		return
-	_scroll_pos = minf(_scroll_pos + ROLL_SPEED * delta,
-		maxf(0.0, _scroll.get_v_scroll_bar().max_value - _scroll.size.y))
-	_scroll.scroll_vertical = int(_scroll_pos)
+	var limit := maxf(0.0,
+		_scroll.get_v_scroll_bar().max_value - _scroll.size.y)
+	_scroll_pos = minf(_scroll_pos + ROLL_SPEED * delta, limit)
+	# ROLL_SPEED advances by less than one pixel on many rendered frames. Avoid
+	# dirtying the ScrollContainer (and its descendants' transforms) when the
+	# integer scroll position has not actually changed.
+	var next_pixel := int(_scroll_pos)
+	if _scroll.scroll_vertical != next_pixel:
+		_scroll.scroll_vertical = next_pixel
+	# Once the chronicle reaches its foot the DRIFT is done — but the fire is
+	# not, so this parks the scroll with a flag instead of killing `_process`.
+	# Input below clears it if the player wheels back up.
+	if _scroll_pos >= limit:
+		_rolled_out = true
+
+
+## The guttering. Three harmonics at incommensurate rates never line up, which is
+## what separates a fire from a pulsing UI element — the same reasoning, and the
+## same shape, as the war table's standard lamp.
+func _drive_firelight(delta: float) -> void:
+	if _firelight == null:
+		return
+	if UserSettings != null and UserSettings.reduce_motion:
+		return
+	_fire_t += delta
+	var f: float = 1.0 \
+		+ 0.17 * sin(_fire_t * 2.1) \
+		+ 0.08 * sin(_fire_t * 5.3 + 1.1) \
+		+ 0.05 * sin(_fire_t * 11.7 + 2.6)
+	_firelight.set_shader_parameter("flicker", f)
 
 
 func _on_scroll_input(event: InputEvent) -> void:
@@ -137,6 +184,75 @@ func _on_scroll_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton or event is InputEventScreenDrag:
 		_scroll_pos = float(_scroll.scroll_vertical)
 		_roll_hold = ROLL_RESUME_DELAY
+		# `_process` is always on now (the fire), so wheeling back up only has to
+		# clear the parked flag.
+		_rolled_out = false
+
+
+## THE FIRE THE SCREEN ALREADY CLAIMED (2026-09-11).
+##
+## `_build_backdrop`'s own comment has always said "the chronicler writes these
+## names by its light" — and there was no light on the roll. The whole screen was
+## a list of labels drifting over a painted camp at one flat exposure, with no
+## focal point anywhere and nothing alive on it. Same shape as
+## `_play_face_damage_flash`, which described blood at the edges of vision and
+## shipped a uniform wash: the intent was documented and unbuilt.
+##
+## FORM: a pool of firelight across the reading line, falling off above and
+## below, so a name is brightest exactly where the eye already is.
+##
+## ALIVENESS: **guttering**, matched to the matter. A campfire does not breathe
+## on a clean sine, so this is the three-harmonic flicker the map's standard lamp
+## uses — incommensurate rates, never repeating. It is the one moving thing on a
+## screen whose only other motion is a constant scroll.
+##
+## ADDITIVE, AND HERE THAT IS CORRECT. The ring engine measured additive and
+## rejected it, but that was for a mark that FADES — folding alpha into the
+## colour means a fading additive ring stops adding anything. This pool never
+## fades; it is light falling on a page, which is the one thing `blend_add`
+## actually models. It also means the effect can only ever ADD contrast, so it
+## cannot push any name below the §11 readability floor — which a darkening
+## vignette could, and `add_atmosphere` is already spending one of those.
+func _build_firelight() -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	var lamp := ColorRect.new()
+	lamp.name = "Firelight"
+	lamp.set_anchors_preset(Control.PRESET_FULL_RECT)
+	lamp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lamp.color = Color.WHITE
+	lamp.z_index = 6
+	var sh := Shader.new()
+	sh.code = """shader_type canvas_item;
+render_mode blend_add;
+
+uniform vec4 warm : source_color = vec4(1.0, 0.72, 0.38, 1.0);
+uniform float line = 0.46;     // where the reading band sits, in UV
+uniform float spread = 0.26;   // how far the pool reaches up and down
+uniform float gain = 0.20;
+uniform float flicker = 1.0;
+
+void fragment() {
+	// Vertical pool: a soft band centred on the reading line.
+	float dy = (UV.y - line) / spread;
+	float band = exp(-dy * dy * 2.2);
+	// ...and a gentle horizontal falloff, so it is a POOL of light and not a
+	// stripe running off both edges of the screen.
+	float dx = (UV.x - 0.5) / 0.62;
+	float across = exp(-dx * dx * 1.4);
+	COLOR = vec4(warm.rgb * band * across * gain * flicker, 1.0);
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = sh
+	lamp.material = mat
+	add_child(lamp)
+	_firelight = mat
+	# Reduce Motion holds the fire steady rather than switching it off: the pool
+	# is what gives the page a focal point, and that is information about where
+	# to read, not decoration. Only the guttering is decorative.
+	if UserSettings != null and UserSettings.reduce_motion:
+		mat.set_shader_parameter("flicker", 1.0)
 
 
 func _build_backdrop() -> void:
@@ -174,7 +290,9 @@ func _build_roll() -> void:
 	var page := ChroniclePage.new()
 	page.name = "CreditsPage"
 	page.page_seed = 20260719
-	page.custom_minimum_size = Vector2(PAGE_W, 0)
+	# Keep the lower deckle beyond the viewport while offscreen entries hydrate.
+	# Finished copy is taller than this, so final scroll distance is unchanged.
+	page.custom_minimum_size = Vector2(PAGE_W, vp.y)
 	page.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	var s := StyleBoxEmpty.new()
 	s.content_margin_left = 66
@@ -192,7 +310,7 @@ func _build_roll() -> void:
 	var name_lbl := _make_display_label("BURNING MEADOW", 46, INK)
 	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	list.add_child(name_lbl)
-	var sub := _make_display_label("THE CHRONICLE OF THE MAKING", 21, INK_BRONZE)
+	var sub := _make_display_label("CREDITS", 21, INK_BRONZE)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	list.add_child(sub)
 	list.add_child(_make_spacer(6))
@@ -200,7 +318,10 @@ func _build_roll() -> void:
 	list.add_child(_make_spacer(18))
 
 	for section in SECTIONS:
-		_add_section(list, section)
+		await _add_section(list, section)
+		if _exit_committing or not is_instance_valid(list) \
+				or not list.is_inside_tree():
+			return
 
 	# ── Close of the roll: thanks + the chronicler's seal ──
 	list.add_child(_make_spacer(20))
@@ -215,7 +336,12 @@ func _build_roll() -> void:
 	col.add_child(_make_spacer(vp.y * 0.42))
 
 
+## Build only the currently-near portion of the long attribution roll per frame.
+## The unseen lower copy completes beneath the 0.30 s scene fade; headless probes
+## retain the complete synchronous tree they use for structural assertions.
 func _add_section(list: VBoxContainer, section: Dictionary) -> void:
+	var windowed := DisplayServer.get_name() != "headless"
+	var lines_this_frame := 0
 	list.add_child(_make_spacer(14))
 	var heading := _make_display_label(section.get("heading", ""), 22, INK_BRONZE)
 	heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -230,6 +356,15 @@ func _add_section(list: VBoxContainer, section: Dictionary) -> void:
 			14 if is_detail else 16, INK_DIM if is_detail else INK)
 		line.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		list.add_child(line)
+		lines_this_frame += 1
+		if windowed and lines_this_frame >= ROLL_BUILD_LINES_PER_FRAME:
+			lines_this_frame = 0
+			await RenderingServer.frame_post_draw
+			if _exit_committing or not is_instance_valid(list) \
+					or not list.is_inside_tree():
+				return
+	if windowed:
+		await RenderingServer.frame_post_draw
 
 
 func _build_chrome() -> void:
@@ -246,7 +381,11 @@ func _build_chrome() -> void:
 	back_btn.offset_top = 34
 	back_btn.offset_bottom = 82
 	back_btn.pressed.connect(func():
+		if _exit_committing:
+			return
+		_exit_committing = true
 		GameTheme.fade_out_then_change_scene(self, MENU_SCENE, 0.30))
+	GameTheme.arm_ui_press(back_btn, "back")
 	add_child(back_btn)
 	GameTheme.make_settings_gear(self)
 

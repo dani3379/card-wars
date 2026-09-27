@@ -8,9 +8,9 @@ const MAIN_MENU = "res://scenes/main_menu.tscn"
 # a little each loop. Hard cap of 3 by design — more reads as content churn, not
 # as a refrain the meadow recites.
 const DEATH_REFRAINS := [
-	"The march ends here. You can begin another.",
+	"The run ends here. You can begin another.",
 	"You stop here, but the war continues.",
-	"This march did not reach the final fire. The next one might.",
+	"This run did not reach the final fire. The next one might.",
 ]
 
 # ── Chronicle ink palette ──────────────────────────────────────────────
@@ -25,12 +25,31 @@ const INK_GOLD := Color(0.478, 0.310, 0.063, 1.0)       # gold values (#7a4f10)
 const INK_RUBRIC := Color(0.56, 0.13, 0.07, 1.0)        # red rubric — what the win changed
 const INK_LAUREL := Color(0.22, 0.37, 0.16, 1.0)        # fastest-march laurel line
 
+# Only the first exit intent may commit while its claim animation is playing.
+var _exit_committing: bool = false
+
 
 ## The parchment sheet the run's chronicle is written on — extracted to
 ## scripts/ui/painters/ChroniclePage.gd (2026-07-19) so the Credits roll can
 ## be written on the same paper. Preloaded under its old name (painter
 ## convention), so ChroniclePage.new() call sites below read unchanged.
 const ChroniclePage := preload("res://scripts/ui/painters/ChroniclePage.gd")
+
+## How much canvas the chronicle page leaves below itself, and the least the
+## scrolling body may ever be squeezed to. Both are read by the sizing step at
+## the end of `_build_run_summary`, which is what keeps the foot buttons on
+## screen no matter how heavy the run was.
+const PAGE_BOTTOM_GAP: float = 28.0
+const PAGE_MIN_SCROLL: float = 160.0
+
+# One authored result-screen timeline. The page used to be faded by both
+# `_animate_intro` and `_build_run_summary`, while the seal ran on a third clock.
+# Those clocks could overlap differently on a cold card bake. Keep every beat
+# relative to the moment the complete page is ready instead.
+const SUMMARY_REVEAL_DELAY: float = 0.34
+const SUMMARY_INK_DELAY: float = 0.52
+const SUMMARY_INK_STAGGER: float = 0.055
+const SUMMARY_SEAL_DELAY: float = 1.08
 
 
 ## A hand-ruled ledger separator: heavier line over a hairline, in bronze
@@ -69,7 +88,7 @@ class EndorsementBox extends Control:
 		# anchors below resolve ONCE, against a parent that is still 0×0 when
 		# the box is added — which left this drawing nothing at all. Track the
 		# button's rect explicitly instead of trusting anchor propagation.
-		set_anchors_preset(Control.PRESET_FULL_RECT)
+		set_anchors_preset(Control.PRESET_TOP_LEFT)
 		var p := get_parent() as Control
 		if p != null:
 			p.resized.connect(_follow_parent)
@@ -148,11 +167,11 @@ func _ready() -> void:
 		"grad_outer": Color(0.02, 0.01, 0.03, 0.50),
 	})
 	GameTheme.fade_in(self, 0.26)
-	if RunState.hero_hp > 0:
+	if RunState.last_run_victorious:
 		AudioBank.play_music_random(["victory", "victory_boss"])
 	else:
 		AudioBank.play_music("defeat")
-	_spawn_run_end_flourish(RunState.hero_hp > 0)
+	_spawn_run_end_flourish(RunState.last_run_victorious)
 
 	# Apply display font to title
 	if GameTheme.font_display:
@@ -165,7 +184,7 @@ func _ready() -> void:
 	var asc_suffix: String = ""
 	if RunState.current_ascension > 0:
 		asc_suffix = "\nAscension %d" % RunState.current_ascension
-	if RunState.hero_hp > 0:
+	if RunState.last_run_victorious:
 		$Title.text = "VICTORY"
 		var vcol := Color(1.0, 0.84, 0.38)
 		$Title.add_theme_color_override("font_color", vcol)
@@ -205,7 +224,7 @@ func _ready() -> void:
 
 	_build_run_summary()
 
-	# The .tscn's plain BackBtn is superseded: the exit actions (MARCH AGAIN /
+	# The .tscn's plain BackBtn is superseded: the exit actions (PLAY AGAIN /
 	# BACK TO MENU) are now written at the FOOT of the chronicle page itself —
 	# see the foot row in _build_run_summary. Living inside the page means
 	# they can never collide with it however tall the deck strip grows, and
@@ -235,21 +254,53 @@ func _spawn_run_end_flourish(won: bool) -> void:
 		[0.0, Color(0.60, 0.52, 0.48, 0.0)], [0.18, Color(0.42, 0.36, 0.34, 0.46)],
 		[0.72, Color(0.20, 0.16, 0.15, 0.26)], [1.0, Color(0.08, 0.06, 0.055, 0.0)],
 	]
-	Motion.burst(self, Vector2(vp.x * 0.5, vp.y * (0.30 if won else 0.18)), "base", {
-		"name": "RunEndFlourish", "z_index": 8,
-		"explosiveness": 0.55 if won else 0.28,
-		"amount": 58 if won else 36,
-		"lifetime": 1.7 if won else 2.2,
-		"emission_rect": Vector2(vp.x * 0.36, 12.0 if won else 20.0),
-		"direction": Vector2(0, -1 if won else 1),
-		"spread": 42.0 if won else 24.0,
-		"gravity": Vector2(0, 120.0 if won else 38.0),
-		"velocity_min": 60.0 if won else 18.0,
-		"velocity_max": 190.0 if won else 54.0,
-		"angular_min": -90.0, "angular_max": 90.0,
-		"scale_min": 1.5, "scale_max": 3.6 if won else 4.8,
-		"ramp": ramp,
-	})
+	# THREE WAVES, NOT ONE BATCH (2026-09-10).
+	#
+	# This was a single 58-particle burst: everything spawned together and died
+	# together, so the screen went from full to empty in one fade and the run's
+	# last beat was over before the page had finished being read. It is the fire
+	# family's lesson and the lightning's fourth rule in the same sentence — a
+	# thing is REBORN in waves; one batch that dims reads as an effect ending
+	# rather than a thing happening.
+	#
+	# AND THE TWO VERDICTS ARE SHAPED DIFFERENTLY IN TIME, which is the part that
+	# was only ever colour and direction before. A victory ARRIVES: the first
+	# wave is the loudest and it thins to drifting embers. Ash SETTLES: it starts
+	# thin and keeps coming, because what is falling is the run, and it should
+	# still be falling when the player looks away.
+	var waves: Array = [
+		{"t": 0.00, "n": 34, "ex": 0.95, "v": 1.25},
+		{"t": 0.42, "n": 22, "ex": 0.55, "v": 1.00},
+		{"t": 0.96, "n": 15, "ex": 0.30, "v": 0.82},
+	] if won else [
+		{"t": 0.00, "n": 13, "ex": 0.35, "v": 0.85},
+		{"t": 0.70, "n": 20, "ex": 0.20, "v": 1.00},
+		{"t": 1.55, "n": 26, "ex": 0.12, "v": 1.10},
+	]
+	for w in waves:
+		var fire := func() -> void:
+			if not is_inside_tree():
+				return
+			Motion.burst(self,
+				Vector2(vp.x * 0.5, vp.y * (0.30 if won else 0.18)), "base", {
+					"name": "RunEndFlourish", "z_index": 8,
+					"explosiveness": float(w.ex),
+					"amount": int(w.n),
+					"lifetime": 1.7 if won else 2.2,
+					"emission_rect": Vector2(vp.x * 0.36, 12.0 if won else 20.0),
+					"direction": Vector2(0, -1 if won else 1),
+					"spread": 42.0 if won else 24.0,
+					"gravity": Vector2(0, 120.0 if won else 38.0),
+					"velocity_min": (60.0 if won else 18.0) * float(w.v),
+					"velocity_max": (190.0 if won else 54.0) * float(w.v),
+					"angular_min": -90.0, "angular_max": 90.0,
+					"scale_min": 1.5, "scale_max": 3.6 if won else 4.8,
+					"ramp": ramp,
+				})
+		if float(w.t) <= 0.001:
+			fire.call()
+		else:
+			get_tree().create_timer(float(w.t)).timeout.connect(fire)
 
 
 func _add_seed_chip() -> void:
@@ -285,6 +336,7 @@ func _add_seed_chip() -> void:
 
 
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+const CARD_BACK_TEXTURE = preload("res://assets/ui/card_back.png")
 
 # Thumbnail size for deck cards in the summary. Card2D's intrinsic size is
 # 225×300; we display at scale = THUMB_W / 225 ≈ 0.4 to fit a deck of 15-25
@@ -311,7 +363,29 @@ func _build_run_summary() -> void:
 	panel.name = "RunSummaryPanel"
 	panel.charred = RunState.hero_hp <= 0
 	panel.page_seed = RunState.run_seed
-	panel.custom_minimum_size = Vector2(1180, 0)
+	# ── THE PAGE FOLLOWS THE CANVAS (2026-09-19, CLASS C32) ──
+	# Every number below was authored against the 1600x900 design canvas. UI Scale
+	# DIVIDES the logical canvas (60% lays out on 2667x1500), so a fixed 1180/±590
+	# pair made the chronicle a shrinking island: `_probe_uiscale` measured
+	# game_over covering 87% of the canvas in x at 100% and **72% at 60%**. The
+	# player who picks 60% is asking to fit MORE on screen, not to get the same
+	# page with a wider margin of background around it.
+	#
+	# READ BEFORE "FIXING" THIS BACK: ProjectSettings is the AUTHORING REFERENCE
+	# here — the static canvas these constants were written against — which is its
+	# one honest use. The 2026-09-03 decorative-frame bug was the opposite mistake,
+	# reading ProjectSettings as if it were the RUNTIME canvas. Static reference,
+	# live target; never the other way round. Exactly a no-op at 100%.
+	# One definition of this rule lives in GameTheme.canvas_scale — see its header.
+	var _k: Vector2 = GameTheme.canvas_scale(self)
+	var _kx: float = _k.x
+	var _ky: float = _k.y
+	panel.custom_minimum_size = Vector2(1180.0 * _kx, 0)
+	# The complete page is revealed by its existing ink-dry tween. Keep partial
+	# construction hidden while the lower sections are staged across frames.
+	var staged_build := DisplayServer.get_name() != "headless"
+	panel.modulate.a = 0.0 if staged_build else 1.0
+	panel.visible = not staged_build
 	var s := StyleBoxEmpty.new()
 	s.content_margin_left = 60
 	s.content_margin_right = 60
@@ -325,24 +399,67 @@ func _build_run_summary() -> void:
 	panel.anchor_right = 0.5
 	panel.anchor_top = 0.0
 	panel.anchor_bottom = 0.0
-	panel.offset_left = -590
-	panel.offset_right = 590
-	panel.offset_top = 292
-	panel.offset_bottom = 292  # height auto-expands from content
+	panel.offset_left = -590.0 * _kx
+	panel.offset_right = 590.0 * _kx
+	panel.offset_top = 292.0 * _ky
+	panel.offset_bottom = 292.0 * _ky  # height auto-expands from content
 	add_child(panel)
+
+	# THE PAGE IS BOUNDED TO THE CANVAS, AND THE FOOT IS NOT PART OF WHAT SCROLLS.
+	#
+	# The contract two comments above ("must ALWAYS fit the 900px canvas with its
+	# foot buttons visible") was a HOPE ABOUT CONTENT SIZE, enforced nowhere: the
+	# page is top-anchored at 292 with its height auto-expanding, so a heavy run
+	# simply grew past the bottom of the screen and took PLAY AGAIN and BACK TO
+	# MENU with it. Measured before this fix, at 292 + content: a lean run's foot
+	# landed at y=716, a typical one at 795, a heavy one (38 cards, 12 relics, 3
+	# veterans, 9 fallen) at 852-906, and a real defeat at 919-973 — i.e. the two
+	# ways off this screen were painted entirely below the canvas. Esc still
+	# worked, so it was not a softlock; PLAY AGAIN has no key, so the rematch was
+	# unreachable exactly on the longest runs. The deck strip's own one-row scroll
+	# was an earlier patch for the same overflow, which is the tell that bounding
+	# the CONTENT one section at a time does not hold — a new section undoes it.
+	#
+	# So the structure enforces it instead: everything that varies goes in a
+	# ScrollContainer, the foot block sits BELOW that scroll and outside it, and
+	# the scroll is capped at whatever height is left over (see the sizing step at
+	# the end of this function). A page that fits is sized to its content exactly
+	# as before and shows no scrollbar — the common case is visually unchanged.
+	var outer := VBoxContainer.new()
+	outer.add_theme_constant_override("separation", 0)
+	panel.add_child(outer)
+
+	var scroll := ScrollContainer.new()
+	scroll.name = "PageScroll"
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	outer.add_child(scroll)
 
 	var col := VBoxContainer.new()
 	col.add_theme_constant_override("separation", 6)
-	panel.add_child(col)
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(col)
+
+	# The closing marks live here, always on screen, never scrolled away.
+	var foot_col := VBoxContainer.new()
+	foot_col.name = "PageFoot"
+	foot_col.add_theme_constant_override("separation", 6)
+	outer.add_child(foot_col)
 
 	var head := _make_summary_label("RUN SUMMARY", 21, INK_BRONZE)
 	head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(head)
+	if staged_build:
+		await RenderingServer.frame_post_draw
+		if _exit_committing or not is_instance_valid(panel) \
+				or not panel.is_inside_tree():
+			return
 
 	# What this win CHANGED — the meta bumps used to happen silently (the
 	# player only noticed a new ascension tier next time they opened run
 	# setup). Announce them here, at the moment they were earned.
-	if RunState.hero_hp > 0:
+	if RunState.last_run_victorious:
 		if MetaState.last_victory_unlocked_tier > 0:
 			var tier: int = MetaState.last_victory_unlocked_tier
 			var rule: String = ""
@@ -368,7 +485,12 @@ func _build_run_summary() -> void:
 	stats_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	stats_row.add_theme_constant_override("separation", 28)
 	col.add_child(stats_row)
-	stats_row.add_child(_stat_chip("Province", str(RunState.current_floor)))
+	# "Provinces", plural — this cell is a COUNT of how far the run got, and the
+	# subtitle six lines above it already says "Provinces reached: %d" off the
+	# same number. The singular was the odd one out on its own page (COPY_STYLE
+	# §12, one term per concept). The main menu's dossier keeps the SINGULAR
+	# "PROVINCE" on purpose: there the run is live and the figure is a position.
+	stats_row.add_child(_stat_chip("Provinces", str(RunState.current_floor)))
 	stats_row.add_child(_stat_chip("Fights Won", str(RunState.fights_won)))
 	stats_row.add_child(_stat_chip("Gold", str(RunState.gold), true))
 	var total_kills: int = 0
@@ -378,12 +500,17 @@ func _build_run_summary() -> void:
 		stats_row.add_child(_stat_chip("Kills", str(total_kills)))
 	if RunState.fallen.size() > 0:
 		stats_row.add_child(_stat_chip("Veterans Lost", str(RunState.fallen.size())))
+	if staged_build:
+		await RenderingServer.frame_post_draw
+		if _exit_committing or not is_instance_valid(panel) \
+				or not panel.is_inside_tree():
+			return
 
 	# Mutators survived — only show the strip if the player actually braved
 	# any. Still rendered as text since mutators are conceptual debuffs, not
 	# collectible items with art.
 	if RunState.mutators_survived.size() > 0:
-		_section_head(col, "MUTATORS SURVIVED  (%d)" % RunState.mutators_survived.size())
+		_section_head(col, "BATTLE RULES SURVIVED  (%d)" % RunState.mutators_survived.size())
 
 		var mnames: Array = []
 		for mid in RunState.mutators_survived:
@@ -392,7 +519,7 @@ func _build_run_summary() -> void:
 				mnames.append(String(m.get("name", mid)))
 			else:
 				mnames.append(mid)
-		var mlist := _make_summary_label(", ".join(mnames), 13,
+		var mlist := _make_summary_label(", ".join(mnames), 14,
 			Color(INK.r, INK.g, INK.b, 0.88))
 		mlist.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		mlist.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -404,17 +531,22 @@ func _build_run_summary() -> void:
 	# chronicle names them rather than counting them: "The Sunken Road" is a
 	# thing the player remembers doing, in a way that "1 named action" is not.
 	if RunState.setpieces_carried.size() > 0:
-		_section_head(col, "GROUND CARRIED  (%d)" % RunState.setpieces_carried.size())
+		_section_head(col, "SPECIAL BATTLES WON  (%d)" % RunState.setpieces_carried.size())
 		var spnames: Array = []
 		for sp_id in RunState.setpieces_carried:
 			var sp: Dictionary = SetPieceDB.get_set_piece(String(sp_id))
 			spnames.append(String(sp.get("name", sp_id)) if not sp.is_empty() else String(sp_id))
-		var splist := _make_summary_label(", ".join(spnames), 13,
+		var splist := _make_summary_label(", ".join(spnames), 14,
 			Color(INK.r, INK.g, INK.b, 0.88))
 		splist.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		splist.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		splist.custom_minimum_size = Vector2(480, 0)
 		col.add_child(splist)
+	if staged_build:
+		await RenderingServer.frame_post_draw
+		if _exit_committing or not is_instance_valid(panel) \
+				or not panel.is_inside_tree():
+			return
 
 	# Relics — gilded chips with hover tooltips (name + desc), matching the
 	# combat HUD strip. make_relic_chip handles tier-glow + icon/letter
@@ -443,6 +575,11 @@ func _build_run_summary() -> void:
 	# Campaign memory (docs/CAMPAIGN_MEMORY.md) — the run closes as history:
 	# the named veterans who carried the march, then the Roll of the Fallen.
 	_add_campaign_memory_section(col)
+	if staged_build:
+		await RenderingServer.frame_post_draw
+		if _exit_committing or not is_instance_valid(panel) \
+				or not panel.is_inside_tree():
+			return
 
 	# Deck — deduplicated Card2D thumbnails with ×N stack badges. Uses
 	# CardTextureCache to flatten the full writ layout into one TextureRect
@@ -465,12 +602,18 @@ func _build_run_summary() -> void:
 		deck_row.alignment = BoxContainer.ALIGNMENT_CENTER
 		deck_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		deck_scroll.add_child(deck_row)
-		# Build deferred so the panel skeleton renders immediately and the
-		# fade-in animation can start while bakes are still in flight.
+		# Build deferred so the panel skeleton renders immediately. The producer
+		# installs every exact-size back before its first await, so the page may
+		# reveal while rich faces bake without showing a growing/recentering strip.
 		_populate_deck_strip(deck_row)
+	if staged_build:
+		await RenderingServer.frame_post_draw
+		if _exit_committing or not is_instance_valid(panel) \
+				or not panel.is_inside_tree():
+			return
 
 	# ── The document's closing marks: the exit actions, inked at the foot ──
-	# MARCH AGAIN wears the rubric red (the "do it again" line is the page's
+	# PLAY AGAIN wears the rubric red (the "do it again" line is the page's
 	# one imperative); BACK TO MENU signs off in plain ink. Frameless, per
 	# the shell-wide button idiom — the label IS the button.
 	#
@@ -478,54 +621,139 @@ func _build_run_summary() -> void:
 	# bare paper with nothing around it reads as an error message rather than
 	# the action the page is asking for, and it had exactly the same weight as
 	# the sign-off beside it. The box is the clerk's, not the UI's.
-	_add_separator(col)
+	_add_separator(foot_col)
 	var foot := HBoxContainer.new()
 	foot.alignment = BoxContainer.ALIGNMENT_CENTER
 	foot.add_theme_constant_override("separation", 64)
-	col.add_child(foot)
-	var rematch := GameTheme.make_back_button("MARCH AGAIN", Vector2(268, 54),
+	foot_col.add_child(foot)
+	var rematch := GameTheme.make_back_button("PLAY AGAIN", Vector2(268, 54),
 		20, INK_RUBRIC)
 	rematch.name = "RematchBtn"
+	# PLAY AGAIN names the action; the tooltip names the OUTCOME, because the
+	# button alone cannot say WHICH run you get (COPY_STYLE §12). It is not a
+	# replay of the run that just ended — _march_again carries the hero and
+	# ascension into run setup and the seed is rolled fresh there.
+	rematch.tooltip_text = \
+		"Start a new run with the same hero and Ascension."
 	_ink_button(rematch, Color(0.78, 0.16, 0.07))
 	rematch.pressed.connect(_on_march_again_pressed.bind(rematch))
 	foot.add_child(rematch)
 	rematch.add_child(EndorsementBox.new())
 	GameTheme.hover_lift(rematch, 1.03)
-	var styled := GameTheme.make_back_button("BACK TO MENU", Vector2(240, 46),
+	# 240 → 176. The row centres the two RECTS, but only one of them is drawn:
+	# PLAY AGAIN's endorsement box fills its 268 box edge to edge, while this
+	# label is 123px of ink centred in a 240px box, reserving ~58px of invisible
+	# padding on each side. The pair therefore CENTRED correctly and READ 28.5px
+	# left of the page — every other row on this document (RUN SUMMARY, the
+	# relics, the deck strip, the tally) lands on 799. 176 still leaves the label
+	# a comfortable target, and it stops the row paying for space nothing uses.
+	var styled := GameTheme.make_back_button("BACK TO MENU", Vector2(176, 46),
 		18, INK_DIM)
 	styled.name = "BackBtn"
+	# States the EFFECT, and states it truthfully: RunState.end_run calls
+	# clear_save(), so the slot this run occupied is already gone. A tooltip
+	# implying it could be picked up again would be a lie the menu then tells
+	# the player off for believing.
+	styled.tooltip_text = "Return to the main menu. This run is over and cannot be resumed."
 	_ink_button(styled, INK)
 	styled.pressed.connect(_on_back_pressed.bind(styled))
 	foot.add_child(styled)
 	GameTheme.hover_lift(styled, 1.03)
 
 	# The ledger keeps its own count — lifetime tally as the page's footnote.
-	var tally := _make_summary_label("Total runs %d  ·  victories %d" % [
+	var tally := _make_summary_label("Total runs %d  ·  Wins %d" % [
 		MetaState.total_runs, MetaState.total_victories], 13,
 		Color(INK_DIM.r, INK_DIM.g, INK_DIM.b, 0.85))
 	tally.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	col.add_child(tally)
+	foot_col.add_child(tally)
+
+	# ── CAP THE SCROLL (the step that actually enforces the contract) ──────
+	# A first estimate now so the page never renders at zero height, then the real
+	# one once the layout exists. See _cap_page_scroll for why a mid-build
+	# measurement is not good enough.
+	scroll.custom_minimum_size.y = _page_budget(panel, foot_col, s)
+	_cap_page_scroll(panel, scroll, col, foot_col, s)
 
 	# The chronicle writes itself in: the page settles first, then each
 	# section's ink dries top-to-bottom. Without this the run's closing
 	# document just popped into existence fully printed.
-	if not (UserSettings != null and UserSettings.reduce_motion):
+	if staged_build:
+		panel.visible = true
+	var snap_intro := not staged_build \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	var closing_seal_delay := SUMMARY_SEAL_DELAY
+	if snap_intro:
+		panel.modulate.a = 1.0
+	else:
 		panel.modulate.a = 0.0
 		var ptw := panel.create_tween()
+		ptw.tween_interval(SUMMARY_REVEAL_DELAY)
 		ptw.tween_property(panel, "modulate:a", 1.0, 0.30).set_ease(Tween.EASE_OUT)
 		var line_i := 0
-		for child in col.get_children():
+		# The foot block lives outside `col` now (it must not scroll away), so it
+		# is dried in explicitly — otherwise the page's closing marks would be the
+		# one part that never faded in.
+		for child in col.get_children() + foot_col.get_children():
 			if not (child is Control):
 				continue
 			var c := child as Control
 			c.modulate.a = 0.0
 			var tw := c.create_tween()
-			tw.tween_interval(0.18 + line_i * 0.07)
-			tw.tween_property(c, "modulate:a", 1.0, 0.30).set_ease(Tween.EASE_OUT)
+			tw.tween_interval(SUMMARY_INK_DELAY + line_i * SUMMARY_INK_STAGGER)
+			tw.tween_property(c, "modulate:a", 1.0, 0.24).set_ease(Tween.EASE_OUT)
 			line_i += 1
+		# Press only after the last authored line has finished drying. Derive this
+		# from the actual page: heavy chronicles have more sections than lean ones.
+		closing_seal_delay = SUMMARY_INK_DELAY \
+			+ maxf(float(line_i - 1), 0.0) * SUMMARY_INK_STAGGER + 0.32
 
 	# ...and once the ink is down, the press comes down on it.
-	_stamp_closing_seal(panel, RunState.hero_hp > 0)
+	_stamp_closing_seal(panel, RunState.last_run_victorious, closing_seal_delay)
+
+
+## What the canvas has left for the scrolling body, once the page's top offset,
+## its writing margins, the foot block and a bottom breathing gap are paid for.
+## Read from the LIVE viewport, never a 1600x900 constant: UI Scale 60-100% sets
+## `content_scale_factor`, which DIVIDES the logical canvas, so a hardcoded 900 is
+## wrong at four of the five settings the player is offered (class C32).
+func _page_budget(panel: Control, foot_col: Control, s: StyleBox) -> float:
+	var canvas_h: float = get_viewport_rect().size.y
+	var foot_h: float = foot_col.get_combined_minimum_size().y
+	var budget: float = canvas_h - panel.offset_top - PAGE_BOTTOM_GAP \
+		- float(s.content_margin_top) - float(s.content_margin_bottom) - foot_h
+	# A floor as well as a cap: if a future header block pushes offset_top far
+	# enough down that the budget goes negative, an unclamped value would collapse
+	# the page to nothing — a worse bug than the one this fixes.
+	return maxf(budget, PAGE_MIN_SCROLL)
+
+
+## Size the scrolling body to its content, capped at what the canvas allows.
+##
+## THE MEASUREMENT HAS TO HAPPEN AFTER A LAYOUT PASS, and the first cut of this
+## did not: a mid-build `get_combined_minimum_size()` under-reported the column by
+## ~58px, because an autowrapped Label cannot know its height until it knows its
+## wrap WIDTH, and the deck strip is populated deferred so its thumbnails are not
+## in the tree yet. Sizing from that number left a scrollbar on EVERY page —
+## including the short ones that fit perfectly well — which is a visual regression
+## in the common case in exchange for fixing the rare one.
+##
+## So it settles instead of guessing: re-measure each frame and stop once the
+## reading HOLDS, which is the same discipline the pixel gates use and for the
+## same reason — a number sampled off a screen that is still assembling is the
+## machine's timing, not the layout's.
+func _cap_page_scroll(panel: Control, scroll: ScrollContainer, col: Control,
+		foot_col: Control, s: StyleBox) -> void:
+	var last := -1.0
+	for i in 16:
+		await get_tree().process_frame
+		if not is_instance_valid(scroll) or not is_instance_valid(col) \
+				or not is_instance_valid(panel) or not scroll.is_inside_tree():
+			return
+		var want: float = col.get_combined_minimum_size().y
+		scroll.custom_minimum_size.y = minf(want, _page_budget(panel, foot_col, s))
+		if absf(want - last) < 0.5:
+			return
+		last = want
 
 
 ## Roman numeral, for the seal's march number. Small by construction — the
@@ -560,7 +788,8 @@ func _roman(n: int) -> String:
 ## Lives on the SCENE, not the page: PanelContainer stretches every child to
 ## its content rect, so a seal parented to the page would fight the VBox.
 ## Positioned against the page's real rect once layout has settled.
-func _stamp_closing_seal(panel: Control, won: bool) -> void:
+func _stamp_closing_seal(panel: Control, won: bool,
+		reveal_delay: float = SUMMARY_SEAL_DELAY) -> void:
 	const SEAL_D := 168.0
 	var host := Control.new()
 	host.name = "ClosingSeal"
@@ -622,22 +851,121 @@ func _stamp_closing_seal(panel: Control, won: bool) -> void:
 	anchor.y = minf(anchor.y, vp.y - SEAL_D - 10.0)
 	host.position = anchor
 
+	# HEADLESS LEAVES THE SEAL SETTLED, and this gate is load-bearing rather than
+	# tidiness. Returning here is exactly right for a probe: the host is already
+	# parked, at scale 1 and full alpha, which is the state a layout gate should
+	# measure — the animation is the only thing skipped.
+	#
+	# Without it, `_probe_alignment` ran the whole press in a headless run and the
+	# contact beat built nodes and tweens (the dent, the spatter host, the foil
+	# rect) that outlived the probe's teardown of the scene. It crashed with no
+	# error and at a DIFFERENT screen each run, which is the signature of a
+	# lifetime fault rather than a bad screen, and it is the same class the gate
+	# runner's own comment documents. `_spawn_run_end_flourish` already gated
+	# headless; this sibling never did, and nothing needed it until the contact
+	# beat gave it something to leak.
+	if DisplayServer.get_name() == "headless":
+		return
 	if UserSettings != null and UserSettings.reduce_motion:
 		return
-	# The press: down fast from above the page, stopping dead on contact
-	# (EASE_IN — a stamp has no follow-through), then the page takes the knock.
+	# THE SEAL IS MOLTEN WAX, NOT A NODE THAT SCALES (2026-09-10).
+	#
+	# The press was already the right shape — down fast, EASE_IN so it stops dead
+	# because a stamp has no follow-through — and it was still a transform tween
+	# with nothing happening inside it. Graded against the lightning it had the
+	# form and the snap and was missing everything the MATERIAL does, which for
+	# wax is very specific and none of it was modelled:
+	#
+	#   · IT SQUEEZES OUT. Wax under a matrix flows sideways, so the seal is
+	#     briefly WIDER than its rest size and settles back as the flow stops.
+	#     That overshoot is the material, not a bounce — a bounce would return
+	#     symmetrically and this must not, so the settle is slow and one-way.
+	#   · THE PAPER TAKES IT. A screen shake says the DESK was hit; it says
+	#     nothing about the sheet. The bolt's rule 9 — an effect that arrives
+	#     with no mark where it LANDS reads as having passed through.
+	#   · IT COOLS. Hot wax is glossy and dulls as it sets, which is the same
+	#     "setting" aliveness the road ink got, on a much shorter clock.
+	#
+	# NO FADE-IN. It used to ramp alpha 0 → 1 over the descent, which is the
+	# defect that cost the lightning its first two rebuilds: there was no instant
+	# at which the thing was ever at full strength. A stamp is a physical object
+	# approaching the page — it is opaque the whole way down.
 	host.scale = Vector2(2.4, 2.4)
 	host.modulate.a = 0.0
+	var wax_col: Color = Color(0.62, 0.14, 0.10) if won else Color(0.26, 0.23, 0.22)
 	var tw := host.create_tween()
-	tw.set_parallel(true)
-	tw.tween_property(host, "modulate:a", 1.0, 0.10).set_delay(0.55)
-	tw.tween_property(host, "scale", Vector2.ONE, 0.16) \
-		.set_delay(0.55).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
-	tw.chain().tween_callback(func():
-		if not is_instance_valid(self):
-			return
-		GameTheme.shake_impulse(self, 0.26 if won else 0.14)
-		AudioBank.play_sfx("upgrade_confirm", 0.02, -2.0, 0.78 if won else 0.62))
+	tw.tween_interval(reveal_delay)
+	tw.tween_property(host, "modulate:a", 1.0, 0.01)
+	# The descent. Stops dead.
+	tw.tween_property(host, "scale", Vector2(1.06, 1.02), 0.16) \
+		.set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
+	tw.tween_callback(func(): _seal_contact(host, panel, wax_col, won))
+	# The squeeze settling back. Slow and one-way — wax does not spring.
+	tw.tween_property(host, "scale", Vector2.ONE, 0.30) \
+		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_QUAD)
+
+
+## The moment the matrix meets the page. Everything here is the impact kit the
+## forge and the writ already speak, so the run's closing beat is in the same
+## grammar as every other permanent mark the game makes on a card.
+func _seal_contact(host: Control, panel: Control, wax_col: Color,
+		won: bool) -> void:
+	if not is_instance_valid(self) or not is_instance_valid(host):
+		return
+	GameTheme.shake_impulse(self, 0.26 if won else 0.14)
+	AudioBank.play_sfx("upgrade_confirm", 0.02, -2.0, 0.78 if won else 0.62)
+	# WARM AND LOW, not the kit's white-hot default. A forge strike is metal being
+	# hit and wants the over-exposure; wax is warm, dull and soft, and at 0.55
+	# white the seal photographed pale pink at the one instant it should read as
+	# a deep red mass landing.
+	Motion.impact_frame(self, host, Vector2(1.06, 1.02),
+		Color(1.0, 0.88, 0.74, 0.30))
+	var centre: Vector2 = host.global_position + host.size * host.scale * 0.5
+	# THE BEAD OF WAX PUSHED OUT PAST THE MATRIX. Rings in the wax's own colour
+	# rather than the kit's white, because this is displaced material and not a
+	# flash — it should look like it came OUT of the seal.
+	Motion.shock_rings(self, centre, wax_col, 1.35)
+	# Spatter: a few droplets thrown clear. Wax, so they are heavy and they fall.
+	Motion.burst(self, centre, "base", {
+		"texture": "ink", "z_index": 9,
+		"explosiveness": 1.0, "amount": 9, "lifetime": 0.5,
+		"direction": Vector2(0, 0), "spread": 180.0,
+		"gravity": Vector2(0, 340.0),
+		"velocity_min": 40.0, "velocity_max": 170.0,
+		"scale_min": 1.0, "scale_max": 2.6,
+		"color": Color(wax_col.r, wax_col.g, wax_col.b, 0.90),
+	})
+	# IT COOLS. The specular crosses the wax once and is gone — the whole read is
+	# that it was liquid a moment ago and is not any more.
+	Motion.foil_sweep(self, host, Color(1.0, 0.90, 0.72), 0.46)
+	_dent_the_page(host, panel, centre)
+
+
+## The impression. A wax seal pressed at the foot of a sheet leaves the paper
+## dished around it, and that mark does not fade — it is the last permanent thing
+## the run does. Drawn UNDER the seal and left there.
+func _dent_the_page(host: Control, panel: Control, centre: Vector2) -> void:
+	if not is_instance_valid(panel) or not is_instance_valid(host):
+		return
+	var dent := TextureRect.new()
+	dent.name = "SealDent"
+	dent.texture = Motion.particle_tex("ink")
+	dent.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dent.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	var d: float = host.size.x * 1.55
+	dent.size = Vector2(d, d * 0.88)
+	dent.global_position = centre - dent.size * 0.5
+	# Behind the seal but above the page. `show_behind_parent` is the same tool
+	# the map's ink layer uses to sit under its parent's own drawing.
+	dent.z_index = -1
+	dent.modulate = Color(0.10, 0.06, 0.04, 0.0)
+	add_child(dent)
+	move_child(dent, maxi(host.get_index() - 1, 0))
+	# It arrives WITH the blow, not after it: the paper is dished at the instant
+	# of contact, so this is a fast fade-up to a held value and then nothing.
+	var dt := dent.create_tween()
+	dt.tween_property(dent, "modulate:a", 0.30, 0.09) \
+		.set_ease(Tween.EASE_OUT)
 
 
 ## Re-ink a shell button for parchment: the heavy dark outline that keeps
@@ -685,7 +1013,7 @@ func _add_campaign_memory_section(col: VBoxContainer) -> void:
 		var vlines: Array = []
 		for v in vets.slice(0, 3):
 			vlines.append("%s — %d kills" % [v["name"], v["kills"]])
-		var vlist := _make_summary_label("\n".join(vlines), 13,
+		var vlist := _make_summary_label("\n".join(vlines), 14,
 			Color(INK.r, INK.g, INK.b, 0.92))
 		vlist.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		vets_box.add_child(vlist)
@@ -708,7 +1036,7 @@ func _add_campaign_memory_section(col: VBoxContainer) -> void:
 				% [String(f.get("name", "?")), String(f.get("enc", "the road")), act_n])
 		if RunState.fallen.size() > 4:
 			flines.append("…and %d earlier falls" % (RunState.fallen.size() - 4))
-		var flist := _make_summary_label("\n".join(flines), 13, INK_DIM)
+		var flist := _make_summary_label("\n".join(flines), 14, INK_DIM)
 		flist.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		flist.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		flist.custom_minimum_size = Vector2(430, 0)
@@ -791,50 +1119,180 @@ func _populate_deck_strip(parent: Container) -> void:
 		(scroll as Control).custom_minimum_size = Vector2(0,
 			thumb_w * (THUMB_H / THUMB_W) + 16.0)
 
-	for key in order:
-		var entry: Dictionary = groups[key]
-		var slot := _make_deck_thumb(entry["data"], int(entry["count"]), thumb_w)
-		if not is_inside_tree():
-			return  # scene exited mid-bake
+	# The complete strip exists before the first asynchronous bake. Small face-down
+	# writs are honest loading content for a deckbuilder and, more importantly,
+	# reserve every final pixel so no completed card can shove an earlier one.
+	var slots: Array[Control] = []
+	var backs: Array[Control] = []
+	for _key in order:
+		var stage := _make_deck_thumb_stage(thumb_w, parent)
+		var slot: Control = stage["slot"]
+		var back: Control = stage["back"]
 		parent.add_child(slot)
+		slots.append(slot)
+		backs.append(back)
+	# Let the HBox sort its final footprint once. Everything after this point is
+	# mounted inside those fixed Controls and cannot alter the row's geometry.
+	await get_tree().process_frame
+
+	# Batch cold identities before constructing any visible Card2D. A late-run
+	# upgrade or never-drawn card must not leave its full ornate fallback alive
+	# on the post-mortem after the cache finishes behind it.
+	var unique_datas: Array = []
+	for key in order:
+		unique_datas.append(groups[key]["data"])
+	var still_here := func() -> bool:
+		return is_inside_tree() and is_instance_valid(parent) \
+			and parent.is_inside_tree()
+	await CardTextureCache.bake_many(unique_datas, still_here)
+	if not still_here.call():
+		return
+
+	var faces: Array[Control] = []
+	for i in order.size():
+		var key: String = order[i]
+		var entry: Dictionary = groups[key]
+		var face := _hydrate_deck_thumb(slots[i], entry["data"],
+			int(entry["count"]), thumb_w)
+		faces.append(face)
+		# Keep the old one-tree-per-frame construction budget, but hide the order
+		# behind the already-complete set of backs.
 		await get_tree().process_frame
+		if not still_here.call():
+			return
+
+	# One final deck, one turn. Every back closes in the same frame and every full
+	# ornate face opens from that shared edge. Reduced motion snaps the same set.
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	for face in faces:
+		if is_instance_valid(face):
+			face.modulate.a = 1.0
+	if snap:
+		for back in backs:
+			if is_instance_valid(back):
+				back.queue_free()
+	else:
+		for i in faces.size():
+			if is_instance_valid(backs[i]) and is_instance_valid(faces[i]):
+				Motion.flip_out(backs[i], 0.13)
+				Motion.flip_in(faces[i], Motion.time(0.13), 0.17)
 
 
-func _make_deck_thumb(card_data: Dictionary, count: int,
-		thumb_w: float = THUMB_W) -> Control:
-	# Slot Control claims the thumb footprint so the row reserves the right
-	# space; the Card2D child renders at full 225×300 logical size but `scale`
-	# shrinks it visually to fit. Width is passed in by the caller, which sizes
-	# the whole strip to the deck (see _populate_deck_strip).
+func _make_deck_thumb_stage(thumb_w: float = THUMB_W,
+		group: CanvasItem = null) -> Dictionary:
 	var thumb_h: float = thumb_w * (THUMB_H / THUMB_W)
 	var slot := Control.new()
 	slot.custom_minimum_size = Vector2(thumb_w, thumb_h)
 	slot.size = Vector2(thumb_w, thumb_h)
 	slot.mouse_filter = Control.MOUSE_FILTER_PASS
 	slot.clip_contents = false  # tooltip popup needs to extend past the slot
+	var back := TextureRect.new()
+	back.texture = CARD_BACK_TEXTURE
+	back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	back.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	Motion.arm_loading_writ(back, group)
+	slot.add_child(back)
+	return {"slot": slot, "back": back}
 
+
+func _hydrate_deck_thumb(slot: Control, card_data: Dictionary, count: int,
+		thumb_w: float = THUMB_W) -> Control:
+	# Card and count badge share one face layer so they turn over as a single writ.
+	# The layer fills the already-reserved slot and never participates in HBox size.
+	var face := Control.new()
+	face.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	face.mouse_filter = Control.MOUSE_FILTER_PASS
+	face.modulate.a = 0.0
+	slot.add_child(face)
 	var card = CARD_SCENE.instantiate()
 	card.card_data = card_data.duplicate(true)
 	card.card_id = card_data.get("id", "")
 	# is_on_battlefield → no drag system, no hover lift. live_baked_mode →
-	# uses CardTextureCache's baked texture once warm (cheap), falls back to
-	# full layout on cold cache. Pre-baked just below.
+	# uses the texture pre-baked by _populate_deck_strip above, so the card
+	# always takes the compact path when it enters the live tree.
 	card.is_on_battlefield = true
 	card.live_baked_mode = true
 	var sc: float = thumb_w / 225.0
-	# The muster strip keeps its crisp vector rules text even at ~0.36 scale —
-	# small but legible, and hovering a thumb still floats the full card.
+	# A THUMB IS A PICTURE, AND THE RULES LIVE ON THE HOVER.
+	#
+	# This used to claim the muster strip proved ~0.36 scale stayed legible and
+	# that "hovering a thumb still floats the full card". Both halves were false.
+	# The muster strip was REPLACED on 2026-09-14 precisely because scaling a
+	# Card2D node renders its rules text below the floor — Card2D holds rules at
+	# an ABSOLUTE 18px (`_fit_desc_to_box` would rather clip the card than shrink
+	# a glyph), so 0.62 drew 11.2px there and was ruled unreadable. This strip is
+	# 82/225 = 0.36, i.e. **6.5px** — less than half the 14px hard floor that
+	# `_probe_text_floor` fails the build on, and invisible to that probe because
+	# it reads font-size OVERRIDES and a `Control.scale` is not one.
+	#
+	# And the float was never wired: the only trace of it was a `clip_contents`
+	# comment on the slot. So the post-mortem showed a player their final deck
+	# with the rules rendered as grey mush and no gesture that could read them.
+	# The scale stays — at 25 cards nothing bigger fits above the foot buttons —
+	# and the readable face is now one hover away, which is the house rule.
 	card.scale = Vector2(sc, sc)
 	card.position = Vector2.ZERO
-	slot.add_child(card)
-	# Bake in background so the first frame the slot exists, the cache is
-	# already warm and Card2D's _build_layout picks the fast path. No await
-	# here — the live overlay numerals stay correct even on cache miss.
-	CardTextureCache.bake(card_data)
+	face.add_child(card)
 
 	if count > 1:
-		slot.add_child(_make_count_badge(count))
-	return slot
+		face.add_child(_make_count_badge(count))
+	_add_thumb_hover(slot, card_data)
+	return face
+
+
+## Topmost catcher on a deck thumb: names the card for a screen reader and a
+## tooltip, and floats the full-size face while the pointer is on it.
+func _add_thumb_hover(slot: Control, card_data: Dictionary) -> void:
+	var catcher := Control.new()
+	catcher.name = "ThumbHover"
+	catcher.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	catcher.mouse_filter = Control.MOUSE_FILTER_STOP
+	catcher.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	catcher.tooltip_text = String(card_data.get("name", ""))
+	slot.add_child(catcher)
+	var data := card_data.duplicate(true)
+	catcher.mouse_entered.connect(func() -> void:
+		_show_thumb_preview(data, catcher))
+	catcher.mouse_exited.connect(_hide_thumb_preview)
+
+
+var _thumb_preview: Node = null
+
+
+func _show_thumb_preview(card_data: Dictionary, anchor: Control) -> void:
+	_hide_thumb_preview()
+	if not is_instance_valid(anchor) or not anchor.is_inside_tree():
+		return
+	var card = CARD_SCENE.instantiate()
+	card.card_data = card_data
+	card.card_id = String(card_data.get("id", ""))
+	card.is_on_battlefield = true
+	card.live_baked_mode = true
+	CardTextureCache.bake(card.card_data)
+	card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Above the parchment page and its closing seal, both of which the strip sits
+	# on top of — a preview half-behind the document reads as a rendering fault.
+	card.z_index = 220
+	add_child(card)
+	var r := anchor.get_global_rect()
+	var vp := get_viewport_rect().size
+	# Standing ABOVE the thumb, because the strip is the last block on the page:
+	# below it there is only the foot row, and 300px of card would leave the
+	# canvas entirely.
+	var pos := Vector2(r.get_center().x - 112.5, r.position.y - 312.0)
+	pos.x = clampf(pos.x, 8.0, maxf(8.0, vp.x - 233.0))
+	pos.y = clampf(pos.y, 8.0, maxf(8.0, vp.y - 308.0))
+	card.global_position = pos
+	_thumb_preview = card
+
+
+func _hide_thumb_preview() -> void:
+	if _thumb_preview != null and is_instance_valid(_thumb_preview):
+		_thumb_preview.queue_free()
+	_thumb_preview = null
 
 
 func _make_count_badge(n: int) -> Label:
@@ -922,26 +1380,30 @@ func _animate_intro() -> void:
 	# Title slams in with a back-eased overshoot; subtitle and stats follow.
 	# Victory feels celebratory, defeat feels heavy — same beat, different colors
 	# (color is already set above).
-	# The exit buttons live INSIDE the chronicle page now, so the summary
-	# fade carries them — no separate button tweens.
+	# The chronicle owns its own reveal timeline once its complete layout is
+	# ready. Do not tween it here too: two opacity writers made the page timing
+	# depend on whether its final card faces were warm or cold.
 	$Title.pivot_offset = $Title.size * 0.5
+	if DisplayServer.get_name() == "headless" \
+			or (UserSettings != null and UserSettings.reduce_motion):
+		$Title.scale = Vector2.ONE
+		$Title.modulate.a = 1.0
+		$Subtitle.modulate.a = 1.0
+		return
 	$Title.scale = Vector2(0.7, 0.7)
 	$Title.modulate.a = 0.0
 	$Subtitle.modulate.a = 0.0
-	var summary := get_node_or_null("RunSummaryPanel")
-	if summary != null:
-		summary.modulate.a = 0.0
 	var tw := create_tween()
 	tw.set_parallel(true)
 	tw.tween_property($Title, "modulate:a", 1.0, 0.50).set_ease(Tween.EASE_OUT)
 	tw.tween_property($Title, "scale", Vector2.ONE, 0.65) \
 		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	tw.tween_property($Subtitle, "modulate:a", 1.0, 0.40).set_delay(0.45)
-	if summary != null:
-		tw.tween_property(summary, "modulate:a", 1.0, 0.50).set_delay(0.80)
-
 
 func _on_march_again_pressed(btn: Button) -> void:
+	if _exit_committing:
+		return
+	_exit_committing = true
 	if btn != null and is_instance_valid(btn) \
 			and not (UserSettings != null and UserSettings.reduce_motion):
 		GameTheme.claim_pop(btn)
@@ -952,6 +1414,9 @@ func _on_march_again_pressed(btn: Button) -> void:
 
 
 func _on_back_pressed(btn: Button) -> void:
+	if _exit_committing:
+		return
+	_exit_committing = true
 	if btn != null and is_instance_valid(btn) \
 			and not (UserSettings != null and UserSettings.reduce_motion):
 		GameTheme.claim_pop(btn)
@@ -971,10 +1436,6 @@ func _march_again() -> void:
 		"ascension": RunState.current_ascension,
 		"signature_relic": RunState.current_signature_relic,
 		"deck_variant": RunState.current_deck_variant,
-		# The banner rides along for the same reason the doctrine does: a rematch
-		# never runs THE MUSTER, so without this the declaration silently reverts
-		# to the default and the rematch marches under someone else's colours.
-		"banner_tribe": RunState.current_banner_tribe,
 	}
 	GameTheme.fade_out_then_change_scene(self, MAIN_MENU)
 
@@ -982,7 +1443,9 @@ func _march_again() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	# Esc returns to the main menu (the run is already over).
 	if event.is_action_pressed("ui_cancel"):
-		_back()
+		if not _exit_committing:
+			_exit_committing = true
+			_back()
 		get_viewport().set_input_as_handled()
 
 

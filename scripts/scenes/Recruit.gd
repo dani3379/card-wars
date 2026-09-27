@@ -7,6 +7,7 @@ extends Control
 ## winning. Fully programmatic UI, same pattern as Shop/Rest/Reward.
 
 const CARD_SCENE = preload("res://scenes/card_2d.tscn")
+const CARD_BACK_TEXTURE = preload("res://assets/ui/card_back.png")
 const MAP_SCENE = "res://scenes/map.tscn"
 
 # Roll a wide slate, keep the 3 most kingdom-aligned. Explicit card affinities
@@ -23,13 +24,20 @@ const AFFINITY := {
 	"everflame": {"kw": ["doom", "rampage", "lifelink"], "burn": true},
 }
 
+# CAUTION: each key here is BOTH the dictionary key AND the caption printed
+# over the card (`_assign_choice_roles` also compares against them, and two
+# `.get()` calls fall back to "ALL-ROUND PICK"). So a wording change is a
+# 6-site coordinated edit, not a copy edit — rename every occurrence in this
+# file at once. They were "LOCAL BANNER"/"FIELD ANSWER"/"SELLSWORD" until
+# 2026-08-06; "banner" meant three different things at the time (a faction
+# choice, a creature's keyword, and this), so the caption named nothing.
 const ROLE_TIPS := {
-	"LOCAL BANNER": "Best match for the kingdom's fighting style.",
-	"ROAD BANNER": "A broad recruit for the road ahead.",
-	"FIELD ANSWER": "A second-fit pick that answers the current country.",
-	"SELLSWORD": "Less local, often more flexible.",
-	"EXTRA BANNER": "Scout's Emblem found a fourth name.",
-	"STARDUST RARE": "Stardust Vial added a rare recruit."
+	"KINGDOM MATCH": "Best match for the kingdom's fighting style.",
+	"ALL-ROUND PICK": "A broad recruit for the road ahead.",
+	"SECOND MATCH": "A second option suited to this kingdom.",
+	"FLEXIBLE PICK": "Less local, often more flexible.",
+	"EXTRA CHOICE": "Scout's Emblem added a fourth recruit.",
+	"RARE CHOICE": "Stardust Vial added a rare recruit."
 }
 
 var _choices: Array[String] = []
@@ -45,6 +53,9 @@ var _card_nodes: Array = []
 var _rerolling: bool = false
 # Blocks a double-click from enlisting the same card twice while the scene fades.
 var _enlist_committing: bool = false
+# Stops cards and the horn from committing after the player has chosen Skip.
+var _leaving: bool = false
+var _ui_build_generation: int = 0
 
 
 func _ready() -> void:
@@ -55,12 +66,30 @@ func _ready() -> void:
 	GameTheme.fade_in(self, 0.22)
 	_choices = _roll_offer()
 	_assign_choice_roles(_choices)
-	# Build visible Card2Ds only after their one-quad textures exist. Previously
-	# each cold offer built the full ornate tree while a second hidden card baked.
-	await ScenePreload.warm_card_ids(_choices)
-	_build_ui()
+	# _build_ui reserves the complete slate as face-down cards before it starts
+	# any asynchronous art/card work. Loading order is therefore never visible.
+	await _build_ui(true)
 	GameTheme.make_settings_gear(self)
+	# Where cards actually enter a deck, so this is where "your deck grows" is
+	# taught — not on the post-fight spoils screen, which hands out relics.
+	TutorialCoach.teach(self, "recruit_card", _card_nodes)
 
+
+
+
+## PRESENT ONE FRAME, safely on both paths.
+##
+## `RenderingServer.frame_post_draw` NEVER FIRES under `--headless` — it parks
+## the coroutine forever, and enough parked coroutines segfault the exit. Recruit
+## had THREE bare awaits on it and no guard, so any headless probe that booted
+## this screen suspended on the first card and never reached the rest of `_ready`
+## — including the coaching call at the end of it. `Shop.gd` already branches this
+## way at its own stagger site; this is the funnel Recruit was missing.
+func _present_frame() -> void:
+	if DisplayServer.get_name() == "headless":
+		await get_tree().process_frame
+	else:
+		await RenderingServer.frame_post_draw
 
 func _unhandled_input(event: InputEvent) -> void:
 	# Esc opens the pause/Settings overlay rather than walking away from the
@@ -108,23 +137,23 @@ func _roll_offer() -> Array[String]:
 func _assign_choice_roles(ids: Array[String]) -> void:
 	_choice_roles.clear()
 	var labels: Array[String] = [
-		"LOCAL BANNER",
-		"FIELD ANSWER",
-		"SELLSWORD",
-		"EXTRA BANNER",
+		"KINGDOM MATCH",
+		"SECOND MATCH",
+		"FLEXIBLE PICK",
+		"EXTRA CHOICE",
 	]
 	for i in range(ids.size()):
 		var label: String = labels[mini(i, labels.size() - 1)]
-		if RunState.get_act_faction() == "" and label == "LOCAL BANNER":
-			label = "ROAD BANNER"
+		if RunState.get_act_faction() == "" and label == "KINGDOM MATCH":
+			label = "ALL-ROUND PICK"
 		if RunState.has_relic("stardust_vial") and i == ids.size() - 1:
-			label = "STARDUST RARE"
+			label = "RARE CHOICE"
 		_choice_roles[ids[i]] = label
 
 
 func _choice_role_tip(id: String) -> String:
-	var role := String(_choice_roles.get(id, "ROAD BANNER"))
-	return String(ROLE_TIPS.get(role, "A recruit joining your march."))
+	var role := String(_choice_roles.get(id, "ALL-ROUND PICK"))
+	return String(ROLE_TIPS.get(role, "A recruit joining your deck."))
 
 
 func _affinity(d: Dictionary, faction: String) -> int:
@@ -181,7 +210,11 @@ func _affinity(d: Dictionary, faction: String) -> int:
 	return s
 
 
-func _build_ui() -> void:
+func _build_ui(stagger_hydration: bool = true) -> void:
+	_ui_build_generation += 1
+	var build_generation := _ui_build_generation
+	var builder_alive := func() -> bool:
+		return is_inside_tree() and build_generation == _ui_build_generation
 	_card_nodes.clear()
 	for child in get_children():
 		# Keep the reroll sweep overlay alive across the rebuild so the outgoing
@@ -214,11 +247,11 @@ func _build_ui() -> void:
 	# The kingdom line sells the conquest fantasy: these are the invaded
 	# land's people changing banners, not a shop shelf.
 	var faction: String = RunState.get_act_faction()
-	var flavor := "Wanderers seek your banner. Take one, no charge."
+	var flavor := "Choose one recruit to join your deck. Free."
 	if faction != "":
 		var fname: String = String(HeroDB.faction_info(faction).get("name", ""))
 		if fname != "":
-			flavor = "Word spreads through %s. Take one banner, no charge." % fname
+			flavor = "Recruits from %s. Choose one to join your deck." % fname
 	var sub = GameTheme.make_label(flavor, GameTheme.FONT_SUBHEADER, GameTheme.IVORY)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	outer.add_child(sub)
@@ -228,32 +261,42 @@ func _build_ui() -> void:
 	# not as a rigged shop.
 	var season_text: String = RunState.season_line()
 	if season_text != "":
+		# Warm bone, not the sage it was (2026-08-05). `g >= r` is the project's
+		# cold-ink tell, and on this screen the line rendered as the one cool
+		# element over an open-flame backdrop. The 2026-08-03 pass called the
+		# muster's copy of this "one of the last two live instances in the
+		# opening" and warmed it; this is the same line on the ROAD, outside the
+		# opening, and it was missed. Same value the muster's now uses.
 		var season = GameTheme.make_label(season_text, GameTheme.FONT_SUBHEADER,
-			Color(0.64, 0.74, 0.60))
+			Color(0.88, 0.83, 0.68))
 		season.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		outer.add_child(season)
 		GameTheme.deal_in(season, 0.09)
 
+	var staged: Array[Dictionary] = []
 	if _choices.size() > 0:
 		var accent := _muster_accent()
 		# Frameless stage — the recruits stand on the scene itself (no cage;
 		# the old full-height bordered panel was mostly empty air).
 		outer.add_child(_make_spacer(18))
 		var card_row = HBoxContainer.new()
+		card_row.name = "RecruitCardGroup"
+		card_row.set_meta("coordinated_card_group", true)
 		card_row.add_theme_constant_override("separation", 34)
 		card_row.alignment = BoxContainer.ALIGNMENT_CENTER
 		outer.add_child(card_row)
+		# Reserve the whole centred row as real card backs before any await. Rich
+		# faces hydrate behind fixed footprints, so load order cannot resize it.
 
-		var slot_idx := 0
 		for id in _choices:
-			var data = CardDB.get_card_data(id)
+			var data: Dictionary = CardDB.get_card_data(id)
 			var slot := VBoxContainer.new()
 			slot.add_theme_constant_override("separation", 8)
 			slot.alignment = BoxContainer.ALIGNMENT_CENTER
 			slot.tooltip_text = _choice_role_tip(id)
 			card_row.add_child(slot)
 
-			var role := String(_choice_roles.get(id, "ROAD BANNER"))
+			var role := String(_choice_roles.get(id, "ALL-ROUND PICK"))
 			# 16, the caption band's floor — not 15. This line is the only thing
 			# telling the player WHY these three banners are the offer, so it is
 			# the second thing they should read, and it was rendering below the
@@ -266,30 +309,30 @@ func _build_ui() -> void:
 			slot.add_child(role_lbl)
 
 			var card_wrap := Control.new()
+			card_wrap.name = "RecruitCardSlot"
 			card_wrap.custom_minimum_size = Vector2(Card2D.CARD_W, Card2D.CARD_H)
 			card_wrap.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 			card_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			card_wrap.pivot_offset = card_wrap.custom_minimum_size * 0.5
+			card_wrap.set_meta("coordinated_card_slot", true)
 			# Ground the recruit: a soft pooled contact shadow under the card
 			# (children draw over the parent, so the card stands on it).
 			card_wrap.draw.connect(_draw_card_shadow.bind(card_wrap))
 			slot.add_child(card_wrap)
 
-			var card = CARD_SCENE.instantiate()
-			card.card_data = data.duplicate(true)
-			card.card_id = id
-			card.is_on_battlefield = true
-			card.live_baked_mode = true
-			CardTextureCache.bake(data)
-			card.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-			card.gui_input.connect(_on_recruit_card_input.bind(id, card, card_wrap))
-			card.mouse_entered.connect(_on_recruit_card_hover.bind(card_wrap, true))
-			card.mouse_exited.connect(_on_recruit_card_hover.bind(card_wrap, false))
-			card_wrap.add_child(card)
+			var face_host := Control.new()
+			face_host.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			card_wrap.add_child(face_host)
+			face_host.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+			var back := _make_loading_card_back(card_row)
+			card_wrap.add_child(back)
+			back.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 			_card_nodes.append(card_wrap)
+			staged.append({
+				"id": id, "data": data, "wrap": card_wrap,
+				"host": face_host, "back": back,
+			})
 
-			_animate_card_reveal(card_wrap, slot_idx, String(data.get("rarity", "")))
-			slot_idx += 1
 
 	# Recruiter's Horn: spend a charge to call up a fresh slate of recruits.
 	# Only shown while the relic is held AND charges remain — the button vanishes
@@ -297,7 +340,7 @@ func _build_ui() -> void:
 	if _choices.size() > 0 and RunState.has_relic("recruiters_horn") \
 			and RunState.muster_rerolls_left > 0:
 		var reroll_btn = GameTheme.make_themed_button(
-			"Sound the Horn — new recruits  (%d left)" % RunState.muster_rerolls_left,
+			"Call New Recruits  (%d left)" % RunState.muster_rerolls_left,
 			Color(0.20, 0.14, 0.06), Vector2(380, 40), 16)
 		reroll_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 		reroll_btn.tooltip_text = "Recruiter's Horn — replace these three recruits."
@@ -307,12 +350,62 @@ func _build_ui() -> void:
 		GameTheme.hover_lift(reroll_btn, 1.03)
 
 	outer.add_child(_make_spacer(10))
-	var leave_btn = GameTheme.make_back_button("Turn Them Away", Vector2(200, 42))
+	var leave_btn = GameTheme.make_back_button("Skip", Vector2(200, 42))
 	leave_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	leave_btn.pressed.connect(_on_leave_pressed.bind(leave_btn))
 	outer.add_child(leave_btn)
 	GameTheme.deal_in(leave_btn, 0.42)
 	GameTheme.hover_lift(leave_btn, 1.03)
+
+	if staged.is_empty():
+		return
+	# Show the complete sleeve row first. Cache warming and ornate face creation
+	# remain paced across frames, but every expensive step is hidden behind stable
+	# covers instead of being presented as a one-by-one layout mutation.
+	await _present_frame()
+	if not builder_alive.call():
+		return
+	await ScenePreload.warm_card_ids(_choices)
+	if not builder_alive.call():
+		return
+
+	var staged_cards: Array[Control] = []
+	var staged_backs: Array[Control] = []
+	var staged_rarities: Array[String] = []
+	var reduce_motion := UserSettings != null and UserSettings.reduce_motion
+	for entry in staged:
+		var data: Dictionary = entry["data"]
+		var id: String = entry["id"]
+		var card_wrap: Control = entry["wrap"]
+		var face_host: Control = entry["host"]
+		var card = CARD_SCENE.instantiate()
+		card.card_data = data.duplicate(true)
+		card.card_id = id
+		card.is_on_battlefield = true
+		card.live_baked_mode = true
+		card.defer_baked_rules_text = stagger_hydration and not reduce_motion
+		card.visible = false
+		card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		card.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		card.gui_input.connect(_on_recruit_card_input.bind(id, card, card_wrap))
+		card.mouse_entered.connect(_on_recruit_card_hover.bind(card_wrap, true))
+		card.mouse_exited.connect(_on_recruit_card_hover.bind(card_wrap, false))
+		face_host.add_child(card)
+		staged_cards.append(card)
+		staged_backs.append(entry["back"])
+		staged_rarities.append(String(data.get("rarity", "")))
+		if stagger_hydration:
+			await _present_frame()
+			if not builder_alive.call():
+				return
+			if card.defer_baked_rules_text and is_instance_valid(card):
+				card.complete_deferred_baked_rules()
+				await _present_frame()
+				if not builder_alive.call():
+					return
+
+	await _reveal_recruit_group(
+		staged_cards, staged_backs, _card_nodes, staged_rarities, builder_alive)
 
 
 func _make_spacer(h: float) -> Control:
@@ -323,15 +416,16 @@ func _make_spacer(h: float) -> Control:
 
 
 func _draw_card_shadow(card_wrap: Control) -> void:
-	# Pooled ellipse at the card's foot — three stacked passes fake the blur.
-	var c := Vector2(Card2D.CARD_W * 0.5, Card2D.CARD_H + 8.0)
-	for pass_i in range(3):
-		var w := 96.0 - float(pass_i) * 18.0
-		var h := 13.0 - float(pass_i) * 2.5
-		card_wrap.draw_set_transform(c, 0.0, Vector2(w / 100.0, h / 100.0))
-		card_wrap.draw_circle(Vector2.ZERO, 100.0, Color(0, 0, 0, 0.13),
-			true, -1.0, true)
-	card_wrap.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	# ONE TEXTURED POOL THAT KNOWS THE CARD'S HEIGHT (2026-09-10). This was three
+	# stacked `draw_circle` passes "to fake the blur" — the hand-rolled-gradient
+	# defect, and worse, a shadow of FIXED size under a card that is now flying in.
+	# A contact shadow that does not move while the thing above it does is the one
+	# detail that gives away a 2D card as a sprite. `deal_card` writes the height
+	# to `deal_lift`; the shadow reads it and spreads, pales and slides away.
+	Motion.card_shadow(card_wrap,
+		Vector2(Card2D.CARD_W * 0.5, Card2D.CARD_H + 8.0),
+		float(card_wrap.get_meta("deal_lift", 0.0)), 96.0,
+		card_wrap.get_meta("deal_off", Vector2.ZERO))
 
 
 func _muster_accent() -> Color:
@@ -345,14 +439,73 @@ func _muster_accent() -> Color:
 
 
 func _animate_card_reveal(card: Control, idx: int, rarity: String = "") -> void:
-	# Staggered fan-in via the kit's shared card_reveal verb (rarity shine
-	# included — uncommons glint silver, rares erupt in gilt).
-	GameTheme.card_reveal(card, 0.18 + float(idx) * 0.16, rarity)
+	# A REAL DEAL (2026-09-10). The three recruits are dealt off to the left, each
+	# arcing in and turning face-up as it lands, rather than fading up in place.
+	# The stagger ACCELERATES (0.16 → ~0.13 apart) because a dealer speeds up, and
+	# the throws alternate side so the slate does not look combed.
+	var side: float = -1.0 if idx % 2 == 0 else 1.0
+	var at: float = 0.16 + float(idx) * 0.135
+	Motion.deal_card(card, at, {
+		"from": Vector2(side * 130.0, 340.0),
+		"spin": side * 0.44,
+		"dur": 0.44,
+	})
+	# The rarity shine still fires, just timed off the LANDING rather than off a
+	# fade that no longer exists — uncommons glint silver, rares erupt in gilt.
+	GameTheme.rarity_reveal(card, rarity, at + 0.42)
+
+func _make_loading_card_back(group: CanvasItem = null) -> TextureRect:
+	var back := TextureRect.new()
+	back.name = "LoadingBack"
+	back.texture = CARD_BACK_TEXTURE
+	back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	back.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	Motion.arm_loading_writ(back, group)
+	return back
+
+
+func _reveal_recruit_group(cards: Array[Control], backs: Array[Control],
+		wraps: Array, rarities: Array[String], validity: Callable) -> void:
+	# One muster, one reveal: every back closes on the same frame and every ornate
+	# face opens from the same edge. Only child transforms animate; the HBox and
+	# exact-size wrappers never change geometry.
+	if not validity.call():
+		return
+	var snap := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	if not snap:
+		if AudioBank != null:
+			AudioBank.play_sfx("card_draw", 0.04, -6.0)
+		for back in backs:
+			Motion.flip_out(back, 0.13)
+		await get_tree().create_timer(maxf(Motion.time(0.13), 0.01)).timeout
+		if not validity.call():
+			return
+	for i in range(cards.size()):
+		var card: Control = cards[i]
+		var back: Control = backs[i] if i < backs.size() else null
+		if snap and is_instance_valid(back):
+			back.queue_free()
+		if is_instance_valid(card):
+			card.visible = true
+			if not snap:
+				Motion.flip_in(card, 0.0, 0.17)
+	if not snap:
+		for i in range(wraps.size()):
+			GameTheme.rarity_reveal(wraps[i], rarities[i], Motion.time(0.12))
+		await get_tree().create_timer(maxf(Motion.time(0.17), 0.01)).timeout
+		if not validity.call():
+			return
+	for card in cards:
+		if is_instance_valid(card):
+			card.mouse_filter = Control.MOUSE_FILTER_STOP
+
 
 
 func _on_recruit_card_input(event: InputEvent, id: String,
 		card: Control, card_wrap: Control) -> void:
-	if _rerolling or not _choices.has(id):
+	if _leaving or _rerolling or not _choices.has(id):
 		return
 	if not (event is InputEventMouseButton):
 		return
@@ -368,7 +521,7 @@ func _on_recruit_card_input(event: InputEvent, id: String,
 
 
 func _on_recruit_card_hover(card_wrap: Control, hovered: bool) -> void:
-	if card_wrap == null or not is_instance_valid(card_wrap) or _rerolling:
+	if card_wrap == null or not is_instance_valid(card_wrap) or _leaving or _rerolling:
 		return
 	card_wrap.z_index = 2 if hovered else 0
 	if UserSettings.reduce_motion:
@@ -377,6 +530,17 @@ func _on_recruit_card_hover(card_wrap: Control, hovered: bool) -> void:
 	var tw := card_wrap.create_tween()
 	tw.tween_property(card_wrap, "scale", target, 0.10) \
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	# THE SHADOW LIFTS WITH IT. A hover that only scales says "this is bigger";
+	# a hover whose shadow spreads and pales at the same time says "this has come
+	# OFF THE TABLE", which is the thing the player is actually being told. It is
+	# the same height channel the deal uses, so it costs one tweened meta — and
+	# it is what makes the scale read as a lift rather than a zoom.
+	tw.parallel().tween_method(func(v: float):
+			if is_instance_valid(card_wrap):
+				card_wrap.set_meta("deal_lift", v)
+				card_wrap.queue_redraw(),
+		float(card_wrap.get_meta("deal_lift", 0.0)),
+		0.30 if hovered else 0.0, 0.10)
 
 
 func _set_recruit_card_pick_pose(card_wrap: Control, pressed: bool) -> void:
@@ -394,7 +558,7 @@ func _set_recruit_card_pick_pose(card_wrap: Control, pressed: bool) -> void:
 ## double-click can't over-draw the pool; _rerolling blocks re-entry while the
 ## sweep plays.
 func _reroll_muster() -> void:
-	if _rerolling:
+	if _leaving or _rerolling or _enlist_committing:
 		return
 	if not RunState.use_muster_reroll():
 		return
@@ -402,50 +566,61 @@ func _reroll_muster() -> void:
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play")
 	# Horn blast: gold call-rings + the current recruits scattering away.
-	GameTheme.reroll_sweep(self, _card_nodes.duplicate(), GameTheme.GILT_BRIGHT)
-	# A short beat, then the new banners march in over the tail of the sweep.
-	await get_tree().create_timer(0.18).timeout
+	var sweep_duration := GameTheme.reroll_sweep(self, _card_nodes.duplicate(), GameTheme.GILT_BRIGHT)
+	# Keep the old cards inert until their sweep has actually cleared the table.
+	await get_tree().create_timer(sweep_duration).timeout
 	_choices = _roll_offer()
 	_assign_choice_roles(_choices)
-	_build_ui()
+	await _build_ui(true)
 	_rerolling = false
 
 
 func _enlist(id: String, card_wrap: Control = null) -> void:
-	if _rerolling or _enlist_committing:
+	if _leaving or _rerolling or _enlist_committing:
 		return
 	_enlist_committing = true
 	RunState.add_card(id)
 	if AudioBank != null:
 		AudioBank.play_sfx("card_play")
-	# The signing beat: the chosen banner flares and the passed-over recruits
-	# bow out before the screen moves on — the pick lands as an event, matching
-	# the Reward/Treasure claim language.
-	if card_wrap != null and is_instance_valid(card_wrap) \
-			and not (UserSettings != null and UserSettings.reduce_motion):
-		GameTheme.claim_pop(card_wrap)
+	# The signing beat: take the complete recruit tile (role + card), let the
+	# alternatives bow out, then carry the choice into the player's pack. This
+	# is the same acquisition grammar as the Shop instead of a timed disappearance.
+	if card_wrap != null and is_instance_valid(card_wrap):
+		var take_tile: Control = card_wrap.get_parent() as Control
+		if take_tile == null:
+			take_tile = card_wrap
+		GameTheme.claim_pop(take_tile)
 		for other in _card_nodes:
 			if other != card_wrap and other is Control and is_instance_valid(other):
 				var host: Control = other.get_parent() as Control
 				if host == null:
 					host = other
-				var stw := host.create_tween()
-				stw.tween_property(host, "modulate:a", 0.0, 0.22) \
-					.set_ease(Tween.EASE_IN)
-		await get_tree().create_timer(0.36).timeout
+				GameTheme.fade_exit(host, 0.22)
+		if UserSettings == null or not UserSettings.reduce_motion:
+			await get_tree().create_timer(0.10).timeout
+		await GameTheme.pocket_away(take_tile, _pack_point(), 0.34)
 	# Collector's Tome: a second banner may join from the same muster.
 	if RunState.has_relic("collectors_tome") and _tome_picks < 1 \
 			and _choices.size() > 1:
 		_tome_picks += 1
 		_choices.erase(id)
 		_assign_choice_roles(_choices)
+		await _build_ui(true)
 		_enlist_committing = false
-		_build_ui()
 		return
 	_go_to_map()
 
 
+func _pack_point() -> Vector2:
+	# Shared campaign destination: the same off-table pack used by Shop wares.
+	var vp := get_viewport_rect().size
+	return Vector2(vp.x * 0.5, vp.y + 30.0)
+
+
 func _on_leave_pressed(btn: Control) -> void:
+	if _leaving or _rerolling or _enlist_committing:
+		return
+	_leaving = true
 	if btn != null and is_instance_valid(btn) \
 			and not (UserSettings != null and UserSettings.reduce_motion):
 		GameTheme.claim_pop(btn)

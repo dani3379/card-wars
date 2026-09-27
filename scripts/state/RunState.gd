@@ -5,8 +5,12 @@ extends Node
 const CampaignMapGenerator = preload("res://scripts/campaign/CampaignMapGenerator.gd")
 
 # ── Hero ──
-var hero_max_hp: int = 30
-var hero_hp: int = 30
+## The HP every march opens on. A constant because THE MUSTER prices a term at
+## "Lose 6 max HP" before a run exists, so the setup screen needs the
+## denominator without a live run to read it off.
+const STARTING_MAX_HP: int = 30
+var hero_max_hp: int = STARTING_MAX_HP
+var hero_hp: int = STARTING_MAX_HP
 var gold: int = 0
 # Id of the hero picked at the start of the run. Used by the rest screen to
 # pick the right silhouette / flavor strings; otherwise the run is hero-agnostic
@@ -77,9 +81,6 @@ var articles_of_war_tribe: String = ""
 # different roads. Announced on the war chest and at each muster. Empty on
 # legacy saves — the lean simply doesn't apply.
 var season_tribes: Array = []
-# The tribe declared at THE MUSTER. Empty only on a legacy v4 save that began
-# before banners existed; new runs always normalize to BannerDB.DEFAULT_BANNER.
-var current_banner_tribe: String = ""
 
 # Per-act choice stash for "Each act, pick X" relics. The MapView picker writes
 # the choice + the act it was made for; a mismatch with get_act() re-prompts at
@@ -199,6 +200,41 @@ var base_max_mana: int = 3
 var current_floor: int = 0
 var run_active: bool = false
 var run_seed: int = 0
+
+# ── The run clock (2026-09-12) ──
+# Nothing in this project has ever measured how long a run takes. Every design
+# doc quotes "a 40-minute run" and that figure predates the 2026-07-07 act
+# lengthening (12 rows / 5 combats → 18 rows / 7), so it is a guess about a
+# structure that no longer exists. The run history screen prints the truth.
+#
+# It is WALL CLOCK, segmented by save/load: the mark is set when a run starts
+# or resumes, flushed into the accumulator at every save and at end_run, and
+# dropped when the run ends. So the hours a save spends sitting on disk are not
+# billed, but a player who leaves the map screen open over lunch is. That is
+# the honest cost of the alternative — a per-frame accumulator on an autoload
+# that every scene in the game pays for — and "time the game was in front of
+# you" is the figure a player means when they ask how long a run took anyway.
+var run_elapsed_seconds: int = 0
+## Unix stamp the live segment started at. -1 means the clock is stopped.
+var _run_clock_mark: int = -1
+
+## DID THE LAST RUN END IN VICTORY? Written by `end_run`, which is the only
+## place that actually knows — and read by GameOver, which used to decide the
+## whole page (title, music, closing seal, meta announcements) on
+## `hero_hp > 0` instead.
+##
+## THAT TEST IS WRONG AND IT SHIPPED A VISIBLE BUG. A relic that heals on an
+## enemy death — `stygian_soul` is "heal 1 HP when an enemy dies" — can fire in
+## the SAME clash that kills the hero, so the run ends with the hero dead and
+## `hero_hp` reading 1. Measured live in a pilot sweep: a run lost to an act-2
+## combat, ended at 1 HP, and the flag said victory. On a player's screen that
+## is the word **VICTORY** over a defeat.
+##
+## Not persisted: it is written by `end_run` and read by the GameOver screen
+## that `end_run` leads to, in the same session. `start_new_run` clears it so a
+## fresh run can never inherit the last one's verdict.
+var last_run_victorious: bool = false
+
 var phoenix_heart_consumed: bool = false
 # Marked One event delayed-payoff. Set by Event.gd, consumed by Combat.gd at
 # the START of the next combat fight and immediately cleared. Both fields
@@ -261,6 +297,7 @@ const MAP_WIDTH: int = CampaignMapGenerator.MAP_WIDTH
 const MAP_HEIGHT: int = CampaignMapGenerator.MAP_HEIGHT
 const BOSS_ROW: int = CampaignMapGenerator.BOSS_ROW
 const REST_ROW: int = CampaignMapGenerator.REST_ROW
+const MID_REST_ROW: int = CampaignMapGenerator.MID_REST_ROW
 const NUM_PATHS: int = CampaignMapGenerator.NUM_PATHS
 
 # Row skeleton (Kaycee's-Mod model, 2026-06-12; lengthened 2026-07-07): every
@@ -268,11 +305,18 @@ const NUM_PATHS: int = CampaignMapGenerator.NUM_PATHS
 # road's rhythm is guaranteed by construction and the within-row choice becomes
 # "which flavor of this beat" (fights differ by terrain/kit, waysides by verb).
 # This replaced the per-node probability table + sibling/consecutive rules: the
-# skeleton can't deal a corridor of straight fights, and fight count per act is
-# CONSTANT. Lengthened from 12 rows / 5 combats — the act ended in 3-4 fights,
-# too short for the deck, veterancy, and relics to snowball. Now 18 rows /
-# 7 combats: 4 plain holds + 2 elite spikes + keep, all extra length being
-# between-fights tissue. See _assign_node_types for the band content.
+# skeleton can't deal a corridor of straight fights. Lengthened from 12 rows /
+# 5 combats — the act ended in 3-4 fights, too short for the deck, veterancy,
+# and relics to snowball.
+#
+# "fight count per act is CONSTANT" WAS TRUE UNTIL 2026-09-19 AND IS NOT NOW.
+# It was measured at exactly 7 every route, 180 of 180 acts — 21 a run, against
+# StS's ~16 — with a span of ZERO, i.e. the chart carried no decision at all
+# about how much of the run was combat. Now 18 rows: 3 plain holds (rows 0/3/15)
+# + keep are mandatory, and the two elite bands are DECLINABLE, so a route runs
+# 4-6 fights an act. Row 9 became MID_REST_ROW in the same pass. See
+# _assign_node_types for the band content and CampaignMapGenerator's
+# FIGHT_ROWS / ELITE_ROWS headers for why.
 const FIGHT_ROWS: Array[int] = CampaignMapGenerator.FIGHT_ROWS
 const ELITE_ROWS: Array[int] = CampaignMapGenerator.ELITE_ROWS
 
@@ -336,8 +380,6 @@ func seed_from_string(s: String) -> int:
 #   hero.deck (unlocked by a victory at Ascension 4+).
 var pending_signature_relic: String = ""
 var pending_deck_variant: String = ""
-# Declared banner on the still-reversible setup screen. Consumed at commit.
-var pending_banner_tribe: String = ""
 
 
 # What the LIVE run actually mustered with, recorded by start_new_run as the
@@ -347,11 +389,17 @@ var pending_banner_tribe: String = ""
 var current_signature_relic: String = ""
 var current_deck_variant: String = ""
 
-## Pure opener composition used by THE ROLL preview and start_new_run alike.
-## Keeping one function on both sides of the commit boundary is what makes the
-## visible eleven-card roll an honest preview rather than a second deck recipe.
-static func opening_deck_for(hero_id: String, use_alt_deck: bool = false,
-		banner_tribe: String = BannerDB.DEFAULT_BANNER) -> Array[String]:
+## Pure opener composition used by the run-setup preview and start_new_run
+## alike. Keeping one function on both sides of the commit boundary is what
+## makes the visible ten-card roll an honest preview rather than a second deck
+## recipe.
+##
+## THE BANNER IS GONE (2026-09-16). This used to append one authored levy card
+## chosen on the setup screen, so an opener was eleven cards. The declaration
+## was cut with the rest of the banner system; a hero's opener is now exactly
+## the deck HeroDB prints for him.
+static func opening_deck_for(hero_id: String,
+		use_alt_deck: bool = false) -> Array[String]:
 	var hero: Dictionary = HeroDB.get_hero(hero_id)
 	var source: Array = hero.get("deck", CardDB.STARTER_DECK)
 	if use_alt_deck:
@@ -361,16 +409,13 @@ static func opening_deck_for(hero_id: String, use_alt_deck: bool = false,
 	var out: Array[String] = []
 	for cid in source:
 		out.append(String(cid))
-	var banner_card := BannerDB.card_id(BannerDB.normalize(banner_tribe))
-	if banner_card != "":
-		out.append(banner_card)
 	return out
 
 
 
 func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int = 0) -> void:
-	hero_max_hp = 30
-	hero_hp = 30
+	hero_max_hp = STARTING_MAX_HP
+	hero_hp = STARTING_MAX_HP
 	gold = 100
 	potions = []
 	base_max_mana = 3
@@ -379,6 +424,7 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	# starts a new run from MainMenu without restarting the executable. A
 	# fresh Phoenix Heart relic wouldn't have fired in that case.
 	phoenix_heart_consumed = false
+	last_run_victorious = false
 	next_combat_gift_creature = {}
 	next_combat_mana_bonus = 0
 	pawned_cards = []
@@ -386,12 +432,17 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	daily_mutator_id = ""
 	daily_date = ""
 	map_plate_cache.clear()
+	# Draw fresh road themes for this march (2026-09-14). Each act's chart theme
+	# is picked once and HELD for the whole run so it can become familiar — the
+	# variety lives here, between runs, where it costs no recognition. Only
+	# "run:*" themes are dropped, so the menu keeps its session voice.
+	if AudioBank != null:
+		AudioBank.clear_music_themes()
 	# Campaign memory starts blank — a new march, a fresh ledger.
 	creature_kills = {}
 	fallen = []
 	generals_broken_run = 0
 	articles_of_war_tribe = ""
-	current_banner_tribe = ""
 	season_tribes = []
 	# Default to player's highest unlocked tier if caller didn't pick one.
 	if ascension < 0:
@@ -439,8 +490,7 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 		use_alt_deck = true
 		use_alt_relic = true
 
-	var declared_banner := BannerDB.normalize(pending_banner_tribe)
-	var deck_list: Array[String] = opening_deck_for(hero_key, use_alt_deck, declared_banner)
+	var deck_list: Array[String] = opening_deck_for(hero_key, use_alt_deck)
 	for id in deck_list:
 		add_card(id)
 	# A3 "The ledger follows" — every act opens with a War-Debt in the deck
@@ -459,10 +509,8 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	current_deck_variant = "alt" if use_alt_deck else ""
 	pending_signature_relic = ""
 	pending_deck_variant = ""
-	current_banner_tribe = declared_banner
 	current_floor = 0
 	current_act_idx = 0
-	pending_banner_tribe = ""
 	map_position = {"row": -1, "col": -1}
 	current_encounter_id = ""
 	current_node_type = ""
@@ -483,6 +531,8 @@ func start_new_run(hero_id: String = "", ascension: int = -1, seed_override: int
 	holds_broken_run = 0
 	finale_stage = 0
 	run_active = true
+	run_elapsed_seconds = 0
+	run_clock_resume()
 	# seed_override of 0 means "roll a fresh random seed". Non-zero values come
 	# from daily_seed() / seed_from_string() so the map is reproducible.
 	run_seed = seed_override if seed_override != 0 else randi()
@@ -562,21 +612,18 @@ const SEASON_TRIBE_NAMES := {"soldier": "Soldiers", "beast": "Beasts",
 ## Deal the run's season: two distinct tribes muster strong. Sub-seeded off
 ## run_seed (same trick as _select_rivals) so seeded/daily runs reproduce it.
 func _roll_season() -> void:
-	season_tribes = preview_season_tribes(run_seed, current_banner_tribe)
+	season_tribes = preview_season_tribes(run_seed)
 
 
-## Pure season deal shared by preview and commit. A valid declaration is fixed
-## in slot zero; the war deals a different second tribe from the same sub-seed.
-static func preview_season_tribes(seed_value: int, declared_tribe: String = "") -> Array:
+## Pure season deal shared by preview and commit. Both tribes come off the run
+## seed — the banner used to pin the first slot to whatever the player declared,
+## and that declaration was cut with the banner system (2026-09-16), so the war
+## now deals the whole season.
+static func preview_season_tribes(seed_value: int) -> Array:
 	var pool: Array = SEASON_TRIBE_POOL.duplicate()
-	var declared := declared_tribe if declared_tribe in SEASON_TRIBE_POOL else ""
-	if declared != "":
-		pool.erase(declared)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_value ^ 0x5345534F
 	CampaignMapGenerator.shuffle_array(pool, rng)
-	if declared != "":
-		return [declared, pool[0]]
 	return [pool[0], pool[1]]
 
 
@@ -708,8 +755,47 @@ func _rebake_boss_node(act_idx: int) -> void:
 				return
 
 
+# ── The run clock ──
+# Three verbs, and the only three: resume (a run started or was loaded), flush
+# (bank the live segment without stopping — every save), stop (the run ended).
+# Keeping the accumulator and the mark in one place is what stops a resumed
+# save double-counting the segment it was saved during.
+
+func run_clock_resume() -> void:
+	_run_clock_mark = int(Time.get_unix_time_from_system())
+
+
+func run_clock_flush() -> void:
+	if _run_clock_mark < 0:
+		return
+	var now := int(Time.get_unix_time_from_system())
+	# maxi guards a clock the OS moved backwards (DST, an NTP correction, a
+	# player fixing their system time mid-run). A negative segment would bill
+	# the run in reverse; skipping it merely loses the segment.
+	run_elapsed_seconds += maxi(0, now - _run_clock_mark)
+	_run_clock_mark = now
+
+
+func run_clock_stop() -> void:
+	run_clock_flush()
+	_run_clock_mark = -1
+
+
+## Elapsed seconds INCLUDING the unbanked live segment. Read this, never the
+## raw accumulator, anywhere the number is shown to a player mid-run.
+func run_elapsed_now() -> int:
+	if _run_clock_mark < 0:
+		return run_elapsed_seconds
+	return run_elapsed_seconds \
+		+ maxi(0, int(Time.get_unix_time_from_system()) - _run_clock_mark)
+
+
 func end_run(victorious: bool) -> void:
 	run_active = false
+	# THE ONLY PLACE THAT KNOWS. Every caller passes the real verdict; GameOver
+	# reads this rather than re-deriving it from the hero's HP. See the field.
+	last_run_victorious = victorious
+	run_clock_stop()
 	_append_run_log(victorious)
 	PlayLog.end_session({"result": "victory" if victorious else "defeat",
 		"act": get_act(), "floor": current_floor, "fights_won": fights_won})
@@ -726,13 +812,57 @@ func end_run(victorious: bool) -> void:
 ## The rival columns feed the Successor Wars matchup matrix (the project's
 ## dominant balancing cost): every dev run records who was marched on, in
 ## what order, who was spared, and how many holds the act had fallen.
+##
+## SCHEMA v2 (2026-09-12) — three columns added, one renamed, for the run
+## history screen (Collection's RUN HISTORY tab, which is the first thing that
+## has ever READ this file):
+##   + elapsed_seconds — see the run clock above. Nothing measured this.
+##   + deck_cards / relic_ids — the actual ids, ';'-joined. `deck_size` and
+##     `relics` were COUNTS, so "show me the deck that run died with" was
+##     unanswerable from a row; the counts stay (cheap, and a row can now be
+##     checked against its own list), and `relics` is renamed `relic_count`
+##     because a column called `relics` holding the number 3 was a lie the
+##     reader had to know about in advance.
+## `finale_rival,holds_broken_run` deliberately stay the LAST two columns.
 const _RUN_LOG_HEADER: String = ("ended_at,result,hero,ascension,seed,act," +
-	"floor,hp,max_hp,gold,fights_won,deck_size,relics,cause_of_death," +
+	"floor,hp,max_hp,gold,fights_won,elapsed_seconds,deck_size,deck_cards," +
+	"relic_count,relic_ids,cause_of_death," +
 	"rival_act1,rival_act2,rival_act3,finale_rival,holds_broken_run")
+
+## A CSV cell is one field: anything that could carry a comma or a newline is
+## flattened here rather than quoted, because the reader is a plain split and
+## quoting would make it a parser. ';' is the separator the log has always used
+## for cause_of_death, so it stays the house convention for list cells too.
+static func _csv_cell(text: String) -> String:
+	return text.replace(",", ";").replace("\n", " ").replace("\r", " ")
+
+
+static func _csv_list(items: Array) -> String:
+	var parts: PackedStringArray = PackedStringArray()
+	for item in items:
+		parts.append(_csv_cell(String(item)).replace(";", " "))
+	return ";".join(parts)
+
+
+## The shelf name the schema migration renames a stale log to. It was
+## `runs_legacy_<unix>.csv` with no collision check, and rename_absolute onto an
+## EXISTING path fails on Windows — which does not just lose the shelf, it
+## leaves the stale file sitting at runs.csv and the writer then appends
+## new-schema rows underneath an old-schema header. Two runs ending inside the
+## same second is a stretch in play and routine in a probe, so the name is now
+## proven free before it is used.
+static func _free_legacy_log_path() -> String:
+	var stamp := int(Time.get_unix_time_from_system())
+	var candidate := "user://runs_legacy_%d.csv" % stamp
+	var bump := 1
+	while FileAccess.file_exists(candidate) and bump < 1000:
+		candidate = "user://runs_legacy_%d_%d.csv" % [stamp, bump]
+		bump += 1
+	return candidate
 
 
 func _append_run_log(victorious: bool) -> void:
-	var path := "user://runs.csv"
+	var path := RUN_LOG_PATH
 	# Schema change (rival columns): a file written with the old header can't
 	# take the new rows — shelve it under a timestamped name and start fresh
 	# rather than mixing two schemas in one CSV.
@@ -743,8 +873,7 @@ func _append_run_log(victorious: bool) -> void:
 			probe.close()
 			if first_line != _RUN_LOG_HEADER:
 				DirAccess.rename_absolute(ProjectSettings.globalize_path(path),
-					ProjectSettings.globalize_path("user://runs_legacy_%d.csv"
-						% int(Time.get_unix_time_from_system())))
+					ProjectSettings.globalize_path(_free_legacy_log_path()))
 	var exists := FileAccess.file_exists(path)
 	var f := FileAccess.open(path,
 		FileAccess.READ_WRITE if exists else FileAccess.WRITE)
@@ -757,15 +886,245 @@ func _append_run_log(victorious: bool) -> void:
 	var r1: String = rival_lords[0] if rival_lords.size() > 0 else ""
 	var r2: String = rival_lords[1] if rival_lords.size() > 1 else ""
 	var r3: String = rival_lords[2] if rival_lords.size() > 2 else ""
-	f.store_line("%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%s,%s,%s,%s,%d" % [
+	# THREE results, not two. Both non-victory endings called this with
+	# `false` and both wrote "defeat", so a run the player walked away from was
+	# indistinguishable from one that was killed — and the history screen's
+	# first job is to tell them apart. The discriminator is already on the
+	# object and needs no new plumbing: Combat sets `hero_hp = 0` immediately
+	# before its end_run(false), and the abandon path (SettingsOverlay) cannot
+	# reach a dead hero because the run is already over by then. MetaState is
+	# untouched — an abandoned run still records as a defeat there, which is
+	# what the abandon dialog promises the player.
+	var outcome := "victory"
+	if not victorious:
+		outcome = "defeat" if hero_hp <= 0 else "abandoned"
+	f.store_line("%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%d,%s,%s,%s,%s,%s,%s,%d" % [
 		Time.get_datetime_string_from_system(),
-		"victory" if victorious else "defeat",
+		outcome,
 		current_hero_id, current_ascension, run_seed,
 		get_act(), current_floor, hero_hp, hero_max_hp, gold,
-		fights_won, deck.size(), relics.size(),
-		cause_of_death.replace(",", ";"),
+		fights_won, run_elapsed_now(),
+		deck.size(), _csv_list(deck),
+		relics.size(), _csv_list(relics),
+		_csv_cell(cause_of_death),
 		r1, r2, r3, finale_rival, holds_broken_run])
 	f.close()
+
+
+# ── Reading the ledger back (2026-09-12) ──
+#
+# The log had been written for months and read by NOTHING — every finished run
+# in the project's history is sitting in user://runs.csv and the game could not
+# show a player one line of it. This is the reader behind Collection's RUN
+# HISTORY tab.
+#
+# IT TRUSTS THE FILE FOR NOTHING. The log is plain text in user:// that a
+# player can edit, a crash can truncate mid-line, and a version bump can leave
+# in an older shape — and the project's own chaos-save class (C21) is built on
+# the observation that a reader which trusts its input IS the bug. So:
+#   · the HEADER names the columns, not their positions — a legacy file with
+#     twelve columns reads fine and the columns it lacks simply come back
+#     absent, which is different from zero and the screen prints it as such;
+#   · a cell that does not parse as the type its column promises is treated as
+#     ABSENT rather than coerced (String.to_int() answers 0 for "banana", and a
+#     run that never happened reading "0 gold" is invented data);
+#   · a row that cannot be identified as a run at all is dropped, not shown;
+#   · a file whose first line is not a header is skipped whole — guessing the
+#     column order of an unlabelled row is the same invention one step up.
+# Nothing here can throw: every access is .get() with a default and every
+# coercion is guarded.
+
+const RUN_LOG_PATH: String = "user://runs.csv"
+## Newest N rows. A dev machine accumulates thousands of these and the screen
+## builds a node per row; the cap is the screen's budget, not the file's.
+const RUN_HISTORY_MAX: int = 300
+## The vocabulary of the `result` column. Used ONLY to recognise a row as a run
+## (see _run_log_record); an unknown word is still carried through verbatim, so
+## adding a fourth outcome does not silently hide those rows.
+const RUN_RESULTS: Array[String] = ["victory", "defeat", "abandoned"]
+
+
+## Every finished run the machine still has a record of, newest first.
+## Reads the live log AND any shelved runs_legacy_*.csv, so a schema bump costs
+## the columns it added and not the whole history.
+func read_run_history() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	_read_run_log_file(RUN_LOG_PATH, out)
+	for legacy_path in _legacy_run_log_paths():
+		_read_run_log_file(legacy_path, out)
+	# ended_at is written by Time.get_datetime_string_from_system(), which is
+	# ISO-ordered (YYYY-MM-DDTHH:MM:SS) and therefore sorts correctly as text.
+	# A row with no stamp sorts last rather than claiming to be the newest.
+	out.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return String(a.get("ended_at", "")) > String(b.get("ended_at", "")))
+	if out.size() > RUN_HISTORY_MAX:
+		out.resize(RUN_HISTORY_MAX)
+	return out
+
+
+func _legacy_run_log_paths() -> PackedStringArray:
+	var paths := PackedStringArray()
+	var dir := DirAccess.open("user://")
+	if dir == null:
+		return paths
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while entry != "":
+		if not dir.current_is_dir() and entry.begins_with("runs_legacy_") \
+				and entry.ends_with(".csv"):
+			paths.append("user://" + entry)
+		entry = dir.get_next()
+	dir.list_dir_end()
+	return paths
+
+
+func _read_run_log_file(path: String, out: Array[Dictionary]) -> void:
+	if not FileAccess.file_exists(path):
+		return
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return
+	var columns := PackedStringArray()
+	var read_cap: int = RUN_HISTORY_MAX * 4
+	while not f.eof_reached() and out.size() < read_cap:
+		var line := f.get_line()
+		if line.strip_edges() == "":
+			continue
+		var cells := line.split(",")
+		if columns.is_empty():
+			# The first non-empty line must BE the header. Anything else means
+			# the file lost its top and the remaining rows are unlabelled — a
+			# positional guess against today's header would file a run's
+			# fights_won under its Command curve, so the file is left alone.
+			if not line.contains("ended_at"):
+				push_warning("RunState: %s has no run-log header; skipped" % path)
+				break
+			for c in cells:
+				columns.append(_hist_clean(String(c)))
+			continue
+		var rec := _run_log_record(columns, cells)
+		if not rec.is_empty():
+			out.append(rec)
+	f.close()
+
+
+## Strip control characters (a NUL-padded or partially-flushed line is one of
+## the corruptions run_chaos_save.sh injects) and the surrounding whitespace.
+static func _hist_clean(text: String) -> String:
+	var clean := ""
+	for i in range(text.length()):
+		var c := text.unicode_at(i)
+		if c >= 32:
+			clean += String.chr(c)
+	return clean.strip_edges()
+
+
+static func _hist_looks_like_stamp(text: String) -> bool:
+	if text.length() < 10 or text[4] != "-":
+		return false
+	var year := text.substr(0, 4)
+	if not year.is_valid_int():
+		return false
+	var y := int(year)
+	return y >= 1970 and y <= 2999
+
+
+## A cell is only recorded as PRESENT when it carried usable data — an absent
+## column, an empty cell and an unparseable one are all "we do not know", which
+## the screen renders as a dash instead of a zero.
+static func _hist_str(raw: Dictionary, key: String, present: Dictionary) -> String:
+	var text := _hist_clean(String(raw.get(key, "")))
+	if text != "":
+		present[key] = true
+	return text
+
+
+static func _hist_int(raw: Dictionary, key: String, present: Dictionary) -> int:
+	var text := _hist_clean(String(raw.get(key, "")))
+	if not text.is_valid_int():
+		return 0
+	present[key] = true
+	return int(text)
+
+
+static func _hist_list(raw: Dictionary, key: String,
+		present: Dictionary) -> PackedStringArray:
+	var items := PackedStringArray()
+	var text := _hist_clean(String(raw.get(key, "")))
+	if text == "":
+		return items
+	for part in text.split(";"):
+		var item := _hist_clean(String(part))
+		if item != "":
+			items.append(item)
+	if not items.is_empty():
+		present[key] = true
+	return items
+
+
+## One CSV line → one typed record, or {} if the line is not a run.
+func _run_log_record(columns: PackedStringArray,
+		cells: PackedStringArray) -> Dictionary:
+	var raw: Dictionary = {}
+	for i in range(columns.size()):
+		if i >= cells.size():
+			break  # short row: the remaining columns are absent, not empty
+		raw[columns[i]] = cells[i]
+	# Extra cells past the header are unnamed and are dropped on the floor.
+
+	var present: Dictionary = {}
+	# `relics` (a COUNT) was renamed `relic_count` in the v2 schema. Both names
+	# are read, so a shelved legacy file still reports its relic tallies.
+	var relic_key := "relic_count" if raw.has("relic_count") else "relics"
+	var rec: Dictionary = {
+		"ended_at": _hist_str(raw, "ended_at", present),
+		"result": _hist_str(raw, "result", present).to_lower(),
+		"hero": _hist_str(raw, "hero", present),
+		"ascension": _hist_int(raw, "ascension", present),
+		"seed": _hist_int(raw, "seed", present),
+		"act": _hist_int(raw, "act", present),
+		"floor": _hist_int(raw, "floor", present),
+		"hp": _hist_int(raw, "hp", present),
+		"max_hp": _hist_int(raw, "max_hp", present),
+		"gold": _hist_int(raw, "gold", present),
+		"fights_won": _hist_int(raw, "fights_won", present),
+		"elapsed_seconds": _hist_int(raw, "elapsed_seconds", present),
+		"deck_size": _hist_int(raw, "deck_size", present),
+		"deck_cards": _hist_list(raw, "deck_cards", present),
+		"relic_count": _hist_int(raw, relic_key, present),
+		"relic_ids": _hist_list(raw, "relic_ids", present),
+		"cause_of_death": _hist_str(raw, "cause_of_death", present),
+		"finale_rival": _hist_str(raw, "finale_rival", present),
+		"holds_broken_run": _hist_int(raw, "holds_broken_run", present),
+	}
+	# Presence is keyed by the CANONICAL name, whichever spelling the file used.
+	if present.has(relic_key):
+		present["relic_count"] = true
+	var rivals := PackedStringArray()
+	for n in range(1, 4):
+		var lord := _hist_str(raw, "rival_act%d" % n, present)
+		if lord != "":
+			rivals.append(lord)
+	rec["rivals"] = rivals
+	rec["present"] = present
+
+	# IS THIS A RUN? A truncated or garbled line still splits into cells and
+	# still fills a record with defaults, and showing that record is exactly
+	# the "invented data" failure. Two independent tells, either of which is
+	# enough: a plausible ISO stamp in ended_at, or a result word from the
+	# known vocabulary. Noise produces neither.
+	if _hist_looks_like_stamp(String(rec["ended_at"])):
+		return rec
+	if RUN_RESULTS.has(String(rec["result"])):
+		return rec
+	return {}
+
+
+## True when this row actually carried the named column. The screen must be
+## able to tell "0 gold" from "this run predates the gold column".
+static func run_history_has(record: Dictionary, key: String) -> bool:
+	var present = record.get("present", {})
+	return present is Dictionary and bool(present.get(key, false))
 
 
 # ── Deck manipulation ──
@@ -787,6 +1146,15 @@ func remove_card_at(index: int) -> bool:
 	deck.remove_at(index)
 	deck_uids.remove_at(index)
 	card_upgrades.erase(uid)
+	# The service record dies with the slot too. load_run already DEFINES the
+	# ledger as "kills keyed by a uid still in the deck" (it drops every other
+	# key on read), so leaving the entry here made the in-session ledger disagree
+	# with the same run after a reload — and one live consumer read the stale
+	# half: RelicDB's act-3 Drill Book gate answers "does any creature have 2+
+	# kills?" straight off this dictionary, so a sold veteran kept offering a
+	# relic that had nothing left to shorten. The Roll of the Fallen is the run's
+	# history of its dead and is deliberately NOT touched.
+	creature_kills.erase(uid)
 	# The Sin-Eater's Crust (event relic): every card that leaves the deck
 	# feeds you. All removal paths — events, shop service, wayside scales,
 	# curse-eating — funnel through here, so this is the one hook site.
@@ -1120,6 +1488,18 @@ func _apply_plus_upgrade(d: Dictionary) -> Dictionary:
 			d.adj_buff.atk = int(d.adj_buff.get("atk", 0)) + int(u.adj_buff_atk)
 		if u.has("adj_buff_hp") and d.has("adj_buff"):
 			d.adj_buff.hp = int(d.adj_buff.get("hp", 0)) + int(u.adj_buff_hp)
+		# The tribe aura (Warchief). SET, not added: the UPGRADES entry carries the
+		# FINAL dict ({"ctype": "soldier", "atk": 2}), the tail allow-list's
+		# convention rather than the additive one the stat deltas above use.
+		# It needs its own arm precisely BECAUSE it is a Dictionary — the tail
+		# allow-list folds with `d[k] = int(u[k])` and cannot carry one, so
+		# without this the forge applied the "+2 ATK" desc override and left the
+		# aura paying 1 for the rest of the run (the exact trap the allow-list's
+		# comment below documents for Counterorders). Safe to assign the
+		# reference: CardDB.get_plus_upgrade already returns a duplicate(true),
+		# so `u` is a deep copy and the static DB is never aliased.
+		if u.has("type_buff") and d.has("type_buff"):
+			d.type_buff = u.type_buff
 		if u.has("wither"):
 			d.wither = maxi(0, int(d.get("wither", 0)) + int(u.wither))
 		if u.has("extra_damage"):
@@ -1144,7 +1524,15 @@ func _apply_plus_upgrade(d: Dictionary) -> Dictionary:
 			d.on_play.heal = int(d.on_play.heal) + int(u.on_play_heal)
 	# Cost (any card)
 	if u.has("cost"):
-		d.cost = maxi(0, int(d.get("cost", 0)) + int(u.cost))
+		# FLOOR 1, NOT 0 (2026-09-16 economy redesign). Sixteen forges carry
+		# "cost": -1 and the spell default is -1 as well, so under the rescaled
+		# 1-6 curve every cost-1 spell forged to FREE — Read the Will, Venom Tip,
+		# Foul the Blades and The Coin all did. A free card is the one thing a
+		# ramping resource cannot price: the whole contract is "cost N is first
+		# affordable on round N", and 0 has no round. The same floor is already
+		# the house rule for Discover finds ("enter the hand costing 1 less,
+		# never free"); this makes the forge agree with it.
+		d.cost = maxi(1, int(d.get("cost", 0)) + int(u.cost))
 	# Spell value (non-custom spells with a value field)
 	if u.has("value") and d.has("spell") and d.spell.has("value"):
 		d.spell.value = int(d.spell.value) + int(u.value)
@@ -1169,9 +1557,21 @@ func _apply_plus_upgrade(d: Dictionary) -> Dictionary:
 	# Tail-effect bonus fields that custom resolvers consult by name. These
 	# only matter if the card's resolver reads them — declaring them here is
 	# free for cards that don't (it's just a no-op merge).
+	#
+	# THIS IS AN ALLOW-LIST, AND THAT IS A TRAP (paid for 2026-07-30). A field a
+	# resolver reads but that is NOT named here is SILENTLY DROPPED from the
+	# forged data: the resolver falls back to its own default, the forge does
+	# nothing, and the card's "+" text describes a number the card cannot produce.
+	# Counterorders shipped exactly that way — `order_bonus` was declared in
+	# UPGRADES, never merged, and the forged card promised 9 damage while dealing
+	# 6. A card that lies about its own numbers is worse than a weak card.
+	#
+	# NOTE ALSO that this merge SETS rather than adds (unlike the stat deltas
+	# above), so an entry here must carry the FINAL value, not a delta.
+	# Adding a new custom-resolver field means adding it to this list too.
 	for k in ["dmg_bonus", "slay_draw", "slay_gold", "slay_mana", "atk_bonus",
 			"hp_bonus", "spell_ping_bonus", "extra_reveal", "doom_atk_bonus", "doom_tick",
-			"extra_draw", "extra_mana", "ricochet_hits"]:
+			"extra_draw", "extra_mana", "ricochet_hits", "order_bonus"]:
 		if u.has(k):
 			d[k] = int(u[k])
 	# Description override — applied last so it wins over any auto-generated
@@ -1223,24 +1623,37 @@ func _pandoras_box_transform() -> void:
 	# curses, tokens) are untouched so the deck stops looking like "hero starter".
 	# card_upgrades is keyed by deck_uid: erase the entry for each replaced
 	# slot so prior upgrade payloads don't carry onto the new card identity.
+	# creature_kills is keyed by the SAME uid and is exactly the same class of
+	# per-slot payload — get_upgraded_card_data folds it into the card as the
+	# epithet, the 6-kill +1/+1 and Letters Patent's grant of arms. Left behind,
+	# a fresh rare body inherited a stranger's service record and marched in
+	# pre-named and pre-buffed. Clear it with the upgrades.
 	var rare_creatures: Array[String] = []
 	for cid in CardDB.get_pool_by_rarity("rare"):
 		if CardDB.get_card_data(cid).get("type", "") == "creature":
 			rare_creatures.append(cid)
 	if rare_creatures.is_empty():
 		return
+	# SEEDED off run_seed, not the global stream. These were bare randi() calls
+	# that PERMANENTLY rewrite the deck, so two players on the same daily seed
+	# diverged into different decks for the rest of the run. One rng walked
+	# through the loop keeps every slot's roll distinct while making the whole
+	# sequence reproduce; current_floor discriminates a second Coffer later on.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = run_seed ^ 0x50414E44 ^ ((current_floor + 1) * 7919)
 	var transformed := 0
 	for i in deck.size():
 		var entry: String = deck[i]
 		var data: Dictionary = CardDB.get_card_data(entry)
 		if data.get("type", "") == "creature" and data.get("rarity", "") == "starter":
-			deck[i] = rare_creatures[randi() % rare_creatures.size()]
+			deck[i] = rare_creatures[rng.randi() % rare_creatures.size()]
 			card_upgrades.erase(deck_uids[i])
+			creature_kills.erase(deck_uids[i])
 			transformed += 1
 	# Selling every starter before finding the Coffer should not turn a boss
 	# reward into blank cardboard. Its floor is one new rare body.
 	if transformed == 0:
-		add_card(rare_creatures[randi() % rare_creatures.size()])
+		add_card(rare_creatures[rng.randi() % rare_creatures.size()])
 
 
 func _calling_bell_grant() -> void:
@@ -1300,7 +1713,17 @@ func has_event_choice(flag: String) -> bool:
 ## Jittered fight reward (±25% around `base`) so payouts land on odd numbers, not fixed amounts.
 func roll_gold_reward(base: int) -> int:
 	var spread: int = int(round(base * 0.25))
-	return base + randi_range(-spread, spread)
+	# SEEDED off run_seed, not the global stream. This was a bare randi_range,
+	# which meant two players on the SAME daily seed were paid different gold at
+	# every single fight — the Daily March's whole promise is that the run is the
+	# same run. current_floor is the discriminator (it increments once per node
+	# visit and is persisted), so each stop still rolls its own number while the
+	# sequence reproduces exactly; `base` is mixed in so the three fight tiers
+	# can't collide at one stop. Same trick as _select_rivals / the march roll.
+	# Reproducing on reload is a FEATURE here: it also kills gold save-scumming.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = run_seed ^ 0x474F4C44 ^ ((current_floor + 1) * 7919) ^ base
+	return base + rng.randi_range(-spread, spread)
 
 
 func get_max_mana() -> int:
@@ -1454,35 +1877,42 @@ func apply_terrain_redeal() -> void:
 						and String(n.get("terrain", "")) != "" \
 						and String(n.get("encounter_id", "")) != "":
 					nodes.append(n)
-		if nodes.size() < 2:
-			continue
-		var pool: Array = []
-		for n in nodes:
-			pool.append(String(n.encounter_id))
-		# Stage 0 (combat only) — the landing is always light: row-0 holds
-		# take the lightest kits in the deal outright, terrain be damned.
-		# The act opens like an invasion (skirmishes at the beachhead) and
-		# the heavy deals are pushed up-road by construction.
+		# Stage 0 (combat only) — THE LANDING IS NOT OURS TO DEAL (2026-08-01).
+		#
+		# This used to grab row 0 and stamp it with the lightest kits in the
+		# deal. Two things were wrong with that and both were measured:
+		#   · it ran from MapTerrain._derive_terrain_tags before the player
+		#     could click anything, and it did not know about the first-run
+		#     on-ramp guard in CampaignMapGenerator._assign_encounters. On a
+		#     brand-new profile it silently displaced the hand-picked opener
+		#     on 22.4% of seeds — putting two Doom bombs (powderkeg_run) or a
+		#     borrowed act-2 lineup (signal_glass) in a first-ever fight.
+		#   · "lightest in the deal" was read through kit_weight, a raw
+		#     statline+bodycount score that rated a 5-body act-2 kit lighter
+		#     than a 7-body act-1 chaff kit. The landing preferred BORROWED
+		#     fights, whose passives do not rescale across acts.
+		# CampaignMapGenerator._deal_landing now owns row 0 outright, from a
+		# curated pool, on the act's own seeded stream. Row 0 is therefore
+		# excluded from this re-deal entirely — both from the multiset that
+		# gets permuted and from the nodes that receive one.
+		#
+		# (Legacy note: an act generated before this change and still
+		# unvisited keeps whatever row-0 kit it was dealt. Nothing here can
+		# improve it without breaking the multiset invariant below, and the
+		# defect that mattered — a first-ever run's first fight — is dealt at
+		# generation, so it is fixed for every new run.)
 		var rest_nodes: Array = []
 		if node_type == "combat":
-			var landing: Array = []
 			for n in nodes:
-				if int(n.row) == 0:
-					landing.append(n)
-				else:
+				if int(n.row) != 0:
 					rest_nodes.append(n)
-			landing.sort_custom(func(a, b): return int(a.col) < int(b.col))
-			for n in landing:
-				var li := 0
-				for i in range(pool.size()):
-					var wi: int = EncounterDB.kit_weight(pool[i])
-					var wl: int = EncounterDB.kit_weight(pool[li])
-					if wi < wl or (wi == wl and pool[i] < pool[li]):
-						li = i
-				n["encounter_id"] = pool[li]
-				pool.remove_at(li)
 		else:
 			rest_nodes = nodes
+		if rest_nodes.size() < 2:
+			continue
+		var pool: Array = []
+		for n in rest_nodes:
+			pool.append(String(n.encounter_id))
 		# Stage 1 — terrain claims the rest: ash holds pick first (rarest
 		# ground, loudest theme), then woods, pass, meadow; (row, col)
 		# breaks ties so the order is total.
@@ -1711,6 +2141,9 @@ func save_run() -> void:
 		# write rather than silently clobbering slot 0's save.
 		push_warning("RunState.save_run: no active_slot claimed (%d), skipping save" % active_slot)
 		return
+	# Bank the live segment of the run clock before it is written. The mark is
+	# left running (the player is still playing) — flush, not stop.
+	run_clock_flush()
 	# JSON converts integer dict keys to strings, so card_upgrades keys come
 	# back as Strings on load — we convert back in load_run().
 	var payload: Dictionary = {
@@ -1757,7 +2190,6 @@ func save_run() -> void:
 		"current_ascension": current_ascension,
 		"current_hero_id": current_hero_id,
 		"current_signature_relic": current_signature_relic,
-		"current_banner_tribe": current_banner_tribe,
 		"current_deck_variant": current_deck_variant,
 		"rival_lords": rival_lords,
 		"finale_rival": finale_rival,
@@ -1776,6 +2208,11 @@ func save_run() -> void:
 		"is_daily_run": is_daily_run,
 		"daily_mutator_id": daily_mutator_id,
 		"daily_date": daily_date,
+		# Additive and optional — a v4 save written before the run clock existed
+		# simply resumes at 0 banked seconds and starts counting from the load.
+		# That is a wrong TOTAL for exactly one in-flight run per player and is
+		# not worth retiring every live save over, so SAVE_VERSION stays at 4.
+		"run_elapsed_seconds": run_elapsed_seconds,
 		"saved_at": int(Time.get_unix_time_from_system()),
 	}
 	var path := _save_path_for_slot(active_slot)
@@ -1864,7 +2301,6 @@ func load_run(slot: int = -1) -> bool:
 	if data.is_empty():
 		return false
 
-	pending_banner_tribe = ""
 	hero_max_hp = int(data.get("hero_max_hp", 25))
 	hero_hp = int(data.get("hero_hp", 25))
 	gold = int(data.get("gold", 0))
@@ -1927,9 +2363,9 @@ func load_run(slot: int = -1) -> bool:
 			relics.append(relic_id)
 	generals_broken_run = int(data.get("generals_broken_run", 0))
 	articles_of_war_tribe = String(data.get("articles_of_war_tribe", ""))
-	var saved_banner := String(data.get("current_banner_tribe", ""))
-	current_banner_tribe = saved_banner if BannerDB.has_banner(saved_banner) else ""
-
+	# (`current_banner_tribe` was read here until 2026-09-16. The banner system
+	# is gone; an older save's key is simply ignored, which costs that run
+	# nothing — the levy card it bought is already in the saved deck.)
 	season_tribes = Array(data.get("season_tribes", []))
 	map_data = data.get("map_data", [])
 	map_plate_cache.clear()
@@ -2012,7 +2448,9 @@ func load_run(slot: int = -1) -> bool:
 	# today's date as the compatibility fallback.
 	if is_daily_run and daily_date == "":
 		daily_date = MetaState.daily_date_for_run(current_hero_id, s)
+	run_elapsed_seconds = maxi(0, int(data.get("run_elapsed_seconds", 0)))
 	run_active = true
+	run_clock_resume()
 	active_slot = s
 	CardTextureCache.clear()
 	return true

@@ -4,7 +4,7 @@ const WireProtocol = preload("res://scripts/net/NetProtocol.gd")
 const NetPlayerRules = preload("res://scripts/net/NetPlayerState.gd")
 ## Bump this whenever online combat/resolver logic changes without changing one
 ## of the data registries included in _compatibility_snapshot().
-const COMPAT_RULESET_REVISION: int = 1
+const COMPAT_RULESET_REVISION: int = 2
 ## NetMatch.gd — autoload singleton. The networking + match brain for the
 ## online 1-v-1 Skirmish mode (see docs/MULTIPLAYER_SKIRMISH_PLAN.md).
 ##
@@ -196,6 +196,19 @@ var best_of: int = 1
 const STYLE_ALTERNATING := 0
 const STYLE_SEALED := 1
 var battle_style: int = STYLE_ALTERNATING
+## Arsenal size (host-chosen, synced exactly like best_of): how many battle-relic
+## and battle-potion picks the shared Arsenal stage offers EACH player before the
+## deck screen. ONE pair of numbers for the whole match — both sides draft the
+## same count, so an item advantage is never an accident of who is hosting. 0
+## skips that category outright (a bare-steel duel).
+##
+## These literals MIRROR SkirmishState.ARSENAL_RELIC_ROUNDS / _POTION_ROUNDS,
+## which own the defaults and the ceilings. They cannot be read here: NetMatch is
+## registered BEFORE SkirmishState in the autoload order, so at field-initializer
+## time that singleton does not exist yet. Everything below reads the real
+## constants at CALL time; tools/_probe_draft_relic.gd gates the pair.
+var arsenal_relics: int = 3
+var arsenal_potions: int = 2
 ## True for a local practice match against SkirmishBot — no real peer. The host
 ## path runs normally; this just makes is_connected_to_peer() pass, makes the deck
 ## "finished" handoff answer with a bot deck, and keeps launch_combat off the wire.
@@ -211,6 +224,9 @@ var session_id: String = ""
 var _out_sequence: int = 0
 var _last_in_sequence: int = 0
 var _remote_loadout_received: bool = false
+## Host-owned Quick/Sealed generation config. It is recorded when the host
+## broadcasts cfg and is never read from the peer's finished loadout message.
+var _loadout_source_config: Dictionary = {}
 var _compatibility_fingerprint_cache: String = ""
 var _compatibility_confirmed: bool = false
 var _pending_session_id: String = ""
@@ -398,11 +414,19 @@ func _accept_wire(wire: Variant, expected_kind: String) -> Variant:
 	return WireProtocol.payload(wire)
 
 
-func _valid_match_config(mode: int, bo: int, style: int) -> bool:
+func _valid_match_config(mode: int, bo: int, style: int,
+		ars_relics: int = -1, ars_potions: int = -1) -> bool:
+	# -1 = "not supplied" (an older peer's payload, or a caller that only means to
+	# check the three original terms) — the arsenal size falls back to the default.
+	var relics_ok: bool = ars_relics == -1 \
+		or (ars_relics >= 0 and ars_relics <= SkirmishState.arsenal_relic_max())
+	var potions_ok: bool = ars_potions == -1 \
+		or (ars_potions >= 0 and ars_potions <= SkirmishState.arsenal_potion_max())
 	return mode >= SkirmishState.MatchMode.DRAFT \
 		and mode <= SkirmishState.MatchMode.SEALED \
 		and bo in [1, 3] \
-		and style in [STYLE_ALTERNATING, STYLE_SEALED]
+		and style in [STYLE_ALTERNATING, STYLE_SEALED] \
+		and relics_ok and potions_ok
 
 
 func _draft_direction_allowed(event: Dictionary, sender_is_host: bool) -> bool:
@@ -537,6 +561,7 @@ func leave() -> void:
 	client_peer_id = 0
 	_reset_wire_session("")
 	_remote_loadout_received = false
+	_loadout_source_config.clear()
 	_compatibility_confirmed = false
 	_pending_session_id = ""
 	_pending_remote_fingerprint = ""
@@ -546,6 +571,8 @@ func leave() -> void:
 	remote_hero = ""   # the pick leaves with the peer; local_hero stays (sticky)
 	match_mode = 0
 	best_of = 1
+	arsenal_relics = SkirmishState.ARSENAL_RELIC_ROUNDS
+	arsenal_potions = SkirmishState.ARSENAL_POTION_ROUNDS
 	entities.clear()
 	_next_entity_id = 1
 	detach_combat()   # drop any buffered combat messages from the torn-down session
@@ -583,7 +610,7 @@ func fresh_seed() -> int:
 ## chosen mode/format, fresh seed) so the deck-acquisition scenes and combat run
 ## their normal host path. The opponent "peer" is emulated in send_draft_event
 ## (auto-finishes with a bot deck) and Combat drives slot 1 via SkirmishBot.
-func start_vs_bot(mode: int, bo: int) -> void:
+func start_vs_bot(mode: int, bo: int, ars_relics: int = -1, ars_potions: int = -1) -> void:
 	leave()                      # clean slate (also clears any relay/peer state)
 	_reset_wire_session(_new_session_id())
 	vs_bot = true
@@ -594,6 +621,12 @@ func start_vs_bot(mode: int, bo: int) -> void:
 	remote_present = false
 	match_mode = mode
 	best_of = bo
+	# The arsenal size rides the call rather than a pre-set field: leave() above
+	# restores the defaults, so a value written before this would be erased.
+	if ars_relics >= 0:
+		arsenal_relics = mini(ars_relics, SkirmishState.arsenal_relic_max())
+	if ars_potions >= 0:
+		arsenal_potions = mini(ars_potions, SkirmishState.arsenal_potion_max())
 	match_seed = fresh_seed()
 	# The bot marches as a random rival lord (never a mirror of your pick), so the
 	# foe plate and emote voice have an identity in practice matches too.
@@ -833,6 +866,8 @@ func _can_send() -> bool:
 func start_match() -> void:
 	if not is_host or not both_ready():
 		return
+	_remote_loadout_received = false
+	_loadout_source_config.clear()
 	match_seed = fresh_seed()
 	# Carry the match config in the start message too, so the client definitely has
 	# the chosen mode / best-of / battle style even if it missed an earlier
@@ -840,7 +875,8 @@ func start_match() -> void:
 	# picks were exchanged on click, but a pick racing the START press could leave
 	# the two machines disagreeing — the host's view wins at start.
 	var payload := {"seed": match_seed, "mode": match_mode, "bo": best_of,
-		"style": battle_style, "h0": local_hero, "h1": remote_hero}
+		"style": battle_style, "ar": arsenal_relics, "ap": arsenal_potions,
+		"h0": local_hero, "h1": remote_hero}
 	var wire := _next_wire(_RK_MATCH_START, payload)
 	if transport == Transport.RELAY:
 		_relay_ship(wire)
@@ -856,21 +892,43 @@ func _rpc_match_start(wire: Dictionary) -> void:
 		return
 	_apply_match_start(int(payload.get("seed", 0)), int(payload.get("mode", 0)),
 		int(payload.get("bo", 1)), int(payload.get("style", STYLE_ALTERNATING)),
-		String(payload.get("h0", "")), String(payload.get("h1", "")))
+		String(payload.get("h0", "")), String(payload.get("h1", "")),
+		_wire_arsenal(payload, "ar"), _wire_arsenal(payload, "ap"))
+
+
+## Read an arsenal count out of a peer payload. A MISSING key means an older peer
+## that predates the setting, which must keep the fixed 3+2 stage — so it reads
+## as -1 ("not supplied") and the apply path leaves our value alone. A present
+## key is coerced totally: a Dictionary or Array through a bare int() THROWS and
+## aborts the handler where it stands (the C13 fuzz-wire class).
+func _wire_arsenal(payload: Dictionary, key: String) -> int:
+	if not payload.has(key):
+		return -1
+	var raw: Variant = payload[key]
+	if typeof(raw) != TYPE_INT and typeof(raw) != TYPE_FLOAT:
+		return -1
+	return int(raw)
 
 
 func _apply_match_start(seed: int, mode: int, bo: int, style: int = STYLE_ALTERNATING,
-		h0: String = "", h1: String = "") -> void:
-	if not _valid_match_config(mode, bo, style):
+		h0: String = "", h1: String = "", ars_relics: int = -1,
+		ars_potions: int = -1) -> void:
+	if not _valid_match_config(mode, bo, style, ars_relics, ars_potions):
 		protocol_rejected.emit("match_start_config")
 		return
 	if (h0 != "" and not HeroDB.has_hero(h0)) or (h1 != "" and not HeroDB.has_hero(h1)):
 		protocol_rejected.emit("match_start_hero")
 		return
+	_remote_loadout_received = false
+	_loadout_source_config.clear()
 	match_seed = seed
 	match_mode = mode
 	best_of = bo
 	battle_style = style
+	if ars_relics >= 0:
+		arsenal_relics = ars_relics
+	if ars_potions >= 0:
+		arsenal_potions = ars_potions
 	# Runs on the CLIENT: h0 is the host's lord (our foe), h1 the host's view of
 	# OUR pick — adopt both so the two machines can't start disagreeing.
 	if h0 != "":
@@ -884,20 +942,26 @@ func _apply_match_start(seed: int, mode: int, bo: int, style: int = STYLE_ALTERN
 ## Host-only: choose the deck-acquisition mode + best-of and push the choice to the
 ## client so its lobby can display it. Safe to call before a client is present (the
 ## broadcast is skipped until one connects; start_match re-sends it regardless).
-func set_match_config(mode: int, bo: int, style: int = -1) -> void:
+func set_match_config(mode: int, bo: int, style: int = -1,
+		ars_relics: int = -1, ars_potions: int = -1) -> void:
 	if not is_host:
 		return
 	var resolved_style := battle_style if style < 0 else style
-	if not _valid_match_config(mode, bo, resolved_style):
+	var resolved_relics := arsenal_relics if ars_relics < 0 else ars_relics
+	var resolved_potions := arsenal_potions if ars_potions < 0 else ars_potions
+	if not _valid_match_config(mode, bo, resolved_style, resolved_relics, resolved_potions):
 		protocol_rejected.emit("local_match_config")
 		return
 	match_mode = mode
 	best_of = bo
 	if style >= 0:
 		battle_style = resolved_style
+	arsenal_relics = resolved_relics
+	arsenal_potions = resolved_potions
 	if remote_present:
 		var wire := _next_wire(_RK_MATCH_CONFIG,
-			{"mode": mode, "bo": bo, "style": battle_style})
+			{"mode": mode, "bo": bo, "style": battle_style,
+				"ar": arsenal_relics, "ap": arsenal_potions})
 		if transport == Transport.RELAY:
 			_relay_ship(wire)
 		else:
@@ -911,16 +975,22 @@ func _rpc_match_config(wire: Dictionary) -> void:
 	if payload == null:
 		return
 	_apply_match_config(int(payload.get("mode", 0)), int(payload.get("bo", 1)),
-		int(payload.get("style", STYLE_ALTERNATING)))
+		int(payload.get("style", STYLE_ALTERNATING)),
+		_wire_arsenal(payload, "ar"), _wire_arsenal(payload, "ap"))
 
 
-func _apply_match_config(mode: int, bo: int, style: int = STYLE_ALTERNATING) -> void:
-	if not _valid_match_config(mode, bo, style):
+func _apply_match_config(mode: int, bo: int, style: int = STYLE_ALTERNATING,
+		ars_relics: int = -1, ars_potions: int = -1) -> void:
+	if not _valid_match_config(mode, bo, style, ars_relics, ars_potions):
 		protocol_rejected.emit("match_config")
 		return
 	match_mode = mode
 	best_of = bo
 	battle_style = style
+	if ars_relics >= 0:
+		arsenal_relics = ars_relics
+	if ars_potions >= 0:
+		arsenal_potions = ars_potions
 	match_config_changed.emit()
 
 
@@ -948,6 +1018,16 @@ func get_entity(entity_id: int) -> Object:
 #  DRAFT MESSAGING  (Phase 1)
 # ─────────────────────────────────────────────────────────────────────────
 
+## Record the host's canonical Quick/Sealed source configuration before sending
+## cfg. Finished loadouts never get to choose or override this state.
+func set_loadout_source_config(mirror: bool, sub_seed: int) -> void:
+	if not is_host:
+		return
+	if match_mode not in [SkirmishState.MatchMode.QUICK, SkirmishState.MatchMode.SEALED]:
+		protocol_rejected.emit("local_loadout_config")
+		return
+	_loadout_source_config = {"mirror": mirror, "seed": sub_seed}
+
 ## Send a draft message to the other peer (e.g. {"t":"pick","n":3}).
 func send_draft_event(event: Dictionary) -> void:
 	if vs_bot:
@@ -958,13 +1038,24 @@ func send_draft_event(event: Dictionary) -> void:
 		var t := String(event.get("t", ""))
 		if t == "finished":
 			# Deck handoff: answer with the bot's own randomly built warband, plus
-			# a drafted arsenal (3 board-authoritative relics; no potions — see
+			# a drafted arsenal (board-authoritative relics; no potions — see
 			# SkirmishState.BOT_RELIC_POOL for why the bot never drinks).
+			#
+			# THE COUNT IS THE HOST'S ARSENAL SETTING, and it has to be. Read off
+			# SkirmishState rather than our own field because that is the number
+			# validate_loadout_event judges this very loadout against six lines
+			# below — a hardcoded 3 against a host who set fewer is rejected as
+			# "loadout_arsenal_size", the bot never finishes, and the drill waits
+			# on an opponent that has already answered. (It may still hold fewer:
+			# BOT_RELIC_POOL is short by design, and deal_unique_cards caps at
+			# what the bag holds.)
 			var bot_cards := SkirmishBot.build_deck(match_seed ^ 0x80B0)
 			var bot_rng := RandomNumberGenerator.new()
 			bot_rng.seed = match_seed ^ 0xB07A
 			var bot_relics: Array = SkirmishState.deal_unique_cards(
-				SkirmishState.BOT_RELIC_POOL, 3, bot_rng)
+				SkirmishState.BOT_RELIC_POOL,
+				mini(SkirmishState.arsenal_relics, SkirmishState.BOT_RELIC_POOL.size()),
+				bot_rng)
 			call_deferred("_apply_draft_event", {"t": "finished", "cards": bot_cards,
 				"relics": bot_relics, "potions": []})
 		elif t == "ready":
@@ -1018,6 +1109,9 @@ func _apply_draft_event(event: Dictionary) -> void:
 				protocol_rejected.emit("loadout_duplicate")
 				return
 			var reason := SkirmishState.validate_loadout_event(event, match_mode)
+			if reason == "" and is_host and not vs_bot:
+				reason = SkirmishState.validate_loadout_provenance(event, match_mode,
+						match_seed, 1, _loadout_source_config)
 			if reason != "":
 				protocol_rejected.emit(reason)
 				return
@@ -1150,18 +1244,18 @@ func send_to_client(event: Dictionary) -> void:
 ## Host-only: drop BOTH peers into the combat scene and set each side's skirmish
 ## mode. The host triggers the client via RPC, then enters locally, so neither
 ## side change_scenes on its own (the draft client waits for this).
-func launch_combat() -> void:
+func launch_combat(animated: bool = false) -> void:
 	if not is_host:
 		return
 	if vs_bot:
-		_enter_combat_local()   # no peer to signal — just drop into combat locally
+		_enter_combat_local(animated)   # no peer to signal — enter locally
 		return
-	var wire := _next_wire(_RK_LAUNCH)
+	var wire := _next_wire(_RK_LAUNCH, {"animated": animated})
 	if transport == Transport.RELAY:
 		_relay_ship(wire)
 	else:
 		_rpc_launch_combat.rpc(wire)
-	_enter_combat_local()                # host enters (the remote path is call_remote only)
+	_enter_combat_local(animated)        # host enters (remote path is call_remote only)
 
 
 @rpc("authority", "call_remote", "reliable")
@@ -1169,10 +1263,10 @@ func _rpc_launch_combat(wire: Dictionary) -> void:
 	var payload = _accept_wire(wire, _RK_LAUNCH)
 	if payload == null:
 		return
-	_enter_combat_local()
+	_enter_combat_local(bool(payload.get("animated", false)))
 
 
-func _enter_combat_local() -> void:
+func _enter_combat_local(animated: bool = false) -> void:
 	SkirmishState.combat_mode = SkirmishState.CombatMode.NET_HOST \
 		if is_host else SkirmishState.CombatMode.NET_CLIENT
 	SkirmishState.local_index = local_player_index
@@ -1187,7 +1281,22 @@ func _enter_combat_local() -> void:
 	# opening turn-begin before the new combat scene finishes booting and calls
 	# attach_combat(). Anything that lands in that gap is captured, not dropped.
 	detach_combat()
-	get_tree().change_scene_to_file("res://scenes/combat.tscn")
+	# ARM THE LATCH ACROSS THE DEFERRED SWAP. change_scene_to_file lands on the
+	# next idle frame, and `leave()` — one Esc away on every deck screen, plus the
+	# draft's own BACK TO MENU button — clears every term of is_connected_to_peer()
+	# in between. Combat cannot otherwise tell that from an ordinary campaign
+	# fight, and used to open the player's live run instead of the match.
+	SkirmishState.launch_armed = true
+	var tree := get_tree()
+	var current := tree.current_scene
+	var can_animate := animated and DisplayServer.get_name() != "headless" \
+		and (UserSettings == null or not UserSettings.reduce_motion) \
+		and current != null and is_instance_valid(current)
+	if can_animate:
+		GameTheme.fade_out_then_change_scene(
+			current, "res://scenes/combat.tscn", 0.30, Vector2(0.50, 0.15))
+	else:
+		tree.change_scene_to_file("res://scenes/combat.tscn")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -1314,10 +1423,12 @@ func _rpc_relay_deliver(wire: Dictionary) -> void:
 		_RK_MATCH_START:
 			_apply_match_start(int(payload.get("seed", 0)), int(payload.get("mode", 0)),
 				int(payload.get("bo", 1)), int(payload.get("style", STYLE_ALTERNATING)),
-				String(payload.get("h0", "")), String(payload.get("h1", "")))
+				String(payload.get("h0", "")), String(payload.get("h1", "")),
+				_wire_arsenal(payload, "ar"), _wire_arsenal(payload, "ap"))
 		_RK_MATCH_CONFIG:
 			_apply_match_config(int(payload.get("mode", 0)), int(payload.get("bo", 1)),
-				int(payload.get("style", STYLE_ALTERNATING)))
+				int(payload.get("style", STYLE_ALTERNATING)),
+				_wire_arsenal(payload, "ar"), _wire_arsenal(payload, "ap"))
 		_RK_DRAFT:
 			_apply_draft_event(payload.get("event", {}))
 		_RK_INTENT:
@@ -1325,18 +1436,26 @@ func _rpc_relay_deliver(wire: Dictionary) -> void:
 		_RK_EVENT:
 			_apply_combat_event(payload.get("event", {}))
 		_RK_LAUNCH:
-			_enter_combat_local()
+			_enter_combat_local(bool(payload.get("animated", false)))
 
 
 # ── Room control: player → relay ──
 
 @rpc("any_peer", "call_remote", "reliable")
-func _rpc_create_room() -> void:
+func _rpc_create_room(protocol_version: int, player_fingerprint: String) -> void:
 	if not is_relay:
 		return
 	var sender := multiplayer.get_remote_sender_id()
 	if not _relay_rate_allowed(sender, 0, true):
 		_relay_reject(sender, "control_rate")
+		return
+	# A relay pairs two clients without ever letting them address each other
+	# directly, so this is its compatibility handshake. The client has already
+	# sent both values in _on_connected_to_server(); accepting fewer arguments
+	# here made every room-create RPC fail before a code could be issued.
+	var compatibility_reason := _compatibility_error(protocol_version, player_fingerprint)
+	if compatibility_reason != "":
+		_rpc_room_error.rpc_id(sender, _compatibility_message(compatibility_reason))
 		return
 	if _relay_peer_room.has(sender):
 		_rpc_room_error.rpc_id(sender, "You already have a room open.")
@@ -1357,12 +1476,19 @@ func _rpc_create_room() -> void:
 
 
 @rpc("any_peer", "call_remote", "reliable")
-func _rpc_join_room(code: String) -> void:
+func _rpc_join_room(code: String, protocol_version: int, player_fingerprint: String) -> void:
 	if not is_relay:
 		return
 	var sender := multiplayer.get_remote_sender_id()
 	if not _relay_rate_allowed(sender, code.to_utf8_buffer().size(), true):
 		_relay_reject(sender, "control_rate")
+		return
+	# Match the creator's check above before the joiner can enter a room. Both
+	# clients are therefore known to share the relay's protocol and content
+	# fingerprint when _rpc_room_paired marks the peer usable.
+	var compatibility_reason := _compatibility_error(protocol_version, player_fingerprint)
+	if compatibility_reason != "":
+		_rpc_room_error.rpc_id(sender, _compatibility_message(compatibility_reason))
 		return
 	if _relay_peer_room.has(sender):
 		_rpc_room_error.rpc_id(sender, "You are already in a room.")
@@ -1431,6 +1557,10 @@ func _rpc_room_paired(partner_id: int, my_index: int, room_session: String,
 	local_player_index = my_index
 	is_host = (my_index == 0)
 	remote_present = true
+	# The relay accepted the version + fingerprint of both room members before
+	# pairing them. Relay traffic has no DIRECT session-result round trip, so this
+	# is the point at which the shared readiness/connected predicates become true.
+	_compatibility_confirmed = true
 	_connected = true
 	# Mirror DIRECT's late-ready resend so a pre-pair toggle still propagates.
 	if local_ready:

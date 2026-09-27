@@ -2,10 +2,18 @@ extends SceneTree
 ## COLD-ENTRY probe (2026-07-25). Answers the only two questions a player can
 ## feel when a fight opens cold:
 ##
-##   T1 = ms from scene instantiate until the BOARD IS ON SCREEN (the opening
-##        enemy formation exists and has been through a rendered frame), and
+##   T1 = ms from scene instantiate until the BOARD IS ON SCREEN (a body exists
+##        on EITHER side and has been through a rendered frame), and
 ##   T2 = ms from scene instantiate until the player CAN ACT (phase ==
 ##        PLAYER_TURN with a dealt hand).
+##
+## T1 = -1 IS THE EXPECTED READING SINCE TAKE THE FIELD (2026-07-27), not a probe
+## failure. Neither side has a body on the board when a fight opens: the player
+## has played nothing yet and the hold does not muster until the END of round 1,
+## which is past the measurement window. It counted the ENEMY side only until
+## 2026-08-01 (so it could never fire at all); it now counts both, which makes it
+## meaningful again for a set-piece with an authored opening — but for an ordinary
+## fight, `Tf_furniture_ms` is the metric that answers "is the table set".
 ##
 ## It also records the wall-clock gap between every rendered frame across that
 ## window (and for a few seconds INTO the player's turn), so a "fix" that just
@@ -214,6 +222,12 @@ func _arm_run() -> void:
 		% [RS.deck.size(), added])
 
 
+func _board_count(require_visible: bool) -> int:
+	## Both sides — see the T1 note in the header. Reading only the enemy side
+	## made T1 permanently -1 once the hold stopped being pre-seated.
+	return _side_count(false, require_visible) + _side_count(true, require_visible)
+
+
 func _side_count(is_enemy: bool, require_visible: bool) -> int:
 	if not is_instance_valid(combat):
 		return 0
@@ -283,7 +297,7 @@ func _via_map() -> void:
 		prev = now
 		if not is_instance_valid(combat):
 			break
-		if t_board < 0 and _side_count(true, true) >= 1:
+		if t_board < 0 and _board_count(true) >= 1:
 			t_board = now
 		if t_play < 0 and combat.phase == combat.Phase.PLAYER_TURN \
 				and combat._hand.size() > 0:
@@ -364,9 +378,9 @@ func _cold_entry(label: String, deep: bool = false) -> Dictionary:
 		# claim of "shows the set table instead of a blank freeze".
 		if t_furniture < 0 and _descendants(combat) >= 150:
 			t_furniture = now
-		if t_board < 0 and _side_count(true, false) >= 1:
+		if t_board < 0 and _board_count(false) >= 1:
 			t_board = now
-		if t_opaque < 0 and _side_count(true, true) >= 1:
+		if t_opaque < 0 and _board_count(true) >= 1:
 			t_opaque = now
 		if t_play < 0 and combat.phase == combat.Phase.PLAYER_TURN \
 				and combat._hand.size() > 0:

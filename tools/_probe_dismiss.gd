@@ -96,11 +96,16 @@ func _run_test() -> void:
 		_check(not mule.marked_for_discard, "curse marking refused")
 		mule.card_id = real_id
 
-	# Deep Satchel raises the refill target computation (relic exists + value 1).
+	# Deep Satchel adds to the per-turn DRAW (relic exists + value 1). It used to
+	# raise a refill TARGET; the 2026-09-16 economy redesign replaced draw-to-N
+	# with a fixed draw, so the relic became a flat adder and the quantity this
+	# names changed under it. The assertion was always just "the relic is
+	# registered at value 1" and is still exactly right — only its label was
+	# describing a mechanic the game no longer has.
 	var RDB = root.get_node_or_null("RelicDB")
 	var satchel: Dictionary = RDB.get_relic("deep_satchel") if RDB != null else {}
 	_check(not satchel.is_empty() and int(satchel.get("value", 0)) == 1,
-		"Deep Satchel relic registered (+1 refill target)")
+		"Deep Satchel relic registered (+1 card drawn per turn)")
 
 	_finish(_fails)
 

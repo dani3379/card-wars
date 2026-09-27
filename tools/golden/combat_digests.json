@@ -1,0 +1,5 @@
+{
+  "seed13579_style1": "seed=13579 style=1 round=3 hp=30/30 mana=3/3 hand=[brute,brute,brute,goblin,goblin,goblin,strike,strike] board=[foe:brute:2/3:r0l1,me:brute:2/1:r0l0]",
+  "seed24601_style0": "seed=24601 style=0 round=4 hp=24/29 mana=0/4 hand=[goblin,goblin,goblin,goblin,strike,strike,strike] board=[foe:brute:2/0:r0l1,foe:brute:2/3:r0l0,foe:brute:2/3:r0l2,me:brute:2/1:r0l1,me:brute:2/2:r0l0]",
+  "seed24601_style0_frugal": "seed=24601 style=0 round=4 hp=17/30 mana=6/4 hand=[brute,brute,brute,goblin,goblin,goblin,goblin,goblin,strike,strike] board=[foe:brute:2/3:r0l0,foe:brute:2/3:r0l1,foe:brute:2/3:r0l2,foe:brute:2/3:r0l3,foe:goblin:2/1:r1l0]"
+}

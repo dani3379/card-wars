@@ -270,7 +270,53 @@ Don't invent a new size stop; pick the register and use its band.
 
 ---
 
-## 12. What to report back
+## 12. UI chrome is exempt from the road register (2026-08-06 plain-language pass)
+
+§10's road register governs **event prose and card/relic flavor only**. It had
+leaked into UI chrome, where it cost the player information: *march*, *column*,
+*host*, *roll*, *opener*, *company*, *warband*, *weight* and *rank* were all
+doing noun-work in labels, and several were doing it for **two different
+mechanics at once**.
+
+**Screen titles, buttons, section headers, HUD captions, tooltips, empty states
+and event choice ACTION labels use standard product language.** The rules:
+
+- **Verb first; name the outcome.** `Choose a card to sell`, not `Lay one on
+  the counter. He pays by weight.` A label states what it does.
+- **No riddles and no withheld referents.** If a phrase needs the setting to
+  decode, it is wrong. `TAKE THE FIELD` → `START RUN`.
+- **A blocked state names the cause *and* the effect.** `Temperance Vow` →
+  `No potions (Temperance Vow)`.
+- **One term per concept, across every screen.** This is the rule the old copy
+  broke hardest — "banner" meant both a faction choice and a creature's
+  keyword; "order" meant both a set-piece objective and an enemy intent badge.
+- **Proper nouns stay**: Burning Meadow, hero/relic/card/encounter names,
+  `Command`, `General`, `Forge`, `Daily Run`, and every keyword display name.
+  (**`Daily Run`, corrected 2026-09-10.** This section said `Daily March` and the
+  DOC was the stale side: an audit of on-screen labels found every player-facing
+  string already reads *Daily Run* — the button in both places it is built, the
+  active-options chip, and the How-To-Play heading — while every surviving
+  *Daily March* is a code comment or a probe's own `print`. The §12 rule is one
+  term per concept **as the player meets it**, so the screens win.)
+- **Settled vocabulary** (do not re-split these): the run is a **run**, not a
+  march; the deck is a **deck**, not a company/warband/column; the upgrade
+  action is **Forge** everywhere, including event choice labels; the per-fight
+  modifier is a **Battle Rule**, not a mutator/omen; combat rows are **rows**,
+  not ranks; the human opponent is the **opponent**, a board creature is the
+  **enemy**.
+
+Event `desc` prose, flavor lines, result text and the defeat refrains keep the
+road register — only the choice's ACTION label is held to this section.
+
+**Two structural traps to know before writing a label:**
+`tools/_probe_copy_lint.gd`'s `_check_shouting` fails a LONE all-caps word of
+3+ chars, so an ALL-CAPS label needs two capped words. And several UI strings
+are asserted verbatim by probes in `tools/` — grep `scripts/` **and** `tools/`
+before changing one, and update every site together.
+
+---
+
+## 13. What to report back
 
 For your assigned file(s), return:
 1. A count of strings changed.

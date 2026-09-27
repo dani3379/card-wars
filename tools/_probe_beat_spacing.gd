@@ -64,11 +64,17 @@ extends Node
 ##   * Readiness is gated on `round_number >= 1`. Phase.PLAYER_TURN is enum 0 —
 ##     the uninitialised default — so polling on phase alone reports ready before
 ##     the fight has begun.
-##   * `_lane_dwell()` and `_round_beat()` DELIBERATELY return early in headless
-##     and in net. This probe does not fight that: it asserts the bails are still
-##     there by source inspection (removing one would make every headless probe
-##     run sleep through thousands of rounds) and tests the PREDICATES that decide
-##     whether a dwell is owed, which are pure and run identically headless.
+##   * `_lane_dwell()` and `_round_beat()` DELIBERATELY return early in headless.
+##     This probe does not fight that: it asserts the bail is still there by source
+##     inspection (removing it would make every headless probe run sleep through
+##     thousands of rounds) and tests the PREDICATES that decide whether a dwell is
+##     owed, which are pure and run identically headless.
+##   * The NET bail is NOT symmetric with the headless one (2026-08-04).
+##     `_round_beat` still takes it, for a structural reason: `_start_round` is
+##     called from CombatNet's plain `void` turn-machine entry points and must not
+##     become a coroutine there. `_lane_dwell` no longer does — skirmish now paces
+##     its clash exactly as solo does, with each peer running the beat against its
+##     OWN Clash Pause dial. Both halves are asserted below.
 
 const COMBAT_SCENE := "res://scenes/combat.tscn"
 
@@ -436,20 +442,54 @@ func _test_downed_count(combat) -> void:
 
 func _test_bails_intact() -> void:
 	print("")
-	print("[beat] — the headless / net bails are still in place")
+	print("[beat] — the deliberate bails: headless everywhere, NET only where it is structural")
 	var src: String = load("res://scripts/scenes/Combat.gd").source_code
+	var net_src: String = load("res://scripts/net/CombatNet.gd").source_code
 
-	# These two are the reason a headless probe run does not sleep through
-	# thousands of rounds. Removing either bail would not fail an assertion
-	# anywhere else — it would just make every probe in tools/ 10x slower and
-	# eventually trip their watchdogs. So it is gated here, explicitly.
-	for fn in ["_lane_dwell", "_round_beat"]:
+	# THE HEADLESS BAIL is the one that must never go: it is the reason a headless
+	# probe run does not sleep through thousands of rounds. Removing it would not
+	# fail an assertion anywhere else — it would just make every probe in tools/ 10x
+	# slower and eventually trip their watchdogs. So it is gated here, explicitly.
+	for fn in ["_lane_dwell", "_lane_dwell_minor", "_round_beat"]:
 		var body := _fn_body(src, fn)
 		_check(body != "", "%s exists" % fn)
-		_check(body.contains("_is_net()"),
-			"%s still returns early in NET (the turn machine's clocks are not ours)" % fn)
 		_check(body.contains("headless"),
 			"%s still returns early HEADLESS (probe runs have nothing to look at)" % fn)
+
+	# THE NET BAIL WAS DIFFERENT, AND IT IS GONE FROM THE DWELLS (2026-08-04).
+	#
+	# `_round_beat` keeps its net bail for a STRUCTURAL reason: `_start_round` is
+	# called from CombatNet's plain `void` turn-machine entry points, so letting it
+	# suspend would push a coroutine through the hardest-to-verify layer in the
+	# project. That reason is still true, so it is still asserted.
+	#
+	# `_lane_dwell` bailed for a WEAKER reason ("the turn machine's clocks are not
+	# ours"), and it produced the gap this pass closed: the campaign clash was a
+	# serialized, spotlit, per-column read and the skirmish clash of the same
+	# creatures was one undifferentiated burst. Nothing in the net layer is on a
+	# clock — no turn timer exists in NetMatch — so the dwell now runs in both modes
+	# and each peer paces to its OWN Clash Pause dial. Asserted from the other side
+	# now: the skirmish clash must go through the shared paced unit, and the pacing
+	# must reach the watching peer as a decision rather than as the host's seconds.
+	var rb := _fn_body(src, "_round_beat")
+	_check(rb.contains("_is_net()"),
+		"_round_beat still returns early in NET (_start_round must not suspend there)")
+	var ld := _fn_body(src, "_lane_dwell")
+	_check(not ld.contains("_is_net()"),
+		"_lane_dwell no longer bails in NET (skirmish paces its clash like solo)")
+	var clash := _fn_body(net_src, "_net_run_clash")
+	_check(clash.contains("_clash_lane_pass"),
+		"the net clash resolves through the SHARED paced column unit")
+	_check(clash.contains("_cleanup_dead_paced"),
+		"the net clash flushes its corpses on the shared paced beats")
+	_check(clash.contains("_post_clash_ledger"),
+		"the net clash closes with the same one-line casualty ledger solo prints")
+	var lp := _fn_body(src, "_clash_lane_pass")
+	_check(lp.contains("_net_log_dwell"),
+		"the dwell CHOICE is logged for the watching peer (never the host's seconds)")
+	var fc := _fn_body(src, "_focus_combat_lane")
+	_check(fc.contains("_net_log_focus"),
+		"the spotlight column is logged for the watching peer")
 
 
 # ══ HELPERS ═══════════════════════════════════════════════════════════════════

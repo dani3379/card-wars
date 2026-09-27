@@ -33,15 +33,6 @@ var tex_hud_potion: Texture2D = null
 var tex_hud_relic: Texture2D = null
 var tex_hud_deck: Texture2D = null
 
-# ── Card stat icons (hand-painted, pbmojART CC-BY 3.0 + Kenney CC0). ──
-# Used by Card2D v4 in place of the procedurally-drawn GemOrb shapes —
-# painted assets read as "real game art" where the polygon orbs always
-# read as "programmer placeholder", no matter how many specular layers we
-# stack on them.
-var tex_stat_cost: Texture2D = null    # blue runestone (cost / mana)
-var tex_stat_atk: Texture2D = null     # gold sword (attack)
-var tex_stat_hp: Texture2D = null      # painted red heart (health)
-
 # ── NinePatch panel textures (Kenney Fantasy UI Borders CC0) ──
 var tex_panel_9p: Texture2D = null
 
@@ -71,6 +62,7 @@ var _keyword_icons: Dictionary = {}
 func _ready() -> void:
 	_load_assets()
 	_apply_root_theme()
+	_install_press_feedback()
 
 
 func _apply_root_theme() -> void:
@@ -277,18 +269,6 @@ func _load_assets() -> void:
 	tex_hud_relic = load("res://assets/icons/map/hud_relic.png")
 	tex_hud_deck = load("res://assets/icons/map/hud_deck.png")
 
-	# Card stat icons — hand-painted assets that replace the procedural
-	# GemOrb cost/ATK/HP shapes. Heart reuses the existing painted HUD
-	# texture (Kenney pack) so all three stat icons share the same painted
-	# vocabulary. Cost+sword from pbmojART's Fantasy RPG Icons (CC-BY 3.0,
-	# credited in CREDITS.md).
-	var cost_path := "res://assets/icons/stats/cost_runestone.png"
-	if ResourceLoader.exists(cost_path):
-		tex_stat_cost = load(cost_path)
-	var atk_path := "res://assets/icons/stats/atk_sword.png"
-	if ResourceLoader.exists(atk_path):
-		tex_stat_atk = load(atk_path)
-	tex_stat_hp = tex_hud_heart  # reuse painted heart from HUD set
 	var np_path = "res://assets/ui/kenney_fantasy-ui-borders/PNG/Double/Panel/panel-009.png"
 	if ResourceLoader.exists(np_path):
 		tex_panel_9p = load(np_path)
@@ -549,6 +529,14 @@ func make_panel_textured(tint: Color = Color(0.18, 0.14, 0.10),
 	return s
 
 
+## The struck-metal BUTTON plate. Preloaded under its own name like every other
+## painter in that directory (no `class_name`, so no `--import` pass is needed
+## for it to resolve). Used by `make_plaque_style` above; kept out of
+## `ChartPanelStyle`'s path on purpose — see that factory's header.
+const PlaqueStyle := preload("res://scripts/ui/painters/PlaqueStyle.gd")
+const PageBorder := preload("res://scripts/ui/painters/PageBorder.gd")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  CHART PANEL STYLE — the drawn "document furniture" panel (2026-07-06).
 #  Replaces the flat rounded-rectangle StyleBoxFlat every UI panel used to
@@ -777,6 +765,41 @@ class ChartPanelStyle extends StyleBox:
 
 
 # The praised chart look (see make_choice_banner), now drawn as real document
+## THE ONE DEFINITION OF "SCALE AN AUTHORED CONSTANT TO THE LIVE CANVAS"
+## (2026-09-19, CLASS C32).
+##
+## UI Scale sets `Window.content_scale_factor`, and under `canvas_items` stretch
+## that DIVIDES the logical canvas — at 60% the UI lays itself out on 2667×1500.
+## So any rect placed from a constant authored against 1600×900 becomes a
+## shrinking island: the player who picks 60% is asking to fit MORE on screen and
+## instead gets the same panel with a wider margin of background around it.
+## Multiply authored numbers by this and they keep the FRACTION they were chosen
+## for. Exactly (1, 1) at 100%, so every call site is a no-op at design scale.
+##
+## THIS IS A FUNCTION RATHER THAN FOUR COPIES OF THE ARITHMETIC ON PURPOSE.
+## `_probe_uiscale` flagged four screens at once (net_lobby, treasure, recruit,
+## game_over) and MainMenu had already solved it inline; five hand-rolled copies
+## of one rule is this codebase's documented worst pathology — the same shape as
+## `NetPlayerState` restating every relic's magnitude as a literal, equal on the
+## day it was written and one retune from diverging silently.
+##
+## READ BEFORE "FIXING" THIS BACK: ProjectSettings is the AUTHORING REFERENCE —
+## the static canvas the callers' numbers were written against — which is its one
+## honest use. The 2026-09-03 decorative-frame bug was the opposite mistake,
+## reading ProjectSettings as if it were the RUNTIME canvas. Static reference,
+## live target; never the other way round.
+static func canvas_scale(node: Node) -> Vector2:
+	if node == null or not node.is_inside_tree():
+		return Vector2.ONE
+	var canvas: Vector2 = node.get_viewport_rect().size
+	var design := Vector2(
+		float(ProjectSettings.get_setting("display/window/size/viewport_width", 1600)),
+		float(ProjectSettings.get_setting("display/window/size/viewport_height", 900)))
+	if design.x <= 0.0 or design.y <= 0.0 or canvas.x <= 0.0 or canvas.y <= 0.0:
+		return Vector2.ONE
+	return Vector2(canvas.x / design.x, canvas.y / design.y)
+
+
 # furniture (ChartPanelStyle above): chamfered corners, metal rule over an ink
 # keyline, corner tacks, lit field, layered shadow. Every "UI-kit" panel in the
 # game routes through here, so this is THE place the document aesthetic is
@@ -811,29 +834,47 @@ static func make_btn_style(bg: Color, border: Color = GILT, corner: int = 4) -> 
 	return s
 
 
-# ═══════════════════════════════════════════
-#  BUTTON FACTORY
-# ═══════════════════════════════════════════
-
-## Inked-parchment plaque stylebox for buttons — a dark warm fill with the
-## caller's accent surviving as the gilt-blended keyline (+ a faint inner tint),
-## so a button reads as an aged plaque in the wax / cartouche kit instead of a
-## flat colour rectangle laid over the painted scenes. `accent_strength` 0..1
-## scales how much the accent shows (dim for disabled, full on hover).
-func _plaque_style(fill: Color, accent: Color, accent_strength: float) -> StyleBox:
-	var s := ChartPanelStyle.new()
-	s.bg_color = fill.lerp(accent, 0.08 * accent_strength)
-	var key := GILT.lerp(accent, 0.55 * accent_strength)
-	s.border_color = Color(key.r, key.g, key.b, 0.92)
-	s.rule_width = 2.0
-	s.chamfer = 9.0
-	s.shadow = true
-	s.corner_tacks = false
-	s.content_margin_left = 14
-	s.content_margin_right = 14
-	s.content_margin_top = 7
-	s.content_margin_bottom = 7
+## THE PLATED BUTTON (2026-09-17) — `PlaqueStyle`, the struck-metal plate.
+##
+## ONE FACTORY, because a button's plate is specified in four places
+## (`make_primary_button`, `make_themed_button`, MainMenu's primary action and
+## its save slots) and four spellings of one material is how they come to be lit
+## by different lamps. See `PlaqueStyle`'s header for the diagnosis: every
+## button's edge was FOUR STACKED SYMMETRIC POLYLINES, which is the lightning
+## defect, and its face was a vertical ramp lit from a different direction than
+## its own edge.
+##
+## DELIBERATELY NOT ROUTED THROUGH `ChartPanelStyle`. That helper is every panel,
+## chip, tile and banner in the game, and its own comments record what happens
+## when a warm pass is added to all of them at once — "stacked into a global
+## brightness lift", "the game looks too lit up". A molding is a much bigger
+## change than a halo, so it goes where it was asked for: the buttons.
+##
+## `state` is `PlaqueStyle.REST` / `.HOVER` / `.PRESS`. The press state is the
+## point — the plate goes FLUSH rather than merely darker.
+static func make_plaque_style(metal: Color, fill: Color, state: int,
+		opts: Dictionary = {}) -> StyleBox:
+	var s = PlaqueStyle.new()
+	s.metal = metal
+	s.fill = fill
+	s.state = state
+	for k in opts:
+		# AN UNKNOWN KEY IS REPORTED, NOT SWALLOWED. `Object.set()` on a property
+		# that does not exist does NOTHING AT ALL — no error, no warning, no
+		# return value — so a misspelled option is a style that silently keeps
+		# its default and a tuning session spent wondering why a number has no
+		# effect. (The sibling spelling is worse in the other direction: a TYPED
+		# `s.rule_width = x` against a missing property throws, and a failed
+		# assignment ABORTS the function, so the factory returns null and the
+		# caller reports "required object is null" from somewhere else entirely.
+		# That is exactly how this loop's first version was caught.)
+		if not (k in s):
+			push_warning("make_plaque_style: unknown option '%s' ignored" % str(k))
+			continue
+		s.set(k, opts[k])
 	return s
+
+
 
 
 func make_themed_button(text: String, bg: Color, min_size: Vector2 = Vector2(160, 44),
@@ -849,25 +890,197 @@ func make_themed_button(text: String, bg: Color, min_size: Vector2 = Vector2(160
 	# font_display hasn't loaded yet (very early scene init).
 	if font_display:
 		btn.add_theme_font_override("font", font_display)
-	# Gilt-ivory letters with a heavier ink outline so the type reads on the dark
-	# plaque (the old thin outline leaned on the bright flat fill behind it).
+	# Gilt-ivory letters. The outline is back to 3 now the plaque is gone — the
+	# label sits on whatever painted scene is behind it, which is what the heavy
+	# outline is for.
 	btn.add_theme_color_override("font_color", Color(0.95, 0.88, 0.68))
 	btn.add_theme_color_override("font_hover_color", Color(1.0, 0.96, 0.80))
 	btn.add_theme_color_override("font_disabled_color", Color(0.62, 0.57, 0.47, 0.6))
 	btn.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.6))
 	btn.add_theme_constant_override("outline_size", 3)
-	# Inked-parchment plaque, NOT a flat colour fill — the caller's `bg` becomes
-	# the accent keyline so price / affordability / rarity colour-coding survives
-	# while the button stops reading as a generic UI rectangle.
-	btn.add_theme_stylebox_override("normal",
-		_plaque_style(Color(0.115, 0.090, 0.066, 0.96), bg, 0.85))
-	btn.add_theme_stylebox_override("hover",
-		_plaque_style(Color(0.160, 0.125, 0.088, 0.97), bg.lightened(0.10), 1.0))
-	btn.add_theme_stylebox_override("pressed",
-		_plaque_style(Color(0.085, 0.065, 0.050, 0.98), bg.darkened(0.10), 0.9))
-	btn.add_theme_stylebox_override("disabled",
-		_plaque_style(Color(0.100, 0.085, 0.070, 0.92), Color(0.40, 0.34, 0.22), 0.35))
+
+	## ── FRAMELESS (2026-09-18, owner's call). NO PLAQUE, NO FILL, NO KEYLINE.
+	##
+	## These 44 call sites are the last of the boxed buttons: the primaries went
+	## frameless first, and leaving the shop shelf and the lobby rows plated
+	## would have been the same mixed grammar from the other side. See
+	## [[feedback_ui_aesthetic]] — the text IS the button.
+	##
+	## THE ACCENT IS PRESERVED, AND THAT IS THE ONLY DELICATE PART. `bg` has
+	## carried price / affordability / rarity coding across every one of those
+	## sites, first as a flat fill and then as the plaque's keyline. Dropping it
+	## would silently delete meaning from a shop shelf, so it MOVES to the
+	## igniting underline via the exact expression the plaque used
+	## (`GILT.lerp(accent, 0.55 * strength)`) — the same colour, relocated from a
+	## box's edge to a rule under the word.
+	##
+	## AT REST THE ACCENT IS NOT DRAWN, deliberately. Measured across the call
+	## sites, most accents are near-identical dark browns (0.34/0.22/0.08 and
+	## friends) inherited from the flat-fill era and carrying no information at
+	## all; only a handful — the reds and the gilts — mean anything. A rest-state
+	## rule per button would therefore print 44 near-identical lines to
+	## distinguish about four cases, which is the flat-rectangle problem wearing
+	## a thinner hat.
+	var key := GILT.lerp(bg.lightened(0.10), 0.55)
+	var rest := StyleBoxEmpty.new()
+	rest.content_margin_left = 14
+	rest.content_margin_right = 14
+	rest.content_margin_top = 7
+	rest.content_margin_bottom = 7
+	btn.add_theme_stylebox_override("normal", rest)
+	btn.add_theme_stylebox_override("disabled", rest)
+	var lit_style := StyleBoxFlat.new()
+	lit_style.bg_color = Color(0.85, 0.62, 0.25, 0.09)
+	lit_style.border_color = Color(key.r, key.g, key.b, 0.95)
+	lit_style.border_width_bottom = 2
+	lit_style.content_margin_left = 14
+	lit_style.content_margin_right = 14
+	lit_style.content_margin_top = 7
+	lit_style.content_margin_bottom = 7
+	btn.add_theme_stylebox_override("hover", lit_style)
+	btn.add_theme_stylebox_override("focus", lit_style)
+	var down := lit_style.duplicate() as StyleBoxFlat
+	down.bg_color = Color(0.85, 0.62, 0.25, 0.03)
+	down.border_color = Color(key.r * 0.85, key.g * 0.85, key.b * 0.85, 0.95)
+	btn.add_theme_stylebox_override("pressed", down)
+	arm_ui_hover(btn)
 	return btn
+
+
+# ===========================================================================
+#  THE UI VOICE (2026-08-05)
+#
+#  Before this pass NOTHING in this game made a sound when you touched it:
+#  40 `mouse_entered` handlers across scripts/ and not one played a cue, and
+#  the whole shell (MainMenu, SettingsOverlay, Collection, Credits) held zero
+#  play_sfx call sites. Meanwhile the clash has hitstop and a shuffle bag.
+#
+#  HOVER is armed HERE, inside the game-wide button funnels, because it is
+#  collision-free by construction: no call site in the repo plays anything on
+#  hover, so nothing can double up.
+#
+#  PRESS is NOT armed here, deliberately. Roughly twenty call sites already
+#  play their own cue on a button press (Reward's forge pick, MapView's march,
+#  Combat's initiative, the event minigame props), and arming the funnel would
+#  layer a second sound under every one of them. Screens that have no cue of
+#  their own call `arm_ui_press()` explicitly — see SettingsOverlay, Collection
+#  and NetLobby. When adding a press cue to a screen, GREP IT FOR play_sfx
+#  FIRST.
+# ===========================================================================
+
+func arm_ui_hover(btn: Button) -> void:
+	## The dry paper tick under the cursor. Skips disabled buttons — a control
+	## that refuses the click must not answer the hover.
+	if btn == null:
+		return
+	btn.mouse_entered.connect(func() -> void:
+		if is_instance_valid(btn) and not btn.disabled:
+			AudioBank.play_ui("hover"))
+
+
+func arm_ui_press(btn: Button, cue: String = "select") -> void:
+	## cue: "select" (an ordinary pick) · "back" (any retreat, pitched down so
+	## advance and retreat are distinguishable with the screen unread) ·
+	## "commit" (a wax seal — reserved for the buttons that spend a run).
+	##
+	## Since the 2026-09-17 press pass this is no longer how a button GETS a
+	## voice — every button has one. It is how a button gets a DIFFERENT one:
+	## calling it declares the cue explicitly and the funnel's default "select"
+	## stands down (see `_install_press_feedback`).
+	if btn == null:
+		return
+	btn.set_meta("ui_cue", cue)
+	if cue == "commit":
+		btn.set_meta("press_weight", true)
+	btn.pressed.connect(func() -> void: AudioBank.play_ui(cue))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  THE PRESS FUNNEL (2026-09-17)
+#
+#  MEASURED BEFORE THE PASS: 214 `pressed.connect` sites, 2 `button_down`
+#  connections in the entire repo, 24 buttons with a press cue, and
+#  `Motion.press` called exactly ONCE (on a HUD instrument, not a button). So
+#  pressing almost anything in this game changed a StyleBox and nothing else —
+#  no motion, no sound, and the StyleBox swap itself is a state the player only
+#  sees while the mouse is down and looking at the thing it is covering.
+#
+#  WHY THIS IS A TREE HOOK AND NOT FOUR FACTORY CALLS. The obvious
+#  implementation arms it inside `make_themed_button` / `make_back_button` /
+#  `make_primary_button` / `make_choice_banner`, where `arm_ui_hover` already
+#  lives. Counted: those four cover ~87 call sites — against 92 bare
+#  `Button.new()`s built by hand across the scenes. Half the game's buttons are
+#  not made by the factories, so a factory-side arm would deliver exactly the
+#  half-covered surface this pass exists to end, and the gap would be invisible
+#  (a button that does not react looks like a button, not like a bug). Hooking
+#  `node_added` is the only spelling that cannot drift from the population.
+#
+#  HOVER'S RULE, APPLIED AGAIN. The block above this one arms hover in the
+#  funnels because hover was collision-free, and deliberately leaves PRESS out
+#  because ~two dozen call sites already play their own cue. Press MOTION is
+#  collision-free in exactly the way hover audio was — nothing but MainMenu
+#  animated a press — so it is armed unconditionally. Press AUDIO is not, and is
+#  handled by the two devices below.
+#
+#  DEVICE 1 — THE CUE IS CONNECTED DEFERRED. A screen's own cue is connected
+#  later than the funnel's and would therefore run second; deferring the
+#  funnel's lets the explicit one claim the frame first.
+#  DEVICE 2 — `AudioBank.play_ui` COLLAPSES A REPEAT IN THE SAME FRAME, so the
+#  loser is dropped rather than layered. One press is one sound.
+#
+#  Both are needed: the ordering decides WHICH cue survives, the dedupe decides
+#  that only one does.
+# ═══════════════════════════════════════════════════════════════════════════
+
+func _install_press_feedback() -> void:
+	var tree := get_tree()
+	if tree == null:
+		return
+	tree.node_added.connect(_on_node_added_press)
+	# Autoloads are readied before the main scene, so in practice the tree holds
+	# nothing yet — but a probe that boots a scene itself can beat us here, and
+	# a funnel that silently covers "everything added after I woke up" is the
+	# kind of partial coverage this pass is about.
+	for n in tree.root.find_children("*", "BaseButton", true, false):
+		_arm_press_default(n as BaseButton)
+
+
+func _on_node_added_press(node: Node) -> void:
+	# Runs for EVERY node added to the tree, combat's thousands included, so it
+	# stays a single type test and nothing else.
+	if node is BaseButton:
+		_arm_press_default(node)
+
+
+func press_cue_for(btn: BaseButton) -> String:
+	## "back" for any retreat, "commit" for a button that spends a run, else
+	## "select". Read off the button rather than guessed from its label: the
+	## words move with the copy pass and the meaning does not.
+	if btn == null or not is_instance_valid(btn):
+		return "select"
+	if btn.has_meta("ui_cue"):
+		return String(btn.get_meta("ui_cue"))
+	if btn.has_meta("shell_cue"):
+		return String(btn.get_meta("shell_cue"))
+	return "select"
+
+
+func _arm_press_default(btn: BaseButton) -> void:
+	if btn == null or not is_instance_valid(btn):
+		return
+	# `no_press_feel` is the opt-out for a control that owns its own press
+	# behaviour (a drag handle, a slider grabber, an invisible catcher whose
+	# wrapper is animated by its screen).
+	if btn.has_meta("no_press_feel"):
+		return
+	# `press_weight` asks for the at-cursor mark on top of the dip — set by
+	# `make_primary_button` and by any button declaring the "commit" cue, i.e.
+	# the actions that spend something. See Motion.press_mark for why it is not
+	# simply given to everything.
+	Motion.arm_press(btn, {"mark": btn.has_meta("press_weight")})
+	btn.pressed.connect(func() -> void:
+		if is_instance_valid(btn):
+			AudioBank.play_ui(press_cue_for(btn)), CONNECT_DEFERRED)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1655,6 +1868,46 @@ func make_tile_skeleton(min_size: Vector2, separation: int = 4) -> Dictionary:
 	return {"button": btn, "col": col}
 
 
+## LEVEL A ROW OF TILES, so peers can be compared rather than merely read.
+##
+## `fit_tile_height` closes each box onto ITS OWN content, which is right for a
+## lone tile and wrong for a row: two relic offers whose rules text differs by a
+## line get different heights, and an HBox child set SHRINK_CENTER then centres
+## each one separately — so the icons sit at different heights, the names sit at
+## different heights, and nothing in the row shares a baseline. (Measured on the
+## General's reward: Quartermaster's Chest against Pen Nib put 23px between two
+## titles that are the same kind of thing.) It is the C30 class exactly — every
+## tile passes every test applied to it alone, and the row still looks wrong.
+##
+## Raise them all to the tallest instead. No await: `fit_tile_height` computes
+## from font metrics synchronously, so the heights are final the moment the
+## tiles are built.
+##
+## EQUAL BOXES ARE ONLY HALF OF IT. `make_tile_skeleton` centres its inner column
+## (right for a lone tile, where the content should sit in the middle of its
+## plate), so levelling the boxes alone still centres a two-line tile's whole
+## stack against a four-line one and leaves the icons exactly as far apart as
+## they started. The levelled row top-aligns as well, which is what puts the
+## icons and the names on a shared baseline and lets only the rules text — the
+## one thing that genuinely differs — run longer on one side.
+func level_tile_row(tiles: Array) -> void:
+	var tallest := 0.0
+	for t in tiles:
+		if t is Control:
+			tallest = maxf(tallest, (t as Control).custom_minimum_size.y)
+	if tallest <= 0.0:
+		return
+	for t in tiles:
+		if not (t is Control):
+			continue
+		var c := t as Control
+		c.custom_minimum_size = Vector2(c.custom_minimum_size.x, tallest)
+		for ch in c.get_children():
+			if ch is VBoxContainer:
+				(ch as VBoxContainer).alignment = BoxContainer.ALIGNMENT_BEGIN
+				break
+
+
 func fit_tile_height(btn: Button, col: VBoxContainer) -> void:
 	# The tile skeleton's inner VBox is anchored FULL_RECT, so the Button's min
 	# size never grows with content — a long autowrapped body printed straight
@@ -1778,19 +2031,41 @@ const HOW_TO_PLAY_PRIMER := [
 	["The goal", "Cross three acts and defeat each rival lord. If your hero reaches 0 HP, the run ends and you start a new one."],
 	["Each round", "Refill your hand and Command, then play cards. End your turn to resolve both sides' attacks and begin the next round."],
 	["Command", "Command pays for creatures and spells. You start each turn with 3. Up to 2 unspent Command carries into your next turn."],
-	["Your hand", "Cards stay in your hand between turns. Each turn refills it to 5. Right-click a card to mark it for discard at the end of your turn."],
-	["The board", "Each side has 4 lanes with a front and back slot. Both rows attack. The front row attacks first and takes attacks before the back row."],
-	["New creatures", "A creature played this round is Forming Up and cannot attack until next round. Swift creatures can attack immediately."],
-	["Forecast and combat", "Incoming shows expected face damage. End your turn to start the clash: Swift attacks first, then front rows, then back rows."],
-	["Map sites", "Holds are normal fights; Generals are harder fights with relic rewards. Recruit Camps add cards. The Trader sells items. Relic Caches offer a relic. Supply Caches offer an upgrade, potions, or gold."],
-	["Cards and upgrades", "Hover keywords for their rules. At camp, Forge gives one card its permanent + version. The preview shows the exact change before you confirm."],
+	["Your hand", "Cards stay in your hand between turns. Each turn refills it to 5. Right-click up to 2 cards to mark them for discard when the turn ends."],
+	# THE BACK ROW IS NOT A BENCH. "Front guards back" is the model this line has
+	# to kill: both rows attack every round, so a player who reads the front row
+	# as the fighting one and the back row as a reserve throws away four of their
+	# eight slots. Stated as a count first (all 8 fight), because that is the fact
+	# a player can act on; the strike order is the qualifier, not the rule.
+	["The board", "Each side has 4 lanes with a front and a back slot. All 8 slots fight: both rows attack every round. The front row attacks first and is attacked first — the back row is not a reserve."],
+	# "Swift creatures can attack immediately" was false in the way that costs a
+	# game: _can_reach_face returns `ready_to_swing or has_keyword("charge")`, so a
+	# Swift body on its arrival round breaks BODIES and cannot touch the enemy
+	# face. Charge is the one keyword that buys that. The strike-back clause is the
+	# other half nothing had stated — _defender_is_mustering arms the counter in
+	# solo, so a creature still forming up is not a free kill.
+	["New creatures", "A creature played this round is Forming Up: it cannot start an attack until next round, though it still strikes back if hit. Swift lets it hit a creature at once, but not the enemy face — only Charge reaches the face on its arrival round."],
+	["Forecast and combat", "Incoming shows the face damage headed your way. End your turn to start the clash: Swift strikes first, then both front rows, then both back rows. Round 1 has no clash — both sides are still forming up."],
+	# OVERKILL IS UNIVERSAL AND WAS STATED NOWHERE ON THIS SCREEN. Piercing's
+	# glossary entry names the spill, which reads as though the keyword owns it —
+	# so a player learns that chump-blocking negates a whole attack, which stopped
+	# being true in the 2026-07-28 blocker-economy pass. Both halves of
+	# _apply_piercing_overflow are here: the spill stops at the body behind, and
+	# only Piercing reads on, and only into an empty slot.
+	["Killing blows", "A killing blow spills its extra damage into the creature standing behind the one it felled, then stops. Piercing carries that spill on to the enemy face when the slot behind is empty."],
+	["Map sites", "Holds are normal fights; Generals are harder fights with relic rewards. Recruit Camps add cards. The Trader's Wagon buys and sells. Relic Caches show one relic: take it or take gold instead. Supply Caches offer a Forge, potions, or gold."],
+	["Keywords and the Forge", "Hover keywords for their rules. At camp, Forge gives one card its permanent + version. The preview shows the exact change before you confirm."],
 	["The boss gate", "A lord's keep starts locked. Win enough Holds to open the road. The map always shows how many Holds remain."],
-	["Ascension and Daily March", "Ascension adds the listed difficulty rules. Daily March uses today's fixed hero, seed, and special rule so everyone faces the same run."],
+	["Ascension and Daily Run", "Ascension adds the listed difficulty rules. Daily Run uses today's fixed hero, seed, and Battle Rule so everyone faces the same run."],
 	["Skirmish modes", "Draft: pick 1 of 3 cards twenty times. Constructed: choose any 20 cards. Quick Battle: use random decks. Sealed: build 20 cards from a fixed pool."],
 ]
 ## Builds the full-screen "How to Play" overlay. Add the returned Control as a
 ## child; CLOSE or a click on the dim scrim dismisses it.
-func make_how_to_play_overlay() -> Control:
+## `open_tab` — 0 opens on the campaign primer, 1 on the COACHING lesson list.
+## Combat's `?` panel opens straight to 1: mid-fight is the moment of maximum
+## confusion, and making someone land on the primer and find a tab first is the
+## menu dive this screen exists to remove.
+func make_how_to_play_overlay(open_tab: int = 0) -> Control:
 	var gilt_b := Color(1.0, 0.88, 0.35, 1.0)
 	var ivory_c := Color(0.96, 0.92, 0.78, 1.0)
 	var ash_c := Color(0.62, 0.58, 0.52, 1.0)
@@ -1804,6 +2079,10 @@ func make_how_to_play_overlay() -> Control:
 	scrim.gui_input.connect(func(ev: InputEvent):
 		if ev is InputEventMouseButton and ev.pressed \
 				and ev.button_index == MOUSE_BUTTON_LEFT:
+			# Clicking out of a modal IS a retreat, so it gets the retreat's
+			# voice. It used to close in silence while the CLOSE button beside
+			# it spoke — the same act, two different answers.
+			AudioBank.play_ui("back")
 			scrim.queue_free())
 
 	var panel := PanelContainer.new()
@@ -1864,17 +2143,48 @@ func make_how_to_play_overlay() -> Control:
 	# stopping at a hard line.
 	var field := Color(0.06, 0.05, 0.045, 0.99)
 
-	# LEFT — campaign primer.
+	# LEFT — two pages behind one pair of tabs: the campaign primer, and the
+	# COACHING page, which is the tutorial itself made readable and replayable.
+	#
+	# WHY THE MANUAL IS WHERE THE TUTORIAL GOES TO BE FOUND AGAIN. A lesson is
+	# spent the instant it fires — one line, seven seconds, during your first
+	# fight — and until now the only way back was a Settings button that wiped
+	# every flag on the profile. That is not retrieval, it is a reset. NN/g's rule
+	# for dismissible help is that dismissal and RECALL matter equally, and the
+	# Game Accessibility Guidelines list replayable instructions as a standing
+	# requirement rather than a nicety. So every lesson is printed here in full,
+	# ticked if the player has met it, with its own button to have it back in
+	# context — and this screen is already on the menu column and behind the map's
+	# "?", so the path to it is one a player has walked before.
+	var left_col := VBoxContainer.new()
+	left_col.add_theme_constant_override("separation", 8)
+	left_col.custom_minimum_size = Vector2(500, 0)
+	left_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	cols.add_child(left_col)
+
 	var left_wrap: Control = _htp_scroll_column(500.0, false, field)
-	cols.add_child(left_wrap)
-	var left_scroll: ScrollContainer = left_wrap.get_node("Scroll")
-	var left := VBoxContainer.new()
-	left.add_theme_constant_override("separation", 10)
-	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	left_scroll.add_child(left)
-	left.add_child(make_label("HOW THE CAMPAIGN WORKS", FONT_SUBHEADER, gilt_b))
+	var basics := VBoxContainer.new()
+	basics.add_theme_constant_override("separation", 10)
+	basics.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	(left_wrap.get_node("Scroll") as ScrollContainer).add_child(basics)
 	for entry in HOW_TO_PLAY_PRIMER:
-		left.add_child(_htp_primer_block(entry[0], entry[1], ivory_c))
+		basics.add_child(_htp_primer_block(entry[0], entry[1], ivory_c))
+
+	var coaching_wrap: Control = _htp_scroll_column(500.0, false, field)
+	var coaching := VBoxContainer.new()
+	coaching.add_theme_constant_override("separation", 10)
+	coaching.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	(coaching_wrap.get_node("Scroll") as ScrollContainer).add_child(coaching)
+	_htp_fill_coaching_page(coaching, ivory_c, ash_c, gilt_b)
+
+	var tabs := _htp_tab_row(
+		["HOW THE CAMPAIGN WORKS", "COACHING"], [left_wrap, coaching_wrap],
+		clampi(open_tab, 0, 1))
+	left_col.add_child(tabs)
+	left_col.add_child(left_wrap)
+	left_col.add_child(coaching_wrap)
+	left_wrap.visible = open_tab != 1
+	coaching_wrap.visible = open_tab == 1
 
 	var vrule := ColorRect.new()
 	vrule.color = Color(0.50, 0.42, 0.28, 0.40)
@@ -1899,8 +2209,14 @@ func make_how_to_play_overlay() -> Control:
 	gloss.add_theme_constant_override("separation", 9)
 	gloss.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	gloss_scroll.add_child(gloss)
+	# Not a real KeywordEffects entry — the muster delay has no keyword, so the
+	# glossary has to state it by hand or the commonest "why did nothing happen"
+	# in the game has no entry at all. It stops a body INITIATING, never
+	# defending (Combat._defender_is_mustering), and that clause is the whole
+	# difference between "wait a round" and "you just gave away a free kill".
 	gloss.add_child(_htp_keyword_row("mustering", "Forming Up",
-		"Cannot attack this round. Can attack next round.", ivory_c))
+		"Cannot start an attack this round, but still strikes back if hit. Attacks normally from next round.",
+		ivory_c))
 	for key in KeywordEffects.KEYWORDS.keys():
 		var kw: Dictionary = KeywordEffects.KEYWORDS[key]
 		gloss.add_child(_htp_keyword_row(String(key),
@@ -1973,6 +2289,180 @@ func _htp_scroll_column(min_w: float, expand_h: bool, field: Color) -> Control:
 	bar.changed.connect(func(): sync.call())
 	wrap.resized.connect(func(): sync.call())
 	return wrap
+
+
+## A pair of page tabs over a shared column. Exactly one page is visible; the
+## chosen tab loses its underline-and-dim so the state reads without colour
+## alone (GAG: no essential information by a fixed colour).
+func _htp_tab_row(labels: Array, pages: Array, active: int = 0) -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 18)
+	var buttons: Array[Button] = []
+	var repaint := func(active: int) -> void:
+		for i in buttons.size():
+			var b: Button = buttons[i]
+			if not is_instance_valid(b):
+				continue
+			b.add_theme_color_override("font_color",
+				Color(1.0, 0.88, 0.40) if i == active else Color(0.60, 0.55, 0.46))
+			# The chosen tab is the one carrying the rule beneath it. A tab strip
+			# distinguished only by a brighter gold fails for a player who cannot
+			# separate the two golds.
+			var rule: Control = b.get_node_or_null("TabRule")
+			if rule != null:
+				rule.visible = i == active
+	for i in labels.size():
+		var b := Button.new()
+		b.text = String(labels[i])
+		b.flat = true
+		b.focus_mode = Control.FOCUS_ALL
+		b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		b.add_theme_font_size_override("font_size", FONT_SUBHEADER)
+		if font_display:
+			b.add_theme_font_override("font", font_display)
+		var rule := ColorRect.new()
+		rule.name = "TabRule"
+		rule.color = Color(0.95, 0.78, 0.34, 0.85)
+		rule.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		rule.anchor_left = 0.0
+		rule.anchor_right = 1.0
+		rule.anchor_top = 1.0
+		rule.anchor_bottom = 1.0
+		rule.offset_top = -2
+		b.add_child(rule)
+		var idx := i
+		b.pressed.connect(func() -> void:
+			for j in pages.size():
+				if is_instance_valid(pages[j]):
+					pages[j].visible = j == idx
+			repaint.call(idx))
+		buttons.append(b)
+		row.add_child(b)
+	repaint.call(clampi(active, 0, maxi(buttons.size() - 1, 0)))
+	return row
+
+
+## THE COACHING PAGE — every lesson in the game, printed in full, ticked if met,
+## and replayable one at a time.
+##
+## THE DEDUPE RULE IS LOAD-BEARING. Several lessons share one underlying flag —
+## the three steps of the guided fight are one walkthrough and cannot be replayed
+## apart — so a replay button is offered ONCE per distinct flag. Keyed off the
+## flag rather than off a hand-listed set of ids, so a future lesson that joins an
+## existing group inherits the behaviour instead of shipping a second button that
+## silently does the same thing as the first.
+func _htp_fill_coaching_page(box: VBoxContainer, ivory: Color, ash: Color,
+		gilt: Color) -> void:
+	var intro := make_label(
+		"Every lesson the game will teach you. Replay one to have it offered "
+		+ "again the next time it is relevant.", 16, ash)
+	intro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	intro.custom_minimum_size = Vector2(460, 0)
+	box.add_child(intro)
+
+	var all_btn := make_themed_button("REPLAY ALL", Color(0.34, 0.22, 0.10),
+		Vector2(170, 32), 14, "Offer every lesson again, from the first fight.")
+	# SHRINK_BEGIN or the ScrollContainer stretches it to the full column and its
+	# right end goes under the scroll rail — shot-caught, and the same fault the
+	# state chips below had.
+	all_btn.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	box.add_child(all_btn)
+
+	var rows: Array[Dictionary] = []
+	var claimed: Dictionary = {}
+	for group in TutorialDB.GROUP_ORDER:
+		var ids := TutorialDB.ids_in_group(group)
+		if ids.is_empty():
+			continue
+		box.add_child(make_label(
+			String(TutorialDB.GROUP_TITLES.get(group, group)), 18, gilt))
+		for id in ids:
+			# The replay control goes to the first lesson standing on a given flag.
+			var flag := TutorialDB.legacy_flag(id)
+			var owns_button: bool = flag == "" or not claimed.has(flag)
+			if flag != "":
+				claimed[flag] = true
+			rows.append(_htp_coaching_row(box, id, owns_button, ivory, ash))
+
+	var refresh := func() -> void:
+		for r in rows:
+			var state: Label = r.get("state")
+			var btn: Button = r.get("button")
+			var seen: bool = UserSettings != null \
+				and UserSettings.lesson_seen(String(r.get("id", "")))
+			if is_instance_valid(state):
+				# A word, not a tick alone — a glyph in one colour is exactly the
+				# signal GAG says may not stand by itself.
+				state.text = "SEEN  ✓" if seen else "NOT YET SEEN"
+				state.modulate = Color(0.66, 0.78, 0.56) if seen \
+					else Color(0.80, 0.72, 0.52)
+			if btn != null and is_instance_valid(btn):
+				btn.disabled = not seen
+	refresh.call()
+
+	all_btn.pressed.connect(func() -> void:
+		if UserSettings != null:
+			UserSettings.reset_tutorials()
+		claim_pop(all_btn)
+		refresh.call())
+	for r in rows:
+		var btn: Button = r.get("button")
+		if btn == null or not is_instance_valid(btn):
+			continue
+		var lesson_id := String(r.get("id", ""))
+		btn.pressed.connect(func() -> void:
+			if UserSettings != null:
+				UserSettings.replay_lesson(lesson_id)
+			claim_pop(btn)
+			refresh.call())
+
+
+func _htp_coaching_row(box: VBoxContainer, id: String, with_button: bool,
+		ivory: Color, ash: Color) -> Dictionary:
+	var entry := VBoxContainer.new()
+	entry.add_theme_constant_override("separation", 2)
+	entry.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	box.add_child(entry)
+
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 10)
+	head.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	entry.add_child(head)
+	var title := make_label(TutorialDB.title(id), 18, Color(0.92, 0.80, 0.50, 1.0))
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(title)
+	# 15px: a caption chip riding a bigger element — COPY_STYLE §11's middle
+	# register and its floor. It states live state, so it may not go lower.
+	var state := make_label("", 15, ash)
+	state.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	head.add_child(state)
+	# THE RAIL GUTTER. The column's ScrollContainer stretches this row to the FULL
+	# wrap width, but `_htp_scroll_column` floats the scrollbar over the last ~15px
+	# of it — so a right-aligned chip lands underneath the rail and loses its last
+	# letter ("NOT YET SEE"). The body text below never hits this because it is
+	# capped at 460; the head is not, so it needs the gutter spelled out.
+	var gutter := Control.new()
+	gutter.custom_minimum_size = Vector2(22, 0)
+	gutter.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	head.add_child(gutter)
+
+	# THE BODY IS THE LESSON'S OWN TEXT, not a paraphrase — the whole point of the
+	# registry is that there is one copy of each sentence. `{n}` is filled with the
+	# printed default here: this page is read outside a fight, where there is no
+	# live cap to read, and a raw token on the page would be a bug on screen.
+	var body := make_label(TutorialDB.body(id, {"n": 2}), 16, ivory)
+	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body.custom_minimum_size = Vector2(460, 0)
+	entry.add_child(body)
+
+	var btn: Button = null
+	if with_button:
+		btn = make_themed_button("SHOW AGAIN", Color(0.26, 0.20, 0.12),
+			Vector2(150, 28), 14, "Offer this lesson again when it next applies.")
+		btn.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+		entry.add_child(btn)
+	return {"id": id, "state": state, "button": btn}
 
 
 func _htp_primer_block(heading: String, body: String, ivory: Color) -> Control:
@@ -2467,8 +2957,18 @@ static func add_atmosphere(parent: Control, screen_type: String,
 	atm.add_child(bright_rect)
 	if parent.is_inside_tree() and parent.get_node_or_null("/root/UserSettings") != null:
 		var us = parent.get_node("/root/UserSettings")
-		if not us.brightness_changed.is_connected(_on_brightness_changed_static):
-			us.brightness_changed.connect(_on_brightness_changed_static.bind(bright_rect))
+		# The old guard tested the UNBOUND callable against a connection made with
+		# `.bind(bright_rect)` — two different Callables, so `is_connected` was
+		# always false and every screen entered stacked one more permanent
+		# connection on the autoload's signal. Bind once, and drop the connection
+		# with the rect it feeds (a static func's Callable outlives the ColorRect,
+		# so nothing else ever cleans it up).
+		var bright_cb: Callable = _on_brightness_changed_static.bind(bright_rect)
+		if not us.brightness_changed.is_connected(bright_cb):
+			us.brightness_changed.connect(bright_cb)
+		bright_rect.tree_exiting.connect(func() -> void:
+			if is_instance_valid(us) and us.brightness_changed.is_connected(bright_cb):
+				us.brightness_changed.disconnect(bright_cb))
 
 	parent.add_child(atm)
 	# Slot right after Background (index 0) so UI builds on top
@@ -2541,73 +3041,27 @@ static func _make_ambient_particles(mood: Dictionary) -> CPUParticles2D:
 	return p
 
 
+## ── ONE RULE PER EDGE, AND IT IS DRAWN (2026-09-18) ──
+##
+## This built the border out of TWELVE `ColorRect`s at TWO alphas — eight corner
+## arms at `frame_color`, four connecting rules at half that, four corner dots —
+## so every edge carried a HARD -46% value step where the arm met the rule.
+## Measured on RUN SETUP: 0.151 for 48px, then 0.084, mid-run, on a straight
+## line, EIGHT times round the page. Its cross-section was two rows at one value,
+## and the "corner diamond dot" was an axis-aligned SQUARE, because a `ColorRect`
+## in a static layout has no rotation available to it.
+##
+## It is now one drawn Control: `PageBorder` ramps the corner emphasis into the
+## run instead of stepping it, gives the rule the house cross-section so the page
+## edge and the frames on the page sit under one lamp, and draws the pips as real
+## lit diamonds. The C32 anchoring lesson SURVIVES the rebuild and got shorter —
+## it moved from anchors on twelve rects into `_draw` reading `size`, which IS
+## the live canvas, so the border is right at any resolution and at every UI
+## Scale with no resize handler and no `ProjectSettings` read. (`ProjectSettings`
+## is static and the runtime canvas is not: at the 60% the settings screen
+## offers, the canvas is 2667x1500 while it still reports 1600x900.)
 static func _make_decorative_frame(frame_color: Color) -> Control:
-	var frame := Control.new()
-	frame.name = "Frame"
-	frame.set_anchors_preset(Control.PRESET_FULL_RECT)
-	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	# Render above all sibling UI regardless of add-order
-	frame.z_as_relative = false
-	frame.z_index = 10
-
-	var inset := 14.0
-	var clen := 40.0    # corner piece length
-	var w := 1.5
-
-	var dim := Color(frame_color.r, frame_color.g, frame_color.b,
-		frame_color.a * 0.5)
-
-	# Span the actual design canvas (project base viewport), not a hardcoded
-	# 1600×900 — the frame is PRESET_FULL_RECT over the canvas, so these absolute
-	# coords must track the base size or the right/bottom edges float inward when
-	# the base resolution changes.
-	var vw := float(ProjectSettings.get_setting("display/window/size/viewport_width", 1920))
-	var vh := float(ProjectSettings.get_setting("display/window/size/viewport_height", 1080))
-
-	# Corner L-shapes (8 rects: 2 per corner)
-	_add_frame_rect(frame, Vector2(inset, inset), Vector2(clen, w), frame_color)
-	_add_frame_rect(frame, Vector2(inset, inset), Vector2(w, clen), frame_color)
-	_add_frame_rect(frame, Vector2(vw - inset - clen, inset), Vector2(clen, w), frame_color)
-	_add_frame_rect(frame, Vector2(vw - inset - w, inset), Vector2(w, clen), frame_color)
-	_add_frame_rect(frame, Vector2(inset, vh - inset - w), Vector2(clen, w), frame_color)
-	_add_frame_rect(frame, Vector2(inset, vh - inset - clen), Vector2(w, clen), frame_color)
-	_add_frame_rect(frame, Vector2(vw - inset - clen, vh - inset - w), Vector2(clen, w), frame_color)
-	_add_frame_rect(frame, Vector2(vw - inset - w, vh - inset - clen), Vector2(w, clen), frame_color)
-
-	# Thin connecting lines between corners
-	_add_frame_rect(frame, Vector2(inset + clen, inset),
-		Vector2(vw - 2 * (inset + clen), w), dim)
-	_add_frame_rect(frame, Vector2(inset + clen, vh - inset - w),
-		Vector2(vw - 2 * (inset + clen), w), dim)
-	_add_frame_rect(frame, Vector2(inset, inset + clen),
-		Vector2(w, vh - 2 * (inset + clen)), dim)
-	_add_frame_rect(frame, Vector2(vw - inset - w, inset + clen),
-		Vector2(w, vh - 2 * (inset + clen)), dim)
-
-	# Small diamond dots at the four corners
-	var ds := 5.0
-	var bright := Color(frame_color.r * 1.4, frame_color.g * 1.4,
-		frame_color.b * 1.4, minf(frame_color.a * 1.5, 1.0))
-	_add_frame_rect(frame, Vector2(inset - ds / 2, inset - ds / 2),
-		Vector2(ds, ds), bright)
-	_add_frame_rect(frame, Vector2(vw - inset - ds / 2, inset - ds / 2),
-		Vector2(ds, ds), bright)
-	_add_frame_rect(frame, Vector2(inset - ds / 2, vh - inset - ds / 2),
-		Vector2(ds, ds), bright)
-	_add_frame_rect(frame, Vector2(vw - inset - ds / 2, vh - inset - ds / 2),
-		Vector2(ds, ds), bright)
-
-	return frame
-
-
-static func _add_frame_rect(parent: Control, pos: Vector2, sz: Vector2,
-		col: Color) -> void:
-	var r := ColorRect.new()
-	r.position = pos
-	r.size = sz
-	r.color = col
-	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	parent.add_child(r)
+	return PageBorder.make(frame_color)
 
 
 # ═══════════════════════════════════════════
@@ -2891,6 +3345,13 @@ func forge_strike(host: Control, target: Control) -> void:
 	await Motion.forge_strike(host, target)
 
 
+func writ_amend(host: Control, card: Control, stamp_text: String,
+		accent: Color = Color(1.0, 0.84, 0.40), opts: Dictionary = {}) -> void:
+	# Await-forwarding: the permanent-change stamp is a ~0.9s beat callers wait
+	# on before rebuilding their screen. forge_strike's quieter sibling.
+	await Motion.writ_amend(host, card, stamp_text, accent, opts)
+
+
 func rarity_reveal(ctrl: Control, rarity: String, delay: float = 0.0) -> void:
 	Motion.rarity_reveal(ctrl, rarity, delay)
 
@@ -3061,6 +3522,10 @@ shader_type canvas_item;
 uniform float progress : hint_range(0.0, 1.0) = 0.0;
 uniform vec3 ember : source_color = vec3(0.95, 0.45, 0.14);
 uniform vec2 origin = vec2(0.08, 0.10);
+// 0 = the ink FLOODS IN toward the origin (leaving a screen).
+// 1 = the ink LIFTS AWAY from the origin (arriving on one), so the new screen
+//     appears first at the point the player was already looking at.
+uniform float invert = 0.0;
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
@@ -3076,6 +3541,7 @@ void fragment() {
 		+ vnoise(UV * 43.0) * 0.15;
 	float field = distance(UV, origin) / 1.35;
 	float f = field * 0.72 + n * 0.28;
+	f = mix(f, 1.0 - f, invert);
 	float t = progress * 1.12;
 	float a = 1.0 - smoothstep(t - 0.035, t, f);
 	// A THIN charring line at the very frontier — an accent, not a fire wall.
@@ -3085,6 +3551,28 @@ void fragment() {
 }
 "
 var _ink_wipe_shader: Shader = null
+
+## Where the last transition's ink closed, in UV. Read by `fade_in` so the next
+## screen opens at the same point. Defaults to the page-turn corner for a cold
+## boot or any scene reached without a wipe.
+var transition_origin := Vector2(0.08, 0.10)
+
+## How long the outgoing ink is held after the scene swap, covering the incoming
+## screen while its `_ready` builds. Long enough to span instantiation plus a
+## build frame or two; short enough that a warm scene is not made to wait.
+## The cover is held until the incoming screen is settled, bounded at both ends.
+## MIN keeps an instant swap from flickering; MAX is the ceiling for a scene that
+## never calms down, so a bad frame budget degrades to the old fixed behaviour
+## rather than to a screen that stays covered. CALM_FRAME is ~1.5x a 60Hz frame:
+## a build hitch is a long frame by definition, so short frames mean it is over.
+const TRANSITION_COVER_MIN := 0.10
+const TRANSITION_COVER_MAX := 1.10
+const TRANSITION_CALM_FRAME := 0.024
+
+## True while a wipe still owns the screen and is going to reveal it itself.
+## `fade_in` stands down for that window — otherwise the incoming scene stacks a
+## second cover on top of the one already mid-reveal.
+var _transition_reveal_pending := false
 
 
 func _get_ink_wipe_shader() -> Shader:
@@ -3113,22 +3601,240 @@ func fade_out_then_change_scene(host: Node, target_scene: String,
 	mat.set_shader_parameter("progress", 0.0)
 	# MapView passes the committed site's screen position so the ink starts at
 	# the place the army just entered. Other scenes keep the page-turn origin.
-	mat.set_shader_parameter("origin", Vector2(
-		clampf(origin_uv.x, 0.0, 1.0), clampf(origin_uv.y, 0.0, 1.0)))
+	var ink_origin := Vector2(
+		clampf(origin_uv.x, 0.0, 1.0), clampf(origin_uv.y, 0.0, 1.0))
+	mat.set_shader_parameter("origin", ink_origin)
+	# CARRIED ACROSS THE CUT. The incoming scene has no way to know where the
+	# outgoing one closed, so it is remembered here and `fade_in` opens from the
+	# same point — see the note there on why that is the whole idea.
+	transition_origin = ink_origin
 	overlay.material = mat
 	host.get_tree().root.add_child(overlay)
 	var tw := overlay.create_tween()
 	tw.tween_method(func(p: float):
 		mat.set_shader_parameter("progress", p),
 		0.0, 1.0, duration).set_ease(Tween.EASE_IN)
+	# HOLD THE TREE, NOT THE HOST. This callback used to close over `host` and
+	# reach the tree through it. The outgoing scene root can be freed inside the
+	# 0.34s wipe (a second transition racing this one, quit-to-menu, a scene that
+	# frees itself on the way out) — and a freed capture makes Godot abort the
+	# callable while it MARSHALS captures ("Lambda capture at index 0 was freed"),
+	# so NEITHER statement below ran. That lost both halves at once: the scene
+	# change was silently dropped, and this full-rect MOUSE_FILTER_STOP overlay at
+	# z_index 1000 was never freed — a black screen that ate every click, with no
+	# way out. The SceneTree outlives every scene, so it is the safe thing to
+	# hold; the overlay rides a weakref for the same reason.
+	var tree := host.get_tree()
+	# Explicit type: weakref() is declared Variant, and this project compiles with
+	# Variant-inference warnings treated as errors, so `:=` here fails the gate.
+	var overlay_ref: WeakRef = weakref(overlay)
 	tw.tween_callback(func():
-		if host.get_tree() != null:
+		if tree != null and is_instance_valid(tree):
 			# Measure the actual scene load/settle, not this fixed ink-wipe tween.
 			PerformanceOverlay.begin_transition(target_scene)
-			host.get_tree().change_scene_to_file(target_scene)
-		if is_instance_valid(overlay):
-			overlay.queue_free()
+			tree.change_scene_to_file(target_scene)
+		# ONE OVERLAY DOES BOTH HALVES (2026-09-11).
+		#
+		# This used to free the overlay in the same breath as the scene change,
+		# and that leaves a real uncovered window: `change_scene_to_file` swaps
+		# on the next idle frame, the incoming scene then runs `_ready` — which
+		# is where every screen in this game assembles its entire UI in code —
+		# and only AFTER that does its `fade_in` get to spawn a cover, because
+		# `fade_in` is itself deferred. The half-built screen was therefore on
+		# display for the whole of its own construction, which on a cold scene is
+		# the most expensive frame it will ever have.
+		#
+		# HOLDING THE OLD COVER AND LETTING THE NEW ONE REVEAL UNDER IT WAS THE
+		# FIRST FIX AND IT IS WRONG: two stacked overlays means the incoming one
+		# is already part-revealed when the outgoing one frees, so the screen
+		# jumps from fully covered to half-revealed in a single frame. Worse, the
+		# obvious patch — fading the old one out — cannot work here, because this
+		# shader writes COLOR outright and `modulate` never reaches it.
+		#
+		# So the same overlay covers, waits out the build, and then reveals: flip
+		# `invert`, run `progress` back down. At the moment of the flip it is
+		# opaque either way (every f lies below the threshold at progress 1), so
+		# the hand-off has no seam by construction rather than by timing.
+		_transition_reveal_pending = true
+		if tree == null or not is_instance_valid(tree):
+			var ov = overlay_ref.get_ref()
+			if ov != null and is_instance_valid(ov):
+				ov.queue_free()
+			_transition_reveal_pending = false
+			return
+		# THE BACKSTOP IS NOT OPTIONAL. The failure recorded above was this exact
+		# overlay never being freed — a black screen that ate every click with no
+		# way out — so there is a tree-owned timer that frees it and clears the
+		# flag whatever happens to the reveal, including a scene that never
+		# loads. The tree outlives every scene, so this fires regardless.
+		var bail := tree.create_timer(TRANSITION_COVER_MAX + duration + 1.5)
+		bail.timeout.connect(func():
+			var ob = overlay_ref.get_ref()
+			if ob != null and is_instance_valid(ob):
+				ob.queue_free()
+			_transition_reveal_pending = false)
+		_hold_cover_until_settled(overlay_ref, duration)
 	)
+
+
+## Hold the cover until the incoming screen is genuinely ON ITS FEET, then reveal.
+##
+## A FIXED HOLD WAS THE FIRST VERSION AND IT IS A GUESS DRESSED AS A NUMBER: a
+## warm scene is ready in a frame or two and is made to wait out the rest, while
+## a cold one is still building when the ink starts lifting — which is the exact
+## defect the hold was added to fix, just narrower.
+##
+## So it waits for the thing that actually matters: the scene has SWAPPED (a
+## different instance from the one we left, since `change_scene_to_file` is
+## deferred and `current_scene` still points at the old one for a frame), and
+## then two consecutive CALM frames. A build hitch is a long frame by definition,
+## so "frames are short again" IS "the build is done" — no per-scene cooperation
+## needed, which matters because every screen here builds differently.
+##
+## Wall-clock between resumes, not `delta`: under a stalled frame the reported
+## delta can be clamped, and the whole point is to notice the stall.
+func _hold_cover_until_settled(overlay_ref: WeakRef, duration: float) -> void:
+	var tree := get_tree()
+	if tree == null:
+		_transition_reveal_pending = false
+		return
+	var left_behind: int = 0
+	if tree.current_scene != null:
+		left_behind = tree.current_scene.get_instance_id()
+	var elapsed := 0.0
+	var calm := 0
+	var last := Time.get_ticks_usec()
+	while elapsed < TRANSITION_COVER_MAX:
+		await tree.process_frame
+		if not is_instance_valid(tree):
+			break
+		var now := Time.get_ticks_usec()
+		var dt := float(now - last) / 1000000.0
+		last = now
+		elapsed += dt
+		var cur := tree.current_scene
+		var swapped: bool = cur != null and cur.get_instance_id() != left_behind
+		if swapped and dt <= TRANSITION_CALM_FRAME:
+			calm += 1
+			if calm >= 2:
+				break
+		else:
+			calm = 0
+	# A FLOOR, even on an instant swap. Headless and on a fast machine the two
+	# calm frames land almost immediately, and a reveal that begins before the
+	# eye has registered the cut reads as a flicker rather than a transition.
+	if elapsed < TRANSITION_COVER_MIN:
+		await tree.create_timer(TRANSITION_COVER_MIN - elapsed).timeout
+	_reveal_cover(overlay_ref, duration)
+
+
+## The second half: flip the wipe and run it back out from the origin. Opaque on
+## either side of the flip (at progress 1 every `f` sits below the threshold), so
+## there is no seam to time.
+func _reveal_cover(overlay_ref: WeakRef, duration: float) -> void:
+	var o2 = overlay_ref.get_ref()
+	if o2 == null or not is_instance_valid(o2):
+		_transition_reveal_pending = false
+		return
+	var m2 := (o2 as ColorRect).material as ShaderMaterial
+	if m2 == null:
+		o2.queue_free()
+		_transition_reveal_pending = false
+		return
+	m2.set_shader_parameter("invert", 1.0)
+	m2.set_shader_parameter("progress", 1.0)
+	# Explicit type: `o2` came out of a WeakRef and is therefore Variant, so `:=`
+	# cannot infer the return and the Variant-inference warning is an error in
+	# this project — the same trap the weakref in the wipe already documents.
+	var rt: Tween = o2.create_tween()
+	rt.tween_method(func(p: float):
+		if is_instance_valid(m2):
+			m2.set_shader_parameter("progress", p),
+		1.0, 0.0, duration).set_ease(Tween.EASE_OUT)
+	rt.tween_callback(func():
+		_transition_reveal_pending = false
+		var o3 = overlay_ref.get_ref()
+		if o3 != null and is_instance_valid(o3):
+			o3.queue_free())
+
+
+## ── The slider kit ───────────────────────────────────────────────────────────
+## Lives here rather than in SettingsOverlay (which owned it privately until
+## 2026-09-14) because the skirmish lobby's arsenal scale needs the same face,
+## and a second copy of a look is how two controls drift apart. SettingsOverlay
+## calls through to these.
+
+## A filled diamond with a 1px dark keyline, so a grabber reads as a set stone
+## rather than a floating blob. Antialiased by manhattan-distance falloff.
+func make_diamond_texture(radius: int, color: Color) -> ImageTexture:
+	var size := radius * 2 + 2
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var c := (size - 1) / 2.0
+	var edge := Color(0.10, 0.07, 0.03, color.a)
+	for x in range(size):
+		for y in range(size):
+			var d := absf(x - c) + absf(y - c)
+			if d <= radius - 1.6:
+				img.set_pixel(x, y, color)
+			elif d <= radius - 0.6:
+				img.set_pixel(x, y, edge.lerp(color, clampf(radius - 0.6 - d, 0.0, 1.0)))
+			elif d <= radius + 0.4:
+				var a := clampf(radius + 0.4 - d, 0.0, 1.0)
+				img.set_pixel(x, y, Color(edge.r, edge.g, edge.b, edge.a * a))
+	return ImageTexture.create_from_image(img)
+
+
+## The house slider face: sunken track, gilt fill, diamond grabber.
+func style_slider(slider: HSlider) -> void:
+	var track := StyleBoxFlat.new()
+	track.bg_color = Color(0.08, 0.06, 0.05, 0.9)
+	track.border_color = Color(0.3, 0.22, 0.12, 0.5)
+	for prop in ["border_width_top", "border_width_bottom",
+			"border_width_left", "border_width_right"]:
+		track.set(prop, 1)
+	for prop in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		track.set(prop, 4)
+	track.content_margin_top = 4
+	track.content_margin_bottom = 4
+	slider.add_theme_stylebox_override("slider", track)
+
+	var filled := StyleBoxFlat.new()
+	filled.bg_color = Color(0.65, 0.50, 0.18, 0.9)
+	for prop in ["corner_radius_top_left", "corner_radius_top_right",
+			"corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		filled.set(prop, 4)
+	filled.content_margin_top = 4
+	filled.content_margin_bottom = 4
+	slider.add_theme_stylebox_override("grabber_area", filled)
+
+	var filled_hl := filled.duplicate() as StyleBoxFlat
+	filled_hl.bg_color = Color(0.82, 0.66, 0.30, 1.0)
+	slider.add_theme_stylebox_override("grabber_area_highlight", filled_hl)
+
+	slider.add_theme_icon_override("grabber", make_diamond_texture(9, GILT_BRIGHT))
+	slider.add_theme_icon_override("grabber_highlight",
+		make_diamond_texture(11, Color(1.0, 0.92, 0.55)))
+	slider.add_theme_icon_override("grabber_disabled", make_diamond_texture(9, DIMMED))
+
+
+## A whole-number scale: a styled HSlider stepping by 1 over [min_value, max].
+## Snapping is not decoration — the arsenal size is a COUNT, and a slider that
+## can rest between two rounds is a control that lies about what it sets.
+func make_count_slider(min_value: int, max_value: int, value: int,
+		width: float = 190.0) -> HSlider:
+	var slider := HSlider.new()
+	slider.min_value = float(min_value)
+	slider.max_value = float(maxi(max_value, min_value))
+	slider.step = 1.0
+	slider.value = float(clampi(value, min_value, max_value))
+	slider.rounded = true
+	slider.scrollable = true
+	slider.custom_minimum_size = Vector2(width, 24)
+	slider.focus_mode = Control.FOCUS_NONE
+	slider.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	style_slider(slider)
+	return slider
 
 
 func make_back_button(label: String = "BACK", min_size: Vector2 = Vector2(140, 42),
@@ -3181,7 +3887,162 @@ func make_back_button(label: String = "BACK", min_size: Vector2 = Vector2(140, 4
 	pressed.bg_color = Color(0.85, 0.62, 0.25, 0.04)
 	pressed.border_color = GILT
 	btn.add_theme_stylebox_override("pressed", pressed)
+	# THE RETREAT KEEPS ITS OWN VOICE. Once the press funnel gives every button a
+	# default cue, a back button that declares nothing says "select" — and the
+	# whole reason `ui_back` exists is to be pitched DOWN so advance and retreat
+	# are distinguishable with the screen unread. 32 call sites would have
+	# quietly lost that. Keyed off `rest_color`, which is this helper's own
+	# existing declaration of intent (its header: pass GILT for "a primary-feeling
+	# action that should read warmer at rest"), so the two uses stay separable
+	# without a new argument.
+	btn.set_meta("ui_cue", "back" if rest_color == IVORY else "select")
+	arm_ui_hover(btn)
 	return btn
+
+
+func make_primary_button(text: String, min_size: Vector2 = Vector2(220, 52),
+		font_size: int = 20) -> Button:
+	## THE WAY ON (2026-08-05) — the counterpart `make_back_button` never had.
+	##
+	## That helper is the house frameless idiom for "go back / leave / close /
+	## cancel", and its own header notes it also serves "light primary confirms".
+	## In practice the in-run shell used it for the FORWARD move on screens the
+	## player passes through many times a run — Reward's "Continue" (pressed
+	## after every fight, the most-repeated press in the game outside combat),
+	## the Shop's "Leave the Wagon", a Wayside's "Continue" — so the action that
+	## advances the run rendered as a caption floating under the content it was
+	## meant to conclude.
+	##
+	## Warm parchment tab with a gilt keyline: the same weight as MainMenu's
+	## `_make_primary_action`, deliberately WITHOUT its flame. The igniting flame
+	## is the title screen's own motif for a menu column; in the run the plate is
+	## the signal and a flame here would read as a second, unrelated grammar.
+	var btn := Button.new()
+	btn.text = text
+	btn.custom_minimum_size = min_size
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	if font_display:
+		btn.add_theme_font_override("font", font_display)
+	btn.add_theme_font_size_override("font_size", maxi(font_size, MIN_LABEL_SIZE))
+	btn.add_theme_color_override("font_color", Color(0.99, 0.92, 0.74))
+	btn.add_theme_color_override("font_hover_color", GILT_BRIGHT)
+	btn.add_theme_color_override("font_pressed_color", Color(0.94, 0.86, 0.62))
+	btn.add_theme_color_override("font_outline_color", Color(0.05, 0.02, 0.0, 0.85))
+	# BACK TO 4 (2026-09-18). It was cut to 2 when this button had a plate, on the
+	# reasoning that a plated button controls its own background. It does not have
+	# one any more — the label now floats over whatever painted scene is behind
+	# it, which is the exact case the heavy outline exists for. Dropping the plate
+	# without restoring this would have left the word to fend for itself over the
+	# meadow fire.
+	btn.add_theme_constant_override("outline_size", 4)
+
+	## THE PLATE IS A SOLID NOW (2026-09-17). These three states used to be three
+	## `make_panel_style` calls, i.e. the same flat-rule assembly in three
+	## colours: the press differed from the rest state by a darker fill and a
+	## slightly different keyline, which is the only thing a rectangle can do.
+	## `PlaqueStyle` makes it an object with a molded edge, so the press can
+	## drive it FLUSH instead — see that file's fact 5.
+	## ── NO PLATE. THE WORD IS THE BUTTON (2026-09-18, owner's call).
+	##
+	## This helper carried a filled tab since 2026-08-05, and the 2026-09-17 pass
+	## rebuilt that tab as a struck metal plaque. The owner's verdict on the
+	## result was blunt and it was right: hide the background, like the start
+	## menu. The standing preference is on record and predates all of it —
+	## *"frameless text buttons over boxed ones: no panel/fill; the text IS the
+	## button; hover = brighten to gilt + a flame igniting"*, chosen explicitly
+	## when offered the alternative, alongside *"don't force things cuz they are
+	## there"* about exactly this kind of inherited chrome. A gilt frame added to
+	## the board was pushed back on the same way once before. I built a better
+	## rectangle when the note in the file said not to build a rectangle.
+	##
+	## So the plate is gone and the AFFORDANCE MOVES TO THE INK: the label is the
+	## object, and hover ignites a gilt underline beneath it — `make_back_button`'s
+	## idiom, which is already what most of this game's buttons do. The plaque
+	## kit stays in the tree for the surfaces that genuinely are objects (the
+	## save-slot rows), not for anything that is really a word.
+	var rest := StyleBoxEmpty.new()
+	rest.content_margin_left = 18
+	rest.content_margin_right = 18
+	rest.content_margin_top = 6
+	rest.content_margin_bottom = 6
+	btn.add_theme_stylebox_override("normal", rest)
+	btn.add_theme_stylebox_override("disabled", rest)
+	# Hover / focus: the underline ignites. Bottom border only, near-transparent
+	# fill — no pill, nothing that reads as a box.
+	var lit_style := StyleBoxFlat.new()
+	lit_style.bg_color = Color(0.85, 0.62, 0.25, 0.10)
+	lit_style.border_color = GILT_BRIGHT
+	lit_style.border_width_bottom = 2
+	lit_style.content_margin_left = 18
+	lit_style.content_margin_right = 18
+	lit_style.content_margin_top = 6
+	lit_style.content_margin_bottom = 6
+	btn.add_theme_stylebox_override("hover", lit_style)
+	btn.add_theme_stylebox_override("focus", lit_style)
+	var down := lit_style.duplicate() as StyleBoxFlat
+	down.bg_color = Color(0.85, 0.62, 0.25, 0.04)
+	down.border_color = GILT
+	btn.add_theme_stylebox_override("pressed", down)
+	# THE WAY ON earns the at-cursor mark: this helper exists for the action that
+	# advances the run, which is the most-repeated weighted press outside combat.
+	btn.set_meta("press_weight", true)
+	arm_ui_hover(btn)
+	# The glint is FOLDED INTO `arm_transitions` now (the lamp crossing the brass
+	# is part of the hover movement, not a separate effect) — and it had to be:
+	# with ONE plate instead of three, a swept `sweep_phase` would persist into
+	# the rest pose instead of disappearing with the hover stylebox.
+	# NO ENGRAVE HERE ANY MORE: a struck word needs metal to be struck INTO, and
+	# there is no plate now. `arm_plaque_label` is a no-op on a non-plaque
+	# stylebox anyway, but leaving the call would read as an intention.
+	return btn
+
+
+## Push a word into every plaque state a button wears, so the plate can strike it
+## (see `PlaqueStyle.label`).
+##
+## ONE FUNNEL, because the failure mode is a DOUBLE PRINT rather than a miss. The
+## engrave is drawn by the stylebox and the glyph by the Button, from two
+## different copies of the string — so a caller that assigns `btn.text` after
+## construction leaves the OLD word ghosted under the new one, at full shadow
+## strength, forever. Re-calling this is the fix, and having exactly one place to
+## call is what makes that instruction meaningful.
+##
+## Non-plaque styleboxes are skipped silently: this is safe to call on any button,
+## which is what lets a screen that retitles a control just call it unconditionally.
+## Strike a word that lives in its own `Label` rather than in `Button.text`.
+##
+## TWO MECHANISMS FOR ONE EFFECT, BECAUSE THE ENGINE OFFERS DIFFERENT THINGS TO
+## THE TWO CONTROLS, and this is worth knowing before anyone tries to unify them.
+## Measured off `ThemeDB` rather than recalled: a `Button`'s theme carries
+## `font_outline_color` and no shadow item at all — its colour list is
+## font/font_pressed/font_hover/font_focus/font_hover_pressed/font_disabled/
+## font_outline plus the icon set, and nothing else — so a Button's engrave has
+## to be drawn underneath it by the stylebox (`PlaqueStyle.label`). A `Label`
+## DOES carry `font_shadow_color` with `shadow_offset_x/y`, which the engine
+## positions itself.
+##
+## Where a Label is available it is strictly better, and the reason is exactness:
+## the stylebox route re-derives where the glyph will land, and a cast shadow one
+## pixel off its caster is not a softer shadow, it is a double print. The engine
+## cannot be off by a pixel. That is why the flame buttons — whose word sits in a
+## child Label inside an HBox, where the stylebox genuinely cannot know the
+## position — get this instead of an engrave, and end up with the more reliable
+## half of the pair.
+##
+## Down-light (down-right, for the kit's up-left lamp), matching the plate's own
+## drop so the letter and the plate it stands on are lit by one sun.
+static func engrave_label(lbl: Label, shadow_a: float = 0.62) -> void:
+	if lbl == null:
+		return
+	lbl.add_theme_color_override("font_shadow_color",
+		Color(0.02, 0.012, 0.008, shadow_a))
+	lbl.add_theme_constant_override("shadow_offset_x", 2)
+	lbl.add_theme_constant_override("shadow_offset_y", 2)
+
+
+
+
 
 
 func make_close_button(min_size: Vector2 = Vector2(44, 44)) -> Button:
@@ -3199,6 +4060,9 @@ func make_close_button(min_size: Vector2 = Vector2(44, 44)) -> Button:
 	btn.add_theme_color_override("font_hover_color", Color(1.0, 0.55, 0.45))
 	btn.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.55))
 	btn.add_theme_constant_override("outline_size", 3)
+	# Closing a modal is a retreat, so it takes the retreat's cue — same rule as
+	# the click-outside-to-dismiss scrim.
+	btn.set_meta("ui_cue", "back")
 	var bg := Color(0.18, 0.14, 0.10, 0.92)
 	var normal := StyleBoxFlat.new()
 	normal.bg_color = bg
@@ -3366,11 +4230,19 @@ func make_card_thumb(card_data: Dictionary, card_scale: float = 0.46) -> Diction
 	card.card_data = card_data.duplicate(true)
 	card.card_id = card_data.get("id", "")
 	card.is_on_battlefield = true       # no drag / hover-lift
+	card.static_display = true
 	card.live_baked_mode = true         # cheap once the cache is warm
+	# Pool screens may prepare the native 1x gallery class while combat-facing
+	# paths prepare the larger mipmapped class. Pick the class that actually
+	# exists before Card2D._ready chooses its layout.
+	var use_gallery := not CardTextureCache.has(card_data) \
+		and CardTextureCache.has_gallery(card_data)
+	card.gallery_baked_mode = use_gallery
 	card.scale = Vector2(card_scale, card_scale)
 	card.position = Vector2.ZERO
 	slot.add_child(card)
-	CardTextureCache.bake(card_data)
+	if not CardTextureCache.has(card_data) and not use_gallery:
+		CardTextureCache.bake(card_data)
 
 	# Full-rect transparent click catcher with a gilt hover outline (the "add /
 	# remove" affordance). Sits above the card, below the badge.
@@ -3419,6 +4291,45 @@ func make_card_thumb(card_data: Dictionary, card_scale: float = 0.46) -> Diction
 	return {"root": slot, "card": card, "badge": badge, "button": btn}
 
 
+## THE PICKER RANK — one wrap rule for every screen that asks for a card.
+##
+## Every card picker in the game used to be a `GridContainer` with `columns = 6`,
+## and a GridContainer fills left to right: eleven cards seated as six over five
+## LEFT-FLUSH, with a card-shaped hole in the bottom right. Nine cards (the drill
+## yard) read worse still — six over three, and half the rank empty. It is the
+## commonest short-row defect there is, and it was on every choosing screen at
+## once: the muster forge, Rest's forge, every Event picker, the drill yard and
+## `show_deck_picker`.
+##
+## A FlowContainer centres each line it wraps, which is the whole fix — but its
+## wrap point is decided by the width it is GIVEN, and that made the naive
+## version fragile in two directions measured before this shipped:
+##
+##   * a ScrollContainer hands its child the child's MINIMUM width, and a flow
+##     container's minimum width is ONE item — so without an expand/shrink flag
+##     every picker collapsed to a single column;
+##   * sized to the viewport instead, the wrap moves when a vertical scrollbar
+##     appears. Rest's grid clears six 225px cards by 10px; lose 8 to a scrollbar
+##     and the rank silently becomes five, which is a bigger regression than the
+##     hole it was meant to fix.
+##
+## So the width is PINNED to exactly `cols` items and the flow is SHRINK_CENTER
+## inside its viewport. The wrap point is then arithmetic rather than a
+## measurement, and the centring happens twice: the block inside the screen, and
+## the short last rank inside the block.
+func make_picker_rank(cols: int, item_w: float, h_sep: int,
+		v_sep: int) -> HFlowContainer:
+	var flow := HFlowContainer.new()
+	flow.alignment = FlowContainer.ALIGNMENT_CENTER
+	flow.add_theme_constant_override("h_separation", h_sep)
+	flow.add_theme_constant_override("v_separation", v_sep)
+	flow.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	flow.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	var c: float = float(maxi(cols, 1))
+	flow.custom_minimum_size.x = item_w * c + float(h_sep) * (c - 1.0)
+	return flow
+
+
 func show_deck_picker(host: Node, title: String, type_filter: String = "",
 		allow_cancel: bool = false) -> int:
 	## Modal grid of the run deck; the player clicks a card. Returns the chosen
@@ -3463,56 +4374,32 @@ func show_deck_picker(host: Node, title: String, type_filter: String = "",
 	root.offset_bottom = -24
 	root.add_theme_constant_override("separation", 16)
 	overlay.add_child(root)
-
+	# Give the first render something honest to present while the shared bake
+	# viewport prepares a cold late-run deck. Removed before cards are staged.
 	var title_lbl := make_label(title, FONT_TITLE, GILT_BRIGHT, true)
 	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	root.add_child(title_lbl)
+	var preparing := make_label("PREPARING THE DECK...", FONT_SUBHEADER,
+		Color(IVORY.r, IVORY.g, IVORY.b, 0.72))
+	preparing.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	preparing.custom_minimum_size = Vector2(0, 28)
+	preparing.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(preparing)
 
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	root.add_child(scroll)
 
-	var grid := GridContainer.new()
-	grid.columns = 6
-	grid.add_theme_constant_override("h_separation", 18)
-	grid.add_theme_constant_override("v_separation", 20)
+	# Tiles are 220 wide here (see the reserved slot below), so the rank is pinned
+	# to six of them and the short last row centres itself.
+	var grid := make_picker_rank(6, 220.0, 18, 20)
 	scroll.add_child(grid)
 
 	# -2 = still open, -1 = cancelled, >=0 = picked deck index.
 	var result := {"index": -2}
-	var batch := 6
-	for bstart in range(0, eligible.size(), batch):
-		for k in range(batch):
-			var ei := bstart + k
-			if ei >= eligible.size():
-				break
-			var di: int = eligible[ei]
-			var data: Dictionary = RunState.get_upgraded_card_data(di)
-			var slot := Control.new()
-			slot.custom_minimum_size = Vector2(220, 300)
-			grid.add_child(slot)
-			var card = card_scene.instantiate()
-			card.card_data = data.duplicate(true)
-			card.card_id = data.get("id", "")
-			card.is_on_battlefield = true
-			card.static_display = true
-			card.live_baked_mode = true
-			CardTextureCache.bake(data)
-			slot.add_child(card)
-			var btn := Button.new()
-			btn.flat = true
-			btn.focus_mode = Control.FOCUS_NONE
-			btn.set_anchors_preset(Control.PRESET_FULL_RECT)
-			var captured: int = di
-			btn.pressed.connect(func():
-				result["index"] = captured
-				layer.queue_free())
-			slot.add_child(btn)
-		if not is_instance_valid(layer):
-			return -1
-		await get_tree().process_frame
 
+	# Cancellation is live during cache preparation as well as card selection.
 	if allow_cancel:
 		var cancel := make_back_button("CANCEL", Vector2(170, 44))
 		cancel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
@@ -3520,6 +4407,115 @@ func show_deck_picker(host: Node, title: String, type_filter: String = "",
 			result["index"] = -1
 			layer.queue_free())
 		root.add_child(cancel)
+
+	var card_datas: Array[Dictionary] = []
+	for di in eligible:
+		card_datas.append(RunState.get_upgraded_card_data(di))
+	# Reserve the complete grid before the first asynchronous bake. Adding cards
+	# directly to a centred/container-managed row made every completed card resize
+	# the layout and shove the cards already on screen. The backs are the content
+	# while the faces hydrate; the final geometry exists from frame one.
+	var picker_slots: Array[Control] = []
+	var picker_backs: Array[Control] = []
+	var card_back_tex := load("res://assets/ui/card_back.png") as Texture2D
+	for _ei in range(eligible.size()):
+		var reserved := Control.new()
+		reserved.custom_minimum_size = Vector2(220, 300)
+		reserved.size = Vector2(220, 300)
+		reserved.mouse_filter = Control.MOUSE_FILTER_PASS
+		grid.add_child(reserved)
+		var back: Control
+		if card_back_tex != null:
+			var back_pic := TextureRect.new()
+			back_pic.texture = card_back_tex
+			back_pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			back_pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			back = back_pic
+		else:
+			var back_plate := ColorRect.new()
+			back_plate.color = Color(0.075, 0.055, 0.045, 1.0)
+			back = back_plate
+		back.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		back.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		Motion.arm_loading_writ(back, grid)
+		reserved.add_child(back)
+		picker_slots.append(reserved)
+		picker_backs.append(back)
+	var picker_alive := func() -> bool:
+		return is_instance_valid(layer)
+	# Picker cards never exceed their native 225x300 face, so use the 1x gallery
+	# cache instead of allocating 3x mipmapped combat textures for the whole deck.
+	# Sequential bakes naturally cap construction/readback at one card per beat.
+	for data in card_datas:
+		if not CardTextureCache.has_gallery(data):
+			await CardTextureCache.bake_gallery(data, picker_alive)
+		if not is_instance_valid(layer):
+			return int(result["index"]) if int(result["index"]) != -2 \
+				else -1
+
+	# Hydrate one face per presented frame BEHIND the complete set of backs. The
+	# work stays bounded without exposing build order to the player.
+	var picker_cards: Array[Control] = []
+	var picker_buttons: Array[Button] = []
+	for ei in range(eligible.size()):
+		var di: int = eligible[ei]
+		var data: Dictionary = card_datas[ei]
+		var slot: Control = picker_slots[ei]
+		var card = card_scene.instantiate()
+		card.card_data = data.duplicate(true)
+		card.card_id = data.get("id", "")
+		card.is_on_battlefield = true
+		card.gallery_baked_mode = true
+		card.static_display = true
+		card.live_baked_mode = true
+		card.modulate.a = 0.0
+		slot.add_child(card)
+		var btn := Button.new()
+		btn.flat = true
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+		btn.disabled = true
+		var captured: int = di
+		btn.pressed.connect(func():
+			result["index"] = captured
+			layer.queue_free())
+		slot.add_child(btn)
+		picker_cards.append(card)
+		picker_buttons.append(btn)
+		if DisplayServer.get_name() == "headless":
+			await get_tree().process_frame
+		else:
+			await RenderingServer.frame_post_draw
+		if not is_instance_valid(layer):
+			return int(result["index"]) if int(result["index"]) != -2 \
+				else -1
+
+	# One reveal for one set. All backs close together and all faces open together;
+	# no card advertises which bake happened to finish first. Flip scale belongs to
+	# the children, so the GridContainer never receives a geometry change.
+	var snap_reveal := DisplayServer.get_name() == "headless" \
+		or (UserSettings != null and UserSettings.reduce_motion)
+	if snap_reveal:
+		for i in range(picker_cards.size()):
+			picker_backs[i].queue_free()
+			picker_cards[i].modulate.a = 1.0
+			picker_buttons[i].disabled = false
+		preparing.text = ""
+	else:
+		preparing.text = "UNSEALING THE DECK..."
+		await RenderingServer.frame_post_draw
+		if not is_instance_valid(layer):
+			return -1
+		for i in range(picker_cards.size()):
+			picker_cards[i].modulate.a = 1.0
+			Motion.flip_out(picker_backs[i], 0.13)
+			Motion.flip_in(picker_cards[i], Motion.time(0.13), 0.17)
+		await get_tree().create_timer(maxf(Motion.time(0.34), 0.01)).timeout
+		if not is_instance_valid(layer):
+			return -1
+		for btn in picker_buttons:
+			btn.disabled = false
+		preparing.text = ""
 
 	while result["index"] == -2 and is_instance_valid(layer):
 		await get_tree().process_frame
@@ -3629,14 +4625,71 @@ func bind_bottled_talisman(host: Node) -> void:
 
 func fade_in(host: Node, duration: float = 0.32) -> void:
 	# Quick black->transparent overlay so the new scene fades in. Call from _ready.
+	# A scene root may still be assembling its children at that point; defer the
+	# root-level insertion so transitions never lose their fade or emit an error.
 	if host == null or not is_instance_valid(host) or host.get_tree() == null:
 		return
+	# A wipe that is still covering will reveal this screen itself — see
+	# `_transition_reveal_pending`. Standing down here is what keeps the
+	# transition ONE movement instead of two overlays taking turns.
+	if _transition_reveal_pending:
+		return
+	call_deferred("_spawn_fade_in", host, duration)
+
+
+## `host` is deliberately UNTYPED. See the house gotcha recorded on 2026-07-07
+## for Card2D._fit_desc_to_box: a call_deferred target with a TYPED Object param
+## errors at DISPATCH ("Cannot convert argument 1 from Object to Object") when
+## the argument is freed between the deferred call and the next idle frame — the
+## is_instance_valid guard below never gets to run, because marshalling fails
+## first. A scene that changes scene in the same frame it calls fade_in (every
+## fast transition: map -> fight -> reward) hits exactly that window, and it was
+## spamming the error on nearly every transition. Untyped param, guard, then use.
+func _spawn_fade_in(host, duration: float) -> void:
+	if host == null or not is_instance_valid(host) or not (host is Node) \
+			or host.get_tree() == null:
+		return
+	# THE TRANSITION WAS ONE-SIDED (2026-09-11).
+	#
+	# The exit is authored: a noise-perturbed ink front blooming from a chosen
+	# origin with a charring ember rim, and MapView even hands it the screen
+	# position of the site the army just entered. The entrance was
+	# `color:a 1 -> 0` on a PURE BLACK rect — so every screen change in the game
+	# read as "a page burns away, and then a brightness happens".
+	#
+	# Two separate faults in that, and the second is the interesting one:
+	#
+	#   · A HUE POP AT THE CUT. The exit settles on sepia ink (0.043, 0.031,
+	#     0.024) and the entrance started from pure black, so the switch flicked
+	#     colder for a frame before brightening. Same overlay colour now.
+	#
+	#   · NO CONTINUITY OF ATTENTION. The exit converges on the thing the player
+	#     clicked; the entrance began nowhere in particular. Running the SAME
+	#     shader inverted means the ink now LIFTS from that same point — the new
+	#     screen appears first exactly where the eye already is, and the two
+	#     halves become one movement instead of two effects that happen to be
+	#     adjacent. That is the whole reason the origin is carried on GameTheme
+	#     rather than recomputed.
+	#
+	# It is the screen-level form of the rule the card pass already settled:
+	# things arrive as THEMSELVES, not by becoming less transparent.
 	var overlay := ColorRect.new()
 	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	overlay.color = Color(0, 0, 0, 1)
+	overlay.color = Color(0.043, 0.031, 0.024, 1.0)
 	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	overlay.z_index = 1000
+	var mat := ShaderMaterial.new()
+	mat.shader = _get_ink_wipe_shader()
+	mat.set_shader_parameter("origin", transition_origin)
+	mat.set_shader_parameter("invert", 1.0)
+	# Opaque on the spawn frame: the scene behind is still assembling and must
+	# not be seen doing it.
+	mat.set_shader_parameter("progress", 1.0)
+	overlay.material = mat
 	host.get_tree().root.add_child(overlay)
 	var tw := overlay.create_tween()
-	tw.tween_property(overlay, "color:a", 0.0, duration).set_ease(Tween.EASE_OUT)
+	tw.tween_method(func(p: float):
+		if is_instance_valid(mat):
+			mat.set_shader_parameter("progress", p),
+		1.0, 0.0, duration).set_ease(Tween.EASE_OUT)
 	tw.tween_callback(overlay.queue_free)

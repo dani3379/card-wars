@@ -58,15 +58,40 @@ func _scan_file(path: String, sites: Dictionary) -> void:
 	if f == null:
 		return
 	var text := f.get_as_text()
-	# One pattern for both call shapes; [^)]* crosses newlines, so split
+	# One pattern for all three call shapes; [^)]* crosses newlines, so split
 	# pool arrays (a call wrapped to the next line) are still captured. Any
 	# quoted string inside the args is a track name — play_music's only other
 	# params are floats, and play_music_random takes an array of names.
-	var re_call := RegEx.create_from_string("play_music(?:_random)?\\(([^)]*)\\)")
+	#
+	# COVERAGE HANDOFF (2026-09-14). Combat's fight books moved out of inline
+	# play_music_random([...]) calls into the static Combat._combat_music_book,
+	# so nine names — combat_elite{,_b,_c} and combat_boss{,_b,_c,_d,_e,_act3} —
+	# are no longer literals this scan can see. They are covered instead by
+	# tools/_probe_music_layers.tscn, which ENUMERATES every fight in the game by
+	# calling that function and resolves every track in every book through
+	# AudioBank._resolve_music_path. That is strictly stronger than this scan: it
+	# proves the names a real fight would ask for, including the per-rival-lord
+	# boss branch a literal scan could only approximate. The twelve act-combat
+	# names still appear here because the skirmish branch keeps them inline.
+	#
+	# play_music_theme (2026-09-14) is the exception and needs the skip below:
+	# its FIRST argument is a theme KEY, not a track. Matching it without that
+	# skip would report the key as a missing track and fail the gate; not
+	# matching it at all would leave its pool unscanned, which is the coverage
+	# hole that adding the function opened. Its sibling play_road_theme takes an
+	# int and holds its pool in AudioBank.ROAD_BOOKS, a const this scanner
+	# cannot see — that one is gated by tools/_probe_music_theme.tscn phase A.
+	var re_call := RegEx.create_from_string("play_music(_random|_theme)?\\(([^)]*)\\)")
 	var re_str := RegEx.create_from_string("\"([^\"]+)\"")
 	for m in re_call.search_all(text):
 		var line: int = text.count("\n", 0, m.get_start()) + 1
-		for s in re_str.search_all(m.get_string(1)):
+		var is_theme: bool = m.get_string(1) == "_theme"
+		var first := true
+		for s in re_str.search_all(m.get_string(2)):
+			if is_theme and first:
+				first = false
+				continue  # the theme key, not a track name
+			first = false
 			var track: String = s.get_string(1)
 			if not sites.has(track):
 				sites[track] = []

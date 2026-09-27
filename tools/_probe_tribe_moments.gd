@@ -115,7 +115,7 @@ func _process(_delta: float) -> bool:
 		var sbody: String = st[1].split("\nfunc ")[0]
 		_check("get_opposing_card" in sbody,
 			"Stampede aims at the opposing CREATURE")
-		_check("NO QUARRY" in sbody,
+		_check("NO TARGET" in sbody,
 			"an empty column fizzles visibly instead of redirecting")
 		for face in ["damage_enemy_hero", "damage_player_hero", "_hurt_opposing_hero"]:
 			_check(not (face in sbody),

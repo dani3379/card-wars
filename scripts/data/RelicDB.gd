@@ -225,11 +225,15 @@ const RELICS: Dictionary = {
 	"blacksmiths_hammer": {"id": "blacksmiths_hammer", "name": "Blacksmith's Hammer", "tier": "utility",
 		"desc": "Forge upgrades give +3 instead of +2.",
 		"hooks": [], "effect": "upgrade_bonus", "value": 0},
+	# The marker is credit with the wagon, and since 2026-09-16 the wagon CHARGES
+	# for removal instead of paying for cards — so the marker discounts the fee.
+	# `value` is a PERCENTAGE, matching merchants_license beside it rather than
+	# the old multiplier; Shop._removal_fee reads it.
 	"scavengers_pouch": {"id": "scavengers_pouch", "name": "Trader's Marker", "tier": "utility",
-		"desc": "Selling a card pays twice as much.",
-		"hooks": [], "effect": "sell_double", "value": 2},
+		"desc": "Removing a card at the shop costs half as much.",
+		"hooks": [], "effect": "removal_discount", "value": 50},
 	"whetstone": {"id": "whetstone", "name": "Whetstone", "tier": "utility",
-		"desc": "Once per act, you may Reforge at a rest site to upgrade 2 cards.",
+		"desc": "Once per act at a rest site: forge 2 cards instead of 1.",
 		"hooks": [], "effect": "whetstone_reforge", "value": 2},
 
 	# ═══════════════════════════════════════════
@@ -244,7 +248,7 @@ const RELICS: Dictionary = {
 		"hooks": [], "effect": "boss_mana", "value": 1,
 		"downside": "no_rest_heal", "retired": true},
 	"fusion_hammer": {"id": "fusion_hammer", "name": "Cracked Anvil", "tier": "boss",
-		"desc": "+1 max Command. Can't upgrade cards at rest sites.",
+		"desc": "+1 max Command. Can't forge cards at rest sites.",
 		"hooks": [], "effect": "boss_mana", "value": 1,
 		"downside": "no_upgrade", "retired": true},
 	"ectoplasm": {"id": "ectoplasm", "name": "Vow of Poverty", "tier": "boss",
@@ -292,8 +296,13 @@ const RELICS: Dictionary = {
 	"ice_cream": {"id": "ice_cream", "name": "Iron Rations", "tier": "combat",
 		"desc": "At the start of each round, each of your damaged creatures heals 1.",
 		"hooks": ["turn_start"], "effect": "rations_heal", "value": 1},
+	# 2026-09-16: was "your hand refills to 6 cards each turn instead of 5". There
+	# is no refill any more — the economy redesign replaced draw-to-N with a fixed
+	# per-turn draw, and this relic became a flat ADDER on that draw. The old text
+	# named a number the game had stopped using, which is worse than vague: a
+	# player reading "refills to 6" plans a hand size the relic no longer sets.
 	"deep_satchel": {"id": "deep_satchel", "name": "Deep Satchel", "tier": "combat",
-		"desc": "Your hand refills to 6 cards each turn instead of 5.",
+		"desc": "Draw 1 extra card each turn.",
 		"hooks": ["turn_start"], "effect": "hand_refill_bonus", "value": 1},
 
 	# ═══════════════════════════════════════════════════════════════════════
@@ -511,7 +520,7 @@ const RELICS: Dictionary = {
 	#  UTILITY RELICS — Round 3 additions (3) — hook into map / reward flow.
 	# ═══════════════════════════════════════════════════════════════════════
 	"olympians_mark": {"id": "olympians_mark", "name": "Olympian's Mark", "tier": "utility",
-		"desc": "After you defeat a General: upgrade a random card in your deck for free.",
+		"desc": "After you defeat a General: forge a random card in your deck for free.",
 		"hooks": ["elite_won"], "effect": "post_elite_upgrade", "value": 1},
 	"centaur_heart": {"id": "centaur_heart", "name": "Centaur Heart", "tier": "utility",
 		"desc": "When you reach Act 2: gain +5 max HP and heal to full.",
@@ -561,9 +570,23 @@ const RELICS: Dictionary = {
 	"pandoras_box": {"id": "pandoras_box", "name": "The Conjurer's Coffer", "tier": "boss",
 		"desc": "Transform all starting creatures into random rares. If none remain, gain a random rare creature.",
 		"hooks": [], "effect": "pandoras_box", "value": 0},
+	# Campaign-retired, but STILL LIVE IN SKIRMISH — SkirmishState.NET_RELIC_POOL
+	# is an explicit allow-list and does not consult `retired`, so this text is
+	# read by a player on the arsenal stage and this roll decides real costs.
+	#
+	# 2026-09-16: the roll was 0-3, chosen against a curve where 86% of the pool
+	# cost 2 or less. Under the rescaled 1-6 curve that same roll is not chaos,
+	# it is a blanket discount — and its floor of 0 hands out free cards, which a
+	# ramping resource cannot price at all ("cost N is first affordable on round
+	# N" has no round for 0). 1-5 restores the relic's actual character: a mean
+	# just under the pool's own, so it is a gamble with a small edge rather than
+	# a sale. THE RANGE LIVES HERE because three sites roll it — Combat and
+	# NetPlayerState twice — and a magnitude restated three times is the drift
+	# this file's own header warns about.
 	"snecko_eye": {"id": "snecko_eye", "name": "Basilisk Eye", "tier": "boss",
-		"desc": "Draw 6 cards each turn. At the start of each turn, randomize every card's cost from 0 to 3.",
-		"hooks": ["turn_start"], "effect": "snecko_eye", "value": 6,
+		"desc": "Draw 1 extra card each turn. At the start of each turn, every card's cost becomes a fresh roll of 1 to 5.",
+		"hooks": ["turn_start"], "effect": "snecko_eye", "value": 1,
+		"cost_lo": 1, "cost_hi": 5,
 		"retired": true},
 	"calling_bell": {"id": "calling_bell", "name": "Calling Bell", "tier": "boss",
 		"desc": "Gain 3 boss relics. Add 3 Curses to your deck.",
@@ -582,8 +605,18 @@ const RELICS: Dictionary = {
 	"glowing_hand": {"id": "glowing_hand", "name": "Glowing Hand", "tier": "boss",
 		"desc": "Your damage spells deal +1 per spell already cast this fight (max +5).",
 		"hooks": ["spell_damage"], "effect": "glowing_hand", "value": 5},
+	# Campaign-retired, skirmish-live (see Basilisk Eye above).
+	#
+	# 2026-09-16: the old text sold a RAMP — "start each fight with 1 Command,
+	# gain 2 per round" — which was the trade for +2 max back when everyone else
+	# opened on a flat 3. The economy redesign made that ramp the baseline, so
+	# two thirds of this card's printed downside evaporated and the remaining
+	# sentence described the house rules rather than the relic. What the code
+	# actually does is unchanged and still worth a boss slot: +2 to the ceiling,
+	# and round 1 is held to its lone Command so the bonus starts paying on
+	# round 2.
 	"marathoners_sash": {"id": "marathoners_sash", "name": "Marathoner's Sash", "tier": "boss",
-		"desc": "+2 max Command. Start each fight with 1 Command. Gain 2 Command per round, up to your maximum.",
+		"desc": "+2 max Command, but your first round is still a single Command.",
 		"hooks": ["combat_start", "turn_start"], "effect": "marathoners_sash", "value": 2,
 		"retired": true},
 	"steady_banner": {"id": "steady_banner", "name": "Steady Banner", "tier": "boss",
@@ -660,9 +693,37 @@ const RELICS: Dictionary = {
 	"heads_on_pikes": {"id": "heads_on_pikes", "name": "Heads on Pikes", "tier": "combat",
 		"desc": "Start of each fight: the highest-ATK enemy gets -1 ATK this fight for each General defeated this run (max -3).",
 		"hooks": ["combat_start"], "effect": "general_fear", "value": 3},
+	# 2026-09-16: was "Banking Command adds 1 powder charge". Carryover became a
+	# RELIC that round (see field_chest), so this relic's trigger silently became
+	# "only if you also hold that one" — a reward that does nothing on its own is
+	# the dead-reward class, and it would have shipped invisible because nothing
+	# here asserts that a hook has a live constituency. Re-keyed to the fact that
+	# was doing the work anyway: ENDING a turn with Command still on the seal.
+	# Same moment, same shape, no dependency — and it reads better besides, since
+	# powder left in the horn is exactly what unspent Command is.
 	"powder_horn": {"id": "powder_horn", "name": "Powder Horn", "tier": "combat",
-		"desc": "Banking Command adds 1 powder charge (max 3). Your next damage spell spends all charges for +2 damage each.",
-		"hooks": ["mana_banked", "spell_damage"], "effect": "powder_charges", "value": 2},
+		"desc": "Unspent Command at turn's end: gain 1 powder charge (max 3). Your next damage spell spends them, +2 damage each.",
+		"hooks": ["turn_end", "spell_damage"], "effect": "powder_charges", "value": 2},
+	# ── THE ONLY CARRYOVER IN THE GAME (2026-09-16) ──────────────────────────
+	# Command does not bank by default any more. It is a per-round allowance:
+	# what you do not spend is gone, which is what makes the ramp a real cost
+	# curve rather than a savings account you can skip a turn to fill.
+	#
+	# This is the SECOND reversal on the same question and the reasoning is worth
+	# keeping so it is not reversed a third time by accident. Miser's Coffer
+	# (uncapped banking) was retired 2026-07-25 on the grounds that "Command is a
+	# FIXED resource and banking is the clearest violation of that" — but the
+	# UNIVERSAL 2-point bank was left standing, so the rule that retired the relic
+	# was never applied to the rule itself. It is now: the default is zero, and
+	# carryover is a thing you choose to hold a relic slot for.
+	#
+	# Capped by Combat.MAX_BANKED_MANA, which is deliberately still the authority
+	# on HOW MUCH — this entry is the GATE. One number, two implementations
+	# (Combat + NetPlayerState) plus the wire fingerprint read it, and a relic
+	# `value` that could outrun it is how those three part company.
+	"field_chest": {"id": "field_chest", "name": "The Field Chest", "tier": "combat",
+		"desc": "Unspent Command carries into your next turn, up to 2.",
+		"hooks": ["turn_start"], "effect": "command_carryover", "value": 2},
 	"familiars_quill": {"id": "familiars_quill", "name": "The Familiar's Quill", "tier": "combat",
 		"desc": "When you play a Warlock: your next spell this turn costs 1 less.",
 		"hooks": ["creature_played"], "effect": "warlock_spell_discount", "value": 1},
@@ -688,7 +749,7 @@ const RELICS: Dictionary = {
 		"desc": "Your first creature each fight copies the newest fallen creature's printed keywords. If none, it gains +1/+1.",
 		"hooks": ["creature_played"], "effect": "wear_last_shroud", "value": 1},
 	"drill_book": {"id": "drill_book", "name": "The Drill Book", "tier": "utility",
-		"desc": "Your creatures earn epithets at 2 kills instead of 3; the war school opens at 7 kills instead of 10.",
+		"desc": "Your creatures earn their name and war school at 2 kills instead of 3, and their tribe doctrine at 7 instead of 10.",
 		"hooks": [], "effect": "faster_veterancy", "value": 0},
 	"articles_of_war": {"id": "articles_of_war", "name": "The Articles of War", "tier": "boss",
 		"desc": "Choose a tribe. Its creatures cost 1 less (minimum 1).",
@@ -734,6 +795,7 @@ const RELIC_RARITY: Dictionary = {
 	"bridge_watcher": "uncommon", "swift_boots": "uncommon", "du_vu_doll": "uncommon",
 	"sellswords_retainer": "uncommon", "bottled_talisman": "uncommon",
 	"heads_on_pikes": "uncommon", "powder_horn": "uncommon",
+	"field_chest": "uncommon",
 	"familiars_quill": "uncommon", "head_money": "uncommon",
 	"portcullis": "uncommon", "second_rank": "uncommon", "forlorn_hope": "uncommon",
 	"drill_book": "rare",
@@ -764,14 +826,76 @@ static func get_relic(id: String) -> Dictionary:
 	return {}
 
 
+## STAND-IN ICONS — the relic half of AudioBank's SFX_FALLBACKS, and the same
+## deal the event pool already makes with its `"art"` stand-ins: ship a near
+## neighbour rather than a hole, and let the bespoke file win automatically the
+## day it lands (a real `<id>.png`/`.svg` is checked FIRST in get_relic_icon, so
+## dropping the art in is the whole install — no edit here required, and this
+## entry can then just be deleted).
+##
+## These 25 relics had no art at all. That is not a crash — get_relic_icon
+## returned null and GameTheme.gd's chip builder null-guards it — but it drew a
+## ringed chip with an empty middle in the HUD rail, the Shop shelf and the
+## Reward tile, which reads as a broken slot rather than a relic.
+##
+## Every pairing below is chosen for what the relic DOES, not merely for a word
+## in its name, because a mismatched icon misinforms worse than a blank one:
+## Chain Censer takes the censer, Cinder Crown the ember crown, the Familiar's
+## Quill the pen nib, Marching Spurs the swift boots, the Second Rank the phalanx
+## stone. Where two relics wanted the same picture the closer claim won and the
+## other took its next-best (Head-Money the purse, Paymaster's Coin the coin).
+const ICON_FALLBACKS: Dictionary = {
+	"articles_of_war": "conscription_relic",   # a written code that levies a tribe
+	"centurions_rule": "veterans_medal",       # the line that survives a hit hardens
+	"cerecloth": "phantom_veil",               # a burial shroud, wearing the dead's traits
+	"chain_censer": "ember_censer",            # literally a censer
+	"cinder_crown": "ember_crown",             # literally an ember crown
+	"drill_book": "blueprint",                 # a manual of instruction
+	"eagle_of_the_fourth": "iron_legion",      # the Fourth's own standard
+	"familiars_quill": "pen_nib",              # literally a quill
+	# A BOX, NOT A PURSE. coin_purse was the first pick and it misinforms: gold
+	# and Command are different currencies and this game keeps them apart, so a
+	# purse on a Command relic says "money" to every player who reads an icon
+	# before a line of text. The latched case is the honest near neighbour.
+	"field_chest": "toolbox",                  # a latched case: what you did not spend, kept
+	"forlorn_hope": "vanguards_cry",           # the first man over the wall
+	"funeral_lantern": "soul_lantern",         # a lantern for the dead
+	"head_money": "coin_purse",                # a bounty paid per head
+	"heads_on_pikes": "mark_of_pain",          # a trophy that cows the enemy
+	"ledger_seal": "soul_ledger",              # literally a ledger
+	"marching_spurs": "swift_boots",           # movement into Swift
+	"mirror_primer": "mimic_ring",             # doubling / echoing spells
+	"old_meg": "catapult_crew",                # a named siege gun
+	"paymasters_tally": "gamblers_coin",       # the paymaster's coin
+	"portcullis": "bulwark_engine",            # a gate that stops what comes in
+	"powder_horn": "war_horn",                 # a horn that carries a charge
+	"rearward_horn": "rear_guard_charm",       # the back row's own device
+	"reserve_standard": "steady_banner",       # a standard held in reserve
+	"second_rank": "phalanx_stone",            # soldier behind soldier, in formation
+	"sextons_spade": "gravewardens_pact",      # the gravedigger's office
+	"sunken_road_stone": "corner_stone",       # a stone that armours the line
+	"war_bellows": "pyre_stoker",              # bellows feeding a fire
+}
+
+
 # Returns the texture for a relic icon, or null if none is installed for that
 # id. Stored in `assets/icons/relics/<id>.{png,svg}` — PNG wins so painted
 # Hades/StS-style art transparently replaces the legacy SVG silhouettes.
 # Both are convention-based so RelicDB entries don't need an explicit path.
+# An explicit `"icon"` on the entry wins over the id; ICON_FALLBACKS above is
+# the last resort, so bespoke art always beats a stand-in.
+static func _resolve_icon_id(id: String) -> String:
+	var icon_id := String(RELICS[id].get("icon", id)) if RELICS.has(id) else id
+	if ResourceLoader.exists("res://assets/icons/relics/%s.png" % icon_id) \
+			or ResourceLoader.exists("res://assets/icons/relics/%s.svg" % icon_id):
+		return icon_id
+	return String(ICON_FALLBACKS.get(icon_id, icon_id))
+
+
 static func get_relic_icon(id: String) -> Texture2D:
 	if _icon_cache.has(id):
 		return _icon_cache[id]
-	var icon_id := String(RELICS[id].get("icon", id)) if RELICS.has(id) else id
+	var icon_id := _resolve_icon_id(id)
 	var png_path := "res://assets/icons/relics/%s.png" % icon_id
 	if ResourceLoader.exists(png_path):
 		_icon_cache[id] = load(png_path) as Texture2D
@@ -789,7 +913,11 @@ static func get_relic_icon(id: String) -> Texture2D:
 # wreck a full-color painting).
 static func is_painted_icon(id: String) -> bool:
 	if not _painted_icon_cache.has(id):
-		var icon_id := String(RELICS[id].get("icon", id)) if RELICS.has(id) else id
+		# Must resolve the SAME id get_relic_icon settled on, or a relic wearing a
+		# painted stand-in would be treated as a monochrome silhouette and get the
+		# gilt tint applied over full-colour art (the exact thing this flag exists
+		# to prevent).
+		var icon_id := _resolve_icon_id(id)
 		_painted_icon_cache[id] = ResourceLoader.exists("res://assets/icons/relics/%s.png" % icon_id)
 	return bool(_painted_icon_cache[id])
 
@@ -938,6 +1066,15 @@ static func get_mana_cap_credit(relics_held: Array[String]) -> int:
 
 
 # True if acquiring this relic would exceed the +2 non-boss mana cap.
+#
+# THE +2 WAS BUDGETED AGAINST A FLAT 3, and the 2026-09-16 ramp changed what it
+# buys without touching a line here: on round 1 the player holds ONE Command, so
+# a full +2 stack is a TRIPLED opening, where it used to be +67% on a number that
+# never moved. Left at 2 on purpose — the cap still does its job (it bounds how
+# much non-boss Command may be stacked) and ECONOMY_REDESIGN §5.12 sequences the
+# balance cascade after the rescale is measured, so moving this in the same pass
+# would make neither attributable. Re-read it when that pass runs; the relics it
+# governs are all listed by `mana_cap_cost`.
 static func would_exceed_mana_cap(relic_id: String, relics_held: Array[String]) -> bool:
 	if not RELICS.has(relic_id):
 		return false

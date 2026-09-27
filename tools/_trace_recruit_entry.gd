@@ -1,0 +1,137 @@
+extends SceneTree
+## Focused, windowed Recruit cold-entry trace. Reports every long presented frame
+## alongside offer/cache/UI state so card-art decode, texture bake, live Card2D
+## construction, and delayed reveal effects can be distinguished.
+
+const RUN_SEED := 20260903
+
+var _started := false
+var _done := false
+var _scene: Node = null
+var _open_usec := 0
+var _last_post_usec := 0
+var _last_signature := ""
+var _frame_index := 0
+
+
+func _process(_delta: float) -> bool:
+	if not _started:
+		_started = true
+		_run()
+	return _done
+
+
+func _run() -> void:
+	var settings := root.get_node("UserSettings")
+	settings.graphics_preset = "medium"
+	settings.render_scale = 1.0
+	settings.adaptive_render_scale = false
+	settings.particles = true
+	settings.reduce_motion = false
+	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	DisplayServer.window_set_size(Vector2i(1600, 900))
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	Engine.max_fps = 0
+	await process_frame
+	await _wait_for_session_warmup()
+
+	var rs := root.get_node("RunState")
+	rs.active_slot = -1
+	rs.start_new_run("raider", 0, RUN_SEED)
+	rs.active_slot = -1
+	rs.current_node_type = "recruit"
+	await process_frame
+
+	_open_usec = Time.get_ticks_usec()
+	_last_post_usec = _open_usec
+	_scene = load("res://scenes/recruit.tscn").instantiate()
+	root.add_child(_scene)
+	for _i in 420:
+		await RenderingServer.frame_post_draw
+		_trace_presented_frame()
+		if float(Time.get_ticks_usec() - _open_usec) / 1000000.0 >= 4.0:
+			break
+	print("[recruit-entry] DONE")
+	_scene.queue_free()
+	for _i in 4:
+		await process_frame
+	_done = true
+	quit(0)
+
+
+func _trace_presented_frame() -> void:
+	var now := Time.get_ticks_usec()
+	var gap := float(now - _last_post_usec) / 1000.0
+	_last_post_usec = now
+	_frame_index += 1
+	var ids: Array = []
+	var cards := 0
+	var hits := 0
+	var rarity_fx := 0
+	if _scene != null and is_instance_valid(_scene):
+		ids = _scene.get("_choices")
+		cards = _count_script_nodes(_scene, "Card2D.gd")
+		rarity_fx = _count_named_controls(_scene, "")
+		for id in ids:
+			var data: Dictionary = root.get_node("CardDB").get_card_data(String(id))
+			if root.get_node("CardTextureCache").has(data):
+				hits += 1
+	var busy := bool(root.get_node("CardTextureCache").get("_bake_busy"))
+	var sig := "%d/%d|cards=%d|busy=%s|controls=%d" % [
+		hits, ids.size(), cards, str(busy), rarity_fx]
+	if sig != _last_signature or gap >= 16.0:
+		print("[recruit-entry] f=%d t=%.2fms gap=%.2fms %s ids=%s" % [
+			_frame_index, float(now - _open_usec) / 1000.0, gap, sig, str(ids)])
+		_last_signature = sig
+
+
+func _count_script_nodes(host: Node, script_name: String) -> int:
+	var count := 0
+	var stack: Array[Node] = [host]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		var script = node.get_script()
+		if script != null and String(script.resource_path).get_file() == script_name:
+			count += 1
+		for child in node.get_children():
+			stack.append(child)
+	return count
+
+
+func _count_named_controls(host: Node, _unused: String) -> int:
+	var count := 0
+	var stack: Array[Node] = [host]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		if node is Control:
+			count += 1
+		for child in node.get_children():
+			stack.append(child)
+	return count
+
+
+func _wait_for_session_warmup() -> void:
+	var preload_service := root.get_node("ScenePreload")
+	var cache := root.get_node("CardTextureCache")
+	var card_db := root.get_node("CardDB")
+	var creature: Dictionary = {}
+	var spell: Dictionary = {}
+	for id in card_db.CARD_POOL:
+		var card: Dictionary = card_db.CARD_POOL[id]
+		if creature.is_empty() and card.get("type", "") == "creature":
+			creature = card_db.get_card_data(id)
+		elif spell.is_empty() and card.get("type", "") == "spell":
+			spell = card_db.get_card_data(id)
+		if not creature.is_empty() and not spell.is_empty():
+			break
+	var deadline := Time.get_ticks_msec() + 25000
+	while Time.get_ticks_msec() < deadline:
+		var resources_done: bool = bool(preload_service.is_warmup_complete())
+		var cards_done: bool = bool(preload_service.get("_prewarmed")) \
+			and cache.has(creature) and cache.has_battlefield(creature) \
+			and cache.has(spell) and not bool(cache.get("_bake_busy"))
+		if resources_done and cards_done:
+			break
+		await create_timer(0.10).timeout
+	for _i in 4:
+		await RenderingServer.frame_post_draw

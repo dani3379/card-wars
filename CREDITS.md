@@ -84,14 +84,12 @@ Kenney — CC0 (https://kenney.nl)
 Kreon (Julia Petretta), Inter (Rasmus Andersson), Marcellus (Astigmatic),
 Nunito (Vernon Adams) fonts — SIL Open Font License
 
-## Card stat icons (cost / ATK)
+## Command glyph
 **pbmojART** — CC BY 3.0
-- "Fantasy RPG Icons" pack — hand-painted Runestone (blue) and Sword
+- "Fantasy RPG Icons" pack — hand-painted Runestone (blue)
   https://opengameart.org/content/fantasy-rpg-icons
-  Used in Card2D v4 as the cost runestone and ATK sword overlays
-  (`assets/icons/stats/cost_runestone.png`, `assets/icons/stats/atk_sword.png`).
-  Heart icon (HP) is reused from Kenney's painted HUD set above
-  (`assets/icons/map/hud_heart_painted.png`).
+  Used as the inline Command glyph in event body text
+  (`assets/icons/stats/cost_runestone.png`).
 
 ## Card spell icons (`assets/spells/`)
 **J. W. Bjerk ("eleazzaar")** — CC BY 3.0

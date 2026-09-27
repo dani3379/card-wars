@@ -21,10 +21,23 @@ func _run() -> void:
 	var EvScript = load("res://scripts/scenes/Event.gd")
 	EVENTS = EvScript.EVENTS
 
-	await _flow("pawnbrokers_window", "Trade Coin", 60)   # pay + upgrade picker
-	await _flow("beekeeper", "Ask what the hive", 0)        # remove picker
-	await _flow("woodcutter", "Take the axe", 0)            # risk_loop jackpot
-	await _flow("the_bone_pit", "Take the open seat", 0)    # dice_run
+	# Repointed 2026-08-06. Every one of the four original flows was DEAD: the
+	# `beekeeper` and `woodcutter` event keys no longer exist in EventDB at all
+	# (cut in the 2026-07-03 pool remake), and neither "Trade Coin" nor "Take
+	# the open seat" matched any label on their events any more. `_flow` then
+	# resolved an EMPTY choice dict and the probe still printed a line, so this
+	# harness reported success while exercising nothing. If you rename an event
+	# label, re-run this and check every row says Continue=True.
+	# The two PICKER rows are the real gate: they must always say Continue=true.
+	await _flow("gravesong_choir", "Forge one card", 0)            # forge picker
+	await _flow("the_sentrys_board", "Remove a starting card", 0)  # remove picker
+	# The two GAMBLE rows are best-effort and NON-DETERMINISTIC — a risk_loop /
+	# dice_run rides an unseeded ladder, so clicks and payout differ run to run
+	# and "ran out of steps" here is normal, not a failure. Read them only for
+	# a hard error or a "no wired button" line, which would mean the screen
+	# stopped responding entirely.
+	await _flow("gravesong_choir", "Sing for growing rewards", 0)  # risk_loop
+	await _flow("the_bone_pit", "Play with a 25-gold pot", 25)     # dice_run
 	print("[stuck2] DONE")
 	quit(0)
 
@@ -102,20 +115,52 @@ func _flow(event_id: String, choice_substr: String, expect_pay: int) -> void:
 	# If a picker/loop screen is up, click the FIRST freshly-wired tile/action a
 	# few times to reach a result. (Frame settled, so only the new screen's
 	# buttons remain.)
-	for _step in range(4):
+	# 12, not 4: the picker flows resolve in 1-2 clicks, but a push-your-luck
+	# loop (risk_loop, dice_run) only leaves the screen when it banks or busts,
+	# and 4 presses was not enough to reach either — so those two rows reported
+	# Continue=false and read as a stuck flow when they were merely unfinished.
+	# `why` records how the click loop ENDED. Without it a non-terminating flow
+	# is indistinguishable from a flow whose buttons this walk cannot even see,
+	# and those need opposite fixes — that ambiguity is why the dead flows here
+	# went unnoticed for so long.
+	var why := "ran out of steps"
+	var steps := 0
+	for _step in range(12):
 		if _overlay():
+			why = "overlay opened"
 			break
 		var cont = _find_button(ev, "Continue")
 		if cont != null:
+			why = "reached Continue"
 			break
 		var btns: Array = []
 		_all_buttons(ev, btns)
+		# Prefer the button that ENDS the screen. A push-your-luck loop's first
+		# wired button is "risk again", so taking it blindly rode the ladder to
+		# the step budget and reported a stuck flow — gravesong actually climbed
+		# +60 gold over 12 presses. Banking also tests the more interesting path:
+		# the one that has to pay out and build a result page.
 		var clicked := false
-		for b in btns:
-			if b.pressed.get_connections().size() > 0:
+		for want in [true, false]:
+			for b in btns:
+				if b.pressed.get_connections().size() == 0:
+					continue
+				var t := String((b as Button).text).to_lower()
+				# Name first: a gamble's bank control is the coin heap itself and
+				# carries no text at all, so label matching alone never sees it.
+				var ends := String(b.name) == "DiceBankBtn" \
+					or t.contains("bank") or t.contains("stop") \
+					or t.contains("leave") or t.contains("enough") \
+					or t.contains("take") or t.contains("walk")
+				if ends != want:
+					continue
 				b.pressed.emit(); clicked = true; break
+			if clicked:
+				break
 		if not clicked:
+			why = "no wired button under the Event node (%d buttons seen)" % btns.size()
 			break
+		steps += 1
 		await process_frame
 		await process_frame
 
@@ -124,6 +169,6 @@ func _flow(event_id: String, choice_substr: String, expect_pay: int) -> void:
 	if cont2 != null:
 		cont2.pressed.emit()
 		await process_frame
-	print("[stuck2] %-22s paid=%d (want %d)  Continue=%s  transition=%s"
-		% [event_id, paid, expect_pay, str(cont2 != null), str(_overlay())])
+	print("[stuck2] %-22s paid=%-4d (want %-4d) clicks=%-2d Continue=%-5s  %s"
+		% [event_id, paid, expect_pay, steps, str(cont2 != null), why])
 	_clear_overlay(); ev.free()

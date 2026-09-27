@@ -124,7 +124,23 @@ func _place(atk: int, hp: int, lane: int, is_enemy: bool, row: int):
 		arr[lane].queue_free()
 		arr[lane] = null
 	combat.summon_token(atk, hp, lane, is_enemy, row)
-	return combat._row_array(is_enemy, row)[lane]
+	var card = combat._row_array(is_enemy, row)[lane]
+	# FORM THE BODY UP (2026-08-05). `ready_to_swing` defaults FALSE — the
+	# MUSTER DELAY (2026-07-21) — and `_creature_hits_face` refuses a swing from
+	# a body that has not formed up (`_can_reach_face`, the Rush rule). This
+	# probe pre-dates both, so it placed a token and swung with it in the same
+	# breath; the face test had been failing on its OWN PRECONDITION ("the swing
+	# landed on the enemy hero") ever since, and reporting it as a lifesteal
+	# fault. Nothing was wrong with lifesteal.
+	#
+	# Stamped here rather than passing `bypass_muster_delay` at the call site,
+	# because the bypass would also skip the Rush rule — this probe should be
+	# testing the heal, with the creature in the state a real swinging creature
+	# is in, not testing around the guard. `_start_round` does exactly this
+	# sweep for every body on the board.
+	if card != null and is_instance_valid(card) and card.get("state") != null:
+		card.state.ready_to_swing = true
+	return card
 
 
 func _clear_all() -> void:

@@ -7,7 +7,42 @@ extends RefCounted
 
 const MAX_HAND_SIZE := 10
 const HAND_REFILL_TARGET := 5
+## HOW MUCH carries over for a player who has earned carryover at all — WHETHER
+## any does is `_bank_cap()`, and the default is zero. Mirrors Combat's constant
+## of the same name; it also rides the compatibility fingerprint, so changing it
+## refuses a match against a build that banks differently rather than desyncing
+## one player's Command pool halfway through a game.
 const MAX_BANKED_MANA := 2
+## Combat.BANK_RELIC. Restated for the same reason command_for_round() is — this
+## file cannot name that script (see _relic_field) — and safe to restate because
+## it is an ID rather than a magnitude: a wrong id is a relic nobody holds, which
+## the parity gate reads as "the client banks when the host does not".
+const BANK_RELIC := "field_chest"
+# ── THE COMMAND RAMP — MIRRORED FROM Combat.gd, NOT DECIDED HERE ──────────
+# Combat.COMMAND_START / COMMAND_RAMP_PER_ROUND / COMMAND_RAMP_CAP /
+# LEGACY_FLAT_COMMAND and Combat.command_for_round() are the authority.
+#
+# This class CANNOT name that script — see _relic_value's header below: a
+# preload drags the named script into a pre-autoload compile and takes the whole
+# depending probe down. So the four numbers and the one formula are restated,
+# and restating host-side rules is the exact trap this file was repaired for
+# once already (every relic magnitude used to be a literal here while Combat
+# read RelicDB — equal on the day it was written, one retune from diverging
+# silently on ONE player's Command pool).
+#
+# The guard is that BOTH sides are static and pure, so the parity gate diffs
+# command_for_round() against Combat's over a span of rounds instead of trusting
+# the copy. If you change a number here, change it there, and the gate is what
+# tells you that you forgot.
+const COMMAND_START := 1
+const COMMAND_RAMP_PER_ROUND := 1
+const COMMAND_RAMP_CAP := 6
+const LEGACY_FLAT_COMMAND := 3
+const HAND_DRAW_PER_TURN := 2
+
+static func command_for_round(r: int) -> int:
+	return clampi(COMMAND_START + (maxi(1, r) - 1) * COMMAND_RAMP_PER_ROUND,
+		COMMAND_START, COMMAND_RAMP_CAP)
 const CURSE_IDS: Array[String] = ["curse", "wound", "craven",
 	"deserters_mark", "grave_debt", "war_debt"]
 
@@ -30,6 +65,48 @@ var first_spell_played: bool = false
 var _spell_tome_active: bool = false
 var _rng := RandomNumberGenerator.new()
 var _card_resolver: Callable
+
+
+## A relic's magnitude, read from the SAME place `Combat._start_round` and
+## `Combat._effective_cost` read it, so the host's own side and the host's model of
+## the client can never be tuned apart.
+##
+## LOOKED UP LAZILY, AND THAT IS THE WHOLE POINT. Two shapes were tried here first
+## and both broke the build in ways `_probe_parsecheck` cannot see, because it runs
+## as a SCENE where autoload names resolve:
+##   * a bare `RelicDB.get_relic(...)` — this class is a RefCounted that tools
+##     preload, and in a `--script` run its dependencies compile BEFORE autoloads
+##     register, so the identifier is a compile error that takes the whole
+##     depending script down (`_probe_skirmish_combat` failed to load outright);
+##   * `preload("res://scripts/data/RelicDB.gd")` — worse. It drags RelicDB.gd into
+##     that same early compile, where ITS OWN `RunState` reference fails, and the
+##     failure then poisons the RelicDB autoload for the entire run (every call
+##     site in Combat reporting "Nonexistent function 'get_relic' in base 'Node'").
+## Resolving through the tree at CALL time touches nothing at compile time, and the
+## explicit fallback is the value the literal used to be — so a context with no
+## autoloads still prices cards exactly as before instead of throwing.
+static func _relic_value(id: String, fallback: int) -> int:
+	return _relic_field(id, "value", fallback)
+
+
+## Any integer field off a relic entry, resolved through the TREE at call time.
+##
+## Never `RelicDB.get_relic(...)` directly: this file is a plain RefCounted that
+## tools `preload`, so its dependencies compile BEFORE the autoloads register and
+## a bare `RelicDB` identifier is a hard compile error there — which takes the
+## whole depending probe down while `parsecheck` (a SCENE, autoloads resolved)
+## stays green. See CLAUDE.md's "parsecheck's ONE blind spot".
+static func _relic_field(id: String, key: String, fallback: int) -> int:
+	var loop := Engine.get_main_loop()
+	if loop == null or not (loop is SceneTree):
+		return fallback
+	var tree := loop as SceneTree
+	if tree.root == null:
+		return fallback
+	var db := tree.root.get_node_or_null("RelicDB")
+	if db == null or not db.has_method("get_relic"):
+		return fallback
+	return int(db.get_relic(id).get(key, fallback))
 
 
 func setup(deck: Array, deck_uids: Array, loadout_relics: Array,
@@ -92,18 +169,43 @@ func predeal(count: int, include_coin: bool) -> void:
 func begin_turn(new_round: int, empty_edge_columns: int = 0) -> void:
 	round_number = maxi(1, new_round)
 	first_spell_played = false
-	# 2026-07-25: uncapped banking retired with Miser's Coffer — one cap for all.
-	var banked := mini(mana, MAX_BANKED_MANA)
+	# 2026-09-16: Command does not carry over by default on either side of the
+	# wire. The cap is gated on the SAME relic id Combat._bank_cap gates on, so a
+	# client and the host's model of that client cannot bank differently — which
+	# would be invisible until the round the two pools disagreed about a cost.
+	var banked := mini(mana, MAX_BANKED_MANA if relics.has(BANK_RELIC) else 0)
 	if round_number <= 1:
 		banked = 0
-	max_mana = base_max_mana + bonus_mana_next_turn
+	# THE RAMP supplies this round's baseline; base_max_mana keeps its old
+	# meaning (the flat 3 plus whatever the loadout added), so the slot field,
+	# the match-config envelope and every relic arm below are untouched. Same
+	# signed-delta shape as Combat._start_round — see that block.
+	max_mana = command_for_round(round_number) \
+		+ (base_max_mana - LEGACY_FLAT_COMMAND) + bonus_mana_next_turn
 	bonus_mana_next_turn = 0
-	if relics.has("lantern") and round_number == 1:
-		max_mana += 1
+	# READ THE RELIC, DO NOT RESTATE IT. Every number below used to be a literal
+	# while `Combat._start_round` — the SAME rule, applied to the host — reads it
+	# out of RelicDB. Identical today, and that is exactly what makes it a trap:
+	# the two would part company the moment one of these is retuned, silently, and
+	# the split would land on ONE player's Command pool. CombatNet's opening
+	# pre-deal already carries this warning in a comment; its siblings here were
+	# left as literals. (Verified: every RelicDB value equals the literal it
+	# replaced — 1/2/6/1/1/2 — so this changes no play today.)
+	#
+	# A `lantern` arm granting +1 max Command on round 1 was removed here. It was
+	# dead twice over: `lantern` is not in SkirmishState.NET_RELIC_POOL (dropped
+	# 2026-07-16) and relic loadouts are filtered against that pool, so a client
+	# cannot hold one; and the relic was reshaped into The Burnt Dispatches, an
+	# exhaust-pile effect that has nothing to do with the Command pool. Do not
+	# restore it — it described a relic that no longer exists.
 	if relics.has("cavalry_sigil"):
-		max_mana += clampi(empty_edge_columns, 0, 2)
+		# Host: += value for EACH empty edge column (0 and LANES_PER_ROW-1, both
+		# rows clear). `empty_edge_columns` is that same count, taken off the
+		# client's half of the host's board by _net_remote_empty_edge_columns.
+		max_mana += clampi(empty_edge_columns, 0, 2) \
+			* _relic_value("cavalry_sigil", 1)
 	if relics.has("marathoners_sash"):
-		max_mana += 2
+		max_mana += _relic_value("marathoners_sash", 2)
 	max_mana = maxi(0, max_mana)
 	mana = max_mana + banked
 	if relics.has("marathoners_sash") and round_number == 1:
@@ -112,23 +214,29 @@ func begin_turn(new_round: int, empty_edge_columns: int = 0) -> void:
 	for entry in hand:
 		entry["pact_zero"] = false
 		if relics.has("snecko_eye"):
-			entry["cost"] = _rng.randi_range(0, 3)
+			entry["cost"] = _snecko_cost()
 
 	if skip_next_refill:
 		skip_next_refill = false
 	else:
-		var target := HAND_REFILL_TARGET
+		# FIXED DRAW, mirroring Combat._start_round's block exactly: round 1
+		# deals the opening hand, every round after draws HAND_DRAW_PER_TURN,
+		# and the draw relics are flat ADDERS rather than refill-target raises.
+		# Same rule as the mana block above — these magnitudes are the host's and
+		# the host reads them out of RelicDB. (tome_of_many is gated host-side on
+		# a deck of 20+; a skirmish deck is exactly SkirmishState.DECK_TARGET ==
+		# 20, so the gate is always true here and restating it would only add
+		# state that can never change the answer.)
+		var count := HAND_REFILL_TARGET if round_number <= 1 else HAND_DRAW_PER_TURN
 		if relics.has("snecko_eye"):
-			target = 6
+			count += 1
 		if relics.has("deep_satchel"):
-			target += 1
+			count += _relic_value("deep_satchel", 1)
 		if relics.has("couriers_bag") and round_number == 1:
-			target += 1
+			count += _relic_value("couriers_bag", 1)
 		if relics.has("tome_of_many"):
-			target += 2
-		var count := maxi(0, target - hand.size())
-		if count == 0:
-			count = 1
+			count += _relic_value("tome_of_many", 2)
+		count = maxi(1, count)
 		for _i in count:
 			draw_one()
 
@@ -158,9 +266,19 @@ func draw_one() -> bool:
 	var entry: Dictionary = draw_pile.pop_front()
 	entry["pact_zero"] = false
 	if relics.has("snecko_eye"):
-		entry["cost"] = _rng.randi_range(0, 3)
+		entry["cost"] = _snecko_cost()
 	hand.append(entry)
 	return true
+
+
+## Basilisk Eye's cost roll, READ OFF THE RELIC like every other magnitude in
+## this file. Both bounds moved with the 2026-09-16 cost rescale; a literal here
+## would have kept the client rolling 0-3 against a host rolling 1-5, which is a
+## silent divergence on one player's whole hand.
+func _snecko_cost() -> int:
+	return _rng.randi_range(
+		_relic_field("snecko_eye", "cost_lo", 1),
+		_relic_field("snecko_eye", "cost_hi", 5))
 
 
 func draw_cards(count: int) -> void:
@@ -219,9 +337,12 @@ func effective_cost(entry: Dictionary, data: Dictionary,
 		cost -= 1
 	if bool(entry.get("pact_zero", false)):
 		cost = 0
+	# Read the relic, as Combat._effective_cost does (same reason as begin_turn's
+	# block: a retune would otherwise price the client's cards differently from
+	# the host's for the identical card and relic). Verified equal today: 1.
 	if not is_spell and relics.has("last_breath") \
 			and int(data.get("hp", 99)) == 1 and cost > 0:
-		cost = maxi(0, cost - 1)
+		cost = maxi(0, cost - _relic_value("last_breath", 1))
 	return cost
 
 

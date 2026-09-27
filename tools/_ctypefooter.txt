@@ -1,0 +1,34 @@
+=== ctype footer A/B (cold cache vs warm cache) ===
+--- goblin ---
+  pre-bake cache_has=false
+  [COLD] goblin  ctype=beast  cache_has=false  footer(B E A S T)=PRESENT
+      labels: ["Camp Cur", "2", "2", "1", "B E A S T"]
+  [WARM] goblin  ctype=beast  cache_has=false  footer(B E A S T)=PRESENT
+      labels: ["Camp Cur", "2", "2", "1", "B E A S T"]
+--- ratling ---
+  pre-bake cache_has=false
+  [COLD] ratling  ctype=beast  cache_has=false  footer(B E A S T)=PRESENT
+      labels: ["Fever Rat", "1", "2", "2", "B E A S T"]
+  [WARM] ratling  ctype=beast  cache_has=false  footer(B E A S T)=PRESENT
+      labels: ["Fever Rat", "1", "2", "2", "B E A S T"]
+--- brute ---
+  pre-bake cache_has=false
+  [COLD] brute  ctype=beast  cache_has=false  footer(B E A S T)=PRESENT
+      labels: ["Goring Boar", "2", "2", "3", "B E A S T"]
+  [WARM] brute  ctype=beast  cache_has=false  footer(B E A S T)=PRESENT
+      labels: ["Goring Boar", "2", "2", "3", "B E A S T"]
+--- mourner ---
+  pre-bake cache_has=false
+  [COLD] mourner  ctype=dead  cache_has=false  footer(D E A D)=PRESENT
+      labels: ["Mourner", "2", "1", "3", "D E A D"]
+  [WARM] mourner  ctype=dead  cache_has=false  footer(D E A D)=PRESENT
+      labels: ["Mourner", "2", "1", "3", "D E A D"]
+--- cinder_pup ---
+  pre-bake cache_has=false
+  [COLD] cinder_pup  ctype=beast  cache_has=false  footer(B E A S T)=PRESENT
+      labels: ["Cinder Pup", "1", "2", "1", "B E A S T"]
+  [WARM] cinder_pup  ctype=beast  cache_has=false  footer(B E A S T)=PRESENT
+      labels: ["Cinder Pup", "1", "2", "1", "B E A S T"]
+
+COLD (live _build_chart_proto): 5/5 showed the footer
+WARM (_build_baked_overlay_layout): 5/5 showed the footer

@@ -59,6 +59,12 @@ func _ready() -> void:
 	SS.rng_seed = 12345
 	SS.slots[0].hero_id = "raider"    # what begin_session seats from the lobby picks
 	SS.slots[1].hero_id = "kindler"
+	# ALL THREE net terms before the combat boot. The lobby block above armed
+	# _connected + remote_present only; without the third, Combat._ready boots
+	# SOLO and the plate shows a campaign face instead of the synced lord.
+	NM._connected = true
+	NM.remote_present = true
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0
 	NM.entities.clear()
 	NM._next_entity_id = 1

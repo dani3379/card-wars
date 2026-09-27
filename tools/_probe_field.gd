@@ -321,6 +321,7 @@ func _fight(enc_id: String, deck: Array):
 		await _teardown(); return null
 	var rounds := 0
 	while is_instance_valid(combat) and combat.phase != combat.Phase.GAME_OVER and rounds < MAX_ROUNDS:
+		await _settle_hand()
 		await _auto_play_turn()
 		if not is_instance_valid(combat): break
 		combat._end_turn_confirmed = true
@@ -349,6 +350,46 @@ func _wait_turn() -> bool:
 		await create_timer(TICK).timeout
 		w += 1
 	return false
+
+
+## Poll until the hand has finished ARRIVING, not just until input is accepted.
+##
+## Combat._start_round STAGGERS the deal: only the first card is drawn inline,
+## and every one after it lands on a `create_timer(0.08 * i)` — no headless
+## branch, no reduce_motion branch, not scaled by `anim_speed` — while `phase`
+## ALREADY reads PLAYER_TURN. A driver that starts there is playing a hand the
+## game has not finished dealing it: on round 1 that is ONE card of five, and at
+## Command 1 a single 2-drop means the whole turn plays nothing.
+##
+## Rounds 2+ hide it, because the hand is PERSISTENT and carries unplayed stock
+## forward — so the fault is worst exactly where round-1 measurements live. It
+## cost `_probe_deploy_curve` a published number before it was found; see
+## CLAUDE.md's settle-until-stable note.
+##
+## Stability polling, NOT a computed deal window: draw_count is the ramp plus
+## four relics plus two mutators, and restating that arithmetic in a probe is
+## the duplicate-rule pathology. Bounded, because an unbounded `while await`
+## spins to the harness timeout and reports NOTHING at all.
+func _settle_hand() -> void:
+	const SETTLE_TICK := 0.03    # poll interval
+	const STABLE_TICKS := 5      # 0.15s unchanged, a 1.9x margin on the 0.08s gap
+	const SETTLE_BUDGET := 40    # ~1.2s ceiling
+	var last := -1
+	var stable := 0
+	var waited := 0
+	while waited < SETTLE_BUDGET:
+		if not is_instance_valid(combat) or combat.phase != combat.Phase.PLAYER_TURN:
+			return
+		var n: int = combat._hand.size()
+		if n == last:
+			stable += 1
+			if stable >= STABLE_TICKS:
+				return
+		else:
+			stable = 0
+			last = n
+		await create_timer(SETTLE_TICK).timeout
+		waited += 1
 
 
 func _auto_play_turn() -> void:

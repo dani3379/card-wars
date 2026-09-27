@@ -5,9 +5,15 @@ extends SceneTree
 ## card-upgrade paths (drill / strip_kw / grant_kw). Run:
 ##   Godot.exe --headless --path . --script res://tools/_probe_wayside.gd
 
-const FIGHT_ROWS := [0, 3, 9, 15]
+# 2026-09-19: the mandatory spine lost row 9 (it is the mid-act camp now) and
+# the elite bands became declinable — one General, every other lane road.
+const FIGHT_ROWS := [0, 3, 15]
 const ELITE_ROWS := [6, 12]
+const MID_REST_ROW := 9
 const WAYSIDE_ROWS := [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
+## What an elite band's non-spike lanes may be. A plain hold here would mean the
+## General cannot be declined, which is the defect the 2026-09-19 pass removed.
+const BAND_BYPASS := ["event", "wayside"]
 const VERBS := ["drill_yard", "muster_scale", "standard_bearer", "supply_cache"]
 
 var _fails := 0
@@ -59,8 +65,10 @@ func _process(_delta: float) -> bool:
 					if r in ELITE_ROWS:
 						if t == "elite":
 							elites += 1
-						elif t != "combat":
+						elif not (t in BAND_BYPASS):
 							ok_rows = false
+					if r == MID_REST_ROW and t != "rest":
+						ok_rows = false
 					if r in WAYSIDE_ROWS and t in ["combat", "elite", "boss", "rest"]:
 						ok_rows = false
 					if t == "wayside" and not (String(n.get("wayside_id", "")) in VERBS):

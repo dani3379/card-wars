@@ -150,19 +150,14 @@ func _run() -> void:
 	var alt_relic := String(doctrine_hero.get("relic_alt", ""))
 	var default_relic := String(doctrine_hero.get("relic", ""))
 
-	# THE BANNER (2026-07-30): opening_deck_for appends one authored levy card, so
-	# a hero's opener is its 10 plus the declared banner's card — these expectations
-	# compared against the raw HeroDB list and went red the moment the banner
-	# landed. Derived from BannerDB rather than hardcoded so a change of default
-	# banner cannot re-break it.
-	var BDB = root.get_node("BannerDB")
-	var banner_card := String(BDB.card_id(BDB.DEFAULT_BANNER))
-
+	# (A banner card was appended to both expectations here from 2026-07-30 until
+	# 2026-09-16: opening_deck_for used to add one authored levy card on top of
+	# the hero's ten. With the banner system gone, an opener is the raw HeroDB
+	# list again.)
 	RS.pending_signature_relic = alt_relic
 	RS.pending_deck_variant = "alt"
 	RS.start_new_run(doctrine_hero_id, 0, 4242)
 	var alt_deck: Array = (alt_info.get("deck", []) as Array).duplicate()
-	alt_deck.append(banner_card)
 	var got_deck: Array = RS.deck.duplicate()
 	alt_deck.sort()
 	got_deck.sort()
@@ -176,7 +171,6 @@ func _run() -> void:
 	RS.pending_deck_variant = "alt"
 	RS.start_new_run(doctrine_hero_id, 0, 4242)
 	var def_deck: Array = (doctrine_hero.get("deck", []) as Array).duplicate()
-	def_deck.append(banner_card)
 	var got2: Array = RS.deck.duplicate()
 	def_deck.sort()
 	got2.sort()
@@ -287,6 +281,13 @@ func _run() -> void:
 	# An untyped creature must still be offered something.
 	_check(not cb._doctrines_for({}).is_empty(),
 		"an untyped veteran falls back to the universal three")
+	# A COLLAPSED PAIR MUST BACKFILL. Guardian is printed on several Soldiers and
+	# Bastions, so those creatures reach the rung with one of their two options
+	# already filtered out — and a one-tile "choice" is a fake decision. Asserted
+	# on the source because the top-up happens inside the modal drain.
+	var mmsrc := FileAccess.get_file_as_string("res://scripts/scenes/Combat.gd")
+	_check("if options.size() == 1:" in mmsrc,
+		"a collapsed doctrine pair is topped up rather than shown as one tile")
 	cb.free()
 
 	# Drive the real rung on a real deck creature.

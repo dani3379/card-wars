@@ -13,9 +13,14 @@ extends SceneTree
 ##      +2 Command caster-local, the heal routes through _net_heal_hero, and
 ##      EV_POTION_FX routes without crashing.
 ##   5. The NetDraft scene runs the shared ARSENAL stage (3 relic slates + 2
-##      potion slates, pass allowed per slate — NetDeckBuilder._begin_arsenal,
-##      2026-07-16) → card triplets; picks land in the local slot, and the
-##      finished handoff ships the whole arsenal.
+##      potion slates by default, pass allowed per slate —
+##      NetDeckBuilder._begin_arsenal, 2026-07-16) → card triplets; picks land in
+##      the local slot, and the finished handoff ships the whole arsenal.
+##   6. ARSENAL SIZE IS THE HOST'S (2026-09-14): the stage deals exactly the
+##      configured number of rounds, a zero/zero setting raises no stage at all,
+##      the host's loadout authority caps at the SAME number the stage dealt, and
+##      NetMatch's mirrored defaults still equal SkirmishState's constants (they
+##      cannot be read from NetMatch's field initializers — autoload order).
 ##
 ## Run:
 ##   Godot.exe --headless --path "D:\Godot" --script res://tools/_probe_draft_relic.gd
@@ -23,6 +28,10 @@ extends SceneTree
 var _fails: int = 0
 var _started: bool = false
 var _done: bool = false
+## Wall-clock ceiling on the whole run. Generous — the widest-arsenal section
+## alone drives 14 dealt tables — but BOUNDED. See _process.
+const WATCHDOG_MS: int = 900000
+var _start_ms: int = 0
 
 var SS: Node
 var NM: Node
@@ -38,6 +47,34 @@ func _check(cond: bool, label: String) -> void:
 		print("  FAIL  ", label)
 
 
+## Wait until the stage has actually DEALT its table. `_on_ars_pick` refuses a
+## slate that is still assembling (NetDeckBuilder guards on `_ars_slate_ready`,
+## because the tiles arrive one per rendered frame), so a probe that fires picks
+## back to back SILENTLY no-ops every one after the first — the stage stays put
+## and every later assertion reads the wrong round. Poll the public accessor.
+func _await_slate(screen: Node) -> void:
+	for _tick in 60:
+		if not is_instance_valid(screen) or not screen.arsenal_active():
+			return
+		if screen.arsenal_slate_ready():
+			return
+		await create_timer(0.05).timeout
+
+
+## A structurally legal deck of the exact target size, for the loadout-authority
+## checks. validate_loadout_event tests the DECK before the arsenal, so a probe
+## that passes an empty card list is answered "loadout_deck_size" and proves
+## nothing about the arsenal cap it meant to exercise.
+func _legal_deck() -> Array:
+	var pool: Array = SS.skirmish_legal_pool()
+	var out: Array = []
+	for id in pool:
+		if out.size() >= SS.DECK_TARGET:
+			break
+		out.append(String(id))
+	return out
+
+
 func _unique_count(items: Array) -> int:
 	var seen := {}
 	for item in items:
@@ -48,7 +85,22 @@ func _unique_count(items: Array) -> int:
 func _process(_delta: float) -> bool:
 	if not _started:
 		_started = true
+		_start_ms = Time.get_ticks_msec()
 		_run_test()
+	# THE WATCHDOG, and it is not paranoia — it is the documented GDScript trap
+	# turned on the harness itself. A RUNTIME error (an out-of-range index, a
+	# write to a freed node) aborts _run_test WHERE IT STANDS: it does not raise,
+	# does not stop the process, and never reaches _finish(). `_done` then stays
+	# false forever and this SceneTree spins with nothing left to do. Measured
+	# once, for real: `NET_RELIC_POOL[14]` on a 14-entry pool left a headless
+	# Godot running 43 minutes, holding 377MB, until it was killed by hand — and
+	# the harness reported the run as merely "timed out", which reads like a slow
+	# probe rather than a dead one. Fail LOUDLY and with a nonzero code instead.
+	if not _done and Time.get_ticks_msec() - _start_ms > WATCHDOG_MS:
+		printerr("[draft-relic] WATCHDOG at %ds — _run_test never reached _finish. "
+			% (WATCHDOG_MS / 1000)
+			+ "Look for a SCRIPT ERROR above: it aborted the coroutine silently.")
+		_finish(1)
 	return _done
 
 
@@ -122,6 +174,13 @@ func _run_test() -> void:
 	NM.local_player_index = 0
 	NM._connected = true
 	NM.remote_present = true
+	# THE THIRD TERM (2026-08-05). `is_connected_to_peer()` is
+	# `vs_bot or (_connected and remote_present and _compatibility_confirmed)`,
+	# and this probe set only the first two — so Combat booted SOLO, `_has_relic`
+	# never consulted the drafted skirmish slot, and both assertions failed
+	# while appearing to test the net path. This is the documented skirmish-probe
+	# trap: miss a term and the harness silently measures the campaign instead.
+	NM._compatibility_confirmed = true
 	NM.client_peer_id = 0
 	NM.entities.clear()
 	NM._next_entity_id = 1
@@ -225,7 +284,9 @@ func _run_test() -> void:
 	_check(SS.local_slot().relics.has("deep_satchel"), "relic pick 1 landed in the local slot")
 	_check(String(draft._ars_header.text).begins_with("Choose a battle relic — 2 of 3"),
 		"a second relic slate follows")
+	await _await_slate(draft)
 	draft._on_ars_pick("lantern", true)
+	await _await_slate(draft)
 	draft._on_ars_pick("", true)   # round 3: pass — fighting lighter is legal
 	await create_timer(0.15).timeout
 	_check(SS.local_slot().relics.size() == 2, "two picks + one pass = 2 relics held")
@@ -233,16 +294,25 @@ func _run_test() -> void:
 		"potion slates follow the relic rounds")
 	var pslots: int = draft._ars_row.get_child_count()
 	_check(pslots == 3, "potion slate shows 3 potion tiles (got %d)" % pslots)
+	await _await_slate(draft)
 	draft._on_ars_pick("healing", false)
 	_check(String(draft._ars_header.text).begins_with("Choose a battle potion — 2 of 2"),
 		"a second potion slate follows")
+	await _await_slate(draft)
 	draft._on_ars_pick("insight_tonic", false)
 	await create_timer(0.15).timeout
 	_check(SS.local_slot().potions.size() == 2, "both potion picks landed in the local slot")
 	_check(not draft.arsenal_active(), "the arsenal closes after the 3+2 rounds")
 	_check(String(draft._header.text).begins_with("Pick a card"), "card picks follow the arsenal")
 
-	# One card pick still works after the two opening stages.
+	# One card pick still works after the two opening stages. The triplet builds
+	# progressively (one card per rendered frame) and `_on_pick` refuses until it
+	# is dealt — the same shape as the arsenal slate above, so wait, don't sleep.
+	for _tick in 60:
+		if not is_instance_valid(draft) or draft._triplet_ready:
+			break
+		await create_timer(0.05).timeout
+	_check(draft._triplet_ready, "the card triplet finished dealing")
 	var legal: Array = SS.skirmish_legal_pool()
 	draft._on_pick(String(legal[0]))
 	await create_timer(0.2).timeout
@@ -256,6 +326,200 @@ func _run_test() -> void:
 	_check(SS.get_slot(SS.opponent_index()).potions.has("insight_tonic"),
 		"opponent's drafted potion stored from the finished handoff")
 	draft.queue_free()
+	await create_timer(0.2).timeout
+
+	# ── 5. THE ARSENAL SIZE IS THE HOST'S PICK (2026-09-14) ──────────────────
+	# NetMatch cannot read SkirmishState's constants from a field initializer
+	# (it is registered FIRST in the autoload order), so its defaults are hand
+	# mirrored. That mirror is the one thing here a future edit can silently
+	# break — a drifted default would open a stage of one length and validate
+	# the peer against another.
+	NM.leave()
+	_check(NM.arsenal_relics == SS.ARSENAL_RELIC_ROUNDS
+		and NM.arsenal_potions == SS.ARSENAL_POTION_ROUNDS,
+		"NetMatch's mirrored arsenal defaults match SkirmishState's constants (%d/%d vs %d/%d)"
+			% [NM.arsenal_relics, NM.arsenal_potions,
+				SS.ARSENAL_RELIC_ROUNDS, SS.ARSENAL_POTION_ROUNDS])
+	# Every offered round must deal a FULL table. A slate is ARSENAL_SLATE_SIZE ids
+	# never re-dealt, so the ceiling is pool/3 — a hardcoded one was wrong the day
+	# it was typed (NET_RELIC_POOL holds 14, so five rounds would deal a short
+	# fifth table). Both defaults must also sit under their own ceiling.
+	var rmax: int = SS.arsenal_relic_max()
+	var pmax: int = SS.arsenal_potion_max()
+	# A relic is held or not held, so a round past the pool's last distinct id
+	# cannot add anything — that, not pool/3, is the relic ceiling now that the
+	# lap rule keeps every table full past the first pass through the pool.
+	_check(rmax >= 1 and rmax <= SS.NET_RELIC_POOL.size(),
+		"the relic ceiling (%d rounds) is the pool's distinct count (%d ids)"
+			% [rmax, SS.NET_RELIC_POOL.size()])
+	# Potions are capped by the COMBAT BELT, not the pool: the shelf is
+	# 16 + n*52 + (n-1)*6 wide against the board's left edge at x272.
+	_check(pmax >= 1 and pmax <= SS.NET_POTION_POOL.size()
+			and 16 + pmax * 52 + (pmax - 1) * 6 <= 272,
+		"the potion ceiling (%d rounds) fits both the pool (%d) and the belt (%dpx)"
+			% [pmax, SS.NET_POTION_POOL.size(), 16 + pmax * 52 + (pmax - 1) * 6])
+	_check(16 + (pmax + 1) * 52 + pmax * 6 > 272,
+		"one more potion than the ceiling would put the belt through the board")
+	_check(SS.ARSENAL_RELIC_ROUNDS <= rmax and SS.ARSENAL_POTION_ROUNDS <= pmax,
+		"the shipped defaults (%d/%d) sit inside the ceilings (%d/%d)"
+			% [SS.ARSENAL_RELIC_ROUNDS, SS.ARSENAL_POTION_ROUNDS, rmax, pmax])
+
+	# An out-of-range config is REFUSED rather than clamped on the wire — the two
+	# peers must agree on the number, and a silently narrowed one would not.
+	NM.is_host = false
+	var before_relics: int = NM.arsenal_relics
+	NM._apply_match_config(SS.MatchMode.DRAFT, 1, NM.STYLE_ALTERNATING, 99, 1)
+	_check(NM.arsenal_relics == before_relics,
+		"an over-ceiling arsenal count is rejected, not clamped")
+	NM._apply_match_config(SS.MatchMode.DRAFT, 1, NM.STYLE_ALTERNATING, rmax, 1)
+	_check(NM.arsenal_relics == rmax and NM.arsenal_potions == 1,
+		"a legal arsenal count crosses the wire (got %d/%d)"
+			% [NM.arsenal_relics, NM.arsenal_potions])
+	# A peer that predates the setting sends NEITHER key. That must leave the
+	# stage at its default, never at zero — a bare int() on a missing key is 0.
+	NM._apply_match_config(SS.MatchMode.DRAFT, 1, NM.STYLE_ALTERNATING)
+	_check(NM.arsenal_relics == rmax and NM.arsenal_potions == 1,
+		"a payload with no arsenal keys leaves the count alone (got %d/%d)"
+			% [NM.arsenal_relics, NM.arsenal_potions])
+
+	# A configured stage deals exactly that many rounds, on both categories.
+	NM.start_vs_bot(SS.MatchMode.DRAFT, 1, rmax, 1)
+	var big = load("res://scenes/net_draft.tscn").instantiate()
+	root.add_child(big)
+	await create_timer(0.4).timeout
+	if not is_instance_valid(big):
+		_check(false, "the wide-arsenal draft scene survived boot")
+		_finish(1)
+		return
+	_check(SS.arsenal_relics == rmax and SS.arsenal_potions == 1,
+		"begin_session adopted the host's arsenal size (got %d/%d)"
+			% [SS.arsenal_relics, SS.arsenal_potions])
+	_check(big._ars_pips.size() == rmax + 1,
+		"the progress rail is one pip per pick (got %d, want %d)"
+			% [big._ars_pips.size(), rmax + 1])
+	_check(String(big._ars_header.text).begins_with(
+			"Choose a battle relic — 1 of %d" % rmax),
+		"the header counts against the configured size, got: %s" % big._ars_header.text)
+	var dealt_relics := 0
+	var short_table := ""
+	for _i in rmax:
+		await _await_slate(big)
+		if not big.arsenal_active():
+			break
+		if String(big._ars_header.text).begins_with("Choose a battle relic"):
+			dealt_relics += 1
+			# Every offered round must lay a FULL table — the reason the ceiling
+			# is derived from the pool rather than written down.
+			if big._ars_row.get_child_count() != SS.ARSENAL_SLATE_SIZE:
+				short_table = "round %d dealt %d tiles" % [
+					dealt_relics, big._ars_row.get_child_count()]
+		big._on_ars_pick("", true)
+	_check(dealt_relics == rmax,
+		"the widest legal stage dealt %d relic slates (got %d)" % [rmax, dealt_relics])
+	_check(short_table == "",
+		"every relic round at the ceiling dealt a full table%s"
+			% ("" if short_table == "" else " — " + short_table))
+	_check(String(big._ars_header.text).begins_with("Choose a battle potion — 1 of 1"),
+		"the single potion round follows, got: %s" % big._ars_header.text)
+	await _await_slate(big)
+	big._on_ars_pick("", false)
+	await create_timer(0.2).timeout
+	_check(not big.arsenal_active(), "the stage closes after %d + 1 rounds" % rmax)
+	# The host's own authority must cap where the stage did. The DECK is filled
+	# first: validate_loadout_event tests deck size before the arsenal, so an
+	# empty card list answers "loadout_deck_size" and proves nothing here.
+	var deck: Array = _legal_deck()
+	var held: Array = []
+	for rid in SS.NET_RELIC_POOL:
+		if held.size() < rmax:
+			held.append(String(rid))
+	_check(SS.validate_loadout_event({"cards": deck, "relics": held, "potions": []},
+			SS.MatchMode.DRAFT) == "",
+		"a full-arsenal loadout passes when the host set %d rounds" % rmax)
+	# One MORE than the stage offered. At the ceiling the pool has no unused id
+	# left to add, so this repeats one — and the size check runs BEFORE the
+	# distinctness loop, so "loadout_arsenal_size" is still the exact verdict
+	# under test (the bare-steel case below covers the same cap from zero).
+	held.append(String(SS.NET_RELIC_POOL[0]))
+	_check(SS.validate_loadout_event({"cards": deck, "relics": held, "potions": []},
+			SS.MatchMode.DRAFT) == "loadout_arsenal_size",
+		"one relic past the configured stage is refused")
+	# THE LAP RULE. Below pool/3 rounds nothing changes (no lap ever turns over),
+	# which is what makes the shipped 3+2 stage byte-identical to before it
+	# existed; past that, tables stay FULL instead of being dealt short or empty.
+	var lap_rng := RandomNumberGenerator.new()
+	lap_rng.seed = 1234
+	var lap_seen: Array = []
+	var lap_rounds: Array = []
+	for _i in rmax:
+		lap_rounds.append(SS.deal_arsenal_slate(SS.NET_RELIC_POOL, lap_rng, lap_seen))
+	var all_full := true
+	var first_lap_unique := {}
+	var laps_turned := 0
+	for i in lap_rounds.size():
+		var table: Array = lap_rounds[i]
+		if table.size() != SS.ARSENAL_SLATE_SIZE:
+			all_full = false
+		if i < SS.NET_RELIC_POOL.size() / SS.ARSENAL_SLATE_SIZE:
+			for id in table:
+				if first_lap_unique.has(String(id)):
+					laps_turned += 1
+				first_lap_unique[String(id)] = true
+	_check(all_full, "every table is full at the ceiling, all %d of them" % rmax)
+	_check(laps_turned == 0,
+		"no id repeats inside the first lap (got %d repeats)" % laps_turned)
+	_check(_unique_count(lap_rounds[0]) == SS.ARSENAL_SLATE_SIZE,
+		"a table never offers the same id twice")
+
+	var offers: Dictionary = SS.arsenal_source_offers(NM.match_seed, 0)
+	_check(offers.get("relics", []).size() == rmax
+			and offers.get("potions", []).size() == 1,
+		"the host rebuilds the SAME number of slates it dealt (got %d/%d)"
+			% [offers.get("relics", []).size(), offers.get("potions", []).size()])
+	big.queue_free()
+	await create_timer(0.2).timeout
+
+	# Zero and zero: a bare-steel duel raises no stage at all, and the card draft
+	# still opens — the finish callback has to fire for a stage that never built.
+	NM.start_vs_bot(SS.MatchMode.DRAFT, 1, 0, 0)
+	var bare = load("res://scenes/net_draft.tscn").instantiate()
+	root.add_child(bare)
+	await create_timer(0.5).timeout
+	if not is_instance_valid(bare):
+		_check(false, "the bare-steel draft scene survived boot")
+		_finish(1)
+		return
+	_check(not bare.arsenal_active(), "a 0+0 arsenal never raises the stage")
+	_check(String(bare._header.text).begins_with("Pick a card"),
+		"the card draft still opens with no arsenal, got: %s" % bare._header.text)
+	_check(SS.validate_loadout_event({"cards": _legal_deck(),
+			"relics": [String(SS.NET_RELIC_POOL[0])], "potions": []},
+			SS.MatchMode.DRAFT) == "loadout_arsenal_size",
+		"with no arsenal dealt, ANY submitted relic is refused")
+
+	# THE BOT FIGHTS UNDER THE SAME TERMS, and it has to for a mechanical reason
+	# as well as a fair one: its emulated handoff goes through the very same
+	# loadout authority a human peer's does (only PROVENANCE is skipped for a
+	# drill). A bot that drafts a fixed 3 relics into a bare-steel match is
+	# refused "loadout_arsenal_size" — and a refused handoff never finishes, so
+	# the drill waits forever on an opponent that already answered.
+	var rejected := ""
+	var on_reject := func(reason: String) -> void: rejected = reason
+	NM.protocol_rejected.connect(on_reject)
+	NM.send_draft_event({"t": "finished", "cards": _legal_deck(),
+		"relics": [], "potions": []})
+	await create_timer(0.3).timeout
+	NM.protocol_rejected.disconnect(on_reject)
+	var bot_slot = SS.get_slot(SS.opponent_index())
+	_check(rejected == "",
+		"the bot's handoff is accepted at a 0-relic arsenal (rejected: '%s')" % rejected)
+	_check(bot_slot != null and bot_slot.relics.is_empty(),
+		"the bot drafts no relics when the host set none (got %s)"
+			% str(bot_slot.relics if bot_slot != null else []))
+	_check(bot_slot != null and bot_slot.deck.size() == SS.DECK_TARGET,
+		"the bot's deck still landed, so the drill can actually start (got %d)"
+			% (bot_slot.deck.size() if bot_slot != null else -1))
+	bare.queue_free()
 	await create_timer(0.2).timeout
 
 	_finish(_fails)
