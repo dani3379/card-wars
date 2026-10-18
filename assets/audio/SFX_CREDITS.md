@@ -35,3 +35,14 @@ the combat-y sounds (hit, hit_hero, death, spell_cast) would benefit from more
 thematic replacements (Kenney's RPG Audio or Impact Sounds packs, or
 OpenGameArt fantasy SFX). Drop new variants into the existing event folders
 and they'll be picked up automatically by AudioBank.
+
+## Ambience loops (separate from one-shot SFX)
+
+`fire_crackle/` — looping campfire ambience played on the rest screen via
+`AudioBank.play_ambience("fire_crackle")`. AudioBank routes it through the SFX
+bus, so the SFX volume slider attenuates it (players reach for that knob
+when they want a crackle quieter, not the music slider).
+
+- **Source**: [Fireplace Sound Loop by PagDev (OpenGameArt)](https://opengameart.org/content/fireplace-sound-loop)
+- **File**: `fire.wav` (10.3 MB) — Godot's WAV importer will compress on import.
+- **Licence**: [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/) — credit not required but appreciated.

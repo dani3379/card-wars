@@ -1,66 +1,65 @@
-# Card Wars — Phase 2 prototype
+# Burning Meadow
 
-This is the foundation scene: a tilted 3D table, a real candle with a real point light, drifting embers, dust motes lit by the candle, and a hand of three cards you can hover, drag, and play.
+A 2D lane-combat roguelike deckbuilder built with **Godot 4.6 and GDScript**. Build a deck over a branching campaign, place creatures across four lanes with front and back rows, and combine spells, activated abilities, keywords, and relic effects.
 
-## How to run it
+This repository is a curated development snapshot from the October 2026 project archive. It demonstrates game systems and tools; it is not a finished commercial release or a claim that every game mode has passed release testing.
 
-1. Install Godot 4.3 or later from https://godotengine.org (free, no account needed)
-2. Open Godot, click "Import" and select this folder's `project.godot`
-3. Press F5 (Run). The first run asks you to set a main scene — `play_area.tscn` is already set in `project.godot` so it should just go.
+## Game systems present
 
-## What you should feel when it runs
+- A three-act branching campaign with hero selection, encounters, rewards, shops, rest stops, recruitment, and events.
+- Seeded run generation, daily/custom-seed options, card upgrades, relics, potions, and progression.
+- Simultaneous lane combat with front/back rows, spells, creature keywords, activated abilities, and encounter-specific rules.
+- Save slots and recovery/versioning support, player settings, collection/help screens, audio, and in-game credits.
+- A separate Skirmish implementation with host-authoritative networking and draft/constructed/quick/sealed flows.
 
-- Camera idles with subtle drift, follows your mouse a bit. The scene feels like a head, not a viewport.
-- The candle flame flickers, casts warm orange light on the table.
-- Cards in your hand breathe slightly out of phase. Hover one — it lifts toward you and tilts to face you, with a soft warm glow underneath.
-- Click and drag a card. Pull it toward the center of the table and release. It arcs forward, flips face-down, lands with a small scale pop.
-- Embers drift up from the candle. Dust motes drift through the warm light.
+Skirmish source is included, but no public relay is configured by this snapshot. Multiplayer transport, two-player interaction, balancing, and a complete campaign playthrough were not validated during this publication pass.
 
-If any of those feels wrong, tweak the constants at the top of `Card.gd` and `PlayArea.gd`. Those constants are the "feel" — `HOVER_LIFT`, `HOVER_LIFT_TIME`, `BREATH_AMPLITUDE`, `CAMERA_DRIFT_AMPLITUDE`, `CANDLE_FLICKER_AMOUNT`. Tune them obsessively until it feels right.
+## Run locally
 
-## Free assets to grab next
+1. Install the standard **Godot 4.6.2 stable** editor from the [official release](https://github.com/godotengine/godot-builds/releases/tag/4.6.2-stable). The engine is not bundled in this repository.
+2. Import `project.godot` in Godot and let the initial asset import finish.
+3. Press **F5** to run the main scene, `scenes/main_menu.tscn`.
 
-The prototype currently uses placeholder colors. To make it look like the grimoire scene we mocked up, you need:
+The project uses the GL Compatibility renderer and a 1600×900 stretched canvas. The asset set is sizeable, so the first import takes longer than subsequent opens. Godot stores player data through `user://`; personal saves and settings from the recovered archive are not included.
 
-**Wood texture for the table** (highest priority — placeholder flat brown reads as plastic):
-- Poly Haven: https://polyhaven.com/textures/wood — search "dark wood planks", grab the 2K albedo + normal map
-- Drop the files into `textures/` and uncomment the texture lines in `play_area.tscn`
+For a headless import using your own verified engine:
 
-**Candle model** (current candle is a cylinder, fine for prototype, swap for real model later):
-- Sketchfab, filter by CC0 license, search "candle"
-- Or model one yourself in Blender — 30 minutes, two cylinders and a cone
+```text
+godot --headless --path . --editor --import --quit
+```
 
-**Card art textures** (the SVG cards we built):
-- Render each card SVG to a 512x768 PNG
-- Drop into `textures/cards/` named `<card_id>.png` (e.g. `deaths_head_moth.png`)
-- The Card script auto-loads them by `card_id`
+## Technical map
 
-**SFX** for hover, play, draw, candle crackle:
-- Freesound.org, filter by CC0
-- Search "paper rustle", "card flip", "candle crackle"
-- Add an AudioStreamPlayer3D node to Card.tscn and play on hover/play events
+| Area | Main location |
+|---|---|
+| Screen and campaign flow | `scenes/`, `scripts/scenes/` |
+| Combat orchestration | `scripts/scenes/Combat.gd` |
+| Deterministic combat helpers | `scripts/combat/CombatOps.gd` |
+| Runtime creature snapshots | `scripts/state/CreatureInstance.gd` |
+| Run state and save handling | `scripts/state/` |
+| Card/relic/encounter registries | `scripts/data/` |
+| Network messages and match state | `scripts/net/` |
+| Recovered regression probes | `tools/` |
 
-**Font** for card text and HUD:
-- Google Fonts: Cormorant Garamond, EB Garamond, or IM Fell English
-- Drop the .ttf into `fonts/`, set as default theme font
+`Combat.gd` remains a large controller. Extracted helper/state modules and probes are useful examples of system boundaries; they do not imply that the entire game has been refactored or exhaustively tested.
 
-## What's next (phases from earlier)
+## Verification
 
-- Phase 3: card system from config files (currently hardcoded in PlayArea._ready)
-- Phase 4: opponent across the table, intent display, basic combat resolution
-- Phase 5: polish loop — particles on play resolve, screen shake, hit flashes, audio
+The publication checks use an engine binary compared against the official Godot release. Saves and settings are isolated from the player's normal data. [Validation notes](docs/PUBLICATION_VALIDATION.md) record the exact checks and their outcomes.
 
-## Architecture notes
+Two focused contract probes can be run after import:
 
-- `PlayArea.gd` is the orchestrator. It owns the hand, spawns cards, manages camera/lighting/global state.
-- `Card.gd` owns its own animation state. The "feel" lives in its constants.
-- `Atmosphere.gd` owns ambient particles. All particle config is procedural so you can tweak parameters without poking the editor.
-- Scenes (`.tscn`) are the visual layout; scripts (`.gd`) are behavior. This separation matches Godot's idiom — keep visual changes in the editor, keep logic in code.
+```text
+godot --headless --path . --script res://tools/_probe_combat_ops.gd
+godot --headless --path . --script res://tools/_probe_creature_instance.gd
+```
 
-## Performance notes
+The included PowerShell `tools/run_safe_probes.ps1` runs a larger selected set with timeouts and isolated Windows `APPDATA`. It requires an installed engine passed through `-GodotPath` or `GODOT_BIN`. Refer to the validation notes before interpreting any probe as evidence of game-wide readiness.
 
-- All particles use GPUParticles3D — GPU-driven, near-zero CPU cost
-- Card meshes are simple boxes (12 triangles each). Hand of 5 cards = 60 triangles.
-- Hover glow uses real OmniLight3D — Forward+ renderer handles dozens of lights cheaply
-- Shadow casting on the candle's point light is enabled but with low resolution to stay fast
-- Tested target: 60fps on a 5-year-old laptop. If it stutters, drop `msaa_3d` to 0 in project.godot.
+## Credits and publication scope
+
+Keep [CREDITS.md](CREDITS.md), [third-party notices](THIRD_PARTY_LICENSES.txt), the per-track/per-pack ledgers, and the in-game Credits screen with distributions. Third-party art, icons, fonts, sound, and music retain their own notices.
+
+The snapshot excludes engine executables, transfer/history/save backups, external-game references, source asset ZIPs, generated import caches, and local credentials. Its original-code license and some per-image provenance records remain unresolved; no blanket license or authorship claim has been invented. See [PROVENANCE.md](PROVENANCE.md).
+
+Design and planning documents in `docs/` are development records. Their dates, counts, and plans can differ from what is implemented in this snapshot.

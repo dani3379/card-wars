@@ -1,32 +1,35 @@
-﻿.godot/
-*.translation
-export.cfg
-export_presets.cfg
+# Godot's generated import/editor cache. Keep .gd.uid and .import sidecars.
+.godot/
+.godot_mono/
+
+# Local builds, diagnostics, and player data.
+build/
+builds/
+export/
+exports/
+*.pck
+*.exe
+*.dll
+*.log
+*.tmp
+*.save
+*.save.bak
+*.save.tmp
+playlogs/
+
+# Transfer/recovery material and reference/source packs are not runtime assets.
+Transfer/
+references/
+_frame_work/
+.zcode/
+.codex*/
+*.zip
+*.rar
+*.7z
+*.tar.gz
+
+# Local editor / credential configuration.
+.env
+.env.*
 .vscode/
 .idea/
-.DS_Store
-Thumbs.db
-.claude/
-
-# --- Scratch / work-in-progress (not shipped) ---
-staging/
-_preview_*
-*.tmp.*
-
-# Frame iteration & debug leftovers
-assets/frames/_backup_v3/
-assets/frames/_debug_*
-assets/frames/frame_comparison*
-assets/frames/frame_cleaned_comparison*
-assets/frames/*_cleaned*
-assets/frames/*_thin*
-assets/frames/frame_creature_common_v3*
-assets/frames/frame_creature_common_v4*
-assets/frames/frame_v4_cardsize*
-assets/frames/frame_v5_*
-
-# AI art / UI experiments
-assets/ui/_ai_*
-
-# Font test scratch
-assets/fonts/test/

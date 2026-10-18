@@ -14,20 +14,36 @@ config/name="Burning Meadow"
 config/description="A lane combat roguelike deckbuilder."
 run/main_scene="res://scenes/main_menu.tscn"
 config/features=PackedStringArray("4.6", "GL Compatibility")
-config/icon="res://icon.svg"
+boot_splash/bg_color=Color(0.03, 0.025, 0.02, 1)
+boot_splash/image="res://assets/backgrounds/main_menu.png"
+config/icon="res://icon.png"
 
 [autoload]
 
-RunState="*uid://dcq27ifbf3e7g"
-MetaState="*uid://cyts2mfhubru2"
-CardDB="*uid://c0ddf4qlhb4bb"
-RelicDB="*uid://2p6cly80x3np"
+RunState="*res://scripts/state/RunState.gd"
+MetaState="*res://scripts/state/MetaState.gd"
+CardDB="*res://scripts/data/CardDB.gd"
+RelicDB="*res://scripts/data/RelicDB.gd"
+HeroDB="*res://scripts/data/HeroDB.gd"
+PotionDB="*res://scripts/data/PotionDB.gd"
 KeywordEffects="*res://scripts/data/KeywordEffects.gd"
+EncounterEffects="*res://scripts/data/EncounterEffects.gd"
 EncounterDB="*res://scripts/data/EncounterDB.gd"
+MutatorDB="*res://scripts/data/MutatorDB.gd"
+SetPieceDB="*res://scripts/data/SetPieceDB.gd"
+WritDB="*res://scripts/data/WritDB.gd"
 GameTheme="*res://scripts/GameTheme.gd"
 UserSettings="*res://scripts/state/UserSettings.gd"
+Supersample="*res://scripts/state/Supersample.gd"
+PlayLog="*res://scripts/state/PlayLog.gd"
 CardTextureCache="*res://scripts/state/CardTextureCache.gd"
+ScenePreload="*res://scripts/state/ScenePreload.gd"
 AudioBank="*res://scripts/AudioBank.gd"
+PerformanceOverlay="*res://scripts/state/PerformanceOverlay.gd"
+NetMatch="*res://scripts/net/NetMatch.gd"
+SkirmishState="*res://scripts/net/SkirmishState.gd"
+SkirmishBot="*res://scripts/net/SkirmishBot.gd"
+SavedDecks="*res://scripts/state/SavedDecks.gd"
 
 [display]
 
@@ -40,5 +56,4 @@ window/stretch/mode="canvas_items"
 
 textures/canvas_textures/default_texture_filter=2
 renderer/rendering_method="gl_compatibility"
-anti_aliasing/quality/msaa_2d=3
 environment/defaults/default_clear_color=Color(0.04, 0.03, 0.025, 1)
