@@ -1,18 +1,20 @@
 # Burning Meadow
 
-A 2D lane-combat roguelike deckbuilder built with **Godot 4.6 and GDScript**. Build a deck over a branching campaign, place creatures across four lanes with front and back rows, and combine spells, activated abilities, keywords, and relic effects.
+A **Godot 4.6 / GDScript card-game prototype** combining tactical lane battles with a branching roguelike campaign. Build a deck, position creatures across four lanes with front and back rows, and combine spells, creature effects, keywords, and relics.
 
-This repository is a curated development snapshot from the October 2026 project archive. It demonstrates game systems and tools; it is not a finished commercial release or a claim that every game mode has passed release testing.
+The code offers concrete examples of turn-based gameplay rules, seeded campaign generation, persistent game state, and multiplayer message handling—the kinds of systems involved in custom card-game and strategy-game prototypes. This repository is a curated October 2026 development snapshot. The checks below verify selected contracts and script loading; full campaign and multiplayer acceptance testing remain outstanding.
 
 ## Game systems present
 
 - A three-act branching campaign with hero selection, encounters, rewards, shops, rest stops, recruitment, and events.
 - Seeded run generation, daily/custom-seed options, card upgrades, relics, potions, and progression.
-- Simultaneous lane combat with front/back rows, spells, creature keywords, activated abilities, and encounter-specific rules.
-- Save slots and recovery/versioning support, player settings, collection/help screens, audio, and in-game credits.
+- Phased lane battles with Swift attacks, front/back rows, spells, triggered creature effects, and encounter-specific rules.
+- Three save slots with schema/version checks and backup-file handling, plus player settings, collection/help screens, audio, and in-game credits.
 - A separate Skirmish implementation with host-authoritative networking and draft/constructed/quick/sealed flows.
 
-Skirmish source is included, but no public relay is configured by this snapshot. Multiplayer transport, two-player interaction, balancing, and a complete campaign playthrough were not validated during this publication pass.
+Campaign battles and the Sealed Skirmish battle style resolve lane attacks in sequence while deferring deaths so eligible creatures can trade blows. Swift resolves in an earlier phase. Alternating Skirmish uses the active side's attack pass with defender counterstrikes. The term “simultaneous combat” in older design notes refers to mutual-trade resolution within those specific passes.
+
+The bundled default relay address is empty; a relay requires separate configuration. The publication checks did not exercise multiplayer transport, a two-player session, balance, or a complete campaign playthrough.
 
 ## Run locally
 
@@ -34,9 +36,10 @@ godot --headless --path . --editor --import --quit
 |---|---|
 | Screen and campaign flow | `scenes/`, `scripts/scenes/` |
 | Combat orchestration | `scripts/scenes/Combat.gd` |
+| Seeded campaign maps | `scripts/campaign/CampaignMapGenerator.gd` |
 | Deterministic combat helpers | `scripts/combat/CombatOps.gd` |
 | Runtime creature snapshots | `scripts/state/CreatureInstance.gd` |
-| Run state and save handling | `scripts/state/` |
+| Run state and save handling | `scripts/state/RunState.gd`, `scripts/state/SaveIO.gd` |
 | Card/relic/encounter registries | `scripts/data/` |
 | Network messages and match state | `scripts/net/` |
 | Recovered regression probes | `tools/` |
@@ -45,7 +48,7 @@ godot --headless --path . --editor --import --quit
 
 ## Verification
 
-The publication checks use an engine binary compared against the official Godot release. Saves and settings are isolated from the player's normal data. [Validation notes](docs/PUBLICATION_VALIDATION.md) record the exact checks and their outcomes.
+The recorded checks were run on **18 October 2026** with Godot **4.6.2 stable** compared against the official release. They completed asset import, checked 129 production scripts, and passed eight combat-helper checks plus nine creature-state snapshot checks. Saves and settings were isolated from the player's normal data. [Validation notes](docs/PUBLICATION_VALIDATION.md) record the commands, evidence, and limits.
 
 Two focused contract probes can be run after import:
 
@@ -62,4 +65,4 @@ Keep [CREDITS.md](CREDITS.md), [third-party notices](THIRD_PARTY_LICENSES.txt), 
 
 The snapshot excludes engine executables, transfer/history/save backups, external-game references, source asset ZIPs, generated import caches, and local credentials. Its original-code license and some per-image provenance records remain unresolved; no blanket license or authorship claim has been invented. See [PROVENANCE.md](PROVENANCE.md).
 
-Design and planning documents in `docs/` are development records. Their dates, counts, and plans can differ from what is implemented in this snapshot.
+Inherited contributor notes in `AGENTS.md` and design documents in `docs/` are development records. Their dates, counts, and plans can differ from what is implemented in this snapshot.
